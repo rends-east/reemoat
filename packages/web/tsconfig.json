@@ -1,0 +1,37 @@
+{
+  // The root config is `lib: ["ES2023"]`, `types: ["node"]`, NodeNext — correct
+  // for everything that runs under tsx, and unable to compile a line that says
+  // `window`. That is why this package is excluded there and configured here.
+  //
+  // The strictness flags are copied deliberately rather than inherited: the root
+  // config's module settings are wrong for a bundler, and extending it only to
+  // override half is harder to read than stating all of it once.
+  //
+  // `types: []` is load-bearing. With `@types/node` present, `setInterval` returns
+  // `NodeJS.Timeout` rather than `number` and `process` becomes an available
+  // global in code that ships to a phone. Neither is wanted. `vite.config.ts` is
+  // outside `include` for the same reason — it is the one file here that is not
+  // browser code, and Vite type-checks nothing at build time anyway.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "types": [],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "verbatimModuleSyntax": true,
+
+    "noEmit": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
+}

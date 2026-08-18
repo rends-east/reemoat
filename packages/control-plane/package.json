@@ -1,0 +1,32 @@
+{
+  "name": "@reemoat/control-plane",
+  "version": "0.1.0",
+  "description": "The reemoat control plane: accounts, machines, grants, signing keys and the relay.",
+  "license": "AGPL-3.0-only",
+  "author": "rends-east",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rends-east/reemoat.git",
+    "directory": "packages/control-plane"
+  },
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "cp": "UV_THREADPOOL_SIZE=${UV_THREADPOOL_SIZE:-64} tsx src/main.ts",
+    "cpctl": "tsx scripts/cpctl.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.17",
+    "hono": "^4.13.2",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  }
+}

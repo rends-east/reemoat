@@ -1,0 +1,96 @@
+# What a secret scanner is allowed to stay quiet about, and why each one.
+#
+# This file exists because the thing it replaced was decoration. `.gitleaksignore`
+# named `scripts/relaycheck.ts` and `scripts/deploycheck.ts` **whole** — 8 900 and
+# 2 100 lines — and nothing anywhere ran gitleaks, so the suppression was never
+# exercised and the breadth never cost anything. Both halves were wrong in the
+# same direction: a real credential pasted into either file would have been
+# silently excused the moment a scan was added, which is the failure this
+# repository names elsewhere as *a property the code appears to have and nothing
+# enforces*. So the scan is a job in `check.yml` now, and this list names the
+# **exact secrets** rather than the files that hold them.
+#
+# **Every entry is a `regexes` and nothing else, and that is measured rather than
+# stylistic.** The obvious form is `paths` plus `regexes` under
+# `condition = "AND"`, which reads as "this secret, in this file". It is not what
+# gitleaks does: a `paths` entry in a global allowlist filters the *file* out
+# before any finding is compared against the regexes, so the `AND` never runs.
+# Measured — an allowlist naming `scripts/deploycheck.ts` alongside a regex
+# matching a string that appears nowhere in the tree still suppressed both of
+# that file's findings. That is the old whole-file breadth arriving through a
+# form that reads as narrow, which is worse than the honest version. Content
+# alone is genuinely narrow: a different secret in the same file fires, and so
+# does the same secret moved somewhere new.
+#
+# **Not fingerprints**, which are gitleaks' own unit for this. A fingerprint is
+# `commit:file:rule:startline`, and this repository is published with fresh
+# history — every commit hash a fingerprint could name stops existing on the day
+# of publication, and the suppression would expire into a red scan nobody could
+# explain.
+#
+# Adding an entry means pasting the literal that fires, not the file it is in.
+
+title = "reemoat"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = """
+Local agent tooling that is not part of this repository.
+
+`.gstack/` is a directory some contributors have in their checkout — it holds a
+loopback daemon's own token, among other things — and `.gitignore` already denies
+it, so nothing in it can ever be committed. But the scan below runs over the
+**working tree** rather than over git's index, so it walks in anyway: green in CI,
+where a fresh checkout has no such directory, and one false positive on every
+local run. That asymmetry is the worst kind, because the person who stops reading
+the output is the one running it by hand.
+
+A whole-path exclusion, unlike everything else here, and the difference is whose
+code it is: the entries below hide two lines of *our* source and so are pinned to
+the exact secret, where this hides a directory that is not ours and never ships.
+`scripts/docscheck.ts` skips the same directory for the same reason.
+"""
+paths = ['''^\.gstack/''']
+
+[[allowlists]]
+description = """
+The self-signed TLS key the mail half is driven against. Rule: `private-key`.
+
+`scripts/relaycheck.ts` brings up a fake SMTP server on 127.0.0.1, in-process,
+for the duration of one `pnpm relaycheck` run, and this is the key it presents.
+It is `CN=localhost` with SANs for `localhost` and `127.0.0.1`, it expires in
+2126, it signs nothing, nothing trusts it, and the only thing that ever offers it
+is a listener the checking process itself started. Generating one at run time
+would need an X.509 library this tree does not have and deliberately does not
+want; shelling out to `openssl` would make the driver skip itself on any machine
+without it, which is a driver that is green because it did nothing.
+
+Matched on the first line of the key material rather than on the PEM header, so
+this excuses that key and not the next one somebody pastes anywhere.
+"""
+regexes = ['''MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDKLowvLSz''']
+
+[[allowlists]]
+description = """
+The bootstrap credentials `deploycheck` renders against. Rule: `generic-api-key`.
+
+`packages/control-plane/src/main.ts` prints an API key and an admin password on
+the one start that bootstraps an admin, and `deploy/install.sh` scrapes both out
+of the container log — the marker contract is what `deploycheck` is asserting
+here, so it needs a line shaped exactly like the real one. Both values are the
+words they look like: base64 of `deploycheck-key` and of `deploycheck-password`.
+
+These two are what a scan of this tree actually reports. The old suppression
+named a *third* thing — the literal `-----BEGIN OPENSSH PRIVATE KEY-----` string
+that `deploycheck` hands `ci-deploy.sh` to prove it writes a key to a 0600 file
+rather than echoing it — and that one has never been a finding at all: it carries
+no closing `-----END`, so no rule matches it. It is listed here as prose rather
+than as an entry, because an allowlist line for a finding that does not exist is
+a line nothing would ever remove.
+"""
+regexes = [
+  '''rk_ZGVwbG95Y2hlY2sta2V5''',
+  '''ZGVwbG95Y2hlY2stcGFzc3dvcmQ''',
+]

@@ -1,0 +1,243 @@
+# The whole automated safety net, on every push.
+#
+# `pnpm check` exists and this file deliberately does not use it. It is the
+# one-line loop for a contributor on a laptop; here the steps are listed one by
+# one, because the aggregate is an `&&` chain that stops at the first failure and
+# would say nothing about the rest — which is exactly the information you want
+# when a first run on a new platform goes red. That is what the `if:
+# '!cancelled()'` arms below buy, and an aggregate cannot.
+#
+# An earlier version of this comment said the aggregate was "gated on
+# `corecheck`" — a driver that never existed, named from a plan whose artifacts
+# were never built. The drivers that exist are the steps below.
+#
+# The incidents below are named rather than cited by SHA: this repository was
+# republished with fresh history, so every hash that used to be here resolves to
+# nothing. What is worth keeping is what happened, not where.
+#
+# `harness` is the only driver excluded on purpose, and it must stay excluded: it
+# drives a real `claude`, `kimi` or `codex` subprocess and needs an out-of-band
+# login, which CI has no way to hold. Every step in the `check` job below runs
+# offline in one process with no fleet and no agent — that property is what makes
+# them runnable here at all, and it is a property of the drivers rather than of
+# this file. "No agent" is not decorative, and it is the single thing this
+# workflow catches most often: violated by the since-deleted `dockercheck`, which
+# needed an agent on PATH, and again by a `daemoncheck` assertion that reached
+# `registry.create` with a real agent id — green on a laptop only because it
+# genuinely spawned `kimi`, red here, and fixed by asserting the refusal that
+# would be a regression instead of the 201 that needs an agent.
+#
+# **That claim is scoped to one job now, and it did not used to need scoping.**
+# The `image` job builds a container and starts it, so it is the first thing here
+# that needs the world: a daemon, a registry and a network. Separate job rather
+# than a step, because it takes minutes where the rest takes seconds and because
+# leaving the old unqualified sentence standing beside a job contradicting it
+# would be exactly the failure that sentence exists to warn about.
+#
+# It is not a return of that deleted `dockercheck`. That one was about the
+# per-tenant *agent* sandbox and needed an agent on PATH; the control plane's
+# image contains no agent and spawns nothing, which is why the objection that
+# killed it does not reach this one.
+#
+# Nothing here deploys. `deploy/deploy.sh` is the deployment path and it is run
+# by a person on the machine being deployed to; when that changes, it becomes a
+# second job calling that same script, not a reimplementation of it here.
+#
+# The drivers are developed on macOS and run here on Linux, and the difference is
+# not cosmetic: macOS resolves /tmp to /private/tmp through realpathSync, which
+# feeds the withinRoots comparisons in src/browse.ts, and temp-directory
+# semantics differ between the two. A red run here on a green laptop is
+# information about the code rather than about this file.
+
+name: check
+
+on:
+  push:
+  pull_request:
+
+# Nothing here reads a secret and nothing here writes anything back, so the token
+# gets the least a checkout needs. Stated rather than left to the repository
+# default, because that default is a setting somebody can widen for an unrelated
+# reason and this file would silently follow it. `pull_request` from a fork
+# already lands read-only; this is what makes the same true of a push.
+permissions:
+  contents: read
+
+concurrency:
+  # A newer push supersedes an in-flight run on the same ref. The old one is
+  # answering a question nobody is asking any more.
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # No `version:` here on purpose. The pin used to live in this file because
+      # the repo had no `packageManager` field, and a floating pnpm major would
+      # land here first and look like a code failure. The field exists now, so
+      # the version comes from the repository and there is one place to change it.
+      #
+      # What that buys is precise, and an earlier version of this comment claimed
+      # more: it said CI and a developer's machine "cannot disagree". They still
+      # can. `pnpm/action-setup` reads `packageManager` and installs that version
+      # here; on a laptop only corepack binds the field, and corepack is not
+      # necessarily present — measured absent on the machine this was written on,
+      # under node v26.3.0 with pnpm 11.17.0 on PATH by other means. So this is
+      # what CI reads, and nothing enforces it locally.
+      #
+      # The major is v6 for a reason beyond currency: `packageManager` here says
+      # `pnpm@11.17.0`, and v6.0.0 is the release that added pnpm 11 support. v4
+      # was also one of the three actions still targeting Node 20, which the
+      # runner now force-runs on Node 24 and warns about on every job.
+      - uses: pnpm/action-setup@v6
+
+      # `engines` is >=24 because node:sqlite needs --experimental-sqlite on 22.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Each step runs even if an earlier one failed, so one red check does not
+      # hide the state of the rest. A single `&&` chain would report the first
+      # failure and say nothing about the others, which is exactly the
+      # information you want when the first run on a new platform goes red.
+      - name: typecheck
+        run: pnpm typecheck
+
+      - name: authcheck
+        if: '!cancelled()'
+        run: pnpm authcheck
+
+      - name: daemoncheck
+        if: '!cancelled()'
+        run: pnpm daemoncheck
+
+      - name: relaycheck
+        if: '!cancelled()'
+        run: pnpm relaycheck
+
+      # The one driver whose subject is shell rather than TypeScript, and the
+      # only check that reaches `deploy/`'s *shell* — `imagecheck` reaches only
+      # `deploy/docker/`, which it builds and starts, and not one line of
+      # `lib.sh`, `install.sh` or `deploy.sh`. It belongs in this job rather than
+      # beside `imagecheck` because it is offline and in one process like
+      # everything above: it spawns `sh`, never a supervisor.
+      #
+      # Worth running *here* in particular. These drivers are developed on macOS
+      # and run on Linux, and this is the one where that difference is the
+      # subject: `render_unit` is driven for both launchd and systemd from
+      # whichever host it lands on, and a divergence in `sed`, `awk` or `ls -ld`
+      # between BSD and GNU shows up in no other step.
+      - name: deploycheck
+        if: '!cancelled()'
+        run: pnpm deploycheck
+
+      - name: webcheck
+        if: '!cancelled()'
+        run: pnpm webcheck
+
+      # Two files pin the ACP adapter and a third copy is the one that runs.
+      # Nothing enforced their agreement until this existed, and nothing but this
+      # ever compares any of them to what is actually installed.
+      - name: pincheck
+        if: '!cancelled()'
+        run: pnpm pincheck
+
+      # The only step here whose subject is prose. `CLAUDE.md` is loaded into
+      # every session before any work starts, so its size is a cost paid on every
+      # question asked of this repository — and the last time it was cut, the cut
+      # installed no number and nothing to check it, and six days later the file
+      # was larger than before. This is that number. It also asserts the things
+      # the documentation claims about itself: that every `Q<n>.<m>` citation
+      # resolves, that every symbol `DECISIONS.md` cites still greps to source
+      # (its own rule, previously enforced by nothing), that the index count is
+      # the real one, and that every `.claude/rules/` glob still matches a file —
+      # the last being the only failure in this repository with no symptom at
+      # all, since a rule scoped to a renamed path simply stops arriving.
+      - name: docscheck
+        if: '!cancelled()'
+        run: pnpm docscheck
+
+  # The control plane's image. Its own job because it is the one check here that
+  # is not offline-in-one-process — see the header — and because a cold build is
+  # minutes against seconds for everything above.
+  #
+  # It does not `needs: check`. The failure it catches most cheaply is a new
+  # import from the repository root that the Dockerfile's four `COPY src/*.ts`
+  # lines do not cover, and that change passes typecheck and every other driver —
+  # so gating this behind them would only delay the one signal nothing else gives.
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Docker is preinstalled on ubuntu-latest; buildx gives the layer cache
+      # that keeps a warm run to about a minute.
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # The driver runs under tsx, so this job needs the workspace even though
+      # the image it builds deliberately does not.
+      - run: pnpm install --frozen-lockfile
+
+      - name: imagecheck
+        run: pnpm imagecheck
+
+  # A secret scanner, and the reason it is a job here rather than a step above.
+  #
+  # `.gitleaks.toml` used to be a `.gitleaksignore` naming two whole drivers, and
+  # nothing ran gitleaks anywhere — so the suppression was never exercised, its
+  # breadth never cost anything, and a real credential pasted into either file
+  # would have been excused by a scan that did not yet exist. Adding the scan is
+  # what turns that file from a declaration into a check, and narrowing it to the
+  # two fixtures by content is what makes the check worth running.
+  #
+  # Its own job for the reason the `image` job gives: every step in `check` is
+  # offline in one process, and fetching a scanner is a network call. Not
+  # `needs:` anything, for the same reason again — this catches a class nothing
+  # else looks at, so gating it behind TypeScript only delays it.
+  #
+  # `--no-git` scans the working tree rather than history. History here is one
+  # commit by construction — the repository is published fresh — so a `--log-opts`
+  # walk would re-scan the same bytes and report the same findings twice. Push
+  # protection on the repository is what covers the commits that come after.
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pinned to an exact version rather than floating, because what makes
+      # `.gitleaks.toml` narrow is top-level `[[allowlists]]` carrying `regexes`
+      # beside `[extend] useDefault`, and a downgrade past that would widen the
+      # allowlist silently rather than fail.
+      #
+      # ⚠ Not `paths` under `condition = "AND"`, which is the form this comment
+      # used to name: `.gitleaks.toml` records the measurement that a `paths`
+      # entry in a global allowlist filters the file out *before* any finding
+      # reaches the regexes, so the `AND` never runs and the entry is the old
+      # whole-file breadth wearing a narrow shape.
+      - name: gitleaks
+        env:
+          GITLEAKS_VERSION: 8.28.0
+        run: |
+          curl -fsSL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks version
+          /tmp/gitleaks detect --no-git --config .gitleaks.toml --redact --verbose

@@ -1,0 +1,74 @@
+# What may enter a build context, and the shape is deny-first on purpose.
+#
+# The build context is the repository root, because the control plane imports
+# `../../../src/token.js` and friends by literal relative path and the layout
+# cannot be flattened. So the context is a directory that also holds, on the
+# machine this was written on:
+#
+#   * `.env` at mode 0600 — the daemon's REEMOAT_TOKEN,
+#   * `packages/control-plane/.env`,
+#   * `*.db` files, if REEMOAT_DB was ever pointed here,
+#   * 439 MB of node_modules whose pnpm bin shims have /Users/rends/... baked
+#     into an exported NODE_PATH, so they are wrong in an image anyway.
+#
+# All of those are gitignored, so none is in a fresh clone and every one is on
+# the machine most likely to run the first build. Deny-first rather than a list
+# of exclusions, because a missed exclusion puts a live credential in a layer
+# somebody can `docker save`, while a missed inclusion is a build error you see
+# immediately.
+#
+# The `!src/*.ts` lines are named individually rather than `!src/`, and that is
+# the coupling made visible: those files are the whole of what the control plane
+# reaches for out of the root, and their transitive closure is `node:crypto` plus
+# `hono`. `!src/` would drag the daemon's ACP surface in behind them. An import
+# not named here fails the build, which is the right failure.
+#
+# ⚠ **This list and `deploy/docker/Dockerfile`'s COPY lines must agree**, and the
+# failure when they do not is worth stating because it does not name this file:
+# an entry missing *here* fails at COPY with `"/src/<name>": not found`, because
+# the build context never carried it, while an entry missing only from the
+# Dockerfile fails later at `Cannot find module`. Two lists, one fact — adding an
+# import means editing both.
+
+*
+
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.json
+
+!src/token.ts
+!src/auth.ts
+!src/cors.ts
+!src/http.ts
+!src/relay/protocol.ts
+
+!packages/control-plane/package.json
+!packages/control-plane/src
+!packages/control-plane/scripts
+
+!deploy/docker/prune-store.mjs
+
+!packages/web/package.json
+!packages/web/tsconfig.json
+!packages/web/vite.config.ts
+!packages/web/index.html
+!packages/web/src
+# The favicon and the touch icon. Vite copies this directory to the root of
+# `dist` verbatim, and `index.html` names both files — so without this the page
+# ships with two `<link>`s pointing at 404s, which is what happened the first
+# time: the build succeeded, `dist` was correct on the build host, and the
+# container served JSON errors for `/favicon.svg`.
+!packages/web/public
+
+# Re-deny what a directory allow just let back in. A `!packages/web/src` above
+# would otherwise readmit a stray `.env` or a `dist` somebody built in there.
+**/node_modules
+**/dist
+**/.env
+**/.env.*
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.log
+**/.DS_Store

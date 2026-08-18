@@ -1,0 +1,59 @@
+# One template for both services, rendered by deploy/install.sh.
+#
+# A --user unit, not a system one: both services keep all of their state under
+# homedir(), and the daemon runs your agents as whoever it runs as. Running it as
+# root would run every agent as root, on your files.
+#
+# The cost of --user is one real setup step, and install.sh says it out loud:
+# without `loginctl enable-linger <user>` a user unit stops when the last session
+# for that user ends, so a headless host that nobody stays logged into loses the
+# service the moment the operator disconnects.
+
+[Unit]
+Description=@DESC@
+Documentation=https://github.com/rends-east/reemoat
+# The control plane binds a listener and the daemon dials out to a relay; both
+# want an address before they start.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_ROOT@
+# systemd starts a unit with a minimal PATH that will not contain a Nix, nvm,
+# fnm or corepack install of node. Resolved at install time from the operator's
+# own PATH rather than written down here.
+Environment=PATH=@PATH@
+# The wrapper resolves its environment file from REEMOAT_ENV_FILE on every start,
+# and `systemctl --user` propagates nothing from the shell that installed the
+# unit — so a packaged install pointing that variable at /etc configured one file
+# and supervised another. It either exited 2 into the Restart=always loop below
+# because the default path held nothing, or found a stale default file and came up
+# on the wrong token and the wrong database while the health probe, reading the
+# port out of the file install.sh had just written, reported it fine.
+#
+# Quoted where PATH is not: systemd splits Environment= on whitespace, and this
+# value is a path under $HOME, which on a desktop install is allowed to contain a
+# space. A PATH holding one is already broken everywhere else.
+Environment="REEMOAT_ENV_FILE=@ENV_FILE@"
+ExecStart=@EXEC@
+
+# Always, not on-failure: a clean exit is still an outage. Both services exit 0
+# on SIGTERM, which is also what a shutdown looks like, so systemd's own stop
+# path is what distinguishes the two — not the exit code.
+Restart=always
+RestartSec=10
+
+# The daemon's graceful shutdown has a 20s budget for closing sessions and a 25s
+# hard exit after it. Anything below that turns an orderly stop into a SIGKILL
+# and strands whatever was mid-flight; this leaves a margin over the hard exit.
+TimeoutStopSec=30
+
+# SIGTERM to the main process only, SIGKILL to anything left after the timeout.
+# The wrapper `exec`s tsx, so the main process really is the service and it gets
+# to run its own shutdown — while the daemon's children, which are now the agent
+# process groups themselves, are still guaranteed to go at the end.
+KillMode=mixed
+
+[Install]
+WantedBy=default.target

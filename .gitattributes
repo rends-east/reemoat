@@ -1,0 +1,28 @@
+# Line endings.
+#
+# `deploycheck` spawns `sh` against the scripts in `deploy/`, and a Windows clone
+# with `core.autocrlf=true` gives every one of them CRLF line endings — at which
+# point the shebang carries a trailing CR and the shell reports the *interpreter*
+# as not found, which is one of the more baffling errors this repository could
+# hand a first-time contributor. The unit templates are read by `render_unit` and
+# written to disk on the target host, where a CR is equally wrong.
+* text=auto
+
+*.sh text eol=lf
+*.in text eol=lf
+Dockerfile text eol=lf
+
+# Binary, so git never tries to normalise them.
+*.png binary
+*.ico binary
+*.webp binary
+
+# Generated and enormous: collapse it in diffs and keep it out of language stats.
+pnpm-lock.yaml linguist-generated=true -diff
+
+# The prose, kept out of the repository's language breakdown. `scripts/` is
+# deliberately NOT here even though the drivers are the test suite: it also holds
+# `daemon.ts` and `client.ts`, which are entry points rather than tests, and
+# marking the whole directory would mis-file them.
+docs/** linguist-documentation=true
+.claude/** linguist-documentation=true

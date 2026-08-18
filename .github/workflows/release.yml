@@ -1,0 +1,251 @@
+# Publishing a release, from a tag rather than from a button.
+#
+# `deploy.yml` is `workflow_dispatch` and nothing else, because *when* to deploy
+# is a judgement about somebody's running work. A release is the opposite shape:
+# the judgement was exercised the moment a person typed `git tag v0.1.0`, and the
+# tag is the record of it. So the tag push is the trigger, and there is no second
+# button to press — which keeps "nothing happens on a push to a branch" true while
+# not pretending that tagging is accidental.
+#
+# There is deliberately **no `workflow_dispatch`**. The case it would serve is a
+# GHCR hiccup after the image was built, and GitHub's own re-run-jobs button
+# already covers that with the same ref, the same tag and the same commit. A
+# second entry point would be a second way to answer "which commit is v0.1.0",
+# and the two could disagree.
+#
+# **This file decides nothing**, the same correction `deploy.yml` exists in.
+# Every refusal — a tag the six version sites disagree with, a commit whose `check`
+# run is not green, a tag that already has a release or an image, an empty
+# changelog section, a digest directory a skipped matrix leg left behind — is in
+# `deploy/ci-release.sh`, where `deploycheck` drives it with no registry, no forge
+# and no network. What is left here is a checkout and four calls.
+#
+# The job order is `plan → image → manifest → publish`, and `publish` is last on
+# purpose: a GitHub Release whose image does not exist is the failure that looks
+# like success, and it is the one a reader would find months later.
+
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+# Nothing by default, and each job takes only what it needs. `plan` in particular
+# can write nothing anywhere — it is the job that runs every gate, and a gate does
+# not need a token that could publish.
+permissions: {}
+
+concurrency:
+  # `deploy.yml`'s reasoning in a sharper form. A superseded test run is answering
+  # a stale question; a superseded *release* is a half-pushed manifest, with some
+  # tags moved and some not. Keyed on the ref rather than a constant, because two
+  # different tags releasing at once is fine and two runs on the same tag is
+  # exactly what must not overlap.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Everything that can refuse, before anything reaches a registry. A bad tag
+  # costs seconds here and never gets as far as a build.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # The check gate reads workflow runs through `gh run list`. Without this the
+      # call returns nothing, the verdict reads as "none", and every release
+      # refuses — the safe direction, but for a reason that has nothing to do with
+      # the commit.
+      actions: read
+      # ⚠ And the re-release gate reads the *registry*, through
+      # `buildx imagetools inspect`. Without a credential that call fails for
+      # "unauthorized" and the script's `>/dev/null 2>&1` collapses that into the
+      # same answer as "not published" — so the gate `ci-release.sh` calls "where a
+      # genuine re-release is caught" would fail **open** against a private package
+      # and let a release move a tag somebody has already pulled. Read-only, which
+      # keeps this job's "can write nothing anywhere" true.
+      packages: read
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      image: ${{ steps.plan.outputs.image }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The tag's own commit, and the whole history behind it — the same
+          # reason `deploy.yml` gives, so an older ref still resolves.
+          fetch-depth: 0
+
+      # The re-release gate asks the registry, so this job needs to be able to
+      # ask. See `packages: read` above for what a missing credential turns that
+      # question into.
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: plan
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REF: ${{ github.sha }}
+        run: deploy/ci-release.sh plan
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/reemoat-release/notes.md
+          if-no-files-found: error
+          # A re-run of this job uploads the same name again, and without this
+          # that is a conflict rather than a replacement — which would break the
+          # re-run-jobs button this file names as its whole recovery story.
+          overwrite: true
+
+  # The image, one job per architecture, each pushing **by digest** and claiming
+  # no tag. Its own job because it is the only part of this workflow that needs
+  # Docker, a registry and a network — the same sentence `check.yml`'s header uses
+  # about its own image job, and true here for the same reason.
+  #
+  # Adding `linux/arm64` is one entry below plus one matrix entry in `check.yml`'s
+  # image job, so `imagecheck` builds and starts it before a release publishes it.
+  # The script's `RELEASE_PLATFORMS` comment is the argument for why that order
+  # and not the other one.
+  image:
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      # ⚠ **Not optional, and its absence was a hard stop.** The check gate in
+      # `ci-release.sh` is above the verb dispatch, so it runs for *every* verb —
+      # which the script's own header says out loud ("every one of them re-runs
+      # every gate"). Only `plan` had this, so `gh run list` here returned nothing,
+      # the verdict read "unknown", and this job refused before building anything.
+      # The release workflow could not complete a single release.
+      actions: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REF: ${{ github.sha }}
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+        run: deploy/ci-release.sh image
+
+      - uses: actions/upload-artifact@v7
+        with:
+          # One artifact per architecture, named after it, so `manifest` can merge
+          # them into one directory without two legs overwriting each other.
+          name: digest-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/reemoat-release/digests/*
+          if-no-files-found: error
+          # Same reason as `release-notes` above: re-running one matrix leg must
+          # replace its digest, not collide with the one it wrote last time.
+          overwrite: true
+
+  # The digests, merged into the tags people type.
+  manifest:
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      # The check gate again — see the `image` job. Every verb runs it.
+      actions: read
+      # Both needed by the attestation below, and by nothing else here.
+      id-token: write
+      attestations: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: digest-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/reemoat-release/digests
+
+      - name: manifest
+        id: manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REF: ${{ github.sha }}
+        run: deploy/ci-release.sh manifest
+
+      # One mechanism rather than two. buildx can export its own provenance
+      # attestation and the script passes `--provenance=false` to stop it: that
+      # form is verified by almost nobody, and it adds manifests to the index —
+      # and `deploy/lib.sh` already records that the compose `provenance:` field
+      # validates and is then ignored, which is the kind of surprise worth not
+      # having twice. This one an operator checks with a single command:
+      #
+      #   gh attestation verify oci://<image>:<tag> --repo ${{ github.repository }}
+      #
+      # The subject is the **index** digest the previous step emitted, so the
+      # attestation covers the manifest people actually pull rather than one
+      # architecture inside it.
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ steps.manifest.outputs.image }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
+
+  # Last, and only once the image it describes exists.
+  publish:
+    needs: manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # The only job here that may write to the repository, and all it writes is
+      # the release.
+      contents: write
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/reemoat-release
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REF: ${{ github.sha }}
+        run: deploy/ci-release.sh publish

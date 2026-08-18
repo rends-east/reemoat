@@ -1,0 +1,48 @@
+node_modules/
+
+# Holds the bearer token the daemon refuses to start without.
+#
+# Widened to every `.env.*` variant, with `.env.example` exempted, because
+# `.dockerignore` already denies `**/.env` and `**/.env.*` and the two disagreeing
+# is how a `.env.production` ends up tracked while the image correctly refuses it.
+.env
+.env.*
+!.env.example
+
+# Nothing in this repository generates these, which is the point: a key or a
+# certificate appearing in a working tree is a mistake, and it should not be one
+# `git add -A` away from being public and permanent.
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+id_rsa*
+id_ed25519*
+
+# npm and pnpm write registry auth tokens here, and `pnpm` is this repository's
+# package manager. Nothing tracked needs one — every resolution in
+# `pnpm-lock.yaml` is the public registry — so a file appearing at all is either
+# a credential or a mistake, and both want the same treatment.
+.npmrc
+
+*.log
+.DS_Store
+
+# The event log holds full agent transcripts and every file diff. Insurance
+# against someone pointing REEMOAT_DB at the repo.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Local agent tooling, not part of this project.
+.gstack/
+.claude/settings.local.json
+.claude/*.local.json
+
+# Build output. The control plane serves packages/web/dist when it is there and
+# says how to build it when it is not, so there is nothing to check in.
+dist/

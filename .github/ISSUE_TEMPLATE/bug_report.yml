@@ -1,0 +1,81 @@
+name: Bug report
+description: Something behaves differently from what the documentation says.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Not for security issues.** Report those privately through
+        [Security → Report a vulnerability](https://github.com/rends-east/reemoat/security/advisories/new).
+
+        Before filing: `README.md`'s "The honest part" and `SECURITY.md`'s
+        "Known and accepted" list the things that look like bugs and are the
+        design — no sandbox, the agent running as you, git hooks running during a
+        checkout. Those are closed as intended.
+
+  - type: dropdown
+    id: part
+    attributes:
+      label: Which part
+      description: The three are separate programs with separate failure modes.
+      options:
+        - The daemon (src/, on your own machine)
+        - The control plane (packages/control-plane)
+        - The relay
+        - The web UI (packages/web)
+        - The deploy scripts (deploy/)
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What you did, and what happened
+      description: What you expected is usually implied; what you actually saw is not.
+    validations:
+      required: true
+
+  - type: input
+    id: driver
+    attributes:
+      label: Which driver reproduces it, if any
+      description: >
+        A reproduction against `pnpm daemoncheck`, `relaycheck`, `webcheck` or
+        `authcheck` is the most useful form a report can take, because that is
+        where a fix ends up being asserted. Leave blank if you have not tried.
+      placeholder: pnpm daemoncheck
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: >
+        The sign-in screen prints it beside the source link. On a checkout, the
+        commit you are on.
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: OS, and init system for a daemon or control-plane issue
+      placeholder: macOS 15 / launchd, or Ubuntu 24.04 / systemd
+    validations:
+      required: true
+
+  - type: input
+    id: agent
+    attributes:
+      label: Agent CLI and version, if the issue involves one
+      description: The three behave differently and most agent-facing bugs are about one of them.
+      placeholder: claude 2.1.220 / kimi 0.29.2 / codex-acp 1.1.9
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Anything the process printed
+      description: >
+        Redact before pasting. A transcript can contain your code, and a daemon's
+        environment can contain a token.
+      render: text

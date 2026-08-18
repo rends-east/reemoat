@@ -1,0 +1,300 @@
+# The control plane and the relay: two services, one image.
+#
+# There is no unit for either any more. Unlike the unit templates nothing here is
+# rendered: a compose file has interpolation of its own, so the file in the
+# repository is the file that runs, and everything that differs per machine comes
+# out of the operator's own environment file — the same one both processes read.
+# One artifact, three readers.
+#
+# **Why two services rather than one.** They have opposite restart costs. The
+# API's inputs move constantly — a web bundle, a route, a mail template — and
+# recreating it is ordinary; the relay's move rarely, and recreating *it* costs
+# every tunnel in the fleet: tens of seconds of reconnecting for every open
+# session, every in-flight request, and any approval tapped in the window. As one
+# container the cheap deploy paid the expensive price every time. Split, a
+# backend deploy recreates `control-plane` alone and no daemon notices — which is
+# only true because `deploy.sh` names the service it recreates. A bare
+# `compose.sh up -d` still recreates both, and that is the operator's own act.
+#
+# **One image, two commands**, rather than two images. The relay's code is a
+# subset of what is already copied in; a second Dockerfile target would be a
+# third place the file list is written down, and this repository has already paid
+# for having it in two. What decides whether the relay is recreated is therefore
+# not what the image is — that moves for any change to either service — but
+# `deploy.sh`'s RELAY_INPUTS, with `deploycheck` asserting the list covers the
+# relay entry's import closure.
+#
+# **Not to be run with plain `docker compose`.** `deploy/compose.sh` sets the
+# project name, the env file, the project directory and the image tag, and the
+# `:?` guards below are what say so rather than failing obscurely later.
+
+# Everything both services share. An anchor rather than two copies, because the
+# hardening below is the kind of thing that gets fixed in one place and left
+# broken in the other.
+x-cp-common: &cp-common
+  image: ${REEMOAT_CP_IMAGE:?run deploy/compose.sh rather than docker compose directly}
+  build:
+    # The repository root, because the control plane imports
+    # ../../../src/token.js and friends by literal relative path. The root
+    # .dockerignore is what keeps the daemon's .env out of that context.
+    #
+    # On both services deliberately: the second build is a total cache hit, and
+    # the alternative — a service with no build section — turns "the image is not
+    # here yet" into an attempted *pull* of a name no registry has.
+    #
+    # A cache hit is not a byte-identical `.Id`, which this said and which is
+    # measured false: `.Id` is the OCI index digest, and while `exporting config`
+    # and `exporting manifest` print the same digest on a cached rebuild,
+    # `exporting attestation manifest` does not — so the index moves with it.
+    # `deploy.sh` compares `cp_image_fingerprint` for that reason. `provenance:
+    # false` here does **not** fix it: the field validates and the attestation is
+    # exported anyway, so it was tried and taken back out.
+    context: ../..
+    dockerfile: deploy/docker/Dockerfile
+
+  # No container_name. `docker compose run --rm`, which is how the very first
+  # start is done, refuses to run when one is set. It would also be wrong twice
+  # over now that one image runs as two containers.
+
+  env_file:
+    - ${REEMOAT_CP_ENV_FILE:?run deploy/compose.sh, which sets it, rather than docker compose directly}
+
+  volumes:
+    # Named, not a bind mount of ~/.reemoat, and the second reason is the one
+    # that would bite silently:
+    #
+    #  1. On Linux a bind mount preserves host ownership, and this image runs
+    #     as uid 1000 (`node`). Any host user whose uid is not 1000 gets EACCES
+    #     creating the database — on the only kind of host a control plane is
+    #     actually meant to live on. Docker Desktop and OrbStack paper over
+    #     ownership on macOS, so it would work on the development machine and
+    #     fail on the deployment target, which is the worst arrangement
+    #     available.
+    #  2. store.ts chmods the directory 0700 and the file 0600 and tolerates
+    #     failure on both, silently. A mount without POSIX modes therefore
+    #     leaves the fleet's signing key at whatever the sharing layer decided
+    #     and says nothing. A named volume is a real filesystem and the modes
+    #     hold — and the Dockerfile seeds the mount point 0700/node so a fresh
+    #     volume inherits both.
+    #  3. store.ts opens with `PRAGMA journal_mode = WAL` and *throws* if it
+    #     does not take ("a networked or read-only filesystem is the usual
+    #     cause"). WAL needs a shared-memory mapping of a -shm file beside the
+    #     database, which is exactly the operation with a history of not
+    #     working over virtiofs.
+    #
+    # **Both services mount it, and WAL is what makes that safe.** Two processes
+    # on one SQLite file is many readers and one writer at a time; the relay
+    # reads users, machines and grants per request and writes only `relay_tunnels`,
+    # best-effort, a few rows every few seconds. It is the same host and a real
+    # filesystem, which is the case WAL is for — and the reason "the relay could
+    # live on another machine" is a different design and not this one.
+    #
+    # What it costs is real and belongs in the README: on macOS the database is
+    # inside the VM. It is no longer at ~/.reemoat/control-plane.db, Time
+    # Machine does not see it, and `pnpm cp` on the host cannot open the same
+    # file. REEMOAT_CP_VOLUME is the lever for an operator who wants a host
+    # path anyway.
+    - cp-state:/var/lib/reemoat
+
+  # `unless-stopped`, not `always`: a container the operator stopped on purpose
+  # stays stopped across a docker daemon restart. Docker's own backoff is
+  # exponential, which is strictly better than launchd's flat ThrottleInterval
+  # 10 for the case this guards — a misconfiguration that exits 2 every time.
+  #
+  # FIRST START IS NOT `up -d`. See deploy/docker/README.md: the bootstrap
+  # admin key is printed once, to stdout, and only its hash is kept.
+  restart: unless-stopped
+
+  # Both shutdowns are synchronous — close tunnels, close the server, checkpoint
+  # and close the database. Neither needs 20s; they get them so that a slow WAL
+  # truncate is never the reason a SIGKILL lands mid-checkpoint.
+  stop_grace_period: 20s
+
+  # The start command is `node --import tsx`, not `tsx`, so the entry point is
+  # PID 1 and there is no grandchild to reap. This stays anyway: the cost is a
+  # small static binary, and the benefit is that the next person who reaches for
+  # `tsx src/main.ts` here — matching run-cp.sh, which is a reasonable instinct
+  # — does not silently reintroduce unreaped grandchildren.
+  init: true
+
+  read_only: true
+  tmpfs:
+    # tsx caches its transforms under os.tmpdir() (measured in its
+    # dist/register-*.mjs and index-*.mjs), and /app is read-only and
+    # root-owned. Without this the process does not start. TMPDIR=/tmp is set
+    # in the image.
+    - /tmp:mode=1777,size=64m
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+
+  logging:
+    driver: json-file
+    options:
+      # Bounded, because the relay logs an event per refusal and per tunnel
+      # transition, and an unbounded log on the host holding the signing key is
+      # its own outage.
+      #
+      # It also bounds how long the one-time bootstrap admin key survives in
+      # `docker logs`, which cuts both ways: capture it at first run and do not
+      # treat the log as the copy. Note that `compose down` deletes the log
+      # entirely while the volume keeps the user that makes the key
+      # unmintable — see the README.
+      #
+      # Nothing here logs a token: proxy.ts logs pathOf(req), never req.url,
+      # because a browser cannot set headers on a WebSocket so the credential
+      # arrives as ?token=<JWS>.
+      max-size: "10m"
+      max-file: "5"
+
+services:
+  control-plane:
+    <<: *cp-common
+
+    environment:
+      # **The in-container bind, pinned.** Measured: `environment:` wins over
+      # `env_file:`. So a REEMOAT_CP_HOST left over in the operator's file — and
+      # on the machine this was written on that file says 192.0.2.10 — cannot
+      # make this bind an address the namespace does not have. That failure has
+      # no symptom from inside, and `serve()` reports EADDRNOTAVAIL
+      # *asynchronously*, i.e. after main.ts has already printed the one-time
+      # bootstrap admin key, which a restart policy then burns because `users` is
+      # no longer empty.
+      #
+      # Binding wide in here is not a relaxation. Inside a network namespace a
+      # loopback bind means "reachable by nobody"; who can reach this service is
+      # the host side of the published ports below, which default exactly as
+      # main.ts does.
+      REEMOAT_CP_HOST: "0.0.0.0"
+      # **The tunnels are the other container's.** Pinned rather than left to the
+      # env file because it is not a preference: this compose file *is* the split,
+      # and a control plane here that started its own relay listener would bind a
+      # port nothing publishes and then answer `relayOnline` from a map no daemon
+      # ever dials into — every machine offline, with two relays' worth of code
+      # running and no error anywhere. `embedded` remains the default in main.ts
+      # and remains what `pnpm cp` and every offline driver run.
+      REEMOAT_CP_RELAY_MODE: "external"
+      # Pinned here as well as in the image, and the image alone was not enough:
+      # `env_file:` beats an image `ENV`, so a leftover REEMOAT_CP_DB in the
+      # operator's own file relocated the database — and a database in the wrong
+      # place is not an error, it is a fresh one with a NEW signing key. Under
+      # `read_only: true` most wrong values fail loudly, because the only
+      # writable non-volume path is the /tmp tmpfs; a /tmp-resident one would
+      # mint a new key on every restart, silently.
+      #
+      # REEMOAT_CP_ISSUER is deliberately NOT pinned here. It has to be
+      # *carried* from the env file, because a fleet whose daemons enrolled
+      # against a non-default issuer checks `iss` against exactly that value.
+      REEMOAT_CP_DB: "/var/lib/reemoat/control-plane.db"
+
+    ports:
+      # ------------------------------------------------------------------
+      # The API and the web UI. This port carries /v1/admin/*, and behind it the
+      # Ed25519 private key that mints every token in the fleet.
+      #
+      # Default 127.0.0.1 — main.ts's own default, for main.ts's own stated
+      # reason: exposing it "should be a decision somebody has to make on
+      # purpose". Widening it means writing an address into the env file, which
+      # is that decision. Write an *interface* address, a Tailnet or LAN one,
+      # rather than 0.0.0.0 — the same advice .env.example already gives for the
+      # native case, and more pressing here because:
+      #
+      #   ON LINUX THIS LINE BYPASSES ufw AND firewalld.
+      #
+      # Docker writes DNAT rules into nat/PREROUTING, evaluated before
+      # filter/INPUT where ufw's rules live, so `ufw deny 7888` does not deny
+      # this. A specific address is the fix and needs no firewall cooperation:
+      # the DNAT rule then matches one destination and nothing else reaches it.
+      # On macOS none of this applies — ports are published by a listening
+      # socket on the host, which the application firewall sees normally.
+      #
+      # The same number on both sides of the colon, deliberately: the health
+      # probe, cpctl.env and REEMOAT_CP_RELAY_URL all read REEMOAT_CP_PORT out
+      # of this same file, and a second port number is a second thing to be
+      # wrong about.
+      # ------------------------------------------------------------------
+      - "${REEMOAT_CP_PUBLISH:-127.0.0.1}:${REEMOAT_CP_PORT:-7888}:${REEMOAT_CP_PORT:-7888}"
+
+  # ------------------------------------------------------------------------
+  # The relay: the only way into any machine in the fleet.
+  #
+  # Same image, different command. It holds the tunnels and nothing else — no
+  # signing key is minted here, no admin is bootstrapped, no mail is sent, and
+  # `authorize` reads `public_jwk` and never a private one. That narrowness is
+  # what makes it the container that stays up: almost nothing that changes in
+  # this repository is an input to it.
+  #
+  # No `depends_on`, deliberately. The relay must start and serve with the API
+  # down — authorization is four live row reads, so a control plane that is
+  # stopped prevents you *minting* a token and does not prevent an existing one
+  # reaching your machine. Wiring a dependency would trade that property for an
+  # ordering nothing needs: on a first boot the relay may create the schema
+  # before the API mints signing keys, and a relay holding no keys answers 401 to
+  # requests that, at that point in a fresh install, nobody is making.
+  # ------------------------------------------------------------------------
+  relay:
+    <<: *cp-common
+
+    # The one difference that matters. Exec form and `node --import tsx` for
+    # exactly the reasons the image's own CMD gives.
+    command: ["node", "--enable-source-maps", "--import", "tsx", "src/relay/main.ts"]
+
+    environment:
+      # Inside a network namespace a loopback bind means "reachable by nobody";
+      # who can reach this is the host side of the published port below.
+      REEMOAT_CP_RELAY_HOST: "0.0.0.0"
+      # Same pin, same reason as the API's: `env_file:` beats an image `ENV`, and
+      # a relay pointed at the wrong database is not an error — it is a relay
+      # authorizing against an empty file, which refuses every request with a 404
+      # that looks exactly like a revoked grant.
+      REEMOAT_CP_DB: "/var/lib/reemoat/control-plane.db"
+      # REEMOAT_CP_ISSUER is deliberately NOT pinned, for the same reason as on
+      # the API: it is *carried* from the env file, and these two must agree or
+      # every token fails `iss` here.
+
+    ports:
+      # ------------------------------------------------------------------
+      # Wide by default and that is correct: every daemon dials it and every
+      # browser reaches every machine through it, so a relay daemons cannot dial
+      # is not a relay. This is why the two listeners have opposite defaults, and
+      # why they are two ports on two containers rather than one — publishing the
+      # relay must not publish /v1/admin/* with it.
+      #
+      # Its own variable, deliberately not sharing the API's. To restrict it on
+      # Linux the rules go in the DOCKER-USER chain: Docker flushes everything
+      # else it manages and never flushes that.
+      # ------------------------------------------------------------------
+      - "${REEMOAT_CP_RELAY_PUBLISH:-0.0.0.0}:${REEMOAT_CP_RELAY_PORT:-7889}:${REEMOAT_CP_RELAY_PORT:-7889}"
+
+    # Overrides the image's, which probes the API port this container does not
+    # serve. `/__relay/health` is answered before `authorize`, so it needs no
+    # token — and it is deliberately not `/health`, which belongs to the daemon
+    # on the far side of a tunnel and is what a browser fetches to decide whether
+    # a machine is reachable at all.
+    healthcheck:
+      interval: 15s
+      timeout: 6s
+      start_period: 10s
+      retries: 3
+      test:
+        - CMD
+        - node
+        - -e
+        - "const r=process.env.REEMOAT_CP_RELAY_PORT||'7889';fetch('http://127.0.0.1:'+r+'/__relay/health',{signal:AbortSignal.timeout(5000)}).then(x=>{if(!x.ok)throw new Error('relay '+x.status)}).then(()=>process.exit(0),e=>{console.error(String(e));process.exit(1)})"
+
+volumes:
+  cp-state:
+    # Named explicitly rather than left as <project>_cp-state, because the
+    # migration runbook names this volume and a renamed project must not
+    # silently produce a second, empty one with a second signing key.
+    #
+    # **A migrated host prints a warning here on every command**, and it is
+    # expected rather than a fault: the runbook creates and loads this volume by
+    # hand before the stack first comes up, so compose finds a volume it did not
+    # create and says `volume "reemoat-cp-state" already exists but was not
+    # created by Docker Compose. Use `external: true``. Taking that advice would
+    # be wrong — `external: true` makes compose *refuse* when the volume is
+    # absent, which is every fresh install, trading a cosmetic warning on
+    # migrated hosts for a hard failure on new ones. The volume is used either
+    # way; only the warning differs.
+    name: ${REEMOAT_CP_VOLUME:-reemoat-cp-state}

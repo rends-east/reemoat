@@ -1,0 +1,83 @@
+# Deploying the control plane, from a button rather than from a push.
+#
+# `CLAUDE.md` said "there is no CD, and that is a decision", and the reason it
+# gave was about the **daemon**: on a machine where you develop and run agents at
+# once, every push to `main` would interrupt every turn in flight and drop every
+# pending approval. That still holds, and `deploy/ci-deploy.sh` refuses to deploy
+# a daemon rather than merely not offering to.
+#
+# What changed is the other half. The control plane runs on a host of its own,
+# where no agent has ever run: recreating it costs relay tunnels a redial, which
+# the daemons perform themselves and which `deploy.sh` already declines to pay
+# when the diff never reached the relay.
+#
+# **It stays a deliberate act**, which is the part of the old decision worth
+# keeping: `workflow_dispatch` and nothing else — no `push`, no schedule. The
+# runner replaces the ssh session, never the judgement about when.
+#
+# **This file decides nothing**, and that is the correction it exists in. The
+# first version of it carried five `run:` blocks — a secret guard, a CI gate, the
+# ssh, a health probe — none of which any driver could reach, because a workflow
+# is exercised by pushing and watching. `deploy.sh` had already written the rule
+# down one file over: keeping the logic in a script is what lets it be tested by
+# running it. So every decision moved into `deploy/ci-deploy.sh`, `deploycheck`
+# drives all of them with no host and no secrets, and what is left here is a
+# checkout and one call.
+
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit to deploy (blank = the ref this was dispatched on). A SHA here is also the rollback."
+        required: false
+        default: ""
+
+# The token gets a checkout and the one read the gate needs, and nothing else.
+#
+# `actions: read` is not optional and is the half worth naming: `ci-deploy.sh`
+# refuses a commit whose `check` run is not green, and it asks by running
+# `gh run list --workflow check` against `github.token`. Narrowed to `contents`
+# alone, that call returns nothing, the verdict reads as `"none"`, and every
+# deploy refuses — which is the safe direction, but it is a gate failing shut for
+# a reason that has nothing to do with the commit.
+#
+# Stated rather than left to the repository default, because that default is a
+# setting somebody can widen for an unrelated reason, and this is the workflow
+# that holds an ssh key to a production host.
+permissions:
+  contents: read
+  actions: read
+
+# One at a time, and a queued one waits rather than replacing the run in flight —
+# the opposite of `check.yml`'s `cancel-in-progress`. A superseded test run is
+# answering a stale question; a superseded deploy is a half-applied
+# `git reset --hard` on somebody's box.
+concurrency:
+  group: deploy-control-plane
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The whole history, so a SHA from an older release resolves — this is
+          # the rollback path as well as the deploy one.
+          fetch-depth: 0
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: deploy the control plane
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_DIR: ${{ vars.DEPLOY_DIR }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DEPLOY_REF=$(git rev-parse HEAD) deploy/ci-deploy.sh

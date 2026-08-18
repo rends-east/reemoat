@@ -1,0 +1,13 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/rends-east/reemoat/security/advisories/new
+    about: >
+      Report privately, not as an issue. A report is more useful before it becomes
+      instructions somebody can follow against other people's machines.
+  - name: Why is it built this way?
+    url: https://github.com/rends-east/reemoat/blob/main/docs/DECISIONS.md
+    about: >
+      644 entries of question → decision, with the measurement behind each and the
+      alternatives that were tried and taken back out. Most "why on earth" questions
+      are answered there, with a number.

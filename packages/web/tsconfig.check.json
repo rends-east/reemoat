@@ -1,0 +1,24 @@
+{
+  // The driver's config, and only the driver's.
+  //
+  // `scripts/webcheck.ts` is the one file in this package that is *not* browser
+  // code: it runs under `tsx` and needs `@types/node`. It cannot go in
+  // `tsconfig.json`, whose `types: []` is load-bearing — with `@types/node`
+  // present, `setInterval` returns `NodeJS.Timeout` instead of `number` and
+  // `process` becomes a global in code that ships to a phone.
+  //
+  // And it cannot go in the *root* config either: that one is NodeNext, which
+  // demands explicit `.js` on every relative import, and this package's own
+  // imports are extensionless because a bundler resolves them. Importing `src/`
+  // from a root-config file pulls those files into a program that rejects them.
+  //
+  // So: same bundler resolution and same DOM lib as the shipped code, plus node.
+  // `src/**` is included because the driver imports it, and stating it here is
+  // clearer than relying on import following.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["ES2023", "DOM", "DOM.Iterable"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "scripts/**/*.ts"]
+}

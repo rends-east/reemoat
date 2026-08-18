@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  One template for both services, rendered by deploy/install.sh.
+
+  One rather than two because the daemon's plist and the control plane's differ
+  only in a label, a program and a log name — everything a substitution can do.
+  Two files identical but for three words is how two files stop being identical
+  for a fourth reason nobody meant.
+
+  A user agent (~/Library/LaunchAgents), not a system daemon. Both services keep
+  all of their state under homedir() — databases and worktrees — so a
+  system-wide unit would run them as a user whose home is not the one holding it.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>@LABEL@</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@EXEC@</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>@REPO_ROOT@</string>
+
+  <!--
+    launchd starts a job with almost no environment: no profile is read, and PATH
+    is a bare default that will not contain a Homebrew, Nix, nvm or corepack
+    install of node. This value is resolved at install time from the operator's
+    own PATH, which is why nothing here is written down.
+
+    HOME is set explicitly for the same class of reason. It is normally present
+    for a gui/ agent, but everything either service stores is under it.
+
+    REEMOAT_ENV_FILE is here because it is a *runtime* override — the wrapper
+    reads it on every start — and nothing propagates the installing shell's
+    environment to a bootstrapped job. Without this line a packaged install run as
+    `REEMOAT_ENV_FILE=/etc/reemoat/d.env install.sh daemon` configured one file
+    and supervised another: either the wrapper found nothing at the default path
+    and exited 2 into the KeepAlive/ThrottleInterval retry below, for ever, or —
+    worse — it found a leftover default file and came up on the wrong token,
+    the wrong REEMOAT_AUTH and the wrong database, while `wait_healthy` probed
+    the port it read from the file it wrote and reported health: ok. Rendered
+    unconditionally rather than only when the variable is set, so the unit names
+    the file it reads instead of relying on the wrapper's fallback agreeing.
+  -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>@PATH@</string>
+    <key>HOME</key>
+    <string>@HOME@</string>
+    <key>REEMOAT_ENV_FILE</key>
+    <string>@ENV_FILE@</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!--
+    Restart whenever it stops, for any reason. This is the half that is missing
+    today: nothing brings either service back after a reboot, a logout or a
+    crash, and nobody finds out until they reach for a session that is not there.
+
+    ThrottleInterval bounds the retry when a service is failing at startup rather
+    than running — a wrong REEMOAT_TOKEN, a port in use, or a second daemon
+    against a database the first one still holds. Without it a misconfigured
+    service busy-loops.
+  -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <!--
+    Both streams to one file, because that is the order things actually happened
+    in. Nothing in src/ prints; the startup banner and every warning come from
+    scripts/, and splitting them across two files interleaves them wrongly.
+
+    Deliberately no ProcessType: the default is Standard, while "Background"
+    tells macOS this job may be throttled — which is a reasonable thing to say
+    about an indexer and a bad thing to say about a process holding WebSocket
+    tunnels for a fleet.
+  -->
+  <key>StandardOutPath</key>
+  <string>@LOG_DIR@/@SERVICE@.log</string>
+  <key>StandardErrorPath</key>
+  <string>@LOG_DIR@/@SERVICE@.log</string>
+</dict>
+</plist>

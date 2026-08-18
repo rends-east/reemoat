@@ -1,0 +1,41 @@
+{
+  "name": "@reemoat/web",
+  "version": "0.1.0",
+  "description": "The reemoat web UI: supervises a fleet of coding-agent sessions from a phone.",
+  "license": "AGPL-3.0-only",
+  "author": "rends-east",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rends-east/reemoat.git",
+    "directory": "packages/web"
+  },
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.check.json"
+  },
+  "dependencies": {
+    "highlight.js": "^11.12.0",
+    "lucide-react": "^1.31.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.0.5",
+    "tailwindcss": "^4.1.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1"
+  }
+}

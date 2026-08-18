@@ -1,0 +1,833 @@
+@import "tailwindcss";
+
+/*
+ * **The rail's width, and it lives here so that the first paint is already right.**
+ *
+ * `ui/rail.ts` owns the number and `AppShell` writes it onto `documentElement`
+ * from an effect — which runs *after* the first paint, so without a value here the
+ * rail would mount at whatever `w-[var(--rail-w)]` falls back to and jump one
+ * frame later. The declared value is `RAIL_DEFAULT`, i.e. the width this shipped
+ * at, so a browser that has never been dragged never sees the variable change at
+ * all.
+ *
+ * On `:root` rather than in `@theme`: a theme entry generates utilities, and there
+ * is no `w-rail-w` anybody should be writing. This is one value read by one
+ * `w-[var(…)]`, and it is *mutated at runtime* — which is the whole reason it is a
+ * custom property rather than a Tailwind class in the first place.
+ *
+ * **`px` and not `19.5rem`, which is the same number only at a 16px root.** It was
+ * written `19.5rem` to match the `w-[19.5rem]` this replaced, and that quietly made
+ * the sentence above false for anybody who has changed their browser's font size:
+ * nothing here sets a root `font-size` — the only `font-size` in this file is the
+ * iOS form-control rule — so `1rem` is the reader's own setting, and `AppShell`
+ * writes `${width}px` unconditionally. At Chrome's "Large" (20px) the first paint
+ * was 390px and the effect rewrote it to 312px, a 78px snap on every reload,
+ * i.e. precisely the jump this declaration exists to prevent, appearing only for
+ * the readers least able to ignore it. Same unit on both sides is the whole fix,
+ * and `webcheck` now derives this literal from `RAIL_DEFAULT` so the two cannot
+ * drift apart again.
+ *
+ * The consequence worth stating rather than discovering: the bounds in `rail.ts`
+ * are device pixels, so the rail is the one box here that does **not** grow with
+ * the reader's type. That is accepted rather than overlooked — a drag produces
+ * device pixels and `RAIL_MIN` is a floor somebody can always drag away from, not
+ * a fixed width — but it does mean `RAIL_MIN`'s "enough of a name to tell two
+ * sessions apart" is a claim about a 16px root and gets tighter above it.
+ */
+:root {
+  --rail-w: 312px;
+}
+
+/*
+ * A control surface for a phone in daylight, and for a desktop browser beside it.
+ *
+ * **One palette, and it has no hue.** Light, warm, paper-coloured, with the whole
+ * app drawn in values of a single near-black. There is no dark block any more and
+ * `prefers-color-scheme: dark` is deliberately ignored: everything that used to be
+ * carried by colour — a waiting session, a failed one, a removed diff line, a
+ * keyword in a code fence — is carried by fill, ring, weight, motion or shape
+ * instead, and each of those had to be *designed*. A second palette would mean
+ * designing all of it twice, and the second copy is the one nobody looks at, which
+ * is exactly what went wrong with the light mode this file used to claim to have.
+ *
+ * Every colour is still a variable, and that is what makes a restyle a one-file
+ * change: a component writes `bg-surface`, never a hex.
+ */
+@theme {
+  /* Four surfaces, not three. A sidebar sitting beside cards needs one more
+     step than a single scrolling column did.
+
+     `ink` is the plane things sit on (the page, the rail, a well); `surface` is
+     a thing on that plane (a card, a pane, a menu); `raised` is a mark on a
+     thing (a chip, a hover tint, a code span). Those three sentences are the
+     whole rule, and they are unchanged from the dark palette — which is why no
+     component had to be re-read when the values moved.
+
+     **Almost all of the colour came back out, and that is the third and final
+     position rather than a retreat to the first.** The version before this went
+     the other way — it pushed `ink` *up* in chroma to 0.026 so the rail would
+     read unmistakably beige beside a near-white pane — and beige at that strength
+     is a decision the whole app then wears: the user's own message was a beige
+     block, a tool card was a beige block, and what should have read as paper read
+     as a colour scheme. Chroma is now 0.003–0.006 across all three, so these are
+     **greys with a memory of warmth**: enough that the app is not clinical, far
+     too little to be called beige by anybody looking at it.
+
+     Two things follow from the values, and both are load-bearing.
+     `surface` is now plain `#ffffff`, so the conversation is white and nothing
+     composites over a tint. And `ink` at 1.06:1 against it is **too small a step
+     to divide two panes**, which is why `border-r` came back onto the rail in
+     `AppShell` after being deleted twice: at this delicacy a line is the divider
+     and the tone is only a hint.
+
+     What the three still mean is unchanged — `ink` is the plane, `surface` is a
+     thing on it, `raised` is a mark on a thing — but the *transcript* now spends
+     `raised` at two strengths rather than reaching for `ink`: `bg-raised` for the
+     message you wrote (1.22:1 on the pane, and grey) and `bg-raised/50` for a
+     tool card (1.10:1), which is the "both grey, yours louder" ranking with one
+     token instead of a fourth surface.
+
+     Every text token was re-measured against all three and the floors below are
+     the *new* numbers. They all went **up**, because the grounds got lighter. */
+  --color-ink: #f9f8f6;
+  --color-surface: #ffffff;
+  --color-raised: #eae8e4;
+
+  /* Two weights of line, and the split is load-bearing rather than tidy.
+
+     `edge` is a decorative hairline (1.23:1 on `ink`) and **may never be the sole
+     identification of a control**. `edge-strong` is a control's own boundary and
+     is held at ≥3:1 on all three surfaces (4.14 / 4.40 / 3.59) because WCAG 1.4.11
+     asks that of a non-text control with no fill — which is now **most controls in
+     this app**, and by request rather than by accident: a field or a button is
+     drawn in the colour of the thing it sits on, so the border is the whole of
+     what says a control is there. That is why `edge` is not an alternative to it.
+
+     The consequence a builder has to apply: **hover moves a fill, never a border.**
+     `hover:border-edge-strong` was fine when the gap was small; here it is a jump
+     from #E3E1DD to #7B7873, louder than the press itself. */
+  --color-edge: #e3e1dd;
+  --color-edge-strong: #7b7873;
+
+  /* 16.37 on `ink`, 17.37 on `surface`, 14.20 on `raised`. */
+  --color-fg: #1c1a16;
+  /* 7.30 / 7.75 / 6.33. */
+  --color-muted: #57524a;
+  /* The quietest text in the app, and almost every use of it is 12px — which is
+     small text, so WCAG AA wants 4.5:1 rather than the 3:1 that would be enough
+     for a large heading. So this value is bounded by measurement, not by taste.
+     5.87 on `ink`, 6.23 on `surface`, and 5.09 on `raised` — that last one is
+     still the binding case and still the reason this is not lighter, though the
+     margin grew when the grounds did. Every consumer goes through the token, so
+     only the floor moved. */
+  --color-faint: #676051;
+
+  /*
+   * The one colour in the app, and it is here because irreversibility is the one
+   * failure a second look cannot repair.
+   *
+   * A dark oxblood on the same warm axis as the paper rather than beside it —
+   * 8.08 / 8.57 / 7.01, so it is a *value* first and a hue second. Rules for it:
+   * `text-danger` and `border-danger` on an outlined control only, **never a
+   * fill**, and never more than one control in a view.
+   *
+   * It **had** one non-control use that was argued for: the worktree notice on the
+   * session header, the one line in the app that said work you can see is *not*
+   * in the session you are looking at. It qualified on the same grounds as
+   * irreversibility — a thing a second look does not repair, because the second
+   * look shows the same wrong thing — and it was text, so the `never a fill` half
+   * was untouched. The banner was deleted on request. Kept in the record rather
+   * than cut, because the *category* it established is the one a future
+   * non-control use has to argue itself into.
+   *
+   * ⚠ **This used to end "so this token is back to controls only", and that was
+   * false when it was written.** `text-danger` appears 34 times across 16 files
+   * under `ui/`, and not all of them are controls: the transcript alone draws two
+   * plain paragraphs with it — the daemon `error` row and the orphaned failed
+   * update, both in `EventList.tsx`, neither of which anybody can press. Those are
+   * defensible on the same "a second look does not repair it" grounds the worktree
+   * notice was, and they were never argued for; they simply appeared. Corrected
+   * rather than re-litigated, because a docblock stating a rule the file does not
+   * keep is worse than no rule: the next person reads it, believes it, and either
+   * removes a use that was fine or adds one thinking the rule allows it.
+   *
+   * The half that **is** still absolute and is worth keeping absolute: `danger` is
+   * never a fill, and never more than one control in a view.
+   *
+   * `warn` and `ok` were retired rather than joining it. `warn`'s only job was
+   * "something needs you", which is now a filled dot with a permanent ring, a
+   * semibold row title and a count on the folder — three signals against one.
+   * Every `ok` site already carried a `Check` glyph.
+   */
+  --color-danger: #7e362b;
+
+  /*
+   * Names were retired here, and the grep gate in `webcheck` is what made deleting
+   * them safe.
+   *
+   * `--color-accent`, `--color-accent-ink`, `--color-warn` and `--color-ok` are
+   * gone. The reason they left in two steps — retargeted to `fg`/`muted` first,
+   * deleted only once nothing named them — is that **Tailwind v4 emits no rule at
+   * all for a utility whose token does not exist**. `bg-warn` without
+   * `--color-warn` is not an error, not a build warning and not a type failure;
+   * the background simply never paints. Measured on the commit that introduced
+   * this palette: a deliberate `bg-nonexistent` built green and produced no CSS.
+   *
+   * So a missed call site would have lost its background silently, and the only
+   * thing that can catch that is a source-text assertion. It lives in
+   * `webcheck.ts` beside the two that already read `SessionBrowser.tsx` and
+   * `Composer.tsx` off disk.
+   *
+   * **`--color-add` and `--color-del` were on that list and have come back**, with
+   * real values this time, and the gate now asserts their *presence* as well as
+   * the others' absence — the same property from the other side, because the
+   * failure it exists to catch is a utility with no token behind it, whichever
+   * direction the two drifted apart in.
+   */
+
+  /*
+   * The diff's two colours, and the only ones in the app besides `danger`.
+   *
+   * `danger`'s rules are `text`/`border` on an outlined control, never a fill, and
+   * never more than one in a view. None of them is being bent, because none of them
+   * is about this: those bound a colour that identifies a **control**, and these
+   * tint **content**. A diff is many lines of it by construction, so "one per view"
+   * is not a sentence that can be said here.
+   *
+   * What keeps them from being a licence: **the fill is tinted and the text is not.**
+   * A changed line renders `text-fg` on `bg-add`/`bg-del` — 14.68 and 14.34, against
+   * 17.37 on plain `surface` — so nothing about legibility rests on the hue, and no
+   * reader depends on telling green from red to know what happened: the `+`/`−` in
+   * the gutter and the two line-number columns say it without colour, which is the
+   * arrangement the monochrome palette was chosen to force. Context lines keep
+   * `text-muted` (6.54 on `add`).
+   *
+   * `-ink` is the sigil and the word-level mark (at `/20`), never body text: 7.06 on
+   * `add` and 7.57 on `del`. Both sit on the same warm axis as `danger` and are
+   * deliberately quiet — a transcript is twenty of these down a column, and a
+   * saturated pair would make the machinery the loudest thing on a screen whose job
+   * is the conversation. Measured against the palette's own grades, the tints are
+   * 1.184 and 1.211 from `surface`, i.e. between a tool card (1.10) and the message
+   * you wrote (1.22).
+   *
+   * **They are measured against `surface` because that is where they must be drawn**,
+   * and that is a constraint rather than a note: on `raised` they are 1.034 and 1.010,
+   * i.e. invisible. So `DiffView`'s body paints `bg-surface` even inside a card whose
+   * frame is `raised` — the same move the tool card already makes for the well its
+   * child steps sit in, and for the same reason.
+   */
+  --color-add: #e4efe2;
+  --color-add-ink: #2c5730;
+  --color-del: #f6e6e2;
+  --color-del-ink: #77332a;
+
+  /* A scale, replacing the `text-[11px]` / `text-[10px]` arbitrary values that
+     were scattered through every component with no relationship between them.
+
+     Everything moved up about a notch with looser leading, because the previous
+     scale was drawn for a dense bordered list and this one separates rows with
+     whitespace. `--text-xl` is the one addition and the brief required it: with a
+     17px ceiling, a pop-up's title was the same size as a row in the list behind
+     it. */
+  --text-2xs: 0.75rem;
+  --text-2xs--line-height: 1.125rem;
+  --text-xs: 0.8125rem;
+  --text-xs--line-height: 1.25rem;
+  --text-sm: 0.875rem;
+  --text-sm--line-height: 1.375rem;
+  --text-base: 0.9375rem;
+  --text-base--line-height: 1.5625rem;
+  --text-lg: 1.125rem;
+  --text-lg--line-height: 1.6875rem;
+  --text-xl: 1.375rem;
+  --text-xl--line-height: 1.875rem;
+
+  --radius-sm: 0.375rem;
+  --radius-md: 0.625rem;
+  --radius-lg: 0.875rem;
+  --radius-xl: 1.25rem;
+
+  /*
+   * Warm shadows, because Tailwind's default is neutral black and neutral black
+   * over paper reads as cold grey — the one thing that makes a beige page look
+   * like a beige page with a bug rather than a beige page.
+   */
+  --shadow-sm: 0 1px 2px 0 rgb(60 52 38 / 0.06);
+  --shadow-md:
+    0 2px 6px -1px rgb(60 52 38 / 0.08), 0 1px 2px -1px rgb(60 52 38 / 0.06);
+  --shadow-lg:
+    0 8px 20px -6px rgb(60 52 38 / 0.12), 0 2px 6px -2px rgb(60 52 38 / 0.07);
+  --shadow-xl:
+    0 16px 36px -10px rgb(60 52 38 / 0.16), 0 4px 10px -4px rgb(60 52 38 / 0.08);
+  --shadow-2xl: 0 28px 60px -16px rgb(60 52 38 / 0.22);
+
+  /*
+   * The face the brief asked for, first, and the four it will actually resolve to.
+   *
+   * `Microsoft YaHei UI` before `Microsoft YaHei`: the UI cut is the one Microsoft
+   * ships for chrome, with tight vertical metrics. Asking for plain YaHei on
+   * Win10/11 gets the print cut, whose line gap blows out a 44px row — and every
+   * row in this app is 44px. `微软雅黑` is the local name, which is what a
+   * Chinese-locale Windows resolves when the Latin lookup misses.
+   *
+   * `-apple-system` before any CJK face, not after: on a Mac that is SF Pro, and
+   * putting PingFang ahead of it would take the *Latin* too and render a Mac UI in
+   * a Chinese face. There is no webfont here and there will not be one — YaHei and
+   * Segoe UI are Microsoft's and cannot be shipped, and a free CJK substitute is
+   * 2–4 MB of woff2 out of the control plane's own container to a phone on LTE,
+   * which is not a trade this app makes anywhere else.
+   *
+   * **The CJK tail is load-bearing rather than thorough.** SF Pro has no Hanzi, so
+   * without naming PingFang a Chinese session title — or a Chinese sentence in an
+   * agent's reply — falls to the browser's last resort, which on macOS is a
+   * *serif*. A serif Chinese paragraph inside a sans UI, in a transcript.
+   */
+  --font-sans:
+    "Microsoft YaHei UI", "Microsoft YaHei", 微软雅黑, -apple-system,
+    BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Noto Sans SC", system-ui, sans-serif;
+  /* Same shape of fix on the mono side: `Cascadia Mono` is the modern Windows
+     face (Consolas is the floor), and the CJK mono tail exists because a Chinese
+     comment inside a code fence otherwise falls to last resort and breaks the
+     grid the fence is drawn on. */
+  --font-mono:
+    ui-monospace, "SF Mono", SFMono-Regular, Menlo, "Cascadia Mono", Consolas,
+    "Sarasa Mono SC", "Noto Sans Mono CJK SC", monospace;
+
+  /*
+   * "An agent is working", as the one piece of motion in this app.
+   *
+   * Tailwind's own `animate-pulse` is 2s between full and half opacity, which is
+   * tuned for a page of skeleton placeholders — a whole screen of it, breathing
+   * gently, deliberately not asking for attention. A status dot is the opposite
+   * job: it is 8px, there is one of it per row, and it has to be readable as
+   * *moving* from a phone lying on a desk. At that size a fade to 50% over two
+   * seconds is, in practice, a dot that looks static and slightly dim.
+   *
+   * So: faster, deeper, and brighter at the top of the cycle. The glow is what
+   * carries the colour half — a plain opacity fade only ever subtracts, so the
+   * peak of the old animation was just the dot's own flat fill. `currentColor`
+   * rather than a named token, so this stays one keyframe for every state that
+   * uses it; the caller sets `text-*` beside its `bg-*`.
+   *
+   * `ease-in-out` and not `linear`: a linear blink reads as a hardware fault
+   * light, which is a thing to say about a broken machine and not about an agent
+   * that is working normally.
+   */
+  --animate-blink: blink 1.2s ease-in-out infinite;
+
+  /*
+   * …and what carries the colour half now that there is no colour.
+   *
+   * The old keyframe was a `box-shadow` **glow** — `0 0 7px 1px currentColor`,
+   * a soft halo that reads as light on a dark ground and as a smudge on paper.
+   * This is a hard **ring** that grows from nothing instead, which survives the
+   * inversion and, more importantly, is a different *shape* from the thing it has
+   * to be told apart from.
+   *
+   * That pairing is deliberate and it is the whole reason the two states are still
+   * distinguishable with the hue gone. `blocked` carries a **permanent** ring, as
+   * a static utility class. `running` carries an **animated** ring, from zero. At
+   * rest they differ (one has a ring, one is mid-fade); in motion they obviously
+   * differ.
+   *
+   * And under `prefers-reduced-motion` the block at the bottom of this file
+   * collapses the animation to 0.01ms with no `animation-fill-mode`, so `running`
+   * settles back to a **plain filled dot** carrying no ring at all — still clearly
+   * not `blocked`. The dark palette could not do that without the hue, which makes
+   * this one of the few places the monochrome version is strictly better.
+   */
+
+  /*
+   * A card arriving, rather than appearing.
+   *
+   * The second keyframe in this app, and the bar for adding one is the complaint
+   * it answers: the permission card mounted between the transcript and the
+   * composer with no warning at all, at full amber, and that is most of what made
+   * it feel like an alarm rather than a question.
+   *
+   * **It moves now, and that is a reversal with a reason.** This said "opacity
+   * only", because a `translateY` had been tried and rejected: the card was a
+   * static-position sibling directly above the composer, so a transform painted
+   * over the composer for the duration. The card is `absolute` inside the
+   * conversation region now and paints above everything there by design, so the
+   * objection is simply gone — the thing it was protecting is what the card is
+   * deliberately doing. Six pixels, which is a card sliding into place rather
+   * than a card that has to be watched.
+   *
+   * The `prefers-reduced-motion` block below zeroes this, and that degradation is
+   * correct rather than merely acceptable: unlike the `blocked` dot, nothing about
+   * this card's *state* is carried by the motion. It is still there and still
+   * saying the same thing.
+   */
+  --animate-rise: rise 140ms ease-out;
+
+  /*
+   * The third keyframe, and the bar for one is stated two paragraphs up: it has to
+   * answer a complaint. This one answers "the agent is working" with the product's
+   * own mark instead of a borrowed dot — the three bars blinking in sequence, which
+   * is the typing indicator every messenger draws and which nobody has to be taught
+   * to read.
+   *
+   * **Opacity only, and it bottoms out at 0.25 rather than at 0.** Three bars going
+   * fully out and coming back is a mark that keeps *disassembling*, which reads as
+   * a rendering fault at the foot of a conversation; a floor keeps it one object
+   * that is breathing. It is deeper than `blink`'s 0.35 because there is no ring
+   * here to carry the other half — this glyph has no room for one.
+   *
+   * 1.05s against `blink`'s 1.2s, and the two are deliberately not the same number:
+   * a rail full of dots and one mark in the transcript beating in lockstep would
+   * read as one mechanism driving both, which they are not, and which the note on
+   * `WorkingMark` explains at length.
+   *
+   * The stagger is **not** here: it is three `[animation-delay:…]` utilities on the
+   * rects, because Tailwind emits a class only for a literal it finds in the source
+   * and a delay computed from an index emits nothing at all — the failure being
+   * three bars pulsing in unison, which is a different animation that still looks
+   * deliberate.
+   */
+  --animate-bar: bar 1.05s ease-in-out infinite;
+
+  @keyframes bar {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.25;
+    }
+  }
+
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+  }
+
+  @keyframes blink {
+    0%,
+    100% {
+      opacity: 1;
+      box-shadow: 0 0 0 3px color-mix(in oklab, currentColor 18%, transparent);
+    }
+    50% {
+      opacity: 0.35;
+      box-shadow: 0 0 0 0 transparent;
+    }
+  }
+}
+
+/*
+ * There is no second palette, and `prefers-color-scheme` is read nowhere in this
+ * file.
+ *
+ * A dark block used to live here. It is gone rather than dormant, because with
+ * the hue removed every state is now encoded in fill, ring, weight or shape, and
+ * each of those inverts differently on a dark ground — the diff's band, the
+ * blocked dot's ring, the semibold-versus-regular split in a code fence. Keeping
+ * a dark copy would mean designing all of that twice and reviewing it once.
+ *
+ * `data-theme` is not read either, for the reason it never was: there is no theme
+ * switcher, and the one thing worse than a single palette is a palette that
+ * disagrees with what is on screen because a stale localStorage key said so.
+ */
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+/*
+ * No rubber-band, and **it has to be on `html`** — this is the whole of the fix and
+ * the reason the previous one did nothing.
+ *
+ * It lived in the `body` block below for a long time, as `overscroll-behavior-y`,
+ * with a comment about the iOS bounce revealing white behind the page. WebKit never
+ * read it. `LocalFrameView::horizontalOverscrollBehavior()` resolves the viewport's
+ * behaviour from `document->documentElement()` and has no `body` fallback at all,
+ * so on iOS that declaration was inert from the day it was written. Gecko is the
+ * same; Chrome read it from `body` as a longstanding bug and stopped in Chrome 140,
+ * which is the CSSWG resolution — viewport properties propagate from the **root**.
+ * `overflow` propagates from `body`; this does not, and the two being different is
+ * exactly what makes it easy to get wrong twice.
+ *
+ * On iOS this maps straight onto `UIScrollView`'s per-axis bounce flags, and the
+ * predicate is `!= none` — so **`contain` would not do it**: `contain` blocks
+ * chaining out, `none` additionally blocks the local bounce, which is the thing you
+ * can see. Safari has honoured it since 16.0, and since **16.4** specifically for a
+ * page too small to scroll, which is this app on the sign-in screen.
+ *
+ * Nothing else is needed and the alternatives all cost something: `overflow: hidden`
+ * here does not touch the bounce flag at all and stays scrollable whenever the
+ * keyboard is up (the visual viewport shrinks under the layout one), `position:
+ * fixed` on the body loses scroll position and collides with `viewport-fit=cover`,
+ * and `touch-action: none` on the root would kill pinch-to-zoom app-wide while not
+ * even reaching a touch that lands inside `main`.
+ */
+html {
+  overscroll-behavior: none;
+}
+
+body {
+  margin: 0;
+  background: var(--color-ink);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  /* The bounce this used to try to stop is handled on `html` above, where WebKit
+     actually reads it. Kept as a pointer rather than a duplicate declaration: a
+     second copy here would be inert on every engine shipping today and would
+     re-teach the next reader the thing that was wrong. */
+  -webkit-text-size-adjust: 100%;
+  /*
+   * `light` alone, and it is not cosmetic.
+   *
+   * This is what the browser reads to decide the colour of everything the page
+   * does not paint itself. Left as `dark light`, a viewer whose OS is in dark mode
+   * gets a dark UA scrollbar, dark form-control chrome, and — the one that
+   * actually matters — a dark `-internal-light-dark` **autofill** fill painted
+   * over the two beige inputs on the sign-in form, which is the first screen
+   * anybody sees.
+   */
+  color-scheme: light;
+}
+
+/* The approve buttons sit at the bottom of the session screen, which is exactly
+   where the iPhone home indicator is. Both this and `viewport-fit=cover` in the
+   HTML are needed; either alone does nothing. */
+.pb-safe {
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+}
+.pt-safe {
+  padding-top: max(0.5rem, env(safe-area-inset-top));
+}
+
+/* Tap targets on a phone. 44px is the platform minimum and the approve buttons
+   are the reason it matters here. */
+button {
+  touch-action: manipulation;
+}
+
+/*
+ * A pointer over anything you can press — **restored, because Tailwind took it
+ * away.**
+ *
+ * v3's preflight carried `button, [role="button"] { cursor: pointer }` and v4
+ * dropped it, deliberately, on the grounds that the browser default is what a
+ * native button does. The result here is that *every* button in this app has
+ * shown the ordinary arrow: the sign-in doors, the kebabs, the approve buttons,
+ * the config strip. On a phone nobody can tell; on a desktop it is the one cue
+ * that separates a control from a caption, and this app spends nothing else on
+ * that — with the accent colour gone, an unfilled button is drawn in the colour
+ * of what it sits on and identified by its border alone.
+ *
+ * `:not(:disabled)` because a control that will not act must not claim it will.
+ * That is the whole of the exception: `Button` disables Send until there is
+ * something to send, and the arrow there is correct.
+ *
+ * **Inside `@layer base`, unlike every other rule in this file**, and the
+ * docblock on the focus ring below is why: an unlayered rule beats every
+ * utility regardless of specificity, so writing this one at the top level would
+ * make `cursor-default` and `cursor-not-allowed` dead classes wherever somebody
+ * needed one. This is a default, not a decision — base is where a default goes.
+ */
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not(:disabled),
+  summary {
+    cursor: pointer;
+  }
+}
+
+/*
+ * 16px in every form control, decoupled from the reading scale above.
+ *
+ * iOS Safari zooms the viewport when a text field whose font is under 16px takes
+ * focus, and it does not zoom back out afterwards — the app is left panned and
+ * oversized until you pinch it back by hand, on every single tap into the
+ * composer. `--text-sm` is 13px and `--text-xs` is 12px, and every input,
+ * textarea and select in this app is one of those, so that is every field.
+ *
+ * The other cure is `maximum-scale=1` (or `user-scalable=no`) in the viewport
+ * tag, which fixes it by switching pinch zoom off for everybody — including the
+ * person who needs it to read a diff. This costs a slightly larger field on a
+ * phone instead, which is the right side of that trade.
+ *
+ * These rules are deliberately unlayered: Tailwind's utilities live in a cascade
+ * layer, unlayered author styles beat any layer regardless of specificity, so
+ * this wins over the `text-sm` on the element without `!important`. `1em` is the
+ * *parent's* size, so a control that is already larger than 16px keeps its size.
+ */
+input,
+textarea,
+select {
+  font-size: max(16px, 1em);
+}
+
+/*
+ * …and on a pointer that cannot trigger that behaviour, hand the size back to
+ * whatever utility class the component wrote. `revert-layer` from an unlayered
+ * rule rolls the property back to the utilities layer, which is the only way to
+ * undo the rule above without hardcoding a second copy of the type scale here.
+ */
+@media (pointer: fine) {
+  input,
+  textarea,
+  select {
+    font-size: revert-layer;
+  }
+}
+
+pre,
+code,
+kbd {
+  font-family: var(--font-mono);
+}
+
+kbd {
+  border: 1px solid var(--color-edge);
+  border-radius: var(--radius-sm);
+  padding: 0 0.25rem;
+  background: var(--color-raised);
+}
+
+/* A transcript is mostly long unbroken strings — paths, commands, JSON. Without
+   this they force the whole page to scroll sideways. */
+.wrap-anywhere {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/*
+ * A scrollbar that does not repaint the page.
+ *
+ * Once there were two panes side by side, the default one on a desktop browser
+ * drew a light gutter down the middle of a dark app. Only styled where the
+ * pointer is fine: on a phone the bars are overlays and already invisible.
+ */
+@media (pointer: fine) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-edge-strong) transparent;
+  }
+}
+
+/*
+ * A box that scrolls without saying so.
+ *
+ * For one shape only: a strip you drag sideways, whose contents already announce
+ * that there is more of them by being cut off at the edge. The machine tab bar is
+ * the only one, and the bar it would otherwise draw is a permanent classic
+ * scrollbar (see the rule above — `scrollbar-width: thin` opts every container in
+ * this app out of macOS's overlay bars) painted under the pills, eight pixels
+ * from the bottom of the rail.
+ *
+ * It hides the bar and keeps the scrolling: `scrollbar-width: none` is the
+ * standard property, and the `::-webkit-scrollbar` rule is what Safari still
+ * needs. Never put this on a vertical list — there a bar is the only thing saying
+ * how much more there is.
+ */
+.no-scrollbar {
+  scrollbar-width: none;
+  /* Dragged past its end, this strip does not hand the gesture to the page. `contain`
+     and not `none`: the strip's own bounce is the thing that says you have reached
+     the last tab, and it is the only feedback there is with the bar hidden. The root
+     rule above is the backstop, because WebKit does not put a box that is not
+     currently overflowing into the scrolling tree at all, so this has no effect
+     until there are enough tabs to scroll. */
+  overscroll-behavior-x: contain;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * A scroll box whose content width does not depend on whether it is scrolling.
+ *
+ * `scrollbar-width: thin` above is a *classic* scrollbar: it takes layout width
+ * rather than floating over the content the way a phone's does. So the moment a
+ * box crosses from fitting to not fitting, `clientWidth` drops by about eight
+ * pixels — and everything centred inside it re-centres by half of that.
+ *
+ * In the transcript that is a visible jolt with an obvious trigger: expanding a
+ * tool call or a subagent card adds height, height crosses the threshold, and the
+ * "before /clear" button's label, the turn-end line, a gap marker, the
+ * context-cleared divider and the right-hand edge of every message bubble all
+ * slide left together. Nothing moved horizontally; the box got narrower under
+ * them. Left-aligned rows sit still, which is why it reads as *some* things
+ * shifting and makes it hard to place.
+ *
+ * Reserving the gutter always is the whole fix. Applied to the box whose width
+ * other things are measured against rather than to `*`: on every scroll container
+ * it would also pad the inside of every popover and every `<pre>` in a tool card,
+ * where nothing is centred and there is nothing to steady.
+ *
+ * **One box, and it used to be two.** `AppShell`'s content pane carried this as
+ * well, on the argument that its reserved strip "lands against the window's own
+ * edge and nobody can see it". That holds only while nothing inside the pane
+ * paints out to that edge, and two things do: the session header and the
+ * composer, both full-bleed with a fill and a rule. So the strip was visible as a
+ * header that stopped ten pixels short — and it was bought for nothing, because
+ * that pane never scrolls. It is the transcript's box alone now.
+ */
+.scroll-stable {
+  scrollbar-gutter: stable;
+}
+
+/*
+ * Syntax highlighting, in a palette with one colour in it.
+ *
+ * Still hand-written rather than importing one of `highlight.js`'s themes, and
+ * the original reason has only got stronger: every shipped theme hardcodes its own
+ * background and its own foreground, so a code block would be the one rectangle on
+ * the page ignoring the tokens above — and none of them is monochrome, so there is
+ * nothing to import even if that were acceptable.
+ *
+ * **Six colour classes became three value/weight classes, and two distinctions
+ * were genuinely lost.** On paper at 13px there are about four separable slots —
+ * three text values times regular/semibold, minus the combinations that read the
+ * same — and six things wanted one. What is gone: a string no longer differs from
+ * a number, and a function name no longer differs from a keyword.
+ *
+ * What is kept is the two that carry *reading* rather than lookup:
+ * comment-versus-code, and literal-versus-structure. Everything else inherits `fg`
+ * at regular weight, which was already the right answer for the majority of tokens
+ * — `attr`, `variable`, `type`, `built_in` were all a blend of `fg` before.
+ *
+ * If a third of the tokens in semibold turns out to read as busy, the graceful
+ * minimum is the first rule alone. That is a decision to make against a real
+ * TypeScript fence in a transcript, not in advance.
+ */
+.hljs-comment,
+.hljs-quote,
+.hljs-meta {
+  color: var(--color-faint);
+  font-style: italic;
+}
+/* Structure: what the code *does*. */
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-doctag,
+.hljs-meta .hljs-keyword,
+.hljs-title,
+.hljs-section,
+.hljs-name,
+.hljs-selector-id,
+.hljs-selector-class {
+  color: var(--color-fg);
+  font-weight: 600;
+}
+/* Literals: what the code *contains*. */
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-attribute,
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-link,
+.hljs-deletion {
+  color: var(--color-muted);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 600;
+}
+
+/*
+ * Transitions are opt-in, per property, on the elements that want them.
+ *
+ * A blanket `transition: all` is how a list that re-renders on every event
+ * becomes a smear, and this list re-renders on every event.
+ */
+.tap {
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+/*
+ * Press feedback, as a second class rather than by widening `.tap`.
+ *
+ * `transform` deliberately stays out of the list above: `.tap` is on every row of
+ * a list that re-renders on every event, and that is the exact combination the
+ * comment above is about. This goes on buttons only — a thing you aim at and
+ * push — never on a list row.
+ */
+.press {
+  transition: transform 90ms ease;
+}
+.press:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+/*
+ * One focus ring for the whole app.
+ *
+ * Per-component focus styling is how the fifth copy of a control ends up with
+ * none, which is what happened to every icon button here: hover was colour-only
+ * and focus was nothing at all, so a keyboard had no way to show where it was.
+ *
+ * `:focus-visible` and not `:focus`, so pressing a button with a mouse does not
+ * leave a ring behind.
+ *
+ * **`:where()` does not make this overridable from a component, and the comment
+ * here used to say it did.** Zero specificity is only half the cascade: Tailwind
+ * emits every utility inside `@layer utilities`, this rule is unlayered, and
+ * unlayered styles beat layered ones *regardless of specificity*. So no utility
+ * class can win against it — measured, `outline-none` and even
+ * `focus-visible:outline-none` (specificity 0,2,0 against this rule's 0,1,0) both
+ * lose, and the composer went on drawing an accent ring around its input while
+ * two comments over there claimed it did not.
+ *
+ * Hence `.no-focus-ring`, an opt-out declared here where the rule is, which is
+ * the only place that can grant one. It sits *inside* `:where()` so this rule's
+ * own specificity stays at zero.
+ *
+ * It is an opt-out and not a general escape hatch: a control that suppresses this
+ * is taking on the job of showing a keyboard user where they are. The composer's
+ * textarea is the one place that holds, because a text caret is a focus indicator
+ * in its own right — nothing else here should use it.
+ *
+ * **`[role="separator"][tabindex]` is in the list rather than styling its own**,
+ * which is this rule's whole argument applied the first time something new arrived
+ * to test it. The rail's drag handle is not a `button` and matches nothing else
+ * here, so it would have had no ring at all — and the `focus-visible:outline-none`
+ * written on it in the first draft was the *dead* utility this docblock exists to
+ * warn about, silently losing to an unlayered rule that was never going to fire on
+ * it anyway. Qualified on `[tabindex]` because a decorative separator is a common
+ * thing to write and must not become focusable-looking by joining this list.
+ */
+:where(
+  button,
+  a,
+  summary,
+  [role="button"],
+  [role="option"],
+  [role="separator"][tabindex],
+  input,
+  textarea,
+  select
+):not(:where(.no-focus-ring)):focus-visible {
+  /* `fg`, named directly rather than through the retired accent: this is the
+     highest-contrast thing the palette has (14.2:1 on `ink`), which is what a
+     focus ring on paper needs, and it is the same ink the filled primary button
+     uses — so "the app is pointing at this" is one value everywhere. */
+  outline: 2px solid var(--color-fg);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

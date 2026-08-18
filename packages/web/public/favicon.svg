@@ -1,0 +1,11 @@
+<!-- Favicon: the mark knocked out of a dark badge, so it survives both a light
+     and a dark browser tab strip. Scale 0.7059 fits the 170-wide mark into a
+     120-wide box centred in 192; translate centres it on both axes. -->
+<svg width="192" height="192" viewBox="0 0 192 192" xmlns="http://www.w3.org/2000/svg">
+  <rect width="192" height="192" rx="48" fill="#1c1a16"/>
+  <g fill="#f9f8f6" transform="translate(36,28.25) scale(.7059)">
+    <rect y="35.5" width="50" height="121" rx="16.43"/>
+    <rect x="60" width="50" height="192" rx="16.43"/>
+    <rect x="120" y="36" width="50" height="120" rx="16.43"/>
+  </g>
+</svg>
