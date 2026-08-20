@@ -3,8 +3,11 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { keyOf, type SessionRef } from "../ids";
 import { describe, missingRowReason } from "../machine";
 import { downloadablePath, relativeTo } from "../paths";
+import { navigate } from "../router";
+import { settingsPath } from "../settings";
 import { store, type AppState, type SessionRow } from "../store";
 import { humanRequests, mayStillReport, showsWorking, waitingCount, type SessionSnapshot } from "../wire";
+import { agentLabel } from "./agentCard";
 import { Composer } from "./Composer";
 import { EventList } from "./EventList";
 import { FileAccessContext, type FileAccess } from "./files";
@@ -360,7 +363,7 @@ function ExitNotice({ row, machineName }: { row: SessionRow; machineName: string
       }`}
     >
       <span>{notice.text}</span>
-      {notice.retry && (
+      {notice.action === "reconnect" && (
         <button
           type="button"
           disabled={busy}
@@ -371,6 +374,25 @@ function ExitNotice({ row, machineName }: { row: SessionRow; machineName: string
           className="tap rounded border border-edge px-2 py-0.5 text-2xs text-fg hover:bg-raised disabled:opacity-50"
         >
           {busy ? "reconnecting…" : "Reconnect"}
+        </button>
+      )}
+      {/*
+        * Straight to the agent's own screen **on this machine**, which is the
+        * screen that can actually fix it — a sign-out is per host, and a person
+        * reading this is looking at one conversation on one of them. Navigating
+        * rather than opening anything inline: signing in is a wizard or a pasted
+        * token, and both live there already.
+        *
+        * The same shape as `Reconnect` beside it and never both, which is what
+        * `action` being one field rather than two booleans guarantees.
+        */}
+      {notice.action === "sign_in" && (
+        <button
+          type="button"
+          onClick={() => navigate(settingsPath("machines", row.ref.machineId, row.snapshot.agent))}
+          className="tap rounded border border-edge px-2 py-0.5 text-2xs text-fg hover:bg-raised"
+        >
+          Sign in to {agentLabel(row.snapshot.agent)}
         </button>
       )}
     </p>

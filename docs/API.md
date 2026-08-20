@@ -43,7 +43,7 @@ below the auth gate.
 
 ---
 
-## The daemon — 36 routes
+## The daemon — 37 routes
 
 Runs on your machine, reachable through the relay. `pnpm client` drives all of it.
 
@@ -72,6 +72,7 @@ Runs on your machine, reachable through the relay. `pnpm client` drives all of i
 |---|---|
 | `GET /fs/roots` | `REEMOAT_ROOTS` narrows this picker **and nothing else** |
 | `GET /fs/list` · `POST /fs/mkdir` | Browse and create, for the directory picker |
+| `POST /fs/import` | Unpack a `.zip`/`.tar.gz` of a project into one new folder under `?path=`. Streams its body past the 1 MiB bound like the upload route, and cancels it on every refusal. Answers the created path, which is what the picker moves to |
 | `GET /worktrees` | Every worktree this daemon has made, and which session owns it |
 
 ### Sessions

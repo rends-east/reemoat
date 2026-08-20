@@ -1,3 +1,5 @@
+import { ApiError } from "./http";
+import type { CredentialWritten } from "./wire";
 import type { ContentValue } from "./elicitation";
 import type { SessionId } from "./ids";
 import type { MachineConnection } from "./machine";
@@ -15,6 +17,7 @@ import type {
   RootListing,
   SessionList,
   SessionSnapshot,
+  ImportAccepted,
   UploadAccepted,
 } from "./wire";
 
@@ -47,14 +50,14 @@ export class DaemonClient {
     return this.machine.request<AgentAuthListing>("/agent-auth");
   }
 
-  saveCredential(agent: string, envName: string, token: string): Promise<{ saved: boolean }> {
+  saveCredential(agent: string, envName: string, token: string): Promise<CredentialWritten> {
     return this.machine.request(`/agent-auth/${encodeURIComponent(agent)}`, {
       method: "PUT",
       body: JSON.stringify({ envName, token }),
     });
   }
 
-  clearCredential(agent: string, envName: string): Promise<{ removed: boolean }> {
+  clearCredential(agent: string, envName: string): Promise<CredentialWritten> {
     const query = new URLSearchParams({ envName });
     return this.machine.request(`/agent-auth/${encodeURIComponent(agent)}?${query.toString()}`, {
       method: "DELETE",
@@ -251,6 +254,63 @@ export class DaemonClient {
   ): Promise<UploadAccepted> {
     const path = `/sessions/${encodeURIComponent(id)}/uploads?name=${encodeURIComponent(name)}`;
     return this.machine.upload<UploadAccepted>(path, file, onProgress, signal);
+  }
+
+  /**
+   * Whether this daemon has the import route at all, asked before any bytes move.
+   *
+   * **A 404 does not survive an archive.** Measured against a daemon predating
+   * this route, through a real relay: a 5 MiB `POST /fs/import` came back as
+   * `502 tunnel_failed` after 3.4 MB, not as the 404 the same request answers
+   * with an empty body. The daemon refuses — no such route, and its 1 MiB body
+   * bound would refuse anyway — **without draining the request body**, so its end
+   * of the tunnel stream dies mid-upload and the relay reports the only thing it
+   * can see, which is that the stream failed. The honest sentence about an old
+   * daemon was therefore unreachable in exactly the case it exists for.
+   *
+   * So the question is asked with **no body**, where the answer comes back
+   * intact: a daemon with the route answers `400 bad_request` (there is no
+   * `?path=`), one without it answers a bare 404 carrying no envelope. One small
+   * round trip in front of a multi-megabyte upload is not a cost worth measuring.
+   *
+   * Deliberately **not** a version check. `DAEMON_VERSION` is a label and nothing
+   * may branch on it — see `compatibility.md`. This asks the route whether it is
+   * there, which is the question actually being asked.
+   */
+  async importSupported(): Promise<boolean> {
+    try {
+      await this.machine.request("/fs/import", { method: "POST" });
+      return true;
+    } catch (error) {
+      // An envelope means this daemon knows the route and refused on its merits.
+      // Only the envelope-free 404 means the route is absent.
+      if (error instanceof ApiError) return !(error.status === 404 && error.code === `http_${error.status}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Unpack an archive of somebody's project into a directory on this machine.
+   *
+   * Not a session route: this is how a folder worth starting a session *in* comes
+   * to exist, so it happens on the new-session screen before there is an id to
+   * hang it off. Both parameters ride the query string for `uploadFile`'s reason
+   * one method up — the relay answers preflights from a fixed header list.
+   *
+   * Goes through `upload` rather than `request` for the same reason an attachment
+   * does: it is the only path in this client that reports progress, and an
+   * archive is the one thing here big enough that a bar is the difference between
+   * waiting and reloading.
+   */
+  importArchive(
+    path: string,
+    file: File,
+    name: string,
+    onProgress: (fraction: number) => void,
+    signal: AbortSignal,
+  ): Promise<ImportAccepted> {
+    const query = `path=${encodeURIComponent(path)}&name=${encodeURIComponent(name)}`;
+    return this.machine.upload<ImportAccepted>(`/fs/import?${query}`, file, onProgress, signal);
   }
 
   /** The bytes of one file in the session's tree, by workspace-relative path. */

@@ -24,7 +24,7 @@ import {
   updateAttachment,
   type PendingAttachment,
 } from "../attach";
-import { errorText } from "../http";
+import { ApiError, errorText } from "../http";
 import { keyOf, type SessionRef } from "../ids";
 import { composerKey } from "../keys";
 import { formatBytes } from "../paths";
@@ -1031,7 +1031,22 @@ export function Composer({
           drafts.set(key, body);
         }
         restoreAttachments(key, sent);
-        toast("error", errorText(cause));
+        /*
+         * **Silent for the one refusal the transcript itself explains.**
+         *
+         * A prompt to an agent nobody is signed in to is refused *and ends the
+         * session*, so the notice under the transcript is already saying so —
+         * with the button that fixes it, on the screen the person is looking at.
+         * A toast beside that is the same news twice, in the place with no room
+         * for the remedy, and it is the one that disappears.
+         *
+         * The message is still restored above, like every other refusal: the
+         * conversation comes back when they sign in, and their draft is waiting
+         * in it.
+         */
+        if (!(cause instanceof ApiError && cause.code === "agent_signed_out")) {
+          toast("error", errorText(cause));
+        }
       })
       .finally(() => {
         if (onScreen()) setBusy(false);

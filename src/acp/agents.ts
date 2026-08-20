@@ -535,12 +535,24 @@ export function resolveAgent(id: AgentId): AgentLaunchConfig {
         command,
         args: [],
         env: agentEnv(),
+        /*
+         * **Two stores really do exist, and neither is worth claiming here.**
+         * The CLI keeps a `Claude Code-credentials` item in `login.keychain-db`
+         * *and* a copy in `~/.claude/.credentials.json`, and measured on
+         * 2026-08-19 they disagreed by two days. The sentence that used to sit
+         * here named the JSON as *the* location, and a later one blamed the
+         * Keychain for a daemon reporting signed-out — **both were guesses, and
+         * the second was measured wrong the next day** (Q7.99). So this says
+         * neither. What it names is the remedy that does not depend on which
+         * store won: a token pasted here is injected into the agent's
+         * environment, and nothing has to be read or unlocked to find it.
+         */
         authHint:
           "The Claude adapter uses the credentials of the `claude` CLI, and it is not signed in. " +
-          "Settings → Machines → Configure agent will run its login here, or take a token from " +
-          "`claude setup-token`; " +
-          "`claude auth login` in a terminal on this machine does the same thing. The tokens live " +
-          "in ~/.claude/.credentials.json, not the macOS Keychain.",
+          "Run `claude setup-token` in a terminal on this machine and paste the token below — " +
+          "a token saved here is handed to the agent directly, so it does not depend on which " +
+          "of the CLI's own credential stores this daemon can read. `claude auth login` in a " +
+          "terminal signs the CLI in, which is often enough on its own.",
       };
     }
     case "kimi": {

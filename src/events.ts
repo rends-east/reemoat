@@ -729,7 +729,25 @@ export type ExitReason =
    * nobody asked for this session to end, and if the resume that follows never
    * lands, the daemon is the one that owes it a retry.
    */
-  | "config_changed";
+  | "config_changed"
+  /**
+   * Somebody signed this agent out, so every conversation on it was ended.
+   *
+   * **Signing out is a state of the whole machine, not of one screen.** The
+   * credential an agent authenticates with is read once, at spawn, so a process
+   * started while signed in goes on working long after the credential it holds
+   * has been revoked — which is a session that answers for an account its owner
+   * has just taken away. Ending them is what makes the sign-out mean what it
+   * says.
+   *
+   * **Deliberately not in `DAEMON_EXIT_REASONS`.** A person decided this, exactly
+   * as they do for `stopped`, so nothing may bring these back on its own: not the
+   * boot pass, not a typed message. What *does* bring them back is signing in
+   * again, which is the same person reversing the same decision — see
+   * `reloadCredentials`, which resumes precisely the sessions carrying this
+   * reason and leaves every hand-stopped one alone.
+   */
+  | "agent_signed_out";
 
 /**
  * The exits that mean the daemon went away rather than that anybody decided

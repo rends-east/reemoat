@@ -8,6 +8,6 @@ contact_links:
   - name: Why is it built this way?
     url: https://github.com/rends-east/reemoat/blob/main/docs/DECISIONS.md
     about: >
-      644 entries of question → decision, with the measurement behind each and the
+      655 entries of question → decision, with the measurement behind each and the
       alternatives that were tried and taken back out. Most "why on earth" questions
       are answered there, with a number.

@@ -1,4 +1,4 @@
-import { ChevronRight, Folder, FolderPlus, GitBranch, LogIn } from "lucide-react";
+import { ChevronRight, FileArchive, Folder, FolderPlus, GitBranch, LogIn } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { ApiError, errorText } from "../http";
 import { refOf, sessionId, type MachineId } from "../ids";
@@ -7,6 +7,7 @@ import { settingsPath } from "../settings";
 import { navigate, sessionPath } from "../router";
 import { store, type AppState } from "../store";
 import type { AgentId, AgentInfo, DirEntry, Me } from "../wire";
+import { ImportCode } from "./ImportCode";
 import { Sheet } from "./Sheet";
 import { agentLabel } from "./agentCard";
 import { AgentDetail } from "./settings/AgentsPanel";
@@ -659,6 +660,7 @@ function DirectoryPicker({
   const [entries, setEntries] = useState<DirEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   // The dependency rather than a lookup inside each effect, for the reason given
@@ -851,21 +853,48 @@ function DirectoryPicker({
             </Button>
           </div>
         ) : (
-          <button
-            onClick={() => setCreating(true)}
-            disabled={path === null}
-            /* 44px, with no negative margin: this row's other state is the two
-               `Button`s of the create form, which are 44px already, so matching
-               them is what stops the panel changing height when the form opens
-               and closes. It was a 22px target on the one control that gets you
-               somewhere the list cannot. */
-            className="tap press flex min-h-11 items-center gap-1.5 rounded-sm px-2 text-xs text-muted hover:bg-raised hover:text-fg disabled:opacity-40"
-          >
-            <Icon as={FolderPlus} size={13} />
-            New folder here
-          </button>
+          /* Two controls, and they belong together: this bar is the one place on
+             the screen for getting somewhere the list cannot take you, and both
+             of these act on the folder you are standing in rather than on a row.
+             Neither takes `tone="primary"` — `bg-fg` is the affirmative action
+             inside a decision, and on this screen that is `Start`. */
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setCreating(true)}
+              disabled={path === null}
+              /* 44px, with no negative margin: this row's other state is the two
+                 `Button`s of the create form, which are 44px already, so matching
+                 them is what stops the panel changing height when the form opens
+                 and closes. It was a 22px target on the one control that gets you
+                 somewhere the list cannot. */
+              className="tap press flex min-h-11 items-center gap-1.5 rounded-sm px-2 text-xs text-muted hover:bg-raised hover:text-fg disabled:opacity-40"
+            >
+              <Icon as={FolderPlus} size={13} />
+              New folder here
+            </button>
+            <button
+              onClick={() => setImporting(true)}
+              disabled={path === null}
+              className="tap press flex min-h-11 items-center gap-1.5 rounded-sm px-2 text-xs text-muted hover:bg-raised hover:text-fg disabled:opacity-40"
+            >
+              <Icon as={FileArchive} size={13} />
+              Import code
+            </button>
+          </div>
         )}
       </div>
+      {importing && path !== null && (
+        <ImportCode
+          machineId={id}
+          into={path}
+          onClose={() => setImporting(false)}
+          /* Straight into it, for the reason creating a folder walks into the one
+             it just made: the folder somebody imported is the folder they meant to
+             work in, and making them find it in the list is the step this screen
+             exists to remove. */
+          onImported={(imported) => setPath(imported)}
+        />
+      )}
     </div>
   );
 }

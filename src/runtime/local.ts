@@ -237,6 +237,53 @@ export function hostLoginArgs(
  * Pure, so `daemoncheck` asserts both platforms from a machine that is only one
  * of them — the same reason `hostLoginArgs` is.
  */
+/**
+ * Why this host cannot drive an agent's own login, when it cannot.
+ *
+ * **Three ways to fail and the third had no answer.** `script` missing and the
+ * CLI not resolving were already folded into `supported`; this adds the one that
+ * is a fact about the *platform and the flow together*, and it is the one that
+ * had been costing somebody a wizard that opens and then dies in a `<pre>`.
+ *
+ * BSD `script` reads the termios of **its own stdin** in order to copy it onto
+ * the pty it allocates. {@link loginStdio} is the fix, and it works by handing it
+ * `/dev/null` — which is only available where the flow reads no input at all. A
+ * flow that needs stdin must be given a pipe, a pipe has no termios, and `script`
+ * exits with `tcgetattr/ioctl: Operation not supported on socket` before the CLI
+ * is ever executed. On this platform, for that flow, there is nothing to try.
+ *
+ * Today that is exactly `claude` on macOS: it prints a URL and waits for the code
+ * to be pasted back, so `interactiveStdin` is true and cannot be traded away
+ * without taking away the box the code goes in.
+ *
+ * **This used to be reachable only by tapping the button.** `ui/login.ts` still
+ * recognises the failure and says the right thing, and that stays — a transcript
+ * can carry it for reasons this cannot predict. But a control that cannot work
+ * should not be offered, and the remedy (`claude setup-token`, pasted as a
+ * credential) is a different control on the same screen.
+ *
+ * Pure, so `daemoncheck` asserts every platform from a machine that is one of
+ * them — the same reason {@link loginStdio} and `hostLoginArgs` are.
+ */
+export function loginBlockedReason(
+  platform: NodeJS.Platform,
+  interactiveStdin: boolean,
+  hasScript: boolean,
+  hasCli: boolean,
+): "no_script" | "no_cli" | "interactive_pty" | null {
+  if (!hasScript) return "no_script";
+  if (!hasCli) return "no_cli";
+  if (interactiveStdin && loginStdio(platform, interactiveStdin) === "pipe") {
+    const bsd =
+      platform === "darwin" ||
+      platform === "freebsd" ||
+      platform === "openbsd" ||
+      platform === "netbsd";
+    if (bsd) return "interactive_pty";
+  }
+  return null;
+}
+
 export function loginStdio(
   platform: NodeJS.Platform,
   interactiveStdin: boolean,
@@ -392,6 +439,26 @@ export class LocalRuntime implements SessionRuntime {
     );
   }
 
+  /**
+   * Whether this agent is **known** to be signed out.
+   *
+   * ⚠ **`true` only for an explicit `false` from the CLI's own status command.**
+   * `loginState` has three answers and the third is the one that matters here:
+   * `null` is "could not tell", which is kimi's permanent and correct answer —
+   * it publishes no non-interactive status verb at all. Reading `!== true` would
+   * therefore refuse every kimi conversation on this machine, for ever, on the
+   * strength of a question kimi cannot be asked. The same `null` is also what a
+   * missing binary and an unrecognised output produce, and none of those is
+   * evidence that anybody signed out.
+   *
+   * Cached like every other read of that probe (3s), and collapsed onto one spawn
+   * when several callers arrive together — which they do, because this is on the
+   * prompt path.
+   */
+  async signedOut(agent: AgentId): Promise<boolean> {
+    return (await this.loginState(agent, this.probeGeneration)) === false;
+  }
+
   /** See {@link SessionRuntime.forgetAvailability}. */
   forgetAvailability(): void {
     this.probeGeneration += 1;
@@ -455,8 +522,15 @@ export class LocalRuntime implements SessionRuntime {
    * button is drawn rather than as a `503` after it is tapped.
    */
   loginSupport(agent: AgentId): AgentLoginSupport {
+    const blocked = loginBlockedReason(
+      process.platform,
+      AGENT_LOGIN[agent].interactiveStdin,
+      this.scriptPath() !== null,
+      this.resolveLoginBinary(agent) !== null,
+    );
     return {
-      supported: this.scriptPath() !== null && this.resolveLoginBinary(agent) !== null,
+      supported: blocked === null,
+      blocked,
       needsInput: AGENT_LOGIN[agent].interactiveStdin,
       canSignOut: AGENT_LOGIN[agent].logoutArgs !== null,
     };

@@ -281,6 +281,11 @@ export function autoResumable(
     case "start_failed":
     case "start_timeout":
     case "agent_kill_failed":
+    // A person signed the agent out, and bringing the conversation back would
+    // launch a process holding a credential they have just revoked — which fails
+    // at the first message, in a transcript, as an internal error. Signing in is
+    // what reverses this, and it does so by name: see `reloadCredentials`.
+    case "agent_signed_out":
       return false;
   }
 }
@@ -2732,7 +2737,33 @@ export class ManagedSession {
     this.ultracodeChoice = next;
     this.touchSafe();
     if (this.agentSessionId === null) return;
+    await this.restartAgent();
+  }
 
+  /**
+   * Replace this session's agent process, keeping the conversation.
+   *
+   * **Extracted rather than copied, because there are two callers now and the
+   * sequence is not one anybody would reproduce correctly from memory.** It was
+   * written for `ultracode` — a setting the agent reads when the conversation is
+   * opened, so the only way to change it is to open a new one — and a pasted
+   * credential is the same shape of fact: `secrets` are read at spawn, in
+   * `env: { ...agentEnv(), ...this.secrets(agent) }`, so a token saved while an
+   * agent is running reaches it never. Somebody pasted one, the badge turned
+   * green, and the conversation in front of them went on failing to authenticate.
+   *
+   * `resume()` carries `agentSessionId`, so what comes back is *this*
+   * conversation rather than a fresh one. The window in which the controls are
+   * held and every instruction answers `busy` is opened synchronously below and
+   * closed in the `finally` — see {@link restarting} for why that has to be one
+   * statement and one `finally`.
+   *
+   * **Callers own the decision to do this at all.** Nothing here asks whether a
+   * turn is in flight or a permission is parked, because `applyUltracode`'s
+   * caller has already decided for its own reasons; see `reloadCredentials`,
+   * which decides differently.
+   */
+  private async restartAgent(): Promise<void> {
     /*
      * Captured before the stop, because the stop is what destroys it.
      *
@@ -2816,6 +2847,49 @@ export class ManagedSession {
       // `reject`: see {@link whenRestarted}.
       finished();
     }
+  }
+
+  /**
+   * Take a credential saved after this agent started, by starting it again.
+   *
+   * **Returns whether it did**, because the caller reports a count and a silent
+   * "no" would make a screen say chats were brought back when none were.
+   *
+   * The refusals are the whole design:
+   *
+   *   - **Terminal**: nothing is running to replace, and the next `resume()`
+   *     reads the credential anyway. Restarting here would launch an agent
+   *     nobody asked for, on a conversation somebody deliberately ended.
+   *   - **Mid-turn**: `stop()` would kill the turn. And a session that is
+   *     *currently working* is one whose credential is demonstrably fine — the
+   *     sessions that need the new one are exactly the idle and the failing.
+   *     That is not a compromise; a turn in flight is evidence.
+   *   - **Blocked**: a parked permission is somebody being waited on, and the
+   *     restart would drop the question without answering it. This daemon's whole
+   *     shape is that an approval cannot be lost.
+   *   - **Already restarting or clearing**: one process boundary at a time.
+   *
+   * Everything refused here picks the credential up the next time it starts,
+   * which for a turn in flight is whenever it next ends and is resumed.
+   *
+   * **A getter rather than a promise that answers `false`**, so a caller can count
+   * what it is about to do *before* doing it. The first version of
+   * `reloadCredentials` returned a number it decremented inside a `.then`, which
+   * resolves after the return — so the count it reported was every session on the
+   * agent, refusals included.
+   */
+  get takesCredentialChange(): boolean {
+    if (this.terminal || this.stopRequested) return false;
+    if (this.session === null || this.agentSessionId === null) return false;
+    if (this.turn !== null) return false;
+    if (this.awaitingCount > 0) return false;
+    return !this.clearing && !this.restarting;
+  }
+
+  /** {@link takesCredentialChange}, then the restart. Re-checked, never assumed. */
+  async applyCredentialChange(): Promise<void> {
+    if (!this.takesCredentialChange) return;
+    await this.restartAgent();
   }
 
   /** Switches permission/plan mode. Same refusal shapes as {@link setConfigOption}. */
@@ -4381,6 +4455,103 @@ export class SessionRegistry {
 
   get(id: string): ManagedSession | undefined {
     return this.sessions.get(id);
+  }
+
+  /**
+   * End every conversation running on an agent somebody has just signed out of.
+   *
+   * **This is what makes signing out mean anything.** A credential is read once,
+   * at spawn, so a process started while signed in keeps answering long after the
+   * account behind it was revoked — the conversation carries on, apparently
+   * fine, for an account its owner has just taken away. Nothing about the
+   * sign-out reached it, because nothing could.
+   *
+   * Ended rather than relaunched, which is the opposite of what a *saved*
+   * credential does and for a reason worth stating: relaunching here would start
+   * an agent with no way to authenticate, and that fails at the first message —
+   * inside the transcript, as `Internal error: Failed to authenticate`, which is
+   * the least explicable place a refusal can appear. Ending it says the true
+   * thing in the one place the client can render properly.
+   *
+   * A turn in flight is **not** spared, unlike `takesCredentialChange`. That
+   * asymmetry is the point: there, the credential was being *added* and a working
+   * turn was evidence of a working credential; here the credential is being taken
+   * away, and a turn still running on it is exactly what somebody signing out
+   * means to stop.
+   *
+   * Returns how many were ended, so the route can say so.
+   */
+  async signOutSessions(agent: AgentId): Promise<number> {
+    const live = [...this.sessions.values()].filter(
+      (session) => session.agent === agent && !session.terminal,
+    );
+    // Sequential rather than `Promise.all`: each `stop` awaits a process teardown,
+    // and firing every one at once on a machine with many sessions is a thundering
+    // herd of SIGTERMs against the same event loop.
+    for (const session of live) {
+      await session.stop("agent_signed_out").catch(() => undefined);
+    }
+    return live.length;
+  }
+
+  /**
+   * Put a credential change in front of every conversation already running on it.
+   *
+   * **The gap this closes is a whole product's worth of confusion.** Secrets are
+   * injected at spawn, so pasting a token updated the database, turned the badge
+   * green, and changed nothing at all for the chat somebody was looking at — which
+   * went on answering `Failed to authenticate` with no explanation available
+   * anywhere on the screen. Measured 2026-08-20: a token saved at 00:23:02, a
+   * prompt refused at 00:23:12, and a session created four minutes later working
+   * immediately.
+   *
+   * **Started, not awaited.** A restart runs into seconds and this is a fan-out
+   * over every session on the agent; holding the route open for all of them would
+   * make saving a key a request that looks hung. Nothing is lost by answering
+   * early, because the wait already exists where it matters: `prompt` calls
+   * `whenRestarted()`, so somebody who saves a token and immediately types is made
+   * to wait for their own session rather than refused by it.
+   *
+   * The count is what came back, and is deliberately the number of sessions that
+   * **will** restart rather than the number that finished — the caller answers a
+   * request, not a fleet.
+   */
+  reloadCredentials(agent: AgentId): number {
+    const mine = [...this.sessions.values()].filter((session) => session.agent === agent);
+    const restarting = mine.filter((session) => session.takesCredentialChange);
+    /*
+     * **Signing in reverses a sign-out, and only a sign-out.**
+     *
+     * `agent_signed_out` is the record of who ended these and why, so it is what
+     * decides which come back: a conversation this daemon ended *because the
+     * credential went away* is owed a resume when a credential returns. One
+     * somebody stopped by hand carries `stopped` and stays stopped — reviving
+     * that would be the daemon overruling a person, which is the whole reason the
+     * reason exists rather than a boolean.
+     *
+     * `autoResumable` deliberately answers `false` for it, and that is not in
+     * tension with this: nothing may bring these back *on its own*. This is not
+     * on its own — it is the same person, on the same machine, undoing the thing
+     * that ended them.
+     */
+    const returning = mine.filter(
+      (session) => session.terminal && session.exit?.reason === "agent_signed_out",
+    );
+
+    for (const session of restarting) {
+      /*
+       * Each independently, and a failure in one may not take the others with it.
+       * A refused session never reaches here — `takesCredentialChange` decided
+       * that above — so what this swallows is a stop or a resume that genuinely
+       * threw, which the session reports through its own state the way any failed
+       * resume does.
+       */
+      void session.applyCredentialChange().catch(() => undefined);
+    }
+    for (const session of returning) {
+      void session.resume().catch(() => undefined);
+    }
+    return restarting.length + returning.length;
   }
 
   list(): ManagedSession[] {

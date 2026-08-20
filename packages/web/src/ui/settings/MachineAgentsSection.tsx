@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { daemonReadable } from "../../machine";
 import type { MachineId } from "../../ids";
 import { navigate } from "../../router";
 import { settingsPath } from "../../settings";
@@ -52,7 +53,7 @@ export function MachineAgentsSection({
         machines.
       </p>
 
-      {machine.reach !== "online" ? (
+      {!daemonReadable(machine.reach) ? (
         /*
          * Not filtered out and not silently empty. An unreachable machine is the
          * commonest reason somebody is on this screen — they came to sign an

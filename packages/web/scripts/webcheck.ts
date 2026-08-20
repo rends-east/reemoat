@@ -7701,6 +7701,7 @@ process.stdout.write("\nsessions the daemon interrupted\n");
     "agent_kill_failed",
     "daemon_restarted",
     "config_changed",
+    "agent_signed_out",
   ] as const;
 
   /*
@@ -8018,13 +8019,42 @@ process.stdout.write("\nwhat an interrupted session says\n");
   check("an interrupted one never says ended", waitingText.includes("ended"), false);
   check("nor names an exit reason", /daemon_shutdown|daemon_restarted/.test(waitingText), false);
   check("it says what is actually happening", waitingText, "the daemon restarted — reconnecting the agent");
-  check("and offers no button, because nobody needs to press one", sessionNotice(deployed, "kimi", "box")?.retry, false);
+  check("and offers no button, because nobody needs to press one", sessionNotice(deployed, "kimi", "box")?.action, null);
 
   const stalledNotice = sessionNotice(stalled, "kimi", "box");
   check("a stalled one is warn-toned", stalledNotice?.tone, "warn");
   check("says what the daemon said", stalledNotice?.text, "could not reconnect the agent — kimi is not signed in on box");
-  check("and offers the retry", stalledNotice?.retry, true);
+  check("and offers the retry", stalledNotice?.action, "reconnect");
   check("a live session says nothing at all", sessionNotice(sessionOf({ status: "running", exit: null }), "kimi", "box"), null);
+
+  /*
+   * **A signed-out agent explains itself in the transcript, with the remedy.**
+   *
+   * This used to be a toast on the send: the news in the place with no room for
+   * a button and the shortest life on screen, about the one refusal a person can
+   * actually fix. The conversation is not broken — nobody is signed in to the
+   * thing that answers it — so the line says that, and the button goes to the
+   * screen that fixes it.
+   */
+  const signedOut = sessionOf({
+    status: "exited",
+    exit: { reason: "agent_signed_out", detail: null, at: 1, agentConfirmedDead: true },
+  });
+  const out = sessionNotice(signedOut, "claude", "box");
+  check("it names the agent and the machine", out?.text, "nobody is signed in to claude on box. Sign in and this conversation comes back.");
+  check("never as an internal reason", /agent_signed_out|ended:/.test(out?.text ?? ""), false);
+  check("and it offers the sign-in rather than a reconnect", out?.action, "sign_in");
+  /*
+   * One field, so the two remedies cannot both be claimed. Two booleans could,
+   * and the screen would draw two buttons for one problem.
+   */
+  const view = stripComments(readFileSync(new URL("../src/ui/SessionView.tsx", import.meta.url), "utf8"));
+  check("the view draws it as a route to that machine's agent", /settingsPath\("machines", row\.ref\.machineId, row\.snapshot\.agent\)/.test(view), true);
+  check("and the two buttons are mutually exclusive by construction", /notice\.retry/.test(view), false);
+
+  const composer = stripComments(readFileSync(new URL("../src/ui/Composer.tsx", import.meta.url), "utf8"));
+  check("and the send does not toast what the transcript already says", /cause\.code === "agent_signed_out"/.test(composer), true);
+  check("while still putting the message back", /restoreAttachments\(key, sent\);/.test(composer), true);
 
   // `agentConfirmedDead: false` is worth saying about a session somebody
   // stopped — it is the difference between "stopped" and "probably orphaned" —
@@ -10905,16 +10935,28 @@ process.stdout.write("\nthe password rules\n");
  * roughly 47px and 39px tall: the *same field* on either side of the 44px tap
  * minimum depending on which screen you reached it from.
  *
- * What this cannot assert is the cascade or the call sites — there is no DOM
- * here and no CSS — so it pins the number and nothing more.
+ * **That was pinned as `py-3` and is pinned as `min-h` now**, because padding only
+ * ever reached 44px by multiplying with a line-height that lives in the type
+ * scale — a rendered height that no file stated and that nothing could assert
+ * without a DOM. Two controls meant to line up then differed by 10px, and the
+ * class that was supposed to fix it never applied at all: Tailwind emits every
+ * utility at equal specificity, `.py-3` is emitted after `.py-2`, so
+ * `` `${FIELD} py-2` `` silently kept the taller box.
+ *
+ * What this cannot assert is the cascade or the call sites — there is no DOM here
+ * and no CSS — so it pins the numbers, and the *absence* of the padding a caller
+ * would try to beat.
  * ------------------------------------------------------------------ */
 
 process.stdout.write("\nthe one measurement in a text field's chrome\n");
 {
   const { FIELD } = await import("../src/ui/bits.js");
 
-  check("the field's padding is the one that clears 44px", FIELD.includes("py-3"), true);
-  check("and it is not the one that does not", FIELD.includes("py-2"), false);
+  check("the field states a resting height", FIELD.includes("min-h-9"), true);
+  check("and the floor that clears 44px under a thumb", FIELD.includes("[@media(pointer:coarse)]:min-h-11"), true);
+  // The height is not padding any more, and that is the property: with no `py-*`
+  // in the string there is nothing for a caller's own to lose an argument to.
+  check("with no vertical padding at all", /\bpy-\d/.test(FIELD), false);
   // Layout is deliberately absent: width, margin and `block` legitimately differ
   // between a full-width form field and a `flex-1` one beside a Button, and
   // folding one caller's layout in here is how the next caller writes a fourth
@@ -14011,6 +14053,384 @@ process.stdout.write("\nthe machine limit\n");
      * own `+` drawn for the life of the tab, onto a `409`.
      */
     check("saving a server setting re-reads the admin's own quota", /refreshMe\(\)/.test(src), true);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Importing a codebase
+ *
+ * Two of these are about a rule that has no runtime symptom until it is somebody
+ * else's machine that breaks. The daemon's route is new, and the client shipping
+ * inside the control plane's image means *new client against old daemon* is the
+ * ordinary state of this fleet rather than an edge — so the shape of that answer,
+ * a 404 with no error envelope, has to keep its own sentence. And `DAEMON_VERSION`
+ * may not be read to predict it: rule 1 of `compatibility.md` is that a version is
+ * negotiated or it is a label, and this one is a label.
+ *
+ * The rest are the drag-and-drop invariant nobody discovers by reading — `drop`
+ * simply never fires without a `preventDefault` on `dragover` — and the promise
+ * the skill text makes to the extractor. Those two drift apart silently: the skill
+ * telling somebody to include `.git` would produce an archive refused whole, and
+ * the only symptom is a 400 at the end of a five-minute export.
+ * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+ * A sign-in that is not offered
+ *
+ * The daemon decides — `loginBlockedReason` knows the platform and the flow's
+ * shape — and the client's job is to draw the remedy rather than an empty space.
+ * Before this, `canSignIn === false` rendered `null`: no button, no sentence, and
+ * a credential slot with no account of why it was the only thing there.
+ * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+ * Saving a credential while a chat is open
+ *
+ * A credential reaches an agent only at spawn, so a token saved mid-conversation
+ * used to change nothing for the chat in front of you — the badge went green and
+ * the messages went on failing to authenticate. The daemon relaunches those
+ * sessions now and reports how many; this is the half that says so.
+ * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+ * A re-probe is not the host going away
+ *
+ * `resumeMachine` forgets the route on every wake — a route learned on one
+ * network says nothing on another — so a healthy machine was re-probed every time
+ * the tab came back. `probeRoute` published `probing` before any I/O and `online`
+ * up to 1.5s later, and everything keyed on `reach` changed twice for a question
+ * whose answer never changed: every machine row's dot went hollow and back, and
+ * the agents panel *unmounted and remounted*, restarting `useAgentAuth` from
+ * nothing — a spinner, a second `GET /agent-auth` that shells out to every CLI,
+ * and any half-typed credential thrown away. Once per tab switch.
+ *
+ * `.claude/rules/web-shell.md` already states this rule for the rail: reachability
+ * flickers, so a row may not change because of it. These screens are the two that
+ * legitimately *show* reachability, and showing it is still not a reason to take
+ * the content away while asking.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\na re-probe is not the host going away\n");
+{
+  const { daemonReadable } = await import("../src/machine.js");
+  const mach = stripComments(readFileSync(new URL("../src/machine.ts", import.meta.url), "utf8"));
+  const panel = stripComments(
+    readFileSync(new URL("../src/ui/settings/MachineAgentsSection.tsx", import.meta.url), "utf8"),
+  );
+
+  // All four, because the interesting one is `probing` and a predicate over a
+  // union is only asserted by walking it.
+  check("a machine that answered is readable", daemonReadable("online"), true);
+  check("and one being re-checked still is", daemonReadable("probing"), true);
+  check("one that did not answer is not", daemonReadable("offline"), false);
+  check("nor is one never asked", daemonReadable("unknown"), false);
+
+  /*
+   * The root fix, and the one that covers every other screen: a probe of a
+   * machine already believed reachable does not publish `probing` at all.
+   * `unknown` is still the value for never having asked.
+   */
+  check("a re-probe keeps a known-online state", /if \(this\.reach !== "online"\) this\.reach = "probing";/.test(mach), true);
+  check("and does not overwrite it unconditionally", /^\s*this\.reach = "probing";$/m.test(mach), false);
+
+  check("the agents panel asks the predicate", /!daemonReadable\(machine\.reach\)/.test(panel), true);
+  check("rather than treating a measurement as an outage", /machine\.reach !== "online"/.test(panel), false);
+}
+
+process.stdout.write("\nsaving a credential while a chat is open\n");
+{
+  const { credentialToast } = await import("../src/ui/settings/AgentsPanel.js");
+
+  check("one chat is singular", credentialToast(false, 1), "Saved. 1 chat is restarting to pick it up.");
+  check("and several are not", credentialToast(false, 3), "Saved. 3 chats are restarting to pick it up.");
+  check("removing says removed", credentialToast(true, 2), "Removed. 2 chats are restarting to pick it up.");
+  check("nothing to restart keeps the old sentence", credentialToast(false, 0), "Saved. Checking whether it works…");
+  /*
+   * **`undefined` is not zero.** A daemon predating this omits the field, and
+   * "0 chats" there would be a confident claim about behaviour it does not have —
+   * the same rule `wire.ts` states for every narrowing in it.
+   */
+  check("and a daemon that does not say is not read as zero", credentialToast(false, undefined), "Saved. Checking whether it works…");
+}
+
+process.stdout.write("\na sign-in that is not offered\n");
+{
+  const panel = stripComments(readFileSync(new URL("../src/ui/settings/AgentsPanel.tsx", import.meta.url), "utf8"));
+  const { stanceLine, osName } = await import("../src/ui/agentCard.js");
+
+  /*
+   * **One sentence, and it names the system.** "This machine can't run…" reads as
+   * something misconfigured on your box; the truth is that the OS cannot hand a
+   * background service the terminal this login needs. The refusal is returned for
+   * every BSD, so the name comes from the daemon — a hardcoded "macOS" would tell
+   * a FreeBSD operator something false in the one sentence meant to absolve them.
+   */
+  check("the sentence names the system", stanceLine("claude", "signed_out", false, "darwin"), "macOS can't run Claude's own sign-in, so a saved key is the only way in.");
+  check("and a different BSD gets its own name", osName("freebsd"), "FreeBSD");
+  check("while a daemon that does not say names nothing", osName(undefined), "This machine");
+  check("a wizard that can run says nothing at all", stanceLine("claude", "signed_out", true, "darwin"), null);
+  check("and the panel passes the platform through", /stanceLine\(agent\.id, stance, canSignIn, os\)/.test(panel), true);
+
+  /*
+   * **The command sits on the field it fills.** It was a paragraph above the
+   * divider, which restated the sentence above it and then said "paste the token
+   * below" with a heading and two inputs in between.
+   */
+  check("the command is rendered inside the credential slot", /howTo !== null && editable && <SetupTokenCommand/.test(panel), true);
+  check("and only on the slot that command actually fills", /slot\.envName === "CLAUDE_CODE_OAUTH_TOKEN"/.test(panel), true);
+  check("and only where the wizard cannot run", /login\.blocked === "interactive_pty"/.test(panel), true);
+  check("naming the command the CLI really has", /"claude setup-token"/.test(panel), true);
+  /*
+   * A row of two, not a control laid over a box: the overlay took its height from
+   * the field's own text and hung off the edge the moment the two disagreed.
+   */
+  check("the copy control is a sibling of the field, not an overlay on it", /items-stretch/.test(panel), true);
+  check("so it cannot be positioned out of the box it belongs to", /SetupTokenCommand[\s\S]{0,900}absolute top-/.test(panel), false);
+  check("the button is still gated on supported, not on the reason", /login\.supported && agent\.available/.test(panel), true);
+
+  /*
+   * **The key row is shorter only where there is no tap floor to miss.**
+   * `FIELD`'s `py-3` exists because `index.css` forces 16px on an input under a
+   * coarse pointer — iOS zooms the page otherwise — and at `py-2` the box measures
+   * ~39px against 44px. Shrinking it unconditionally would have traded a tidier
+   * desktop row for a target under the floor on the device this product is shaped
+   * around, and nothing would have said so.
+   */
+  /*
+   * **Two boxes that line up, held to one number rather than to arithmetic.**
+   *
+   * The first attempt wrote `` `${FIELD} py-2` `` and did nothing at all: Tailwind
+   * emits every utility at equal specificity, `.py-3` is emitted after `.py-2`, so
+   * the constant won and the field stayed 10px deeper than the command box above
+   * it — with no error, and with the code and the review both saying otherwise.
+   * That is the same trap `Button` documents for a size passed via `className`,
+   * and it is why the short field is a constant of its own.
+   */
+  {
+    const bits = readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8");
+    /*
+     * **One height for every single-line control in the app**, and it is stated
+     * rather than arrived at: `py-3` only ever reached 44px by multiplying with a
+     * line-height that lives in the type scale, so the rendered height was a
+     * coincidence between two files and two controls could differ by 10px with
+     * nothing anywhere naming a number.
+     */
+    check("the field constant states its height", /export const FIELD =\s*\n?\s*"min-h-9/.test(bits), true);
+    check("and carries no padding for a caller to lose to", /export const FIELD =\s*\n?\s*"[^"]*\bpy-\d/.test(bits), false);
+    check("with the touch floor written down beside it", /export const FIELD =[\s\S]{0,240}\[@media\(pointer:coarse\)\]:min-h-11/.test(bits), true);
+    check("and no second field constant to drift from it", /FIELD_SM/.test(bits), false);
+
+    check("the key field uses the standard one", /\$\{FIELD\} min-w-0 flex-1 font-mono/.test(panel), true);
+    /*
+     * The general form of the defect, not this one instance of it: composing
+     * `FIELD` with a vertical padding is always a no-op and always silent.
+     */
+    /*
+   * The general form of the defect rather than this one instance: composing
+   * `FIELD` with a vertical padding is always a no-op and always silent, so it is
+   * checked across every screen that draws a field, not just this one.
+   */
+  {
+    const withFields = readdirSync(new URL("../src/ui/settings/", import.meta.url))
+      .filter((f) => f.endsWith(".tsx"))
+      .map((f) => readFileSync(new URL(`../src/ui/settings/${f}`, import.meta.url), "utf8"));
+    for (const extra of ["SignIn.tsx", "ForcedPasswordChange.tsx", "gate/Gate.tsx", "gate/GateCard.tsx"]) {
+      withFields.push(readFileSync(new URL(`../src/ui/${extra}`, import.meta.url), "utf8"));
+    }
+    const offenders = withFields.filter((src) => /\$\{FIELD\}[^`]*\bpy-\d/.test(src)).length;
+    report("no screen composes FIELD with a padding that cannot win", offenders === 0, `${withFields.length} files scanned`);
+  }
+    check("the command box states the same height", /flex min-h-9 items-stretch/.test(panel), true);
+    check("and the same floor, so the two cannot drift", (panel.match(/\[@media\(pointer:coarse\)\]:min-h-11/g) ?? []).length >= 2, true);
+  }
+  // Width is the other fields', which is what it was before a wrong axis was tried.
+  check("and its width is left alone", /max-w-80/.test(panel), false);
+
+  /*
+   * **The row is tightened, and Remove keeps the space it actually needs.** Its
+   * `after:-inset-2.5` target reaches 10px past its own face, so at an 8px gap it
+   * lands on the control to its left — the defect the old blanket `gap-3` was
+   * carrying for all three children. Tightening without putting that 4px back on
+   * Remove would have reintroduced it silently, on a destructive button.
+   */
+  /*
+   * **Remove keeps the room its own target needs, and only it.** Its
+   * `after:-inset-2.5` reaches 10px past its face, so at an 8px gap it lands on
+   * the control to its left — which is why the row carried `gap-3` for all three
+   * children. Tightening the field and Save without putting that 4px back on
+   * Remove reintroduces it silently, on a destructive button.
+   */
+  check("the field and Save sit closer", /mt-3 flex gap-2/.test(panel), true);
+  check("and Remove carries the room its own target needs", /tone="destructive"[\s\S]{0,220}className="ml-1"/.test(panel), true);
+  check("with Save wide enough to hold its label", /min-w-20/.test(panel), true);
+}
+
+process.stdout.write("\nimporting a codebase\n");
+{
+  const src = stripComments(readFileSync(new URL("../src/ui/ImportCode.tsx", import.meta.url), "utf8"));
+  const picker = stripComments(readFileSync(new URL("../src/ui/NewSession.tsx", import.meta.url), "utf8"));
+  const client = stripComments(readFileSync(new URL("../src/daemon.ts", import.meta.url), "utf8"));
+
+  const { importFailure } = await import("../src/ui/ImportCode.js");
+  const { ApiError } = await import("../src/http.js");
+  const envelope = (status: number, code: string, detail: unknown = null): unknown =>
+    new ApiError(status, code, "refused", detail, { error: { code, detail } });
+  /** What `parseBody` makes of a response carrying no envelope at all. */
+  const bare = (status: number): unknown =>
+    new ApiError(status, `http_${status}`, "Not Found", null, null);
+
+  check(
+    "a daemon with no such route is named as old rather than shown a 404",
+    importFailure(bare(404)).includes("too old"),
+    true,
+  );
+  /*
+   * **The 404 has to be asked for before the archive moves**, because it does not
+   * survive one. Measured through a real relay against a daemon predating this
+   * route: the same request that answers a clean 404 with an empty body came back
+   * `502 tunnel_failed` after 3.4 MB of a 5 MiB upload — the daemon refuses
+   * without draining the body, its end of the stream dies, and the relay reports
+   * the only thing it can see. So the sentence above was unreachable in exactly
+   * the case it exists for, and the ordering is what makes it reachable.
+   */
+  check("the route is probed before any bytes are sent", /importSupported\(\)/.test(src), true);
+  check(
+    "and the upload only starts once that has answered",
+    src.indexOf("importSupported()") < src.indexOf("importArchive("),
+    true,
+  );
+  check(
+    "with the probe carrying no body of its own",
+    /await this\.machine\.request\("\/fs\/import", \{ method: "POST" \}\)/.test(client),
+    true,
+  );
+  // A tunnel can still die for its own reasons, so the code keeps a sentence.
+  check(
+    "and a stream that dies mid-upload still says something actionable",
+    importFailure(envelope(502, "tunnel_failed")).includes("Try again"),
+    true,
+  );
+  check(
+    "and a 404 that *is* this system's own is not",
+    importFailure(envelope(404, "not_found")).includes("too old"),
+    false,
+  );
+  check(
+    "nothing reads the daemon's version to decide that",
+    /DAEMON_VERSION|daemonVersion/.test(src),
+    false,
+  );
+  check(
+    "a name collision says which name",
+    importFailure(envelope(409, "import_exists", { name: "my-app" })).includes("my-app"),
+    true,
+  );
+  check(
+    "and survives a detail that is not the shape it expected",
+    typeof importFailure(envelope(409, "import_exists", "nonsense")),
+    "string",
+  );
+  for (const code of ["archive_unsafe", "unsupported_archive", "import_busy", "import_too_large"]) {
+    check(`${code} draws a sentence of its own`, importFailure(envelope(400, code)) !== code, true);
+  }
+
+  /*
+   * What somebody is asked to paste reads their repository and writes files, so
+   * it is shown rather than described. A copy button alone asks them to take that
+   * on trust, and it is the failure with no symptom: nobody reports a block of
+   * text they were never offered.
+   */
+  check("the text being copied is rendered, not only put on the clipboard", /\{IMPORT_SKILL\}/.test(src), true);
+  check("in a box that scrolls on its own", /overflow-y-auto/.test(src), true);
+  check("without dragging the sheet behind it when it ends", /overscroll-contain/.test(src), true);
+  check("and the control over it carries an icon rather than a word", /as=\{Copy\}/.test(src), true);
+  /*
+   * **Both glyphs are mounted and swapped by opacity**, never rendered one at a
+   * time. A conditional would snap, and the tick going out is the half that
+   * carries the meaning: it says the confirmation expired rather than that the
+   * state was lost. Asserted as the pair, because rendering one of them
+   * conditionally still passes any test that only looks for `Check`.
+   */
+  check("the tick is mounted beside it rather than swapped in", /as=\{Check\}/.test(src), true);
+  check("and neither is drawn conditionally", !/\{copied \? <Icon|copied \? \(/.test(src), true);
+  check("they cross-fade instead", (src.match(/transition-opacity/g) ?? []).length >= 2, true);
+  /*
+   * The tick reverts. It used to be permanent — set on success and never unset —
+   * so a screen left open claimed a clipboard that had long since moved on.
+   */
+  check("and it takes itself down again", /setCopied\(false\), 1400\)/.test(src), true);
+  check("with the name following it, for anybody who cannot see either glyph", /aria-label=\{copied \? "Copied" : "Copy to clipboard"\}/.test(src), true);
+  /*
+   * Set from the *result* this lit the tick on an origin where the clipboard is
+   * absent rather than refused — which is every LAN address this app is read on.
+   * See `clipboard.ts`, which exists for that measurement.
+   */
+  check("and it is only ever lit on a copy that worked", !/setCopied\(ok\)/.test(src), true);
+
+  /*
+   * **"Machine" is a word this screen has already spent**, and the instructions
+   * may not spend it again on something else. There is a machine picker on the
+   * form behind this sheet, a Machines section in settings, and an `m_…` on every
+   * row — all of them meaning *an enrolled host in your fleet*, which is where an
+   * import is going. The source is the opposite end, so "paste this into a coding
+   * agent on that machine" read as the machine you had just selected.
+   *
+   * The *refusals* are deliberately not checked: those say "machine" correctly,
+   * about the daemon that answered. The rule is about the instructions alone.
+   */
+  {
+    const steps = [...src.matchAll(/\stext="([^"]*)"/g)].map((m) => m[1] ?? "");
+    const intro = /<p className="text-sm text-muted">([^<]*)<\/p>/.exec(src)?.[1] ?? "";
+    const lines = [intro, ...steps].filter((line) => line.length > 0);
+    report(
+      "the instructions never call the source a machine",
+      lines.length >= 4 && lines.every((line) => !/machine/i.test(line)),
+      `${lines.length} lines checked`,
+    );
+    check("naming the project instead, which cannot be one", /that project/.test(steps.join(" ")), true);
+  }
+
+  // Without this the browser refuses the drop and nothing fires at all — the one
+  // bug in a drop target that looks like the handler was never wired.
+  check("dragover preventDefaults, or drop never fires", /onDragOver=\{[\s\S]*?preventDefault\(\)/.test(src), true);
+  check("and the drop target is the body rather than the box alone", /onDrop=\{/.test(src), true);
+
+  // The folder is drawn from the daemon's answer, never from the file that was
+  // sent: an import that fails must not leave a folder named on the screen.
+  check("the picker is moved to the path the daemon answered", /onImported\(answer\.import\.path\)/.test(src), true);
+  check("and only after it has answered", /onImported\([^)]*\)[\s\S]{0,200}\.catch/.test(src), true);
+
+  check("the control sits in the picker beside New folder here", /Import code/.test(picker), true);
+  check("and does not wear the affirmative action's fill", /Import code[\s\S]{0,200}bg-fg/.test(picker), false);
+  {
+    // 44px, like the sibling whose row it shares: the two swap places with the
+    // create form's buttons, and a shorter row makes the panel jump.
+    const control = /<button[^>]*onClick=\{\(\) => setImporting\(true\)\}[\s\S]*?>/.exec(picker)?.[0] ?? "";
+    check("and clears 44px like the control beside it", /min-h-11/.test(control), true);
+  }
+
+  {
+    const { IMPORT_SKILL } = await import("../src/importSkill.js");
+    const { safeMemberPath } = await import("../../../src/archive.js");
+    /*
+     * The skill and the extractor have to agree, and `.git` is the one where
+     * disagreeing is expensive: `safeMemberPath` refuses the whole archive rather
+     * than trimming the member, so a skill that packed one would produce a file
+     * that always fails, at the end of the slowest step.
+     */
+    check("the extractor refuses .git", safeMemberPath("app/.git/config").ok, false);
+    check("and the skill says so rather than leaving it to be discovered", /Exclude \.git/.test(IMPORT_SKILL), true);
+    check("the skill asks for one top-level folder", /\*\*one\*\* folder named after/.test(IMPORT_SKILL), true);
+    check("and names a size the daemon will actually take", /under 50 MB/.test(IMPORT_SKILL), true);
+    /*
+     * **It names no agent and no path.** The machine on the other end is the
+     * customer's, running whatever they run; a skill directory from one vendor
+     * is a first step that fails before any work starts. What step one has to
+     * be is a single paste that any agent can act on as it stands.
+     */
+    check("the skill names no vendor path", !/\.claude\//.test(IMPORT_SKILL), true);
+    check("and no agent by name", !/Claude Code|Cursor|Copilot/.test(IMPORT_SKILL), true);
+    check("it is runnable as pasted, with the skill file optional", /If your agent keeps skills/.test(IMPORT_SKILL), true);
   }
 }
 

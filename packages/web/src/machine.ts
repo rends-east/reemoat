@@ -194,6 +194,37 @@ export function missingRowReason(reach: Reach | null, listed: boolean): MissingR
   return listed ? "not_here" : "loading";
 }
 
+/**
+ * Whether a screen may draw this machine's daemon-backed content.
+ *
+ * **`probing` keeps the previous answer, and that is the whole of it.** A re-probe
+ * is this client re-checking a route it deliberately forgot — `resumeMachine`
+ * calls `forgetRoute()` on every wake, because what it believed about
+ * reachability was true of a network the phone may have left. It is a
+ * measurement in progress, not the host going away, and it publishes twice:
+ * `probing` before any I/O, then `online` up to 1.5s later.
+ *
+ * Read as "not online", those two publishes **unmount and remount** whatever the
+ * screen was showing. On Settings → Machines → an agent that meant: the panel
+ * replaced by "not reachable right now", then `useAgentAuth` restarting from
+ * `listing: null` on the way back — a spinner, a second `GET /agent-auth` (which
+ * shells out to every agent's CLI, on the 90s budget), and anything typed into a
+ * credential box or any sign-in wizard in progress thrown away. Once per tab
+ * switch, which is exactly what somebody does on this screen: go and copy a
+ * token, come back.
+ *
+ * `.claude/rules/web-shell.md` already states the rule this restores, about the
+ * rail: reachability flickers, so a row may not change because of it. These two
+ * screens are the ones that legitimately *show* reachability — and showing it is
+ * still not a reason to take the content away while asking.
+ *
+ * Pure, and beside {@link missingRowReason} rather than inside a component, so
+ * `webcheck` walks all four values instead of asserting JSX.
+ */
+export function daemonReadable(reach: Reach): boolean {
+  return reach === "online" || reach === "probing";
+}
+
 export interface MachineState {
   id: MachineId;
   name: string;
@@ -604,7 +635,25 @@ export class MachineConnection {
       return null;
     }
 
-    this.reach = "probing";
+    /*
+     * **A re-probe of a machine already believed reachable does not erase that
+     * belief**, and this line used to.
+     *
+     * `probing` means "no answer yet". `resumeMachine` calls `forgetRoute()` on
+     * every wake — correctly, because a route learned on one network says nothing
+     * on another — so a healthy machine came through here on every tab switch and
+     * published `online → probing → online`, up to 1.5s apart. Everything keyed on
+     * `reach` changed twice for a question whose answer never changed: the dot on
+     * every machine row went hollow and back, and the agents panel unmounted and
+     * remounted, restarting `useAgentAuth` from nothing and throwing away whatever
+     * was half-typed into it.
+     *
+     * The knowledge is still there while it is being re-checked, so it is kept.
+     * `unknown` remains the value for never having asked, and a probe that fails
+     * still lands on `offline` below — the only thing given up is announcing the
+     * question, which nothing on screen was better for.
+     */
+    if (this.reach !== "online") this.reach = "probing";
     this.offlineReason = null;
     this.onChange();
 

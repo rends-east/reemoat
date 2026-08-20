@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import type { Server } from "node:http";
 import { connect as netConnect, type AddressInfo } from "node:net";
-import { gunzipSync } from "node:zlib";
+import { crc32, deflateRawSync, gunzipSync, gzipSync } from "node:zlib";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -33,7 +33,12 @@ import {
   type AgentLaunchConfig,
 } from "../src/acp/agents.js";
 import { AgentLoginRuns, readFrom, sanitize } from "../src/agentauth.js";
-import { SignedTokenVerifier } from "../src/auth.js";
+import {
+  MAX_IMPORT_BYTES,
+  MAX_IMPORT_ENTRIES,
+  MAX_IMPORT_UNPACKED_BYTES,
+} from "../src/archive.js";
+import { SignedTokenVerifier, type Scope } from "../src/auth.js";
 import { forgetStalled, isStalled, listDirs, makeDir, PathError, probeExists, resolveCwd } from "../src/browse.js";
 import { isRemoteType, mountFor, parseBsdMounts, parseLinuxMounts, readMounts } from "../src/mounts.js";
 import { CORS_ALLOW_METHODS } from "../src/cors.js";
@@ -95,7 +100,7 @@ import {
 } from "../src/registry.js";
 import { sessionMetaFor } from "../src/acp/agents.js";
 import { RelayTunnel } from "../src/relay/tunnel.js";
-import { hostLoginArgs, LocalRuntime, loginStdio, readLoginAnswer } from "../src/runtime/local.js";
+import { LocalRuntime, hostLoginArgs, loginBlockedReason, loginStdio, readLoginAnswer } from "../src/runtime/local.js";
 import { toCommands } from "../src/session.js";
 import type { AgentAvailability, AgentProcess } from "../src/runtime/types.js";
 import { EVENTS_PAGE_LIMIT, createApp } from "../src/server.js";
@@ -270,7 +275,7 @@ const identity = {
 const now = Date.now();
 const iat = Math.floor(now / 1000);
 
-function tokenFor(sub: string): string {
+function tokenWith(sub: string, scp: Scope[]): string {
   const claims: TokenClaims = {
     iss: "reemoat-cp",
     sub,
@@ -279,9 +284,13 @@ function tokenFor(sub: string): string {
     iat,
     nbf: iat,
     exp: iat + 300,
-    scp: ["session:read", "session:write", "machine:admin"],
+    scp,
   };
   return signToken(claims, kid, privateKey);
+}
+
+function tokenFor(sub: string): string {
+  return tokenWith(sub, ["session:read", "session:write", "machine:admin"]);
 }
 
 const verifier = new SignedTokenVerifier({ identity });
@@ -1219,6 +1228,30 @@ process.stdout.write("\nis this agent signed in\n");
   check("output that is not JSON is `cannot tell`", await claudeSays("Error: something went wrong"), null);
   check("JSON without the field is too", await claudeSays('{"account": "someone"}'), null);
   check("and no output at all is too", await claudeSays(null), null);
+
+  /*
+   * `signedOut` is the same three answers read for a different decision, and the
+   * decision is *refusing somebody's message*. Driven here rather than asserted
+   * off the source, because the load-bearing half is which of the three map to
+   * `true` — and getting that wrong takes an agent off the air rather than
+   * failing a build.
+   */
+  const signedOutSays = async (answer: string | null): Promise<boolean> =>
+    new LocalRuntime({ exec: async () => answer }).signedOut("claude");
+
+  check("an explicit no is a sign-out", await signedOutSays('{"loggedIn": false}'), true);
+  check("an explicit yes is not", await signedOutSays('{"loggedIn": true}'), false);
+  /*
+   * ⚠ The three not-knowings, each of which would silence a working agent if it
+   * were read as a refusal. Kimi is the permanent case — it publishes no status
+   * verb at all — so `!== true` here would take every kimi conversation on the
+   * machine off the air for ever.
+   */
+  check("output that is not JSON is not a sign-out", await signedOutSays("Error: something went wrong"), false);
+  check("nor is JSON without the field", await signedOutSays('{"account": "someone"}'), false);
+  check("nor is no output at all", await signedOutSays(null), false);
+  check("and kimi, which can never be asked, is never signed out",
+    await new LocalRuntime({ exec: async () => null }).signedOut("kimi"), false);
 
   // The asymmetry the Settings screen depends on: a pasted credential is believed
   // over "cannot tell", because we are the ones who cannot tell — but a *clean*
@@ -3388,6 +3421,544 @@ process.stdout.write("\ncreating a folder\n");
   const missing = await mkdir("u_alice", { parent: join(users, "u_alice", "nowhere"), name: "x" });
   check("but a parent that does not exist is not", missing.status, 400);
   check("with a code that says which half was wrong", (await missing.json() as any).error.code, "not_found");
+}
+
+/* ------------------------------------------------------------------ *
+ * Signing out, as a state of the machine
+ *
+ * A credential is read once, at spawn, so signing out used to reach nothing that
+ * was already running: the conversation carried on answering for an account its
+ * owner had just revoked, and the only sign anything had changed was a badge on
+ * another screen. What is asserted here is that the sign-out ends them, that
+ * nothing brings them back on its own, and that signing in brings back exactly
+ * those and no others.
+ *
+ * The `null` rule is the one worth breaking the build over. `loginState` has
+ * three answers, and kimi's permanent, correct one is "could not tell" — it
+ * publishes no status verb. A refusal written as `!== true` would take every kimi
+ * conversation on the machine off the air for ever, on the strength of a question
+ * kimi cannot be asked.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nsigning out, as a state of the machine\n");
+{
+  const events = readFileSync(new URL("../src/events.ts", import.meta.url), "utf8");
+  const reg = readFileSync(new URL("../src/registry.ts", import.meta.url), "utf8");
+  const routes = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+  const runtime = readFileSync(new URL("../src/runtime/local.ts", import.meta.url), "utf8");
+
+  check("there is a reason for it", /\| "agent_signed_out"/.test(events), true);
+  /*
+   * **Not a daemon exit.** That list is "the daemon went away rather than anybody
+   * deciding anything", and it is what the boot pass resumes. A person decided
+   * this, so putting it there would have the daemon relaunch, at every restart,
+   * an agent whose credential was deliberately taken away.
+   */
+  check(
+    "and it is not one of the daemon's own",
+    /DAEMON_EXIT_REASONS = \["daemon_restarted", "daemon_shutdown", "config_changed"\]/.test(events),
+    true,
+  );
+  check("so nothing auto-resumes it", /case "agent_signed_out":\s*\n\s*return false;/.test(reg), true);
+
+  check("signing out ends the live conversations", /async signOutSessions\(agent: AgentId\): Promise<number>/.test(reg), true);
+  check("with that reason", /session\.stop\("agent_signed_out"\)/.test(reg), true);
+  /*
+   * Deliberately not filtered by `takesCredentialChange`: that spares a turn in
+   * flight because a working turn is evidence of a working credential. Here the
+   * credential is being taken away, and a turn still running on it is exactly
+   * what somebody signing out means to stop.
+   */
+  check("including one mid-turn, unlike a credential being added", /takesCredentialChange/.test(
+    /async signOutSessions[\s\S]*?\n  \}/.exec(reg)?.[0] ?? "",
+  ), false);
+  check("and the route waits for it before answering", /await registry\.signOutSessions\(agent\)/.test(routes), true);
+
+  /*
+   * The prompt path covers every way a credential can go that this daemon did not
+   * perform: signed out in a terminal, revoked elsewhere, or expired.
+   */
+  check("a prompt to a signed-out agent is refused", /"agent_signed_out",\s*\n\s*`nobody is signed in to/.test(routes), true);
+  check("before anything relaunches an agent that cannot authenticate",
+    routes.indexOf("if (await registry.sessionRuntime.signedOut(managed.agent))") <
+      routes.indexOf("await managed.whenRestarted();"),
+    true);
+
+  // The rule that keeps kimi on the air.
+  const probe = /async signedOut\(agent: AgentId\): Promise<boolean> \{[\s\S]*?\n  \}/.exec(runtime)?.[0] ?? "";
+  check("and only a known sign-out counts", /=== false/.test(probe), true);
+  check("never a could-not-tell", /!== true/.test(probe), false);
+}
+
+/* ------------------------------------------------------------------ *
+ * A credential saved while an agent is already running
+ *
+ * Secrets are injected at spawn — `env: { ...agentEnv(), ...this.secrets(agent) }`
+ * — so a token saved afterwards reaches a running agent never. Measured on a live
+ * daemon: a token saved at 00:23:02, a prompt refused at 00:23:12 with
+ * `Failed to authenticate`, and a session created four minutes later working at
+ * once. The save updated the database, turned the badge green, and changed
+ * nothing for the conversation somebody was looking at.
+ *
+ * What is asserted here is the *decision*, which is pure: which sessions take a
+ * relaunch and which are left alone. The relaunch itself is `applyUltracode`'s
+ * sequence, already covered, and the fan-out is deliberately not awaited.
+ *
+ * The refusals matter more than the acceptance. A mid-turn session is one whose
+ * credential is demonstrably working, and stopping it would kill the turn; a
+ * blocked one is somebody being waited on, and a relaunch drops the question
+ * without answering it.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\na credential saved while an agent is already running\n");
+{
+  const src = readFileSync(new URL("../src/registry.ts", import.meta.url), "utf8");
+
+  // The guard set, read off the predicate itself: each of these is a state in
+  // which a relaunch would destroy something a person is waiting on.
+  const guard = /get takesCredentialChange\(\): boolean \{[\s\S]*?\n  \}/.exec(src)?.[0] ?? "";
+  report("a relaunch is refused for a session that has ended", /this\.terminal \|\| this\.stopRequested/.test(guard), "terminal");
+  report("and for one with a turn in flight", /this\.turn !== null/.test(guard), "mid-turn");
+  report("and for one with somebody parked on a question", /this\.awaitingCount > 0/.test(guard), "blocked");
+  // Both flags read, however the predicate happens to be phrased — the guard was
+  // written as `!this.clearing && !this.restarting`, and pinning one spelling
+  // would fail on a rewrite that changed nothing.
+  report(
+    "and while another process boundary is already open",
+    /this\.clearing/.test(guard) && /this\.restarting/.test(guard),
+    "clearing/restarting",
+  );
+
+  /*
+   * The count has to be decided before the work starts. The first version
+   * incremented and then decremented inside a `.then`, which resolves after the
+   * return — so every refusal was still counted as a restart and the screen would
+   * have reported chats it never touched.
+   */
+  const fan = /reloadCredentials\(agent: AgentId\): number \{[\s\S]*?\n  \}/.exec(src)?.[0] ?? "";
+  check("the fan-out counts what it filtered", /session\.takesCredentialChange/.test(fan), true);
+  check(
+    "and returns that, not a number it hoped to correct later",
+    /return restarting\.length \+ returning\.length;/.test(fan),
+    true,
+  );
+  check("without awaiting the restarts", /void session\.applyCredentialChange\(\)/.test(fan), true);
+  /*
+   * **Signing in reverses a sign-out and nothing else.** The reason is the record
+   * of who ended a session: one this daemon ended because the credential went
+   * away is owed a resume when a credential returns, and one a person stopped by
+   * hand carries `stopped` and stays stopped. Keying on `terminal` alone would
+   * revive both, which is the daemon overruling somebody.
+   */
+  check("and signing in brings back what the sign-out ended", /exit\?\.reason === "agent_signed_out"/.test(fan), true);
+  check("keyed on the reason rather than on being terminal at all", /session\.terminal && session\.exit\?\.reason/.test(fan), true);
+
+  /*
+   * One sequence, two callers. It was written for `ultracode` and is subtle
+   * enough — a synchronously-opened window, five guard sites, one `finally` — that
+   * a second copy would drift.
+   */
+  check("the restart sequence has one definition", (src.match(/private async restartAgent\(/g) ?? []).length, 1);
+  check("and ultracode goes through it", /await this\.restartAgent\(\);[\s\S]{0,80}\}/.test(src), true);
+  check("and so does a credential change", /takesCredentialChange[\s\S]{0,400}await this\.restartAgent\(\)/.test(src), true);
+
+  // The route reports it, so a client can say what happened rather than guessing.
+  const routes = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+  check("saving a credential relaunches and says how many", /saved: true, agent, envName, restarting/.test(routes), true);
+  check("and so does removing one", /removed: true, agent, envName, restarting/.test(routes), true);
+}
+
+/* ------------------------------------------------------------------ *
+ * A login that cannot be offered
+ *
+ * `loginStdio` fixed BSD `script` for the flows that read nothing, and the one
+ * that reads something was left with an enabled button that opens a wizard and
+ * dies in a `<pre>`. `loginBlockedReason` is the answer *before* the button is
+ * drawn, and it is asserted for every platform from a machine that is one of
+ * them — the same reason `loginStdio` and `hostLoginArgs` are pure.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\na login that cannot be offered\n");
+{
+  const ok = (p: NodeJS.Platform, interactive: boolean) => loginBlockedReason(p, interactive, true, true);
+
+  check("claude on macOS cannot be offered a wizard", ok("darwin", true), "interactive_pty");
+  check("nor on the other BSDs", [ok("freebsd", true), ok("openbsd", true), ok("netbsd", true)], [
+    "interactive_pty",
+    "interactive_pty",
+    "interactive_pty",
+  ]);
+  // The whole point of the distinction: the device-code flows are fine there,
+  // because `loginStdio` can hand them /dev/null.
+  check("a device-code flow on macOS is fine", ok("darwin", false), null);
+  check("and everything is fine on Linux, including the interactive one", [ok("linux", true), ok("linux", false)], [
+    null,
+    null,
+  ]);
+
+  // The two older reasons still answer first, and in this order: a host with no
+  // `script` cannot run any login, whatever the flow.
+  check("no script outranks the platform", loginBlockedReason("darwin", true, false, true), "no_script");
+  check("and a missing CLI outranks the flow", loginBlockedReason("darwin", true, true, false), "no_cli");
+  check("with a present CLI and script on Linux clearing it", loginBlockedReason("linux", true, true, true), null);
+
+  /*
+   * `supported` is `blocked === null` and nothing else, asserted against the
+   * **real** `loginSupport` rather than by re-deriving it here. Comparing the
+   * pure function to itself is a tautology that passes whatever the runtime does,
+   * which is precisely the "assertion passing for the wrong reason" this file
+   * warns about elsewhere.
+   */
+  {
+    const runtime = new LocalRuntime();
+    for (const agent of AGENT_IDS) {
+      const support = runtime.loginSupport(agent);
+      check(
+        `${agent}: supported is exactly "nothing is blocking it"`,
+        support.supported,
+        support.blocked === null,
+      );
+    }
+    // On this machine, which is the one running the driver.
+    const claude = runtime.loginSupport("claude");
+    report(
+      "and on a BSD host the interactive flow is the one that is blocked",
+      process.platform !== "darwin" || claude.blocked === "interactive_pty" || claude.blocked === "no_cli",
+      `${process.platform}: claude blocked=${String(claude.blocked)}`,
+    );
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Importing a codebase
+ *
+ * The guard here is unlike every other one in this file, because this is the
+ * only route that takes a *path* from somebody else and creates a file at it.
+ * Everywhere else a path is either one this daemon made or one a person picked
+ * out of a listing of what already exists; an archive member is a string written
+ * by whoever built the archive, and `paths.ts` is explicit that none of the
+ * containment primitives may be used to authorise an action on one.
+ *
+ * So the assertions below come in pairs on purpose: the refusal, and then that
+ * **nothing was created** — including no staging directory. A refusal that
+ * leaves half a tree behind is not a refusal, and the second half is the one
+ * that would rot silently.
+ *
+ * The archives are built here rather than shelled out to `zip` and `tar`, for
+ * two reasons: neither is guaranteed on a CI box, and neither will *produce*
+ * most of what needs testing — GNU tar refuses to write a `../` member at all,
+ * which is exactly the member worth being sure about.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nimporting a codebase\n");
+{
+  const pad512 = (n: number): number => (512 - (n % 512)) % 512;
+
+  interface Member {
+    name: string;
+    data?: Buffer;
+    dir?: boolean;
+    /** tar typeflag; zip reads `mode` instead. */
+    type?: string;
+    link?: string;
+    /** Unix st_mode for zip's external attributes: 0o120777 is a symlink. */
+    mode?: number;
+    method?: number;
+    encrypted?: boolean;
+    /** Raw name bytes, which also clears the UTF-8 flag. */
+    rawName?: Buffer;
+  }
+
+  const tarHeader = (name: string, size: number, type: string, link = ""): Buffer => {
+    const h = Buffer.alloc(512);
+    h.write(name.slice(0, 100), 0, "utf8");
+    h.write("000755 \0", 100);
+    h.write("000000 \0", 108);
+    h.write("000000 \0", 116);
+    h.write(size.toString(8).padStart(11, "0") + " ", 124);
+    h.write("00000000000 ", 136);
+    h.write("        ", 148); // spaces while the checksum is summed over the block
+    h.write(type, 156);
+    h.write(link.slice(0, 100), 157, "utf8");
+    h.write("ustar\0", 257);
+    h.write("00", 263);
+    let sum = 0;
+    for (const byte of h) sum += byte;
+    h.write(sum.toString(8).padStart(6, "0") + "\0 ", 148);
+    return h;
+  };
+
+  const buildTarGz = (members: Member[]): Buffer => {
+    const parts: Buffer[] = [];
+    for (const m of members) {
+      const type = m.type ?? (m.dir === true ? "5" : "0");
+      const data = m.dir === true || type === "2" || type === "1" ? Buffer.alloc(0) : (m.data ?? Buffer.alloc(0));
+      parts.push(tarHeader(m.name, data.length, type, m.link ?? ""));
+      if (data.length > 0) parts.push(data, Buffer.alloc(pad512(data.length)));
+    }
+    parts.push(Buffer.alloc(1024)); // the two zero blocks that end an archive
+    return gzipSync(Buffer.concat(parts));
+  };
+
+  /** A pax `x` header carrying `path=`, then the member it renames. */
+  const paxMember = (realPath: string, data: Buffer): Member[] => {
+    const make = (len: number): string => `${len} path=${realPath}\n`;
+    let len = make(0).length;
+    for (let i = 0; i < 4; i += 1) len = make(len).length;
+    return [
+      { name: "PaxHeader/x", type: "x", data: Buffer.from(make(len), "utf8") },
+      { name: "short-stand-in", type: "0", data },
+    ];
+  };
+
+  const buildZip = (members: Member[]): Buffer => {
+    const locals: Buffer[] = [];
+    const centrals: Buffer[] = [];
+    let offset = 0;
+    for (const m of members) {
+      const nameStr = m.dir === true && !m.name.endsWith("/") ? `${m.name}/` : m.name;
+      const name = m.rawName ?? Buffer.from(nameStr, "utf8");
+      const raw = m.dir === true ? Buffer.alloc(0) : (m.data ?? Buffer.alloc(0));
+      const method = m.method ?? (raw.length === 0 ? 0 : 8);
+      const body = method === 8 ? deflateRawSync(raw) : raw;
+      const flags = (m.rawName ? 0 : 0x0800) | (m.encrypted === true ? 0x0001 : 0);
+
+      const lh = Buffer.alloc(30);
+      lh.writeUInt32LE(0x04034b50, 0);
+      lh.writeUInt16LE(20, 4);
+      lh.writeUInt16LE(flags, 6);
+      lh.writeUInt16LE(method, 8);
+      lh.writeUInt32LE(crc32(raw), 14);
+      lh.writeUInt32LE(body.length, 18);
+      lh.writeUInt32LE(raw.length, 22);
+      lh.writeUInt16LE(name.length, 26);
+      locals.push(lh, name, body);
+
+      const ch = Buffer.alloc(46);
+      ch.writeUInt32LE(0x02014b50, 0);
+      ch.writeUInt16LE(((3 << 8) | 20) >>> 0, 4); // "made by" UNIX, so the mode is read
+      ch.writeUInt16LE(20, 6);
+      ch.writeUInt16LE(flags, 8);
+      ch.writeUInt16LE(method, 10);
+      ch.writeUInt32LE(crc32(raw), 16);
+      ch.writeUInt32LE(body.length, 20);
+      ch.writeUInt32LE(raw.length, 24);
+      ch.writeUInt16LE(name.length, 28);
+      ch.writeUInt32LE((((m.mode ?? (m.dir === true ? 0o040755 : 0o100644)) << 16) >>> 0), 38);
+      ch.writeUInt32LE(offset, 42);
+      centrals.push(ch, name);
+      offset += 30 + name.length + body.length;
+    }
+    const local = Buffer.concat(locals);
+    const central = Buffer.concat(centrals);
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0);
+    eocd.writeUInt16LE(members.length, 8);
+    eocd.writeUInt16LE(members.length, 10);
+    eocd.writeUInt32LE(central.length, 12);
+    eocd.writeUInt32LE(local.length, 16);
+    return Buffer.concat([local, central, eocd]);
+  };
+
+  let box = 0;
+  /** A fresh empty directory to import into, so no case can see another's leavings. */
+  const target = (): string => {
+    const dir = join(users, "u_alice", `import-${box++}`);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  };
+
+  const send = async (
+    into: string,
+    archive: Buffer,
+    name = "a.zip",
+  ): Promise<{ status: number; body: any; left: string[] }> => {
+    const res = await app.fetch(
+      new Request(`http://d/fs/import?path=${encodeURIComponent(into)}&name=${encodeURIComponent(name)}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${tokenFor("u_alice")}` },
+        body: new Uint8Array(archive),
+        // Node refuses a streaming request body without it, and this is what a
+        // browser sends too.
+        duplex: "half",
+      } as RequestInit),
+    );
+    return { status: res.status, body: await res.json(), left: readdirSync(into).sort() };
+  };
+
+  const good: Member[] = [
+    { name: "app/", dir: true },
+    { name: "app/src/", dir: true },
+    { name: "app/src/index.js", data: Buffer.from("console.log(1)\n") },
+    { name: "app/README.md", data: Buffer.from("# app\n") },
+  ];
+
+  /* The happy path, both formats, because they are two separate readers. */
+  for (const [label, archive, name] of [
+    ["a zip", buildZip(good), "app.zip"],
+    ["a tar.gz", buildTarGz(good), "app.tar.gz"],
+  ] as const) {
+    const into = target();
+    const out = await send(into, archive, name);
+    check(`${label} unpacks`, out.status, 201);
+    check(`${label} lands as the one folder the archive named`, out.body.import.name, "app");
+    check(`${label} answers the path the picker walks into`, out.body.import.path, join(into, "app"));
+    check(`${label} wrote the file that was in it`, readFileSync(join(into, "app/src/index.js"), "utf8"), "console.log(1)\n");
+    check(`${label} counted the members rather than reporting zero`, out.body.import.entries > 0, true);
+    check(`${label} left no staging directory behind`, out.left, ["app"]);
+  }
+
+  /* Every refusal, and its second half: that nothing was created. */
+  const refusals: [string, Buffer, string, number, string][] = [
+    ["a member that climbs out of the tree", buildZip([...good, { name: "app/../../out.txt", data: Buffer.from("x") }]), "escapes_root", 400, "archive_unsafe"],
+    ["the same member in a tar", buildTarGz([...good, { name: "app/../../out.txt", data: Buffer.from("x") }]), "escapes_root", 400, "archive_unsafe"],
+    ["an absolute member", buildZip([...good, { name: "/tmp/out.txt", data: Buffer.from("x") }]), "absolute_path", 400, "archive_unsafe"],
+    ["a zip symlink, by its mode bits", buildZip([...good, { name: "app/link", mode: 0o120777, data: Buffer.from("/etc") }]), "not_a_regular_file", 400, "archive_unsafe"],
+    ["a tar symlink, by its typeflag", buildTarGz([...good, { name: "app/link", type: "2", link: "/etc" }]), "not_a_regular_file", 400, "archive_unsafe"],
+    ["a tar hardlink", buildTarGz([...good, { name: "app/hard", type: "1", link: "/etc/passwd" }]), "not_a_regular_file", 400, "archive_unsafe"],
+    ["a device node", buildTarGz([...good, { name: "app/dev", type: "3" }]), "not_a_regular_file", 400, "archive_unsafe"],
+    ["a .git the daemon would run hooks out of", buildZip([...good, { name: "app/.git/hooks/post-checkout", data: Buffer.from("#!/bin/sh\n") }]), "git_directory", 400, "archive_unsafe"],
+    ["an encrypted member", buildZip([...good, { name: "app/s", data: Buffer.from("x"), encrypted: true }]), "encrypted", 400, "archive_unsafe"],
+    ["a compression this daemon does not read", buildZip([...good, { name: "app/b", data: Buffer.from("x"), method: 12 }]), "unsupported_method", 400, "archive_unsafe"],
+    ["a name that is not UTF-8", buildZip([...good, { name: "x", rawName: Buffer.from([0x61, 0xff]), data: Buffer.from("x") }]), "unsupported_name_encoding", 400, "archive_unsafe"],
+  ];
+  for (const [label, archive, reason, status, code] of refusals) {
+    const into = target();
+    const out = await send(into, archive);
+    check(`${label} is refused`, out.status, status);
+    check(`and says which member and why`, [out.body.error.code, out.body.error.detail?.reason], [code, reason]);
+    check(`and nothing at all was created`, out.left, []);
+  }
+
+  {
+    const into = target();
+    const out = await send(into, Buffer.from("this is not an archive at all"));
+    check("something that is not an archive is refused", out.status, 400);
+    check("on its bytes rather than its filename", out.body.error.code, "unsupported_archive");
+    check("and left nothing behind", out.left, []);
+  }
+
+  {
+    const into = target();
+    const out = await send(into, buildZip([...good, { name: "__MACOSX/", dir: true }, { name: "__MACOSX/app/._x", data: Buffer.from("junk") }]));
+    check("Finder's resource-fork tree does not count as a second root", out.status, 201);
+    check("so the folder is still the real one", out.left, ["app"]);
+  }
+
+  {
+    const into = target();
+    const deep = "app/" + "a-long-segment-".repeat(9) + "end.txt";
+    const out = await send(into, buildTarGz([{ name: "app/", dir: true }, ...paxMember(deep, Buffer.from("pax"))]), "app.tar.gz");
+    check("a pax extended header is read rather than refused", out.status, 201);
+    check("and the member takes the name the pax record gave it", readFileSync(join(into, deep), "utf8"), "pax");
+    check("rather than the short stand-in beside it", existsSync(join(into, "app/short-stand-in")), false);
+  }
+
+  {
+    const into = target();
+    const out = await send(into, buildZip([{ name: "a.txt", data: Buffer.from("x") }, { name: "b.txt", data: Buffer.from("y") }]), "my-thing.zip");
+    check("loose members at the root are gathered under the archive's own name", out.body.import.name, "my-thing");
+    check("and that is the one folder in the target", out.left, ["my-thing"]);
+  }
+
+  {
+    const into = target();
+    await send(into, buildZip(good));
+    const again = await send(into, buildZip(good));
+    check("a second import of the same name is refused", again.status, 409);
+    check("with a code the client can act on", again.body.error.code, "import_exists");
+    check("and the first one is untouched", readFileSync(join(into, "app/README.md"), "utf8"), "# app\n");
+    check("and no staging directory survived the refusal", again.left, ["app"]);
+  }
+
+  {
+    // The destination already being a symlink is the case `rename` answers
+    // `ENOTDIR` to rather than `EEXIST`, and the one where getting it wrong means
+    // writing through somebody's link.
+    const into = target();
+    mkdirSync(join(into, "elsewhere"));
+    symlinkSync(join(into, "elsewhere"), join(into, "app"));
+    const out = await send(into, buildZip(good));
+    check("a destination that is already a symlink is refused", out.status, 409);
+    check("rather than written through", existsSync(join(into, "elsewhere/README.md")), false);
+  }
+
+  {
+    const into = target();
+    /*
+     * Built from one buffer repeated rather than a single half-gigabyte member,
+     * so the *driver* does not need the memory the daemon is refusing to spend.
+     * Zeros deflate to almost nothing, so the archive stays far under the wire
+     * bound — which is the point: this refusal has to come from the unpacked
+     * counter, not from the one on the way in.
+     */
+    const slab = Buffer.alloc(50 * 1024 * 1024);
+    const slabs: Member[] = [{ name: "app/", dir: true }];
+    for (let i = 0; i * slab.length <= MAX_IMPORT_UNPACKED_BYTES; i += 1) {
+      slabs.push({ name: `app/zeros-${i}`, data: slab });
+    }
+    const bomb = buildZip(slabs);
+    check("and the bomb itself is small enough to be accepted on the wire", bomb.length < MAX_IMPORT_BYTES, true);
+    const out = await send(into, bomb);
+    check("a bomb is refused on the bytes it actually produced", out.status, 413);
+    check("rather than on the size it declared", out.body.error.code, "import_unpacked_too_large");
+    check("and left nothing behind", out.left, []);
+  }
+
+  {
+    const into = target();
+    const many: Member[] = [{ name: "app/", dir: true }];
+    for (let i = 0; i <= MAX_IMPORT_ENTRIES; i += 1) many.push({ name: `app/f${i}`, data: Buffer.alloc(0) });
+    const out = await send(into, buildZip(many));
+    check("more members than the ceiling is refused", out.status, 413);
+    check("because a byte cap cannot see an inode", out.body.error.code, "import_too_many_entries");
+    check("and left nothing behind", out.left, []);
+  }
+
+  {
+    const into = target();
+    const res = await app.fetch(
+      new Request(`http://d/fs/import?path=${encodeURIComponent(into)}&name=a.zip`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${tokenFor("u_alice")}`, "content-length": String(MAX_IMPORT_BYTES + 1) },
+        body: new Uint8Array(buildZip(good)),
+        duplex: "half",
+      } as RequestInit),
+    );
+    check("an over-size archive is refused on the header", res.status, 413);
+    check("before any of it is read", ((await res.json()) as any).error.code, "import_too_large");
+    check("and nothing was created", readdirSync(into), []);
+  }
+
+  {
+    // The exemption is a predicate over both streaming routes now, so the thing
+    // worth pinning is that it is still *narrow*: every other POST is bounded.
+    const into = target();
+    const res = await app.fetch(
+      new Request("http://d/fs/mkdir", {
+        method: "POST",
+        headers: { authorization: `Bearer ${tokenFor("u_alice")}`, "content-type": "application/json" },
+        body: JSON.stringify({ parent: into, name: "x".repeat(2 * 1024 * 1024) }),
+      }),
+    );
+    check("a route that is not a streaming one is still bounded at 1 MiB", res.status, 413);
+    const big = await send(into, buildZip(good));
+    check("while the import route takes a body past that bound", big.status, 201);
+  }
+
+  {
+    const into = target();
+    const res = await app.fetch(
+      new Request(`http://d/fs/import?path=${encodeURIComponent(into)}&name=a.zip`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${tokenWith("u_alice", ["session:read"])}` },
+        body: new Uint8Array(buildZip(good)),
+        duplex: "half",
+      } as RequestInit),
+    );
+    check("a read-only grant may not import", res.status, 403);
+    check("and nothing was created", readdirSync(into), []);
+  }
 }
 
 /* ------------------------------------------------------------------ *

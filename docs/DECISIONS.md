@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 104 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 65 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 69 | `###` |
 | [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 180 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 41 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 95 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 64 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 95 | `###` |
-| | | **644** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 102 | `###` |
+| | | **655** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 644 rather than the 369
+dividers. So the count is over **both** depths, and it says 655 rather than the 380
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -3970,6 +3970,161 @@ here — the same distinction kimi's plan-mode `-32603` makes (Q2.8) — so the 
 agent's is written down separately.
 
 **Status.** Current
+
+### Q2.107 — Code arrives as an archive. Where does the containment argument come from?
+
+**Question.** `POST /fs/import` takes a `.zip` or `.tar.gz` and unpacks it into a
+directory somebody picked. Every other path in this daemon deals in paths a person
+chose out of a listing of what already exists. An archive member is a string a
+remote party wrote, used to create a file. What authorises the write?
+
+**Decision.** Nothing does, and that is the point — the argument is **refusal
+first, and it is purely syntactic**.
+
+`paths.ts` already says this in as many words: `atOrUnder` "is correct only where
+the path is ours and merely not created yet, and nothing may use it to authorise
+an action on a path somebody else chose." `atOrUnderReal` — the primitive that
+would have been reached for here — was deleted with its last caller rather than
+kept, precisely so that a future caller would have to make this argument instead of
+inheriting one.
+
+So `safeMemberPath` is pure, touches no filesystem, and runs before anything is
+created. It refuses NUL and control characters, a backslash (a member path is POSIX
+or it is refused, never translated), a leading `/` or a drive prefix, any `..`
+segment, `.git`, and anything past a depth or length bound. **Both readers go
+through it**, which is what stops zip and tar drifting into disagreeing about what
+is safe — the failure that would otherwise be found one format at a time.
+
+**`..` is refused rather than normalised**, and that is the whole of the zip-slip
+answer. A member reading `a/../../x` is not asking for `x`, it is probing for
+whether this code normalises; every surviving zip-slip works by the check running
+on the pretty form and the write running on the raw one. There is no pretty form.
+
+**The filesystem half adds exactly one thing: `O_EXCL`.** Every member is written
+`"wx"`, the flag `Uploads.receive` already uses, which never follows a link and
+never truncates. A link planted between the check and the write is an `EEXIST`.
+
+**Measured.** `daemoncheck` builds both formats itself — shelling out would not
+have worked, since GNU tar refuses to *write* a `../` member at all, which is
+exactly the member worth being sure about. Every refusal is asserted in a pair: the
+refusal, and that nothing at all was created, staging directory included.
+
+**Status.** Current
+
+### Q2.108 — Why is a `.git` inside an archive refused, when cloning a hostile repository is accepted?
+
+**Question.** `CLAUDE.md` is explicit that git hooks run as you and that this is
+the intent: "Cloning a hostile repository is exactly as dangerous here as in your
+own terminal — and no more." An imported `.git` is the same bytes. Why treat it
+differently?
+
+**Decision.** Refused, because the sentence above has a clause that does not
+survive the move: *in your own terminal*. The danger there is one you initiated and
+are watching.
+
+The daemon runs `git worktree add` on the directory somebody picks, and `git.ts`
+deletes `GIT_NO_EXEC_CONFIG` on purpose so that a repository's own `post-checkout`
+and its LFS smudge filters run. For a repository you cloned, that is correct and
+was measured — neutralising it checked out LFS pointer files instead of content.
+For an imported one it makes "upload a file" mean "the daemon executes what was in
+that file", with no agent in between and nobody on screen. Every other route to
+executing a hostile repository in this system goes through the agent, which is the
+thing a person is watching.
+
+**Nothing legitimate is lost**, which is what makes this cheap rather than a trade:
+the export skill excludes `.git` anyway, and somebody who wants history asks the
+agent to clone — the existing path, on screen while it happens.
+
+**Rejected.** Allowing it and stripping `hooks/`. That is a second, weaker rule
+about the same directory, and `.git/config` still carries `credential.helper` and
+`core.sshCommand`.
+
+**Reversible, and deliberately so.** It is one clause in `safeMemberPath`, and
+`webcheck` pins the export skill against it so the two cannot come to disagree —
+a skill that packed a `.git` would produce an archive refused *whole*, and the only
+symptom would be a 400 at the end of the slowest step somebody takes.
+
+**Status.** Current
+
+### Q2.109 — An import writes into a directory the daemon does not own. What may it not do to it?
+
+**Question.** This is the only route that creates files inside a folder somebody
+else made. What happens when it fails halfway?
+
+**Decision.** Nothing in the target is touched until one `rename`. Extraction goes
+to `<target>/.reemoat-import-<random>/tree/`, so a failure at any point leaves the
+folder exactly as it was.
+
+**Staging sits inside the target rather than beside the worktree and upload roots**,
+for two reasons that are both requirements rather than preferences. The `rename` is
+then within one filesystem by construction, where a root under `~/.reemoat` would
+be an `EXDEV` copy for anybody whose projects live on another volume. And a third
+remover tree would owe `scripts/daemon.ts` a proof that it nests with neither of
+the other two (Q5.74) — a startup refusal that is currently a two-way check.
+
+It also buys the thing that makes the rest of the file ordinary: **because the
+daemon created the staging directory, every path below it is one it made**, so the
+rule about bounding filesystem calls through `stall.ts` — which is about paths
+somebody else named — does not apply below that line. `resolveCwd` on the target is
+the bounded half.
+
+**The destination is `lstat`ed before the rename, and anything there at all is
+refused.** Measured on macOS: `rename(2)` answers `ENOTDIR` for a destination that
+is a file or a symlink, `ENOTEMPTY` for a non-empty directory, and **succeeds for
+an empty one** — implicitly `rmdir`ing it. That loses no data and is still a
+removal of a directory this daemon did not create, which is exactly what it may not
+decide to do. The errno mapping below the check is the backstop for the race, not
+the rule.
+
+**Known limitation.** A daemon restart mid-import leaves a `.reemoat-import-*`
+directory behind. It is dot-prefixed so the picker hides it and named
+unmistakably; sweeping directories the daemon does not own would be worse than the
+defect.
+
+**Status.** Current
+
+### Q2.110 — Two archive formats. What did each actually cost?
+
+**Question.** Zip is what Finder's Compress and Windows' "Send to" produce; tar.gz
+is what the export skill writes and is the better archive. Accepting both means two
+readers. What was not obvious?
+
+**Decision.** Both, chosen by **magic bytes rather than by filename** — a filename
+is the least reliable thing in the request. Five things cost a measurement:
+
+**A zip states every member twice and the copies may disagree.** Only the central
+directory is read. Every extractor ever walked past a check was walked past it by
+validating one copy and reading the other; the local header is consulted for
+exactly one thing, its own name and extra lengths, being the only way to know where
+the data starts.
+
+**The zip64 extra field is positional.** Its members are present only when the
+corresponding 32-bit field is saturated, always in the same order. Reading it at
+fixed offsets yields a garbage offset out of a valid archive — the first draft did
+this and it was caught by reading it back rather than by a test.
+
+**A zip name without general-purpose bit 11 is CP437, and is refused.** Decoding it
+as UTF-8 anyway turns undecodable bytes into U+FFFD and collapses distinct names
+onto one — a check passing on one string while a file is created at another. Pure
+ASCII is identical in both, so only a genuinely ambiguous name is refused.
+
+**pax headers are read, not refused.** macOS ships bsdtar, which writes typeflag
+`x` ahead of members whose metadata does not fit the 1979 layout, routinely rather
+than rarely. Refusing them refuses most archives made on a Mac.
+
+**`__MACOSX/` is skipped.** Finder writes a parallel resource-fork tree beside the
+folder it compressed, so *every* zip made that way has two top-level directories —
+which would fail the single-root rule and refuse the most likely archive there is.
+
+**And one that is about Node rather than about archives.**
+`handle.createReadStream` per member registers a `close` listener on the shared
+`FileHandle` and releases none until the import ends, so a zip of twenty thousand
+members registers twenty thousand. Node warns at eleven, which is how it was found
+— from `daemoncheck`'s output, on an archive of eleven files. `readRange` reads
+positionally and has no such bookkeeping.
+
+**Status.** Current
+
 
 ## The web client
 
@@ -15033,3 +15188,278 @@ makes a live one any more — which is the honest fixture, since the legacy row 
 exactly what that route exists to rescue.
 
 **Status.** Reversed an earlier decision
+
+### Q7.96 — Import stacks the same body-cancel discipline behind the same middlewares. Is Q7.62 now asked twice?
+
+**Question.** Q7.62 asks whether the upload route's body-cancel discipline
+actually survives the auth and scope middlewares stacked above it — the code is
+written and the measurement is missing. `POST /fs/import` is the second route with
+that shape.
+
+**Position.** Yes, and it is the same open question rather than a new one. Both
+routes refuse through a wrapper that cancels the request body first, both sit under
+the same gate, and neither has been driven with a real body in flight through a
+relay under a scope that refuses. What makes it matter is stated where the
+discipline is: the relay grants a stream's window on consumption, so a reader that
+stops parks the sender at 256 KiB, and the next valve is the tunnel's 8 MiB socket
+check — which closes the whole tunnel for that machine, taking every other session
+on it down rather than the one request.
+
+What the second route changes is only the arithmetic: the remedy, whenever somebody
+measures it, now fixes two places instead of one. It is not a reason to measure it
+sooner than Q7.62 already argues.
+
+**Status.** Open
+
+### Q7.97 — Import is serialised for the whole daemon. Is that a bound or a bottleneck?
+
+**Question.** `POST /fs/import` answers `409 import_busy` while another import is
+unpacking. Every other route in this daemon is concurrent.
+
+**Decision.** Serialised, because this route is the only one with **no accounting
+that outlives the request**. An upload is charged against a session's 100 MiB and
+100 files; an import is charged against nothing once it has landed, and the relay
+allows 256 concurrent streams — which at these bounds is 12 GiB of archive and 125
+GiB of unpacked tree. A per-request size cap cannot see that, so the bound has to
+be on arrival.
+
+**Why it costs nothing real.** A person imports a codebase about as often as they
+start a project, and the window is one archive rather than one session. Two people
+sharing a machine and importing in the same thirty seconds is the entire collision
+surface, and the answer is a sentence telling them to try again.
+
+**Rejected.** A queue. That turns a bound into latency nobody can see the end of,
+and the thing being bounded is disk — which a queue does not reduce, only defers.
+
+**Reconsider if** anything else ever writes an unbounded amount into a directory
+per request, at which point the honest shape is a shared admission budget rather
+than a second boolean.
+
+**Status.** Current
+
+### Q7.98 — Claude's browser login worked, then stopped. What actually changed?
+
+**Question.** Signing an agent in from the browser worked. On macOS it now opens
+a wizard that dies with `script: tcgetattr/ioctl: Operation not supported on
+socket`, and the screen says the machine cannot run the sign-in program. The
+record said this was a known limitation; the person running the fleet said it
+used to work. Both were right, and the record was missing the half that explains
+it.
+
+**What changed, from the history.**
+
+| date | commit | |
+|---|---|---|
+| 2026-07-31 | `16ccfeb` | browser login arrives — **agents run in a Linux container**, reached with `docker exec -i` |
+| **2026-08-02** | `5e573c9` | **Phase B/C deletes the container runtime**; agents become processes on the host |
+| 2026-08-08 | `c9676f4` | `loginStdio` arrives and rescues the device-code flows |
+
+**Decision.** Nothing about claude's login broke. **macOS was never on the path
+before.** Until Phase B/C the login executed inside a Linux container, where
+`script` accepts a pipe on stdin and the flow works; deleting the container moved
+it onto the host, and the host here is BSD.
+
+`loginStdio` closed the gap a week later for `kimi` and `codex` — device-code
+flows read nothing, so they can be handed `/dev/null`. It cannot close it for
+`claude`, whose flow prints a URL and **waits for the code to be pasted back**:
+taking its stdin away removes the box the code goes in. So one of the three is
+permanently unreachable by wizard on a BSD host, and `agents.ts` already said so
+in a comment — without saying that it had ever been otherwise, which is why the
+screen reads as a regression.
+
+**What this changes in the code.** The failure was reachable only by *tapping the
+button*: `supported` folded in `script` and the CLI, not the flow's own shape, so
+a control that cannot work was drawn and then died in a `<pre>`. That is the same
+defect `AgentLoginSupport.supported` was created to fix, one condition short.
+`loginBlockedReason` adds it, and answers *why* on the wire —
+`no_script | no_cli | interactive_pty` — because each has a different remedy and
+the remedy is offered on the client. `supported` is now `blocked === null` and
+nothing else, so the two cannot disagree.
+
+**Status.** Current
+
+### Q7.99 — A daemon reported claude signed out, then an agent failed to authenticate. Two different things.
+
+**Question.** `claude auth status` in a terminal printed `{"loggedIn": true}` while
+the daemon on the same host reported `loggedIn: false`. A day later a session on
+that daemon answered `Internal error: Failed to authenticate: OAuth session
+expired and could not be refreshed`. Same cause?
+
+**No, and the first explanation written here was wrong.** It said the CLI keeps a
+`Claude Code-credentials` item in the login Keychain, reads it before the JSON, and
+that a daemon under launchd cannot open it without a prompt nobody is there to
+answer. The Keychain item is real — created 2026-08-03, last modified 2026-08-17,
+while `~/.claude/.credentials.json` was rewritten 2026-08-19 — so the two stores do
+disagree. **That is not what either symptom was.** Measured 2026-08-20: the same
+launchd daemon reports `loggedIn: true`, and a session created on it authenticated
+and completed a turn in under two seconds. Whatever the badge was reading, it was
+not a Keychain the daemon cannot reach.
+
+**What the second symptom actually is: a stale agent process, not a stale
+credential.** The session's own log is unambiguous:
+
+| | |
+|---|---|
+| 17:36:03 | session created, agent spawned |
+| 18:46:47 | daemon restarts, agent respawned |
+| **00:23:12** | the **first** prompt this session ever received — instant `authentication_failed` |
+
+Five hours and thirty-six minutes idle, and the failure arrives on first use. At
+that moment the access token on disk was valid for another 1.4 hours and the
+refresh token for another two weeks; neither store had been written since *before*
+the agent started. A CLI run from a shell completed an inference call, and — the
+measurement that settles it — **a freshly spawned agent on that same daemon
+answered normally four minutes later.**
+
+So the credential was fine, the daemon was fine, and the process holding an OAuth
+session across five idle hours was not. Restarting the agent is the remedy, and
+resuming the session is what does it.
+
+**What is left unexplained, and is recorded as unexplained.** Why the refresh
+failed rather than succeeding is not established. Rotation is the obvious
+candidate — several clients share one account here, and a refresh rotates the
+token server-side, so whoever refreshes second loses — but nothing rewrote either
+store in the window, which is what rotation would normally leave behind. Naming a
+mechanism this file cannot demonstrate is how the paragraph above came to be wrong
+the first time.
+
+**The lesson worth more than the diagnosis.** The first answer was assembled by
+elimination — probe, timeout, cache and PATH each ruled out — and then handed to
+the one hypothesis left standing, which was never itself tested. Ruling out four
+things does not prove the fifth. The test that would have caught it, *spawn a
+fresh agent and see*, cost one request and was not run.
+
+**Status.** Reversed an earlier decision
+
+### Q7.100 — Signing out reached nothing that was already running
+
+**Question.** A credential is read once, at spawn. So an agent started while
+signed in goes on answering after its account is revoked, and a conversation
+begun before a sign-out carries on as though nothing happened. Is a sign-out a
+fact about the machine, or about a screen?
+
+**Decision.** About the machine, and three paths were needed to make that true.
+
+**Signing out ends the conversations.** `signOutSessions` stops every live session
+on that agent with a new reason, `agent_signed_out`. **Ended rather than
+relaunched**, which is the opposite of what saving a credential does: relaunching
+here starts an agent with nothing to authenticate with, and that fails at the
+first message *inside the transcript* as `Internal error: Failed to
+authenticate` — the least explicable place a refusal can appear. It does not
+spare a turn in flight, and that asymmetry with `takesCredentialChange` is the
+point: there a credential was being added and a working turn was evidence the
+credential worked; here it is being taken away, and a turn still running on it is
+exactly what somebody signing out means to stop.
+
+**A prompt never reaches a signed-out agent.** The route asks before sending, so
+the sign-outs this daemon did not perform — done in a terminal, revoked elsewhere,
+or simply expired — are covered too. That is the case that actually occurred
+(Q7.99): three prompts answered `Failed to authenticate` from a session whose
+agent had held a dead OAuth session across five idle hours.
+
+⚠ **Refused on a known `false` and never on "could not tell".** `loginState` has
+three answers and kimi's permanent, correct one is the third — it publishes no
+non-interactive status verb at all. `!== true` would take every kimi conversation
+on the machine off the air for ever, on the strength of a question kimi cannot be
+asked. `daemoncheck` drives all five inputs through the `exec` seam.
+
+**Signing in reverses it, and reverses only it.** `agent_signed_out` is the record
+of *who* ended a session, so `reloadCredentials` resumes exactly those and leaves
+every `stopped` one alone. Reviving a hand-stopped session would be the daemon
+overruling a person — which is why the reason is a reason rather than a boolean.
+
+**Deliberately not in `DAEMON_EXIT_REASONS`.** That list is "the daemon went away
+rather than anybody deciding", and it is what the boot pass brings back. A person
+decided this. `autoResumable` answering `false` for it is not in tension with the
+resume above: nothing brings these back *on its own*; that is the same person, on
+the same machine, undoing the thing that ended them. Adding the reason made
+`autoResumable`'s exhaustive switch a compile error until the decision was
+written, which is what that switch is for.
+
+**Measured.** A session that answered a prompt, then refused the next one with
+`409 agent_signed_out` — "nobody is signed in to claude on this machine" — the
+moment its agent's CLI reported signed out, with kimi unaffected on the same
+daemon.
+
+**Status.** Current
+
+### Q7.102 — A refusal a person can fix does not belong in a toast
+
+**Question.** Sending to a signed-out agent answered `409 agent_signed_out`, and
+the composer drew it the way it draws every refusal: a toast. The one refusal on
+this screen with an actual remedy was announced in the place with no room for
+one, and the shortest life on screen.
+
+**Decision.** Say it in the transcript, with the button that fixes it — and make
+the state singular first, because two states cannot share one line.
+
+**The daemon ends the session rather than only refusing it.** `signOutSessions`
+already covered a sign-out this daemon performed; a prompt refused for any *other*
+way the credential went — signed out in a terminal, revoked elsewhere, expired —
+left the conversation looking live while it could never accept a message again.
+Ending it with the same reason collapses both paths onto one state, so the client
+has one thing to draw and signing in brings all of them back together. Guarded on
+`!managed.terminal`, so a session already ended keeps the reason it had.
+
+**The notice grew an action instead of a second boolean.** `sessionNotice`
+returned `retry: boolean`; a `signIn: boolean` beside it could be true at the same
+time, which means nothing and would draw two buttons for one problem. It is one
+`action: "reconnect" | "sign_in" | null` — mutually exclusive by construction,
+and `webcheck` walks it.
+
+**The button navigates rather than opening anything inline.** Signing in is a
+wizard or a pasted token and both already live at
+`/settings/machines/:machineId/agents/:agentId`; the machine comes from the row
+being read, because a sign-out is per host and somebody is looking at one
+conversation on one of them.
+
+**And the toast is suppressed for exactly that code.** The message is still
+restored to the box — the conversation returns when they sign in, and their draft
+is waiting in it — but the news is not told twice, once in the place that cannot
+carry the remedy.
+
+**Measured.** One daemon run, one live session: a prompt answered `202`, the CLI's
+own status was switched to signed-out, and the next prompt on the same session
+answered `409` with the session `exited`, `reason: agent_signed_out`. Saving a
+credential then reported `restarting: 2` and the session came back `idle` with no
+exit at all.
+
+**Status.** Current
+
+### Q7.101 — Every tab switch redrew the settings screen, and one line was why
+
+**Question.** Switching to another window and back made Settings flicker: machine
+dots blinked, and the agents panel blanked and reloaded.
+
+**Decision.** `probeRoute` published `probing` for a machine it already knew was
+online, and two screens read that as the host being gone.
+
+The chain: `resumeMachine` calls `forgetRoute()` on every wake — correctly, since
+a route learned on one network says nothing on another — so a healthy machine is
+re-probed whenever the tab comes back. `probeRoute` set `reach = "probing"` and
+published **before any I/O**, then `online` again up to 1.5s later. Everything
+keyed on `reach` therefore changed twice for a question whose answer never
+changed.
+
+**On one screen that was not a repaint but an unmount.** `MachineAgentsSection`
+tested `reach !== "online"` and replaced the panel with "not reachable right now",
+so the return trip *remounted* it: `useAgentAuth` restarted from `listing: null`,
+drew its spinner, issued a second `GET /agent-auth` — which shells out to every
+agent's CLI and is on the 90s budget — and threw away anything half-typed into a
+credential box or any sign-in wizard in progress. Once per tab switch, on the
+screen whose whole purpose is "go and copy a token, come back".
+
+**Fixed at the source**: a probe of a machine already believed reachable keeps
+that belief. `probing` means *no answer yet*, and re-checking does not erase an
+answer already held; `unknown` remains the value for never having asked, and a
+failed probe still lands on `offline`. That covers every screen at once rather
+than one predicate per caller. `daemonReadable` is the second half, for the
+genuine first-load `probing`, and it is pure so all four values are walked.
+
+**What it confirms.** `.claude/rules/web-shell.md` already states this rule for
+the rail — reachability flickers, so a row may not change because of it — and the
+two screens that legitimately *show* reachability had quietly become the
+exception. Showing a measurement is still not a reason to take the content away
+while it is being taken.
+
+**Status.** Current

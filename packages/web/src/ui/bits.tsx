@@ -111,8 +111,13 @@ export const COLUMN = "mx-auto w-full max-w-3xl";
  * forces `font-size: max(16px, 1em)` on every input under a coarse pointer —
  * the rule that stops iOS zooming the page on focus — so with a 16px face those
  * two are roughly 47px and 39px tall, which puts the *same field* on either side
- * of the 44px tap minimum depending on which screen you reached it from. `py-3`
- * is the one that clears it, so `py-3` is the one that survived.
+ * of the 44px tap minimum depending on which screen you reached it from.
+ *
+ * **That was first settled by keeping `py-3`, and it is settled by `min-h` now.**
+ * Padding only ever reached 44px *via* whatever line-height the type scale
+ * happened to give that font size — two numbers in two files multiplying out to a
+ * height nothing stated. The floor is written down instead, and the resting
+ * height with it.
  *
  * Layout is deliberately **not** in here. Width, margin and `block` legitimately
  * differ — a full-width form field, a `max-w-sm` one, a `flex-1` one sitting
@@ -131,7 +136,24 @@ export const COLUMN = "mx-auto w-full max-w-3xl";
  * the token: this box has no fill of its own to identify it, so its boundary is
  * the control, and a boundary that identifies a control is held at 3:1.
  */
-export const FIELD = "rounded-md border border-edge-strong bg-surface px-3 py-3 text-sm outline-none";
+export const FIELD =
+  "min-h-9 rounded-md border border-edge-strong bg-surface px-3 text-sm leading-5 outline-none [@media(pointer:coarse)]:min-h-11";
+
+/*
+ * ⚠ **Never compose this with a vertical padding, and there is no way to make one
+ * work.** Tailwind emits every utility at equal specificity, so the winner is
+ * whichever comes later *in the generated stylesheet* rather than in the class
+ * attribute. Measured on this bundle: `.py-3` is emitted after `.py-2`, so
+ * `` `${FIELD} py-2` `` silently kept the taller box — no error, and the code
+ * reading as though it had worked. Two controls meant to line up differed by 10px
+ * through a review that said they did not.
+ *
+ * That is the same trap `Button` documents for a size passed through `className`,
+ * and it is why the height above is `min-h` and there is no `py-*` in the string:
+ * with none in here, there is nothing for a caller's to lose an argument to. A
+ * caller needing a different height states `min-h-*`, one utility against one,
+ * which behaves the way it reads.
+ */
 
 /**
  * What a link looks like — the *only* thing in this palette that says "this
@@ -566,11 +588,30 @@ export function resumeRetryable(code: string): boolean {
  * replaced anyway. On a session somebody stopped it is the difference between
  * "stopped" and "probably orphaned", which is worth their knowing.
  */
+/**
+ * A line under the transcript, and the one thing to do about it.
+ *
+ * `action` rather than a `retry` boolean, because the remedies are mutually
+ * exclusive and a second boolean beside the first could claim both at once — a
+ * state that means nothing and would draw two buttons. `null` is the ordinary
+ * case: most notices are a fact with nothing to press.
+ */
+export interface SessionNotice {
+  tone: "quiet" | "warn";
+  text: string;
+  /**
+   * `reconnect` re-runs the resume this daemon gave up on. `sign_in` goes to the
+   * agent's own screen on this machine — the conversation is not broken, nobody
+   * is signed in to the thing that answers it.
+   */
+  action: "reconnect" | "sign_in" | null;
+}
+
 export function sessionNotice(
   session: SessionSnapshot,
   agent: string,
   machineName: string,
-): { tone: "quiet" | "warn"; text: string; retry: boolean } | null {
+): SessionNotice | null {
   if (session.exit === null) return null;
   if (resumeStalled(session)) {
     const error = session.resume?.error;
@@ -578,7 +619,7 @@ export function sessionNotice(
     return {
       tone: "warn",
       text: `could not reconnect the agent — ${resumeFailureText(code, error?.message ?? "", agent, machineName)}`,
-      retry: resumeRetryable(code),
+      action: resumeRetryable(code) ? "reconnect" : null,
     };
   }
   if (waitingForDaemon(session)) {
@@ -588,12 +629,28 @@ export function sessionNotice(
         session.resume?.state === "running"
           ? "reconnecting the agent…"
           : "the daemon restarted — reconnecting the agent",
-      retry: false,
+      action: null,
+    };
+  }
+  /*
+   * **The one exit with a remedy, so it gets a sentence rather than its name.**
+   *
+   * Every other reason here is either self-explanatory (`stopped`) or something
+   * nobody can act on from this screen. This one ended the conversation *because
+   * a credential went away*, and the thing that brings it back is one screen
+   * over — so printing `ended: agent_signed_out` would be withholding the only
+   * useful half of what the daemon said.
+   */
+  if (session.exit.reason === "agent_signed_out") {
+    return {
+      tone: "quiet",
+      text: `nobody is signed in to ${agent} on ${machineName}. Sign in and this conversation comes back.`,
+      action: "sign_in",
     };
   }
   const detail = session.exit.detail === null ? "" : ` — ${session.exit.detail}`;
   const orphan = session.exit.agentConfirmedDead ? "" : " (agent not confirmed dead)";
-  return { tone: "quiet", text: `ended: ${session.exit.reason}${detail}${orphan}`, retry: false };
+  return { tone: "quiet", text: `ended: ${session.exit.reason}${detail}${orphan}`, action: null };
 }
 
 export function Spinner(): ReactNode {

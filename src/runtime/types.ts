@@ -125,6 +125,17 @@ export interface AgentLoginSupport {
    * own log.
    */
   supported: boolean;
+  /**
+   * Why not, when not — so the client can say something other than "unavailable".
+   *
+   * `supported` is `blocked === null` and nothing else, so the two cannot come to
+   * disagree. The reason is on the wire because each one has a *different remedy*
+   * and the client is where a remedy is offered: `no_script` is about the host,
+   * `no_cli` is about installing the agent, and `interactive_pty` is the one with
+   * a way forward on the same screen — paste a token instead. See
+   * `loginBlockedReason`.
+   */
+  blocked: "no_script" | "no_cli" | "interactive_pty" | null;
   /** Whether to draw an input box. See `AGENT_LOGIN[agent].interactiveStdin`. */
   needsInput: boolean;
   /** Whether this agent's CLI has a sign-out verb at all. kimi does not. */
@@ -226,6 +237,17 @@ export interface SessionRuntime {
    * are signed out until it expires — which is the bug this method exists to have
    * already fixed once.
    */
+  /**
+   * Whether this agent is **known** signed out — an explicit `false` from its own
+   * status command, never a "could not tell".
+   *
+   * On the interface because the prompt path asks it: a conversation must not
+   * reach an agent whose credential its owner has revoked, and that is a question
+   * about the machine rather than about the session. See the implementation for
+   * why `null` may never be read as "signed out".
+   */
+  signedOut(agent: AgentId): Promise<boolean>;
+
   forgetAvailability(): void;
 
   /** Start one. */
