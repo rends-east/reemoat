@@ -769,6 +769,33 @@ export type ExitReason =
  */
 export const DAEMON_EXIT_REASONS = ["daemon_restarted", "daemon_shutdown", "config_changed"] as const;
 
+/**
+ * Whether an agent's error says it could not authenticate.
+ *
+ * **The one signal that a credential has gone away while a conversation was
+ * open**, and it comes from the agent rather than from asking a CLI: ACP errors
+ * carry a `data.errorKind`, and `authentication_failed` is what claude reported
+ * on 2026-08-20 when an OAuth session expired mid-session —
+ * `Failed to authenticate: OAuth session expired and could not be refreshed`.
+ *
+ * Read defensively at every level, because this walks two `unknown`s: the error's
+ * own `data`, and the payload inside it. A shape that does not match is simply
+ * not an auth failure — this may never throw on the event pump, and it may never
+ * guess, since what it decides is whether to end somebody's conversation.
+ *
+ * ⚠ **The kind, never the message.** `describeError`'s text is the agent's own
+ * prose and changes with its version; matching "authenticate" in it would end a
+ * conversation on the strength of a sentence somebody's CLI happens to print.
+ */
+export function isAuthFailure(event: { type: string; data?: unknown }): boolean {
+  if (event.type !== "error") return false;
+  const outer = event.data;
+  if (typeof outer !== "object" || outer === null) return false;
+  const inner = (outer as { data?: unknown }).data;
+  if (typeof inner !== "object" || inner === null) return false;
+  return (inner as { errorKind?: unknown }).errorKind === "authentication_failed";
+}
+
 export function endedWithDaemon(exit: { reason: ExitReason } | null | undefined): boolean {
   if (exit === null || exit === undefined) return false;
   return (DAEMON_EXIT_REASONS as readonly ExitReason[]).includes(exit.reason);

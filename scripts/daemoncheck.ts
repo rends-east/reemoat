@@ -1228,31 +1228,6 @@ process.stdout.write("\nis this agent signed in\n");
   check("output that is not JSON is `cannot tell`", await claudeSays("Error: something went wrong"), null);
   check("JSON without the field is too", await claudeSays('{"account": "someone"}'), null);
   check("and no output at all is too", await claudeSays(null), null);
-
-  /*
-   * `signedOut` is the same three answers read for a different decision, and the
-   * decision is *refusing somebody's message*. Driven here rather than asserted
-   * off the source, because the load-bearing half is which of the three map to
-   * `true` — and getting that wrong takes an agent off the air rather than
-   * failing a build.
-   */
-  const signedOutSays = async (answer: string | null): Promise<boolean> =>
-    new LocalRuntime({ exec: async () => answer }).signedOut("claude");
-
-  check("an explicit no is a sign-out", await signedOutSays('{"loggedIn": false}'), true);
-  check("an explicit yes is not", await signedOutSays('{"loggedIn": true}'), false);
-  /*
-   * ⚠ The three not-knowings, each of which would silence a working agent if it
-   * were read as a refusal. Kimi is the permanent case — it publishes no status
-   * verb at all — so `!== true` here would take every kimi conversation on the
-   * machine off the air for ever.
-   */
-  check("output that is not JSON is not a sign-out", await signedOutSays("Error: something went wrong"), false);
-  check("nor is JSON without the field", await signedOutSays('{"account": "someone"}'), false);
-  check("nor is no output at all", await signedOutSays(null), false);
-  check("and kimi, which can never be asked, is never signed out",
-    await new LocalRuntime({ exec: async () => null }).signedOut("kimi"), false);
-
   // The asymmetry the Settings screen depends on: a pasted credential is believed
   // over "cannot tell", because we are the ones who cannot tell — but a *clean*
   // false is the agent itself saying no, and that wins.
@@ -3475,19 +3450,40 @@ process.stdout.write("\nsigning out, as a state of the machine\n");
   check("and the route waits for it before answering", /await registry\.signOutSessions\(agent\)/.test(routes), true);
 
   /*
-   * The prompt path covers every way a credential can go that this daemon did not
-   * perform: signed out in a terminal, revoked elsewhere, or expired.
+   * **A credential that went away some other way is reported by the agent**, not
+   * discovered by asking. The prompt path deliberately has no probe: one there
+   * cost a spawn per message, was only ever as fresh as a 3s cache, and made this
+   * driver depend on whether the person running it was signed in — a stub runtime
+   * inherits the real probe, and `resolveLoginBinary` finds the adapter's own
+   * vendored binary in `node_modules`, which on CI is signed in to nothing.
    */
-  check("a prompt to a signed-out agent is refused", /"agent_signed_out",\s*\n\s*`nobody is signed in to/.test(routes), true);
-  check("before anything relaunches an agent that cannot authenticate",
-    routes.indexOf("if (await registry.sessionRuntime.signedOut(managed.agent))") <
-      routes.indexOf("await managed.whenRestarted();"),
-    true);
+  check("the prompt path asks no CLI whether anybody is signed in", /sessionRuntime\.signedOut\(/.test(routes), false);
+  check("the agent's own failure is what ends it", /isAuthFailure\(event\)/.test(reg), true);
+  check("with the same reason, so one thing brings them back", /this\.stop\("agent_signed_out"\)/.test(reg), true);
 
-  // The rule that keeps kimi on the air.
-  const probe = /async signedOut\(agent: AgentId\): Promise<boolean> \{[\s\S]*?\n  \}/.exec(runtime)?.[0] ?? "";
-  check("and only a known sign-out counts", /=== false/.test(probe), true);
-  check("never a could-not-tell", /!== true/.test(probe), false);
+  /*
+   * The kind, never the message: `describeError`'s text is the agent's own prose
+   * and moves with its version, and matching "authenticate" in it would end a
+   * conversation because of a sentence somebody's CLI happens to print.
+   */
+  const { isAuthFailure } = await import("../src/events.js");
+  check("an auth failure is recognised", isAuthFailure({ type: "error", data: { code: -32603, data: { errorKind: "authentication_failed" } } }), true);
+  check("another agent error is not", isAuthFailure({ type: "error", data: { code: -32603, data: { errorKind: "something_else" } } }), false);
+  check("nor is the message alone", isAuthFailure({ type: "error", data: { code: -32603, data: {} } }), false);
+  check("a non-error event never is", isAuthFailure({ type: "text", data: { data: { errorKind: "authentication_failed" } } }), false);
+  // Every shape it must survive rather than throw on, since this runs on the pump.
+  for (const shape of [undefined, null, "text", 7, {}, { data: null }, { data: "x" }] as unknown[]) {
+    check(`and a payload of ${JSON.stringify(shape) ?? "undefined"} is refused quietly`, isAuthFailure({ type: "error", data: shape }), false);
+  }
+
+  /*
+   * The probe that used to sit on the prompt path is **deleted**, not merely
+   * unused — with the note saying why in its place, for the reason `paths.ts`
+   * gives about `atOrUnderReal`: a method with no callers and a docblock arguing
+   * for itself reads as live policy to whoever finds it next.
+   */
+  check("the probe is gone rather than left for a future caller", /async signedOut\(/.test(runtime), false);
+  check("with the reason it is gone written where it was", /`signedOut\(agent\)` used to live here/.test(runtime), true);
 }
 
 /* ------------------------------------------------------------------ *

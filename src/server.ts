@@ -1473,56 +1473,24 @@ export function createApp(options: ServerOptions): AppBundle {
      * reported as the state it left behind.
      */
     /*
-     * **A conversation may not reach an agent nobody is signed in to.**
+     * **There is deliberately no "is this agent signed in" probe here.**
      *
-     * The credential lives in the agent's process, so a session started while
-     * signed in goes on accepting messages after the account behind it is gone —
-     * and what comes back is the agent's own `Failed to authenticate`, rendered
-     * inside the transcript as an internal error, with nothing on the screen
-     * connecting it to a sign-out. Measured 2026-08-20 on a live daemon: three
-     * prompts in a row answered that way, on a session that worked the moment its
-     * agent was relaunched.
+     * An earlier version asked the agent's CLI before every message. It cost a
+     * process spawn on the hot path, could only ever be as fresh as its 3s cache,
+     * and — the reason it is gone — made the offline drivers depend on whether
+     * the person running them happened to be signed in, because a stub runtime
+     * inherits the real probe and `resolveLoginBinary` finds the adapter's own
+     * vendored copy in `node_modules`. CI is signed in to nothing, so it refused
+     * a prompt two assertions expected to land.
      *
-     * `signOutSessions` handles the sign-out this daemon performed; this handles
-     * every other way the credential can go — signed out in a terminal, revoked
-     * elsewhere, or simply expired — because the only end that can tell is the
-     * CLI, and the only honest moment to ask is before sending something to it.
-     *
-     * ⚠ **Refused on a known `false` and never on "could not tell".** See
-     * `LocalRuntime.signedOut`: kimi publishes no status verb at all, so `null`
-     * is its permanent and correct answer, and reading that as signed out would
-     * silence every kimi conversation on the machine for ever.
-     *
-     * **After** body validation, so a mis-tap spends no probe, and before the
-     * auto-resume below, so a message never relaunches an agent that cannot
-     * authenticate.
+     * The two real cases are covered without asking. A sign-out *through this
+     * daemon* ends the conversations itself (`signOutSessions`). A credential
+     * that went away some other way — revoked elsewhere, or expired — is reported
+     * by the agent, at the only moment that cannot be stale: `isAuthFailure` on
+     * the event pump ends the session with the same reason, so the second message
+     * is refused by `session_terminal` and the client draws the sentence and its
+     * Sign in button.
      */
-    if (await registry.sessionRuntime.signedOut(managed.agent)) {
-      /*
-       * **Ended, not merely refused**, so that "signed out" is one state rather
-       * than two.
-       *
-       * `signOutSessions` covers the sign-out this daemon performed. This covers
-       * every other way the credential can go — signed out in a terminal, revoked
-       * elsewhere, expired — and if it only answered 409 those conversations
-       * would sit in the list looking live, accepting messages that could never
-       * land, with the refusal arriving as a toast each time. Ending them puts
-       * them in the same state, carrying the same reason, so the client has one
-       * thing to draw and signing in brings all of them back together.
-       *
-       * Idempotent by the guard: a session already terminal is left alone, and
-       * `stop` is memoised besides.
-       */
-      if (!managed.terminal) await managed.stop("agent_signed_out").catch(() => undefined);
-      return jsonError(
-        c,
-        409,
-        "agent_signed_out",
-        `nobody is signed in to ${managed.agent} on this machine`,
-        { agent: managed.agent, session: managed.snapshot() },
-      );
-    }
-
     await managed.whenRestarted();
 
     if (

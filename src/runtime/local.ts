@@ -439,25 +439,24 @@ export class LocalRuntime implements SessionRuntime {
     );
   }
 
-  /**
-   * Whether this agent is **known** to be signed out.
-   *
-   * ⚠ **`true` only for an explicit `false` from the CLI's own status command.**
-   * `loginState` has three answers and the third is the one that matters here:
-   * `null` is "could not tell", which is kimi's permanent and correct answer —
-   * it publishes no non-interactive status verb at all. Reading `!== true` would
-   * therefore refuse every kimi conversation on this machine, for ever, on the
-   * strength of a question kimi cannot be asked. The same `null` is also what a
-   * missing binary and an unrecognised output produce, and none of those is
-   * evidence that anybody signed out.
-   *
-   * Cached like every other read of that probe (3s), and collapsed onto one spawn
-   * when several callers arrive together — which they do, because this is on the
-   * prompt path.
-   */
-  async signedOut(agent: AgentId): Promise<boolean> {
-    return (await this.loginState(agent, this.probeGeneration)) === false;
-  }
+/*
+ * `signedOut(agent)` used to live here, and it is gone rather than kept.
+ *
+ * It answered "is this agent known signed out" for a guard on the prompt path,
+ * and that guard was the wrong shape: it spawned the agent's CLI on the hot path,
+ * was only ever as fresh as its 3s cache, and — the reason it was removed —
+ * made every offline driver depend on whether the person running it was signed
+ * in. A stub runtime inherits this class, and `resolveLoginBinary` finds the
+ * adapter's own vendored binary in `node_modules`, so CI (signed in to nothing)
+ * refused a prompt two assertions expected to land.
+ *
+ * What replaced it is not a better probe but a different source: the agent says
+ * so itself. `isAuthFailure` reads `errorKind` off the ACP error on the event
+ * pump, at the only moment that cannot be stale, and the session ends carrying
+ * `agent_signed_out`. Deleted with its caller rather than left for a future one,
+ * for the reason `paths.ts` gives about `atOrUnderReal`: a method with no callers
+ * and a docblock arguing for itself reads as live policy to whoever finds it.
+ */
 
   /** See {@link SessionRuntime.forgetAvailability}. */
   forgetAvailability(): void {

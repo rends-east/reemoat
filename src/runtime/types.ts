@@ -237,17 +237,6 @@ export interface SessionRuntime {
    * are signed out until it expires — which is the bug this method exists to have
    * already fixed once.
    */
-  /**
-   * Whether this agent is **known** signed out — an explicit `false` from its own
-   * status command, never a "could not tell".
-   *
-   * On the interface because the prompt path asks it: a conversation must not
-   * reach an agent whose credential its owner has revoked, and that is a question
-   * about the machine rather than about the session. See the implementation for
-   * why `null` may never be read as "signed out".
-   */
-  signedOut(agent: AgentId): Promise<boolean>;
-
   forgetAvailability(): void;
 
   /** Start one. */

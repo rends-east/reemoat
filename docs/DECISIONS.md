@@ -15351,17 +15351,35 @@ point: there a credential was being added and a working turn was evidence the
 credential worked; here it is being taken away, and a turn still running on it is
 exactly what somebody signing out means to stop.
 
-**A prompt never reaches a signed-out agent.** The route asks before sending, so
-the sign-outs this daemon did not perform — done in a terminal, revoked elsewhere,
-or simply expired — are covered too. That is the case that actually occurred
-(Q7.99): three prompts answered `Failed to authenticate` from a session whose
-agent had held a dead OAuth session across five idle hours.
+**A credential that went away some other way is reported by the agent.** The
+sign-outs this daemon did not perform — done in a terminal, revoked elsewhere, or
+simply expired — end the session too, and the signal is `isAuthFailure`:
+`errorKind: "authentication_failed"` on the ACP error, read on the event pump.
+That is the case that actually occurred (Q7.99), and the payload above is the one
+this daemon recorded on 2026-08-20.
 
-⚠ **Refused on a known `false` and never on "could not tell".** `loginState` has
-three answers and kimi's permanent, correct one is the third — it publishes no
-non-interactive status verb at all. `!== true` would take every kimi conversation
-on the machine off the air for ever, on the strength of a question kimi cannot be
-asked. `daemoncheck` drives all five inputs through the `exec` seam.
+⚠ **A probe on the prompt path was tried first and taken back out**, and the
+measurement is worth keeping. It asked the agent's CLI "is anybody signed in"
+before every message, which cost a process spawn on the hot path, could only ever
+be as fresh as its 3s cache, and **made the offline drivers depend on whether the
+person running them was signed in** — a stub runtime inherits `LocalRuntime`, and
+`resolveLoginBinary` finds the adapter's own vendored binary in `node_modules`.
+CI is signed in to nothing, so it refused a prompt two unrelated assertions
+expected to land, and the failure was invisible on a developer's own machine.
+
+The replacement is not a better probe but a different *source*: the agent says
+so, at the only moment that cannot be stale, and it costs nothing. What is given
+up is that the first message after an external sign-out is still sent and still
+fails — it was going to fail with the probe too, whenever the cache was stale —
+and what is gained is that the failure now *ends* the conversation instead of
+being one internal error among many. `signedOut` was deleted rather than left
+unused, for `paths.ts`'s reason about `atOrUnderReal`.
+
+⚠ **The kind, never the message.** `describeError`'s text is the agent's own prose
+and moves with its version; matching "authenticate" in it would end somebody's
+conversation because of a sentence their CLI happens to print. `isAuthFailure`
+walks two `unknown`s defensively and answers `false` for every shape it does not
+recognise, because it runs on the pump and may not throw.
 
 **Signing in reverses it, and reverses only it.** `agent_signed_out` is the record
 of *who* ended a session, so `reloadCredentials` resumes exactly those and leaves

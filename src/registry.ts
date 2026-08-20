@@ -3,33 +3,34 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { AgentUnavailableError, type AgentId } from "./acp/agents.js";
 import { resolveCwd } from "./browse.js";
 import {
+  MemoryEventStore,
+  SessionLog,
   clampBlob,
   clip,
   endedWithDaemon,
-  MemoryEventStore,
+  isAuthFailure,
   oldestAvailable,
-  SessionLog,
   type AgentCommands,
   type AgentConfig,
-  type ContextUsage,
   type AgentConfigOption,
   type AgentHandle,
   type AgentModes,
+  type AnswerResolvedBy,
+  type ContextUsage,
   type ElicitationAnswer,
   type ElicitationField,
   type ElicitationForm,
   type EventStore,
   type ExitReason,
   type PermissionOptionSummary,
-  type AnswerResolvedBy,
   type PersistedSession,
   type SessionEvent,
   type SessionExit,
   type SessionStatus,
   type SessionStore,
   type SessionWorkspace,
-  type StoredFileRef,
   type StoredEvent,
+  type StoredFileRef,
 } from "./events.js";
 import { LocalRuntime } from "./runtime/local.js";
 import { probeExists } from "./stall.js";
@@ -3373,6 +3374,33 @@ export class ManagedSession {
     // actually happened.
     if (this.stopRequested && event.type === "error") return;
     this.log.append(event);
+    if (isAuthFailure(event)) this.onAuthFailure();
+  }
+
+  /**
+   * The agent said it cannot authenticate, so this conversation is over.
+   *
+   * **Ground truth, and the reason there is no probe on the prompt path.** An
+   * earlier version asked the agent's CLI "are you signed in" before every
+   * message, which cost a process spawn on the hot path, could only ever be as
+   * fresh as its 3s cache — and made the offline drivers depend on whether the
+   * person running them happened to be signed in, because a stub runtime inherits
+   * the real probe. This is the agent itself reporting, at the only moment that
+   * cannot be stale.
+   *
+   * Ended rather than left alive: the credential is gone, so every later message
+   * would fail the same way, one internal error at a time, inside the transcript.
+   * Carrying `agent_signed_out` puts it in the state the client draws a sentence
+   * and a Sign in button for, and is what `reloadCredentials` brings back when
+   * somebody signs in again.
+   *
+   * Fire-and-forget because `record` is on the event pump and must not await a
+   * process teardown; the stop is memoised, so a second failure in the same turn
+   * joins the first rather than starting another.
+   */
+  private onAuthFailure(): void {
+    if (this.terminal || this.stopRequested) return;
+    void this.stop("agent_signed_out").catch(() => undefined);
   }
 
   /* --------------------------------------------------------------------- *

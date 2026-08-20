@@ -31,11 +31,13 @@ it — so a citation here would be the one kind nothing checks.
   so an agent started while signed in kept answering for an account somebody had
   just revoked. Signing out now ends every conversation on that agent
   (`agent_signed_out`), a prompt is refused before it can reach a signed-out agent
-  — which covers a sign-out done in a terminal, or an OAuth session that simply
-  expired — and signing back in resumes **exactly** the sessions the sign-out
+  — a sign-out done in a terminal, or an OAuth session that simply expired, is
+  reported by the agent itself (`errorKind: authentication_failed`) and ends the
+  conversation the same way — and signing back in resumes **exactly** the sessions the sign-out
   ended, leaving hand-stopped ones alone. Refused only on a CLI's explicit
-  "signed out": kimi publishes no status verb at all, and reading "could not tell"
-  as a refusal would take every kimi conversation off the air. Q7.100.
+  "signed out". There is deliberately no probe on the prompt path: one there cost
+  a spawn per message and made the offline drivers depend on whether the person
+  running them was signed in. Q7.100.
 - **A signed-out agent says so in the conversation, with a Sign in button** that
   goes to that machine's own agent screen — instead of a toast, which carried the
   one refusal on this screen with a real remedy in the place that has no room for
