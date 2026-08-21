@@ -25,6 +25,8 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-21
+
 ### Added
 
 - **Signing out is a state of the machine.** A credential is read once, at spawn,
@@ -175,5 +177,6 @@ holds them in full, with what would settle each.
 - Three agent-login questions on macOS are written but unmeasured, all settled by
   one real device-code login.
 
-[Unreleased]: https://github.com/rends-east/reemoat/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/rends-east/reemoat/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/rends-east/reemoat/releases/tag/v0.2.0
 [0.1.0]: https://github.com/rends-east/reemoat/releases/tag/v0.1.0
