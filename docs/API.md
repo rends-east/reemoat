@@ -38,7 +38,7 @@ prefix. The web UI never sends its control-plane credential to a daemon or to th
 relay.
 
 **Bodies** are capped: 1 MiB on the daemon (uploads excepted, which stream against
-their own 25 MiB bound), 64 KiB on the control plane's public routes and 256 KiB
+their own 100 MiB bound), 64 KiB on the control plane's public routes and 256 KiB
 below the auth gate.
 
 ---
@@ -108,7 +108,7 @@ Runs on your machine, reachable through the relay. `pnpm client` drives all of i
 
 | | |
 |---|---|
-| `POST /sessions/:id/uploads` | Streams to disk against a 25 MiB bound |
+| `POST /sessions/:id/uploads` | Streams to disk against a 100 MiB bound, a 1 GiB per-session budget and a 300 MiB / 5 min rate window (`429 upload_rate_limited`, with `Retry-After`) |
 | `GET /sessions/:id/uploads/:uploadId` | Read an upload back, by the id the prompt named it with |
 | `GET /sessions/:id/files` | Read a file back out of the workspace |
 

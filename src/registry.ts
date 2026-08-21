@@ -278,15 +278,61 @@ export function autoResumable(
       return true;
     case "agent_exited":
       return trigger === "prompt";
+    /*
+     * ⚠ **`agent_signed_out` answers `true` on a prompt, and that is a reversal.**
+     *
+     * It answered `false` on both triggers, because "bringing the conversation
+     * back would launch a process holding a credential they have just revoked —
+     * which fails at the first message, in a transcript, as an internal error".
+     * Two things were wrong with that. The failure is no longer an internal
+     * error: `onAgentUnusable` records it and replaces the agent instead of
+     * ending the conversation, so a revoked credential now costs one error row
+     * per message somebody chooses to send. And the premise held only for the *route*
+     * that writes this reason — `POST /agent-auth/:agent/logout` — while the far
+     * commoner writer was an expired token that the CLI had since refreshed on
+     * its own, leaving a conversation nothing could revive: `reloadCredentials`
+     * is the only reversal and every one of its callers is an in-app credential
+     * write, so signing in from a terminal reached none of them.
+     *
+     * On `boot` it stays `false`, and the distinction is the same one
+     * `agent_exited` draws one case up: a prompt is a person asking for this
+     * conversation *now*, and by then the credential situation may be anything at
+     * all. A boot pass is nobody asking, and starting an agent that cannot
+     * authenticate at 4am is how a fleet spends a morning on it.
+     */
+    case "agent_signed_out":
+      return trigger === "prompt";
+    /*
+     * ⚠ **A message revives one somebody stopped, and that is a reversal too.**
+     *
+     * `stopped` was the one reason that meant "a human ended it", and refusing it
+     * on both triggers was how the daemon avoided overruling a person. It still
+     * does: **a prompt is not the daemon deciding anything.** It is the same
+     * person, on the same conversation, typing into it — the identical argument
+     * `agent_exited` has always made one case up, and the identical one
+     * `reloadCredentials` makes about a sign-in undoing a sign-out.
+     *
+     * What forced the question is that the composer is now unconditional: a box
+     * you can type into that answers `409 session_terminal` is worse than no box,
+     * and "type to start it again" is what every row on that screen already
+     * implies. `boot` stays `false`, so nothing revives a stopped conversation on
+     * its own — which is the whole of what the old rule was protecting.
+     */
     case "stopped":
+      return trigger === "prompt";
+    /*
+     * These two never had a conversation to return to, and the `agentSessionId`
+     * guard at the top already answers for them — written out anyway, because a
+     * reason that reaches here with an id somehow must not fall into an arm above.
+     */
     case "start_failed":
     case "start_timeout":
+    // Legacy and genuinely ambiguous: it *replaced* the caller's reason whenever a
+    // kill went unconfirmed, so a row carrying it may be somebody's Stop wearing a
+    // different word — and `agentConfirmedDead: false` means the old agent may
+    // still hold the conversation file. Two agents on one file is worse than a
+    // refusal.
     case "agent_kill_failed":
-    // A person signed the agent out, and bringing the conversation back would
-    // launch a process holding a credential they have just revoked — which fails
-    // at the first message, in a transcript, as an internal error. Signing in is
-    // what reverses this, and it does so by name: see `reloadCredentials`.
-    case "agent_signed_out":
       return false;
   }
 }
@@ -1289,6 +1335,18 @@ export class ManagedSession {
   private startPromise: Promise<Session> | null = null;
   private startAbandoned = false;
   private stopRequested = false;
+  /**
+   * Whether an `authentication_failed` from the agent may replace it.
+   *
+   * Re-armed by every prompt and spent by {@link onAgentUnusable}, which is the
+   * whole of what makes that a retry rather than a loop: a credential that really
+   * has gone away fails the fresh agent the same way, and the second failure sits
+   * in the transcript beside the first instead of starting a third process. What
+   * drives the next attempt is somebody sending another message.
+   *
+   * Starts armed, so the first failure a restored session meets is answered.
+   */
+  private authRestartArmed = true;
   private stopping: Promise<void> | null = null;
   private exitRecord: SessionExit | null = null;
   private resuming: Promise<void> | null = null;
@@ -3141,6 +3199,10 @@ export class ManagedSession {
     const turn = this.turnCounter;
     this.turn = turn;
     this.turnStartedAt = Date.now();
+    // Somebody is asking again, so the agent is allowed one more replacement if
+    // this message meets the same wall. See `onAgentUnusable` and the flag's own
+    // docblock.
+    this.authRestartArmed = true;
 
     // The first prompt names the session, once.
     //
@@ -3362,6 +3424,33 @@ export class ManagedSession {
         if (live !== null) this.startIdleDrain(live);
       }
       this.sweepPending(failed ? "pump_failed" : "turn_ended");
+      /*
+       * **A prompt the agent never engaged with means the agent is finished, so
+       * it is replaced.**
+       *
+       * ⚠ Reported with a screenshot: four messages, four identical
+       * `Internal error: The Claude Agent session has ended. Please start a new
+       * session.` The agent's ACP session had died under a live process — the
+       * daemon saw no exit, `status` stayed `idle`, and every message was
+       * accepted and failed the same way. There was no way out from inside the
+       * app.
+       *
+       * **`failed` is the precise signal and the message is not.** Reaching this
+       * `catch` means `session.prompt()` *rejected* rather than streamed a
+       * failure: the agent did not take the message at all. Anything that goes
+       * wrong **inside** a turn — a tool blowing up, a command exiting non-zero —
+       * arrives through `this.record(event)` and never comes near here, so this
+       * cannot fire on an ordinary bad turn. Measured on the real events:
+       * `{code: -32603}` with **no `errorKind`**, which is why `isAuthFailure`
+       * quite correctly ignored it and why matching the text was never an option
+       * — `describeError` is the agent's own prose and moves with its version.
+       *
+       * Same machinery as an auth failure, for the same reason: what is stale is
+       * the process, not the conversation. Armed once per prompt, so a fresh
+       * agent that fails the same way leaves the error standing and waits for
+       * somebody to send another message rather than looping.
+       */
+      if (failed) this.onAgentUnusable();
       this.touchSafe();
     }
   }
@@ -3374,11 +3463,20 @@ export class ManagedSession {
     // actually happened.
     if (this.stopRequested && event.type === "error") return;
     this.log.append(event);
-    if (isAuthFailure(event)) this.onAuthFailure();
+    if (isAuthFailure(event)) this.onAgentUnusable();
   }
 
   /**
-   * The agent said it cannot authenticate, so this conversation is over.
+   * This agent cannot serve the conversation, so it is given a fresh process.
+   *
+   * **Two callers and one remedy.** The agent reporting
+   * `errorKind: "authentication_failed"` on the event pump, and a prompt the
+   * agent **rejected outright** — `session.prompt()` throwing rather than
+   * streaming a failure, which is the pump's `failed` flag and means the message
+   * was never taken. The second was found the hard way: an ACP session that died
+   * under a live process left `status: idle` and answered four messages in a row
+   * with the same `-32603`, no `errorKind` on any of them, and no way out of the
+   * conversation from inside the app.
    *
    * **Ground truth, and the reason there is no probe on the prompt path.** An
    * earlier version asked the agent's CLI "are you signed in" before every
@@ -3388,19 +3486,60 @@ export class ManagedSession {
    * the real probe. This is the agent itself reporting, at the only moment that
    * cannot be stale.
    *
-   * Ended rather than left alive: the credential is gone, so every later message
-   * would fail the same way, one internal error at a time, inside the transcript.
-   * Carrying `agent_signed_out` puts it in the state the client draws a sentence
-   * and a Sign in button for, and is what `reloadCredentials` brings back when
-   * somebody signs in again.
+   * ⚠ **The auth arm used to end the conversation, and that was wrong about what
+   * it had measured.** It called `stop("agent_signed_out")`, on the reasoning that "the
+   * credential is gone, so every later message would fail the same way". Q7.99
+   * had already found otherwise and the code never caught up: a session idle
+   * 5h36m reported `authentication_failed` on its *first* prompt while the token
+   * on disk was **still valid for another 1.4 hours**, and a freshly spawned
+   * agent worked four minutes later. What had gone stale was the agent process,
+   * not the credential — so ending the conversation destroyed the thing that was
+   * fine and kept nothing that was broken.
+   *
+   * What it cost is worth writing down, because it is what this is fixing.
+   * `autoResumable` answers `false` for `agent_signed_out` on **both** triggers
+   * and the only thing that reverses it is `reloadCredentials`, whose callers are
+   * all in-app credential writes — so somebody whose CLI refreshed its own token,
+   * or who signed in from their own terminal, had a conversation that could never
+   * come back, under a notice claiming they were signed out and a Sign in button
+   * leading to a screen where they already were. The composer was gone, so there
+   * was nothing to try from inside the app at all.
+   *
+   * **So the conversation stays, and the agent is replaced under it.** The error
+   * is already in the log — `record` appended it one statement above — so what
+   * happened is on screen, in the transcript, where somebody can read it and send
+   * again. `restartAgent` is the same path a config change takes and stops with
+   * `config_changed` deliberately rather than inventing a reason: it *is* "the
+   * daemon took the agent away and is bringing it straight back", it is in
+   * `DAEMON_EXIT_REASONS` so a client draws "reconnecting", and a new `ExitReason`
+   * member would read as `showsAsEnded` on every client older than it — which is
+   * the very failure this removes.
+   *
+   * **Armed once per prompt**, which is what makes this a retry rather than a
+   * loop. If the credential really is gone the fresh agent fails the same way,
+   * the second failure lands in the transcript beside the first, and nothing
+   * restarts again until somebody sends another message. The retry is driven by
+   * the person, and the cost of a genuinely revoked credential is one spawn per
+   * message they choose to send.
    *
    * Fire-and-forget because `record` is on the event pump and must not await a
-   * process teardown; the stop is memoised, so a second failure in the same turn
-   * joins the first rather than starting another.
+   * process teardown.
    */
-  private onAuthFailure(): void {
+  private onAgentUnusable(): void {
     if (this.terminal || this.stopRequested) return;
-    void this.stop("agent_signed_out").catch(() => undefined);
+    /*
+     * A restart already in flight is left alone, and this is not defensive.
+     * `restartAgent` writes `this.restart` — a single field holding the config to
+     * put back and the promise `whenRestarted` waits on — so a second one
+     * overwrites the first's receipt: the config captured before a config change
+     * is lost, and everything waiting on the old promise waits for ever. The
+     * agent coming up is a fresh process either way, which is the whole of what
+     * this wanted.
+     */
+    if (this.restarting) return;
+    if (!this.authRestartArmed) return;
+    this.authRestartArmed = false;
+    void this.restartAgent().catch(() => undefined);
   }
 
   /* --------------------------------------------------------------------- *

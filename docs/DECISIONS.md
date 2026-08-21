@@ -58,18 +58,18 @@ bug in the file.
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 104 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 69 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 180 | `####` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 191 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 41 | `###` |
-| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 95 | `####` |
+| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 96 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 64 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 102 | `###` |
-| | | **655** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 103 | `###` |
+| | | **668** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 655 rather than the 380
+dividers. So the count is over **both** depths, and it says 668 rather than the 381
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -4279,31 +4279,57 @@ per section is a list that has to be reassembled by eye.
 
 #### Q3.11 — Does pinning a session move it out of its machine's section?
 
-**Decision.** No — pinning copies rather than moves. A pinned row appears in both
-the Pinned group and its machine's section.
+**Decision.** Yes. Pinning **moves**: `place` in `store.ts` pushes to `pinned` and
+returns `null`, so a pinned row is drawn once, in the Pinned group, carrying its
+own path.
 
-**Why.** A pinned row used to be lifted out of its machine's section entirely, so
-pinning the session being worked in made it disappear from the list it had been
-found in all day — a strange price for a bookmark. The two lists mean different
-things: the pinned group is "wherever it lives, here it is", the section is "what
-is on this machine".
+**⚠ This has now been argued in both directions and the middle position is the one
+that lost.** It copied, and the reasoning was that lifting the row out made the
+session you were working in disappear from the list you had been finding it in all
+day — "the two lists mean different things: the pinned group is *wherever it lives,
+here it is*, the section is *what is on this machine*."
+
+**Why that was wrong.** Both lists are on **one screen at one time**, a few hundred
+pixels apart, with the pinned group directly above the folders. So the copy was
+never a second place to look — it was the same row drawn twice, and a bookmark
+whose entire job is "this one, not the other forty" was drawing itself as two of
+the forty. Reported from a phone, where the rail is the whole screen and the
+duplication is at its most obvious.
+
+**What the copy was protecting is answered instead by `showPath`.** The second
+copy said where the session works, and that is a real thing to lose — so the
+pinned row draws its own path now, which it did not while a copy under the folder
+was saying it. One row, both facts.
+
+**And nothing is hidden.** `waitingFloor` counts by **subtraction** — everything
+blocked, minus everything this view draws — and it draws `pinnedFor`, so a blocked
+pinned row is on screen either as itself or in the floor's count, asserted as a
+superset property over every filter × tab × needle rather than left to this
+paragraph.
 
 **Status.** Reversed an earlier decision
 
 #### Q3.12 — What follows from a session appearing in two places at once?
 
-**Decision.** `blockedCount` goes back to being the ordinary answer, counted off
-where `place` actually filed the row. `visibleRows` **deduplicates by key**.
+**Decision.** `blockedCount` is counted off what `place` **returned**, so a pinned
+row does not count toward its folder's header. `visibleRows` still **deduplicates
+by key**.
 
-**Why.** `blockedCount` was a *correction* while a pinned row was not under its
-header, and is now simply right — and the `liveCount` disagreement it never
-covered goes with it, since that count came from `countByMachine` and always
-included pinned rows, so a machine whose one live session was pinned read "1 live"
-over an empty body. The invisible consequence is the dedup: `keyboard.ts` locates
-the current row with `findIndex`, and two entries for one session would make `j`
-from the section copy jump to whatever follows the pinned copy — a jump across the
-whole list rather than an off-by-one. `visibleRows` is therefore documented as an
-order over *sessions* where the screen draws *rows*.
+**Why the count is keyed on the return value.** A header's "N waiting" is a promise
+about the rows under *that header*, and a folder saying "1 waiting" that opens onto
+nothing waiting is how people learn to stop believing the number — strictly worse
+than the number being smaller. This line has now been right for both reasons in
+turn: it was a correction while a pinned row was not under its header, was simply
+the ordinary answer while pinning copied, and is a correction again. The `liveCount`
+disagreement is a separate one and remains: that count comes from `countByMachine`
+and includes pinned rows.
+
+**Why the dedup stays with nothing left to deduplicate.** `keyboard.ts` locates the
+current row with `findIndex`, and two entries for one session made `j` from the
+section copy jump to whatever followed the pinned copy — a jump across the whole
+list rather than an off-by-one. Nothing produces a duplicate today. It is two lines,
+and what it defends against is the *next* group to copy rather than the one that
+used to; `visibleRows` is documented as an order over *sessions* for that reason.
 
 **Status.** Current
 
@@ -6999,9 +7025,17 @@ component that renders both is the only place they can meet. It fires on the
 optimistic half, beside the echo and the cleared box, and inside the `onScreen()`
 arm — on the `late` door the session that sent the message may not be the one on
 screen, and scrolling *that* conversation would move a transcript nobody was
-writing into. `atBottomRef` is written beside the state because the composer grows
-by the height of the echo in the same commit, and the `ResizeObserver` that notices
-the box shrinking is what finishes the job.
+writing into. `atBottomRef` is written beside the state because the ref is what a
+callback outliving that render sees.
+
+⚠ **That last clause used to read "the composer grows by the height of the echo in
+the same commit, and the `ResizeObserver` that notices the box shrinking is what
+finishes the job", and it stopped being true in Q3.436.** The echo is a row *inside*
+the scroll box now rather than a child of the composer below it, so it adds
+`scrollHeight` and touches `clientHeight` not at all — exactly like the working
+line — and the one `scrollTop` assignment already lands on the finished height. The
+observer is unchanged and is still needed for every other cause it was written for:
+the composer growing as you type, a phone's soft keyboard, a dismissed banner.
 
 **The button.** It assigned `scrollTop` and set `atBottom` in one tick, so the
 conversation teleported: on a long transcript there was no telling "jumped to the
@@ -7020,7 +7054,7 @@ on screen, which is the truth.
 **Why one is instant and the other is not.** The button is a journey somebody asked
 for and wants to watch. Sending is the ground being put back under a message
 already being written, and an animation there would scroll the page out from under
-the composer at the exact moment the echo appears in it.
+the composer at the exact moment that message appears above it.
 `prefers-reduced-motion` is read at the tap and thrown away, because
 `behavior: "smooth"` is not reachable by the CSS block in `index.css` that collapses
 every other animation in this app.
@@ -8591,6 +8625,558 @@ otherwise the same.
 (correct these if wrong)" to "Default settings" — translated here from the
 original pair, which shared only its `"## "` — so the mark covered **92% and 88%**
 of its two lines.
+
+**Status.** Current
+
+#### Q3.435 — A message that said `1)` was drawn `1.`
+
+**Rule.** An ordered list keeps the delimiter it was written with.
+`remarkListDelimiter` in `packages/web/src/ui/mdlist.ts` reads it back out of the
+markdown source and marks the list; `index.css` draws the marker with
+`content: counter(list-item) ") "` on `::marker`.
+
+**Why.** Reported from a phone: a prompt typed as `1) 2) 3)` came back as `1. 2.
+3.`. Both spellings are CommonMark — micromark's `list.js` accepts codepoint 41
+and 46 on the same line — but **mdast records neither**. A `list` node carries
+`ordered`, `start` and `spread`, and the character is gone before anything
+downstream could read it, so `list-style-type: decimal` had one answer and drew it
+over what somebody had written. Small, and it is the reader's own message: the one
+text in this app that must come back as it went in.
+
+The delimiter is still in the *source*, and a remark plugin is the last place that
+holds both halves — `file.value`, and the node's own `position.start.offset`. So
+the fix is a mark and never a rewrite: one class on the `ol`, and CSS does the
+drawing.
+
+**A second defect at the same three lines.** `Markdown.tsx`'s `ol` destructured
+only `children`, so `<ol start>` was dropped — a message beginning `10)` rendered
+as `1.`, renumbered as well as re-punctuated. `counter(list-item)` is the
+browser's own implicit counter, so passing `start` through fixes both the marker
+and the number with nothing here having to know about either.
+
+**Measured** against this repo's own remark-parse 11 / remark-gfm 4 /
+remark-rehype 11, which is also where the pattern's shape comes from: the offset
+points at the **digit** and never at the indentation before it, so it needs no
+leading `\s*`. `10) big` parses to `start: 10`; `1.) weird` is not a list at all.
+
+**Rejected — rendering the user's own bubble as plain text.** It is the literal
+reading of "show exactly what I typed" and it costs more than it buys: a backticked
+path in your own message stops being a download chip, and a pasted fence stops
+being a code block. The defect was one character wide and the fix is too.
+
+**Rejected — swapping `list-decimal` for the counter.** It stays *under* the paren
+class. A browser that will not style `::marker` then draws exactly what it drew
+before this existed, so the degradation is a no-op rather than a fallback anybody
+has to look at; there is no third state where the marker goes missing.
+
+**Status.** Current
+
+#### Q3.436 — Your own message appeared under the conversation, then jumped into it
+
+**Rule.** The optimistic echo is a row in the transcript, drawn by `EventList`
+from `packages/web/src/echo.ts`, above the working line. It carries no spinner and
+says nothing about delivery.
+
+**Why.** It was React state on `Composer` and was drawn as that component's first
+child — inside a `sticky bottom-0` bar which is a **sibling** of the scroll box. So
+a message you had just sent appeared *below* the conversation, marked `sending`
+with a spinner, and then, one commit later, disappeared from there and reappeared
+inside the conversation when the `prompt` event arrived. Two boxes, one frame:
+that is a teleport rather than a transition, and the thing doing it is the
+reader's own words. On the 90-second slow-route budget — `/prompt` resumes a
+terminal session before it answers — the "not quite sent yet" state could last a
+long time.
+
+Nothing about a message on its way is worth that. What a refusal costs is
+unchanged and is a **remedy** rather than a warning: the text goes back into the
+box, the chips come back with it, and a toast says why.
+
+**Keying it by session was the other half, and it fixed a bug rather than avoiding
+one.** As shared state on a component that is never remounted across a session
+switch, the echo had to be cleared by the `[key]` effect — so sending a message,
+stepping into another conversation and stepping back showed nothing at all until
+the daemon answered. In `echo.ts` the write names the session it belongs to, which
+moves it out of the `onScreen()` set `web-composer.md` describes and into the
+`drafts`/`attach.ts` half. It is the third module of that shape and the argument is
+theirs.
+
+**The settle is in the store, and it takes two calls rather than one.** `onEvents`
+compares the newest seq against the echo's; `promptLanded` lowers the sentinel to
+the real seq **and compares again immediately**, because the ordering that makes
+that necessary is the common one rather than the exotic one — the `prompt` event
+comes down a socket waiting for nothing, while the POST that created it is on a
+90-second budget. When the event wins, `onEvents` has already compared it against
+`MAX_SAFE_INTEGER` and quite correctly kept the echo; without the second
+comparison the message would sit doubled at the foot of the conversation until the
+next event happened to arrive.
+
+**What it simplified.** Q3.426 said the composer "grows by the height of the echo
+in this same commit, which shrinks this box, and the `ResizeObserver` is what
+finishes the job". That is no longer true and the observer is not needed for this:
+the bubble is a row *inside* the scroll box now, so it adds `scrollHeight` and
+touches `clientHeight` not at all — exactly like the working line — and the single
+`scrollTop` assignment lands on the finished height.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.437 — `turn cancelled`, `pump failed`, `ended: agent_exited`
+
+**Rule.** Three places drew a wire identifier with its underscores swapped for
+spaces, and all three now go through a table with a fallback: `resolvedByText` and
+`stopReasonText` in `ui/tail.ts`, `exitText` in `ui/bits.tsx`. A cancelled turn is
+drawn in `WaitingFoot`'s own shape — the same line, `WorkingMark still`, the label
+in `text-danger`.
+
+**Why.** `event.by.replace(/_/g, " ")` is not a rendering, it is the absence of
+one. Under a question somebody was about to answer it read `turn cancelled`; a
+transport failure read `pump failed`, and `pump` is not a word anybody using this
+app has; a session that ended read `ended: agent_exited`. Each is the daemon's
+bookkeeping printed at somebody trying to find out what happened to their own
+conversation — and `turn cancelled` in particular describes the wrong actor, since
+what happened is that they pressed Stop.
+
+**Where the cancel goes is the part worth arguing.** A cancelled turn's `turn_end`
+is the **last event of that turn**, so its row lands exactly where `WaitingFoot`
+was an instant earlier. Taking that row's shape rather than a divider's is what
+makes it read as the working state having stopped rather than as an unrelated
+notice appearing: three bars breathing becomes three bars at rest, beside one red
+word, in the place the reader was already looking. Every other stop reason stays a
+centred line, because none of them is something the reader did and none replaces an
+indicator that was just there.
+
+**The fallback is the rule rather than the safety net.** Every table falls through
+to the old rendering for a value it does not know, which is what this client does
+with every unrecognised value on this wire: a newer daemon's member is drawn as
+itself — legible, and never a guess. `webcheck` asserts the *property* (no
+reachable member falls to the fallback) rather than the strings, so a new member
+arriving with no phrase is a red check rather than a quiet regression.
+
+**Nothing but the drawing changed.** `showsInTranscript` and `taskFloor` both key
+on `stopReason !== "end_turn"` and neither moved; moving either would strand
+delegations or bring back the `end_turn` divider Q3.27 removed.
+
+**Status.** Current
+
+#### Q3.438 — A screen replaced another one with nothing saying it had moved
+
+**Rule.** Below `lg`, opening a conversation slides in from the right and going
+back slides out. `announce` in `router.ts` wraps its own update in
+`document.startViewTransition` and writes `data-nav` on the document; `index.css`
+keys two keyframes off it. A sheet slides up from the bottom, in CSS alone.
+
+**Why.** On a phone this app is one screen at a time, and a swap says nothing:
+not which way you went, not that going back is a direction, not that the list is
+still there behind the conversation. Every app already on that phone answers with
+motion, and the answer is not decoration — it is the whole difference between "I
+went somewhere" and "the screen changed".
+
+**The browser's own view transitions, and the alternative is why.** Animating an
+exit by hand means holding the outgoing screen mounted while it leaves: two
+`SessionBrowser`s, or a second `SessionView` running `openSession` against the
+three-socket LRU, on every navigation, to draw something that is over in 220ms.
+The browser snapshots the old frame instead — nothing is mounted twice, `App`
+still unmounts synchronously, and the transforms are on pseudo-elements outside
+the document, so no `sticky` header or `fixed` scrim inside the app resolves
+against one.
+
+**Which widths animate is decided in CSS**, `@media (min-width: 64rem)` setting
+`animation: none`, because `AppShell` is explicit that a breakpoint read in
+JavaScript is how a resized window renders a layout that is not there.
+
+**`navMove` lives in `nav.ts` and its `null` arms are the load-bearing
+ones.** `router.ts` reads `window.location` in its module body and cannot be
+imported by `webcheck` at all, which is the same reason `settings.ts` and `gate.ts`
+exist. Equal depth is `null`, so session → session — what a desktop rail does all
+day — is not an animation and is not even a snapshot. A pop-up is `null` too:
+`/settings` and `/new` are drawn *over* what you were looking at, and giving them a
+depth would slide a conversation sideways underneath a panel rising over it, two
+motions in different axes for one tap.
+
+**Two keyframes for four movements**, via `animation-direction: reverse`. A back
+that is not exactly the forward played backwards feels like a second forward, and
+four sets of numbers is how the two drift apart. `mix-blend-mode: normal` is
+required rather than tidy: the UA stylesheet sets `plus-lighter` on both snapshots
+so its default cross-fade holds up at the midpoint, and with a slide the two
+overlap while both are opaque and glow through each other.
+
+**`data-nav` is cleared only by the navigation that wrote it.** A second tap during
+the first animation is ordinary — the browser skips the running transition and
+starts another — and both `finished` promises then settle in order. Without the
+token the first one's cleanup deletes the second one's attribute mid-flight, and
+that navigation finishes with no rule matching: the new screen appears with the old
+one still snapshotted over it, which reads as the app having frozen.
+
+**Reduced motion is refused in JavaScript**, not animated to zero. The block at
+the foot of `index.css` is written against `*`, `*::before` and `*::after`, and
+none of those reaches `::view-transition-*` — but the better reason is that
+somebody who asked for no motion should not be paying for a snapshot either. The
+CSS rule is kept beside it, because the reason it looks redundant is the reason it
+is easy to delete.
+
+**The sheet is CSS alone** — `animate-sheet sm:animate-rise` on `SHEET_PANEL`, a
+real slide below `sm` where it is bottom-anchored and covers 92% of the screen,
+and the unchanged 6px rise at `sm` and above where it is a centred card with no
+edge to have come from. It carries **no exit animation**, deliberately: that needs
+the panel held mounted past `navigate()`, which is the machinery this entry
+declined for the horizontal case.
+
+**Status.** Current
+
+#### Q3.439 — "It asks for a name" — the sign-up form's first field is a username
+
+**Rule.** `Username`, `Email`, `Password` and `Confirm password`, each marked
+`(required)`. Where the control plane cannot send mail, the missing email field is
+explained rather than merely absent.
+
+**Why.** Reported as a labelling bug and it is one, but not the one it looked
+like. The first field is a **login name** — `USER_NAME` on the control plane is
+`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` and refuses `@` outright — so nobody was ever
+being asked for an address there. What was actually wrong is two things at once:
+`Name` does not say *what kind* of name, and on an instance with no SMTP there is
+genuinely no email field at all, with nothing saying so. Somebody arriving
+expecting to sign up with an email address met one box called "name" and no
+explanation for the absence of the other.
+
+**The marker is on every field, and that is the correction to the first attempt.**
+Marking only the ambiguous one reads as a contrast with the rest — it says the
+others are optional — so it would have introduced a second, quieter lie to fix the
+first. All four are required; all four say so.
+
+**The absent field says why it is absent**, and the consequence is the half worth
+writing rather than the cause: `POST /v1/register` *refuses* a non-empty address
+when mail is not configured, and password recovery here is by mail and by nothing
+else. So there is none on that instance — which is a thing to know before choosing
+a password, not after forgetting one.
+
+**Rejected — signing in by email.** It is a control-plane schema and auth change
+(`USER_NAME`, `nameTaken`, the sessions table, `cpctl`, every throttle key) for a
+labelling complaint. **Rejected — requiring SMTP for registration**, which closes
+sign-up on a local-only instance to fix a sentence.
+
+**Status.** Current
+
+#### Q3.440 — The AGPL §13 source notice is off every screen
+
+**Decision.** `SourceNotice` is deleted. No screen in this client draws the source
+URL, the version or the licence name. `SOURCE_URL` in `app.ts` and `source` on
+`GET /v1/instance` **stay**, unchanged.
+
+**Why.** Asked for, and recorded here rather than left in the log because the
+argument against it is written at length in three places and a reader will
+otherwise restore it. It sat under all six pre-auth forms, on the reasoning that
+§13 is about anybody who interacts with the program over a network and that the
+people who most need the offer are the ones a modified instance never lets in —
+which is why it moved from `SignIn` alone to `GateCard`, so that /register,
+/forgot, /reset, /verify and /confirm stopped making none.
+
+**What must not follow it.** The wire field has four readers that are not the UI
+and every one of them breaks if it goes: `pincheck` asserts `SOURCE_URL` against
+this repository's own `package.json`; `relaycheck` asserts the served value on the
+unauthenticated `GET /v1/instance`; `webcheck` lifts the literal out of `app.ts` by
+regex and **throws** if the constant disappears; and `deploy/ci-release.sh` derives
+the image's `org.opencontainers.image.source` label from it. `isAbsoluteHttpUrl`
+stays too — it is the guard that stops a fork's scheme-less URL rendering as a
+relative href, and a reader who comes back finds it already refusing the shape
+that would embarrass it.
+
+**Stated plainly:** the offer now lives in `LICENSE`, in `README.md` and in the
+image's OCI label, and in no rendered page. That is the decision, not an oversight,
+and no driver enforces it in either direction.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.441 — A pinned row spent two thirds of itself on `/Users/rends`
+
+**Rule.** A working directory is drawn against the daemon's **own** browse roots —
+`displayCwd` in `paths.ts`, `~/thing` — and a row draws it **once**.
+
+**Reported from a phone**, with a screenshot: a pinned row whose title read
+`…/rends/2026-07-tare-r…` and whose subline read `claude · …/rends/2026-07-ta…`.
+The same absolute path, truncated twice, and most of both was the home directory
+every session on that machine shares.
+
+**Two faults, and the first was already written down elsewhere.** `shortPath`
+keeps the last **two** segments unconditionally, so the parent — the home
+directory's own name — is always in the answer. `folderNames` in `groups.ts` had
+argued this out for folder *headers* and says so in as many words: "always two
+segments is a wall of `Users/rends`". Rows were never given the same treatment,
+and it only became visible when Q3.11 made a pinned row draw its path at all,
+because until then the copy under its folder was saying it instead.
+
+**The prefix to cut is `REEMOAT_ROOTS`, and it comes from the daemon.** That is a
+fact the machine states — `/fs/roots` already serves it to the directory picker —
+rather than one this client works out. A home directory inferred from `/Users/<x>`
+or `/home/<x>` would be one operating system's convention applied to somebody
+else's machine, which is the class of guess this codebase refuses everywhere on
+this wire. The longest matching root wins, because roots nest and the more
+specific one says more.
+
+**Both degradations are the old rendering, exactly.** `cwd` is not confined, so a
+session under no root is ordinary rather than exotic; and an empty root list is
+what an older daemon, an unreachable one, and a listing that has not landed yet
+all look like. Each falls back to `shortPath`, so nothing anywhere gets worse and
+no prefix is ever invented.
+
+**Fetched once per machine and never again**, keyed in `rootsByMachine` so a
+failure writes an empty array and the *entry existing* is what stops the
+four-second poll re-asking. `REEMOAT_ROOTS` is read at startup and cannot change
+under a running daemon, and `/fs/roots` is a config array plus an in-memory list
+with no filesystem work at all — the cheapest request this client makes. Fired
+rather than awaited, because the session list is what the screen is waiting for.
+
+**The second fault is the echo, and it is the same rule `tail.ts` already has.** A
+session **nobody has named** has a title that *is* its directory — `sessionLabel`
+falls back to precisely that string — so the subline was drawing one fact twice in
+a row forty characters wide. `headlineWorthDrawing` refuses an echo one screen
+over for the same reason. Compared rather than keyed on `title`, because the two
+are only usually the same question: a row inside a folder draws a subpath its
+title never had, and a named session draws both because they say different things.
+
+**Measured** by pinning a real session on a real daemon with `REEMOAT_ROOTS` at
+the home directory. Before: `…/rends/2026-07-tare-r…` over `claude ·
+…/rends/2026-07-ta…`, both clipped. After: `~/2026-07-tare-rends-east` over
+`claude`, and the name no longer needs clipping at 390px.
+
+**Status.** Current
+
+#### Q3.442 — The sheet appeared and vanished, and its sections swapped in place
+
+**Rule.** `navMove` in `nav.ts` answers one of five values, and `index.css` keys
+every rule off the `data-nav` it becomes: `push`/`pop` move the **screen**,
+`section-push`/`section-pop` move the **sheet's body** while the screen behind it
+is pinned, and `sheet-close` takes the sheet back down the way it came. Opening a
+sheet is `null` — that one is CSS's.
+
+**Why.** Q3.438 gave the phone's list → detail a direction and left two teleports
+one layer in, both reported: **closing** Settings simply stopped drawing a panel
+covering 92% of the screen, and **tapping a section** replaced the panel's
+contents where they stood, as did Back. "There should be no window teleporting
+left in the app" is the ask, and it is the right generalisation — a screen that
+changes without moving is a screen that gives the reader nothing to follow.
+
+**Two stacks, never compared.** `depthOf` numbers screens (`home` 0, a session 1)
+and sheet screens separately (the section list 1, a section 2, a machine's agents
+3, one agent 4). `isSheet` is asked *first*, so a depth from one stack is never
+tested against a depth from the other — a sheet is always opened over a screen and
+closed back onto one, and the combinations the URL can express but nothing can
+reach answer `null` rather than something arbitrary.
+
+**The scope is what the naming buys.** A section slide names the sheet's **body**
+and pins `::view-transition-old/new(root)` with `animation: none`, so the
+conversation behind the scrim does not move and neither does the panel's frame —
+the rounded top, "Settings", the ✕ — because none of that is what changed. A close
+names the **panel** and the **scrim** for the same reason in the other direction:
+what is behind was there all along and is not arriving.
+
+⚠ **A named element with no counterpart gets the UA's default fade**, and that is
+worth knowing before the next name is added. Measured with
+`document.getAnimations()` during a close: `-ua-view-transition-fade-out` on
+`::view-transition-old(sheet-body)`, running beside the panel's own travel — two
+clocks on one object, the contents thinning out before the panel had left.
+Silenced explicitly for that move — **and that remedy was wrong, because it
+treated the symptom.** The body was not fading *and* travelling; it was fading and
+**standing still**, which silencing the fade made sharper rather than better. See
+Q3.444, which takes the name away instead.
+
+**One attribute, not a direction plus a scope.** The pair is never free: there is
+no "forward, sheet-close", and a shape that can express one is a shape somebody has
+to check for.
+
+**Opening stays CSS**, `SHEET_PANEL`'s own `animate-sheet`. It runs on mount, needs
+no snapshot, and works on an engine that has never heard of a view transition; a
+transition here as well would animate one panel twice. The asymmetry is the honest
+one — an enter that always works, an exit that is an enhancement.
+
+**At `sm` and above the section slide is off**, because there the sheet is a
+centred card with the section list *beside* the section: the pane changes next to a
+list that stays, which no horizontal travel describes.
+
+**Measured** by driving the four navigations against a real browser and reading
+`data-nav` off a mutation observer: opening `[]`, a section `section-push`, Back
+`section-pop`, closing `sheet-close`, each cleared afterwards by the navigation
+that wrote it.
+
+**What this cost elsewhere, and it is the useful half.** `webcheck` drives
+`navigate()` for real, and closing a sheet is the first move involving an overlay
+that is **not** `null` — so the short-circuit that had been hiding `announce`'s
+`document` read stopped short-circuiting, and a routing assertion three screens
+away failed with `document is not defined`. The driver has a `document` now,
+deliberately **without** `startViewTransition`: an engine that has never heard of
+one, which pins that the router still routes without it.
+
+**Status.** Current
+
+#### Q3.443 — Telegram drew ✕ Close at every depth, over the session title
+
+**Rule.** Inside a Telegram mini app this page asks for a **back button** on every
+screen that has somewhere up, and asks for none at the root — which is what makes
+the client draw ✕ Close there. `packages/web/src/telegram.ts` is the whole bridge;
+`upFrom` in `nav.ts` is where it goes.
+
+**Reported with a screenshot** from the mini app: the top-left control was Close on
+every screen, so leaving a conversation meant closing the app and reopening it —
+and Telegram's floating pill sat *on* the session title, which was clipped behind
+it.
+
+**No `telegram-web-app.js`, and two independent reasons.** The document is served
+`script-src 'self'`, so a CDN script is refused before it runs; and nothing in this
+repository loads code from anywhere else. Neither is a limitation, because that
+script is a **wrapper**: on iOS and Android Telegram injects the transport itself
+as `TelegramWebviewProxy`, and the SDK's job on this path is `JSON.stringify` plus
+a version check. Verified against the real file rather than from memory —
+`postEvent(eventType, JSON.stringify(eventData))` out,
+`window.Telegram.WebView.receiveEvent(eventType, eventData)` in,
+`web_app_setup_back_button {is_visible}` and `back_button_pressed`, gated at Bot
+API 6.1.
+
+**Owning `window.Telegram` is safe here for exactly one reason**, and it is worth
+writing down because it is a header away from being false: Telegram *calls* that
+global, so something has to define it, and normally that is the SDK. Under
+`script-src 'self'` the SDK can never load, so there is no second writer. Relax
+that header and this becomes a real collision; the remedy then is to stop defining
+it and read theirs.
+
+**The iframe transport is deliberately absent.** Telegram Desktop and Web embed a
+mini app in an `<iframe>` and expect `window.parent.postMessage`; the control plane
+sends `frame-ancestors 'none'` and `X-Frame-Options`, so those clients cannot load
+this page at all and the arm would be unreachable code. Writing it is the *second*
+half of letting Telegram frame a document whose purpose is approving shell commands
+with a tap — the risk that CSP line was written against. Do both or neither.
+
+**One rule for two controls.** `upFrom(route, under)` is what both the client's
+arrow and the app's own leading control answer to: a section walks one level inside
+the sheet, the index leaves it for whatever it was drawn over, a conversation goes
+to the list, and the root has no answer. `null` there is not an absence handled
+elsewhere — Telegram has **one** control, and hiding the back button is precisely
+how Close appears.
+
+**Never `history.back()`**, for the reason `Header.tsx` gives at length and which
+binds harder here: on a cold deep link there is one history entry, and in a mini
+app leaving the app *is* closing it — from a conversation, which is the thing this
+exists to stop.
+
+**The inset is a floor, not an addition.** `safe-area-inset-top` describes the
+*device's* notch, and Telegram paints its chrome inside the same viewport
+afterwards — so on a phone with no notch the inset is 0 and the header starts under
+the buttons. Adding the two double-counts on a notched device, where they describe
+the same strip; `max(3.25rem, env(...))` takes whichever is larger and assumes
+neither. Scoped to `[data-telegram]`, written by `main.tsx` only when the transport
+is actually injected, so an ordinary browser keeps the header it had.
+
+**⚠ Found in a browser, not by `typecheck`.** The effect went below this
+component's early returns, so a render taking the gate, the signed-out or the
+forced-password arm ran one hook fewer than the render before it: React error #310,
+the error boundary, the whole screen gone. Every hook in `App` belongs above line
+one of the branching, and the comment there says so.
+
+**Measured** by driving the bridge against a stub of the injected transport:
+`web_app_setup_back_button {"is_visible":true}` on a screen with somewhere up,
+`false` at the root, one handler per screen rather than a stack of them, a press
+reaching only the newest, an unknown event passing through untouched, and an old
+client asked for nothing at all rather than asked and ignored.
+
+**Status.** Current
+
+#### Q3.444 — Two screens' text at once, and a sheet that left its contents behind
+
+**Rule.** A snapshot that moves must be **opaque**, and a thing that travels as one
+object must be **one snapshot**. `SHEET_BODY` carries `bg-surface`; a closing sheet
+sets `view-transition-name: none` on the body so the panel goes down whole.
+
+**Why.** Q3.442 shipped the movement and both of its surfaces were wrong, reported
+from a phone as one complaint in two halves: "when settings close, all of it should
+go down, not just the header — the rest looks like it disappears on the way", and
+"going into a section, the previous page's text stays on screen for a while; only
+the frames slide, the text appears by itself".
+
+**A `view-transition-name` does not nest**, and that one fact is both halves. A
+named element is **lifted out of** its ancestor's snapshot into a group that is the
+ancestor's *sibling* in the pseudo tree, not its child. So:
+
+- **The close.** With the body named, the panel's image was the frame with its
+  contents cut out of it, and the contents were a group of their own with nothing
+  animating them. Measured at 390px, two fifths of the way through a close slowed
+  to 6s: the head, the rounded top and the ✕ had travelled ~12px and every row
+  inside was exactly where it started. Q3.442 had noticed the group and silenced
+  its fade, which made the contents hold still *crisply*; holding still was the
+  defect. The name is dropped for the length of that one navigation instead —
+  possible only because `router.ts` writes `data-nav` **before** calling
+  `startViewTransition`, so which elements are their own snapshot is a decision
+  each navigation gets to make, with nothing to undo afterwards.
+- **The section.** Being lifted out also means the body stops inheriting the
+  panel's fill, and `SHEET_BODY` had none of its own — so both of its snapshots
+  were transparent images of glyphs, sliding over the panel's static ground.
+  Measured mid-slide: the leaving list's four rows and the arriving section's
+  fields were **both fully legible**, one drawn over the other. The animation was
+  correct the entire time. A pane that arrives has to *cover* the one it replaces,
+  which is a property of the element and not of a keyframe.
+
+**`bg-surface` is the same colour as the panel behind it**, so nothing about the
+sheet at rest changes — and it is `AppShell`'s existing rule (every surface paints
+its own ground, none falls through to `body`) reaching the one box that had been
+getting away with it because nothing had ever moved it before.
+
+**`mix-blend-mode` was the obvious suspect and is not the cause.** The UA sets
+`plus-lighter` on both snapshots so its default cross-fade holds up at the
+midpoint, and `index.css` had `normal` on `(root)` only — which reads as an
+oversight for every other name. Measured: it is not, because Chrome implements the
+blend as an *animation* (`-ua-mix-blend-mode-plus-lighter`), so any rule setting
+the `animation` shorthand removes it and the computed value is already `normal`
+everywhere a slide is written. Recorded because the fix that "obviously" belongs
+here would have been three rules of nothing.
+
+**Asserted** in `webcheck`, off the source of truth: `SHEET_BODY` carries a
+background, `index.css` drops the body's name for a close, and it still grants one
+otherwise. Each was checked by reintroducing the defect and watching the assertion
+fail.
+
+**Status.** Current
+
+#### Q3.445 — `@media` adds no specificity, so the desktop kept every phone animation
+
+**Rule.** Every `index.css` rule that animates a view-transition snapshot is keyed
+on `:root[data-nav…]`, and `webcheck` asserts it as a property over the file rather
+than pinning the two rules that were wrong.
+
+**Why.** Reported as "there should be no slides on a computer, that is for mobile
+only" — against a file that already contained `@media (min-width: 64rem) {
+::view-transition-old(root) { animation: none } }` and had done since Q3.438.
+
+**The rule was dead.** A media query changes *when* a rule applies and contributes
+nothing to specificity. The exemption was written as a bare pseudo-element —
+`(0,0,1)` — against the `:root[data-nav="push"]::view-transition-old(root)` it had
+to overrule, which is `(0,2,1)`. It lost at every width. Measured at 1280px with a
+synthetic `data-nav="push"`: `nav-enter` and `nav-under` running on the root pair,
+so a rail user opening their first conversation had the whole window slide in from
+the right. `@media (prefers-reduced-motion: reduce)` at the foot of the file had
+the identical hole, and was doubly invisible because `announce` declines to start a
+transition in that case at all — the belt beside a brace, and not a belt.
+
+**`:root[data-nav]`** — the attribute without a value — costs the same `(0,2,1)` as
+the rules it overrules and wins on source order, which is the thing a reader can
+actually see. One selector still covers all four movements rather than four copies
+to keep in step.
+
+**The assertion is the class of bug, not the instances.** Two named checks would
+have passed on a file that had grown a third under-specific gate. So `webcheck`
+extracts every rule in `index.css` whose selector names a view-transition
+pseudo-element and whose body sets `animation`, and requires all of them to start
+with `:root[data-nav` — which puts them at one specificity, where order decides.
+Rules setting `mix-blend-mode` or `z-index` are not scanned: nothing overrules
+those by width.
+
+**A third slide was found by the same measurement and is fixed here.**
+`sheet-close` was gated at no width at all, so a *desktop* dialog threw itself a
+full screen height downwards out of the middle of the window. It now leaves the way
+`rise` brought it in above `sm`, matching `animate-sheet sm:animate-rise` on the way
+in. The scrim is deliberately not gated with it — it fades in at every width, and a
+fade is not what was being refused.
+
+**Measured after**, by probing `document.getAnimations()` at 1280px and 390px for
+all five movements: the desktop runs nothing on the root pair, nothing on the
+sheet's body, and `rise` rather than `sheet` on a close; the phone runs
+`nav-enter`/`nav-under` on the root, the same pair on the sheet's body for a
+section, and `sheet` with **no body group at all** for a close.
 
 **Status.** Current
 
@@ -11098,11 +11684,11 @@ a clock.
 | Timeouts | start 45s, shutdown budget 20s, cancel-send 1s, session/close 2s, cancel grace 5s **on a dispose** and 1.5s on a turn somebody stopped (what follows the first is SIGKILL, and what follows the second is nothing), exit grace 3s, WS ping 20s, enrollment 15s |
 | Tokens | 300s lifetime (control-plane default, floor 120s), 60s clock leeway either side. It used to be the revocation window; the relay's live grant check is now, so this bounds only a WebSocket already open |
 | Enrollment codes | single-use, 1 hour. Burned early by **four** things, each recording *which* in `used_from` — minting the next code for that machine (`superseded`), revoking the machine (`revoked`), deleting the user who minted it (`user_deleted`) and **disabling** them (`user_disabled`, which `enable` does not undo); both people-shaped burns are Q1.42. One live code per machine is why "how many may somebody hold" is not a number |
-| Relay streams | 256 KiB h2 window per stream, 256 concurrent streams per tunnel, 8 MiB connection window (`CONNECTION_WINDOW_BYTES`, its own constant — same number as the socket valve, different fact). The per-stream window **is** the flow control — granted on consumption, so a stalled client stops its sender there and nowhere else |
+| Relay streams | **1 MiB** h2 window per stream (`STREAM_WINDOW_BYTES` — raised from 256 KiB as the coupled half of `EVENTS_PAGE_BYTES`, Q6.104; three comments went on saying 256 and were corrected in Q5.101), 256 concurrent streams per tunnel, 64 per caller, 8 MiB connection window (`CONNECTION_WINDOW_BYTES`, its own constant — same number as the socket valve, different fact). The per-stream window **is** the flow control — granted on consumption, so a stalled client stops its sender there and nowhere else |
 | Tunnel | 8 MiB socket-buffer valve (`MAX_TUNNEL_BUFFERED_BYTES`, should be unreachable; the windows exist to make it so), 20s ping / 2 misses, reconnect 1s→30s with **full** jitter — a relay restart reconnects a whole fleet at once, and ±20% would keep the herd synchronised. Backoff resets only after a tunnel has been up 60s (`TUNNEL_STABLE_AFTER_MS`) |
 | Grants listing | 500 per page, 2000 max, with a `total` — the one admin list that grows as users × machines |
-| Uploads | 25 MiB per file, 10 per message, 100 MiB **and** 100 files per session — two bounds because a byte cap cannot see a hundred thousand one-byte uploads and each of those is a directory. 200 bytes of filename, 128 of mime, both clamped at ingest so `truncateEvent` never has to touch an attachment. Inline images 5 MiB raw (~6.8 MiB of base64 in one write to the agent's stdin). Unconsumed uploads expire at 24h; consumed ones have no TTL and die with their session row |
-| Downloads | 100 MiB, and **deliberately not the upload number**: 25 MiB bounds what a client may push onto disk, this bounds a bearer-token-readable read of a whole workspace, where the cost of no bound is one of 256 tunnel streams held open for as long as somebody likes. The client refuses at the same number from `content-length`, before a `Blob` is resident on a phone |
+| Uploads | **100 MiB per file**, 10 per message, **1 GiB** *and* 100 files per session — two bounds because a byte cap cannot see a hundred thousand one-byte uploads and each of those is a directory — plus **300 MiB per 5 minutes** per session (`UPLOAD_RATE_BYTES`), the one refusal here that expires on its own and the only one carrying `Retry-After`. 200 bytes of filename, 128 of mime, both clamped at ingest so `truncateEvent` never has to touch an attachment. Inline images 5 MiB raw *to* the agent (~6.8 MiB of base64 in one write to its stdin); **25 MiB *from* one** (`MAX_AGENT_IMAGE_BYTES` — its own constant since the per-file cap moved, sharing one having put a ~133 MiB string in the base64 pre-check on the emit path). Unconsumed uploads expire at 24h; consumed ones have no TTL and die with their session row. Q5.101 |
+| Downloads | 100 MiB, which **equals the upload cap by coincidence rather than by coupling** — this row said "deliberately not the upload number" and that was true at 25 MiB. Neither may be set by reading the other: that one bounds what a client may push onto disk against budgets outliving the request, this bounds a bearer-token-readable read of a whole workspace, where the cost of no bound is one of 256 tunnel streams held open for as long as somebody likes. The client refuses at the same number from `content-length`, before a `Blob` is resident on a phone |
 | Permission payload | 8 KiB each for `rawInput` and `content`, clamped by `clampBlob`. Far below the per-event cap because this rides the snapshot, which `GET /sessions` returns for every session at once |
 | Session title | 120 characters accepted from a rename, 60 for the one derived from the first prompt. Bounded for the same reason as the row above: it rides the snapshot, which `GET /sessions` returns for sixty sessions every four seconds |
 | Agent login | one run per agent (a second supersedes), 64 KiB of transcript, 10 minute TTL. Pasted credentials capped at 8 KiB, which is far above an OAuth token and far below an argv |
@@ -11134,6 +11720,99 @@ containment primitive file precisely because a third copy disagreed with both
 others once and fail-closed (Q5.32).
 
 **Status.** Current
+#### Q5.101 — What had to move before an attachment could be 100 MiB?
+
+**Rule.** `MAX_UPLOAD_BYTES` is 100 MiB, `MAX_SESSION_UPLOAD_BYTES` is 1 GiB, and
+a session may spend `UPLOAD_RATE_BYTES` (300 MiB) per `UPLOAD_RATE_WINDOW_MS`
+(5 minutes) before a `429 upload_rate_limited` with `Retry-After`.
+
+**Why.** 25 MiB was the right line for a screenshot and the wrong one the moment
+somebody wanted to hand an agent a recording, a heap dump or a database export —
+all attachments to a conversation in every sense except the size the old comment
+assumed ("below anything that is a transfer rather than an attachment").
+
+**The transport was never the constraint, which is the finding.** Nothing in
+`src/`, the relay or the control plane configures a body limit; the running
+counter in `Uploads.receive` is the only bound on any request body anywhere in
+this system, and the relay's numbers are h2 flow control granted on consumption
+rather than caps. So the raise itself is two constants.
+
+**Three things were coupled to it and each would have failed *silently*.**
+
+*The agent's own images.* `keepAgentImage` sized its base64 pre-check as
+`ceil(limit * 4 / 3)` against this constant, so 100 MiB would have admitted a
+~133 MiB **string** into one `Buffer.from` — on the emit path, which must not
+await and must not allocate like that. `MAX_AGENT_IMAGE_BYTES` is that half,
+unhooked at **the same 25 MiB**, so the decoupling changes no behaviour. They were
+always different questions: one is how large a file somebody chooses from a
+picker, the other is how large a blob a model hands back already in memory.
+
+*The client's own deadline.* `uploadDeadlines` capped `hardMs` at 300 s
+"deliberately: that is the token lifetime" — and conceded in its own next sentence
+that a request in flight does not die at `exp`. So the coupling was tidiness
+rather than a property, and at the new size it aborted a **progressing** 100 MiB
+upload at five minutes, i.e. anything under ~350 KiB/s, with no message, halfway
+through, on exactly the slow links a large cap matters on. The ceiling is 45
+minutes now, which is above `scaled` at the largest file this daemon takes
+(~35 min at the assumed 50 KiB/s floor) — so the formula governs at every real
+size and the cap bounds arithmetic rather than transfers. What notices a dead link
+is still `stallMs`, thirty seconds, reset by every progress event.
+
+*The session budget.* 100 MiB per session with 100 MiB per file is a second bound
+one file exhausts, which has stopped being one. 1 GiB, ten files at the cap;
+`MAX_UPLOADS_PER_SESSION` is untouched, the inode ceiling never having been under
+pressure.
+
+**The rate window is soft, and the word is doing work.** Nothing here is a
+security boundary: anybody reaching this route holds a grant on this machine, and
+an agent on it runs as you with no sandbox — somebody who wants to fill this disk
+has a far shorter path than an upload form. What it bounds is **cost**, which went
+up 4× per file in the same change, against ceilings that never refill for the life
+of a session. Shaped on the control plane's `WRITE_THROTTLE` rather than on its
+guessing policies, and for the reason that one gives: a limit against cost blocks
+briefly and **does not escalate**, because the caller is not an attacker to be
+discouraged, it is somebody whose next action should be a moment later.
+
+Charged on bytes **actually written**, refused or not — an upload that streamed
+90 MiB before hitting the per-file cap cost that, and exempting refusals would
+make the cheapest way to spend this daemon's disk bandwidth a stream that is
+always one byte too long. Checked *before* the body is read, beside the count
+check, because a refusal that has already streamed 100 MiB has spent exactly what
+it was refusing to spend. It cannot see the current upload's size — a chunked body
+declares nothing — so one upload may finish past the limit and the next is the one
+refused, which is the right way round for a cost bound.
+
+**Two numbers stopped meaning what their comments said.** `MAX_DOWNLOAD_BYTES` is
+also 100 MiB and its docblock said "deliberately a different number"; it now
+coincides **by accident**, and neither may be set by reading the other — the
+*reasons* were what differed and are unchanged. And `MAX_IMPORT_BYTES` (50 MiB) is
+now the smaller of the two, reversing their old order; its rule file justified it
+by quoting `MAX_UPLOAD_BYTES`'s own comment, and the real reason had to be written
+out: an archive is **expanded onto disk** as up to `MAX_IMPORT_ENTRIES` files, each
+a containment decision and an inode, while one streamed file is one `open` and one
+counter.
+
+**The ceiling nobody in this repository can see.** `deploy/` ships no reverse proxy
+and `install.sh` recommends one twice. nginx defaults `client_max_body_size` to
+**1 MB** and refuses with a 413 *before* the daemon receives the request, so the
+chip shows a failure the daemon has no record of; Cloudflare's 100 MB is not
+configurable at all. `deploy/README.md` names the values now, which it never did
+even at 25 MiB.
+
+**Three stale comments went with it**, each claiming the relay's per-stream window
+is 256 KiB. It has been 1 MiB since Q6.104, and being wrong about it in a paragraph
+that reads as a measurement is worse than not stating it — they name
+`STREAM_WINDOW_BYTES` now.
+
+**Measured** by the drivers rather than by a run: `daemoncheck` drives the running
+counter against the real constant, streaming a shared 8 MiB buffer rather than
+allocating the whole cap on the heap, and drives `uploadRateVerdict` — pure, so
+the window is asserted at the real numbers without writing 300 MiB to a temp
+directory, which is the only alternative and enough of a cost that it would have
+gone unasserted instead.
+
+**Status.** Current
+
 ## Measured behaviour of the agents and the tools
 
 ### Q6.1 — Why did `session_started` land in the log *after* the first `prompt` event?
@@ -15481,3 +16160,117 @@ exception. Showing a measurement is still not a reason to take the content away
 while it is being taken.
 
 **Status.** Current
+
+### Q7.103 — A conversation you cannot type into, under a notice that was not true
+
+**Rule.** Three things, and they are one bug seen from three sides.
+`onAuthFailure` **replaces the agent instead of ending the conversation**;
+`autoResumable` answers `true` on the **prompt** trigger for `agent_signed_out`
+and `stopped`; and `Composer.tsx` has **no early return at all** — nothing takes
+the message box off the screen.
+
+**Reported from a phone**, and the report was two sentences: *why does it say I
+am not logged in, and why will it not let me send anything.* Both were right.
+
+**Measured, on the reporter's own machine.** The daemon's own probe — its exact
+binary (`resolveLoginBinary` finds the adapter's vendored copy), its exact
+environment (`agentEnv()` plus pasted secrets, `HOME` untouched) — answered:
+
+```
+{ "loggedIn": true, "authMethod": "claude.ai", "subscriptionType": "max" }
+```
+
+The credential file had been rewritten at 14:56 the same day; it was 22:31. The
+CLI had refreshed its own token hours earlier and the daemon was in no doubt
+about it.
+
+**What the screen said instead** was `nobody is signed in to claude on <machine>.
+Sign in and this conversation comes back.` — drawn from `session.exit.reason` on a
+row recording something that happened at some point in the past, in the present
+tense, with the live probe not consulted here or anywhere near here. The button
+went to a screen where the reporter was already signed in.
+
+**The chain, and every link was defensible on its own.**
+
+1. Claude's OAuth session expired mid-conversation and the agent emitted
+   `errorKind: "authentication_failed"`.
+2. `onAuthFailure` ended the session with `agent_signed_out` — because "the
+   credential is gone, so every later message would fail the same way".
+3. `autoResumable` answered `false` for that reason on **both** triggers, so
+   neither a boot pass nor a message could bring it back.
+4. `reloadCredentials` is the only reversal, and every one of its callers is an
+   in-app credential **write** — `PUT`/`DELETE /agent-auth/:agent`. A CLI
+   refreshing its own token reaches none of them. Neither does signing in from a
+   terminal.
+5. `showsAsEnded` was true, so `Composer.tsx` returned `null` and there was
+   nothing to type into.
+
+A state with no exit from inside the app, reached by an expiry that had already
+repaired itself.
+
+**Step 2 was already known to be wrong.** Q7.99 recorded it in August: a session
+idle 5h36m reported `authentication_failed` on its *first* prompt while the token
+on disk was **still valid for another 1.4 hours**, and a freshly spawned agent
+worked four minutes later. What goes stale is the agent process, not the
+credential. Ending the conversation therefore destroyed the half that was fine and
+kept nothing that was broken — and the entry that measured this did not change the
+code it was about.
+
+**So the failure is drawn and the process is replaced.** The error event is
+already in the log — `record` appends it one statement before `isAuthFailure` is
+consulted — so what happened is in the transcript, where somebody can read it and
+send again, which is what a chat with an agent does. `restartAgent` is the path a
+config change already takes and stops with `config_changed` **deliberately rather
+than inventing a reason**: it is "the daemon took the agent away and is bringing it
+straight back", it is in `DAEMON_EXIT_REASONS` so a client draws *reconnecting*,
+and a new `ExitReason` member would read as `showsAsEnded` on every client older
+than it — the exact failure being removed.
+
+**Armed once per prompt**, which is the difference between a retry and a loop. A
+credential that really has gone fails the fresh agent the same way, the second
+failure lands in the transcript beside the first, and nothing restarts again until
+somebody sends another message. The retry is driven by the person; a revoked
+credential costs one spawn per message they choose to send. A restart already in
+flight is also left alone — `this.restart` is a single field holding a config to
+put back and a promise `whenRestarted` waits on, and a second writer loses the
+first's receipt for ever.
+
+**`stopped` moved too, and it is the same argument rather than a second one.** A
+prompt is not the daemon deciding anything: it is the person who pressed Stop
+typing into that conversation again. `boot` stays `false` for both reasons, so
+nothing revives anything on its own — which is the whole of what the old rule
+protected. `start_failed`/`start_timeout` are answered by the `agentSessionId`
+guard, and `agent_kill_failed` stays refused because `agentConfirmedDead: false`
+means the old agent may still hold the conversation file.
+
+**The composer is unconditional, and that is a rule rather than today's
+behaviour.** The early return was already half-deleted once, for the deploy case —
+"only a session somebody *ended* loses its composer" — and this is the other half.
+A conversation you cannot type into is a dead end whatever put it there, and this
+app cannot enumerate the ways in advance; that is what the episode demonstrated.
+What is gated is **Send**, never the box, and nothing about the sending path
+changed.
+
+**The notice says only what its row can know**, and the remedy is the one that
+worked all along: `POST /sessions/:id/resume` calls `managed.resume()` with **no
+`autoResumable` gate**, so Reconnect could have brought these back at any point.
+It was simply never drawn, because `sessionNotice` handed this reason a `sign_in`
+action instead.
+
+**Where "sign in" is earned.** The `resumeStalled` branch, and only there, and only
+for `agent_auth_required` — which means the daemon spawned the CLI, asked it to
+reopen the conversation and was refused. That is a measurement rather than a
+memory, and it is the one place in this app entitled to say somebody is not signed
+in. `webcheck` asserts the exit-reason line claims nothing about the present at
+all.
+
+**A fourth thing fell out of the same read, and it had been green the whole
+time.** `Composer.tsx` suppressed its toast on `cause.code === "agent_signed_out"`
+— a code the daemon stopped sending when the probe on the prompt path was deleted;
+the route answers `session_terminal`. `webcheck` asserted the *literal string* was
+present in the file rather than that the client and the daemon agreed, so the
+branch was unreachable and the check stayed green while the toast it exists to
+suppress fired anyway, saying "this session has ended" over a notice already
+saying it better. The assertion reads the code off `src/server.ts` now.
+
+**Status.** Reversed an earlier decision

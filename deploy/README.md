@@ -340,6 +340,31 @@ wins in moving it into a container: a stack under `restart: unless-stopped` is
 supervised by the system Docker daemon, so it survives logout and reboot with no
 lingering and no automatic login.
 
+### If you put a proxy in front
+
+Nothing here ships one, and `install.sh` recommends one twice: for TLS in front of
+a service bound to loopback, and because `x-forwarded-for` is only worth believing
+when something you control wrote it. If you have one, **it needs one setting**.
+
+**Raise the body limit, or uploads break and nothing here can tell you.** An
+attachment may be 100 MiB, and it streams straight through the relay to the daemon
+— no service in this repository buffers it or caps it below that. A proxy that
+does refuses with a 413 of its own, *before* the daemon sees the request, so the
+chip in the composer shows a failure the daemon has no record of.
+
+| | |
+|---|---|
+| nginx | `client_max_body_size 110m;` — the default is **1 MB**, which refuses almost every attachment |
+| Caddy | no limit by default; only set `request_body { max_size }` if you want one |
+| Cloudflare | 100 MB on the free and Pro plans, and **not configurable** — an attachment at the cap will not fit through it |
+
+110m rather than 100m: `Content-Length` counts the whole request, and the file is
+not the whole request.
+
+Also give it a generous read timeout on `POST /sessions/:id/uploads`. The client
+allows a slow upload up to 45 minutes and gives up on **stalling** rather than on
+duration; a proxy that times out on duration will cut a transfer that is working.
+
 ### Backing up the control plane
 
 **One command, and it is not optional.**

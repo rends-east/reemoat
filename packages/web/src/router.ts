@@ -1,6 +1,8 @@
 import { useSyncExternalStore } from "react";
+import { flushSync } from "react-dom";
 import { parseGateScreen, type GateScreen } from "./gate";
 import { machineId, sessionId, type MachineId, type SessionRef } from "./ids";
+import { navMove } from "./nav";
 import { parseSettingsRoute, type SettingsRoute } from "./settings";
 import { isOverlayPath } from "./ui/overlay";
 
@@ -163,9 +165,85 @@ function read(): Location {
 
 let current: Location = read();
 
-function announce(): void {
-  current = read();
+function tell(): void {
   for (const listener of listeners) listener();
+}
+
+/** Which navigation owns `data-nav` right now. See {@link announce}. */
+let navToken = 0;
+
+/**
+ * A screen replacing another one **moves**, on a phone.
+ *
+ * Opening a conversation used to be a swap: the list was there and then it was
+ * not, with nothing saying which way you had gone or that going back was a
+ * direction at all. Every app a phone already has answers that with motion, and
+ * the answer is not decoration — it is the only thing distinguishing "I went
+ * somewhere" from "the screen changed".
+ *
+ * **Through the browser's own view transitions, and the alternative is why.** The
+ * hand-rolled way is to hold the outgoing screen mounted while it animates out,
+ * which here means two `SessionBrowser`s, or a second `SessionView` running its
+ * `openSession` effect against the socket LRU, for the length of an animation —
+ * paid on every navigation, to draw one that is over in 220ms. The browser
+ * snapshots the old frame instead: nothing is mounted twice, `App` still unmounts
+ * synchronously, and `AppShell`'s rule that no breakpoint may be read in
+ * JavaScript is untouched, because **which widths animate is decided in CSS** by
+ * the rules keyed on `data-nav`.
+ *
+ * Three ways this declines, and each leaves exactly today's behaviour:
+ *
+ * - **Nothing moves.** `navMove` answers `null` for a session-to-session move,
+ *   and for opening a sheet — which `SHEET_PANEL`'s own CSS animates without a
+ *   snapshot, on every engine. Nothing is captured at all, so the desktop rail's
+ *   ordinary use pays nothing.
+ * - **No support.** `startViewTransition` is absent on older engines. Read at the
+ *   navigation and thrown away, the `shouldFocusComposer` idiom, so nothing can
+ *   go stale.
+ * - **Reduced motion.** Read the same way, and it skips rather than animating to
+ *   zero: the block at the foot of `index.css` collapses durations with a `*`
+ *   selector, and `*` does not reach `::view-transition-*` — but more to the
+ *   point, somebody who asked for no motion should not be paying for a snapshot
+ *   either.
+ *
+ * `flushSync` is required rather than defensive: the callback has to leave the
+ * DOM in its new state before it returns, and every subscriber here is a
+ * `useSyncExternalStore` whose update React would otherwise schedule. It runs
+ * inside the transition's own callback, which the browser invokes off the event
+ * handler, so this is not a flush from inside a lifecycle.
+ *
+ * The attribute is cleared on `finished`, **and only by the navigation that wrote
+ * it.** A second tap during the first animation is ordinary rather than exotic —
+ * the browser skips the running transition and starts another — and both
+ * `finished` promises then settle, in the order they were made. Without the
+ * token, the first one's cleanup deletes the *second* one's attribute while it is
+ * still travelling, and that navigation finishes with no rule matching: the new
+ * screen appears with the old one still snapshotted over it, which reads as the
+ * app having frozen rather than as a missing animation. Cleared on rejection as
+ * well as fulfilment, so a transition that fails leaves nothing on the document.
+ */
+function announce(): void {
+  const previous = current.route;
+  current = read();
+  const move = navMove(previous, current.route);
+  if (
+    move === null ||
+    typeof document.startViewTransition !== "function" ||
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  ) {
+    tell();
+    return;
+  }
+  const root = document.documentElement;
+  const token = (navToken += 1);
+  root.dataset["nav"] = move;
+  const clear = (): void => {
+    if (navToken !== token) return;
+    delete root.dataset["nav"];
+  };
+  document.startViewTransition(() => {
+    flushSync(tell);
+  }).finished.then(clear, clear);
 }
 
 window.addEventListener("popstate", announce);

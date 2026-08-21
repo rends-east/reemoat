@@ -38,6 +38,8 @@ import {
   MAX_UPLOADS_PER_SESSION,
   parseMime,
   sanitizeUploadName,
+  UPLOAD_RATE_BYTES,
+  UPLOAD_RATE_WINDOW_MS,
   type Uploads,
   type UploadRow,
 } from "./uploads.js";
@@ -185,13 +187,18 @@ const MAX_PATH_CHARS = 4_096;
 /**
  * The largest file this daemon will serve.
  *
- * **Deliberately a different number from `MAX_UPLOAD_BYTES`**, because it bounds
- * a different thing. 25 MiB bounds what a client may push onto this machine's
- * disk; this bounds a bearer-token-readable read of an entire workspace, where
- * the cost of no bound is one tunnel stream held open for as long as somebody
- * likes — and there are 256 of them per machine, shared with every session's
- * WebSocket. The client refuses at the same number, from `content-length`,
- * before it pulls a `Blob` into a phone's memory.
+ * **It happens to equal `MAX_UPLOAD_BYTES` now, and that is a coincidence rather
+ * than a coupling** — the two bound different things and neither may be changed
+ * by reading the other. This said "deliberately a different number", which was
+ * true while uploads were 25 MiB and stopped being true when they became 100 MiB;
+ * the *reasons* are what were different and they are unchanged. That one bounds
+ * what a client may push onto this machine's disk, against a session budget and
+ * an inode ceiling that both survive the request. This bounds a
+ * bearer-token-readable read of an entire workspace, where the cost of no bound
+ * is one tunnel stream held open for as long as somebody likes — and there are
+ * 256 of them per machine, shared with every session's WebSocket. The client
+ * refuses at the same number, from `content-length`, before it pulls a `Blob`
+ * into a phone's memory.
  */
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 
@@ -1051,7 +1058,8 @@ export function createApp(options: ServerOptions): AppBundle {
    * **Every refusal cancels the body**, which is why this route does its own
    * argument checking through `refuse()` instead of reading like the ones above
    * it. The relay grants a stream's window on consumption, so a handler that
-   * answers 400 and walks away parks the sender at 256 KiB — and the next valve is
+   * answers 400 and walks away parks the sender at one `STREAM_WINDOW_BYTES` —
+   * and the next valve is
    * the tunnel's 8 MiB socket check, which closes the whole tunnel for this
    * machine and takes every other session on it down too.
    */
@@ -1493,6 +1501,33 @@ export function createApp(options: ServerOptions): AppBundle {
      */
     await managed.whenRestarted();
 
+    /*
+     * **The folder has to still be there, and this is asked on every message
+     * rather than only before a resume.**
+     *
+     * ⚠ It guarded the resume branch alone, so a session whose workspace vanished
+     * *while it was open* had a live agent standing in a directory that no longer
+     * existed — and the first anybody heard of it was the agent's own words in the
+     * transcript: `Internal error: Path "…/worktrees/…/s_282fc818" does not
+     * exist`. A raw internal error, in the conversation, with no remedy anywhere
+     * on the screen and nothing saying which of the many things it could mean it
+     * was. Reported from a phone, with a screenshot, after exactly that happened.
+     *
+     * It is not exotic: `rmworkspace` is a route, `git worktree remove` is a
+     * command somebody runs, and a worktree under `~` is a directory a person can
+     * delete. What makes it worth a check on the hot path is that the failure is
+     * otherwise indistinguishable from the agent breaking.
+     *
+     * The cost is one `probeExists` — bounded, three-valued, and the reason
+     * `stall.ts` exists — per message a human types, against a prompt that is
+     * about to spawn or wake a process and hold a 90-second budget. `409
+     * workspace_missing` and `503 workspace_unresponsive` are sentences a client
+     * already draws, and telling a stalled mount from a deleted directory is the
+     * whole reason that function has three answers rather than two.
+     */
+    const workspace = await workspaceReady(c, managed);
+    if (workspace) return workspace;
+
     if (
       managed.terminal &&
       registry.autoResumeEnabled &&
@@ -1502,8 +1537,6 @@ export function createApp(options: ServerOptions): AppBundle {
       !managed.resumeSettled &&
       autoResumable(managed.exit, managed.agentSessionId, "prompt")
     ) {
-      const ready = await workspaceReady(c, managed);
-      if (ready) return ready;
       try {
         await managed.resume();
       } catch {
@@ -1669,9 +1702,9 @@ export function createApp(options: ServerOptions): AppBundle {
      * **Every refusal on this route releases the body first.**
      *
      * `Uploads.receive` spends a paragraph on why, and every word of it applies
-     * a layer earlier: these refusals happen with up to 25 MiB in flight and
-     * used to return without ever touching the stream. A body nobody reads parks
-     * the sender against the relay's 256 KiB per-stream window, and the valve
+     * a layer earlier: these refusals happen with a whole `MAX_UPLOAD_BYTES` in
+     * flight and used to return without ever touching the stream. A body nobody
+     * reads parks the sender against the relay's per-stream window, and the valve
      * above that closes the whole tunnel for this machine — every other session
      * with it. `invalid_name` is not hypothetical: `pastedName` exists precisely
      * because a nameless paste 400s here, and `upload_too_large` is by
@@ -1770,6 +1803,33 @@ export function createApp(options: ServerOptions): AppBundle {
         return jsonError(c, 409, "upload_limit", "this session already holds too many staged files", {
           limit: MAX_UPLOADS_PER_SESSION,
         });
+      /*
+       * The one refusal here that expires on its own, so it says when.
+       *
+       * `Retry-After` in whole seconds, rounded **up** and never below 1, which
+       * is the rule `throttle.ts` already states one package over: a
+       * `Retry-After: 0` invites the immediate retry it is refusing. The same
+       * number rides the detail in milliseconds, because a client drawing "try
+       * again in a moment" wants the real one and a second's resolution is not
+       * enough to say a moment.
+       */
+      case "rate": {
+        const seconds = Math.max(1, Math.ceil(result.retryAfterMs / 1000));
+        c.header("Retry-After", String(seconds));
+        /*
+         * The wait is in the **message**, not only in the detail, because the
+         * message is the whole of what a person sees: a failed chip carries
+         * `errorText(cause)` and nothing else, beside a retry button. "Too much
+         * lately" with no number is a control somebody presses again immediately.
+         */
+        return jsonError(
+          c,
+          429,
+          "upload_rate_limited",
+          `too much has been uploaded to this session lately — try again in ${seconds}s`,
+          { limit: UPLOAD_RATE_BYTES, windowMs: UPLOAD_RATE_WINDOW_MS, retryAfterMs: result.retryAfterMs },
+        );
+      }
       case "write_failed":
         return jsonError(c, 503, "upload_write_failed", "that file could not be stored", {
           detail: result.detail,

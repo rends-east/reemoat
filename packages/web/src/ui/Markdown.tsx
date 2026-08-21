@@ -7,6 +7,7 @@ import { Icon, LINK } from "./bits";
 import { copyText } from "./clipboard";
 import { useFileAccess } from "./files";
 import { openableHref } from "./links";
+import { PAREN_LIST, remarkListDelimiter } from "./mdlist";
 
 /**
  * Agent output, rendered as what it is.
@@ -158,6 +159,16 @@ function useSettledText(text: string): string {
 }
 
 /**
+ * Hoisted for {@link COMPONENTS}'s reason, and it is the same failure one prop
+ * over: a fresh array identity on every render is a fresh plugin list, and
+ * nothing below it can be memoised past that.
+ */
+const REMARK_PLUGINS: Parameters<typeof ReactMarkdown>[0]["remarkPlugins"] = [
+  remarkGfm,
+  remarkListDelimiter,
+];
+
+/**
  * Hoisted to module scope, and that is load-bearing rather than tidy.
  *
  * Built inline, this object had a fresh identity on every render, so the memo on
@@ -178,7 +189,29 @@ const COMPONENTS: Parameters<typeof ReactMarkdown>[0]["components"] = {
   ),
   p: ({ children }) => <p className="my-1.5 first:mt-0 last:mb-0">{children}</p>,
           ul: ({ children }) => <ul className="my-1.5 ml-4 list-disc space-y-0.5">{children}</ul>,
-          ol: ({ children }) => <ol className="my-1.5 ml-4 list-decimal space-y-0.5">{children}</ol>,
+          /*
+           * `start` is passed through, and its absence was a second defect on
+           * this one line. `mdast-util-to-hast` sets it whenever a list does not
+           * begin at 1 and react-markdown hands it over; destructuring only
+           * `children` dropped it, so a message beginning `10)` was drawn `1.` —
+           * renumbered as well as re-punctuated.
+           *
+           * `list-decimal` **stays** under the paren class rather than being
+           * swapped for it. `counter(list-item)` in `index.css` overrides it
+           * where `::marker` can be styled, and where it cannot this is the
+           * rendering that was there before — so nothing regresses anywhere and
+           * the marker is right everywhere it can be.
+           */
+          ol: ({ children, className, start }) => (
+            <ol
+              start={start}
+              className={`my-1.5 ml-4 list-decimal space-y-0.5${
+                typeof className === "string" && className.includes(PAREN_LIST) ? ` ${PAREN_LIST}` : ""
+              }`}
+            >
+              {children}
+            </ol>
+          ),
           li: ({ children }) => <li className="pl-0.5">{children}</li>,
           /*
            * A link only where there is somewhere to go — see `openableHref`.
@@ -271,7 +304,7 @@ const MarkdownBody = memo(function MarkdownBody({
 }): ReactNode {
   return (
     <div className={`text-sm wrap-anywhere ${body}`}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={COMPONENTS}>
+      <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={COMPONENTS}>
         {text}
       </ReactMarkdown>
     </div>

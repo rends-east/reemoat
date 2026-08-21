@@ -50,6 +50,67 @@ export function relativeTo(root: string, path: string): string | null {
 }
 
 /**
+ * A working directory as somebody would say it out loud.
+ *
+ * ⚠ **Reported from a phone**, against a pinned row reading
+ * `…/rends/2026-07-tare-r…` on the title *and* `claude · …/rends/2026-07-ta…`
+ * underneath it: the same absolute path, truncated twice, two thirds of it spent
+ * on `/Users/rends` — which is where every session on that machine lives and
+ * therefore tells nobody anything.
+ *
+ * The old answer was `shortPath`, which keeps the last **two** segments
+ * unconditionally. `folderNames` in `groups.ts` had already written down why that
+ * is wrong — "always two segments is a wall of `Users/rends`" — and went to some
+ * length to avoid it for folder headers, while the rows themselves went on doing
+ * exactly that.
+ *
+ * **The prefix to cut is the daemon's own `REEMOAT_ROOTS`**, which defaults to
+ * the home directory and is what `/fs/roots` already serves to the directory
+ * picker. That is a fact the daemon states rather than one this client works out:
+ * a home directory guessed from `/Users/<x>` or `/home/<x>` would be a rule about
+ * one operating system's conventions applied to somebody else's machine, and this
+ * codebase refuses that kind of guess everywhere else on this wire.
+ *
+ * **The longest matching root wins**, because roots may nest (`~` and
+ * `~/work`) and the more specific one is the one that says more.
+ *
+ * Two degradations, both deliberate and both silent. A path under **no** root —
+ * `cwd` is not confined, so this is ordinary rather than exotic — falls back to
+ * `shortPath`, i.e. exactly what every row drew before this existed. And an empty
+ * `roots` does the same, which is what an older daemon, an unreachable one, or a
+ * listing that has not landed yet all look like.
+ */
+export function displayCwd(cwd: string, roots: readonly string[]): string {
+  const path = cwd.trim();
+  if (path.length === 0) return path;
+  let best: string | null = null;
+  for (const root of roots) {
+    const base = root.endsWith("/") ? root.slice(0, -1) : root;
+    if (base.length === 0) continue;
+    // The root itself, which `relativeTo` answers `null` for — correctly, since
+    // it has no *relative* part. Here it is the whole answer.
+    if (path === base) return "~";
+    const rel = relativeTo(base, path);
+    if (rel === null) continue;
+    if (best === null || rel.length < best.length) best = rel;
+  }
+  return best === null ? shortPath(path) : `~/${best}`;
+}
+
+/**
+ * The last two segments of a path, with a leading ellipsis.
+ *
+ * The fallback {@link displayCwd} reaches for when a directory is under none of
+ * the daemon's roots — at which point there is no prefix anybody agreed on to
+ * cut, and two segments is the most that fits a row.
+ */
+export function shortPath(path: string): string {
+  const parts = path.split("/").filter((part) => part.length > 0);
+  if (parts.length <= 2) return path;
+  return `…/${parts.slice(-2).join("/")}`;
+}
+
+/**
  * What to call the file a person just downloaded.
  *
  * Derived from the path we asked for rather than read off `Content-Disposition`,

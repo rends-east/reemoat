@@ -89,7 +89,8 @@ export function Sheet({
      * be a phantom tab stop, and the ✕ is the accessible way out.
      */
     <div
-      className={`fixed inset-0 ${LAYER.overlay} flex touch-manipulation flex-col justify-end bg-fg/25 sm:items-center sm:justify-center sm:p-6`}
+      data-sheet-scrim=""
+      className={`animate-scrim fixed inset-0 ${LAYER.overlay} flex touch-manipulation flex-col justify-end bg-fg/25 sm:items-center sm:justify-center sm:p-6`}
       onClick={(event) => {
         if (event.target === event.currentTarget) close();
       }}
@@ -100,6 +101,14 @@ export function Sheet({
         aria-modal="true"
         aria-labelledby={labelledBy ?? headingId}
         tabIndex={-1}
+        /*
+         * `data-sheet-*` marks the three things a closing sheet animates, and
+         * `index.css` hangs a `view-transition-name` off each. Attributes rather
+         * than classes because a name has to be **unique in the document** and
+         * there is exactly one sheet — a utility class is an invitation to put a
+         * second one somewhere and get neither.
+         */
+        data-sheet-panel=""
         className={`${SHEET_PANEL} outline-none`}
       >
         <div className={SHEET_HEAD}>
@@ -147,7 +156,11 @@ export function Sheet({
           <IconButton icon={X} label="Close" onClick={close} className="-mr-1" />
         </div>
 
-        <div className={SHEET_BODY}>{children}</div>
+        {/* Named for the section slide: what changes when you tap a section is
+            this box's contents, and the frame around it must not travel. */}
+        <div data-sheet-body="" className={SHEET_BODY}>
+          {children}
+        </div>
         {footer}
       </div>
     </div>,

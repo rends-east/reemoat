@@ -48,6 +48,34 @@ import { BackToSignIn, GateCard } from "./GateCard";
 const field = `mt-1 w-full ${FIELD}`;
 const label = "mt-3 block text-2xs font-semibold tracking-wider text-muted uppercase";
 
+/**
+ * A field's name, and whether it has to be filled in.
+ *
+ * ⚠ **Every field on the sign-up form is required, and drawing that on none of
+ * them turned out not to be neutral.** Reported from a phone as "it asks for a
+ * name" — the first field is a *username*, `USER_NAME` on the control plane
+ * refuses `@` outright, and somebody who expected to sign up with an email
+ * address read the first box as the place to put one. Naming the requirement is
+ * what tells the two boxes apart: the account is a name **and** an address, and
+ * both are wanted.
+ *
+ * On **every** field rather than on the email alone, which is the version this
+ * was first written as. A marker on one field is read as a contrast with the
+ * others — it says the rest are optional — so marking only the ambiguous one
+ * would have introduced a second, quieter lie to fix the first.
+ *
+ * Lower-case beside an upper-cased label, and `text-faint`: it is a qualifier
+ * about the field rather than part of its name, and a second word at the same
+ * weight would read as one longer label.
+ */
+function FieldLabel({ htmlFor, children }: { htmlFor: string; children: string }): ReactNode {
+  return (
+    <label htmlFor={htmlFor} className={label}>
+      {children} <span className="font-normal text-faint normal-case">(required)</span>
+    </label>
+  );
+}
+
 export function Gate({ screen, state }: { screen: GateScreen; state: AppState }): ReactNode {
   /*
    * Read once, from the fragment, and never from the path. `readGateToken`
@@ -321,9 +349,7 @@ function Register({ state }: { state: AppState }): ReactNode {
   return (
     <GateCard title="Create an account" footer={<BackToSignIn />}>
       <form onSubmit={submit}>
-        <label htmlFor="reg-name" className={label}>
-          Name
-        </label>
+        <FieldLabel htmlFor="reg-name">Username</FieldLabel>
         <input
           id="reg-name"
           name="username"
@@ -335,13 +361,36 @@ function Register({ state }: { state: AppState }): ReactNode {
           spellCheck={false}
           className={field}
         />
-        <p className="mt-1 text-xs text-muted">Letters, digits and . _ - only. This is what you sign in with.</p>
+        <p className="mt-1 text-xs text-muted">
+          Letters, digits and . _ - only, and not an email address. This is what you sign in with.
+        </p>
+
+        {/*
+         * **The absent field says why it is absent.**
+         *
+         * `signupScreen` answers `open_local` when the control plane has no SMTP,
+         * and there the address is not merely unasked-for — `POST /v1/register`
+         * *refuses* a non-empty one, because an instance that cannot send mail
+         * cannot confirm anything. So the field is genuinely not there, and until
+         * now nothing said so: the form simply had one box fewer than the same
+         * form on the instance next door, and somebody arriving expecting to sign
+         * up with an email had a "username" box and no explanation.
+         *
+         * The consequence is the half worth writing down rather than the cause.
+         * Password recovery is by mail and by nothing else here, so on this
+         * instance there is none — which is a thing to know *before* choosing a
+         * password, not after forgetting one.
+         */}
+        {!wantsEmail && (
+          <p className="mt-1 text-xs text-muted">
+            This server cannot send mail, so it does not ask for an address — and there is no
+            password recovery on it.
+          </p>
+        )}
 
         {wantsEmail && (
           <>
-            <label htmlFor="reg-email" className={label}>
-              Email
-            </label>
+            <FieldLabel htmlFor="reg-email">Email</FieldLabel>
             <input
               id="reg-email"
               name="email"
@@ -360,9 +409,7 @@ function Register({ state }: { state: AppState }): ReactNode {
           </>
         )}
 
-        <label htmlFor="reg-password" className={label}>
-          Password
-        </label>
+        <FieldLabel htmlFor="reg-password">Password</FieldLabel>
         <input
           id="reg-password"
           name="new-password"
@@ -372,9 +419,7 @@ function Register({ state }: { state: AppState }): ReactNode {
           autoComplete="new-password"
           className={field}
         />
-        <label htmlFor="reg-confirm" className={label}>
-          Confirm password
-        </label>
+        <FieldLabel htmlFor="reg-confirm">Confirm password</FieldLabel>
         <input
           id="reg-confirm"
           type="password"

@@ -8,8 +8,8 @@ paths:
 ## Why this exists
 
 Until this route, code reached a machine three ways: it was already there and you
-browsed to it, the agent cloned it itself, or it arrived as a ≤25 MiB attachment
-staged **outside** every workspace on purpose. None of those is "the repository is
+browsed to it, the agent cloned it itself, or it arrived as an attachment staged
+**outside** every workspace on purpose. None of those is "the repository is
 on my laptop and I want an agent on it" — cloning needs a remote, a credential on
 that host, and a repository somebody has pushed.
 
@@ -185,7 +185,7 @@ slowest step.
 
 | | |
 |---|---|
-| `MAX_IMPORT_BYTES` | 50 MiB — the archive on the wire. **Deliberately not `MAX_UPLOAD_BYTES`**, whose own comment places 25 MiB "below anything that is a transfer rather than an attachment". This is that transfer |
+| `MAX_IMPORT_BYTES` | 50 MiB — the archive on the wire. **Deliberately not `MAX_UPLOAD_BYTES`**, and it is now the *smaller* of the two, which reverses their old order without changing this number. The argument used to be borrowed from that constant's own comment — 25 MiB sat "below anything that is a transfer rather than an attachment", and this was that transfer. Uploads are 100 MiB now and the borrowed sentence is gone, so the real reason has to stand on its own: what this bounds is not bytes crossing a wire but **what the daemon expands onto disk**, as up to `MAX_IMPORT_ENTRIES` separate files, each of which is a containment decision and an inode. One streamed file at 100 MiB is one `open` and one counter; 50 MiB of archive is twenty thousand of both. Neither may be set by reading the other |
 | `MAX_IMPORT_UNPACKED_BYTES` | 500 MiB — what it may become, charged against bytes actually produced. 10:1, where source text gzips at about 4:1 and a bomb aims for 1000:1 |
 | `MAX_IMPORT_ENTRIES` | 20 000 — bytes cannot see an inode, the argument `MAX_UPLOADS_PER_SESSION` already makes |
 | `MAX_IMPORT_PATH_CHARS` / `MAX_IMPORT_DEPTH` | 1024 / 64, per member |

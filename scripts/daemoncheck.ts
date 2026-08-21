@@ -61,6 +61,9 @@ import {
   inlinesImage,
   MAX_SESSION_UPLOAD_BYTES,
   MAX_UPLOAD_BYTES,
+  uploadRateVerdict,
+  UPLOAD_RATE_BYTES,
+  UPLOAD_RATE_WINDOW_MS,
   MAX_UPLOADS_PER_SESSION,
   resolveUploadRoot,
   sanitizeUploadName,
@@ -3434,7 +3437,20 @@ process.stdout.write("\nsigning out, as a state of the machine\n");
     /DAEMON_EXIT_REASONS = \["daemon_restarted", "daemon_shutdown", "config_changed"\]/.test(events),
     true,
   );
-  check("so nothing auto-resumes it", /case "agent_signed_out":\s*\n\s*return false;/.test(reg), true);
+  /*
+   * ⚠ **A prompt resumes it and a boot pass does not**, which reverses half of
+   * what this line used to assert (`return false;` on both triggers).
+   *
+   * The old rule made the state unreachable from inside the app: `reloadCredentials`
+   * is the only other reversal and every one of its callers is an in-app credential
+   * write, so a CLI that refreshed its own token — or somebody signing in from
+   * their own terminal — left a conversation nothing could bring back. Asserted
+   * against the *function* rather than its source text, which is what a regex on
+   * `return false;` could never tell apart from the arm above it.
+   */
+  // The trigger split for this reason is asserted with the rest of the table, in
+  // "what a restart brings back" — a regex over `return false;` could never tell
+  // this arm from the one above it.
 
   check("signing out ends the live conversations", /async signOutSessions\(agent: AgentId\): Promise<number>/.test(reg), true);
   check("with that reason", /session\.stop\("agent_signed_out"\)/.test(reg), true);
@@ -3458,8 +3474,61 @@ process.stdout.write("\nsigning out, as a state of the machine\n");
    * vendored binary in `node_modules`, which on CI is signed in to nothing.
    */
   check("the prompt path asks no CLI whether anybody is signed in", /sessionRuntime\.signedOut\(/.test(routes), false);
-  check("the agent's own failure is what ends it", /isAuthFailure\(event\)/.test(reg), true);
-  check("with the same reason, so one thing brings them back", /this\.stop\("agent_signed_out"\)/.test(reg), true);
+  /*
+   * Comments stripped, because the docblocks here quote the call this used to
+   * make and the message it must never read — which is the point of writing them
+   * down, and would otherwise make these assertions fail on their own
+   * explanation.
+   */
+  const code = reg.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  check("the agent's own failure is what it reacts to", /isAuthFailure\(event\)/.test(reg), true);
+  /*
+   * ⚠ **And it replaces the agent rather than ending the conversation.**
+   *
+   * This asserted `this.stop("agent_signed_out")` on the event pump, which is the
+   * line Q7.99 had already measured wrong: a session idle 5h36m reported
+   * `authentication_failed` while the token on disk was valid for another 1.4h,
+   * and a fresh agent worked four minutes later. What was stale was the process.
+   * Ending the conversation threw away the half that was fine.
+   *
+   * The error is in the log either way — `record` appends before this runs — so
+   * what is asserted here is that nothing *else* is done to the session but give
+   * it a new process.
+   */
+  check("and replaces the agent instead of ending the conversation", /onAgentUnusable\(\): void \{[\s\S]*?restartAgent\(\)/.test(reg), true);
+  check("never stopping it on the pump", /onAgentUnusable\(\): void \{[\s\S]*?\n  \}/.exec(reg)?.[0].includes('stop("agent_signed_out")'), false);
+  /*
+   * ⚠ **And the second caller, which is the one a screenshot found.** An ACP
+   * session that dies under a *live* process leaves `status: idle` and answers
+   * every message with the same `-32603` — no `errorKind`, so `isAuthFailure`
+   * quite correctly ignores it, and no way out of the conversation from inside
+   * the app. Four messages, four identical errors.
+   *
+   * `failed` is the precise signal: reaching the pump's own `catch` means
+   * `session.prompt()` **rejected** rather than streamed a failure, so the agent
+   * never took the message. Anything that goes wrong *inside* a turn arrives
+   * through `record` and never comes near it — which is what stops this firing
+   * on an ordinary bad turn.
+   */
+  check("a prompt the agent never took also replaces it", /if \(failed\) this\.onAgentUnusable\(\);/.test(code), true);
+  check("and the message is never what decides", /describeError\(error\)[\s\S]{0,400}onAgentUnusable/.test(code), false);
+  /*
+   * Armed per prompt, which is the difference between a retry and a loop: a
+   * credential that really is gone fails the fresh agent too, and the second
+   * failure must not start a third process.
+   */
+  check("one replacement per message somebody sends", /this\.authRestartArmed = true;/.test(reg), true);
+  check("spent when it fires", /onAgentUnusable\(\): void \{[\s\S]*?this\.authRestartArmed = false;/.test(reg), true);
+  /*
+   * Still the only writer of the reason, so signing out still ends conversations.
+   *
+   * Counted with the comments stripped, which is not fastidiousness: the docblock
+   * on `onAuthFailure` quotes the call it used to make, so a naive count reads 2
+   * and the assertion would have to be loosened to a number that no longer means
+   * "one call site".
+   */
+  check("only an explicit sign-out still writes the reason", (code.match(/stop\("agent_signed_out"\)/g) ?? []).length, 1);
+  check("and it is the sign-out route's own sweep", /signOutSessions[\s\S]*?stop\("agent_signed_out"\)/.test(code), true);
 
   /*
    * The kind, never the message: `describeError`'s text is the agent's own prose
@@ -6857,14 +6926,29 @@ process.stdout.write("\ntaking a file in\n");
      * client that lies about `content-length`, which is the only reason the route
      * can trust a declared length at all.
      *
-     * Streamed a mebibyte at a time rather than allocated whole: the check runs
-     * *before* each write, so at most one chunk past the limit is ever in memory
-     * and none of it reaches the disk.
+     * Streamed rather than allocated whole: the check runs *before* each write,
+     * so at most one chunk past the limit is ever in memory and none of it
+     * reaches the disk.
+     *
+     * ⚠ **This drives the real constant, so it costs a real `MAX_UPLOAD_BYTES` of
+     * writes**, and that quadrupled when the cap did. Two things keep it honest
+     * rather than merely slow. The chunk is **one buffer, enqueued repeatedly** —
+     * nothing here mutates it, and building an array of a hundred separate
+     * mebibytes put the whole cap on the heap to test a bound that exists so it
+     * never is. And the chunk is 8 MiB rather than 1, which is the same journey
+     * in an eighth of the pulls; the assertion below is `pulled < chunks.length`,
+     * a claim about stopping early rather than about a particular count, so the
+     * granularity is free to be coarse.
+     *
+     * Driving a smaller injected cap was the alternative and was declined: the
+     * number this asserts is the number the daemon actually enforces, and a
+     * driver that agrees with a parameter it passed in has asserted nothing.
      */
-    const mib = 1024 * 1024;
+    const step = 8 * 1024 * 1024;
+    const shared = chunk(step, 3);
     // Deliberately more than it takes to cross the line, so "it stopped early"
     // is a claim with something to be wrong about.
-    const chunks = Array.from({ length: MAX_UPLOAD_BYTES / mib + 5 }, () => chunk(mib, 3));
+    const chunks = Array.from({ length: Math.ceil(MAX_UPLOAD_BYTES / step) + 3 }, () => shared);
     const body = bodyOf(chunks);
     const result = await uploads.receive("s_big", {
       name: "huge.bin",
@@ -6882,6 +6966,65 @@ process.stdout.write("\ntaking a file in\n");
   }
 
   await uploads.shutdown();
+}
+
+/* ------------------------------------------------------------------ *
+ * How fast one session may spend this machine's disk
+ *
+ * The soft bound beside the hard ones. `MAX_SESSION_UPLOAD_BYTES` and
+ * `MAX_UPLOADS_PER_SESSION` are totals that never refill; this is a window, and
+ * it exists because the per-file cap went up 4× in the same change that added it.
+ *
+ * Driven as the pure decision rather than through `receive`, and that is the only
+ * way it *can* be driven: reaching `UPLOAD_RATE_BYTES` end-to-end means writing
+ * 300 MiB to a temp directory, per run, offline — which is not a cost this repo
+ * pays, so the alternative to asserting the function is asserting nothing. The
+ * class around it holds a `Map` and calls this; there is no second decision in it.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nhow fast one session may upload\n");
+{
+  const now = 1_700_000_000_000;
+  const full = [{ at: now - 1_000, bytes: UPLOAD_RATE_BYTES }];
+
+  check("a session that has uploaded nothing goes ahead", uploadRateVerdict([], now).waitMs, 0);
+  check(
+    "and one still under the budget does too",
+    uploadRateVerdict([{ at: now - 1_000, bytes: UPLOAD_RATE_BYTES - 1 }], now).waitMs,
+    0,
+  );
+
+  // Exactly the budget is refused rather than allowed one more, which is the
+  // boundary `uploadRateVerdict` states explicitly so it cannot drift by a `<=`.
+  check("spending precisely the budget is already too much", uploadRateVerdict(full, now).waitMs > 0, true);
+  /*
+   * The wait is *when the oldest entry falls out*, to the millisecond — an
+   * arbitrary backoff would be a number nobody can check, and one that is too
+   * short is a client retrying into the same refusal.
+   */
+  check("and the wait is when the oldest spend ages out", uploadRateVerdict(full, now).waitMs, UPLOAD_RATE_WINDOW_MS - 1_000);
+
+  /*
+   * The window really is a window: the same bytes, older, decide nothing.
+   * `at > floor` is strict, so an entry exactly `UPLOAD_RATE_WINDOW_MS` old is
+   * already out — the boundary again, and stated in the same direction.
+   */
+  const stale = [{ at: now - UPLOAD_RATE_WINDOW_MS, bytes: UPLOAD_RATE_BYTES * 4 }];
+  check("bytes older than the window are not spent at all", uploadRateVerdict(stale, now).waitMs, 0);
+  check("and are dropped rather than carried", uploadRateVerdict(stale, now).kept, []);
+
+  // Half in and half out: only what is still inside counts, so a session cannot
+  // be held down by what it did an hour ago.
+  const straddling = [
+    { at: now - UPLOAD_RATE_WINDOW_MS - 1, bytes: UPLOAD_RATE_BYTES },
+    { at: now - 10, bytes: 1 },
+  ];
+  check("a mixed window counts only what is inside it", uploadRateVerdict(straddling, now).waitMs, 0);
+  check("keeping exactly those entries", uploadRateVerdict(straddling, now).kept.length, 1);
+
+  // Never zero while refusing: `Retry-After: 0` invites the retry it refuses.
+  const onTheEdge = [{ at: now - UPLOAD_RATE_WINDOW_MS + 1, bytes: UPLOAD_RATE_BYTES }];
+  check("a refusal never says to retry immediately", uploadRateVerdict(onTheEdge, now).waitMs >= 1, true);
 }
 
 /* ------------------------------------------------------------------ *
@@ -7333,7 +7476,15 @@ process.stdout.write("\nwhich sessions the daemon brings back\n");
   // `switch` has no `default` arm, so a new `ExitReason` is a compile error.
   check("a graceful restart comes back at boot", boot("daemon_shutdown"), true);
   check("and so does a crash", boot("daemon_restarted"), true);
-  check("a session somebody stopped never does", boot("stopped"), false);
+  /*
+   * ⚠ **Stopped: never at boot, and now yes on a prompt.** The `false` on both
+   * triggers was how the daemon avoided overruling a person — and a prompt is not
+   * the daemon deciding anything, it is that person typing into the conversation.
+   * What forced it is the composer becoming unconditional: a box that answers
+   * `409 session_terminal` is worse than no box.
+   */
+  check("a session somebody stopped never comes back on its own", boot("stopped"), false);
+  check("but typing into it starts it again", typed("stopped"), true);
   check("nor does one that never started", [boot("start_failed"), boot("start_timeout")], [false, false]);
   /*
    * `agent_kill_failed` is legacy and stays out, and this line is the guard
@@ -7351,6 +7502,22 @@ process.stdout.write("\nwhich sessions the daemon brings back\n");
    * somebody explicitly asking, and "it crashed, let me carry on" should work.
    */
   check("an agent that quit on its own waits to be asked", [boot("agent_exited"), typed("agent_exited")], [false, true]);
+  /*
+   * ⚠ **The second asymmetry, and it is a reversal.** `agent_signed_out` answered
+   * `false` on both triggers, and that made the state unreachable from inside the
+   * app: `reloadCredentials` is the only other reversal and every one of its
+   * callers is an in-app credential write, so a CLI that refreshed its own token —
+   * or somebody signing in from their own terminal — was left with a conversation
+   * nothing could bring back, under a notice claiming they were signed out.
+   *
+   * It follows `agent_exited`'s split for `agent_exited`'s reason. A prompt is a
+   * person asking for *this* conversation now, and by then the credential
+   * situation may be anything at all; a boot pass is nobody asking, and starting
+   * an agent that cannot authenticate at 4am is how a fleet spends a morning on
+   * it. What a revoked credential now costs is one error row per message somebody
+   * chooses to send — see `onAuthFailure`, which no longer ends anything.
+   */
+  check("a signed-out conversation waits to be asked too", [boot("agent_signed_out"), typed("agent_signed_out")], [false, true]);
   // No conversation to return to means nothing to return to it with, whatever
   // the reason says.
   check(
@@ -8046,6 +8213,9 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     const store = storeOf([
       interruptedRow("s_typed", "daemon_shutdown", "a_typed"),
       interruptedRow("s_killed", "stopped", "a_killed"),
+      // `create = false` points this row's workspace at a directory that was
+      // never made — the fixture for "somebody deleted the folder".
+      interruptedRow("s_gone", "daemon_shutdown", "a_gone", false),
     ]);
     const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
     own.restore({ reapOrphans: false });
@@ -8070,12 +8240,33 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
       return response.status;
     };
 
+    /*
+     * ⚠ **A prompt is refused when the workspace is gone, and it is checked on
+     * every message rather than only before a resume.**
+     *
+     * The guard sat inside the resume branch, so a session whose folder vanished
+     * *while it was open* kept a live agent standing in a directory that no
+     * longer existed — and the first anybody heard was the agent's own
+     * `Internal error: Path "…" does not exist`, in the transcript, with no
+     * remedy on the screen. `409 workspace_missing` is a sentence the client
+     * already draws.
+     */
+    check("a message to a session whose folder is gone is refused", await say("s_gone"), 409);
+
     check("a message to an interrupted session is accepted", await say("s_typed"), 202);
     check("because the daemon resumed it first", rig.resumes()[0]?.sessionId, "a_typed");
-    // The half that matters more: Stop still means stopped. A prompt to a
-    // session somebody ended must not quietly revive it.
-    check("a message to a stopped one still is not", await say("s_killed"), 409);
-    check("and no agent was started for it", rig.resumes().length, 1);
+    /*
+     * ⚠ **And a message to a stopped one is accepted too, which reverses this
+     * pair.** It asserted `409` and "no agent was started for it", on the rule
+     * that Stop must mean stopped — which it still does *for the daemon*: nothing
+     * revives it on a boot pass, and `autoResumable` keeps answering `false` there.
+     * What changed is that a prompt was never the daemon deciding anything. It is
+     * the person who pressed Stop typing into that conversation again, and the
+     * composer is now unconditional, so the alternative is a box whose only
+     * possible answer is a refusal.
+     */
+    check("a message to a stopped one starts it again", await say("s_killed"), 202);
+    check("because that one was resumed as well", rig.resumes().length, 2);
     await own.shutdown();
   }
 

@@ -22,6 +22,41 @@ paths:
 stays off, because it is untrusted text quoting an untrusted repository.
 `Markdown.tsx` is memoised on the joined text of a coalesced run.
 
+- **Markdown renders what somebody wrote, including the marker they wrote it
+  with.** `1)` and `1.` are both CommonMark and **mdast records neither** — a
+  `list` node carries `ordered`, `start` and `spread` — so `list-style-type:
+  decimal` drew `1.` over a message that said `1)`. `remarkListDelimiter` in
+  `ui/mdlist.ts` reads the delimiter back out of `file.value` at the node's own
+  `position.start.offset` and marks the list; `index.css` draws the marker with
+  `counter(list-item)` on `::marker`. Its own module because `Markdown.tsx` cannot
+  be imported offline. **`list-decimal` stays on the element**: a browser that
+  will not style `::marker` then draws exactly what it drew before, so there is no
+  third state. `start` is passed through as well, which it was not — a message
+  beginning `10)` was renumbered as well as re-punctuated.
+- **A message you have sent and not had back is a row in the conversation**, from
+  `echo.ts` through `SessionView` — never a bubble under the transcript, which is
+  where `Composer` used to draw it with a spinner beside it, and from where it
+  jumped into the transcript one commit later when the `prompt` event landed. It
+  is drawn **above** the working line, because `applySnapshot` can mark a session
+  running while its own event is still on the socket. Nothing says "sending": a
+  refusal puts the text back in the box with a toast, which is a remedy rather
+  than a warning. Keyed by session, so leaving mid-send and coming back still
+  shows it. Settled in `store.ts` — `onEvents` compares the seq, and
+  `promptLanded` does it again when the POST answers, because that answer
+  routinely loses the race to the socket.
+- **A turn that stopped says so in words, and a cancel says it where `working…`
+  was.** `stopReasonText` and `resolvedByText` in `tail.ts` replace three places
+  that drew a wire identifier with its underscores taken out (`turn cancelled`,
+  `pump failed`, `ended: agent_exited`); `bits.tsx`'s `exitText` is the third.
+  `cancelled` is the only one somebody *did*, so it takes `WaitingFoot`'s own
+  shape — same line, `WorkingMark still`, `text-danger` — and lands in the row the
+  working line held an instant earlier, a cancelled turn's `turn_end` being its
+  last event. Every other reason stays a centred line. **Every table falls through
+  to the identifier for a value it does not know**, which is the rule everywhere
+  else on this wire: legible, and never a guess. What is drawn changed and nothing
+  else did — `showsInTranscript` and `taskFloor` still key on `stopReason !==
+  "end_turn"`.
+
 - **A link is drawn only where there is somewhere to go.** `openableHref` in
   `ui/links.ts` allows `http`, `https` and `mailto`, answers `null` for everything
   else — a path, a `file://` URI, a fragment — and the text is still drawn without
@@ -196,7 +231,9 @@ rendering that must never happen — the scope is the whole difference between t
 | `packages/web/src/ui/DiffView.tsx` | A file change, drawn — for the transcript **and** the approval card. Its body paints `bg-surface` inside a `raised` frame because that is the ground the two tints were measured against; on `raised` they are 1.03:1, i.e. invisible |
 | `packages/web/src/ui/links.ts` | `openableHref`: which schemes a tap in agent output may open, and why a relative path is text rather than a link. Named for the case collision with `Markdown.tsx` on a case-insensitive filesystem |
 | `packages/web/src/ui/Markdown.tsx` | Agent output as markdown; code blocks with a lazily-loaded highlighter |
-| `packages/web/src/ui/Bubble.tsx` | The user's own messages, right-aligned. One component, three call sites |
+| `packages/web/src/ui/mdlist.ts` | Which ordered lists were written with `)`, recovered from the source because mdast throws the character away. Pure, so `webcheck` imports it |
+| `packages/web/src/echo.ts` | The message that has been sent and has not come back: a module `Map` with subscribers, keyed by session, the third of `attach.ts`'s shape. At `src/` because `store.ts` settles it |
+| `packages/web/src/ui/Bubble.tsx` | The user's own messages, right-aligned. One component, three call sites, and **no `pending`** — a sent message looks sent |
 | `packages/web/src/ui/AskCard.tsx` | The one card for "the agent is waiting on you", whichever way it asked. Two bodies go inside it and neither knows what the other is |
 | `packages/web/src/ui/ElicitationCard.tsx` | The question's body. Renders generically, which is what makes it right for an MCP schema as well as `AskUserQuestion` |
 

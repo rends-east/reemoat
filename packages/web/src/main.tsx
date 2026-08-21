@@ -4,6 +4,7 @@ import { App } from "./App";
 import "./index.css";
 import { installWakeDetection } from "./resume";
 import { store } from "./store";
+import { inTelegram, telegramReady } from "./telegram";
 import { RootErrorBoundary } from "./ui/ErrorBoundary";
 
 const root = document.getElementById("root");
@@ -19,6 +20,24 @@ if (root === null) throw new Error("no #root");
  */
 installWakeDetection();
 void store.bootstrap();
+
+/*
+ * And Telegram, if this is running inside it.
+ *
+ * Here for the reason above — once, outside React — and because it is the same
+ * kind of statement: the page is up. Telegram keeps its own loading placeholder
+ * over a mini app until it hears this. A no-op everywhere else; `inTelegram`
+ * answers on the transport being injected, so an ordinary browser sets nothing
+ * and reads nothing.
+ *
+ * The `<html>` marker is what `index.css` hangs the header inset off, and it is
+ * an attribute rather than a class so nothing in Tailwind's scan has to know
+ * about it.
+ */
+if (inTelegram()) {
+  document.documentElement.dataset["telegram"] = "";
+  telegramReady();
+}
 
 /*
  * The boundary is **inside** `StrictMode` and wraps everything React renders.

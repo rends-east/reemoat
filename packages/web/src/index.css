@@ -405,6 +405,54 @@
     }
   }
 
+  /*
+   * A sheet arrives from the edge it is anchored to.
+   *
+   * The fourth keyframe, and it answers the same complaint the third did, one
+   * screen over: settings *appeared*, which on a phone reads as the app having
+   * been replaced rather than as a panel having been opened over what you were
+   * looking at. `SHEET_PANEL` carried `animate-rise` — six pixels — which is the
+   * right amount for a card materialising at the centre of a desktop and is
+   * nothing at all for a panel covering 92% of a phone.
+   *
+   * So the two cases are two utilities on the same element: `animate-sheet
+   * sm:animate-rise`. Below `sm` the sheet is bottom-anchored (`Sheet.tsx` uses
+   * `justify-end`) and travels its own height; at `sm` and above it is a centred
+   * card and `rise` is unchanged, because a card in the middle of the screen has
+   * no edge to have come from and sliding it up from the bottom of a desktop
+   * would be a much longer journey to the same place. The breakpoint is a class
+   * string, which is `AppShell`'s rule about widths staying in CSS.
+   *
+   * 260ms against `rise`'s 140, and the easing is not `ease-out`: it travels a
+   * screen instead of six pixels, and a fast tail is what makes that read as a
+   * panel being placed rather than as one being thrown. No opacity — a sheet that
+   * fades *and* slides is two statements about one object, and the slide already
+   * says everything.
+   */
+  --animate-sheet: sheet 260ms cubic-bezier(0.32, 0.72, 0, 1);
+
+  @keyframes sheet {
+    from {
+      transform: translateY(100%);
+    }
+  }
+
+  /*
+   * And the ground behind it darkens rather than switching.
+   *
+   * The fifth, and the smallest: a scrim that snaps to full while the panel is
+   * still travelling reads as two unrelated things happening, and it is the half
+   * that says the screen behind is no longer the one you are using. Opacity only,
+   * on the same clock as the panel, so they land together.
+   */
+  --animate-scrim: scrim 260ms ease-out;
+
+  @keyframes scrim {
+    from {
+      opacity: 0;
+    }
+  }
+
   @keyframes blink {
     0%,
     100% {
@@ -501,6 +549,30 @@ body {
 }
 .pt-safe {
   padding-top: max(0.5rem, env(safe-area-inset-top));
+}
+
+/*
+ * Telegram draws its own controls **over** the page, and `env()` does not know.
+ *
+ * ⚠ Reported with a screenshot: inside the Telegram mini app the client's
+ * floating pill — ✕ Close top-left, ⌄ ⋯ top-right — sat directly on the session
+ * title, which was clipped behind it. `safe-area-inset-top` describes the
+ * *device's* notch and is what `pt-safe` already spends; the mini-app chrome is
+ * something Telegram paints inside the same viewport afterwards, so on a phone
+ * with no notch the inset is 0 and the header starts underneath the buttons.
+ *
+ * Which is why this is a floor rather than an addition. Adding to `env()` would
+ * double-count on a notched device, where the pill is drawn *below* the notch and
+ * the two insets describe the same strip of screen. 3.25rem clears the pill on
+ * iOS and Android; the `max()` means whichever is larger wins and neither is
+ * assumed to be.
+ *
+ * Scoped to `[data-telegram]`, written by `main.tsx` only when the bridge is
+ * actually injected — so an ordinary browser, and a phone home-screen shortcut,
+ * keep exactly the header they had.
+ */
+:root[data-telegram] .pt-safe {
+  padding-top: max(3.25rem, env(safe-area-inset-top));
 }
 
 /* Tap targets on a phone. 44px is the platform minimum and the approve buttons
@@ -736,6 +808,310 @@ kbd {
 }
 .hljs-strong {
   font-weight: 600;
+}
+
+/*
+ * **A screen that replaces another one is drawn arriving, on a phone.**
+ *
+ * Opening a conversation below `lg` used to be a swap — the list was there and
+ * then it was not — with nothing saying which way you had gone or that going back
+ * was a direction at all. This is that, and it is the one place in this app where
+ * motion carries meaning rather than polish.
+ *
+ * **The mechanism is the browser's own view transitions**, driven from
+ * `router.ts`, which writes `data-nav` on the document for the length of one
+ * navigation. The argument for it over holding the outgoing screen mounted is
+ * there rather than here; what belongs here is what that buys this file: the old
+ * frame is a *snapshot*, so nothing below has to worry about two `SessionView`s
+ * existing at once, and the `transform`s are on pseudo-elements outside the
+ * document, so no `position: fixed` or `sticky` inside the app resolves against
+ * one. `Sheet` portals to the body precisely to avoid a transformed ancestor and
+ * is unaffected here for the same reason.
+ *
+ * **Two keyframes for four movements**, via `animation-direction: reverse`, and
+ * that is not brevity for its own sake: a back that is not exactly the forward
+ * played backwards is a back that feels like a second forward, and writing four
+ * sets of numbers is how the two drift apart. The leaving screen goes only 22% and
+ * dims — it is still there, underneath, which is the whole reason the gesture
+ * reads as a stack.
+ *
+ * `mix-blend-mode: normal` is required rather than tidy. The UA stylesheet sets
+ * `plus-lighter` on both snapshots so its default cross-fade stays even at the
+ * midpoint; with a slide, the two overlap while both are opaque and that blend
+ * makes them glow through each other.
+ *
+ * **At `lg` and above there is no motion**, and it is refused in CSS rather than
+ * in JavaScript — `AppShell` is explicit that no breakpoint may be read there,
+ * and a resized window must not be able to animate a layout that is not the one
+ * on screen. Above that width the rail is permanent and only the pane changes, so
+ * there is no screen arriving to draw. `animation: none` rather than a zero
+ * duration, which is what makes the transition finish on the next frame and
+ * behave exactly as it did before any of this existed.
+ *
+ * ⚠ **That exemption did nothing for two releases**, and the four rules below are
+ * why: they are `:root[data-nav="…"]::view-transition-old(root)` at `(0,2,1)`, and
+ * the `@media` block that overrules them had been written as a bare
+ * `::view-transition-old(root)` at `(0,0,1)`. A media query gates *when* a rule
+ * applies and adds no specificity to it. Every selector here is keyed on
+ * `data-nav` for that reason, which puts the whole file at one specificity where
+ * source order decides — and `webcheck` asserts that as a property over
+ * `index.css` rather than over the two gates that were wrong.
+ *
+ * The `prefers-reduced-motion` block at the foot of this file had the same hole
+ * and is repaired the same way. The refusal that actually works is in
+ * `router.ts`, which declines to start a transition at all; that block is the
+ * belt beside this brace, and it is here because the reason it looks redundant is
+ * the reason it is easy to delete.
+ */
+@keyframes nav-enter {
+  from {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes nav-under {
+  to {
+    transform: translateX(-22%);
+    opacity: 0.55;
+  }
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  mix-blend-mode: normal;
+}
+
+:root[data-nav="push"]::view-transition-old(root) {
+  animation: nav-under 220ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+:root[data-nav="push"]::view-transition-new(root) {
+  animation: nav-enter 220ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+/*
+ * Going back, the screen you are leaving has to paint **over** the one you are
+ * returning to — it is the thing sliding away, and the one underneath was there
+ * all along. The default order is the opposite (the new snapshot is the later
+ * sibling), so this is the one place the pair is not symmetric.
+ */
+:root[data-nav="pop"]::view-transition-old(root) {
+  animation: nav-enter 220ms cubic-bezier(0.32, 0.72, 0, 1) both reverse;
+  z-index: 1;
+}
+:root[data-nav="pop"]::view-transition-new(root) {
+  animation: nav-under 220ms cubic-bezier(0.32, 0.72, 0, 1) both reverse;
+}
+
+/*
+ * **Inside a sheet, the sheet moves and the screen behind it does not.**
+ *
+ * Tapping a section in Settings replaced the panel's contents where they stood,
+ * and Back replaced them again — the "windows teleporting" the rest of this
+ * block exists to remove, one layer in. It is the same push and pop, scoped: the
+ * root is pinned so the conversation behind the scrim stays exactly where it is,
+ * and `view-transition-name: sheet-body` on the panel's body is what gives the
+ * pane its own pair of snapshots to slide.
+ *
+ * Naming the **body** rather than the panel is half of it. The frame — the
+ * rounded top, the head with "Settings" and the ✕ — is not what changed and must
+ * not travel; only the part whose contents were swapped does.
+ *
+ * **The other half is in `bits.tsx`, and without it this drew two screens at
+ * once.** Being named lifts the body out of the panel's snapshot, so it stops
+ * inheriting the panel's fill and both of its own snapshots are transparent
+ * images of glyphs. Measured mid-slide at 390px: the leaving list's rows and the
+ * arriving section's fields were both entirely legible, one over the other. The
+ * animation was right the whole time — a pane that arrives has to *cover* the one
+ * it replaces, and that is `bg-surface` on `SHEET_BODY`, not a keyframe.
+ */
+:root[data-nav="section-push"]::view-transition-old(root),
+:root[data-nav="section-push"]::view-transition-new(root),
+:root[data-nav="section-pop"]::view-transition-old(root),
+:root[data-nav="section-pop"]::view-transition-new(root) {
+  animation: none;
+}
+
+:root[data-nav="section-push"]::view-transition-old(sheet-body) {
+  animation: nav-under 220ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+:root[data-nav="section-push"]::view-transition-new(sheet-body) {
+  animation: nav-enter 220ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+:root[data-nav="section-pop"]::view-transition-old(sheet-body) {
+  animation: nav-enter 220ms cubic-bezier(0.32, 0.72, 0, 1) both reverse;
+  z-index: 1;
+}
+:root[data-nav="section-pop"]::view-transition-new(sheet-body) {
+  animation: nav-under 220ms cubic-bezier(0.32, 0.72, 0, 1) both reverse;
+}
+
+/*
+ * **A sheet leaves the way it arrived.**
+ *
+ * `animate-sheet` brings it up on mount and nothing took it back down — closing
+ * Settings simply stopped drawing it, which on a phone is a panel covering 92% of
+ * the screen vanishing between two frames. This is that animation played
+ * backwards, which is why it reuses the same keyframe with `reverse` rather than
+ * writing a second set of numbers that can drift from the first.
+ *
+ * The root is pinned again: what is behind the sheet was there all along and is
+ * not arriving. The scrim gets its own name so it can fade on its own clock —
+ * without one it belongs to the root snapshot and would still be dark under a
+ * panel that has already gone.
+ *
+ * **The panel travels as one object, and the body giving up its name is what
+ * makes that true.** A `view-transition-name` does not nest: a named descendant
+ * is *lifted out of* its ancestor's snapshot into a sibling group, so with the
+ * body named here the panel's image was the frame with the contents cut out of
+ * it, and the contents sat in a group of their own with nothing moving them.
+ * Measured at 390px, two fifths of the way down: the head and the rounded top had
+ * travelled and every row inside was exactly where it started. Silencing that
+ * group's fade — which is what stood here — makes the contents hold still
+ * *sharply* instead of thinning out, and holding still was the defect. The name
+ * is dropped for the length of this navigation instead, down beside the rule that
+ * grants it.
+ */
+:root[data-nav="sheet-close"]::view-transition-old(root),
+:root[data-nav="sheet-close"]::view-transition-new(root) {
+  animation: none;
+}
+:root[data-nav="sheet-close"]::view-transition-old(sheet) {
+  animation: sheet 260ms cubic-bezier(0.32, 0.72, 0, 1) both reverse;
+  z-index: 1;
+}
+:root[data-nav="sheet-close"]::view-transition-old(scrim) {
+  animation: scrim 260ms ease-out both reverse;
+}
+
+/*
+ * At `sm` and above a sheet is a centred card with the section list beside the
+ * section, so neither slide describes what happens: the pane changes next to a
+ * list that stays, and the card has no edge to have come from. `rise` is what
+ * brings it in there, and this is the matching absence.
+ *
+ * **A card leaves the way `rise` brought it**, and that half was missing: the
+ * close was written for the phone and gated at no width at all, so a desktop
+ * dialog threw itself a full screen height downwards out of the middle of the
+ * window. Measured at 1280px, `document.getAnimations()` mid-close reported
+ * `sheet` running on `::view-transition-old(sheet)` — the one slide left anywhere
+ * above these breakpoints. The scrim is deliberately not gated with it: it fades
+ * *in* at every width, and a fade is not the thing being refused here.
+ */
+@media (min-width: 40rem) {
+  :root[data-nav="section-push"]::view-transition-old(sheet-body),
+  :root[data-nav="section-push"]::view-transition-new(sheet-body),
+  :root[data-nav="section-pop"]::view-transition-old(sheet-body),
+  :root[data-nav="section-pop"]::view-transition-new(sheet-body) {
+    animation: none;
+  }
+
+  :root[data-nav="sheet-close"]::view-transition-old(sheet) {
+    animation: rise 140ms ease-out both reverse;
+  }
+}
+
+/*
+ * **And above `lg` the screen does not move, which is what this always claimed
+ * and never did.**
+ *
+ * ⚠ `@media` adds **no specificity**, and that is the whole post-mortem. This
+ * block was written as a bare `::view-transition-old(root)` — one pseudo-element,
+ * `(0,0,1)` — against the `:root[data-nav="push"]::view-transition-old(root)` it
+ * had to overrule, which is `(0,2,1)`. The wrapper reads like a stronger
+ * statement and is not one, so the desktop kept every phone animation it was
+ * supposed to be exempt from: measured at 1280px, a synthetic `data-nav="push"`
+ * had `nav-enter` and `nav-under` running on the root pair. A rail user opening
+ * their first conversation had the whole window slide in from the right.
+ *
+ * `:root[data-nav]` matches the attribute without naming a value, which costs the
+ * same `(0,2,1)` and wins on order — so this stays one rule for all four
+ * movements rather than four copies to keep in step. The same repair is at the
+ * foot of this file, where `prefers-reduced-motion` had the identical hole.
+ */
+@media (min-width: 64rem) {
+  :root[data-nav]::view-transition-old(root),
+  :root[data-nav]::view-transition-new(root) {
+    animation: none;
+  }
+}
+
+/*
+ * The sheet's own names, which exist only while a transition is running.
+ *
+ * On the elements rather than in the class strings because `Sheet` is portaled to
+ * the body and there is exactly one of it: a `view-transition-name` has to be
+ * unique in the document, and a utility class is an invitation to put a second
+ * one somewhere.
+ */
+[data-sheet-panel] {
+  view-transition-name: sheet;
+}
+[data-sheet-body] {
+  view-transition-name: sheet-body;
+}
+[data-sheet-scrim] {
+  view-transition-name: scrim;
+}
+
+/*
+ * …and the body gives its name back for a close, so it rides down inside the
+ * panel instead of being a sibling of it.
+ *
+ * This works at all because `router.ts` writes `data-nav` **before** it calls
+ * `startViewTransition`, and a name is read at capture rather than declared for
+ * the document's lifetime — so which elements are their own snapshot is a
+ * decision each navigation gets to make. There is nothing to undo: the attribute
+ * is gone by the time anything else is captured.
+ *
+ * Only the close. A *section* needs the body named — that group is the whole
+ * animation — and only the close asks the panel to move as a single object.
+ */
+:root[data-nav="sheet-close"] [data-sheet-body] {
+  view-transition-name: none;
+}
+
+/*
+ * The belt beside `router.ts`'s brace — which had the `lg` block's bug and so was
+ * neither. `:root[data-nav]` is the same `(0,2,1)` every rule above carries; the
+ * bare pseudo-elements that stood here were `(0,0,1)` and overruled nothing.
+ *
+ * It stays a belt: `announce` declines to start a transition at all under reduced
+ * motion, so this can only matter if that check is ever removed. It is here
+ * because the reason it looks redundant is the reason it is easy to delete.
+ */
+@media (prefers-reduced-motion: reduce) {
+  :root[data-nav]::view-transition-old(root),
+  :root[data-nav]::view-transition-new(root),
+  :root[data-nav]::view-transition-old(sheet),
+  :root[data-nav]::view-transition-new(sheet),
+  :root[data-nav]::view-transition-old(sheet-body),
+  :root[data-nav]::view-transition-new(sheet-body),
+  :root[data-nav]::view-transition-old(scrim),
+  :root[data-nav]::view-transition-new(scrim) {
+    animation: none;
+  }
+}
+
+/*
+ * An ordered list wears the delimiter it was written with.
+ *
+ * `list-style-type: decimal` draws `1.` and has no other setting — `1)` is not a
+ * list style, it is a *marker*, and `content` on `::marker` is the only thing
+ * that can put one there. `counter(list-item)` is the browser's own implicit
+ * list counter, so `<ol start>` and a per-item `value` are both honoured with
+ * nothing here having to know about them.
+ *
+ * Which lists get it is decided in `ui/mdlist.ts`, from the markdown source,
+ * because mdast throws the character away — see the docblock there.
+ *
+ * **The fallback is the whole reason `list-decimal` stays on the element.** A
+ * browser that will not style `::marker` ignores this rule and draws `1.`, which
+ * is the rendering this replaced; there is no third state where the marker goes
+ * missing. Unlayered like every other rule in this file, so it does not have to
+ * out-specify the utility it is overriding.
+ */
+ol.md-paren > li::marker {
+  content: counter(list-item) ") ";
 }
 
 /*

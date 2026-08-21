@@ -4,7 +4,6 @@ import { gateNotice, showsGateLink } from "../gate";
 import { navigate } from "../router";
 import { store } from "../store";
 import type { InstanceConfig } from "../instance";
-import { SourceNotice } from "./gate/GateCard";
 import { Button, FIELD, LINK } from "./bits";
 
 /**
@@ -109,7 +108,7 @@ export function SignIn({
             htmlFor="signin-name"
             className="mt-4 block text-2xs font-semibold tracking-wider text-muted uppercase"
           >
-            Name
+            Username
           </label>
           <input
             id="signin-name"
@@ -198,8 +197,6 @@ export function SignIn({
           )}
           {gateNotice(config) !== null && <p>{gateNotice(config)}</p>}
         </div>
-
-        <SourceNotice source={config?.source ?? null} />
       </div>
     </div>
   );

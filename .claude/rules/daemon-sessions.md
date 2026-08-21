@@ -11,6 +11,23 @@ paths:
 
 ## Surviving a restart
 
+**Nothing takes the message box off the screen, and a conversation you cannot
+type into does not exist in this app.** `Composer.tsx` has no early return;
+sending into an ended one revives it per the table below. What is gated is Send,
+never the box. Q7.103.
+
+**An agent that cannot authenticate is replaced, not buried.** `onAuthFailure`
+records the failure — `record` has already appended it, so it is in the transcript
+— and calls `restartAgent`, which stops with `config_changed` because it *is* "the
+daemon took the agent away and is bringing it straight back" and because a new
+`ExitReason` reads as `showsAsEnded` on every older client. **Armed once per
+prompt**: a credential that really has gone fails the fresh agent too, the second
+failure sits beside the first, and the person's next message drives the next
+attempt. `agent_signed_out` is now written by **one** call site, the explicit
+`POST /agent-auth/:agent/logout` sweep. Q7.99 measured why: what goes stale is the
+process, not the credential — a session idle 5h36m failed while its token had 1.4h
+left, and a fresh agent worked four minutes later. Q7.103.
+
 **A session reads as stopped only when somebody stopped it.** Everything else the
 daemon ended it brings back by itself, on the same conversation, at the next boot,
 over ACP's `session/resume` — which restores the agent's own context without
@@ -22,12 +39,24 @@ arm**, so adding a reason is a compile error rather than a silent `false`:
 | reason | at boot | on a prompt |
 |---|---|---|
 | `daemon_shutdown`, `daemon_restarted`, `config_changed` | yes | yes |
-| `agent_exited` | no | yes |
-| `stopped`, `start_failed`, `start_timeout`, `agent_kill_failed` | no | no |
+| `agent_exited`, **`stopped`**, **`agent_signed_out`** | no | **yes** |
+| `start_failed`, `start_timeout`, `agent_kill_failed` | no | no |
 
-`agent_exited` splits because the boot pass has no recency fence — an agent that
-crashed on Tuesday would otherwise be handed a fresh process by Friday's deploy —
-while a prompt is somebody explicitly asking. Q2.2.
+**Everything splits on the same rule: a prompt is a person asking for this
+conversation *now*, and a boot pass is nobody asking.** The boot pass has no
+recency fence — an agent that crashed on Tuesday would otherwise be handed a fresh
+process by Friday's deploy — and starting an agent that cannot authenticate at 4am
+is how a fleet spends a morning on it. Q2.2, Q7.103.
+
+⚠ **`stopped` and `agent_signed_out` were `no`/`no` and the middle row is a
+reversal.** Refusing a prompt was how the daemon avoided overruling a person — and
+a prompt is not the daemon deciding anything, it is that same person typing into
+the conversation again. What forced it is that the composer is unconditional now: a
+box whose only possible answer is `409 session_terminal` is worse than no box. The
+last row is what is genuinely unrevivable — the first two never had a conversation
+to return to (the `agentSessionId` guard answers them anyway), and
+`agent_kill_failed` carries `agentConfirmedDead: false`, so the old agent may still
+hold the conversation file.
 
 `status` derives through `endedWithDaemon`, so **`interrupted` means exactly "the
 daemon ended this and it is coming back"** and a client can render it without

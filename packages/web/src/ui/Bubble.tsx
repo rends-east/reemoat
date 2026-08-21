@@ -6,7 +6,7 @@ import type { PromptAttachmentRef } from "../wire";
 import type { FileAccess } from "./files";
 import { ImagePreview } from "./ImagePreview";
 import { Markdown } from "./Markdown";
-import { Icon, Spinner } from "./bits";
+import { Icon } from "./bits";
 
 /**
  * What the person said, drawn the way a messenger draws it.
@@ -21,22 +21,29 @@ import { Icon, Spinner } from "./bits";
  *
  * One component, three call sites, so they cannot drift again.
  *
+ * **There is no `pending` any more, and its removal is the point rather than a
+ * tidy-up.** A message on its way carried a spinner and the word `sending`, drawn
+ * under the transcript by the composer — so a message you had just sent was marked
+ * as not-quite-sent for as long as a resume took, and then moved. Nothing is
+ * claimed about delivery now: the bubble is the same bubble in the same place
+ * whichever side of the round trip it is on. What a refusal costs is unchanged and
+ * is a *remedy* rather than a warning — the text goes back into the box, the chips
+ * come back with it, and a toast says why.
+ *
  * **Agent text stays full-bleed and left**, deliberately. The asymmetry is what
  * makes a conversation readable; bubbling the agent's side too would halve the
  * width of the thing people are actually here to read.
  */
 export function UserBubble({
   text,
-  pending = false,
   attachments = [],
   files = null,
 }: {
   text: string;
-  pending?: boolean;
   attachments?: readonly PromptAttachmentRef[];
   files?: FileAccess | null;
 }): ReactNode {
-  if (text.trim().length === 0 && !pending && attachments.length === 0) return null;
+  if (text.trim().length === 0 && attachments.length === 0) return null;
   return (
     /*
      * **Room above and below, and it belongs here rather than on the run.**
@@ -150,11 +157,6 @@ export function UserBubble({
               </li>
             ))}
           </ul>
-        )}
-        {pending && (
-          <p className="mt-1 flex items-center gap-1.5 text-2xs text-muted">
-            <Spinner /> sending
-          </p>
         )}
       </div>
     </div>

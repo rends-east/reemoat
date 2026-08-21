@@ -109,28 +109,45 @@ const UPLOAD_STALL_MS = 30_000;
 const UPLOAD_FLOOR_BYTES_PER_MS = 50;
 
 /**
+ * The wall clock an upload may not exceed however slowly it is progressing.
+ *
+ * ⚠ **This was 300s, and it was the hidden blocker under raising
+ * `MAX_UPLOAD_BYTES` to 100 MiB.** The old docblock said 300s "deliberately: that
+ * is the token lifetime, so the number cannot quietly become load-bearing on
+ * something else" — and then conceded, in its own next sentence, that a request
+ * in flight does not die at `exp` (the daemon verifies the bearer once at the
+ * start, the relay authorizes at CONNECT). So the coupling was tidiness rather
+ * than a property, and what it actually did at the new size was abort a
+ * *progressing* 100 MiB upload at five minutes, i.e. anything under ~350 KiB/s —
+ * a failure with no message, halfway through, on the slow links this cap most
+ * matters on.
+ *
+ * 45 minutes is above `scaled` at the largest file this daemon will take
+ * (~35 min at the assumed floor), so the **formula** governs at every size and
+ * this is a ceiling on arithmetic rather than a second, invisible limit. It is
+ * not a claim about a token, a socket or a tunnel; the thing that actually
+ * notices a dead link is `stallMs`, thirty seconds, reset by every progress
+ * event.
+ */
+const UPLOAD_HARD_CAP_MS = 45 * 60 * 1000;
+
+/**
  * The two deadlines an upload runs under.
  *
  * A wall clock alone is the wrong instrument here: a slow-but-progressing upload
- * is not a failure, and 25 MiB over a phone uplink is minutes rather than the
- * 15s an ordinary request gets. So the primary budget is a **stall** — reset by
- * every progress event — and the wall clock is only a backstop against a
+ * is not a failure, and a large file over a phone uplink is many minutes rather
+ * than the 15s an ordinary request gets. So the primary budget is a **stall** —
+ * reset by every progress event — and the wall clock is only a backstop against a
  * connection that trickles for ever.
  *
- * `hardMs` is capped at 300s deliberately: that is the token lifetime, so the
- * number cannot quietly become load-bearing on something else. A request already
- * in flight does not die at `exp` — the daemon verifies the bearer once at the
- * start and the relay authorizes at CONNECT — but a cap above it would be
- * claiming a property nothing checks.
- *
  * Floored at `REQUEST_TIMEOUT_MS` so a one-byte upload is never *more* fragile
- * than an ordinary request.
+ * than an ordinary request, and capped at {@link UPLOAD_HARD_CAP_MS}.
  */
 export function uploadDeadlines(bytes: number): { stallMs: number; hardMs: number } {
   const scaled = 20_000 + Math.ceil(Math.max(bytes, 0) / UPLOAD_FLOOR_BYTES_PER_MS);
   return {
     stallMs: UPLOAD_STALL_MS,
-    hardMs: Math.min(300_000, Math.max(scaled, REQUEST_TIMEOUT_MS)),
+    hardMs: Math.min(UPLOAD_HARD_CAP_MS, Math.max(scaled, REQUEST_TIMEOUT_MS)),
   };
 }
 

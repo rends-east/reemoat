@@ -67,11 +67,53 @@ export interface UploadIndex {
   removeSession(sessionId: string): void;
 }
 
-/** 25 MiB. Above any screenshot, below anything that is a transfer rather than an attachment. */
-export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+/**
+ * 100 MiB per file.
+ *
+ * ⚠ **This was 25 MiB, and the comment said "above any screenshot, below anything
+ * that is a transfer rather than an attachment."** The line it drew was the right
+ * line for a phone in 2026-07 and the wrong one the moment somebody wanted to
+ * hand an agent a recording, a heap dump or a database export — all of which are
+ * attachments to a conversation in every sense except the size the sentence
+ * assumed. Raised on request, with the risks measured rather than waved at:
+ * nothing here buffers a body, the relay's numbers are h2 flow control granted on
+ * consumption rather than caps, and the running counter below is still the only
+ * bound on any request body anywhere in this system.
+ *
+ * Three things were coupled to it and had to come apart or move first, and each
+ * would have failed *silently* at the new number rather than loudly:
+ *
+ * - `keepAgentImage` sized an agent's base64 against this constant, so raising it
+ *   would have let ~133 MiB of string into one `Buffer.from` on the emit path.
+ *   {@link MAX_AGENT_IMAGE_BYTES} is that half, unhooked and unchanged.
+ * - The browser's own `uploadDeadlines` capped an upload's wall clock at 300 s,
+ *   which is under the time 100 MiB takes on anything but a fast link — a
+ *   *progressing* transfer aborted by the client that started it.
+ * - {@link MAX_SESSION_UPLOAD_BYTES} was 100 MiB, so one file would have filled a
+ *   session's whole budget.
+ *
+ * `MAX_IMPORT_BYTES` in `archive.ts` is deliberately still 50 MiB and is now the
+ * *smaller* number, which reverses their old order. It bounds something else: an
+ * archive is expanded onto disk as up to 20 000 entries, and what that costs has
+ * nothing to do with what one streamed file costs.
+ *
+ * ⚠ **The other ceiling is not in this repository.** `deploy/` ships no reverse
+ * proxy and `install.sh` tells operators to put one in front; nginx defaults
+ * `client_max_body_size` to **1 MB**, which refuses this with a 413 the daemon
+ * never sees. `deploy/README.md` says so out loud now.
+ */
+export const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 
-/** 100 MiB of staged files per session, consumed or not. */
-export const MAX_SESSION_UPLOAD_BYTES = 100 * 1024 * 1024;
+/**
+ * 1 GiB of staged files per session, consumed or not.
+ *
+ * Ten files at the per-file cap, which is the ratio it had before (four) widened
+ * rather than kept: the point of a second bound is that it is about the *session*
+ * and not about the file, and a session budget one file can exhaust has stopped
+ * being one. {@link MAX_UPLOADS_PER_SESSION} is untouched at 100 — the inode
+ * ceiling was never the thing under pressure.
+ */
+export const MAX_SESSION_UPLOAD_BYTES = 1024 * 1024 * 1024;
 
 /**
  * An inode ceiling beside the byte one.
@@ -93,6 +135,91 @@ export const MAX_PROMPT_ATTACHMENTS = 10;
  * this machine.
  */
 export const MAX_INLINE_IMAGE_BYTES = 5 * 1024 * 1024;
+
+/**
+ * The largest image this daemon will take *from* an agent and keep.
+ *
+ * ⚠ **25 MiB, and the number is unchanged — what changed is that it is its own
+ * constant.** `keepAgentImage` sized both its base64 pre-check and its
+ * post-decode check against {@link MAX_UPLOAD_BYTES}, which was fine while the
+ * two happened to want the same answer and became a hazard the moment that one
+ * was raised: the pre-check is `ceil(limit * 4 / 3)`, so a 100 MiB limit admits a
+ * ~133 MiB *string* into `Buffer.from` — on the agent's emit path, which must not
+ * await and must not allocate like that.
+ *
+ * They are different questions and now look it. That one is "how large a file may
+ * somebody put on this machine", which a person chooses, one file at a time, from
+ * a picker. This is "how large a blob may a model hand back", which nobody chose
+ * and which arrives already in memory as base64.
+ */
+export const MAX_AGENT_IMAGE_BYTES = 25 * 1024 * 1024;
+
+/**
+ * A session's upload budget over a rolling window, beside its total.
+ *
+ * **Soft protection, and the word is doing work.** Nothing here is a security
+ * boundary: anybody reaching this route holds a grant on this machine, and an
+ * agent on it runs as you with no sandbox at all — somebody who wants to fill
+ * this disk has a much shorter path than an upload form. What this bounds is
+ * *cost*, and the cost went up 4× per file in the same change: a hundred files at
+ * the new cap is a hundred streamed writes and an fsync each, and the ceilings
+ * above are totals that never refill for the life of a session.
+ *
+ * Shaped on the control plane's `WRITE_THROTTLE` rather than on its guessing
+ * policies, and for the reason that one gives: a limit against *cost* blocks
+ * briefly and **does not escalate**, because the caller is not an attacker to be
+ * discouraged, it is somebody whose next action should simply be a moment later.
+ * Three times the old per-session total in five minutes is far above any way of
+ * using this app and far below a way of hurting it.
+ *
+ * Charged on bytes actually written, so a refusal costs what it cost and no more.
+ */
+export const UPLOAD_RATE_BYTES = 300 * 1024 * 1024;
+
+/** The window {@link UPLOAD_RATE_BYTES} is spent over. */
+export const UPLOAD_RATE_WINDOW_MS = 5 * 60 * 1000;
+
+/** One request's cost against {@link UPLOAD_RATE_BYTES}. */
+export interface UploadCharge {
+  at: number;
+  bytes: number;
+}
+
+/**
+ * Whether this session may write now, and what is still inside the window.
+ *
+ * **A pure function taking the entries and the clock**, so `daemoncheck` can
+ * drive the real constants without writing 300 MiB to a temp directory to reach
+ * them — which is the only way this decision could otherwise be asserted at all,
+ * and is enough of a cost that it would have gone unasserted instead. The class
+ * below holds the map and does the writing; everything that *decides* is here.
+ *
+ * `kept` is returned rather than the caller re-filtering, because pruning and
+ * summing walk the same list and the entries are strictly ordered by `at` —
+ * anything the caller did separately would be a second copy of that assumption.
+ *
+ * The wait is **when the oldest surviving entry falls out of the window**, which
+ * is the earliest moment the answer can change, and never a fixed backoff. It is
+ * a lower bound rather than a promise: if the spending was bunched, enough may
+ * still not have aged out by then and the next answer is a shorter wait again,
+ * which converges. At least 1ms, for the reason `throttle.ts` gives one package
+ * over — a `Retry-After: 0` invites exactly the retry it is refusing.
+ *
+ * Strictly `<`, so a session that has spent precisely the budget is refused
+ * rather than allowed one more. The boundary matters little and being able to
+ * say which way it falls matters more.
+ */
+export function uploadRateVerdict(
+  entries: readonly UploadCharge[],
+  now: number,
+): { kept: UploadCharge[]; waitMs: number } {
+  const floor = now - UPLOAD_RATE_WINDOW_MS;
+  const kept = entries.filter((entry) => entry.at > floor);
+  let total = 0;
+  for (const entry of kept) total += entry.bytes;
+  if (total < UPLOAD_RATE_BYTES) return { kept, waitMs: 0 };
+  return { kept, waitMs: Math.max(1, kept[0]!.at + UPLOAD_RATE_WINDOW_MS - now) };
+}
 
 /** 200 bytes. Long enough for anything a person types, short enough to bound the event. */
 export const MAX_UPLOAD_NAME_BYTES = 200;
@@ -332,6 +459,16 @@ export type ReceiveResult =
   | { kind: "too_large" }
   | { kind: "quota"; used: number }
   | { kind: "too_many" }
+  /**
+   * Too much, too fast — {@link UPLOAD_RATE_BYTES}.
+   *
+   * Carries `retryAfterMs` because it is the only refusal here that stops being
+   * true on its own: `quota` and `too_many` are answered by sending the message
+   * or starting another session, and this one is answered by waiting. A refusal
+   * that says "later" without saying how much later is a refusal somebody
+   * retries immediately.
+   */
+  | { kind: "rate"; retryAfterMs: number }
   | { kind: "write_failed"; detail: string };
 
 export type ResolveResult = { ok: true; rows: UploadRow[] } | { ok: false; missing: string };
@@ -345,6 +482,17 @@ export interface UploadsOptions {
 export class Uploads {
   private stopped = false;
   private readonly sweepTimer: ReturnType<typeof setInterval>;
+  /**
+   * What each session has written lately, oldest first.
+   *
+   * In memory and not in the index, deliberately: it is about the last five
+   * minutes of this process's life, so a restart forgetting it is correct rather
+   * than a gap — and putting it in SQLite would add a write to the one path in
+   * this file that is already doing the expensive thing. Pruned on read, so an
+   * abandoned session's entries cost nothing until somebody asks about it and are
+   * gone the moment they do; `removeSession` clears the key outright.
+   */
+  private readonly recent = new Map<string, UploadCharge[]>();
 
   private constructor(
     private readonly root: string,
@@ -354,6 +502,30 @@ export class Uploads {
     this.sweepTimer = setInterval(() => void this.sweep(), SWEEP_INTERVAL_MS);
     // Housekeeping is never a reason for the process to stay alive.
     this.sweepTimer.unref();
+  }
+
+  /**
+   * How long this session has to wait, in ms, or 0 to go ahead.
+   *
+   * The map, and the decision is {@link uploadRateVerdict}'s.
+   */
+  private rateWait(sessionId: string, now: number): number {
+    const entries = this.recent.get(sessionId);
+    if (entries === undefined) return 0;
+    const { kept, waitMs } = uploadRateVerdict(entries, now);
+    // Written back rather than mutated in place: the verdict is pure, and a
+    // session whose window has emptied loses its key entirely so an abandoned
+    // one costs nothing at all.
+    if (kept.length === 0) this.recent.delete(sessionId);
+    else this.recent.set(sessionId, kept);
+    return waitMs;
+  }
+
+  /** Record what one request cost this session. See {@link rateWait}. */
+  private charge(sessionId: string, bytes: number, now: number): void {
+    const entries = this.recent.get(sessionId);
+    if (entries === undefined) this.recent.set(sessionId, [{ at: now, bytes }]);
+    else entries.push({ at: now, bytes });
   }
 
   /**
@@ -414,6 +586,26 @@ export class Uploads {
       await cancelBody(request.body);
       return { kind: "too_many" };
     }
+
+    /*
+     * The rate check, **before the body is read**, beside the count check and for
+     * the same reason it is: a refusal that has already streamed 100 MiB to disk
+     * has spent exactly what it was refusing to spend.
+     *
+     * It cannot see *this* upload's size — a chunked body declares nothing — so
+     * what it tests is the window as it stands. The consequence is deliberate and
+     * worth naming: one upload may finish past the limit, and the next is the one
+     * refused. That is the right way round for a cost bound. The alternative is
+     * refusing on a declared `Content-Length`, which is a number the client
+     * chooses and which the route above already only trusts to refuse *early*,
+     * never to admit.
+     */
+    const wait = this.rateWait(sessionId, Date.now());
+    if (wait > 0) {
+      await cancelBody(request.body);
+      return { kind: "rate", retryAfterMs: wait };
+    }
+
     const priorBytes = this.index.bytesFor(sessionId);
 
     const uploadId = `u_${randomBytes(8).toString("hex")}`;
@@ -470,14 +662,28 @@ export class Uploads {
       });
     }
 
+    /*
+     * Charged whatever this actually wrote, refused or not.
+     *
+     * The window bounds *cost*, and an upload that streamed 90 MiB before hitting
+     * the per-file cap cost that — so exempting refusals would make the cheapest
+     * way to spend this daemon's disk bandwidth a stream that is always one byte
+     * too long. Written after the loop rather than inside it because the entry is
+     * a pair rather than a running total, and one per request is what makes the
+     * prune cheap.
+     */
+    if (written > 0) this.charge(sessionId, written, Date.now());
+
     if (outcome !== null) {
       await this.discard(dir);
       /*
        * Cancel **after** unlinking, and never not at all.
        *
        * The relay's per-stream HTTP/2 window is granted on consumption, so a
-       * reader that simply stops parks the sender at 256 KiB with the browser
-       * waiting. The next valve above that is the tunnel's 8 MiB socket-buffer
+       * reader that simply stops parks the sender at `STREAM_WINDOW_BYTES` with
+       * the browser waiting. (This said 256 KiB, which is what that constant was
+       * before Q6.104 raised it to 1 MiB; the number is named rather than
+       * restated now, because being wrong about it here reads as a measurement.) The next valve above that is the tunnel's 8 MiB socket-buffer
        * check, and it closes the **whole tunnel for this machine** rather than
        * this one request — every other session on it goes with it. Cancelling
        * releases the stream cleanly instead.
@@ -597,12 +803,18 @@ export class Uploads {
      * than an await would. The quota test used to sit after `Buffer.from`, which
      * meant a 500 MiB image was fully decoded and then discarded. base64 is 4/3,
      * so the encoded length is a cheap upper bound on the decoded one.
+     *
+     * ⚠ **Against `MAX_AGENT_IMAGE_BYTES` and no longer against
+     * `MAX_UPLOAD_BYTES`**, which is the whole reason that constant exists. The
+     * two were one number; raising the per-file cap to 100 MiB would have moved
+     * this pre-check to ~133 MiB of string, on this path, for a blob nobody asked
+     * for. The value here is unchanged — see the docblock there.
      */
-    if (data.length > Math.ceil((MAX_UPLOAD_BYTES * 4) / 3)) return null;
+    if (data.length > Math.ceil((MAX_AGENT_IMAGE_BYTES * 4) / 3)) return null;
 
     const bytes = Buffer.from(data, "base64");
     if (bytes.length === 0) return null;
-    if (bytes.length > MAX_UPLOAD_BYTES) return null;
+    if (bytes.length > MAX_AGENT_IMAGE_BYTES) return null;
     if (this.index.bytesFor(sessionId) + bytes.length > MAX_SESSION_UPLOAD_BYTES) return null;
 
     const uploadId = `a_${randomBytes(8).toString("hex")}`;
@@ -732,6 +944,10 @@ export class Uploads {
       return;
     }
     await this.discard(join(this.root, sessionId));
+    // The rate window with it. A session id is never reused, so leaving entries
+    // behind would only ever be a leak — and a small one, which is exactly the
+    // kind that is never noticed.
+    this.recent.delete(sessionId);
     try {
       this.index.removeSession(sessionId);
     } catch (error) {
@@ -931,7 +1147,7 @@ function extensionForMime(mime: string): string {
  *
  * **Never not at all**, on any path that refuses. The relay's per-stream HTTP/2
  * window is granted on consumption, so a reader that simply stops parks the
- * sender at 256 KiB with the browser waiting; the next valve above that is the
+ * sender at one `STREAM_WINDOW_BYTES` with the browser waiting; the next valve is
  * tunnel's 8 MiB socket-buffer check, and it closes the **whole tunnel for this
  * machine** rather than this one request — every other session on it goes too.
  * Cancelling releases the stream cleanly instead.

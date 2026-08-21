@@ -75,7 +75,7 @@ Three pieces, and you can run all of them yourself.
 | `.claude/rules/` | The same, per area, loaded when you open a file it covers |
 | `docs/API.md` | The HTTP surface of both services — 96 routes, what each is for, and the conventions every one of them answers in |
 | `docs/RELEASING.md` | Where the version is written down, when it moves, and what a tag does that a push does not |
-| `docs/DECISIONS.md` | **Why** any of it is that way. 655 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
+| `docs/DECISIONS.md` | **Why** any of it is that way. 668 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
 | `deploy/README.md` | The deployment surface in full |
 | `deploy/RELAYS.md` | Running more than one relay, and the order of operations |
 | `CHANGELOG.md` | What changed in each release, and what a 0.x minor is allowed to break |
