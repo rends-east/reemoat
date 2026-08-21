@@ -15,6 +15,7 @@ import {
   attachmentsFor,
   canSend,
   attachmentsVersion,
+  echoAttachments,
   forgetAttachments,
   removeAttachment,
   restoreAttachments,
@@ -22,8 +23,8 @@ import {
   sendableAttachments,
   subscribeAttachments,
   updateAttachment,
-  type PendingAttachment,
 } from "../attach";
+import { clearEcho, setEcho } from "../echo";
 import { errorText } from "../http";
 import { keyOf, type SessionRef } from "../ids";
 import { composerKey } from "../keys";
@@ -35,7 +36,6 @@ import {
   MAX_PROMPT_ATTACHMENTS,
   MAX_UPLOAD_BYTES,
   resumeStalled,
-  showsAsEnded,
   needsHuman,
   showsWorking,
   turnInFlight,
@@ -52,7 +52,6 @@ import {
   shouldReleaseComposer,
   takeKeyNav,
 } from "./composing";
-import { UserBubble } from "./Bubble";
 import { COLUMN, IconButton, Spinner } from "./bits";
 import {
   buildCommands,
@@ -156,8 +155,8 @@ export function Composer({
    * A message is going out on this screen, said once per send.
    *
    * `SessionView` turns it into "put the conversation back at its foot". It fires
-   * on the **optimistic** half — where the echo is written and the box is cleared —
-   * rather than when the daemon answers, because that is the moment the reader's
+   * on the **optimistic** half — where the message is written into `echo.ts` and
+   * the box is cleared — rather than when the daemon answers, because that is the moment the reader's
    * own message appears and the moment they expect the ground to move; a refusal
    * arriving 90 seconds later has already put the text back in the box, and having
    * scrolled to the tail in the meantime costs nothing.
@@ -181,12 +180,6 @@ export function Composer({
    * what outlives it is `cancelInFlight`, read off the daemon's own snapshot.
    */
   const [stopping, setStopping] = useState(false);
-  /** The prompt we sent and the seq it landed at, until the log catches up. */
-  const [echo, setEcho] = useState<{
-    text: string;
-    seq: number;
-    attachments: readonly PendingAttachment[];
-  } | null>(null);
   const areaRef = useRef<HTMLTextAreaElement | null>(null);
   /*
    * The command menu's state.
@@ -214,10 +207,15 @@ export function Composer({
    * can land up to ninety seconds later (`POST /sessions/:id/prompt` is on the
    * slow-route budget and resumes a terminal session first), so the `key` in
    * their closure is *the session the message went to* while this ref is *the
-   * session somebody is looking at*. Every `setText`/`setEcho`/`setBusy` after an
-   * await needs the second one: a `409 turn_in_flight` from session A used to
-   * put A's message into B's box, where pressing Enter sent it to B's agent in
-   * B's worktree.
+   * session somebody is looking at*. Every `setText`/`setBusy` after an await
+   * needs the second one: a `409 turn_in_flight` from session A used to put A's
+   * message into B's box, where pressing Enter sent it to B's agent in B's
+   * worktree.
+   *
+   * The echo used to be in that list and is not any more, because it left React
+   * for `echo.ts`, where it is keyed by session. That is the direction this split
+   * wants everything to move: a write that names the session it belongs to needs
+   * no guard at all.
    *
    * Written from the effect rather than during render, so a render React
    * discards cannot move it.
@@ -241,21 +239,6 @@ export function Composer({
   // are resolved inside `send`, from the live list — see the note there.
   const attachments = attachmentsFor(key);
 
-  /** What the optimistic echo draws, in the shape the transcript uses. */
-  const echoRefs = useMemo(
-    () =>
-      (echo?.attachments ?? [])
-        .filter((item) => item.uploadId !== null)
-        .map((item) => ({
-          uploadId: item.uploadId as string,
-          name: item.name,
-          mime: item.mimeType,
-          bytes: item.size,
-          inlined: false,
-        })),
-    [echo],
-  );
-
   /**
    * Take files from the picker and start uploading them.
    *
@@ -265,9 +248,11 @@ export function Composer({
    * agent — and a limit refusal should arrive while somebody is still at the
    * picker rather than after they commit.
    *
-   * Sequentially rather than in parallel: ten concurrent 25 MiB streams against a
-   * 256 KiB-per-stream tunnel window is self-inflicted head-of-line blocking on
-   * the same tunnel that carries the poll and every socket in the fleet.
+   * Sequentially rather than in parallel: ten concurrent uploads at
+   * `MAX_UPLOAD_BYTES` against a 1 MiB-per-stream tunnel window is self-inflicted
+   * head-of-line blocking on the same tunnel that carries the poll and every
+   * socket in the fleet. (Both numbers in that sentence were stale — 25 MiB and
+   * 256 KiB — and the argument is stronger at 100 MiB, not weaker.)
    *
    * The cost, accepted rather than papered over: bytes land on the daemon for
    * messages that are never sent, because a tab can close mid-upload. That is
@@ -360,7 +345,11 @@ export function Composer({
   useEffect(() => {
     liveKey.current = key;
     setText(drafts.get(key) ?? "");
-    setEcho(null);
+    // Deliberately *not* clearing the echo, and that is the whole point of it
+    // having moved: it is keyed by session in `echo.ts` now, like the draft and
+    // like the attachments, so leaving a conversation mid-send and coming back
+    // finds the message still in it. As shared React state on this instance it
+    // had to be cleared here, and the message vanished for the round trip.
     setStage(null);
     setDismissed(false);
     setCaret(0);
@@ -405,7 +394,10 @@ export function Composer({
    * `preventScroll` because this box is inside a sticky footer and the transcript
    * beside it is a separate scroll container: focusing must not also be a scroll.
    */
-  const composerShows = row !== undefined && !showsAsEnded(row.snapshot);
+  // Always, now. Kept as a name rather than folded away because it is what the
+  // autofocus effect below is about, and a `true` inlined there would read as an
+  // oversight rather than as the rule one screen down.
+  const composerShows = row !== undefined;
   useEffect(() => {
     // Taken unconditionally, so a switch that decided not to focus cannot leave
     // the flag set for the next one.
@@ -510,13 +502,6 @@ export function Composer({
   }, []);
 
   const transcript = state.transcripts.get(key);
-  // Drop the echo once the real event is in the log. Comparing seq rather than
-  // text: an identical prompt sent twice would otherwise clear the second echo
-  // against the first event.
-  useEffect(() => {
-    if (echo === null) return;
-    if ((transcript?.events.at(-1)?.seq ?? 0) >= echo.seq) setEcho(null);
-  }, [echo, transcript]);
 
   /*
    * The agent's command list, fetched once per revision for the open session only.
@@ -657,22 +642,34 @@ export function Composer({
   if (row === undefined) return null;
   const session = row.snapshot;
   /*
-   * `showsAsEnded` and not `isTerminal`, which is the whole point of the four
-   * predicates in `wire.ts`.
+   * ⚠ **Nothing takes this box off the screen. There is no early return here any
+   * more, and that is the rule rather than the current behaviour.**
    *
-   * Only a session somebody *ended* loses its composer. One the daemon
-   * interrupted keeps it, and sending a message is what brings the agent back —
-   * the route resumes in front of the prompt. Losing the box for the length of a
-   * deploy was the failure this fixes: an ordinary restart left the reader
-   * looking at `ended: daemon_shutdown` with nothing to type into and a Resume
-   * item buried in a kebab menu.
+   * It was `if (showsAsEnded(session)) return null`, and the argument was
+   * already half of the one that deleted it: "only a session somebody *ended*
+   * loses its composer — one the daemon interrupted keeps it, and sending a
+   * message is what brings the agent back". Losing the box for the length of a
+   * deploy was the failure that reasoning fixed. The remaining half was found
+   * the same way, from a phone: an expired OAuth token ended a conversation as
+   * `agent_signed_out`, `autoResumable` refused to revive it on any trigger, and
+   * the only reversal — `reloadCredentials` — is reachable only by writing a
+   * credential *in the app*. So somebody whose CLI had already refreshed its own
+   * token sat looking at "nobody is signed in", under a Sign in button leading
+   * to a screen where they were, **with nothing to type into**. The one control
+   * that would have fixed it, `POST /sessions/:id/resume`, is ungated and was
+   * simply not drawn.
    *
-   * This also revives two things below that had been dead code for as long as
-   * they had existed: the `disabled` on `AgentConfigBar` — correct, since a
-   * session waiting on the daemon has no live agent to answer a config change —
-   * and the paperclip's own note about staging a file for a terminal session.
+   * A conversation you cannot type into is a dead end whatever put it there, and
+   * this app cannot enumerate the ways in advance — that is what the whole
+   * episode demonstrated. So the box is unconditional, including for a session
+   * somebody stopped by hand: sending into one starts it again, which is the
+   * same promise every other row on this screen already makes.
+   *
+   * **What is gated is Send, never the box.** `canSend` and the placeholder say
+   * what will happen; the daemon answers with a real refusal when it must, and
+   * that refusal is drawn in the conversation. Nothing about the *sending* path
+   * changed here — only that there is always something to send from.
    */
-  if (showsAsEnded(session)) return null;
 
   const blocked = needsHuman(session);
   const working = showsWorking(session);
@@ -720,12 +717,12 @@ export function Composer({
    * this question, and the deferred one cannot accidentally skip it. Stated as a
    * comment alone it was false — `submit` calls `send` with nothing awaited, so
    * the ordinary Send did depend on that effect, and in the window where it does
-   * not hold the message goes to the daemon while the box is left full, no echo
-   * is drawn and no spinner lights: the one rendering that reads as "it did not
-   * send" and invites a duplicate.
+   * not hold the message goes to the daemon while the box is left full and no
+   * spinner lights: the one rendering that reads as "it did not send" and invites
+   * a duplicate.
    *
-   * See `liveKey`: the box, the echo and the spinner are one shared instance
-   * while `drafts` and `attach.ts` are keyed, so a late answer may write the
+   * See `liveKey`: the box and the spinner are shared state on one instance while
+   * `drafts`, `attach.ts` and `echo.ts` are keyed, so a late answer may write the
    * keyed halves and must not write the shared ones.
    */
   const onScreen = (): boolean => liveKey.current === key;
@@ -936,7 +933,7 @@ export function Composer({
    * synchronous path was wrong in the one direction that matters: `liveKey` is
    * written from an effect, so in the window between a session-switch render and
    * its flush the ordinary Send would have put the message on the wire while
-   * skipping the box, the echo and the spinner — which reads as "it did not
+   * skipping the box, the message and the spinner — which reads as "it did not
    * send".
    */
   const send = (body: string, late: boolean): void => {
@@ -975,10 +972,26 @@ export function Composer({
      * keeps `onScreen`'s "only ever asked after an await" true and what stops the
      * ordinary Send depending on an effect having flushed.
      */
+    /*
+     * **Above the arm, because this one names the session it belongs to.**
+     *
+     * The echo is keyed state in `echo.ts` now, not React state on this shared
+     * instance, so it obeys the same rule `drafts` and `attach.ts` already do:
+     * write it whatever is on screen, because the write says which conversation
+     * it is about. On the `late` door that is the correction rather than a
+     * relaxation — the message really did go to that session, and its transcript
+     * should show it whether or not somebody is looking at it.
+     *
+     * `MAX_SAFE_INTEGER` until the daemon names a seq; see `PendingEcho`.
+     */
+    setEcho(key, {
+      text: body,
+      seq: Number.MAX_SAFE_INTEGER,
+      attachments: echoAttachments(sent),
+    });
     if (!late || onScreen()) {
       setBusy(true);
       update("");
-      setEcho({ text: body, seq: Number.MAX_SAFE_INTEGER, attachments: sent });
       // Inside this arm rather than beside it, and for its whole reason: on the
       // `late` door the session that sent this may not be the one on screen, and
       // scrolling *that* conversation to its foot would move a transcript nobody
@@ -995,17 +1008,24 @@ export function Composer({
      * instance** happens only if this is still the session that sent it.
      *
      * `drafts`, `attach.ts` and the store are all keyed, so they are correct from
-     * anywhere. `setText`, `setEcho` and `setBusy` are not: they write into
-     * whichever session this composer is showing when the promise settles, and at
-     * `lg` switching sessions does not remount it. What that produced was A's
-     * refused message appearing in B's box — and then being sent to B's agent by
-     * an Enter aimed at retrying it — plus A's pending bubble drawn above B's
-     * composer, which B's own log can only clear once it passes A's seq.
+     * anywhere — and so, now, is the echo. `setText` and `setBusy` are not: they
+     * write into whichever session this composer is showing when the promise
+     * settles, and at `lg` switching sessions does not remount it. What that
+     * produced was A's refused message appearing in B's box, and then being sent
+     * to B's agent by an Enter aimed at retrying it. A's pending bubble drawn
+     * above B's composer was the other half of that same failure, clearable only
+     * once B's own log passed A's seq; it is gone by construction now rather than
+     * by a guard.
      */
     void daemon
       .prompt(sessionRef.sessionId, body, sending)
       .then((result) => {
-        if (onScreen()) setEcho({ text: body, seq: result.seq, attachments: sent });
+        // Both keyed, both unconditional. `promptLanded` is not just the seq
+        // arriving: the `prompt` event routinely beats this answer down the
+        // socket, which is not waiting on a 90-second slow-route budget, so the
+        // store settles the echo against the log in the same call rather than
+        // leaving one pinned to a conversation that has already drawn it.
+        store.promptLanded(sessionRef, result.seq);
         store.applySnapshot(sessionRef, result.session);
       })
       .catch((cause: unknown) => {
@@ -1020,8 +1040,8 @@ export function Composer({
         // The draft is written through the map either way — that is what makes
         // "come back to the session and it is waiting for you" true — and only the
         // box on screen is rewritten.
+        clearEcho(key);
         if (onScreen()) {
-          setEcho(null);
           update(body);
         } else if (body.length === 0) {
           // A files-only message has no text to restore, and an empty entry left
@@ -1031,6 +1051,33 @@ export function Composer({
           drafts.set(key, body);
         }
         restoreAttachments(key, sent);
+        /*
+         * **Every refusal says so, and the exception that used to be here is
+         * gone.**
+         *
+         * ⚠ Two things were wrong with it, and the second is why it cannot come
+         * back. It tested `agent_signed_out`, **a code the daemon had stopped
+         * sending** when the probe on the prompt path was deleted — the route
+         * answers `session_terminal` — so the branch was unreachable and the
+         * toast it suppressed fired anyway. `webcheck` asserted the *literal
+         * string* was in this file rather than that the behaviour held, which is
+         * how that stayed green.
+         *
+         * And the argument itself expired. It was Q7.102's: a refusal a person
+         * can fix does not belong in a toast, because the *screen changed* — the
+         * send ended the session, and a notice with a Sign in button appeared
+         * where the composer had been. Nothing changes on screen now. The
+         * composer is unconditional and `onAuthFailure` no longer ends anything,
+         * so a refused send restores the text and does nothing else: measured on
+         * a `start_failed` session, pressing Send put "hello?" back in the box
+         * and said nothing anywhere. Silence is the one answer a control may
+         * never give.
+         *
+         * What is left to refuse at all is narrow — `autoResumable` covers every
+         * reason with a conversation to return to — so this fires for a session
+         * that genuinely cannot be reopened, which is exactly when somebody needs
+         * telling.
+         */
         toast("error", errorText(cause));
       })
       .finally(() => {
@@ -1042,7 +1089,8 @@ export function Composer({
    * Ask the agent to stop what it is doing.
    *
    * **Nothing is written optimistically.** Every other action here draws its
-   * effect before the daemon confirms it — the box empties, the echo appears —
+   * effect before the daemon confirms it — the box empties, the message appears
+   * in the conversation —
    * because a message a person typed is theirs and putting it back is the
    * remedy. A cancel has no such copy: drawing "stopping" and then having the
    * request fail would claim an agent had been called off when it is still
@@ -1115,12 +1163,6 @@ export function Composer({
        * card that floats between them, so all three line up at every width.
        */}
       <div className={COLUMN}>
-      {echo !== null && (
-        <div className="px-3 pb-2">
-          <UserBubble text={echo.text} pending attachments={echoRefs} />
-        </div>
-      )}
-
       {/* Its own full-width row rather than a place in the control strip: chips
           wrap to two lines and need the width a phone has, and the strip is a
           single line of controls that must not reflow under them. */}

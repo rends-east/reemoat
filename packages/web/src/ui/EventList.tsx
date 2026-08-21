@@ -22,6 +22,7 @@ import type {
   ElicitationResolvedEvent,
   SessionEvent,
 } from "../wire";
+import type { PendingEcho } from "../echo";
 import { UserBubble } from "./Bubble";
 import { Markdown } from "./Markdown";
 import { COLUMN, Dot, Empty, Icon, Badge, shortDuration, TAP_GROW_Y, TranscriptSkeleton } from "./bits";
@@ -32,7 +33,9 @@ import {
   elicitationOutcome,
   permissionDecisions,
   refused,
+  resolvedByText,
   runSummary,
+  stopReasonText,
   sameNode,
   stripFence,
   opensToAnything,
@@ -95,6 +98,7 @@ export function EventList({
   working,
   reporting,
   turnStartedAt,
+  echo,
 }: {
   transcript: Transcript;
   /** Show the conversation from before the last `/clear`, and go and fetch it. */
@@ -131,6 +135,21 @@ export function EventList({
    * new prop identity on a timer. A primitive is stable when the value is.
    */
   turnStartedAt: number | null;
+  /**
+   * The message that has been sent and has not come back yet, or `null`.
+   *
+   * **It is drawn here, in the conversation, and not by the composer.** It used
+   * to be the first child of that `sticky bottom-0` bar — a sibling of this scroll
+   * box — so a message appeared *under* the transcript with a spinner beside it
+   * and then, one commit later, jumped into the transcript when the `prompt` event
+   * arrived. Two boxes and one frame is not an animation, it is a teleport, and
+   * the reader's own words are the last thing that should be doing it.
+   *
+   * Read from `echo.ts` by `SessionView` rather than fetched here, for `working`'s
+   * reason: this component re-renders on every streamed token, and what crosses
+   * the prop is a value that changes twice per message.
+   */
+  echo: PendingEcho | null;
 }): ReactNode {
   /*
    * The whole loaded transcript, cut only at the agent's own `/clear`.
@@ -413,6 +432,26 @@ export function EventList({
               <TailRow key={node.key} node={node} files={files} />
             ))}
           </DecisionsContext.Provider>
+          {/*
+           * Your own message, at once, in the bubble the committed event will use.
+           *
+           * **Above the working line and below every row**, which is the order the
+           * conversation actually happened in and the one case that decides it:
+           * `applySnapshot` folds the daemon's answer in as soon as `/prompt`
+           * returns, so a session can be drawn as running while the `prompt` event
+           * is still on its way down the socket. Drawn after the foot, a message
+           * would sit *below* "working…" for that window.
+           *
+           * The same `UserBubble` the transcript uses, with the same `files`, so
+           * an attached screenshot has its preview and its download here too —
+           * which the composer could not give it, being outside
+           * `FileAccessContext`. Nothing marks it as pending: it has been sent,
+           * and a refusal puts the text back in the box with a toast beside it,
+           * which is a remedy rather than a warning.
+           */}
+          {echo !== null && (
+            <UserBubble text={echo.text} attachments={echo.attachments} files={files} />
+          )}
           {/*
            * "The agent is working", where the reader is already looking.
            *
@@ -817,7 +856,7 @@ function PermissionResolvedRow({
       <span className="min-w-0 flex-1 truncate">{heading ?? event.title}</span>
       {denied && <span className="shrink-0 font-medium">denied</span>}
       {event.by !== "client" && (
-        <span className="shrink-0 text-faint">{event.by.replace(/_/g, " ")}</span>
+        <span className="shrink-0 text-faint">{resolvedByText(event.by)}</span>
       )}
     </p>
   );
@@ -867,7 +906,7 @@ function ElicitationResolvedRow({ event }: { event: ElicitationResolvedEvent }):
       ) : (
         <p className={`mt-1 ${outcome.tone === "warn" ? "text-fg font-medium" : "text-faint"}`}>
           {outcome.verb}
-          {event.by !== "client" && ` — ${event.by.replace(/_/g, " ")}`}
+          {event.by !== "client" && ` — ${resolvedByText(event.by)}`}
         </p>
       )}
     </div>
@@ -1040,11 +1079,40 @@ function renderEvent(node: EventNode, files: FileAccess | null): ReactNode {
       );
 
     case "turn_end":
-      // Only reached for a stop reason that is **not** `end_turn` — see
-      // `showsInTranscript`. Every one of those is a turn that stopped without
-      // finishing, which is a different fact from a reply ending, so it is
-      // warn-toned rather than one more grey divider.
-      return <p className="text-center text-2xs font-medium text-fg">— turn ended: {event.stopReason} —</p>;
+      /*
+       * Only reached for a stop reason that is **not** `end_turn` — see
+       * `showsInTranscript`. Every one of those is a turn that stopped without
+       * finishing, which is a different fact from a reply ending.
+       *
+       * **A cancel is drawn where `working…` was, and nothing else is.** This
+       * row read `— turn ended: cancelled —`, centred between two em dashes: the
+       * daemon's own enum, framed as a chapter break, for the one thing on this
+       * screen somebody actually *did*. And a cancelled turn's `turn_end` is its
+       * last event, so it lands in exactly the row `WaitingFoot` occupied the
+       * instant before — which is where the reader is already looking, and the
+       * reason it takes that row's shape rather than a divider's: the same 20px
+       * line, the same mark, the same gap, one word.
+       *
+       * The mark is `still`, and that is the whole of the state change: three
+       * bars breathing means work is happening, three bars at rest beside a red
+       * word means it stopped. `text-danger` on text rather than a fill is what
+       * `index.css` allows and what the `error` row below already spends.
+       *
+       * Every *other* reason stays a centred line, because none of them is
+       * something the reader did and none of them replaces an indicator that was
+       * just there — the agent ran out of room, hit its step limit or declined,
+       * and that is news about the agent.
+       */
+      return event.stopReason === "cancelled" ? (
+        <p className="flex h-5 items-center gap-2 text-2xs font-medium text-danger">
+          <WorkingMark still />
+          {stopReasonText(event.stopReason)}
+        </p>
+      ) : (
+        <p className="text-center text-2xs font-medium text-fg">
+          — {stopReasonText(event.stopReason)} —
+        </p>
+      );
 
     /*
      * The same shape the `update` arm above draws, and for the same reason.

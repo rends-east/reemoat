@@ -31,13 +31,18 @@ unconditionally. The box looks the same focused and not, and the opt-out is
 split in two.** Neither `SessionView` nor `Composer` carries a `key`, so switching
 session re-renders the same instance — while `POST /sessions/:id/prompt` and
 `/config` are both on the 90s slow-route budget. The **keyed** halves (`drafts`,
-`attach.ts`'s map, `store.applySnapshot`) run unconditionally, because they name
-the session they belong to; the **shared React** halves (`text`, `echo`, `busy`,
-`stage`, `applying`, `pendingCaret`, `closeMenu`) are gated on `onScreen()`, which
-compares the `liveKey` ref. Ungated, a `409 turn_in_flight` from session A ran
-`update(body)` on the composer now bound to B — A's message in B's box, where
-Enter sends it to B's agent — above B's transcript, behind a `busy` spinner that
-swallowed everything typed into B. Nothing but this paragraph enforces the split.
+`attach.ts`'s map, `echo.ts`'s map, `store.applySnapshot`) run unconditionally,
+because they name the session they belong to; the **shared React** halves (`text`,
+`busy`, `stage`, `applying`, `pendingCaret`, `closeMenu`) are gated on
+`onScreen()`, which compares the `liveKey` ref. Ungated, a `409 turn_in_flight`
+from session A ran `update(body)` on the composer now bound to B — A's message in
+B's box, where Enter sends it to B's agent — above B's transcript, behind a `busy`
+spinner that swallowed everything typed into B. Nothing but this paragraph
+enforces the split. **The optimistic echo used to be in the second list and is now
+in the first**, which is the direction to move anything else here: it became a
+keyed map, so the write needs no guard, the `[key]` reset no longer clears it, and
+leaving a conversation mid-send and coming back shows the message still in it. It
+is drawn by the transcript rather than by this component — see `web-transcript.md`.
 **`onScreen` is only ever asked after an await, and `send`'s required `late`
 argument is what makes that a property rather than a hope** — `send` is reachable
 from `submit` straight off the keystroke *and* from `applyValue`'s callback a
@@ -231,10 +236,11 @@ length guard does not tell the two apart. Q3.410.
 |---|---|
 | `packages/web/src/attach.ts` | Files attached to a message not yet sent: a module `Map` with its own subscribers, `admitFiles`, `sendableAttachments`. At `src/` because `store.ts` imports it |
 | `packages/web/src/choices.ts` | Config changes asked for and not yet answered, keyed by session and option. The same module-`Map`-with-subscribers shape as `attach.ts`, at `src/` for the same reason — and the reason it exists at all is that two components dispatch the same change |
+| `packages/web/src/echo.ts` | The message sent and not yet back. The third of that shape, and the one whose move *out* of React fixed a bug rather than avoiding one |
 | `packages/web/src/keys.ts` | Enter-to-send, the command menu's keys, the bare-letter guards. Enter is claimed by two, and `composerKey` resolves it here rather than in a JSX prop — with `enterSends`, required, which is how a soft keyboard gets its newline back |
 | `packages/web/src/ui/commands.ts` | What a `/` in the composer means, as pure functions: where the token starts and ends, which entries exist, how a query ranks them |
 | `packages/web/src/ui/composing.ts` | What the empty composer says and who gets the caret, including `focusWorthKeeping` |
 | `packages/web/src/ui/agentConfig.ts` | The config bar's rules as pure functions — slotting, `labelFor`, `choiceOverride`, the context readout, the prose the snapshot strips |
-| `packages/web/src/ui/Composer.tsx` | Where a prompt is written: Enter to send, auto-grow, optimistic echo, per-session draft, the `/` menu, and Stop in the send slot while the agent works |
+| `packages/web/src/ui/Composer.tsx` | Where a prompt is written: Enter to send, auto-grow, per-session draft, the `/` menu, and Stop in the send slot while the agent works. It **writes** the optimistic echo and does not draw it |
 | `packages/web/src/ui/CommandMenu.tsx` | The menu: the agent's commands and the controls it does *not* publish, in one list, two stages. Never takes focus |
 | `packages/web/src/ui/AgentConfigBar.tsx` | The composer's control strip: mode left, model/effort/context right, a nested control inside its host's menu, the rest behind `…`. Drawn from `category`, never an id |

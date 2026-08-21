@@ -109,28 +109,45 @@ const UPLOAD_STALL_MS = 30_000;
 const UPLOAD_FLOOR_BYTES_PER_MS = 50;
 
 /**
+ * The wall clock an upload may not exceed however slowly it is progressing.
+ *
+ * ⚠ **This was 300s, and it was the hidden blocker under raising
+ * `MAX_UPLOAD_BYTES` to 100 MiB.** The old docblock said 300s "deliberately: that
+ * is the token lifetime, so the number cannot quietly become load-bearing on
+ * something else" — and then conceded, in its own next sentence, that a request
+ * in flight does not die at `exp` (the daemon verifies the bearer once at the
+ * start, the relay authorizes at CONNECT). So the coupling was tidiness rather
+ * than a property, and what it actually did at the new size was abort a
+ * *progressing* 100 MiB upload at five minutes, i.e. anything under ~350 KiB/s —
+ * a failure with no message, halfway through, on the slow links this cap most
+ * matters on.
+ *
+ * 45 minutes is above `scaled` at the largest file this daemon will take
+ * (~35 min at the assumed floor), so the **formula** governs at every size and
+ * this is a ceiling on arithmetic rather than a second, invisible limit. It is
+ * not a claim about a token, a socket or a tunnel; the thing that actually
+ * notices a dead link is `stallMs`, thirty seconds, reset by every progress
+ * event.
+ */
+const UPLOAD_HARD_CAP_MS = 45 * 60 * 1000;
+
+/**
  * The two deadlines an upload runs under.
  *
  * A wall clock alone is the wrong instrument here: a slow-but-progressing upload
- * is not a failure, and 25 MiB over a phone uplink is minutes rather than the
- * 15s an ordinary request gets. So the primary budget is a **stall** — reset by
- * every progress event — and the wall clock is only a backstop against a
+ * is not a failure, and a large file over a phone uplink is many minutes rather
+ * than the 15s an ordinary request gets. So the primary budget is a **stall** —
+ * reset by every progress event — and the wall clock is only a backstop against a
  * connection that trickles for ever.
  *
- * `hardMs` is capped at 300s deliberately: that is the token lifetime, so the
- * number cannot quietly become load-bearing on something else. A request already
- * in flight does not die at `exp` — the daemon verifies the bearer once at the
- * start and the relay authorizes at CONNECT — but a cap above it would be
- * claiming a property nothing checks.
- *
  * Floored at `REQUEST_TIMEOUT_MS` so a one-byte upload is never *more* fragile
- * than an ordinary request.
+ * than an ordinary request, and capped at {@link UPLOAD_HARD_CAP_MS}.
  */
 export function uploadDeadlines(bytes: number): { stallMs: number; hardMs: number } {
   const scaled = 20_000 + Math.ceil(Math.max(bytes, 0) / UPLOAD_FLOOR_BYTES_PER_MS);
   return {
     stallMs: UPLOAD_STALL_MS,
-    hardMs: Math.min(300_000, Math.max(scaled, REQUEST_TIMEOUT_MS)),
+    hardMs: Math.min(UPLOAD_HARD_CAP_MS, Math.max(scaled, REQUEST_TIMEOUT_MS)),
   };
 }
 
@@ -192,6 +209,37 @@ export function missingRowReason(reach: Reach | null, listed: boolean): MissingR
   if (reach === "unknown" || reach === "probing") return "loading";
   if (reach === "offline") return "unreachable";
   return listed ? "not_here" : "loading";
+}
+
+/**
+ * Whether a screen may draw this machine's daemon-backed content.
+ *
+ * **`probing` keeps the previous answer, and that is the whole of it.** A re-probe
+ * is this client re-checking a route it deliberately forgot — `resumeMachine`
+ * calls `forgetRoute()` on every wake, because what it believed about
+ * reachability was true of a network the phone may have left. It is a
+ * measurement in progress, not the host going away, and it publishes twice:
+ * `probing` before any I/O, then `online` up to 1.5s later.
+ *
+ * Read as "not online", those two publishes **unmount and remount** whatever the
+ * screen was showing. On Settings → Machines → an agent that meant: the panel
+ * replaced by "not reachable right now", then `useAgentAuth` restarting from
+ * `listing: null` on the way back — a spinner, a second `GET /agent-auth` (which
+ * shells out to every agent's CLI, on the 90s budget), and anything typed into a
+ * credential box or any sign-in wizard in progress thrown away. Once per tab
+ * switch, which is exactly what somebody does on this screen: go and copy a
+ * token, come back.
+ *
+ * `.claude/rules/web-shell.md` already states the rule this restores, about the
+ * rail: reachability flickers, so a row may not change because of it. These two
+ * screens are the ones that legitimately *show* reachability — and showing it is
+ * still not a reason to take the content away while asking.
+ *
+ * Pure, and beside {@link missingRowReason} rather than inside a component, so
+ * `webcheck` walks all four values instead of asserting JSX.
+ */
+export function daemonReadable(reach: Reach): boolean {
+  return reach === "online" || reach === "probing";
 }
 
 export interface MachineState {
@@ -604,7 +652,25 @@ export class MachineConnection {
       return null;
     }
 
-    this.reach = "probing";
+    /*
+     * **A re-probe of a machine already believed reachable does not erase that
+     * belief**, and this line used to.
+     *
+     * `probing` means "no answer yet". `resumeMachine` calls `forgetRoute()` on
+     * every wake — correctly, because a route learned on one network says nothing
+     * on another — so a healthy machine came through here on every tab switch and
+     * published `online → probing → online`, up to 1.5s apart. Everything keyed on
+     * `reach` changed twice for a question whose answer never changed: the dot on
+     * every machine row went hollow and back, and the agents panel unmounted and
+     * remounted, restarting `useAgentAuth` from nothing and throwing away whatever
+     * was half-typed into it.
+     *
+     * The knowledge is still there while it is being re-checked, so it is kept.
+     * `unknown` remains the value for never having asked, and a probe that fails
+     * still lands on `offline` below — the only thing given up is announcing the
+     * question, which nothing on screen was better for.
+     */
+    if (this.reach !== "online") this.reach = "probing";
     this.offlineReason = null;
     this.onChange();
 

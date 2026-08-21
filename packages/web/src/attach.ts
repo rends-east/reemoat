@@ -1,5 +1,5 @@
 import type { SessionKey } from "./ids";
-import { MAX_PROMPT_ATTACHMENTS, MAX_UPLOAD_BYTES } from "./wire";
+import { MAX_PROMPT_ATTACHMENTS, MAX_UPLOAD_BYTES, type PromptAttachmentRef } from "./wire";
 
 /**
  * Files a person has attached to a message they have not sent yet.
@@ -290,6 +290,34 @@ export function canSend(
   const { ids, blocked } = sendableAttachments(list);
   if (blocked) return false;
   return text.trim().length > 0 || ids.length > 0;
+}
+
+/**
+ * The chips a sent message carries, in the shape the transcript draws.
+ *
+ * Here rather than in `Composer` because it is the same projection
+ * {@link sendableAttachments} makes, one field wider, and the two must agree
+ * about which chips count: exactly the ones the daemon has answered for. A file
+ * still uploading has no id to name and is not in the message either.
+ *
+ * `inlined` is `false` throughout. It is the daemon's own word for a small image
+ * it put straight into the agent's context, which is not known until the prompt
+ * is accepted — and it decides nothing about how a bubble is drawn, so guessing
+ * it would be inventing a field to fill a shape.
+ */
+export function echoAttachments(list: readonly PendingAttachment[]): PromptAttachmentRef[] {
+  const out: PromptAttachmentRef[] = [];
+  for (const item of list) {
+    if (item.state !== "ready" || item.uploadId === null) continue;
+    out.push({
+      uploadId: item.uploadId,
+      name: item.name,
+      mime: item.mimeType,
+      bytes: item.size,
+      inlined: false,
+    });
+  }
+  return out;
 }
 
 export function sendableAttachments(list: readonly PendingAttachment[]): { ids: string[]; blocked: boolean } {

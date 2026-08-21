@@ -25,6 +25,65 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-21
+
+### Added
+
+- **Signing out is a state of the machine.** A credential is read once, at spawn,
+  so an agent started while signed in kept answering for an account somebody had
+  just revoked. Signing out now ends every conversation on that agent
+  (`agent_signed_out`), a prompt is refused before it can reach a signed-out agent
+  — a sign-out done in a terminal, or an OAuth session that simply expired, is
+  reported by the agent itself (`errorKind: authentication_failed`) and ends the
+  conversation the same way — and signing back in resumes **exactly** the sessions the sign-out
+  ended, leaving hand-stopped ones alone. Refused only on a CLI's explicit
+  "signed out". There is deliberately no probe on the prompt path: one there cost
+  a spawn per message and made the offline drivers depend on whether the person
+  running them was signed in. Q7.100.
+- **A signed-out agent says so in the conversation, with a Sign in button** that
+  goes to that machine's own agent screen — instead of a toast, which carried the
+  one refusal on this screen with a real remedy in the place that has no room for
+  one. The session is ended rather than merely refused, so "signed out" is a
+  single state; the draft is still restored, and signing in brings the
+  conversation back with it waiting. Q7.102.
+
+### Fixed
+
+- **Settings stopped flickering on every tab switch.** A wake deliberately forgets
+  each machine's route, and the re-probe published `probing` for a machine already
+  known to be online — so machine dots blinked and the agents panel *unmounted and
+  remounted*, restarting its fetch and discarding anything half-typed into a
+  credential box. A re-probe now keeps the answer it already has. Q7.101.
+
+- **Import my code** — `POST /fs/import` takes a `.zip` or `.tar.gz` and unpacks it
+  into one new folder inside the directory the new-session picker is standing in,
+  then moves the picker into it. The archive comes from a Claude Code skill the web
+  UI hands over as a single paste, run in a session on the machine the code actually
+  lives on, so the code and the context around it are collected by an agent rather
+  than guessed at by a glob. Format is decided by magic bytes, never by filename.
+  `.claude/rules/code-import.md` is the whole argument; Q2.107–Q2.110 are the
+  measurements.
+  - **Containment is rebuilt from scratch for archive members**, because every
+    member path is a string a remote party wrote. `safeMemberPath` is pure and
+    refuses first — absolute paths, any `..` segment (refused, never normalised),
+    backslashes, control characters, symlinks, hardlinks, devices and `.git` — and
+    both readers go through it so the two formats cannot disagree. Every write is
+    `O_EXCL`.
+  - **Nothing in the target is touched until one `rename`**, so a failed import
+    leaves the folder exactly as it was. A destination that already exists is
+    refused rather than replaced, `rename` onto an empty directory included.
+  - Bounds: 50 MiB on the wire, 500 MiB unpacked (charged against bytes actually
+    produced, not declared), 20 000 members, one import at a time per daemon.
+- **A read-only grant is now asserted to be read-only on a mutating route.**
+  `daemoncheck` grew `tokenWith`, and the scope refusal it exercises had no
+  assertion anywhere before.
+
+### Changed
+
+- The 1 MiB request-body bound now exempts routes through one named predicate
+  (`isStreamingRoute`) rather than an inline regex, since there are two of them.
+
+
 ## [0.1.0] - 2026-08-18
 
 First public release. The repository was published with fresh history as a single
@@ -118,5 +177,6 @@ holds them in full, with what would settle each.
 - Three agent-login questions on macOS are written but unmeasured, all settled by
   one real device-code login.
 
-[Unreleased]: https://github.com/rends-east/reemoat/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/rends-east/reemoat/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/rends-east/reemoat/releases/tag/v0.2.0
 [0.1.0]: https://github.com/rends-east/reemoat/releases/tag/v0.1.0

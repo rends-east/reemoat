@@ -76,12 +76,15 @@ export interface InstanceConfig {
  * scheme-less value — `github.com/them/theirs`, which reads like a URL — produces a
  * **relative** href. That path has no extension and is not under `/assets/`, so the
  * control plane's SPA fallback answers it with `index.html`: the "Source" link opens
- * a second copy of this app. Which is precisely the state `SourceNotice`'s docblock
- * forbids — "a wrong source link is worse than none: it looks like the offer was
- * made" — reached by a typo rather than by malice.
+ * a second copy of this app. A wrong source link is worse than none, because it
+ * looks like the offer was made — reached here by a typo rather than by malice.
  *
- * Refusing here means the notice is not drawn at all, which is the honest answer:
- * no offer, rather than one pointing at ourselves.
+ * ⚠ **Nothing in this client renders it any more** — see `ui/gate/GateCard.tsx`
+ * for what was removed and why. This guard stays, and it is not dead: the field
+ * is still parsed, still asserted on the wire by `relaycheck`, and still the one
+ * value in `InstanceConfig` that a fork is told to change. A reader that comes
+ * back finds it already refusing the shape that would embarrass it, rather than a
+ * plain `string` somebody has to re-derive this whole paragraph about.
  */
 function isAbsoluteHttpUrl(raw: string): boolean {
   try {

@@ -3,33 +3,34 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { AgentUnavailableError, type AgentId } from "./acp/agents.js";
 import { resolveCwd } from "./browse.js";
 import {
+  MemoryEventStore,
+  SessionLog,
   clampBlob,
   clip,
   endedWithDaemon,
-  MemoryEventStore,
+  isAuthFailure,
   oldestAvailable,
-  SessionLog,
   type AgentCommands,
   type AgentConfig,
-  type ContextUsage,
   type AgentConfigOption,
   type AgentHandle,
   type AgentModes,
+  type AnswerResolvedBy,
+  type ContextUsage,
   type ElicitationAnswer,
   type ElicitationField,
   type ElicitationForm,
   type EventStore,
   type ExitReason,
   type PermissionOptionSummary,
-  type AnswerResolvedBy,
   type PersistedSession,
   type SessionEvent,
   type SessionExit,
   type SessionStatus,
   type SessionStore,
   type SessionWorkspace,
-  type StoredFileRef,
   type StoredEvent,
+  type StoredFileRef,
 } from "./events.js";
 import { LocalRuntime } from "./runtime/local.js";
 import { probeExists } from "./stall.js";
@@ -277,9 +278,60 @@ export function autoResumable(
       return true;
     case "agent_exited":
       return trigger === "prompt";
+    /*
+     * ⚠ **`agent_signed_out` answers `true` on a prompt, and that is a reversal.**
+     *
+     * It answered `false` on both triggers, because "bringing the conversation
+     * back would launch a process holding a credential they have just revoked —
+     * which fails at the first message, in a transcript, as an internal error".
+     * Two things were wrong with that. The failure is no longer an internal
+     * error: `onAgentUnusable` records it and replaces the agent instead of
+     * ending the conversation, so a revoked credential now costs one error row
+     * per message somebody chooses to send. And the premise held only for the *route*
+     * that writes this reason — `POST /agent-auth/:agent/logout` — while the far
+     * commoner writer was an expired token that the CLI had since refreshed on
+     * its own, leaving a conversation nothing could revive: `reloadCredentials`
+     * is the only reversal and every one of its callers is an in-app credential
+     * write, so signing in from a terminal reached none of them.
+     *
+     * On `boot` it stays `false`, and the distinction is the same one
+     * `agent_exited` draws one case up: a prompt is a person asking for this
+     * conversation *now*, and by then the credential situation may be anything at
+     * all. A boot pass is nobody asking, and starting an agent that cannot
+     * authenticate at 4am is how a fleet spends a morning on it.
+     */
+    case "agent_signed_out":
+      return trigger === "prompt";
+    /*
+     * ⚠ **A message revives one somebody stopped, and that is a reversal too.**
+     *
+     * `stopped` was the one reason that meant "a human ended it", and refusing it
+     * on both triggers was how the daemon avoided overruling a person. It still
+     * does: **a prompt is not the daemon deciding anything.** It is the same
+     * person, on the same conversation, typing into it — the identical argument
+     * `agent_exited` has always made one case up, and the identical one
+     * `reloadCredentials` makes about a sign-in undoing a sign-out.
+     *
+     * What forced the question is that the composer is now unconditional: a box
+     * you can type into that answers `409 session_terminal` is worse than no box,
+     * and "type to start it again" is what every row on that screen already
+     * implies. `boot` stays `false`, so nothing revives a stopped conversation on
+     * its own — which is the whole of what the old rule was protecting.
+     */
     case "stopped":
+      return trigger === "prompt";
+    /*
+     * These two never had a conversation to return to, and the `agentSessionId`
+     * guard at the top already answers for them — written out anyway, because a
+     * reason that reaches here with an id somehow must not fall into an arm above.
+     */
     case "start_failed":
     case "start_timeout":
+    // Legacy and genuinely ambiguous: it *replaced* the caller's reason whenever a
+    // kill went unconfirmed, so a row carrying it may be somebody's Stop wearing a
+    // different word — and `agentConfirmedDead: false` means the old agent may
+    // still hold the conversation file. Two agents on one file is worse than a
+    // refusal.
     case "agent_kill_failed":
       return false;
   }
@@ -1283,6 +1335,18 @@ export class ManagedSession {
   private startPromise: Promise<Session> | null = null;
   private startAbandoned = false;
   private stopRequested = false;
+  /**
+   * Whether an `authentication_failed` from the agent may replace it.
+   *
+   * Re-armed by every prompt and spent by {@link onAgentUnusable}, which is the
+   * whole of what makes that a retry rather than a loop: a credential that really
+   * has gone away fails the fresh agent the same way, and the second failure sits
+   * in the transcript beside the first instead of starting a third process. What
+   * drives the next attempt is somebody sending another message.
+   *
+   * Starts armed, so the first failure a restored session meets is answered.
+   */
+  private authRestartArmed = true;
   private stopping: Promise<void> | null = null;
   private exitRecord: SessionExit | null = null;
   private resuming: Promise<void> | null = null;
@@ -2732,7 +2796,33 @@ export class ManagedSession {
     this.ultracodeChoice = next;
     this.touchSafe();
     if (this.agentSessionId === null) return;
+    await this.restartAgent();
+  }
 
+  /**
+   * Replace this session's agent process, keeping the conversation.
+   *
+   * **Extracted rather than copied, because there are two callers now and the
+   * sequence is not one anybody would reproduce correctly from memory.** It was
+   * written for `ultracode` — a setting the agent reads when the conversation is
+   * opened, so the only way to change it is to open a new one — and a pasted
+   * credential is the same shape of fact: `secrets` are read at spawn, in
+   * `env: { ...agentEnv(), ...this.secrets(agent) }`, so a token saved while an
+   * agent is running reaches it never. Somebody pasted one, the badge turned
+   * green, and the conversation in front of them went on failing to authenticate.
+   *
+   * `resume()` carries `agentSessionId`, so what comes back is *this*
+   * conversation rather than a fresh one. The window in which the controls are
+   * held and every instruction answers `busy` is opened synchronously below and
+   * closed in the `finally` — see {@link restarting} for why that has to be one
+   * statement and one `finally`.
+   *
+   * **Callers own the decision to do this at all.** Nothing here asks whether a
+   * turn is in flight or a permission is parked, because `applyUltracode`'s
+   * caller has already decided for its own reasons; see `reloadCredentials`,
+   * which decides differently.
+   */
+  private async restartAgent(): Promise<void> {
     /*
      * Captured before the stop, because the stop is what destroys it.
      *
@@ -2816,6 +2906,49 @@ export class ManagedSession {
       // `reject`: see {@link whenRestarted}.
       finished();
     }
+  }
+
+  /**
+   * Take a credential saved after this agent started, by starting it again.
+   *
+   * **Returns whether it did**, because the caller reports a count and a silent
+   * "no" would make a screen say chats were brought back when none were.
+   *
+   * The refusals are the whole design:
+   *
+   *   - **Terminal**: nothing is running to replace, and the next `resume()`
+   *     reads the credential anyway. Restarting here would launch an agent
+   *     nobody asked for, on a conversation somebody deliberately ended.
+   *   - **Mid-turn**: `stop()` would kill the turn. And a session that is
+   *     *currently working* is one whose credential is demonstrably fine — the
+   *     sessions that need the new one are exactly the idle and the failing.
+   *     That is not a compromise; a turn in flight is evidence.
+   *   - **Blocked**: a parked permission is somebody being waited on, and the
+   *     restart would drop the question without answering it. This daemon's whole
+   *     shape is that an approval cannot be lost.
+   *   - **Already restarting or clearing**: one process boundary at a time.
+   *
+   * Everything refused here picks the credential up the next time it starts,
+   * which for a turn in flight is whenever it next ends and is resumed.
+   *
+   * **A getter rather than a promise that answers `false`**, so a caller can count
+   * what it is about to do *before* doing it. The first version of
+   * `reloadCredentials` returned a number it decremented inside a `.then`, which
+   * resolves after the return — so the count it reported was every session on the
+   * agent, refusals included.
+   */
+  get takesCredentialChange(): boolean {
+    if (this.terminal || this.stopRequested) return false;
+    if (this.session === null || this.agentSessionId === null) return false;
+    if (this.turn !== null) return false;
+    if (this.awaitingCount > 0) return false;
+    return !this.clearing && !this.restarting;
+  }
+
+  /** {@link takesCredentialChange}, then the restart. Re-checked, never assumed. */
+  async applyCredentialChange(): Promise<void> {
+    if (!this.takesCredentialChange) return;
+    await this.restartAgent();
   }
 
   /** Switches permission/plan mode. Same refusal shapes as {@link setConfigOption}. */
@@ -3066,6 +3199,10 @@ export class ManagedSession {
     const turn = this.turnCounter;
     this.turn = turn;
     this.turnStartedAt = Date.now();
+    // Somebody is asking again, so the agent is allowed one more replacement if
+    // this message meets the same wall. See `onAgentUnusable` and the flag's own
+    // docblock.
+    this.authRestartArmed = true;
 
     // The first prompt names the session, once.
     //
@@ -3287,6 +3424,33 @@ export class ManagedSession {
         if (live !== null) this.startIdleDrain(live);
       }
       this.sweepPending(failed ? "pump_failed" : "turn_ended");
+      /*
+       * **A prompt the agent never engaged with means the agent is finished, so
+       * it is replaced.**
+       *
+       * ⚠ Reported with a screenshot: four messages, four identical
+       * `Internal error: The Claude Agent session has ended. Please start a new
+       * session.` The agent's ACP session had died under a live process — the
+       * daemon saw no exit, `status` stayed `idle`, and every message was
+       * accepted and failed the same way. There was no way out from inside the
+       * app.
+       *
+       * **`failed` is the precise signal and the message is not.** Reaching this
+       * `catch` means `session.prompt()` *rejected* rather than streamed a
+       * failure: the agent did not take the message at all. Anything that goes
+       * wrong **inside** a turn — a tool blowing up, a command exiting non-zero —
+       * arrives through `this.record(event)` and never comes near here, so this
+       * cannot fire on an ordinary bad turn. Measured on the real events:
+       * `{code: -32603}` with **no `errorKind`**, which is why `isAuthFailure`
+       * quite correctly ignored it and why matching the text was never an option
+       * — `describeError` is the agent's own prose and moves with its version.
+       *
+       * Same machinery as an auth failure, for the same reason: what is stale is
+       * the process, not the conversation. Armed once per prompt, so a fresh
+       * agent that fails the same way leaves the error standing and waits for
+       * somebody to send another message rather than looping.
+       */
+      if (failed) this.onAgentUnusable();
       this.touchSafe();
     }
   }
@@ -3299,6 +3463,83 @@ export class ManagedSession {
     // actually happened.
     if (this.stopRequested && event.type === "error") return;
     this.log.append(event);
+    if (isAuthFailure(event)) this.onAgentUnusable();
+  }
+
+  /**
+   * This agent cannot serve the conversation, so it is given a fresh process.
+   *
+   * **Two callers and one remedy.** The agent reporting
+   * `errorKind: "authentication_failed"` on the event pump, and a prompt the
+   * agent **rejected outright** — `session.prompt()` throwing rather than
+   * streaming a failure, which is the pump's `failed` flag and means the message
+   * was never taken. The second was found the hard way: an ACP session that died
+   * under a live process left `status: idle` and answered four messages in a row
+   * with the same `-32603`, no `errorKind` on any of them, and no way out of the
+   * conversation from inside the app.
+   *
+   * **Ground truth, and the reason there is no probe on the prompt path.** An
+   * earlier version asked the agent's CLI "are you signed in" before every
+   * message, which cost a process spawn on the hot path, could only ever be as
+   * fresh as its 3s cache — and made the offline drivers depend on whether the
+   * person running them happened to be signed in, because a stub runtime inherits
+   * the real probe. This is the agent itself reporting, at the only moment that
+   * cannot be stale.
+   *
+   * ⚠ **The auth arm used to end the conversation, and that was wrong about what
+   * it had measured.** It called `stop("agent_signed_out")`, on the reasoning that "the
+   * credential is gone, so every later message would fail the same way". Q7.99
+   * had already found otherwise and the code never caught up: a session idle
+   * 5h36m reported `authentication_failed` on its *first* prompt while the token
+   * on disk was **still valid for another 1.4 hours**, and a freshly spawned
+   * agent worked four minutes later. What had gone stale was the agent process,
+   * not the credential — so ending the conversation destroyed the thing that was
+   * fine and kept nothing that was broken.
+   *
+   * What it cost is worth writing down, because it is what this is fixing.
+   * `autoResumable` answers `false` for `agent_signed_out` on **both** triggers
+   * and the only thing that reverses it is `reloadCredentials`, whose callers are
+   * all in-app credential writes — so somebody whose CLI refreshed its own token,
+   * or who signed in from their own terminal, had a conversation that could never
+   * come back, under a notice claiming they were signed out and a Sign in button
+   * leading to a screen where they already were. The composer was gone, so there
+   * was nothing to try from inside the app at all.
+   *
+   * **So the conversation stays, and the agent is replaced under it.** The error
+   * is already in the log — `record` appended it one statement above — so what
+   * happened is on screen, in the transcript, where somebody can read it and send
+   * again. `restartAgent` is the same path a config change takes and stops with
+   * `config_changed` deliberately rather than inventing a reason: it *is* "the
+   * daemon took the agent away and is bringing it straight back", it is in
+   * `DAEMON_EXIT_REASONS` so a client draws "reconnecting", and a new `ExitReason`
+   * member would read as `showsAsEnded` on every client older than it — which is
+   * the very failure this removes.
+   *
+   * **Armed once per prompt**, which is what makes this a retry rather than a
+   * loop. If the credential really is gone the fresh agent fails the same way,
+   * the second failure lands in the transcript beside the first, and nothing
+   * restarts again until somebody sends another message. The retry is driven by
+   * the person, and the cost of a genuinely revoked credential is one spawn per
+   * message they choose to send.
+   *
+   * Fire-and-forget because `record` is on the event pump and must not await a
+   * process teardown.
+   */
+  private onAgentUnusable(): void {
+    if (this.terminal || this.stopRequested) return;
+    /*
+     * A restart already in flight is left alone, and this is not defensive.
+     * `restartAgent` writes `this.restart` — a single field holding the config to
+     * put back and the promise `whenRestarted` waits on — so a second one
+     * overwrites the first's receipt: the config captured before a config change
+     * is lost, and everything waiting on the old promise waits for ever. The
+     * agent coming up is a fresh process either way, which is the whole of what
+     * this wanted.
+     */
+    if (this.restarting) return;
+    if (!this.authRestartArmed) return;
+    this.authRestartArmed = false;
+    void this.restartAgent().catch(() => undefined);
   }
 
   /* --------------------------------------------------------------------- *
@@ -4381,6 +4622,162 @@ export class SessionRegistry {
 
   get(id: string): ManagedSession | undefined {
     return this.sessions.get(id);
+  }
+
+  /**
+   * End every conversation running on an agent somebody has just signed out of.
+   *
+   * **This is what makes signing out mean anything.** A credential is read once,
+   * at spawn, so a process started while signed in keeps answering long after the
+   * account behind it was revoked — the conversation carries on, apparently
+   * fine, for an account its owner has just taken away. Nothing about the
+   * sign-out reached it, because nothing could.
+   *
+   * Ended rather than relaunched, which is the opposite of what a *saved*
+   * credential does and for a reason worth stating: relaunching here would start
+   * an agent with no way to authenticate, and that fails at the first message —
+   * inside the transcript, as `Internal error: Failed to authenticate`, which is
+   * the least explicable place a refusal can appear. Ending it says the true
+   * thing in the one place the client can render properly.
+   *
+   * A turn in flight is **not** spared, unlike `takesCredentialChange`. That
+   * asymmetry is the point: there, the credential was being *added* and a working
+   * turn was evidence of a working credential; here the credential is being taken
+   * away, and a turn still running on it is exactly what somebody signing out
+   * means to stop.
+   *
+   * Returns how many were ended, so the route can say so.
+   */
+  async signOutSessions(agent: AgentId): Promise<number> {
+    const live = [...this.sessions.values()].filter(
+      (session) => session.agent === agent && !session.terminal,
+    );
+    // Sequential rather than `Promise.all`: each `stop` awaits a process teardown,
+    // and firing every one at once on a machine with many sessions is a thundering
+    // herd of SIGTERMs against the same event loop.
+    for (const session of live) {
+      await session.stop("agent_signed_out").catch(() => undefined);
+    }
+    return live.length;
+  }
+
+  /**
+   * Put a credential change in front of every conversation already running on it.
+   *
+   * **The gap this closes is a whole product's worth of confusion.** Secrets are
+   * injected at spawn, so pasting a token updated the database, turned the badge
+   * green, and changed nothing at all for the chat somebody was looking at — which
+   * went on answering `Failed to authenticate` with no explanation available
+   * anywhere on the screen. Measured 2026-08-20: a token saved at 00:23:02, a
+   * prompt refused at 00:23:12, and a session created four minutes later working
+   * immediately.
+   *
+   * **Started, not awaited.** A restart runs into seconds and this is a fan-out
+   * over every session on the agent; holding the route open for all of them would
+   * make saving a key a request that looks hung. Nothing is lost by answering
+   * early, because the wait already exists where it matters: `prompt` calls
+   * `whenRestarted()`, so somebody who saves a token and immediately types is made
+   * to wait for their own session rather than refused by it.
+   *
+   * The count is what came back, and is deliberately the number of sessions that
+   * **will** restart rather than the number that finished — the caller answers a
+   * request, not a fleet.
+   *
+   * ⚠ **`revive` is which direction the change went, and it is not a convenience.**
+   * A credential arriving and a credential going away reach the running sessions
+   * the same way — both are invisible until a relaunch — so both callers want the
+   * restart half. Only one of them wants the resume half, which is the `returning`
+   * filter below and the whole of what this argument decides.
+   */
+  reloadCredentials(agent: AgentId, revive = true): number {
+    const mine = [...this.sessions.values()].filter((session) => session.agent === agent);
+    const restarting = mine.filter((session) => session.takesCredentialChange);
+    /*
+     * **Signing in reverses a sign-out, and only a sign-out.**
+     *
+     * `agent_signed_out` is the record of who ended these and why, so it is what
+     * decides which come back: a conversation this daemon ended *because the
+     * credential went away* is owed a resume when a credential returns. One
+     * somebody stopped by hand carries `stopped` and stays stopped — reviving
+     * that would be the daemon overruling a person, which is the whole reason the
+     * reason exists rather than a boolean.
+     *
+     * `autoResumable` deliberately answers `false` for it, and that is not in
+     * tension with this: nothing may bring these back *on its own*. This is not
+     * on its own — it is the same person, on the same machine, undoing the thing
+     * that ended them.
+     *
+     * ⚠ **And only when a credential *arrived*, which is what `revive` carries.**
+     * Both routes reach this function, and reading the change as symmetric made
+     * `DELETE /agent-auth/:agent` resume every conversation that had been ended
+     * *because there was no credential* — spawning agents with nothing to
+     * authenticate with, straight into the `Internal error: Failed to
+     * authenticate` this file argues against three docblocks up. A removal is a
+     * sign-out's second half, never its reversal: the restart half still runs, so
+     * a session holding the old secret in its environment still loses it.
+     */
+    const returning = revive
+      ? mine.filter((session) => session.terminal && session.exit?.reason === "agent_signed_out")
+      : [];
+
+    /*
+     * ⚠ **One at a time, and still without making the caller wait.**
+     *
+     * Each of these is a SIGTERM and a process teardown followed by a fresh spawn
+     * and an ACP handshake. Issued as N bare `void` calls they all started at
+     * once, so saving or deleting one credential on a full machine was up to
+     * `DEFAULT_MAX_SESSIONS` simultaneous teardowns and as many spawns against
+     * this one event loop — which is exactly the thundering herd `signOutSessions`
+     * refuses sixty lines up, in the same file, over the same work.
+     *
+     * The `void` stays where it matters: the loop is detached, so the route still
+     * answers with the count immediately and the restarts proceed behind it. What
+     * changed is that they now proceed in a queue rather than in a stampede.
+     *
+     * Each independently, and a failure in one may not take the others with it. A
+     * refused session never reaches here — `takesCredentialChange` decided that
+     * above — so what this swallows is a stop or a resume that genuinely threw,
+     * which the session reports through its own state the way any failed resume
+     * does.
+     */
+    void (async () => {
+      for (const session of restarting) {
+        if (this.shuttingDown) return;
+        await session.applyCredentialChange().catch(() => undefined);
+      }
+      for (const session of returning) {
+        /*
+         * ⚠ **Both of these are debts serialising this loop took on**, and neither
+         * was payable before it: the old bare-`void` form did all of this in the
+         * tick that decided it, so there was no "later" for anything to change in.
+         *
+         * The shutdown check is the same one the boot resume pass makes per
+         * attempt, for the reason it states there — starting an agent we are about
+         * to kill is worse than not starting it. It matters *more* here. That pass
+         * notes a resume already in flight is safe without it, because `resume()`
+         * clears `exitRecord` synchronously and `shutdown()` then collects the
+         * session; a *queued* one has not run at all, so it is in neither
+         * `shutdown()`'s list nor anything else's, and the agent it spawns is
+         * `detached` and outlives `process.exit(0)`. The restart half above is
+         * incidentally safe — `applyCredentialChange` re-tests
+         * `takesCredentialChange`, whose first line refuses a terminal session —
+         * but it is written out there too rather than relied on silently.
+         *
+         * The predicate is re-tested for the same reason `applyCredentialChange`
+         * re-tests its own: "Re-checked, never assumed." `returning` was decided
+         * before the restarts ran, and by the time a queue of process teardowns and
+         * ACP handshakes reaches the end of it, a session may have been reconnected
+         * and then stopped by hand. `doResume` refuses only a non-terminal session
+         * and never looks at the reason, so without this it would be revived —
+         * which is the docblock's own line about a conversation carrying `stopped`
+         * staying stopped, and the daemon not overruling a person.
+         */
+        if (this.shuttingDown) return;
+        if (!(session.terminal && session.exit?.reason === "agent_signed_out")) continue;
+        await session.resume().catch(() => undefined);
+      }
+    })();
+    return restarting.length + returning.length;
   }
 
   list(): ManagedSession[] {

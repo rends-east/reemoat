@@ -1,6 +1,7 @@
 import { Check, Copy, ExternalLink, LogIn, LogOut, RefreshCw, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { DaemonClient } from "../../daemon";
+import type { CredentialWritten } from "../../wire";
 import { ApiError, errorText } from "../../http";
 import type { MachineId } from "../../ids";
 import { store } from "../../store";
@@ -260,6 +261,7 @@ export function AgentDetail({
         machineId={machineId}
         agent={agent}
         login={login}
+        os={listing.os}
         checking={loading}
         checkFailed={error !== null}
         onChanged={changed}
@@ -299,6 +301,7 @@ function SignIn({
   machineId,
   agent,
   login,
+  os,
   checking,
   checkFailed,
   onChanged,
@@ -306,6 +309,8 @@ function SignIn({
   machineId: MachineId;
   agent: AgentAuthInfo;
   login: AgentLoginSupport;
+  /** The daemon's own platform, for the one sentence that has to name it. */
+  os: string | undefined;
   /** A re-probe is in flight, so no verdict may be claimed yet. */
   checking: boolean;
   /** The re-probe could not be made at all — a different thing from a verdict. */
@@ -343,7 +348,7 @@ function SignIn({
    */
   const canSignIn = login.supported && agent.available;
   const block = tokenBlockFor(stance, stored);
-  const line = stanceLine(agent.id, stance, canSignIn);
+  const line = stanceLine(agent.id, stance, canSignIn, os);
   // Stays true while the wizard runs, or the divider would flip to "Sign in with
   // a key instead" beside a live sign-in.
   const signInAbove = canSignIn && stance !== "signed_in";
@@ -425,6 +430,14 @@ function SignIn({
               slot={slot}
               stance={stance}
               caveat={caveat}
+              /* Only where the wizard cannot run, and only on the slot that
+                 command actually fills. Offered next to the API-key box it would
+                 be an instruction that produces the wrong credential. */
+              howTo={
+                login.blocked === "interactive_pty" && slot.envName === "CLAUDE_CODE_OAUTH_TOKEN"
+                  ? "claude setup-token"
+                  : null
+              }
               editable={block === "editable"}
               onChanged={onChanged}
             />
@@ -547,6 +560,7 @@ function CredentialSlot({
   slot,
   stance,
   caveat,
+  howTo,
   editable,
   onChanged,
 }: {
@@ -556,6 +570,8 @@ function CredentialSlot({
   stance: AgentStance;
   /** The one thing to read before typing. See `credentialCaveat`. */
   caveat: string | null;
+  /** A command that produces this credential, where one exists. See `SetupTokenCommand`. */
+  howTo: string | null;
   /** False where nothing typed here could help — see `tokenBlockFor`. */
   editable: boolean;
   onChanged: () => void;
@@ -563,7 +579,10 @@ function CredentialSlot({
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const withDaemon = (run: (daemon: DaemonClient) => Promise<unknown>, removing = false): void => {
+  const withDaemon = (
+    run: (daemon: DaemonClient) => Promise<CredentialWritten>,
+    removing = false,
+  ): void => {
     const daemon = store.daemonFor(machineId);
     if (daemon === undefined) {
       toast("error", "That machine is not reachable.");
@@ -571,15 +590,21 @@ function CredentialSlot({
     }
     setBusy(true);
     void run(daemon)
-      .then(() => {
+      .then((answer) => {
         setValue("");
         /*
          * True by construction rather than optimistic: `PUT /agent-auth/:agent`
          * and its `DELETE` both call `forgetAvailability()`, so the refetch below
          * re-spawns the probe **with the new key in its environment** and the chip
          * corrects itself within about a second.
+         *
+         * **And the chats already open are told about**, because they are the half
+         * that used to go silently wrong: a credential reaches an agent only at
+         * spawn, so a token saved mid-conversation changed nothing for the one in
+         * front of you. They are relaunched now, and saying how many is what
+         * connects "I saved a key" to "my chat stopped answering for a second".
          */
-        toast("ok", removing ? "Removed." : "Saved. Checking whether it works…");
+        toast("ok", credentialToast(removing, answer.restarting));
         onChanged();
       })
       .catch((cause: unknown) => toast("error", errorText(cause)))
@@ -594,6 +619,9 @@ function CredentialSlot({
     <IconButton
       icon={X}
       tone="destructive"
+      /* The 4px the row's `gap-2` no longer carries, so this button's expanded
+         target still clears the control on its left. See the row's own note. */
+      className="ml-1"
       label={`Remove the saved ${label.name}`}
       onClick={() => withDaemon((daemon) => daemon.clearCredential(agentId, slot.envName), true)}
       disabled={busy}
@@ -617,15 +645,39 @@ function CredentialSlot({
       </div>
       <p className="text-2xs text-muted">{label.note}</p>
 
+      {/*
+        * **How to make the thing this field wants, on the field that wants it.**
+        *
+        * It was a paragraph above the divider once, and that was two mistakes: it
+        * restated the sentence `stanceLine` already draws at the top of the card,
+        * and it said "paste the token below" with a divider, a heading and two
+        * inputs between it and the box it meant. A command belongs against the
+        * field it fills.
+        */}
+      {howTo !== null && editable && <SetupTokenCommand command={howTo} />}
+
       {/* Above the input and before the first keystroke — not a tooltip, which a
           phone has none of, and not a toast after saving. */}
       {editable && caveat !== null && <p className="mt-1 text-xs text-fg">{caveat}</p>}
 
       {editable ? (
         <>
-          {/* `gap-3`, because the Remove button's `after:-inset-2.5` target lands
-              2px onto its neighbour's face at 8px spacing. */}
-          <div className="mt-1 flex gap-3">
+          {/*
+            * `gap-2` between the field and Save, and the 12px the Remove button
+            * needs put back on Remove itself.
+            *
+            * The gap used to be `gap-3` for all of it, and the reason was only ever
+            * about Remove: its `after:-inset-2.5` target reaches 10px past its face,
+            * so at 8px spacing it lands 2px onto its neighbour. That argument says
+            * nothing about the field and Save — two ordinary boxes with no
+            * overhanging targets.
+            *
+            * **One row, so the field is narrower than the command box above it by
+            * exactly Save plus a gap.** That was tried the other way and taken
+            * back: matching the widths costs a whole row of height on every slot,
+            * and there are two of them on this screen alone.
+            */}
+          <div className="mt-3 flex gap-2">
             <input
               value={value}
               onChange={(event) => setValue(event.target.value)}
@@ -634,12 +686,14 @@ function CredentialSlot({
               spellCheck={false}
               placeholder={slot.set ? "paste a new key to replace it" : "paste the key"}
               aria-label={label.name}
-              /* `FIELD`, not a hand-rolled box: `index.css` forces 16px under a
-                 coarse pointer, so the old `py-2` measured ~39px against the 44px
-                 floor — and `bg-ink` was the rail's ground on a `bg-surface` card. */
               className={`${FIELD} min-w-0 flex-1 font-mono`}
             />
             <Button
+              size="sm"
+              /* Shrunk with the field beside it and floored with it too. `min-w-20`
+                 because `sm`'s `px-2.5` around four characters is a button narrower
+                 than its own label is long. */
+              className="min-w-20 [@media(pointer:coarse)]:min-h-11"
               onClick={() => withDaemon((daemon) => daemon.saveCredential(agentId, slot.envName, value))}
               disabled={busy || value.trim().length === 0 || tooLong}
             >
@@ -1087,4 +1141,81 @@ function copy(text: string): void {
   void copyText(text).then((ok) => {
     toast(ok ? "ok" : "error", ok ? "code copied" : "could not copy — select it by hand");
   });
+}
+
+
+/**
+ * A command to run in a terminal, with a control that copies it.
+ *
+ * **A flex row rather than a button positioned over the field**, which is what
+ * this was and what made it hang off the edge: the control was `absolute` inside
+ * a `<pre>` whose height came from its own text, so any padding mismatch pushed
+ * it out. Two siblings under `items-stretch` cannot disagree about height — there
+ * is no second measurement to get wrong.
+ *
+ * Both glyphs are mounted and swapped by opacity, and the tick reverts on a
+ * timer: a confirmation that never leaves is a claim about a clipboard that has
+ * long since moved on.
+ */
+function SetupTokenCommand({ command }: { command: string }): ReactNode {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 1400);
+    return () => clearTimeout(timer);
+  }, [copied]);
+
+  return (
+    /*
+      * **The border is on the wrapper, not on the `<pre>`.** That is what puts the
+      * control inside the field while leaving the two as ordinary flex siblings —
+      * the version before this laid the button over the box with `absolute`, took
+      * its height from the field's own text, and hung off the edge as soon as the
+      * two padding values disagreed. Under `items-stretch` there is no second
+      * measurement to get wrong.
+      */
+    <div className="mt-3 flex min-h-9 items-stretch overflow-hidden rounded-md border border-edge-strong bg-ink [@media(pointer:coarse)]:min-h-11">
+      <pre className="flex min-w-0 flex-1 items-center overflow-x-auto px-3 font-mono text-2xs leading-5 text-fg">
+        {command}
+      </pre>
+      <button
+        type="button"
+        onClick={() => {
+          void copyText(command).then((ok) => {
+            if (ok) setCopied(true);
+          });
+        }}
+        aria-label={copied ? "Copied" : `Copy ${command}`}
+        className="tap press relative flex w-11 shrink-0 items-center justify-center border-l border-edge-strong bg-surface text-muted hover:bg-raised hover:text-fg"
+      >
+        <Icon
+          as={Copy}
+          size={14}
+          className={`absolute transition-opacity duration-300 ${copied ? "opacity-0" : "opacity-100"}`}
+        />
+        <Icon
+          as={Check}
+          size={14}
+          className={`absolute transition-opacity duration-300 ${copied ? "opacity-100" : "opacity-0"}`}
+        />
+      </button>
+    </div>
+  );
+}
+
+
+/**
+ * What to say after a credential is written, given how many chats were relaunched.
+ *
+ * `undefined` is **not** zero: a daemon predating the relaunch omits the field
+ * entirely, and telling somebody "0 chats" there would be a confident claim about
+ * behaviour that daemon does not have. It falls back to the sentence that was
+ * always true.
+ */
+export function credentialToast(removing: boolean, restarting: number | undefined): string {
+  const head = removing ? "Removed." : "Saved.";
+  if (restarting === undefined) return `${head} Checking whether it works…`;
+  if (restarting === 0) return `${head} Checking whether it works…`;
+  const chats = restarting === 1 ? "1 chat is" : `${restarting} chats are`;
+  return `${head} ${chats} restarting to pick it up.`;
 }

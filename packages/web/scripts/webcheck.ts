@@ -70,6 +70,24 @@ const storage = new Map<string, string>();
   },
 };
 
+/*
+ * A `document`, deliberately **without** `startViewTransition`.
+ *
+ * `router.ts`'s `announce` reads it to decide whether a navigation can be
+ * animated, so a driver that drives `navigate()` needs one — and this stub found
+ * that the hard way: closing a sheet became a move that *has* a direction, the
+ * short-circuit that had been hiding the read stopped short-circuiting, and a
+ * routing check three screens away failed with `document is not defined`.
+ *
+ * Absent rather than faked, and that is the assertion in disguise: this is an
+ * engine that has never heard of view transitions, so every navigation here takes
+ * the plain path. What it pins is that the plain path still works — that the
+ * animation is an enhancement over a router that routes without it.
+ */
+(globalThis as Record<string, unknown>)["document"] = {
+  documentElement: { dataset: {} as Record<string, string> },
+};
+
 // Dynamic, so the stub above is in place before any module body runs.
 const { SessionStream } = await import("../src/stream.js");
 const { askedQuestion, drawableOptions, essentialContext, formatLocation, hasInput, optionLabel, permissionButtons, permissionContext, permissionHeadline, detailContext, readInput, withheldDetail } = await import(
@@ -865,20 +883,42 @@ process.stdout.write("\nwhat content type a body gets\n");
  * How long an upload is given
  *
  * A wall clock alone is the wrong instrument: a slow-but-progressing upload is
- * not a failure, and 25 MiB over a phone uplink is minutes rather than the 15s an
- * ordinary request gets. The stall budget is the primary bound and the hard cap
- * is only a backstop against a connection that trickles for ever.
+ * not a failure, and a large file over a phone uplink is many minutes rather than
+ * the 15s an ordinary request gets. The stall budget is the primary bound and the
+ * hard cap is only a backstop against a connection that trickles for ever.
  * ------------------------------------------------------------------ */
 
 process.stdout.write("\nhow long an upload is given\n");
 {
   const { uploadDeadlines } = await import("../src/machine.js");
+  const { MAX_UPLOAD_BYTES } = await import("../src/wire.js");
   const MiB = 1024 * 1024;
 
   // A one-byte upload must not be *more* fragile than an ordinary request.
   check("a tiny upload gets at least what any request gets", uploadDeadlines(1).hardMs >= 15_000, true);
-  check("the cap does not exceed the token lifetime", uploadDeadlines(1024 * MiB).hardMs <= 300_000, true);
-  check("25 MiB reaches the cap", uploadDeadlines(25 * MiB).hardMs, 300_000);
+  /*
+   * ⚠ **This pair asserted 300s and pinned the defect rather than the rule.**
+   * It read "the cap does not exceed the token lifetime" and "25 MiB reaches the
+   * cap" — so the cap was reached by the *largest file the daemon accepted*,
+   * which is precisely the state in which the formula has stopped governing and a
+   * progressing upload is cut off by arithmetic it never reaches the end of.
+   *
+   * The property, stated so it cannot be satisfied by a coincidence: at
+   * `MAX_UPLOAD_BYTES` the scaled budget is still under the ceiling, so every
+   * size this daemon will take is bounded by the assumed floor rather than by the
+   * cap. The cap is what stops a nonsense `size` becoming a day.
+   */
+  check(
+    "the largest file this daemon takes is still governed by the formula",
+    uploadDeadlines(MAX_UPLOAD_BYTES).hardMs < uploadDeadlines(1024 * MiB).hardMs,
+    true,
+  );
+  check("and the ceiling is what bounds anything past it", uploadDeadlines(1024 * MiB).hardMs, 45 * 60_000);
+  check(
+    "so 100 MiB gets a budget matched to the floor it assumes",
+    uploadDeadlines(MAX_UPLOAD_BYTES).hardMs,
+    20_000 + Math.ceil((100 * MiB) / 50),
+  );
 
   // Monotone, so a larger file is never given less time than a smaller one.
   let monotone = true;
@@ -3847,15 +3887,19 @@ process.stdout.write("\nmachine groups\n");
   /*
    * Pinned is its own group above the machines — a pin means "this one, wherever
    * it lives", and one scattered per section is a list you reassemble by eye —
-   * and it is a **copy**, which reverses what this pair used to assert.
+   * and it is a **move**, which reverses what this pair asserted for a while.
    *
-   * The row used to be lifted *out*: pinning the session you were working in made
-   * it disappear from the list you had been finding it in all day, which is a
-   * strange price for a bookmark. Two places, two meanings: the pinned group is
-   * "wherever it lives, here it is", the section is "what is on this machine".
+   * ⚠ It copied, on the argument that lifting the row out made the session you
+   * were working in disappear from the list you had been finding it in all day.
+   * The reversal is not a change of taste: both groups are on the **same screen
+   * at the same time**, a few hundred pixels apart, so the copy was not a second
+   * place to find it, it was the same row drawn twice — and a bookmark whose job
+   * is "this one, not the other forty" was drawing itself as two of the forty.
+   * What the copy said that the pin did not — where the session works — is on the
+   * row itself now, via `showPath`.
    */
   check("a pinned row is in the pinned group", groups.pinned.map((r: { key: string }) => r.key), ["m_a/pinned"]);
-  check("and is still inside its own machine", alpha.active.map((r: { key: string }) => r.key), ["m_a/live", "m_a/pinned"]);
+  check("and is no longer under its own machine", alpha.active.map((r: { key: string }) => r.key), ["m_a/live"]);
 
   // Ordered by name, never by reachability: `reach` flickers, and a list that
   // reorders itself under a travelling thumb is the failure this app cannot have.
@@ -3896,19 +3940,32 @@ process.stdout.write("\nmachine groups\n");
     machines: [machineOf("m_a", "alpha")],
   } as never);
   check("a pinned blocked row is in the pinned group", pinnedBlocked.pinned.map((r: { key: string }) => r.key), ["m_a/pb"]);
-  check("and under its own machine as well", pinnedBlocked.groups[0]!.active.map((r: { key: string }) => r.key), ["m_a/pb"]);
-  check("so its machine counts it as waiting", pinnedBlocked.groups[0]!.blockedCount, 1);
+  check("and not under its own machine", pinnedBlocked.groups[0]!.active.map((r: { key: string }) => r.key), []);
   /*
-   * And the caret visits it once, not twice.
+   * **And its machine's header does not count it, which is the half worth
+   * arguing.**
+   *
+   * A header's "N waiting" is a promise about the rows *under that header*, and
+   * this row is not one of them — a folder saying "1 waiting" that opens onto
+   * nothing waiting is how people learn to stop believing the number, which is
+   * strictly worse than the number being smaller. Nothing is hidden by it: the
+   * pinned group is above the folders on the same screen, `waitingFloor` counts
+   * by subtracting what the view draws from everything blocked, and it draws
+   * `pinnedFor` — asserted as a superset property over every filter, tab and
+   * needle a few blocks down rather than trusted to this comment.
+   */
+  check("and its machine's header does not promise a row it will not draw", pinnedBlocked.groups[0]!.blockedCount, 0);
+  /*
+   * And the caret visits it once.
    *
    * `keyboard.ts` locates the current row with `findIndex(key === currentKey)`,
-   * which answers with the *first* match — so from the machine-section copy, `j`
-   * would resolve to the pinned copy's index and jump to whatever follows it in
-   * the Pinned group. Not an off-by-one: a jump across the whole list. The screen
-   * genuinely draws the row twice and this genuinely returns it once, which is why
-   * `visibleRows` is documented as an order over sessions rather than over rows.
+   * which answers with the *first* match — so while a row was drawn twice, `j`
+   * from the machine-section copy resolved to the pinned copy's index and jumped
+   * across the whole list. Nothing produces a duplicate today; the dedup in
+   * `visibleRows` stays, and so does this, because what they defend against is a
+   * *future* group that copies rather than the one that used to.
    */
-  check("but the render order names it once", visibleRows(pinnedBlocked, currentView(pinnedBlocked)).map((r: { key: string }) => r.key), ["m_a/pb"]);
+  check("and the render order names it once", visibleRows(pinnedBlocked, currentView(pinnedBlocked)).map((r: { key: string }) => r.key), ["m_a/pb"]);
 }
 
 process.stdout.write("\nwhat is actually on screen\n");
@@ -7184,7 +7241,7 @@ process.stdout.write("\nwhat a collapsed row says, and what a fence hides\n");
 process.stdout.write("\nwhich files the composer will take\n");
 {
   const { admitFiles } = await import("../src/attach.js");
-  const MiB = 1024 * 1024;
+  const { MAX_UPLOAD_BYTES } = await import("../src/wire.js");
 
   // `File` needs a DOM; a plain object with the two fields the rule reads is the
   // honest stand-in in a driver that stubs `window` and nothing else.
@@ -7200,8 +7257,8 @@ process.stdout.write("\nwhich files the composer will take\n");
   check("and says why", eleventh.refused[0]?.reason, "too_many");
   check("the tenth is not", admitFiles(ten.slice(0, 9), [file("j.txt", 10)]).accepted.length, 1);
 
-  check("exactly 25 MiB is accepted", admitFiles([], [file("a.bin", 25 * MiB)]).accepted.length, 1);
-  const over = admitFiles([], [file("a.bin", 25 * MiB + 1)]);
+  check("exactly the cap is accepted", admitFiles([], [file("a.bin", MAX_UPLOAD_BYTES)]).accepted.length, 1);
+  const over = admitFiles([], [file("a.bin", MAX_UPLOAD_BYTES + 1)]);
   check("one byte more is not", over.accepted.length, 0);
   check("and says why", over.refused[0]?.reason, "too_large");
   // A directory dropped on a picker arrives as a zero-byte entry.
@@ -7668,7 +7725,9 @@ process.stdout.write("\na path inside the workspace, and one outside it\n");
 
   check("bytes read as bytes", formatBytes(512), "512 B");
   check("and scale", formatBytes(2048), "2.0 KB");
-  check("to something a chip can hold", formatBytes(25 * 1024 * 1024), "25 MB");
+  // Binary divisors with decimal labels, which is the convention `paths.ts` picked
+  // and which is why the per-file cap reads as a round number rather than as 105.
+  check("to something a chip can hold", formatBytes(100 * 1024 * 1024), "100 MB");
 }
 
 /* ------------------------------------------------------------------ *
@@ -7701,6 +7760,7 @@ process.stdout.write("\nsessions the daemon interrupted\n");
     "agent_kill_failed",
     "daemon_restarted",
     "config_changed",
+    "agent_signed_out",
   ] as const;
 
   /*
@@ -8007,7 +8067,32 @@ process.stdout.write("\nwhat an interrupted session says\n");
     resume: { state: "failed", attempts: 3, error: { code: "agent_auth_required", message: "x" }, at: 0 },
   });
 
-  check("a session somebody stopped still says so", sessionNotice(stopped, "kimi", "box")?.text, "ended: stopped");
+  const { exitText } = await import("../src/ui/bits.js");
+  /*
+   * **Every reason this line can reach has a sentence, and the fallback is the
+   * proof rather than the safety net.**
+   *
+   * `exitText`'s unknown arm draws `ended: <reason>`, which is what the whole line
+   * used to be — so asserting that no reason *reachable here* falls to that arm is
+   * the same assertion as "there are no raw enums left on this screen", stated as
+   * a property instead of five strings. `agent_signed_out` and the three daemon
+   * reasons are excluded because `sessionNotice` answers them above this line and
+   * they cannot arrive at it; the exclusion is asserted one screen down, by the
+   * two checks that they say something else entirely.
+   *
+   * Against the fallback's exact shape and **not** `includes(reason)`, which was
+   * the first attempt and is a worse test than no test: `stopped` reads "you
+   * stopped this conversation", so the identifier is a substring of a perfectly
+   * good sentence. What is wrong is a reason printed *as* its identifier, and
+   * that is one string comparison.
+   */
+  const reachable = ["stopped", "agent_exited", "start_failed", "start_timeout", "agent_kill_failed"] as const;
+  check(
+    "every exit reason a person can be shown has a sentence of its own",
+    reachable.filter((reason) => exitText(reason) === `ended: ${reason}`),
+    [],
+  );
+  check("a session somebody stopped says who did it", sessionNotice(stopped, "kimi", "box")?.text, "you stopped this conversation");
   /*
    * The copy rule, asserted as a rule rather than as a string: a session the
    * daemon interrupted must say neither "ended" nor any raw `ExitReason` token.
@@ -8018,13 +8103,85 @@ process.stdout.write("\nwhat an interrupted session says\n");
   check("an interrupted one never says ended", waitingText.includes("ended"), false);
   check("nor names an exit reason", /daemon_shutdown|daemon_restarted/.test(waitingText), false);
   check("it says what is actually happening", waitingText, "the daemon restarted — reconnecting the agent");
-  check("and offers no button, because nobody needs to press one", sessionNotice(deployed, "kimi", "box")?.retry, false);
+  check("and offers no button, because nobody needs to press one", sessionNotice(deployed, "kimi", "box")?.action, null);
 
   const stalledNotice = sessionNotice(stalled, "kimi", "box");
   check("a stalled one is warn-toned", stalledNotice?.tone, "warn");
   check("says what the daemon said", stalledNotice?.text, "could not reconnect the agent — kimi is not signed in on box");
-  check("and offers the retry", stalledNotice?.retry, true);
+  /*
+   * ⚠ **And offers the sign-in, not the retry, for this one code.** The fixture is
+   * `agent_auth_required`, which means the daemon spawned the CLI, asked it to
+   * reopen the conversation and was refused — so "not signed in" here is measured
+   * rather than remembered, and it is the one place in this app that has earned
+   * the right to say it. Retrying is still what every other failure offers, which
+   * the pair below pins.
+   */
+  check("and offers the sign-in it has actually verified", stalledNotice?.action, "sign_in");
+  const stalledOther = sessionOf({
+    status: "interrupted",
+    exit: { reason: "daemon_restarted" },
+    agentSessionId: "a_1",
+    resume: { state: "failed", attempts: 3, error: { code: "agent_start_timeout", message: "x" }, at: 0 },
+  });
+  check("while any other failure still offers the retry", sessionNotice(stalledOther, "kimi", "box")?.action, "reconnect");
   check("a live session says nothing at all", sessionNotice(sessionOf({ status: "running", exit: null }), "kimi", "box"), null);
+
+  /*
+   * **A failed authentication explains itself in the transcript, with the remedy.**
+   *
+   * ⚠ **It said "nobody is signed in to claude on box. Sign in and this
+   * conversation comes back", and both halves could be false at once.** This row
+   * is a record of something that happened, and nothing re-checks it — the
+   * daemon's own login probe is live and three seconds fresh and is not consulted
+   * anywhere near here. An OAuth token that expired mid-conversation and was then
+   * refreshed by the CLI itself left this asserting the opposite of the truth. The
+   * promise was not kept either: `reloadCredentials` is the only thing that
+   * reverses the reason and all its callers are in-app credential *writes*, so the
+   * Sign in button went to a screen where you already were.
+   *
+   * The sentence is about the past now, which is the only thing the row knows, and
+   * the action is the one that has always worked and was never offered:
+   * `POST /sessions/:id/resume` is ungated by `autoResumable`.
+   */
+  const signedOut = sessionOf({
+    status: "exited",
+    exit: { reason: "agent_signed_out", detail: null, at: 1, agentConfirmedDead: true },
+  });
+  const out = sessionNotice(signedOut, "claude", "box");
+  check("it names the agent and the machine", out?.text, "claude could not authenticate on box, so this conversation stopped.");
+  check("never as an internal reason", /agent_signed_out|ended:/.test(out?.text ?? ""), false);
+  /*
+   * **And it claims nothing about right now.** The row cannot know, so the words
+   * that would need checking must not appear: no "nobody is signed in", and no
+   * promise about what happens next.
+   */
+  check(
+    "and it asserts nothing about the present",
+    /signed in|comes back/.test(out?.text ?? ""),
+    false,
+  );
+  check("and it offers the reconnect, which is the one that works", out?.action, "reconnect");
+  /*
+   * One field, so the two remedies cannot both be claimed. Two booleans could,
+   * and the screen would draw two buttons for one problem.
+   */
+  const view = stripComments(readFileSync(new URL("../src/ui/SessionView.tsx", import.meta.url), "utf8"));
+  check("the view draws it as a route to that machine's agent", /settingsPath\("machines", row\.ref\.machineId, row\.snapshot\.agent\)/.test(view), true);
+  check("and the two buttons are mutually exclusive by construction", /notice\.retry/.test(view), false);
+
+  const composer = stripComments(readFileSync(new URL("../src/ui/Composer.tsx", import.meta.url), "utf8"));
+  /*
+   * ⚠ **A refusal always says so, which reverses an exception that had rotted
+   * twice over.** It suppressed the toast for `agent_signed_out` — a code the
+   * daemon had stopped sending, so the branch was dead and this check was green
+   * on a *literal* rather than on the behaviour. And the reason it existed
+   * (Q7.102: the screen already changed, so a toast is the same news twice)
+   * expired when the composer became unconditional: a refused send now restores
+   * the text and changes nothing else, so without a toast it is silent.
+   */
+  check("a refused send is never silent", /catch\(\(cause: unknown\)[\s\S]*?toast\("error", errorText\(cause\)\);/.test(composer), true);
+  check("with no code carved out of it", /cause\.code === "(agent_signed_out|session_terminal)"/.test(composer), false);
+  check("while still putting the message back", /restoreAttachments\(key, sent\);/.test(composer), true);
 
   // `agentConfirmedDead: false` is worth saying about a session somebody
   // stopped — it is the difference between "stopped" and "probably orphaned" —
@@ -8033,7 +8190,7 @@ process.stdout.write("\nwhat an interrupted session says\n");
     status: "exited",
     exit: { reason: "stopped", detail: null, agentConfirmedDead: false },
   });
-  check("an unconfirmed kill is reported when somebody stopped it", sessionNotice(orphaned, "kimi", "box")?.text, "ended: stopped (agent not confirmed dead)");
+  check("an unconfirmed kill is reported when somebody stopped it", sessionNotice(orphaned, "kimi", "box")?.text, "you stopped this conversation (agent not confirmed dead)");
 
   check("a stopped session's dot is dim", statusTone(stopped), "ended");
   // The pair that matters: same `status`, opposite tone, decided by the reason.
@@ -10905,16 +11062,28 @@ process.stdout.write("\nthe password rules\n");
  * roughly 47px and 39px tall: the *same field* on either side of the 44px tap
  * minimum depending on which screen you reached it from.
  *
- * What this cannot assert is the cascade or the call sites — there is no DOM
- * here and no CSS — so it pins the number and nothing more.
+ * **That was pinned as `py-3` and is pinned as `min-h` now**, because padding only
+ * ever reached 44px by multiplying with a line-height that lives in the type
+ * scale — a rendered height that no file stated and that nothing could assert
+ * without a DOM. Two controls meant to line up then differed by 10px, and the
+ * class that was supposed to fix it never applied at all: Tailwind emits every
+ * utility at equal specificity, `.py-3` is emitted after `.py-2`, so
+ * `` `${FIELD} py-2` `` silently kept the taller box.
+ *
+ * What this cannot assert is the cascade or the call sites — there is no DOM here
+ * and no CSS — so it pins the numbers, and the *absence* of the padding a caller
+ * would try to beat.
  * ------------------------------------------------------------------ */
 
 process.stdout.write("\nthe one measurement in a text field's chrome\n");
 {
   const { FIELD } = await import("../src/ui/bits.js");
 
-  check("the field's padding is the one that clears 44px", FIELD.includes("py-3"), true);
-  check("and it is not the one that does not", FIELD.includes("py-2"), false);
+  check("the field states a resting height", FIELD.includes("min-h-9"), true);
+  check("and the floor that clears 44px under a thumb", FIELD.includes("[@media(pointer:coarse)]:min-h-11"), true);
+  // The height is not padding any more, and that is the property: with no `py-*`
+  // in the string there is nothing for a caller's own to lose an argument to.
+  check("with no vertical padding at all", /\bpy-\d/.test(FIELD), false);
   // Layout is deliberately absent: width, margin and `block` legitimately differ
   // between a full-width form field and a `flex-1` one beside a Button, and
   // folding one caller's layout in here is how the next caller writes a fourth
@@ -11963,6 +12132,19 @@ process.stdout.write("\nwho owns Escape, and what paints above what\n");
     [true, true, true, true],
   );
   check("and it is the fallback scroller", bodyClasses.includes("overflow-y-auto"), true);
+  /*
+   * **And it paints its own ground, because it is the thing that slides.**
+   *
+   * This box carries the `view-transition-name` a section change moves, and being
+   * named lifts it out of the panel's snapshot — so with the fill left to the
+   * panel, both of its snapshots were transparent images of nothing but glyphs.
+   * Measured mid-slide at 390px: the leaving list's rows and the arriving
+   * section's fields were both fully legible, one drawn over the other. The
+   * animation was correct throughout; a pane that arrives has to *cover* the one
+   * it replaces, and that is a property of the element rather than of a keyframe.
+   * Same colour as the panel behind it, so nothing at rest changes.
+   */
+  check("and it paints its own ground, so a slide covers what it replaces", bodyClasses.includes("bg-surface"), true);
   check("a sheet's height is definite at both widths", /(^|\s)h-\[/.test(SHEET_PANEL) && /\ssm:h-\[/.test(SHEET_PANEL), true);
   check("and never a ceiling it can shrink under", /(^|\s)(sm:)?max-h-/.test(SHEET_PANEL), false);
 
@@ -14012,6 +14194,981 @@ process.stdout.write("\nthe machine limit\n");
      */
     check("saving a server setting re-reads the admin's own quota", /refreshMe\(\)/.test(src), true);
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * Importing a codebase
+ *
+ * Two of these are about a rule that has no runtime symptom until it is somebody
+ * else's machine that breaks. The daemon's route is new, and the client shipping
+ * inside the control plane's image means *new client against old daemon* is the
+ * ordinary state of this fleet rather than an edge — so the shape of that answer,
+ * a 404 with no error envelope, has to keep its own sentence. And `DAEMON_VERSION`
+ * may not be read to predict it: rule 1 of `compatibility.md` is that a version is
+ * negotiated or it is a label, and this one is a label.
+ *
+ * The rest are the drag-and-drop invariant nobody discovers by reading — `drop`
+ * simply never fires without a `preventDefault` on `dragover` — and the promise
+ * the skill text makes to the extractor. Those two drift apart silently: the skill
+ * telling somebody to include `.git` would produce an archive refused whole, and
+ * the only symptom is a 400 at the end of a five-minute export.
+ * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+ * A sign-in that is not offered
+ *
+ * The daemon decides — `loginBlockedReason` knows the platform and the flow's
+ * shape — and the client's job is to draw the remedy rather than an empty space.
+ * Before this, `canSignIn === false` rendered `null`: no button, no sentence, and
+ * a credential slot with no account of why it was the only thing there.
+ * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+ * Saving a credential while a chat is open
+ *
+ * A credential reaches an agent only at spawn, so a token saved mid-conversation
+ * used to change nothing for the chat in front of you — the badge went green and
+ * the messages went on failing to authenticate. The daemon relaunches those
+ * sessions now and reports how many; this is the half that says so.
+ * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+ * A re-probe is not the host going away
+ *
+ * `resumeMachine` forgets the route on every wake — a route learned on one
+ * network says nothing on another — so a healthy machine was re-probed every time
+ * the tab came back. `probeRoute` published `probing` before any I/O and `online`
+ * up to 1.5s later, and everything keyed on `reach` changed twice for a question
+ * whose answer never changed: every machine row's dot went hollow and back, and
+ * the agents panel *unmounted and remounted*, restarting `useAgentAuth` from
+ * nothing — a spinner, a second `GET /agent-auth` that shells out to every CLI,
+ * and any half-typed credential thrown away. Once per tab switch.
+ *
+ * `.claude/rules/web-shell.md` already states this rule for the rail: reachability
+ * flickers, so a row may not change because of it. These screens are the two that
+ * legitimately *show* reachability, and showing it is still not a reason to take
+ * the content away while asking.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\na re-probe is not the host going away\n");
+{
+  const { daemonReadable } = await import("../src/machine.js");
+  const mach = stripComments(readFileSync(new URL("../src/machine.ts", import.meta.url), "utf8"));
+  const panel = stripComments(
+    readFileSync(new URL("../src/ui/settings/MachineAgentsSection.tsx", import.meta.url), "utf8"),
+  );
+
+  // All four, because the interesting one is `probing` and a predicate over a
+  // union is only asserted by walking it.
+  check("a machine that answered is readable", daemonReadable("online"), true);
+  check("and one being re-checked still is", daemonReadable("probing"), true);
+  check("one that did not answer is not", daemonReadable("offline"), false);
+  check("nor is one never asked", daemonReadable("unknown"), false);
+
+  /*
+   * The root fix, and the one that covers every other screen: a probe of a
+   * machine already believed reachable does not publish `probing` at all.
+   * `unknown` is still the value for never having asked.
+   */
+  check("a re-probe keeps a known-online state", /if \(this\.reach !== "online"\) this\.reach = "probing";/.test(mach), true);
+  check("and does not overwrite it unconditionally", /^\s*this\.reach = "probing";$/m.test(mach), false);
+
+  check("the agents panel asks the predicate", /!daemonReadable\(machine\.reach\)/.test(panel), true);
+  check("rather than treating a measurement as an outage", /machine\.reach !== "online"/.test(panel), false);
+}
+
+process.stdout.write("\nsaving a credential while a chat is open\n");
+{
+  const { credentialToast } = await import("../src/ui/settings/AgentsPanel.js");
+
+  check("one chat is singular", credentialToast(false, 1), "Saved. 1 chat is restarting to pick it up.");
+  check("and several are not", credentialToast(false, 3), "Saved. 3 chats are restarting to pick it up.");
+  check("removing says removed", credentialToast(true, 2), "Removed. 2 chats are restarting to pick it up.");
+  check("nothing to restart keeps the old sentence", credentialToast(false, 0), "Saved. Checking whether it works…");
+  /*
+   * **`undefined` is not zero.** A daemon predating this omits the field, and
+   * "0 chats" there would be a confident claim about behaviour it does not have —
+   * the same rule `wire.ts` states for every narrowing in it.
+   */
+  check("and a daemon that does not say is not read as zero", credentialToast(false, undefined), "Saved. Checking whether it works…");
+}
+
+process.stdout.write("\na sign-in that is not offered\n");
+{
+  const panel = stripComments(readFileSync(new URL("../src/ui/settings/AgentsPanel.tsx", import.meta.url), "utf8"));
+  const { stanceLine, osName } = await import("../src/ui/agentCard.js");
+
+  /*
+   * **One sentence, and it names the system.** "This machine can't run…" reads as
+   * something misconfigured on your box; the truth is that the OS cannot hand a
+   * background service the terminal this login needs. The refusal is returned for
+   * every BSD, so the name comes from the daemon — a hardcoded "macOS" would tell
+   * a FreeBSD operator something false in the one sentence meant to absolve them.
+   */
+  check("the sentence names the system", stanceLine("claude", "signed_out", false, "darwin"), "macOS can't run Claude's own sign-in, so a saved key is the only way in.");
+  check("and a different BSD gets its own name", osName("freebsd"), "FreeBSD");
+  check("while a daemon that does not say names nothing", osName(undefined), "This machine");
+  check("a wizard that can run says nothing at all", stanceLine("claude", "signed_out", true, "darwin"), null);
+  check("and the panel passes the platform through", /stanceLine\(agent\.id, stance, canSignIn, os\)/.test(panel), true);
+
+  /*
+   * **The command sits on the field it fills.** It was a paragraph above the
+   * divider, which restated the sentence above it and then said "paste the token
+   * below" with a heading and two inputs in between.
+   */
+  check("the command is rendered inside the credential slot", /howTo !== null && editable && <SetupTokenCommand/.test(panel), true);
+  check("and only on the slot that command actually fills", /slot\.envName === "CLAUDE_CODE_OAUTH_TOKEN"/.test(panel), true);
+  check("and only where the wizard cannot run", /login\.blocked === "interactive_pty"/.test(panel), true);
+  check("naming the command the CLI really has", /"claude setup-token"/.test(panel), true);
+  /*
+   * A row of two, not a control laid over a box: the overlay took its height from
+   * the field's own text and hung off the edge the moment the two disagreed.
+   */
+  check("the copy control is a sibling of the field, not an overlay on it", /items-stretch/.test(panel), true);
+  check("so it cannot be positioned out of the box it belongs to", /SetupTokenCommand[\s\S]{0,900}absolute top-/.test(panel), false);
+  check("the button is still gated on supported, not on the reason", /login\.supported && agent\.available/.test(panel), true);
+
+  /*
+   * **The key row is shorter only where there is no tap floor to miss.**
+   * `FIELD`'s `py-3` exists because `index.css` forces 16px on an input under a
+   * coarse pointer — iOS zooms the page otherwise — and at `py-2` the box measures
+   * ~39px against 44px. Shrinking it unconditionally would have traded a tidier
+   * desktop row for a target under the floor on the device this product is shaped
+   * around, and nothing would have said so.
+   */
+  /*
+   * **Two boxes that line up, held to one number rather than to arithmetic.**
+   *
+   * The first attempt wrote `` `${FIELD} py-2` `` and did nothing at all: Tailwind
+   * emits every utility at equal specificity, `.py-3` is emitted after `.py-2`, so
+   * the constant won and the field stayed 10px deeper than the command box above
+   * it — with no error, and with the code and the review both saying otherwise.
+   * That is the same trap `Button` documents for a size passed via `className`,
+   * and it is why the short field is a constant of its own.
+   */
+  {
+    const bits = readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8");
+    /*
+     * **One height for every single-line control in the app**, and it is stated
+     * rather than arrived at: `py-3` only ever reached 44px by multiplying with a
+     * line-height that lives in the type scale, so the rendered height was a
+     * coincidence between two files and two controls could differ by 10px with
+     * nothing anywhere naming a number.
+     */
+    check("the field constant states its height", /export const FIELD =\s*\n?\s*"min-h-9/.test(bits), true);
+    check("and carries no padding for a caller to lose to", /export const FIELD =\s*\n?\s*"[^"]*\bpy-\d/.test(bits), false);
+    check("with the touch floor written down beside it", /export const FIELD =[\s\S]{0,240}\[@media\(pointer:coarse\)\]:min-h-11/.test(bits), true);
+    check("and no second field constant to drift from it", /FIELD_SM/.test(bits), false);
+
+    check("the key field uses the standard one", /\$\{FIELD\} min-w-0 flex-1 font-mono/.test(panel), true);
+    /*
+     * The general form of the defect, not this one instance of it: composing
+     * `FIELD` with a vertical padding is always a no-op and always silent.
+     */
+    /*
+   * The general form of the defect rather than this one instance: composing
+   * `FIELD` with a vertical padding is always a no-op and always silent, so it is
+   * checked across every screen that draws a field, not just this one.
+   */
+  {
+    const withFields = readdirSync(new URL("../src/ui/settings/", import.meta.url))
+      .filter((f) => f.endsWith(".tsx"))
+      .map((f) => readFileSync(new URL(`../src/ui/settings/${f}`, import.meta.url), "utf8"));
+    for (const extra of ["SignIn.tsx", "ForcedPasswordChange.tsx", "gate/Gate.tsx", "gate/GateCard.tsx"]) {
+      withFields.push(readFileSync(new URL(`../src/ui/${extra}`, import.meta.url), "utf8"));
+    }
+    const offenders = withFields.filter((src) => /\$\{FIELD\}[^`]*\bpy-\d/.test(src)).length;
+    report("no screen composes FIELD with a padding that cannot win", offenders === 0, `${withFields.length} files scanned`);
+  }
+    check("the command box states the same height", /flex min-h-9 items-stretch/.test(panel), true);
+    check("and the same floor, so the two cannot drift", (panel.match(/\[@media\(pointer:coarse\)\]:min-h-11/g) ?? []).length >= 2, true);
+  }
+  // Width is the other fields', which is what it was before a wrong axis was tried.
+  check("and its width is left alone", /max-w-80/.test(panel), false);
+
+  /*
+   * **The row is tightened, and Remove keeps the space it actually needs.** Its
+   * `after:-inset-2.5` target reaches 10px past its own face, so at an 8px gap it
+   * lands on the control to its left — the defect the old blanket `gap-3` was
+   * carrying for all three children. Tightening without putting that 4px back on
+   * Remove would have reintroduced it silently, on a destructive button.
+   */
+  /*
+   * **Remove keeps the room its own target needs, and only it.** Its
+   * `after:-inset-2.5` reaches 10px past its face, so at an 8px gap it lands on
+   * the control to its left — which is why the row carried `gap-3` for all three
+   * children. Tightening the field and Save without putting that 4px back on
+   * Remove reintroduces it silently, on a destructive button.
+   */
+  check("the field and Save sit closer", /mt-3 flex gap-2/.test(panel), true);
+  check("and Remove carries the room its own target needs", /tone="destructive"[\s\S]{0,220}className="ml-1"/.test(panel), true);
+  check("with Save wide enough to hold its label", /min-w-20/.test(panel), true);
+}
+
+process.stdout.write("\nimporting a codebase\n");
+{
+  const src = stripComments(readFileSync(new URL("../src/ui/ImportCode.tsx", import.meta.url), "utf8"));
+  const picker = stripComments(readFileSync(new URL("../src/ui/NewSession.tsx", import.meta.url), "utf8"));
+  const client = stripComments(readFileSync(new URL("../src/daemon.ts", import.meta.url), "utf8"));
+
+  const { importFailure } = await import("../src/ui/ImportCode.js");
+  const { ApiError } = await import("../src/http.js");
+  const envelope = (status: number, code: string, detail: unknown = null): unknown =>
+    new ApiError(status, code, "refused", detail, { error: { code, detail } });
+  /** What `parseBody` makes of a response carrying no envelope at all. */
+  const bare = (status: number): unknown =>
+    new ApiError(status, `http_${status}`, "Not Found", null, null);
+
+  check(
+    "a daemon with no such route is named as old rather than shown a 404",
+    importFailure(bare(404)).includes("too old"),
+    true,
+  );
+  /*
+   * **The 404 has to be asked for before the archive moves**, because it does not
+   * survive one. Measured through a real relay against a daemon predating this
+   * route: the same request that answers a clean 404 with an empty body came back
+   * `502 tunnel_failed` after 3.4 MB of a 5 MiB upload — the daemon refuses
+   * without draining the body, its end of the stream dies, and the relay reports
+   * the only thing it can see. So the sentence above was unreachable in exactly
+   * the case it exists for, and the ordering is what makes it reachable.
+   */
+  check("the route is probed before any bytes are sent", /importSupported\(\)/.test(src), true);
+  check(
+    "and the upload only starts once that has answered",
+    src.indexOf("importSupported()") < src.indexOf("importArchive("),
+    true,
+  );
+  check(
+    "with the probe carrying no body of its own",
+    /await this\.machine\.request\("\/fs\/import", \{ method: "POST" \}\)/.test(client),
+    true,
+  );
+  // A tunnel can still die for its own reasons, so the code keeps a sentence.
+  check(
+    "and a stream that dies mid-upload still says something actionable",
+    importFailure(envelope(502, "tunnel_failed")).includes("Try again"),
+    true,
+  );
+  check(
+    "and a 404 that *is* this system's own is not",
+    importFailure(envelope(404, "not_found")).includes("too old"),
+    false,
+  );
+  check(
+    "nothing reads the daemon's version to decide that",
+    /DAEMON_VERSION|daemonVersion/.test(src),
+    false,
+  );
+  check(
+    "a name collision says which name",
+    importFailure(envelope(409, "import_exists", { name: "my-app" })).includes("my-app"),
+    true,
+  );
+  check(
+    "and survives a detail that is not the shape it expected",
+    typeof importFailure(envelope(409, "import_exists", "nonsense")),
+    "string",
+  );
+  for (const code of ["archive_unsafe", "unsupported_archive", "import_busy", "import_too_large"]) {
+    check(`${code} draws a sentence of its own`, importFailure(envelope(400, code)) !== code, true);
+  }
+
+  /*
+   * What somebody is asked to paste reads their repository and writes files, so
+   * it is shown rather than described. A copy button alone asks them to take that
+   * on trust, and it is the failure with no symptom: nobody reports a block of
+   * text they were never offered.
+   */
+  check("the text being copied is rendered, not only put on the clipboard", /\{IMPORT_SKILL\}/.test(src), true);
+  check("in a box that scrolls on its own", /overflow-y-auto/.test(src), true);
+  check("without dragging the sheet behind it when it ends", /overscroll-contain/.test(src), true);
+  check("and the control over it carries an icon rather than a word", /as=\{Copy\}/.test(src), true);
+  /*
+   * **Both glyphs are mounted and swapped by opacity**, never rendered one at a
+   * time. A conditional would snap, and the tick going out is the half that
+   * carries the meaning: it says the confirmation expired rather than that the
+   * state was lost. Asserted as the pair, because rendering one of them
+   * conditionally still passes any test that only looks for `Check`.
+   */
+  check("the tick is mounted beside it rather than swapped in", /as=\{Check\}/.test(src), true);
+  check("and neither is drawn conditionally", !/\{copied \? <Icon|copied \? \(/.test(src), true);
+  check("they cross-fade instead", (src.match(/transition-opacity/g) ?? []).length >= 2, true);
+  /*
+   * The tick reverts. It used to be permanent — set on success and never unset —
+   * so a screen left open claimed a clipboard that had long since moved on.
+   */
+  check("and it takes itself down again", /setCopied\(false\), 1400\)/.test(src), true);
+  check("with the name following it, for anybody who cannot see either glyph", /aria-label=\{copied \? "Copied" : "Copy to clipboard"\}/.test(src), true);
+  /*
+   * Set from the *result* this lit the tick on an origin where the clipboard is
+   * absent rather than refused — which is every LAN address this app is read on.
+   * See `clipboard.ts`, which exists for that measurement.
+   */
+  check("and it is only ever lit on a copy that worked", !/setCopied\(ok\)/.test(src), true);
+
+  /*
+   * **"Machine" is a word this screen has already spent**, and the instructions
+   * may not spend it again on something else. There is a machine picker on the
+   * form behind this sheet, a Machines section in settings, and an `m_…` on every
+   * row — all of them meaning *an enrolled host in your fleet*, which is where an
+   * import is going. The source is the opposite end, so "paste this into a coding
+   * agent on that machine" read as the machine you had just selected.
+   *
+   * The *refusals* are deliberately not checked: those say "machine" correctly,
+   * about the daemon that answered. The rule is about the instructions alone.
+   */
+  {
+    const steps = [...src.matchAll(/\stext="([^"]*)"/g)].map((m) => m[1] ?? "");
+    const intro = /<p className="text-sm text-muted">([^<]*)<\/p>/.exec(src)?.[1] ?? "";
+    const lines = [intro, ...steps].filter((line) => line.length > 0);
+    report(
+      "the instructions never call the source a machine",
+      lines.length >= 4 && lines.every((line) => !/machine/i.test(line)),
+      `${lines.length} lines checked`,
+    );
+    check("naming the project instead, which cannot be one", /that project/.test(steps.join(" ")), true);
+  }
+
+  // Without this the browser refuses the drop and nothing fires at all — the one
+  // bug in a drop target that looks like the handler was never wired.
+  check("dragover preventDefaults, or drop never fires", /onDragOver=\{[\s\S]*?preventDefault\(\)/.test(src), true);
+  check("and the drop target is the body rather than the box alone", /onDrop=\{/.test(src), true);
+
+  // The folder is drawn from the daemon's answer, never from the file that was
+  // sent: an import that fails must not leave a folder named on the screen.
+  check("the picker is moved to the path the daemon answered", /onImported\(answer\.import\.path\)/.test(src), true);
+  check("and only after it has answered", /onImported\([^)]*\)[\s\S]{0,200}\.catch/.test(src), true);
+
+  check("the control sits in the picker beside New folder here", /Import code/.test(picker), true);
+  check("and does not wear the affirmative action's fill", /Import code[\s\S]{0,200}bg-fg/.test(picker), false);
+  {
+    // 44px, like the sibling whose row it shares: the two swap places with the
+    // create form's buttons, and a shorter row makes the panel jump.
+    const control = /<button[^>]*onClick=\{\(\) => setImporting\(true\)\}[\s\S]*?>/.exec(picker)?.[0] ?? "";
+    check("and clears 44px like the control beside it", /min-h-11/.test(control), true);
+  }
+
+  {
+    const { IMPORT_SKILL } = await import("../src/importSkill.js");
+    const { safeMemberPath } = await import("../../../src/archive.js");
+    /*
+     * The skill and the extractor have to agree, and `.git` is the one where
+     * disagreeing is expensive: `safeMemberPath` refuses the whole archive rather
+     * than trimming the member, so a skill that packed one would produce a file
+     * that always fails, at the end of the slowest step.
+     */
+    check("the extractor refuses .git", safeMemberPath("app/.git/config").ok, false);
+    check("and the skill says so rather than leaving it to be discovered", /Exclude \.git/.test(IMPORT_SKILL), true);
+    check("the skill asks for one top-level folder", /\*\*one\*\* folder named after/.test(IMPORT_SKILL), true);
+    check("and names a size the daemon will actually take", /under 50 MB/.test(IMPORT_SKILL), true);
+    /*
+     * **It names no agent and no path.** The machine on the other end is the
+     * customer's, running whatever they run; a skill directory from one vendor
+     * is a first step that fails before any work starts. What step one has to
+     * be is a single paste that any agent can act on as it stands.
+     */
+    check("the skill names no vendor path", !/\.claude\//.test(IMPORT_SKILL), true);
+    check("and no agent by name", !/Claude Code|Cursor|Copilot/.test(IMPORT_SKILL), true);
+    check("it is runnable as pasted, with the skill file optional", /If your agent keeps skills/.test(IMPORT_SKILL), true);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * The marker an ordered list was written with
+ *
+ * `1)` and `1.` are both CommonMark and mdast records neither — a `list` node
+ * carries `ordered`, `start` and `spread`, and the character is gone. So a message
+ * saying `1)` was drawn `1.`, which is the app rewriting the one text it has no
+ * business rewriting.
+ *
+ * Driven against hand-built trees rather than a real parse, deliberately: what the
+ * plugin *is* is a rule about `position.start.offset` into the source, and feeding
+ * it a tree it did not parse is what makes the offsets a claim rather than a
+ * coincidence. The shape it walks is asserted against the real remark in the
+ * transcript's own rendering, which no offline driver can reach.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nwhich lists keep their delimiter\n");
+{
+  const { remarkListDelimiter, PAREN_LIST } = await import("../src/ui/mdlist.js");
+  const classOf = (node: Record<string, unknown>): unknown =>
+    (node["data"] as { hProperties?: { className?: unknown } } | undefined)?.hProperties?.className;
+  const list = (offset: number, ordered = true): Record<string, unknown> => ({
+    type: "list",
+    ordered,
+    position: { start: { offset } },
+    children: [],
+  });
+  const run = (source: string, tree: Record<string, unknown>): Record<string, unknown> => {
+    remarkListDelimiter()(tree, { value: source });
+    return tree;
+  };
+
+  check("a paren list is marked", classOf(run("1) a", list(0))), [PAREN_LIST]);
+  check("a dotted one is not", classOf(run("1. a", list(0))), undefined);
+  check("and a bullet list is not, whatever follows it", classOf(run("- a", list(0, false))), undefined);
+
+  // The offset points at the digit, never at the indentation before it — measured
+  // against this repo's own remark-parse, and the pattern has no leading `\s*`
+  // because of it. A tree whose offset lands elsewhere must mark nothing rather
+  // than guess.
+  check("an offset that is not on a marker marks nothing", classOf(run("  1) a", list(0))), undefined);
+  check("and the real offset does", classOf(run("  1) a", list(2))), [PAREN_LIST]);
+
+  // CommonMark's own ceiling is nine digits. Ten is not a list at all, and the
+  // pattern must not match one anyway.
+  check("nine digits is still a list marker", classOf(run("123456789) a", list(0))), [PAREN_LIST]);
+  check("ten is not", classOf(run("1234567890) a", list(0))), undefined);
+
+  // Nested lists are reached: the walk is over `children`, not over the root's
+  // own arms, and a `1)` inside a bullet is the ordinary way people write one.
+  {
+    // 6 is where the `1` sits in `- x\n  1) a`, which is what remark records —
+    // the digit, never the indentation before it.
+    const nested = list(6);
+    const root = { type: "root", children: [{ type: "listItem", children: [nested] }] };
+    run("- x\n  1) a", root as never);
+    check("a nested list is reached", classOf(nested), [PAREN_LIST]);
+  }
+
+  // A node with no position is what a synthesized tree looks like. It must be
+  // skipped rather than read out of the source at offset 0.
+  check("a node with no position is left alone", classOf(run("1) a", { type: "list", ordered: true })), undefined);
+}
+
+/* ------------------------------------------------------------------ *
+ * Which way a navigation goes
+ *
+ * The rule behind the slide, and it lives outside `router.ts` because that file
+ * reads `window.location` in its module body and cannot be imported here at all.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nwhat a navigation moves\n");
+{
+  const { depthOf, isSheet, navMove } = await import("../src/nav.js");
+  const home = { name: "home" } as never;
+  const session = { name: "session", ref: { machineId: "m", sessionId: "s" } } as never;
+  const other = { name: "session", ref: { machineId: "m", sessionId: "t" } } as never;
+  const gate = { name: "gate", screen: "register" } as never;
+  const index = { name: "settings", section: null, machineId: null, agent: null } as never;
+  const account = { name: "settings", section: "account", machineId: null, agent: null } as never;
+  const users = { name: "settings", section: "users", machineId: null, agent: null } as never;
+  const machines = { name: "settings", section: "machines", machineId: null, agent: null } as never;
+  const oneMachine = { name: "settings", section: "machines", machineId: "m", agent: null } as never;
+  const oneAgent = { name: "settings", section: "machines", machineId: "m", agent: "claude" } as never;
+
+  check("opening a conversation pushes a screen", navMove(home, session), "push");
+  check("and leaving it pops one", navMove(session, home), "pop");
+
+  /*
+   * **Inside a sheet the sheet moves, not the screen behind it.** Tapping a
+   * section used to replace the panel's contents where they stood, which is the
+   * teleport the horizontal slide exists to remove — one layer in from the one it
+   * was first written for.
+   */
+  check("tapping a section pushes inside the sheet", navMove(index, account), "section-push");
+  check("and Back pops inside it", navMove(account, index), "section-pop");
+  check("a machine's agents are deeper still", navMove(machines, oneMachine), "section-push");
+  check("and one agent deeper again", navMove(oneMachine, oneAgent), "section-push");
+  check("walking back up pops each time", navMove(oneAgent, oneMachine), "section-pop");
+
+  /*
+   * **Closing goes down, opening does not go anywhere.** The enter is
+   * `SHEET_PANEL`'s own `animate-sheet` — CSS, on mount, on every engine — so a
+   * transition here as well would animate one panel twice.
+   */
+  check("closing a sheet takes it down", navMove(account, session), "sheet-close");
+  check("from any depth", navMove(oneAgent, home), "sheet-close");
+  check("but opening one is CSS's job", navMove(session, index), null);
+  check("from a session or from home", navMove(home, account), null);
+
+  /*
+   * The `null` arms are the load-bearing ones: each is a place motion would be
+   * wrong rather than merely absent. Session → session is what a desktop rail
+   * does all day and has no direction in it.
+   */
+  check("moving between two conversations moves nothing", navMove(session, other), null);
+  check("nor does the same one twice", navMove(session, session), null);
+  check("nor two sections at the same depth", navMove(account, users), null);
+  check("a gate screen is beside the sign-in form, not past it", navMove(home, gate), null);
+
+  // The two stacks are never compared, which is what `isSheet` is asked first for.
+  check("a sheet is a sheet whatever its depth", [isSheet(index), isSheet(oneAgent)], [true, true]);
+  check("and a screen is not", [isSheet(home), isSheet(session)], [false, false]);
+  check("the four sheet depths are the four screens", [depthOf(index), depthOf(account), depthOf(oneMachine), depthOf(oneAgent)], [1, 2, 3, 4]);
+  // `/new` has one screen, so nothing inside it can move.
+  check("and a picker has one", depthOf({ name: "new", machineId: null, cwd: null } as never), 1);
+
+  /*
+   * **The half of the slide that is not a function, and all three of its defects
+   * were invisible to every driver here.**
+   *
+   * `navMove` decides *which* movement; `index.css` decides what a movement does,
+   * and each of these was reported by somebody looking at a phone rather than
+   * caught by anything in this process.
+   *
+   * **A width gate has to out-specify what it gates.** `@media` adds no
+   * specificity, so `@media (min-width: 64rem) { ::view-transition-old(root) }` —
+   * one pseudo-element, `(0,0,1)` — silently lost to
+   * `:root[data-nav="push"]::view-transition-old(root)` at `(0,2,1)`, and the
+   * desktop kept every animation it was written to be exempt from. Measured at
+   * 1280px with `document.getAnimations()`: `nav-enter` and `nav-under` running
+   * on the root pair. `prefers-reduced-motion` at the foot of the file had the
+   * identical hole. So the invariant is the one that makes the class of bug
+   * impossible rather than the two instances of it: **every view-transition rule
+   * that sets an animation is keyed on `data-nav`**, which puts them all at one
+   * specificity where source order — the thing a reader can actually see —
+   * decides. A rule that sets anything else (`mix-blend-mode`, `z-index`) is not
+   * scanned, because nothing overrules those by width.
+   */
+  const transitionCss = readFileSync(new URL("../src/index.css", import.meta.url), "utf8").replace(
+    /\/\*[\s\S]*?\*\//g,
+    "",
+  );
+  const animatingSelectors = [...transitionCss.matchAll(/([^{}]*::view-transition-[^{}]*)\{([^}]*)\}/g)]
+    .filter((rule) => /animation\s*:/.test(rule[2] ?? ""))
+    .flatMap((rule) => (rule[1] ?? "").split(",").map((one) => one.trim()))
+    .filter((one) => one.length > 0);
+  check("there are view-transition animations to check at all", animatingSelectors.length > 8, true);
+  check(
+    "and every one is keyed on data-nav, so a width gate can overrule it",
+    animatingSelectors.filter((one) => !one.startsWith(":root[data-nav")),
+    [],
+  );
+  // The two that were dead. Named as well as covered by the rule above, because
+  // the rule would also pass on a file that had deleted them.
+  check(
+    "the desktop is exempt from the screen slide",
+    /@media \(min-width: 64rem\) \{\s*:root\[data-nav\]::view-transition-old\(root\)/.test(transitionCss),
+    true,
+  );
+  check(
+    "and reduced motion from all four",
+    /@media \(prefers-reduced-motion: reduce\) \{\s*:root\[data-nav\]::view-transition-old\(root\)/.test(transitionCss),
+    true,
+  );
+
+  /*
+   * **A closing sheet is one object, and the body giving up its name is the whole
+   * of it.** A `view-transition-name` does not nest — a named descendant is lifted
+   * out of its ancestor's snapshot into a *sibling* group — so with the body named
+   * during a close the panel's frame travelled and its contents stood still.
+   * Measured at 390px two fifths in: the head and the rounded top had moved and
+   * every row inside was where it started. `router.ts` writes `data-nav` before
+   * `startViewTransition`, so which elements are their own snapshot is a decision
+   * each navigation gets to make.
+   */
+  check(
+    "a closing sheet takes its contents with it",
+    /:root\[data-nav="sheet-close"\] \[data-sheet-body\] \{\s*view-transition-name: none;/.test(transitionCss),
+    true,
+  );
+  // …and the section slide still needs the name it gives back, or there is
+  // nothing for `nav-enter` to move.
+  check(
+    "while a section still has a pane of its own to move",
+    /\[data-sheet-body\] \{\s*view-transition-name: sheet-body;/.test(transitionCss),
+    true,
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * A message that has been sent and has not come back
+ *
+ * Drawn in the conversation now rather than under it by the composer, which is
+ * what makes it the transcript's business — and keyed by session, which is what
+ * makes leaving the conversation mid-send and coming back show it still there.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nthe message on its way out\n");
+{
+  const { clearEcho, echoFor, echoVersion, landEcho, setEcho, settleEcho } = await import("../src/echo.js");
+  const a = "m/a" as never;
+  const b = "m/b" as never;
+
+  check("a session with nothing outstanding has no echo", echoFor(a), null);
+  setEcho(a, { text: "hello", seq: Number.MAX_SAFE_INTEGER, attachments: [] });
+  check("one that sent something does", echoFor(a)?.text, "hello");
+  check("and it is that session's alone", echoFor(b), null);
+
+  /*
+   * **The sentinel is what makes the ordinary case work.** Until the daemon names
+   * a seq, nothing in the log can be newer — so an unrelated event arriving while
+   * `POST /prompt` is still in flight must not clear a message that has not
+   * landed yet.
+   */
+  settleEcho(a, 9_000);
+  check("an unrelated event does not settle an unlanded message", echoFor(a)?.text, "hello");
+
+  landEcho(a, 12);
+  check("the daemon naming a seq lowers it", echoFor(a)?.seq, 12);
+  settleEcho(a, 11);
+  check("an earlier event still does not settle it", echoFor(a) !== null, true);
+  settleEcho(a, 12);
+  check("its own event does", echoFor(a), null);
+
+  /*
+   * ⚠ **The race that made this a store method rather than a call from the
+   * composer.** `prompt` is on the 90-second slow-route budget and resumes a
+   * terminal session first, while the `prompt` event comes down a socket waiting
+   * for nothing — so the event routinely wins. `settleEcho` has already compared
+   * it against the sentinel and quite correctly kept the echo, and `landEcho`
+   * must not then resurrect a message the transcript is already drawing.
+   */
+  setEcho(b, { text: "again", seq: Number.MAX_SAFE_INTEGER, attachments: [] });
+  clearEcho(b);
+  landEcho(b, 40);
+  check("a seq arriving after the log caught up resurrects nothing", echoFor(b), null);
+
+  // The snapshot has to move, or `useSyncExternalStore` never re-reads.
+  {
+    const before = echoVersion();
+    setEcho(b, { text: "x", seq: 1, attachments: [] });
+    check("writing one is a change subscribers can see", echoVersion() > before, true);
+    const written = echoVersion();
+    clearEcho(b);
+    check("and so is clearing it", echoVersion() > written, true);
+    const cleared = echoVersion();
+    clearEcho(b);
+    check("but clearing nothing is not", echoVersion(), cleared);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * The words a turn ends in
+ *
+ * Three places drew a wire identifier with its underscores taken out — `turn
+ * cancelled`, `pump failed`, `ended: agent_exited` — at somebody reading their own
+ * conversation to find out what happened to it.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nwhat a turn says when it stops\n");
+{
+  const { resolvedByText, stopReasonText } = await import("../src/ui/tail.js");
+  /*
+   * Every member of `AnswerResolvedBy` except `client`, which never reaches the
+   * caller — the answer beside it already says who. Written out rather than
+   * derived, because a union cannot be enumerated at runtime and the point of the
+   * assertion is that **none of them falls through to the identifier**.
+   */
+  const every = [
+    "agent_withdrew",
+    "agent_gone",
+    "session_stopped",
+    "turn_ended",
+    "pump_failed",
+    "no_turn",
+    "turn_cancelled",
+  ] as const;
+  check(
+    "no reason a question was taken away is drawn as its identifier",
+    every.filter((by) => resolvedByText(by) === by.replace(/_/g, " ")),
+    [],
+  );
+  check("and the one somebody did says who did it", resolvedByText("turn_cancelled"), "you stopped the turn");
+  // Legible, and never a guess: a daemon newer than this client sends a member
+  // that is not in the table, and the honest answer is what the whole thing used
+  // to be.
+  check("an unknown one keeps the old rendering", resolvedByText("some_new_reason" as never), "some new reason");
+
+  /*
+   * `end_turn` is filtered by `showsInTranscript` and never reaches this, so the
+   * three that do are all turns that did not get where they were going — plus
+   * `cancelled`, which is the only one somebody *did* and the only one drawn red.
+   */
+  check("a cancelled turn says one word", stopReasonText("cancelled"), "cancelled");
+  const others = ["max_tokens", "max_turn_requests", "refusal"] as const;
+  check(
+    "and the rest say what happened rather than naming a constant",
+    others.filter((reason) => stopReasonText(reason).includes(reason)),
+    [],
+  );
+  check("an unknown stop reason is drawn as itself", stopReasonText("weather"), "turn ended: weather");
+
+  /*
+   * ⚠ The tint and the shape are `EventList`'s, and the pair is the whole point:
+   * a cancelled turn's `turn_end` is its last event, so it lands in the row
+   * `WaitingFoot` occupied an instant earlier. Read off disk, because a JSX
+   * branch is untestable here by construction.
+   */
+  const src = readFileSync(new URL("../src/ui/EventList.tsx", import.meta.url), "utf8");
+  check("a cancel is drawn in the working line's own shape", /stopReason === "cancelled" \?[\s\S]{0,300}WorkingMark still/.test(src), true);
+  check("in danger, and it is the only stop reason that is", /stopReason === "cancelled" \?[\s\S]{0,200}text-danger/.test(src), true);
+  check("while every other reason stays a centred line", /text-center text-2xs font-medium text-fg[\s\S]{0,120}stopReasonText/.test(src), true);
+}
+
+/* ------------------------------------------------------------------ *
+ * Which chips ride a message that has not landed
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nwhat an unsent message carries\n");
+{
+  const { echoAttachments } = await import("../src/attach.js");
+  const chip = (state: string, uploadId: string | null) =>
+    ({
+      localId: `l_${uploadId ?? "x"}`,
+      file: null,
+      name: `${uploadId ?? "pending"}.png`,
+      size: 11,
+      mimeType: "image/png",
+      state,
+      progress: 1,
+      uploadId,
+      error: null,
+      cancel: null,
+    }) as never;
+
+  // The same rule `sendableAttachments` applies, and it has to be: what the bubble
+  // draws and what the prompt names are one list, or a chip is shown on a message
+  // that did not carry it.
+  check(
+    "only what the daemon has answered for",
+    echoAttachments([chip("ready", "u_1"), chip("uploading", null), chip("failed", null)]).map((ref) => ref.uploadId),
+    ["u_1"],
+  );
+  check("carrying what the bubble needs to draw it", echoAttachments([chip("ready", "u_1")])[0], {
+    uploadId: "u_1",
+    name: "u_1.png",
+    mime: "image/png",
+    bytes: 11,
+    inlined: false,
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * What a row calls the folder it works in
+ *
+ * ⚠ Reported from a phone against a pinned row: the title read
+ * `…/rends/2026-07-tare-r…` and the line under it `claude · …/rends/2026-07-ta…`
+ * — the same absolute path, truncated twice, both of them mostly `/Users/rends`.
+ * `folderNames` had already written down why two segments is wrong ("a wall of
+ * `Users/rends`") and avoided it for folder *headers* while the rows went on
+ * doing it.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nwhere a row says it works\n");
+{
+  const { displayCwd, shortPath } = await import("../src/paths.js");
+  const home = ["/Users/rends"];
+
+  check("a directory under a root loses the root", displayCwd("/Users/rends/2026-07-tare-reemoat", home), "~/2026-07-tare-reemoat");
+  check("however deep it is", displayCwd("/Users/rends/a/b/c", home), "~/a/b/c");
+  check("and the root itself is the root", displayCwd("/Users/rends", home), "~");
+  check("a trailing slash on the root changes nothing", displayCwd("/Users/rends/x", ["/Users/rends/"]), "~/x");
+
+  /*
+   * **The longest match wins**, because roots nest. `~/work` says more than `~`
+   * about a path under both, and picking the first would make the answer depend
+   * on the order a daemon happened to list them in.
+   */
+  check(
+    "the most specific root is the one that is cut",
+    displayCwd("/Users/rends/work/api", ["/Users/rends", "/Users/rends/work"]),
+    "~/api",
+  );
+  check("whichever order they arrive in", displayCwd("/Users/rends/work/api", ["/Users/rends/work", "/Users/rends"]), "~/api");
+
+  /*
+   * **Two degradations, and both are exactly the old rendering.** `cwd` is not
+   * confined, so a session outside every root is ordinary; and an empty list is
+   * what an older daemon, an unreachable one and a listing that has not landed
+   * yet all look like. Neither may invent a prefix.
+   */
+  check("a path under no root keeps the old rendering", displayCwd("/opt/thing/api", home), shortPath("/opt/thing/api"));
+  check("and so does one with no roots at all", displayCwd("/Users/rends/x", []), shortPath("/Users/rends/x"));
+  check("which is still two segments", displayCwd("/Users/rends/x", []), "…/rends/x");
+  // A root that is empty or "/" must not turn every path into `~/…`.
+  check("an empty root is not a prefix", displayCwd("/Users/rends/x", [""]), "…/rends/x");
+
+  const { sessionLabel } = await import("../src/ui/bits.js");
+  const row = (title: string | null, cwd: string) =>
+    ({ snapshot: { title, workspace: { requestedCwd: cwd } } }) as never;
+  check("an unnamed session is called by where it works", sessionLabel(row(null, "/Users/rends/api"), home), "~/api");
+  check("a named one is called by its name", sessionLabel(row("fix the build", "/Users/rends/api"), home), "fix the build");
+  /*
+   * Defaulted rather than required, and the default is the honest one: every
+   * caller that has no roots to hand gets the label this drew before roots
+   * existed, rather than a guess about where home is.
+   */
+  check("and with no roots it is what it always was", sessionLabel(row(null, "/Users/rends/api")), "…/rends/api");
+
+  /*
+   * **The row draws the location once.** An unnamed session's *title* already is
+   * its directory, so repeating it underneath is one fact twice in a row 40
+   * characters wide — which is what the screenshot showed. Read off disk, because
+   * the comparison is in JSX.
+   */
+  const browser = readFileSync(new URL("../src/ui/SessionBrowser.tsx", import.meta.url), "utf8");
+  check("the row compares its location against its own label", /const subpath = located === label \? null : located;/.test(browser), true);
+  check("and the label is built from the same roots", /sessionLabel\(row, roots\)/.test(browser), true);
+}
+
+/* ------------------------------------------------------------------ *
+ * Telegram, whose chrome sits over this app's own
+ *
+ * The mini app draws ✕ Close until the page asks for a back button and ‹ Back
+ * once it has — so "Close on the list, Back inside" is one function answering
+ * `null` at the root. Everything asserted here is pure; the transport is not
+ * reachable offline and is a no-op without it.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nwhat Telegram's own control does\n");
+{
+  const { upFrom } = await import("../src/nav.js");
+  const { versionAtLeast, inTelegram } = await import("../src/telegram.js");
+
+  const home = { name: "home" } as never;
+  const gate = { name: "gate", screen: "register" } as never;
+  const session = { name: "session", ref: { machineId: "m", sessionId: "s" } } as never;
+  const index = { name: "settings", section: null, machineId: null, agent: null } as never;
+  const account = { name: "settings", section: "account", machineId: null, agent: null } as never;
+  const machines = { name: "settings", section: "machines", machineId: null, agent: null } as never;
+  const oneMachine = { name: "settings", section: "machines", machineId: "m", agent: null } as never;
+  const oneAgent = { name: "settings", section: "machines", machineId: "m", agent: "claude" } as never;
+
+  /*
+   * **`null` is the answer, not the absence of one.** Telegram has one control:
+   * hiding the back button is precisely how ✕ Close appears. So the session list
+   * closing the app is this returning `null`.
+   */
+  check("the session list has nowhere up, which is what draws Close", upFrom(home, "/"), null);
+  check("and so does a signed-out screen", upFrom(gate, "/"), null);
+
+  check("a conversation goes back to the list", upFrom(session, "/"), "/");
+  // Never `history.back()`: on a cold deep link there is one entry, and in a mini
+  // app leaving the app *is* closing it — from a conversation, which is the thing
+  // this exists to stop.
+  check("from a deep link too, not into history", upFrom(session, "/m/m_1/s/s_1"), "/");
+
+  /*
+   * Inside the sheet it walks the same levels the ◀ already walks, and leaves by
+   * the same door the ✕ uses — one rule, so the two controls cannot disagree.
+   */
+  check("a section goes up to the section list", upFrom(account, "/m/m_1/s/s_1"), "/settings");
+  check("an agent goes up to its machine", upFrom(oneAgent, "/"), "/settings/machines/m");
+  check("a machine goes up to Machines", upFrom(oneMachine, "/"), "/settings/machines");
+  check("and Machines goes up to the list", upFrom(machines, "/"), "/settings");
+  // At the index there is no level left inside the sheet, so up leaves it — for
+  // whatever it was drawn over, which is what `Sheet`'s own ✕ does.
+  check("the settings index leaves the sheet", upFrom(index, "/m/m_1/s/s_1"), "/m/m_1/s/s_1");
+  check("onto home when it was opened cold", upFrom(index, "/"), "/");
+  check("and so does the new-session sheet", upFrom({ name: "new", machineId: null, cwd: null } as never, "/m/m_1/s/s_1"), "/m/m_1/s/s_1");
+
+  /*
+   * **Segment-wise on integers**, which a string compare gets backwards at
+   * exactly the version that matters: `6.10` is above `6.9`, and the back
+   * button's gate is `6.1`.
+   */
+  check("6.1 is the gate and meets itself", versionAtLeast("6.1", "6.1"), true);
+  check("6.0 is too old", versionAtLeast("6.0", "6.1"), false);
+  check("6.10 is newer than 6.9, which a string compare denies", versionAtLeast("6.10", "6.9"), true);
+  check("7 clears a 6.x gate on one segment", versionAtLeast("7", "6.1"), true);
+  check("and 6 does not clear 6.1", versionAtLeast("6", "6.1"), false);
+  /*
+   * **Unparseable counts as too old**, and the direction is deliberate: refusing
+   * the control leaves the client drawing Close, while asking an old client for a
+   * back button is a request it answers by doing nothing — a page that believes
+   * it has a control nobody can see.
+   */
+  check("a version that will not parse is too old", versionAtLeast("banana", "6.1"), false);
+  check("and so is no version at all", versionAtLeast(null, "6.1"), false);
+
+  // Nothing runs outside Telegram: the test is the injected transport, not a
+  // pasted hash, and the driver has no such thing.
+  check("none of this is live in an ordinary browser", inTelegram(), false);
+
+  /*
+   * **The bridge itself, driven.** Telegram's transport is a function it injects,
+   * so a stub of it is the real contract rather than a mock of one — what goes
+   * over it is a string this module built, and it is asserted verbatim.
+   *
+   * The stub is installed and removed inside this block: the `window` up top is
+   * shared by every other check in this file, and a page that stays "in Telegram"
+   * after this would change what modules imported later believe.
+   */
+  {
+    const { setTelegramBack, telegramVersion } = await import("../src/telegram.js");
+    const w = (globalThis as Record<string, unknown>)["window"] as Record<string, unknown>;
+    const sent: string[] = [];
+    w["TelegramWebviewProxy"] = { postEvent: (t: string, d: string) => void sent.push(`${t} ${d}`) };
+    (w["location"] as Record<string, unknown>)["hash"] = "#tgWebAppVersion=6.9&tgWebAppPlatform=ios";
+
+    check("the launch hash carries the version", telegramVersion(), "6.9");
+
+    let pressed = 0;
+    setTelegramBack(() => void (pressed += 1));
+    check("asking for a back button posts one event", sent, ['web_app_setup_back_button {"is_visible":true}']);
+
+    // The half that draws ✕ Close: one control, and hiding it is how the other
+    // appears.
+    sent.length = 0;
+    setTelegramBack(null);
+    check("and dropping it hides the same one", sent, ['web_app_setup_back_button {"is_visible":false}']);
+
+    /*
+     * Telegram delivers by **calling into the page**, so something has to define
+     * the function it calls. Under `script-src 'self'` their SDK can never load,
+     * which is what makes owning this global safe — see the module's docblock.
+     */
+    const view = (w["Telegram"] as { WebView: { receiveEvent: (t: string) => void } }).WebView;
+    setTelegramBack(() => void (pressed += 1));
+    view.receiveEvent("back_button_pressed");
+    check("a press reaches the handler", pressed, 1);
+    // An event we do not know must pass through untouched rather than count.
+    view.receiveEvent("theme_changed");
+    check("and nothing else does", pressed, 1);
+
+    /*
+     * **One screen, one handler.** Replaced rather than accumulated: a stack of
+     * stale closures is how a press navigates to where you were three screens
+     * ago.
+     */
+    let second = 0;
+    setTelegramBack(() => void (second += 1));
+    view.receiveEvent("back_button_pressed");
+    check("the newest screen owns the press", [pressed, second], [1, 1]);
+
+    // A client too old for the feature is asked for nothing at all, rather than
+    // asked and silently ignored.
+    sent.length = 0;
+    (w["location"] as Record<string, unknown>)["hash"] = "#tgWebAppVersion=6.0";
+    setTelegramBack(() => {});
+    check("an old client is asked for nothing", sent, []);
+
+    delete w["TelegramWebviewProxy"];
+    delete w["Telegram"];
+    (w["location"] as Record<string, unknown>)["hash"] = "";
+    check("and the stub leaves nothing behind", inTelegram(), false);
+  }
+
+  /*
+   * The two halves that are not pure, read off disk. The inset is a **floor**
+   * rather than an addition — on a notched device `env()` and Telegram's pill
+   * describe the same strip, and adding them double-counts.
+   */
+  const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
+  check("the Telegram header inset is a floor, not an addition", /:root\[data-telegram\] \.pt-safe \{\s*padding-top: max\(/.test(css), true);
+  check("and it is scoped to Telegram", /\.pt-safe \{\s*padding-top: max\(0\.5rem/.test(css), true);
+  const entry = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
+  // `dataset["telegram"]` is the DOM spelling of the `[data-telegram]` the CSS
+  // selects on; asserting the attribute string would pass on the comment.
+  check("the marker is only written when the bridge is there", /if \(inTelegram\(\)\) \{[\s\S]{0,200}dataset\["telegram"\]/.test(entry), true);
+  const bridge = readFileSync(new URL("../src/telegram.ts", import.meta.url), "utf8");
+  /*
+   * ⚠ The iframe transport is deliberately absent: the control plane sends
+   * `frame-ancestors 'none'`, so Telegram Desktop and Web cannot load this page
+   * and the arm would be unreachable. Adding it is the second half of letting
+   * Telegram frame a document whose purpose is approving shell commands.
+   */
+  // Comments stripped, because the docblock *names* the absent transport and the
+  // reason for it — which is the point of writing it down, and would otherwise
+  // make this assertion fail on its own explanation.
+  const bridgeCode = bridge.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  check("no iframe transport, per the CSP", /window\.parent\.postMessage/.test(bridgeCode), false);
+  check("and no script from anywhere else", /telegram\.org|<script/.test(bridgeCode), false);
+  // The transport it *does* use is the one Telegram injects into its own webview.
+  check("only the injected proxy", /TelegramWebviewProxy/.test(bridgeCode), true);
 }
 
 wss.close();

@@ -1,37 +1,26 @@
-import { useSyncExternalStore, type ReactNode } from "react";
-import type { InstanceConfig } from "../../instance";
+import type { ReactNode } from "react";
 import { navigate } from "../../router";
-import { store } from "../../store";
 
 /**
- * Where this instance's source is — the AGPL §13 offer, on screen.
+ * ⚠ **There was a `SourceNotice` here and it has been taken off every screen.**
  *
- * **Drawn on the signed-out screen because that is where the people it is owed
- * to are.** Section 13 is about anybody who interacts with the program over a
- * network, and somebody looking at a sign-in form has already done so. Putting
- * the offer behind the sign-in would exclude exactly the users who most need it:
- * the ones a modified instance never lets in.
+ * It drew `Source · <version> · AGPL-3.0` under all six pre-auth forms, from
+ * `GET /v1/instance`'s `source` field, as the AGPL §13 offer — argued at length
+ * as belonging on the *signed-out* screens specifically, since §13 is about
+ * anybody who interacts with the program over a network and the people who most
+ * need the offer are the ones a modified instance never lets in.
  *
- * **The URL comes from the control plane, never from this bundle.** A fork's
- * instance has to offer *its own* source, so hardcoding this project's
- * repository here would make every fork silently non-compliant while looking
- * answered. `null` — an older control plane, or one that did not say — draws
- * nothing at all, for the same reason: no offer is honest, and a wrong one is
- * not.
+ * It is gone by decision rather than by accident, which is the whole reason this
+ * comment is here instead of nothing: somebody finding `source` on the wire with
+ * no reader will want to "restore" it, and this is the note saying not to. The
+ * field itself **stays** and must — `pincheck` asserts `SOURCE_URL` against this
+ * repository's own `package.json`, `relaycheck` asserts the served value,
+ * `webcheck` lifts the literal straight out of `app.ts`, and
+ * `deploy/ci-release.sh` derives the image's `org.opencontainers.image.source`
+ * label from it. What changed is that nothing draws it.
  *
- * Deliberately plain and quiet. This is a licence notice, not a footer ad.
+ * See `docs/DECISIONS.md` for where the offer is made now.
  */
-export function SourceNotice({ source }: { source: InstanceConfig["source"] }): ReactNode {
-  if (source === null) return null;
-  return (
-    <p className="mt-8 text-xs text-faint">
-      <a href={source.url} target="_blank" rel="noreferrer noopener" className="tap underline hover:text-muted">
-        Source
-      </a>
-      {source.version !== null && ` · ${source.version}`} · AGPL-3.0
-    </p>
-  );
-}
 
 /**
  * The box every pre-auth screen sits in, and `SignIn`'s box too.
@@ -58,20 +47,6 @@ export function GateCard({
   /** Usually the way back. Kept out of `children` so every screen has one place for it. */
   footer?: ReactNode;
 }): ReactNode {
-  /*
-   * ⚠ **The §13 offer is drawn here, by the box, rather than by each screen.** It
-   * was mounted on `SignIn` alone — one of six pre-auth screens — so /register,
-   * /forgot, /reset, /verify and /confirm made no offer at all, against a docblock
-   * one function up saying the clause is about anybody who interacts with the
-   * program over a network. Somebody who followed a mailed reset link and never
-   * reached the sign-in form is exactly such a person.
-   *
-   * Read off the store rather than taken as a prop, and that is the point: a prop
-   * is six call sites that can each forget, which is the drift this component
-   * exists to close. `SignIn` keeps its own mount because it does **not** use this
-   * box — it has its own, for the two-field form.
-   */
-  const config = useSyncExternalStore(store.subscribe, store.getSnapshot).config;
   return (
     <div className="flex min-h-full items-center justify-center p-6">
       <div className="w-full max-w-sm">
@@ -79,7 +54,6 @@ export function GateCard({
         {lead !== undefined && <p className="mt-1 text-sm text-muted">{lead}</p>}
         {children}
         {footer !== undefined && <div className="mt-5 border-t border-edge pt-4">{footer}</div>}
-        <SourceNotice source={config?.source ?? null} />
       </div>
     </div>
   );

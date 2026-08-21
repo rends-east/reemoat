@@ -1,10 +1,22 @@
 import { ArrowDown, GitBranch, Pin } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
+import { echoFor, echoVersion, subscribeEchoes } from "../echo";
 import { keyOf, type SessionRef } from "../ids";
 import { describe, missingRowReason } from "../machine";
-import { downloadablePath, relativeTo } from "../paths";
+import { displayCwd, downloadablePath, relativeTo } from "../paths";
+import { navigate } from "../router";
+import { settingsPath } from "../settings";
 import { store, type AppState, type SessionRow } from "../store";
 import { humanRequests, mayStillReport, showsWorking, waitingCount, type SessionSnapshot } from "../wire";
+import { agentLabel } from "./agentCard";
 import { Composer } from "./Composer";
 import { EventList } from "./EventList";
 import { FileAccessContext, type FileAccess } from "./files";
@@ -20,7 +32,6 @@ import {
   TranscriptSkeleton,
   sessionLabel,
   sessionNotice,
-  shortPath,
 } from "./bits";
 
 export function SessionView({ state, sessionRef }: { state: AppState; sessionRef: SessionRef }): ReactNode {
@@ -161,7 +172,12 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
                 actions*, where it read as one more status light. That is a different
                 place: this is inside the title group, touching the name it is about,
                 with the kebab a whole flex slot away. */}
-            <SessionTitle row={row} renaming={renaming} onRenaming={setRenaming} />
+            <SessionTitle
+              row={row}
+              roots={state.rootsByMachine.get(sessionRef.machineId) ?? []}
+              renaming={renaming}
+              onRenaming={setRenaming}
+            />
             {session.pinned === true && (
               <span className="inline-flex w-3 shrink-0 justify-center text-muted" title="Pinned">
                 <Icon as={Pin} size={12} />
@@ -294,14 +310,19 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
  */
 function SessionTitle({
   row,
+  roots,
   renaming,
   onRenaming,
 }: {
   row: SessionRow;
+  /** This machine's browse roots, so the fallback name is `~/thing`. */
+  roots: readonly string[];
   renaming: boolean;
   onRenaming: (next: boolean) => void;
 }): ReactNode {
-  const fallback = shortPath(row.snapshot.workspace.requestedCwd);
+  // The same string `sessionLabel` falls back to, which is what makes the rename
+  // box's placeholder show exactly what the header is showing.
+  const fallback = displayCwd(row.snapshot.workspace.requestedCwd, roots);
 
   if (renaming) {
     return (
@@ -326,7 +347,7 @@ function SessionTitle({
          so the padding is symmetric and there is nothing to cancel. */
       className="tap min-w-0 truncate rounded-sm px-1 text-left text-sm hover:bg-raised lg:-ml-1"
     >
-      {sessionLabel(row)}
+      {sessionLabel(row, roots)}
     </button>
   );
 }
@@ -360,7 +381,7 @@ function ExitNotice({ row, machineName }: { row: SessionRow; machineName: string
       }`}
     >
       <span>{notice.text}</span>
-      {notice.retry && (
+      {notice.action === "reconnect" && (
         <button
           type="button"
           disabled={busy}
@@ -371,6 +392,25 @@ function ExitNotice({ row, machineName }: { row: SessionRow; machineName: string
           className="tap rounded border border-edge px-2 py-0.5 text-2xs text-fg hover:bg-raised disabled:opacity-50"
         >
           {busy ? "reconnecting…" : "Reconnect"}
+        </button>
+      )}
+      {/*
+        * Straight to the agent's own screen **on this machine**, which is the
+        * screen that can actually fix it — a sign-out is per host, and a person
+        * reading this is looking at one conversation on one of them. Navigating
+        * rather than opening anything inline: signing in is a wizard or a pasted
+        * token, and both live there already.
+        *
+        * The same shape as `Reconnect` beside it and never both, which is what
+        * `action` being one field rather than two booleans guarantees.
+        */}
+      {notice.action === "sign_in" && (
+        <button
+          type="button"
+          onClick={() => navigate(settingsPath("machines", row.ref.machineId, row.snapshot.agent))}
+          className="tap rounded border border-edge px-2 py-0.5 text-2xs text-fg hover:bg-raised"
+        >
+          Sign in to {agentLabel(row.snapshot.agent)}
         </button>
       )}
     </p>
@@ -452,6 +492,18 @@ function Transcript({
   // what it delegated has not.
   const reporting = snapshot !== null && mayStillReport(snapshot);
   const transcript = state.transcripts.get(key);
+  /*
+   * The message on its way out, from module state rather than from the store.
+   *
+   * `useSyncExternalStore` over `echo.ts` for the reason `Composer` subscribes to
+   * `attach.ts` the same way: this is keystroke-adjacent, and putting it in the
+   * store would wake every subscriber — the sixty-row session list included — at
+   * the moment somebody presses Enter. It is read here rather than inside
+   * `EventList` so what crosses that prop is a value, which is the rule every
+   * other prop on it already follows.
+   */
+  useSyncExternalStore(subscribeEchoes, echoVersion);
+  const echo = echoFor(key);
 
   /*
    * How this transcript's files are reached.
@@ -583,13 +635,25 @@ function Transcript({
    * is not an inconsistency: that button is a journey somebody asked for and wants
    * to see, while this is the ground being put back under a message you are already
    * writing. An animation here would scroll the page out from under the composer at
-   * the exact moment the echo appears in it.
+   * the exact moment your own message appears above it.
    *
-   * `atBottomRef` is written beside the state, not instead of it: the state drives
-   * the pinning effect above and the *latest* button's visibility, and the ref is
-   * what the `ResizeObserver` reads — the composer grows by the height of the echo
-   * in this same commit, which shrinks this box, and that callback is what finishes
-   * the job once it has.
+   * **What this now does is the whole of it, and that is a simplification the echo
+   * moving bought.** The bubble used to be drawn by the composer, so sending grew
+   * the bar *below* this box in the same commit, shrinking the box while the
+   * browser kept `scrollTop` — a second, later correction only the
+   * `ResizeObserver` could make. The bubble is a row inside this box now: it adds
+   * `scrollHeight` and touches `clientHeight` not at all, exactly like the working
+   * line, so this one assignment already lands on the finished height.
+   *
+   * `atBottomRef` is still written beside the state rather than instead of it —
+   * the state drives the pinning effect above and the *latest* button's
+   * visibility, the ref is what a callback outliving this render sees — and the
+   * observer is untouched, because every other cause it exists for is: the
+   * composer growing as you type, a soft keyboard, a dismissed banner.
+   *
+   * It measures the finished DOM because `setEcho` and `onSent` land in **one**
+   * commit — both run synchronously inside the same handler, so the bubble is
+   * already there when this effect runs.
    */
   useEffect(() => {
     if (tailRequest === 0) return;
@@ -731,6 +795,7 @@ function Transcript({
           <FileAccessContext.Provider value={files}>
             <EventList
               files={files}
+              echo={echo}
               transcript={transcript}
               working={working}
               reporting={reporting}

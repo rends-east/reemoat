@@ -178,8 +178,13 @@ refused before it is resident. Q2.38.
 |---|---|
 | Changes API | 2000 files, 512 KiB per diff, both reported as `truncated` rather than silently short |
 | git calls | 5s structural, 10s list, 15s status/diff, **120s** `worktree add` (hooks and LFS smudge are live on this path) |
-| Uploads | 25 MiB per file, 10 per message, 100 MiB **and** 100 files per session (a byte cap cannot see a hundred thousand one-byte uploads, each a directory). 200 bytes of filename, 128 of mime. Inline images 5 MiB raw. Unconsumed uploads expire at 24h |
-| Downloads | 100 MiB, **deliberately not the upload number**: that bounds what a client pushes onto your disk, this bounds a token-readable read of a whole workspace. The client refuses at the same number from `content-length` |
+| Uploads | **100 MiB per file**, 10 per message, **1 GiB** *and* 100 files per session (a byte cap cannot see a hundred thousand one-byte uploads, each a directory), plus a **300 MiB / 5 min** window per session — `429 upload_rate_limited` with `Retry-After`, the one refusal here that expires on its own. 200 bytes of filename, 128 of mime. Inline images 5 MiB raw *to* the agent; 25 MiB *from* one (`MAX_AGENT_IMAGE_BYTES`, its own constant since the per-file cap moved — sharing one made the base64 pre-check ~133 MiB). Unconsumed uploads expire at 24h |
+| Downloads | 100 MiB, and it **equals** the upload cap by coincidence rather than by coupling — neither may be set by reading the other. That one bounds what a client pushes onto your disk, against budgets that outlive the request; this bounds a token-readable read of a whole workspace, where the cost is one of 256 tunnel streams held open. The client refuses at the same number from `content-length` |
+
+**A body limit outside this repository is the one nobody sees.** `deploy/` ships no
+reverse proxy and `install.sh` tells operators to put one in front; nginx defaults
+`client_max_body_size` to **1 MB**, which refuses an upload with a 413 the daemon
+never receives and cannot report. `deploy/README.md` names the value to set.
 
 ## Known gotchas
 

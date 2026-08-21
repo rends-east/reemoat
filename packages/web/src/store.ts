@@ -1,5 +1,6 @@
 import { authFailure, signedOutText, type AuthFailure } from "./account";
 import { forgetAttachments } from "./attach";
+import { clearEcho, landEcho, settleEcho } from "./echo";
 import { forgetAsks } from "./ask";
 import { forgetChoices } from "./choices";
 import * as cp from "./cp";
@@ -842,6 +843,13 @@ export interface AppState {
   phase: "signed_out" | "loading" | "ready";
   me: Me | null;
   machines: MachineState[];
+  /**
+   * Each machine's browse roots, for {@link displayCwd}.
+   *
+   * Absent until that machine's first listing lands, and empty for one that could
+   * not answer — both of which draw a path exactly as it was drawn before.
+   */
+  rootsByMachine: ReadonlyMap<MachineId, readonly string[]>;
   sessions: SessionRow[];
   /**
    * The same rows, keyed.
@@ -930,6 +938,7 @@ class AppStore implements StreamSink {
     phase: cp.currentCredential() === null ? "signed_out" : "loading",
     me: null,
     machines: [],
+    rootsByMachine: new Map(),
     sessions: [],
     rowsByKey: new Map(),
     listed: new Set(),
@@ -1027,6 +1036,24 @@ class AppStore implements StreamSink {
    * every existing caller keeps its exact semantics; the hot paths call
    * `emitTranscripts()` instead, which is the only thing they actually change.
    */
+  /**
+   * Where each daemon says its sessions live — `REEMOAT_ROOTS`, one fetch each.
+   *
+   * The prefix `displayCwd` cuts off a working directory, so a pinned row reads
+   * `~/2026-07-tare-reemoat` rather than `…/rends/2026-07-tare-reemoat`. Held per
+   * machine because it is a fact about that host, and here rather than on
+   * `MachineConnection` because it is display state with no bearing on reaching
+   * anything: a machine whose roots never land is drawn exactly as it was before
+   * this existed.
+   *
+   * The **key** is what makes it once-only, so a machine whose `/fs/roots` fails
+   * is not re-asked on every four-second poll: an empty array is written on
+   * failure and the entry then exists. What that costs is a daemon that was
+   * unreachable at exactly the wrong moment keeping absolute paths until the tab
+   * reloads, which is a worse label rather than a wrong one — and the alternative
+   * is a request per machine per poll for a value that cannot change.
+   */
+  private readonly rootsByMachine = new Map<MachineId, readonly string[]>();
   private machinesCache: MachineState[] | null = null;
   private sessionsCache: SessionRow[] | null = null;
   private rowsByKeyCache: ReadonlyMap<SessionKey, SessionRow> | null = null;
@@ -1070,6 +1097,7 @@ class AppStore implements StreamSink {
     this.snapshot = {
       ...this.snapshot,
       machines: this.machinesCache,
+      rootsByMachine: this.rootsByMachine,
       sessions: this.sessionsCache,
       rowsByKey: this.rowsByKeyCache,
       listed: this.listedCache,
@@ -1633,6 +1661,30 @@ class AppStore implements StreamSink {
     );
   }
 
+  /**
+   * Read one machine's browse roots, once, and never fail loudly.
+   *
+   * `GET /fs/roots` is a config array and an in-memory list of recent cwds — no
+   * filesystem work at all — so this is the cheapest request this client makes.
+   * It is still fired rather than awaited: the session list is what the screen is
+   * waiting for, and a row drawn with an absolute path for one more frame is not
+   * worth delaying it.
+   */
+  private async fetchRoots(id: MachineId): Promise<void> {
+    const daemon = this.daemons.get(id);
+    if (daemon === undefined) return;
+    // Written first so a slow answer cannot be asked for twice by the next poll.
+    this.rootsByMachine.set(id, []);
+    try {
+      const listing = await daemon.roots();
+      this.rootsByMachine.set(id, listing.roots);
+      this.emit();
+    } catch {
+      // Left empty, which `displayCwd` reads as "no prefix anybody agreed on" and
+      // answers with the rendering every row had before this existed.
+    }
+  }
+
   private async refreshMachineSessions(connection: MachineConnection, epoch: number): Promise<void> {
     const daemon = this.daemons.get(connection.id);
     if (daemon === undefined) return;
@@ -1654,6 +1706,9 @@ class AppStore implements StreamSink {
      * got. `SessionView` is the only reader — see `missingRowReason`.
      */
     this.listed.add(connection.id);
+    // Once per machine, and never again: `REEMOAT_ROOTS` is read at startup and
+    // cannot change under a running daemon. See `fetchRoots`.
+    if (!this.rootsByMachine.has(connection.id)) void this.fetchRoots(connection.id);
 
     const name = connection.state().name;
     const fetchedAt = Date.now();
@@ -2034,6 +2089,18 @@ class AppStore implements StreamSink {
     const cut = nextCut(current.clearedAt, current.revealedBeforeClear, events);
 
     this.transcripts.set(key, { ...current, events: merged, heldBytes, loadedFrom, ...cut });
+    /*
+     * The message somebody sent is now in the log, so the copy drawn for them
+     * while it was in flight goes.
+     *
+     * **Here rather than in an effect on `Composer`**, which is where it used to
+     * be and which could only ever settle the session on screen: this runs for
+     * every socket, so a message sent into one conversation and left behind is
+     * still tidied up when its own `prompt` event lands. A no-op when nothing is
+     * outstanding, which is the ordinary case tens of times a second — one map
+     * read on a path that already does several.
+     */
+    settleEcho(key, merged.at(-1)?.seq ?? 0);
     // Transcript only. This is the per-event path — the one that runs tens of
     // times a second during a turn — and it touches no machine and no session row.
     this.emitTranscripts();
@@ -2143,6 +2210,9 @@ class AppStore implements StreamSink {
     // reaches here, and a session the daemon says is gone must stop having 25 MiB
     // pushed at it over somebody's uplink.
     forgetAttachments(key);
+    // And the message that was on its way to it. There is nothing left to draw it
+    // in and no event that can ever settle it.
+    clearEcho(key);
     forgetAsks(key);
     // Anything optimistically drawn for a session that is gone. Every entry is
     // also released when its own request settles, so this is about the window in
@@ -2511,6 +2581,32 @@ class AppStore implements StreamSink {
     this.onSnapshot(ref, session);
   }
 
+  /**
+   * `POST /sessions/:id/prompt` has answered, and named the seq the message
+   * landed at.
+   *
+   * Two things, and the second is why this is a store method rather than a call
+   * into `echo.ts` from the composer. First the sentinel seq is replaced by the
+   * real one, so the ordinary case — the event still on its way — settles when it
+   * arrives. Then the echo is settled against the log **now**, because the
+   * opposite order is common rather than exotic: `/prompt` is on the 90-second
+   * slow-route budget and resumes a terminal session before it answers, while the
+   * `prompt` event comes down a socket that is waiting for nothing. When the
+   * event wins the race, `onEvents` has already compared it against
+   * `MAX_SAFE_INTEGER` and quite correctly kept the echo — and without this line
+   * nothing would ever look again, so a message would sit doubled at the foot of
+   * the conversation until the next event happened to arrive.
+   *
+   * Reading the transcript from `this` rather than from a closure is the other
+   * half: the caller's `state` is whatever it rendered with, which on a
+   * ninety-second round trip is not what the log holds.
+   */
+  promptLanded(ref: SessionRef, seq: number): void {
+    const key = keyOf(ref);
+    landEcho(key, seq);
+    settleEcho(key, this.transcripts.get(key)?.events.at(-1)?.seq ?? 0);
+  }
+
 }
 
 export const store = new AppStore();
@@ -2752,27 +2848,42 @@ export function sessionGroups(state: AppState): SessionGroups {
   /**
    * The group this row was filed under, or `null` if it has no machine here.
    *
-   * **Pinning copies rather than moves**, and the difference is the whole of it.
-   * A pinned row used to be lifted out — pushed to `pinned` and then early
-   * returned, so it vanished from its own machine's section. That reads as a
-   * shortcut removing the thing it is a shortcut to: pin the session you are
-   * working in and it disappears from the list you have been finding it in all
-   * day, which is a strange price for a bookmark.
+   * **Pinning moves rather than copies**, and the difference is the whole of it.
    *
-   * So a pinned row is in both places, and the two lists mean different things —
-   * `pinned` is "wherever it lives, here it is", the section is "what is on this
-   * machine". The one consequence to hold onto is that `visibleRows` in
-   * `groups.ts` must deduplicate: `keyboard.ts` finds the current row by key, and
-   * two entries for one session would make `j` teleport rather than step.
+   * ⚠ This has now been argued both ways and the reversal is the load-bearing
+   * part. It copied, on the reasoning that lifting a row out "reads as a shortcut
+   * removing the thing it is a shortcut to" — pin the session you are working in
+   * and it leaves the folder you have been finding it in all day. What that
+   * missed is what the rail actually looks like when it happens: the Pinned
+   * section sits directly above the folders, on the same screen, at the same
+   * time. So the row was not in two *places*, it was on screen twice, a few
+   * hundred pixels apart, identical — and a bookmark whose entire job is "this
+   * one, not the other forty" was drawing itself as two of the forty.
+   *
+   * What the old shape was protecting is still real and is answered instead by
+   * `showPath`: the pinned row draws where it lives, which is what the copy under
+   * its folder used to say. One row, and it says both things.
+   *
+   * Three consequences, and all three are the shape this had before the copy:
+   * `place` answers `null`, so `blockedCount` does not count a row its header no
+   * longer draws; a pinned row whose machine is gone is in `pinned` only, rather
+   * than in `pinned` and `orphans`; and `visibleRows` in `groups.ts` deduplicates
+   * for a reason that no longer occurs. **That dedup stays** — it is two lines,
+   * `keyboard.ts` locates the caret by key and a second entry would make `j`
+   * teleport rather than step, and the day some new section reintroduces the
+   * copy is exactly the day nobody remembers to put it back.
    */
   const place = (row: SessionRow, into: "active" | "ended"): MachineGroup | null => {
-    if (row.snapshot.pinned === true) pinned.push(row);
+    if (row.snapshot.pinned === true) {
+      pinned.push(row);
+      return null;
+    }
     const group = byId.get(row.ref.machineId);
     if (group === undefined) {
-      // Only genuinely homeless rows are here now. A pinned row whose machine is
-      // still granted is filed below *as well as* being in `pinned`; one whose
-      // machine is gone is in `pinned` and in `orphans`, which is the same two
-      // truths and neither of them silently dropped.
+      // A row with nowhere to live. `orphansFor` draws these under "No longer
+      // granted", and a *pinned* one never reaches here — it is already in
+      // `pinned`, which is a section that does not care which machine a session
+      // is on and is precisely where somebody would look for it.
       orphans.push(row);
       return null;
     }
@@ -2784,15 +2895,20 @@ export function sessionGroups(state: AppState): SessionGroups {
   // terminal rows. `sessionLists` has already sorted each of the three.
   for (const row of lists.blocked) {
     /*
-     * Counted off what `place` *did*, and that is now simply the ordinary answer
-     * rather than a correction.
+     * Counted off what `place` *did*, and it is load-bearing again.
      *
-     * It used to be load-bearing: a pinned row was not under its machine's header,
-     * so incrementing from `byId.get(row.ref.machineId)` made the header read
-     * "1 waiting" over a section containing no waiting row. Now that pinning
-     * copies, the row *is* under the header and the count is right — the same
-     * line, for the opposite reason. It stays keyed on the return value because
-     * an orphan still has no header to count on.
+     * A folder header's "N waiting" is a count of the rows under **that header**,
+     * and both things `place` declines to file — a pinned row and an orphan — are
+     * drawn somewhere else entirely. Incrementing from
+     * `byId.get(row.ref.machineId)` instead would make a header read "1 waiting"
+     * over a section containing no waiting row, which is the defect this line was
+     * written for the first time.
+     *
+     * Nothing is hidden by not counting it. `waitingFloor` in `groups.ts` works
+     * by **subtraction** — everything blocked, minus everything this view draws —
+     * and it draws `pinnedFor`, so a blocked pinned row is on screen either as
+     * itself or in the floor's own count. That property is asserted over every
+     * filter, tab and needle rather than left to this comment.
      */
     const filed = place(row, "active");
     if (filed !== null) filed.blockedCount += 1;

@@ -12,6 +12,7 @@ import {
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { MachineId, SessionKey } from "../ids";
 import { machineQuotaNotice, mayAddMachine } from "../quota";
+import { displayCwd } from "../paths";
 import { navigate, newPath, sessionPath } from "../router";
 import { settingsPath } from "../settings";
 import { elapsedSince, sessionGroups, sessionLists, type AppState, type SessionRow } from "../store";
@@ -26,7 +27,6 @@ import {
   resumeFailureText,
   sessionLabel,
   shortDuration,
-  shortPath,
 } from "./bits";
 import {
   ALL_FOLDER,
@@ -267,7 +267,6 @@ export function SessionBrowser({
                 state={state}
                 selected={row.key === activeKey}
                 showMachine={view.all}
-                showPath={false}
                 indented
               />
             ))}
@@ -1067,9 +1066,16 @@ function SessionLine({
   /**
    * Whether the subline may name where this session works.
    *
-   * Off in Pinned. A pin means "this one, wherever it lives", so the folder is the
-   * one fact that group is not about — and naming it there says nothing the same
-   * row, drawn again under its own folder below, does not already say.
+   * ⚠ **It used to be off in Pinned and that was only ever true while pinning
+   * *copied*.** The argument was that a pin means "this one, wherever it lives",
+   * so naming the folder says nothing the same row drawn again under that folder
+   * does not already say. There is no second copy any more — pinning moves — so
+   * withholding the path left the pinned rows as the only ones in the rail that
+   * did not say where they work, which is the thing a folder was a folder for.
+   *
+   * No caller passes it now. It is kept as a parameter rather than deleted
+   * because it is the shape of the question, and the day a group has a real
+   * reason to withhold a path this is where that reason goes.
    */
   showPath?: boolean;
 }): ReactNode {
@@ -1080,12 +1086,35 @@ function SessionLine({
   const waiting = requests.length;
   const pending = requests[0];
   const pinned = row.snapshot.pinned === true;
-  const label = sessionLabel(row);
-  const subpath = !showPath
-    ? null
-    : folderPath === null
-      ? shortPath(row.snapshot.workspace.requestedCwd)
-      : rowSubpath(row, folderPath);
+  const roots = state.rootsByMachine.get(row.ref.machineId) ?? [];
+  const label = sessionLabel(row, roots);
+  /*
+   * Where this session works, and **only where the row is not already saying it.**
+   *
+   * ⚠ Reported from a phone against a pinned row: the title read
+   * `…/rends/2026-07-tare-r…` and the line under it read
+   * `claude · …/rends/2026-07-ta…`. The same absolute path, truncated twice, both
+   * of them mostly `/Users/rends`.
+   *
+   * Two separate faults, and this is both fixes. The path is cut against the
+   * daemon's own roots now (`displayCwd`, reached through `sessionLabel` and
+   * `rowSubpath`), so it reads `~/2026-07-tare-reemoat`. And a session **nobody
+   * has named** has a title that *is* its directory — `sessionLabel` falls back
+   * to exactly this string — so repeating it below is one fact drawn twice, in a
+   * row 40 characters wide. `headlineWorthDrawing` in `tail.ts` refuses an echo
+   * one screen over for the same reason; this is that rule on a list row.
+   *
+   * Compared rather than keyed on `title`, because the two are only *usually* the
+   * same question: a folder row draws a subpath the title never had, and a named
+   * session draws both because they say different things.
+   */
+  const located =
+    !showPath
+      ? null
+      : folderPath === null
+        ? displayCwd(row.snapshot.workspace.requestedCwd, roots)
+        : rowSubpath(row, folderPath);
+  const subpath = located === label ? null : located;
   // Only when the daemon actually gave up. A session it is still working
   // through — the common case for the length of a deploy — is drawn as an
   // ordinary row on purpose, because from here nothing is wrong with it.

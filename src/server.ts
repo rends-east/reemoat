@@ -20,7 +20,14 @@ import {
 } from "./acp/agents.js";
 import { type AgentCredentialStore, type AgentLoginRuns } from "./agentauth.js";
 import { AUTH_LEEWAY_MS, hasScope, type Principal, type Scope, type TokenVerifier } from "./auth.js";
-import { listDirs, makeDir, PathError } from "./browse.js";
+import {
+  importArchive,
+  MAX_IMPORT_BYTES,
+  MAX_IMPORT_ENTRIES,
+  MAX_IMPORT_UNPACKED_BYTES,
+  type ImportOutcome,
+} from "./archive.js";
+import { listDirs, makeDir, PathError, resolveCwd } from "./browse.js";
 import { DESCRIBE_TIMEOUT_MS, probeExists, probeFile, probeRealpath } from "./stall.js";
 import {
   cancelBody,
@@ -31,6 +38,8 @@ import {
   MAX_UPLOADS_PER_SESSION,
   parseMime,
   sanitizeUploadName,
+  UPLOAD_RATE_BYTES,
+  UPLOAD_RATE_WINDOW_MS,
   type Uploads,
   type UploadRow,
 } from "./uploads.js";
@@ -178,13 +187,18 @@ const MAX_PATH_CHARS = 4_096;
 /**
  * The largest file this daemon will serve.
  *
- * **Deliberately a different number from `MAX_UPLOAD_BYTES`**, because it bounds
- * a different thing. 25 MiB bounds what a client may push onto this machine's
- * disk; this bounds a bearer-token-readable read of an entire workspace, where
- * the cost of no bound is one tunnel stream held open for as long as somebody
- * likes — and there are 256 of them per machine, shared with every session's
- * WebSocket. The client refuses at the same number, from `content-length`,
- * before it pulls a `Blob` into a phone's memory.
+ * **It happens to equal `MAX_UPLOAD_BYTES` now, and that is a coincidence rather
+ * than a coupling** — the two bound different things and neither may be changed
+ * by reading the other. This said "deliberately a different number", which was
+ * true while uploads were 25 MiB and stopped being true when they became 100 MiB;
+ * the *reasons* are what were different and they are unchanged. That one bounds
+ * what a client may push onto this machine's disk, against a session budget and
+ * an inode ceiling that both survive the request. This bounds a
+ * bearer-token-readable read of an entire workspace, where the cost of no bound
+ * is one tunnel stream held open for as long as somebody likes — and there are
+ * 256 of them per machine, shared with every session's WebSocket. The client
+ * refuses at the same number, from `content-length`, before it pulls a `Blob`
+ * into a phone's memory.
  */
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 
@@ -207,13 +221,28 @@ const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
  * still be a number. The largest non-upload body any route reads today is a
  * prompt, and `MAX_PROMPT_CHARS` bounds it well under this.
  *
- * **Uploads are excluded and must stay excluded.** `POST /sessions/:id/uploads`
- * streams to disk against `MAX_UPLOAD_BYTES` (25 MiB) with its own counter, and
- * its `refuse()` wrapper cancels the body itself; wrapping it here would either
- * refuse every legitimate upload at 1 MiB or buffer 25 MiB to check a limit the
- * route is already enforcing a better way.
+ * **The streaming routes are excluded and must stay excluded.** `POST
+ * /sessions/:id/uploads` streams to disk against `MAX_UPLOAD_BYTES` (25 MiB) with
+ * its own counter, and `POST /fs/import` does the same against
+ * `MAX_IMPORT_BYTES`; both cancel the body themselves on every refusal. Wrapping
+ * either here would refuse every legitimate request at 1 MiB, or buffer the whole
+ * thing to check a limit the route is already enforcing a better way.
  */
 const MAX_BODY_BYTES = 1024 * 1024;
+
+/**
+ * The routes that read their body as a stream, and so may not be bounded above.
+ *
+ * A predicate rather than a condition inlined into the middleware, because there
+ * are two of them now and the rule they share — *this route counts its own bytes
+ * and cancels its own body* — is the kind that gets half-applied when a third
+ * arrives. Both are POST; matching the method as well keeps a GET on the same
+ * path from inheriting the exemption.
+ */
+function isStreamingRoute(method: string, path: string): boolean {
+  if (method !== "POST") return false;
+  return /^\/sessions\/[^/]+\/uploads$/.test(path) || path === "/fs/import";
+}
 
 /**
  * Hono's per-request variables. `principal` is set by the auth gate and read by
@@ -417,7 +446,7 @@ export function createApp(options: ServerOptions): AppBundle {
       }),
   });
   app.use("*", async (c, next) => {
-    if (c.req.method === "POST" && /^\/sessions\/[^/]+\/uploads$/.test(c.req.path)) return next();
+    if (isStreamingRoute(c.req.method, c.req.path)) return next();
     return boundedBody(c, next);
   });
 
@@ -488,6 +517,14 @@ export function createApp(options: ServerOptions): AppBundle {
   const read = requireScope("session:read");
   const write = requireScope("session:write");
   const admin = requireScope("machine:admin");
+
+  /**
+   * Whether an import is already unpacking. See `POST /fs/import`.
+   *
+   * Per app rather than per module, so two daemons in one driver process do not
+   * block each other — every driver in this repository builds several.
+   */
+  let importing = false;
 
   /**
    * A handler that only runs for a session that exists.
@@ -673,6 +710,20 @@ export function createApp(options: ServerOptions): AppBundle {
       // above says the field exists to prevent, in the one place a person goes
       // when their agent has just refused a prompt.
       loginSupported: logins !== null && registry.sessionRuntime.loginSupported,
+      /*
+       * What this host is, so the client can name it when it has to explain a
+       * refusal that is the platform's doing.
+       *
+       * `login.blocked === "interactive_pty"` is returned for **every** BSD, and
+       * a client that hardcoded "macOS" would be telling a FreeBSD operator
+       * something false about their own machine. The daemon is the only end that
+       * knows, so it says; the client maps it to a name a person uses.
+       *
+       * Reported and never branched on — `blocked` is what decides anything, and
+       * this is a label beside it. The distinction `compatibility.md` draws for
+       * `DAEMON_VERSION` is the same one.
+       */
+      os: process.platform,
       agents: availability.map((agent) => {
         const support = registry.sessionRuntime.loginSupport(agent.id);
         return {
@@ -697,6 +748,22 @@ export function createApp(options: ServerOptions): AppBundle {
            */
           login: {
             supported: logins !== null && support.supported,
+            /*
+             * **`supported` carries one condition this reason does not**, and the
+             * two must not be allowed to drift apart silently: `logins === null`
+             * means there is nowhere to record a run, which is a fact about the
+             * daemon rather than about the agent or the platform. It is reported
+             * as `no_script` — the closest of the three and, like it, "this host
+             * cannot drive a login at all" — rather than by inventing a fourth
+             * code the client would have to be taught.
+             *
+             * Forwarded at all because it was not, at first: the field existed on
+             * the runtime and stopped here, so the client saw `supported: false`
+             * with `blocked: null` and drew neither a button nor a reason. That is
+             * the exact disagreement `supported = blocked === null` exists to make
+             * impossible, reintroduced one layer up.
+             */
+            blocked: logins === null ? "no_script" : support.blocked,
             needsInput: support.needsInput,
             canSignOut: support.canSignOut,
           },
@@ -732,7 +799,17 @@ export function createApp(options: ServerOptions): AppBundle {
     // Dropping it costs one probe on the next read and is the difference between
     // the UI updating and the UI insisting you are still logged out.
     registry.sessionRuntime.forgetAvailability();
-    return c.json({ saved: true, agent, envName });
+    /*
+     * **And the conversations already running on this agent, which the save alone
+     * does not reach.** Secrets are injected at spawn, so a token saved while an
+     * agent is running reaches it never: the badge turned green and the chat in
+     * front of somebody went on failing to authenticate, with nothing on the
+     * screen connecting the two. Started rather than awaited — see
+     * `reloadCredentials`, and `whenRestarted`, which is what makes typing into a
+     * restarting session a wait rather than a refusal.
+     */
+    const restarting = registry.reloadCredentials(agent);
+    return c.json({ saved: true, agent, envName, restarting });
   });
 
   app.delete("/agent-auth/:agent", write, (c) => {
@@ -749,7 +826,20 @@ export function createApp(options: ServerOptions): AppBundle {
     }
     credentials.remove(agent, envName);
     registry.sessionRuntime.forgetAvailability();
-    return c.json({ removed: true, agent, envName });
+    /*
+     * Removing one is the same fact as saving one *for the sessions still
+     * running*: the agents already up still hold it in their environment, and
+     * only a relaunch takes it away.
+     *
+     * ⚠ **It is the opposite fact for the ones already ended, which is what the
+     * `false` says.** Left to default, this resumed every conversation carrying
+     * `agent_signed_out` — conversations this daemon ended *because the
+     * credential went away* — and handed each a fresh agent with nothing to
+     * authenticate with. Deleting a credential is a sign-out's second half, not
+     * its reversal.
+     */
+    const restarting = registry.reloadCredentials(agent, false);
+    return c.json({ removed: true, agent, envName, restarting });
   });
 
   /**
@@ -799,7 +889,22 @@ export function createApp(options: ServerOptions): AppBundle {
       return jsonError(c, 503, "logout_unsupported", `${agent} has no sign-out command`);
     }
     if (!result.ok) return jsonError(c, 502, "logout_failed", result.detail ?? "the CLI refused");
-    return c.json({ signedOut: true, agent, credentialsCleared: cleared, detail: result.detail });
+    /*
+     * **And every conversation running on it, which the CLI's own logout cannot
+     * reach.** A credential is read at spawn, so an agent started while signed in
+     * keeps answering for an account somebody has just revoked. Awaited, unlike
+     * the relaunch a *saved* credential triggers: signing out is a request to
+     * stop, and answering before it has stopped would be reporting a state that
+     * is not true yet.
+     */
+    const ended = await registry.signOutSessions(agent);
+    return c.json({
+      signedOut: true,
+      agent,
+      credentialsCleared: cleared,
+      sessionsEnded: ended,
+      detail: result.detail,
+    });
   });
 
   app.post("/agent-auth/:agent/login", write, async (c) => {
@@ -943,6 +1048,157 @@ export function createApp(options: ServerOptions): AppBundle {
       const errno = errnoError(c, error, 400);
       if (errno) return errno;
       throw error;
+    }
+  });
+
+  /**
+   * Bring a codebase onto this machine.
+   *
+   * Registered here rather than under `/sessions` because it happens **before**
+   * there is a session: it is how somebody gets a folder worth starting one in,
+   * and `POST /fs/mkdir` above is the precedent — the other mutating, session-free
+   * `/fs` route. `session:write` for the same reason it does.
+   *
+   * The archive's filename rides `?name=` rather than a header, for the reason
+   * the upload route gives at length: `CORS_ALLOW_HEADERS` is `authorization` and
+   * `content-type` only, the relay imports that same constant to answer
+   * preflights from it, and a new header would need a control-plane redeploy
+   * before a browser could send it at all.
+   *
+   * **Every refusal cancels the body**, which is why this route does its own
+   * argument checking through `refuse()` instead of reading like the ones above
+   * it. The relay grants a stream's window on consumption, so a handler that
+   * answers 400 and walks away parks the sender at one `STREAM_WINDOW_BYTES` —
+   * and the next valve is
+   * the tunnel's 8 MiB socket check, which closes the whole tunnel for this
+   * machine and takes every other session on it down too.
+   */
+  app.post("/fs/import", write, async (c) => {
+    const refuse = async <T>(answer: () => T): Promise<T> => {
+      await cancelBody(c.req.raw.body as ReadableStream<Uint8Array> | null);
+      return answer();
+    };
+
+    if (registry.isShuttingDown) {
+      return refuse(() => jsonError(c, 503, "shutting_down", "the daemon is shutting down"));
+    }
+
+    const path = c.req.query("path") ?? "";
+    if (path.length === 0) return refuse(() => jsonError(c, 400, "bad_request", "path is required"));
+    if (path.length > MAX_PATH_CHARS) {
+      return refuse(() => jsonError(c, 400, "bad_request", `path exceeds ${MAX_PATH_CHARS} characters`));
+    }
+
+    // Sanitized with the uploads route's own function: this string is a *label*
+    // here too — it only ever names the folder when the archive does not name one,
+    // and `importFolderName` narrows it again to what may be a directory name.
+    const requested = c.req.query("name") ?? "";
+    const named = sanitizeUploadName(requested);
+    if (!named.ok) {
+      return refuse(() =>
+        jsonError(c, 400, "invalid_name", "that filename cannot be stored", { reason: named.reason }),
+      );
+    }
+
+    /*
+     * Honoured to refuse, never to accept — the same rule the upload route
+     * states. Refusing on a `content-length` we believe costs nothing; *trusting*
+     * one would mean a body that lies walks past the counter that is actually
+     * enforcing this.
+     */
+    const declared = Number.parseInt(c.req.header("content-length") ?? "", 10);
+    if (Number.isFinite(declared) && declared > MAX_IMPORT_BYTES) {
+      return refuse(() =>
+        jsonError(c, 413, "import_too_large", `an archive may not exceed ${MAX_IMPORT_BYTES} bytes`, {
+          limit: MAX_IMPORT_BYTES,
+          declared,
+        }),
+      );
+    }
+
+    /*
+     * One at a time, for the whole daemon.
+     *
+     * The relay allows 256 concurrent streams and this route has no per-session
+     * accounting to fall back on the way uploads do — nothing here is charged
+     * against a budget that outlives the request. Two hundred and fifty-six
+     * simultaneous imports is 12 GiB of archive and 125 GiB of unpacked tree, so
+     * the bound has to be arrival rather than size. A person imports a codebase
+     * about as often as they start a project, so serialising it costs nothing
+     * real, and `409` with a sentence is a better answer than a machine that has
+     * filled its disk.
+     */
+    if (importing) {
+      return refuse(() =>
+        jsonError(c, 409, "import_busy", "this machine is already unpacking an import"),
+      );
+    }
+
+    /*
+     * ⚠ **Claimed here, before the first `await`, and that placement is the whole
+     * guard.** The check above and this line used to have `resolveCwd` between
+     * them, which is a `realpath` — a real suspension, and one `stall.ts` records
+     * as able to queue for ever against a mount that has gone away. Every request
+     * that arrived while it was in flight read `importing` as `false`, so the
+     * bound this is here to enforce did not hold for the case it was written for:
+     * the 256 the relay allows arriving together all passed. Nothing between the
+     * test and the set may suspend, so everything that can is below it, inside
+     * the `finally` that releases it.
+     */
+    importing = true;
+    try {
+      let target: string;
+      try {
+        target = await resolveCwd(path);
+      } catch (error) {
+        if (error instanceof PathError) {
+          return refuse(() => jsonError(c, pathErrorStatus(error, 400), error.code, error.message));
+        }
+        const errno = errnoError(c, error, 400);
+        if (errno) return refuse(() => errno);
+        await cancelBody(c.req.raw.body as ReadableStream<Uint8Array> | null);
+        throw error;
+      }
+
+      const body = c.req.raw.body;
+      if (body === null) return jsonError(c, 400, "bad_request", "expected a request body");
+
+      const outcome: ImportOutcome = await importArchive({ target, name: named.name, body });
+
+      switch (outcome.kind) {
+        case "ok":
+          return c.json({ import: outcome.result }, 201);
+        case "too_large":
+          return jsonError(c, 413, "import_too_large", `an archive may not exceed ${MAX_IMPORT_BYTES} bytes`, {
+            limit: MAX_IMPORT_BYTES,
+          });
+        case "unsupported":
+          return jsonError(c, 400, "unsupported_archive", "that is not a .zip or a .tar.gz");
+        case "exists":
+          return jsonError(c, 409, "import_exists", `${outcome.name} is already here`, { name: outcome.name });
+        case "refused": {
+          const { error } = outcome;
+          if (error.code === "too_large") {
+            return jsonError(c, 413, "import_unpacked_too_large", error.message, {
+              limit: MAX_IMPORT_UNPACKED_BYTES,
+            });
+          }
+          if (error.code === "too_many") {
+            return jsonError(c, 413, "import_too_many_entries", error.message, { limit: MAX_IMPORT_ENTRIES });
+          }
+          if (error.code === "unsafe") {
+            return jsonError(c, 400, "archive_unsafe", error.message, error.refusal);
+          }
+          if (error.code === "empty") return jsonError(c, 400, "archive_empty", error.message);
+          return jsonError(c, 400, "archive_unreadable", error.message);
+        }
+        case "write_failed":
+          return jsonError(c, 503, "import_write_failed", "could not unpack that here", {
+            detail: outcome.detail,
+          });
+      }
+    } finally {
+      importing = false;
     }
   });
 
@@ -1244,7 +1500,53 @@ export function createApp(options: ServerOptions): AppBundle {
      * reject, so a restart that failed falls through to the arms below and is
      * reported as the state it left behind.
      */
+    /*
+     * **There is deliberately no "is this agent signed in" probe here.**
+     *
+     * An earlier version asked the agent's CLI before every message. It cost a
+     * process spawn on the hot path, could only ever be as fresh as its 3s cache,
+     * and — the reason it is gone — made the offline drivers depend on whether
+     * the person running them happened to be signed in, because a stub runtime
+     * inherits the real probe and `resolveLoginBinary` finds the adapter's own
+     * vendored copy in `node_modules`. CI is signed in to nothing, so it refused
+     * a prompt two assertions expected to land.
+     *
+     * The two real cases are covered without asking. A sign-out *through this
+     * daemon* ends the conversations itself (`signOutSessions`). A credential
+     * that went away some other way — revoked elsewhere, or expired — is reported
+     * by the agent, at the only moment that cannot be stale: `isAuthFailure` on
+     * the event pump ends the session with the same reason, so the second message
+     * is refused by `session_terminal` and the client draws the sentence and its
+     * Sign in button.
+     */
     await managed.whenRestarted();
+
+    /*
+     * **The folder has to still be there, and this is asked on every message
+     * rather than only before a resume.**
+     *
+     * ⚠ It guarded the resume branch alone, so a session whose workspace vanished
+     * *while it was open* had a live agent standing in a directory that no longer
+     * existed — and the first anybody heard of it was the agent's own words in the
+     * transcript: `Internal error: Path "…/worktrees/…/s_282fc818" does not
+     * exist`. A raw internal error, in the conversation, with no remedy anywhere
+     * on the screen and nothing saying which of the many things it could mean it
+     * was. Reported from a phone, with a screenshot, after exactly that happened.
+     *
+     * It is not exotic: `rmworkspace` is a route, `git worktree remove` is a
+     * command somebody runs, and a worktree under `~` is a directory a person can
+     * delete. What makes it worth a check on the hot path is that the failure is
+     * otherwise indistinguishable from the agent breaking.
+     *
+     * The cost is one `probeExists` — bounded, three-valued, and the reason
+     * `stall.ts` exists — per message a human types, against a prompt that is
+     * about to spawn or wake a process and hold a 90-second budget. `409
+     * workspace_missing` and `503 workspace_unresponsive` are sentences a client
+     * already draws, and telling a stalled mount from a deleted directory is the
+     * whole reason that function has three answers rather than two.
+     */
+    const workspace = await workspaceReady(c, managed);
+    if (workspace) return workspace;
 
     if (
       managed.terminal &&
@@ -1255,8 +1557,6 @@ export function createApp(options: ServerOptions): AppBundle {
       !managed.resumeSettled &&
       autoResumable(managed.exit, managed.agentSessionId, "prompt")
     ) {
-      const ready = await workspaceReady(c, managed);
-      if (ready) return ready;
       try {
         await managed.resume();
       } catch {
@@ -1422,9 +1722,9 @@ export function createApp(options: ServerOptions): AppBundle {
      * **Every refusal on this route releases the body first.**
      *
      * `Uploads.receive` spends a paragraph on why, and every word of it applies
-     * a layer earlier: these refusals happen with up to 25 MiB in flight and
-     * used to return without ever touching the stream. A body nobody reads parks
-     * the sender against the relay's 256 KiB per-stream window, and the valve
+     * a layer earlier: these refusals happen with a whole `MAX_UPLOAD_BYTES` in
+     * flight and used to return without ever touching the stream. A body nobody
+     * reads parks the sender against the relay's per-stream window, and the valve
      * above that closes the whole tunnel for this machine — every other session
      * with it. `invalid_name` is not hypothetical: `pastedName` exists precisely
      * because a nameless paste 400s here, and `upload_too_large` is by
@@ -1523,6 +1823,33 @@ export function createApp(options: ServerOptions): AppBundle {
         return jsonError(c, 409, "upload_limit", "this session already holds too many staged files", {
           limit: MAX_UPLOADS_PER_SESSION,
         });
+      /*
+       * The one refusal here that expires on its own, so it says when.
+       *
+       * `Retry-After` in whole seconds, rounded **up** and never below 1, which
+       * is the rule `throttle.ts` already states one package over: a
+       * `Retry-After: 0` invites the immediate retry it is refusing. The same
+       * number rides the detail in milliseconds, because a client drawing "try
+       * again in a moment" wants the real one and a second's resolution is not
+       * enough to say a moment.
+       */
+      case "rate": {
+        const seconds = Math.max(1, Math.ceil(result.retryAfterMs / 1000));
+        c.header("Retry-After", String(seconds));
+        /*
+         * The wait is in the **message**, not only in the detail, because the
+         * message is the whole of what a person sees: a failed chip carries
+         * `errorText(cause)` and nothing else, beside a retry button. "Too much
+         * lately" with no number is a control somebody presses again immediately.
+         */
+        return jsonError(
+          c,
+          429,
+          "upload_rate_limited",
+          `too much has been uploaded to this session lately — try again in ${seconds}s`,
+          { limit: UPLOAD_RATE_BYTES, windowMs: UPLOAD_RATE_WINDOW_MS, retryAfterMs: result.retryAfterMs },
+        );
+      }
       case "write_failed":
         return jsonError(c, 503, "upload_write_failed", "that file could not be stored", {
           detail: result.detail,

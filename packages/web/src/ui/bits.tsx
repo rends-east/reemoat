@@ -9,8 +9,15 @@ import {
 } from "react";
 import { Check, ChevronDown, X } from "lucide-react";
 import { listNavKey, nextOptionIndex } from "../keys";
+import { displayCwd, shortPath } from "../paths";
 import type { OfflineReason, Reach } from "../machine";
-import { isTerminal, resumeStalled, waitingForDaemon, type SessionSnapshot } from "../wire";
+import {
+  isTerminal,
+  resumeStalled,
+  waitingForDaemon,
+  type ExitReason,
+  type SessionSnapshot,
+} from "../wire";
 import { LAYER, useDismissible } from "./overlay";
 
 /**
@@ -111,8 +118,13 @@ export const COLUMN = "mx-auto w-full max-w-3xl";
  * forces `font-size: max(16px, 1em)` on every input under a coarse pointer —
  * the rule that stops iOS zooming the page on focus — so with a 16px face those
  * two are roughly 47px and 39px tall, which puts the *same field* on either side
- * of the 44px tap minimum depending on which screen you reached it from. `py-3`
- * is the one that clears it, so `py-3` is the one that survived.
+ * of the 44px tap minimum depending on which screen you reached it from.
+ *
+ * **That was first settled by keeping `py-3`, and it is settled by `min-h` now.**
+ * Padding only ever reached 44px *via* whatever line-height the type scale
+ * happened to give that font size — two numbers in two files multiplying out to a
+ * height nothing stated. The floor is written down instead, and the resting
+ * height with it.
  *
  * Layout is deliberately **not** in here. Width, margin and `block` legitimately
  * differ — a full-width form field, a `max-w-sm` one, a `flex-1` one sitting
@@ -131,7 +143,24 @@ export const COLUMN = "mx-auto w-full max-w-3xl";
  * the token: this box has no fill of its own to identify it, so its boundary is
  * the control, and a boundary that identifies a control is held at 3:1.
  */
-export const FIELD = "rounded-md border border-edge-strong bg-surface px-3 py-3 text-sm outline-none";
+export const FIELD =
+  "min-h-9 rounded-md border border-edge-strong bg-surface px-3 text-sm leading-5 outline-none [@media(pointer:coarse)]:min-h-11";
+
+/*
+ * ⚠ **Never compose this with a vertical padding, and there is no way to make one
+ * work.** Tailwind emits every utility at equal specificity, so the winner is
+ * whichever comes later *in the generated stylesheet* rather than in the class
+ * attribute. Measured on this bundle: `.py-3` is emitted after `.py-2`, so
+ * `` `${FIELD} py-2` `` silently kept the taller box — no error, and the code
+ * reading as though it had worked. Two controls meant to line up differed by 10px
+ * through a review that said they did not.
+ *
+ * That is the same trap `Button` documents for a size passed through `className`,
+ * and it is why the height above is `min-h` and there is no `py-*` in the string:
+ * with none in here, there is nothing for a caller's to lose an argument to. A
+ * caller needing a different height states `min-h-*`, one utility against one,
+ * which behaves the way it reads.
+ */
 
 /**
  * What a link looks like — the *only* thing in this palette that says "this
@@ -178,12 +207,14 @@ export function shortDuration(ms: number): string {
   return `${Math.round(hours / 24)}d`;
 }
 
-/** The last two segments, for a row that has no room for more. */
-export function shortPath(path: string): string {
-  const parts = path.split("/").filter((p) => p.length > 0);
-  if (parts.length <= 2) return path;
-  return `…/${parts.slice(-2).join("/")}`;
-}
+
+/**
+ * Re-exported so the six call sites that had it from here keep their import.
+ *
+ * It lives in `paths.ts` now, beside `relativeTo` and {@link displayCwd} — the
+ * two functions that decide what a path *is* rather than how a row draws one.
+ */
+export { shortPath };
 
 /**
  * What to call a session: its name, or a fallback built from where it works.
@@ -201,12 +232,22 @@ export function shortPath(path: string): string {
  * through a markdown renderer would make `[x](y)` a link and `_x_` italic in a
  * session header. Plain string, `truncate`.
  */
-export function sessionLabel(row: {
-  snapshot: { title?: string | null; workspace: { requestedCwd: string } };
-}): string {
+export function sessionLabel(
+  row: { snapshot: { title?: string | null; workspace: { requestedCwd: string } } },
+  /**
+   * The daemon's browse roots, so an unnamed session is called `~/thing` rather
+   * than `…/rends/thing`.
+   *
+   * Defaulted rather than required, and the default is the honest one: a caller
+   * with no roots to hand — an older daemon, a machine that has not answered
+   * `/fs/roots`, a driver — gets exactly the label this drew before roots
+   * existed. See `displayCwd`.
+   */
+  roots: readonly string[] = [],
+): string {
   const title = row.snapshot.title?.trim();
   if (title !== undefined && title.length > 0) return title;
-  return shortPath(row.snapshot.workspace.requestedCwd);
+  return displayCwd(row.snapshot.workspace.requestedCwd, roots);
 }
 
 /**
@@ -566,19 +607,87 @@ export function resumeRetryable(code: string): boolean {
  * replaced anyway. On a session somebody stopped it is the difference between
  * "stopped" and "probably orphaned", which is worth their knowing.
  */
+/**
+ * A line under the transcript, and the one thing to do about it.
+ *
+ * `action` rather than a `retry` boolean, because the remedies are mutually
+ * exclusive and a second boolean beside the first could claim both at once — a
+ * state that means nothing and would draw two buttons. `null` is the ordinary
+ * case: most notices are a fact with nothing to press.
+ */
+export interface SessionNotice {
+  tone: "quiet" | "warn";
+  text: string;
+  /**
+   * `reconnect` re-runs the resume this daemon gave up on. `sign_in` goes to the
+   * agent's own screen on this machine — the conversation is not broken, nobody
+   * is signed in to the thing that answers it.
+   */
+  action: "reconnect" | "sign_in" | null;
+}
+
+/**
+ * How a conversation ended, in words rather than in the daemon's identifier.
+ *
+ * ⚠ This line drew `ended: ${session.exit.reason}` — `ended: agent_exited`,
+ * `ended: start_timeout` — which is a wire enum printed at somebody who is
+ * looking at their own conversation to find out what happened to it. `TONE_TEXT`
+ * one screen up is this app's one human-facing status vocabulary and had no
+ * counterpart for the reason a session is over; this is it.
+ *
+ * `agent_signed_out` is deliberately **not** here. It is answered above, as a
+ * whole sentence with a button beside it, because it is the one exit with a
+ * remedy — and a row in this table would be a second, worse answer competing with
+ * that one.
+ *
+ * The three daemon reasons are not here either, for the structural reason rather
+ * than a stylistic one: `waitingForDaemon` catches every one of them above, so a
+ * value from `DAEMON_EXIT_REASONS` cannot reach this line. They are left out
+ * rather than written down wrong.
+ *
+ * **The unknown arm keeps the identifier**, like every other place in this client
+ * that meets a wire value it does not know: a newer daemon's reason is drawn as
+ * itself — legible, and never a guess about what it meant.
+ */
+const EXIT_TEXT: Partial<Record<ExitReason, string>> = {
+  stopped: "you stopped this conversation",
+  agent_exited: "the agent exited",
+  start_failed: "the agent could not be started",
+  start_timeout: "the agent did not start in time",
+  agent_kill_failed: "the agent could not be stopped",
+};
+
+export function exitText(reason: ExitReason): string {
+  return EXIT_TEXT[reason] ?? `ended: ${reason}`;
+}
+
 export function sessionNotice(
   session: SessionSnapshot,
   agent: string,
   machineName: string,
-): { tone: "quiet" | "warn"; text: string; retry: boolean } | null {
+): SessionNotice | null {
   if (session.exit === null) return null;
   if (resumeStalled(session)) {
     const error = session.resume?.error;
     const code = error?.code ?? "no_agent_session_id";
+    /*
+     * **This is where "sign in" is earned, and it is the only place.**
+     *
+     * `agent_auth_required` means the daemon *tried* — spawned the CLI, asked it
+     * to reopen the conversation, and was refused — so "not signed in" here is a
+     * measurement rather than a memory. The exit-reason branch below used to make
+     * the same claim off a row that could not know, which is how somebody whose
+     * CLI had refreshed its own token was sent to a screen they were already
+     * signed in to.
+     *
+     * Retrying is still the right answer for every other failure, and offering
+     * both would be the two-remedies-at-once this type has one field to prevent.
+     */
     return {
       tone: "warn",
       text: `could not reconnect the agent — ${resumeFailureText(code, error?.message ?? "", agent, machineName)}`,
-      retry: resumeRetryable(code),
+      action:
+        code === "agent_auth_required" ? "sign_in" : resumeRetryable(code) ? "reconnect" : null,
     };
   }
   if (waitingForDaemon(session)) {
@@ -588,12 +697,48 @@ export function sessionNotice(
         session.resume?.state === "running"
           ? "reconnecting the agent…"
           : "the daemon restarted — reconnecting the agent",
-      retry: false,
+      action: null,
+    };
+  }
+  /*
+   * **The one exit with a remedy, so it gets a sentence rather than its name.**
+   *
+   * Every other reason here is either self-explanatory (`stopped`) or something
+   * nobody can act on from this screen. This one ended the conversation *because
+   * a credential went away*, and printing `ended: agent_signed_out` would withhold
+   * the only useful half of what the daemon said.
+   *
+   * ⚠ **It said "nobody is signed in to claude on <machine>. Sign in and this
+   * conversation comes back." Both halves could be false at once, and were.**
+   *
+   * This is a record of something that happened, drawn in the present tense.
+   * Nothing re-checks it: the row keeps its exit reason for ever, and the daemon's
+   * own login probe — which is live, three seconds fresh, and was reporting
+   * `loggedIn: true` throughout — is not consulted here or anywhere near here. So
+   * an expired OAuth token that the CLI then refreshed on its own left this
+   * sentence asserting the opposite of the truth. And the promise was not kept
+   * either: `reloadCredentials` is the only thing that reverses this reason, and
+   * every one of its callers is an in-app credential *write*, so signing in from
+   * a terminal — or the CLI refreshing itself — reached none of them. The button
+   * went to a screen where you were already signed in.
+   *
+   * So the sentence is about the past, which is the only thing this row knows,
+   * and the action is **Reconnect** — `POST /sessions/:id/resume`, which calls
+   * `managed.resume()` with no `autoResumable` gate and has always been able to
+   * bring these back. It was simply never offered here. Signing in is still one
+   * tap away on the machine's own screen, and is no longer the only way out of a
+   * state a person cannot otherwise leave.
+   */
+  if (session.exit.reason === "agent_signed_out") {
+    return {
+      tone: "quiet",
+      text: `${agent} could not authenticate on ${machineName}, so this conversation stopped.`,
+      action: "reconnect",
     };
   }
   const detail = session.exit.detail === null ? "" : ` — ${session.exit.detail}`;
   const orphan = session.exit.agentConfirmedDead ? "" : " (agent not confirmed dead)";
-  return { tone: "quiet", text: `ended: ${session.exit.reason}${detail}${orphan}`, retry: false };
+  return { tone: "quiet", text: `${exitText(session.exit.reason)}${detail}${orphan}`, action: null };
 }
 
 export function Spinner(): ReactNode {
@@ -850,7 +995,7 @@ export function DangerButton({
  * whether or not a caller passes a footer.
  */
 export const SHEET_PANEL =
-  "pb-safe animate-rise relative flex h-[92dvh] min-h-0 w-full flex-col overflow-hidden rounded-t-2xl border-t border-edge bg-surface shadow-2xl sm:h-[min(44rem,88dvh)] sm:max-w-2xl sm:rounded-2xl sm:border sm:pb-0";
+  "pb-safe animate-sheet sm:animate-rise relative flex h-[92dvh] min-h-0 w-full flex-col overflow-hidden rounded-t-2xl border-t border-edge bg-surface shadow-2xl sm:h-[min(44rem,88dvh)] sm:max-w-2xl sm:rounded-2xl sm:border sm:pb-0";
 /** Title left, waiting count and ✕ right. 56px, and it never scrolls. */
 export const SHEET_HEAD =
   "flex min-h-14 shrink-0 items-center gap-2 border-b border-edge px-4 sm:px-5";
@@ -874,9 +1019,24 @@ export const SHEET_HEAD =
  * removed and 0px with it present. Giving this box a flex context fixes both at
  * once, because the children become real scrollers and their `overscroll-contain`
  * becomes true rather than merely stated.
+ *
+ * **`bg-surface` is what makes the section slide legible, and its absence was the
+ * whole of "the previous screen's text is still there".** This box carries the
+ * `view-transition-name` the horizontal slide moves, and a named element is
+ * *lifted out of its ancestor's snapshot* — so with the fill left to the panel,
+ * both snapshots were transparent images of nothing but glyphs. Measured
+ * mid-flight at 390px: the arriving section's fields and the leaving list's rows
+ * were both fully legible, drawn on top of one another over the panel's own fill.
+ * A slide needs the pane that arrives to *cover* the one it replaces, which is a
+ * property of the element rather than of the animation. Same colour as the panel
+ * behind it, so nothing about the sheet at rest changes.
+ *
+ * That is `AppShell`'s rule for the rail and the pane — every surface paints its
+ * own ground, none falls through — reaching the one box that had been getting
+ * away with it because nothing had ever moved it before.
  */
 export const SHEET_BODY =
-  "flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-4 py-5 sm:px-5";
+  "flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain bg-surface px-4 py-5 sm:px-5";
 /** Actions right, Cancel last — see {@link BUTTON_TONE}. */
 export const SHEET_FOOT =
   "flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-edge px-4 py-3.5 sm:px-5";

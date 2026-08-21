@@ -405,13 +405,61 @@ export interface UploadAccepted {
  * Mirrored from `src/uploads.ts` like everything else in this file, and they can
  * drift — the daemon is the one that decides, and its refusal is what a chip
  * shows. What these buy is that the common refusals happen at the picker instead
- * of after 25 MiB has crossed a phone's uplink.
+ * of after the whole file has crossed a phone's uplink — which is worth four
+ * times what it was, this having been 25 MiB.
  *
  * The per-session byte budget is deliberately **not** here: this client cannot
  * know it across a reload, so tracking it would be wrong more often than useful.
+ * Nor is the *rate* budget, for a stronger version of the same reason — it is
+ * about the last five minutes of the daemon's life, which a tab that was asleep
+ * for four of them cannot have an opinion about. Both arrive as refusals with the
+ * daemon's own message.
  */
-export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+export const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 export const MAX_PROMPT_ATTACHMENTS = 10;
+
+/**
+ * What `POST /fs/import` answers with when an archive became a folder.
+ *
+ * `path` is the whole point of the reply: it is what the picker moves to, so the
+ * folder somebody just imported is the one their session starts in without them
+ * having to find it in a list.
+ */
+/**
+ * What `PUT`/`DELETE /agent-auth/:agent` answer.
+ *
+ * `restarting` is how many conversations were relaunched to take the change —
+ * secrets reach an agent only at spawn, so a token saved while one is running
+ * would otherwise be a change that never arrives. **Optional**: a daemon
+ * predating that behaviour omits it, and the client must read its absence as "it
+ * did not say" rather than as zero, which is a different and much more alarming
+ * sentence.
+ */
+export interface CredentialWritten {
+  saved?: boolean;
+  removed?: boolean;
+  restarting?: number;
+}
+
+export interface ImportAccepted {
+  import: {
+    path: string;
+    name: string;
+    entries: number;
+    bytes: number;
+  };
+}
+
+/**
+ * How large an archive this client will offer to send.
+ *
+ * Mirrored from `src/archive.ts`, and **deliberately a different number from
+ * `MAX_UPLOAD_BYTES`** at both ends: that one bounds an attachment to a message,
+ * this one bounds a whole project arriving. Checking it here only saves somebody
+ * pushing a large file over a phone's uplink to be told no — the daemon is still
+ * the one that decides.
+ */
+export const MAX_IMPORT_BYTES = 50 * 1024 * 1024;
 
 /**
  * The longest string answer the daemon will take, mirrored from
@@ -573,7 +621,15 @@ export type ExitReason =
    * claude's `ultracode`, which is read when a conversation is opened and has no
    * live channel.
    */
-  | "config_changed";
+  | "config_changed"
+  /**
+   * Somebody signed this agent out, so the daemon ended its conversations.
+   *
+   * A person's decision, exactly like `stopped`, so it is deliberately **not** a
+   * daemon exit: nothing brings these back on its own. Signing in again does,
+   * because that is the same person reversing it.
+   */
+  | "agent_signed_out";
 
 /**
  * The exits that mean the daemon went away rather than that anybody decided.
@@ -593,7 +649,7 @@ export type ExitReason =
  * **A copy is only worth having while it is the same copy**, and this one was
  * wrong for exactly one release: `config_changed` was added to `src/events.ts`
  * and not here, so a session the daemon was restarting on purpose answered
- * `showsAsEnded` — which takes the composer off the screen, the one thing that
+ * `showsAsEnded` — which used to take the composer off the screen, the one thing that
  * partition is supposed to make impossible for a session that is coming back.
  * `webcheck` now reads `src/events.ts` off disk and compares the two lists rather
  * than trusting the next person to remember.
@@ -618,6 +674,13 @@ export const FINAL_EXIT_REASONS: readonly ExitReason[] = [
   "start_failed",
   "start_timeout",
   "agent_kill_failed",
+  /*
+   * Final, because nothing brings it back on its own — the daemon's
+   * `autoResumable` answers `false` for it by name. Signing in again does, and
+   * that is a person acting rather than the session "coming back", which is the
+   * distinction this list is about.
+   */
+  "agent_signed_out",
 ];
 
 /**
@@ -627,7 +690,7 @@ export const FINAL_EXIT_REASONS: readonly ExitReason[] = [
  * the entire safety property.** This used to be
  * `DAEMON_EXIT_REASONS.includes(exit.reason)`, so a reason the client had never
  * heard of answered `false` — the session fell out of `waitingForDaemon` into
- * `showsAsEnded`, and `Composer.tsx` early-returns on that, which **takes the
+ * `showsAsEnded`, which `Composer.tsx` used to early-return on, **taking the
  * composer off the screen for a conversation that is coming back**.
  *
  * `webcheck` compares both lists against `src/events.ts` off disk, which catches
@@ -1315,6 +1378,14 @@ export interface AgentCredentialSlot {
  */
 export interface AgentLoginSupport {
   supported: boolean;
+  /**
+   * Why the wizard cannot run, when it cannot. Optional: an older daemon omits it.
+   *
+   * Read as a *narrowing*, never as a gate — `supported` is still what decides
+   * whether the button is drawn. An unknown value degrades to "no specific advice"
+   * rather than throwing, which is this file's whole contract.
+   */
+  blocked?: "no_script" | "no_cli" | "interactive_pty" | null;
   needsInput: boolean;
   /** Whether the agent's CLI has a sign-out verb. kimi has none. */
   canSignOut?: boolean;
@@ -1327,6 +1398,14 @@ export interface AgentAuthInfo extends AgentInfo {
 }
 
 export interface AgentAuthListing {
+  /**
+   * The daemon's own platform, as `process.platform`. Absent on an older daemon.
+   *
+   * Used for **one** thing: naming the system in the sentence that explains why a
+   * sign-in wizard cannot run. Never a gate — `login.blocked` decides that — for
+   * the reason `wire.ts` gives about every narrowing in it.
+   */
+  os?: string;
   /**
    * Whether this daemon's runtime will drive an interactive login at all.
    *

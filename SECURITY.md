@@ -159,9 +159,9 @@ byte-identically for known, unknown and unverified.
 **The upload route's body-cancel discipline under the middlewares above it is
 measured-unknown** (Q7.62). `POST /sessions/:id/uploads` reasons carefully about
 cancelling a body it refuses, and the auth gate and the scope check sit *above*
-it — so a 401 or a 403 may answer without draining the 25 MiB the client is still
+it — so a 401 or a 403 may answer without draining the upload the client is still
 sending. Neither half of the described outcome is established, and the obvious
-remedy is worse than the defect. What would settle it is one real 25 MiB upload
+remedy is worse than the defect. What would settle it is one real full-size upload
 through the relay under a read-only grant.
 
 **The first admin's password and API key are printed to the container log**, and

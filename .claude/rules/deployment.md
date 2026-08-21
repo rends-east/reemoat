@@ -184,7 +184,9 @@ the label follow — string equality would pass on a transcribed constant.
 `source` comes from `SOURCE_URL` specifically, not from `repository.url`: they are
 equal in a healthy tree, `pincheck` keeps them so, and `app.ts` is what instructs a
 fork to change its §13 source, so a fork that obeys the licence gets a correct
-image label for free.
+image label for free — and since the web client stopped drawing a source notice,
+this label and `GET /v1/instance` are the only two places the URL surfaces at all.
+Neither is a reason to change `SOURCE_URL`; both are reasons not to delete it.
 
 ⚠ Two traps, both measured. **`publish` deliberately does not ask the
 image-exists question** — `manifest` has just created that tag, so asking would

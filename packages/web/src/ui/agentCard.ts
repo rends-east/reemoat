@@ -55,8 +55,23 @@ export function tokenBlockFor(stance: AgentStance, stored: number): TokenBlock {
 }
 
 /** At most one sentence, and empty in the two commonest states. */
-export function stanceLine(id: string, stance: AgentStance, canSignIn: boolean): string | null {
+export function stanceLine(
+  id: string,
+  stance: AgentStance,
+  canSignIn: boolean,
+  /**
+   * The daemon's platform, when it is the reason. See `osName`.
+   *
+   * The sentence is the *only* place this is explained, so it is the place that
+   * has to name the culprit: "this machine can't" reads as something misconfigured
+   * on your box, when the truth is that the OS cannot give a background service the
+   * terminal this login needs. Absent on an older daemon, which falls back to the
+   * wording that names nothing.
+   */
+  os?: string,
+): string | null {
   const name = agentLabel(id);
+  const host = osName(os);
   if (stance === "not_installed") {
     return `${name} isn't installed on this machine. Nothing on this screen can change that — it has to be installed on the machine itself.`;
   }
@@ -67,7 +82,7 @@ export function stanceLine(id: string, stance: AgentStance, canSignIn: boolean):
   if (stance === "signed_out") {
     return canSignIn
       ? null
-      : `This machine can't run ${name}'s own sign-in, so a saved key is the only way in.`;
+      : `${host} can't run ${name}'s own sign-in, so a saved key is the only way in.`;
   }
   // "cannot tell" is kimi's permanent, correct answer and claude's or codex's
   // accident. The load-bearing half of `cannotAskHint` is the same either way:
@@ -78,7 +93,7 @@ export function stanceLine(id: string, stance: AgentStance, canSignIn: boolean):
       : `This machine couldn't check whether ${name} is signed in.`;
   const cannotRun = canSignIn
     ? ""
-    : ` This machine can't run ${name}'s own sign-in either, so a saved key is the only way in.`;
+    : ` ${host} can't run ${name}'s own sign-in either, so a saved key is the only way in.`;
   return `${why} ${name} may well be working — start a chat to find out.${cannotRun}`;
 }
 
@@ -165,4 +180,28 @@ export function dividerWord(signInAbove: boolean, block: TokenBlock): string | n
   if (block === "hidden") return null;
   if (block === "stored_only") return "Saved keys";
   return signInAbove ? "or" : "Sign in with a key instead";
+}
+
+/**
+ * What to call the host in a sentence that blames it.
+ *
+ * **Named by the daemon, never guessed.** The refusal this explains is returned
+ * for every BSD, so a hardcoded "macOS" would tell a FreeBSD operator something
+ * false about their own machine — in the one sentence whose whole job is to say
+ * the fault is not theirs. An older daemon reports no platform, and the fallback
+ * names nothing rather than the wrong thing.
+ */
+export function osName(os: string | undefined): string {
+  switch (os) {
+    case "darwin":
+      return "macOS";
+    case "freebsd":
+      return "FreeBSD";
+    case "openbsd":
+      return "OpenBSD";
+    case "netbsd":
+      return "NetBSD";
+    default:
+      return "This machine";
+  }
 }

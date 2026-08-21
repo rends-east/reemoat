@@ -80,8 +80,16 @@ export function Mark({ size = 20, className = "" }: { size?: number; className?:
  * foot of that file collapses every animation to one 0.01ms pass with no fill mode,
  * so each bar lands back on its declared opacity of 1. The row beside it still
  * carries the *word* `working…`, which is what survives the freeze.
+ *
+ * **`still` is the same mark with the animation off, and it has exactly one
+ * caller**: the row a cancelled turn leaves behind, which lands in this row's own
+ * place the instant after it. Three bars breathing is work happening; the same
+ * three bars at rest, beside a red word, is the same object having stopped — and
+ * reusing the glyph rather than swapping in a different one is what makes it read
+ * as a state rather than as an unrelated notice. It is not a second spinner and
+ * must not become one: nothing that is *waiting* may draw this.
  */
-export function WorkingMark(): ReactNode {
+export function WorkingMark({ still = false }: { still?: boolean } = {}): ReactNode {
   return (
     <svg
       viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
@@ -99,7 +107,7 @@ export function WorkingMark(): ReactNode {
           width={BAR_WIDTH}
           height={bar.height}
           rx={BAR_RADIUS}
-          className={`animate-bar ${DELAY[index] ?? ""}`}
+          className={still ? undefined : `animate-bar ${DELAY[index] ?? ""}`}
         />
       ))}
     </svg>

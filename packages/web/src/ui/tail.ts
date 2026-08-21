@@ -15,6 +15,7 @@
 import { formatLocation, hasInput, readInput } from "../permission";
 import type { Gap } from "../store";
 import type {
+  AnswerResolvedBy,
   ElicitationResolvedEvent,
   FileChangeEvent,
   FileLocation,
@@ -2014,6 +2015,69 @@ export function permissionDecisions(
 /** Whether a decided permission was a refusal. `null`/unknown is never a refusal. */
 export function refused(kind: PermissionOptionKind | undefined): boolean {
   return kind === "reject_once" || kind === "reject_always";
+}
+
+/**
+ * Who took a question away, in words rather than in the daemon's identifiers.
+ *
+ * ⚠ These strings were `by.replace(/_/g, " ")`, and that is not a small thing to
+ * find in a conversation: the row under a question somebody was about to answer
+ * read `turn cancelled`, `pump failed`, `no turn` — a wire enum with its
+ * underscores taken out, in a screen otherwise written in sentences. `pump` is
+ * not a word anybody using this app has, and `turn cancelled` describes the
+ * daemon's bookkeeping rather than what happened, which is that *you* pressed
+ * Stop.
+ *
+ * **The unknown arm keeps the old rendering deliberately.** A daemon newer than
+ * this client can send a member that is not here, and the honest answer to that
+ * is the identifier with its underscores taken out — ugly, and legible, and never
+ * a guess. Which is the rule this codebase applies to every unrecognised value on
+ * the wire; the table is the improvement, not a claim to know the whole union.
+ *
+ * `client` is not in it and never reaches here: the caller draws nothing at all
+ * when somebody answered for themselves, because the answer beside it already
+ * says who.
+ */
+const RESOLVED_BY_TEXT: Partial<Record<AnswerResolvedBy, string>> = {
+  agent_withdrew: "the agent withdrew it",
+  agent_gone: "the agent went away",
+  session_stopped: "the session was stopped",
+  turn_ended: "the turn ended first",
+  pump_failed: "lost the agent",
+  no_turn: "no turn to answer into",
+  turn_cancelled: "you stopped the turn",
+};
+
+export function resolvedByText(by: AnswerResolvedBy): string {
+  return RESOLVED_BY_TEXT[by] ?? by.replace(/_/g, " ");
+}
+
+/**
+ * Why a turn stopped without finishing, in words.
+ *
+ * Only ever asked about a reason `showsInTranscript` admits — `end_turn` is a
+ * reply ending and is not drawn at all — so every answer here is about a turn that
+ * did not get where it was going.
+ *
+ * `cancelled` is deliberately the shortest and is the one the caller tints: it is
+ * the only member of this union somebody *did*, and it lands in the row the
+ * working line occupied a moment earlier, which is where they were already
+ * looking. The rest are things that happened to the agent and read as a sentence.
+ *
+ * `stopReason` is `string` on the wire rather than ACP's own union, which is the
+ * whole reason this returns a string for anything: a reason this client has never
+ * heard of still has to draw as something, and `turn ended: <it>` is the same
+ * "legible, never a guess" answer {@link resolvedByText} gives.
+ */
+const STOP_REASON_TEXT: Record<string, string> = {
+  cancelled: "cancelled",
+  max_tokens: "the agent ran out of room",
+  max_turn_requests: "the agent hit its step limit",
+  refusal: "the agent declined",
+};
+
+export function stopReasonText(stopReason: string): string {
+  return STOP_REASON_TEXT[stopReason] ?? `turn ended: ${stopReason}`;
 }
 
 /** How long a rendered answer may run in one transcript row. */

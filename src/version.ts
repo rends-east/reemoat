@@ -26,4 +26,4 @@
  * anywhere sends a version *to* a daemon, and adding that is a different decision
  * from this one.
  */
-export const DAEMON_VERSION = "0.1.0";
+export const DAEMON_VERSION = "0.2.0";
