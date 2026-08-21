@@ -221,6 +221,37 @@ export function safeMemberPath(raw: string): MemberPath {
 }
 
 /**
+ * Whether a member names the archive's own root rather than anything inside it.
+ *
+ * **`tar -czf x.tar.gz .` writes `./` as its first member**, and that is one of
+ * the two ordinary ways a person makes an archive of a directory. It was refused,
+ * and the whole archive with it: `safeMemberPath` drops `.` segments, finds
+ * nothing left, and answers `escapes_root` — the same verdict it gives
+ * `a/../../x`. So the most common honest archive there is came back carrying the
+ * message written for a traversal attempt, with nothing imported and no way to
+ * tell from the error that the archive was fine.
+ *
+ * A **skip** rather than a refusal, because there is genuinely nothing to do: the
+ * member names the directory being extracted into, which already exists. Same
+ * shape as {@link isNoiseMember}, and deliberately beside it.
+ *
+ * ⚠ **Checked before `safeMemberPath`, and it may not become a hole.** It answers
+ * `true` only for a name built entirely from `.` and separators, and no such name
+ * can address anything — so skipping one creates nothing, whatever its length. A
+ * `..` anywhere makes it `false`: `".."`, `"./.."` and `"a/.."` all fall through
+ * to the refusal that was always theirs, and so does any name carrying a real
+ * segment or a control character.
+ *
+ * Measured on both writers: bsdtar emits `./`, while Info-ZIP normalises the
+ * prefix away before writing its central directory, so `zip -r x.zip .` never had
+ * this problem. The check is wired into both readers regardless, because which of
+ * them can produce the member is a fact about today's tools rather than a rule.
+ */
+export function isArchiveRoot(raw: string): boolean {
+  return raw.split("/").every((segment) => segment.length === 0 || segment === ".");
+}
+
+/**
  * Members that are noise rather than content, skipped without comment.
  *
  * Not a safety rule — a correctness one, and it is load-bearing for the
@@ -604,6 +635,11 @@ function readZipMembers(central: Buffer): ZipMember[] {
     }
     const rawName = nameBytes.toString("utf8");
 
+    // The archive's own root names nothing to create. Before the refusal, because
+    // to that one it looks like a member that resolved to nothing — see
+    // `isArchiveRoot`.
+    if (isArchiveRoot(rawName)) continue;
+
     const safe = safeMemberPath(rawName);
     if (!safe.ok) {
       throw new ArchiveError("unsafe", `this archive has a member this daemon will not write`, {
@@ -864,6 +900,13 @@ async function extractTgz(source: AsyncIterable<Buffer>, root: string, budget: B
         reason: "not_a_regular_file",
         entry: name,
       });
+    }
+
+    // As in the zip reader, and this is the one that matters: `tar -czf x.tar.gz .`
+    // puts `./` first, so without this the very next line refused the archive.
+    if (isArchiveRoot(name)) {
+      await skipBody();
+      continue;
     }
 
     const safe = safeMemberPath(name);

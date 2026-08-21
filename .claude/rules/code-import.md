@@ -145,6 +145,19 @@ deleted by the next import into the same folder.
   extended header (typeflag `x`) ahead of members whose metadata does not fit the
   1979 layout, routinely rather than rarely. Refusing them refuses most archives
   made on a Mac. GNU's older `L` is handled the same way; `g` globals are skipped.
+- **`./` is skipped, not refused, and this one was a real refusal of ordinary
+  archives.** `tar -czf x.tar.gz .` writes `./` as its first member — one of the
+  two ways anybody makes an archive of a directory — and `safeMemberPath` answers
+  `escapes_root` for it, correctly on its own terms: every segment dropped,
+  nothing left, the same shape as `a/../../x`. The reader threw on that first
+  member and took the whole archive with it, so the commonest honest archive there
+  is came back carrying the message written for a traversal attempt.
+  `isArchiveRoot` is the line between the two, checked before the refusal in both
+  readers, and it is `true` only for a name built entirely from `.` and
+  separators — which can address nothing, so skipping one creates nothing. A `..`
+  anywhere makes it `false`. Measured on both writers: bsdtar emits `./`,
+  Info-ZIP normalises it away, and the check is wired into both readers anyway
+  because which tool emits it is a fact about today's tools rather than a rule.
 - **`__MACOSX/` and `.DS_Store` are skipped silently.** Not safety — correctness,
   and load-bearing for the single-root rule: Finder's Compress writes a parallel
   resource-fork tree beside the folder, so *every* zip made on a Mac has two

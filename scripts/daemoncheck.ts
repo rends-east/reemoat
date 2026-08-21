@@ -36,6 +36,7 @@ import {
 import { AgentLoginRuns, readFrom, sanitize } from "../src/agentauth.js";
 import {
   importFolderName,
+  isArchiveRoot,
   MAX_IMPORT_BYTES,
   MAX_IMPORT_DEPTH,
   MAX_IMPORT_ENTRIES,
@@ -4050,6 +4051,53 @@ process.stdout.write("\nimporting a codebase\n");
       const verdict = safeMemberPath(raw);
       check(label, verdict.ok ? null : verdict.reason, reason);
     }
+
+    /*
+     * The archive's own root, which is a skip and not a refusal.
+     *
+     * `tar -czf x.tar.gz .` writes `./` first, and `safeMemberPath` answers
+     * `escapes_root` for it — correctly, on its own terms: every segment dropped,
+     * nothing left, the same shape as `a/../../x`. So one of the two ordinary ways
+     * to make an archive was refused whole, under the message meant for a
+     * traversal attempt. The line between the two is what this table is.
+     */
+    const roots: [string, string, boolean][] = [
+      ["what bsdtar writes for the directory itself", "./", true],
+      ["and the bare form", ".", true],
+      ["a name that is only separators", "//", true],
+      ["an empty name", "", true],
+      ["but `..` is not a root, it is a climb", "..", false],
+      ["nor is it one behind a dot", "./..", false],
+      ["nor after a real segment", "app/..", false],
+      ["a real member is not a root", "./app/index.ts", false],
+      ["and neither is a name that merely starts with a dot", ".git", false],
+    ];
+    for (const [label, raw, want] of roots) check(label, isArchiveRoot(raw), want);
+  }
+
+  {
+    /*
+     * The whole archive, the way `tar -czf x.tar.gz .` actually arrives — the
+     * `./` member first, then everything under it. Driven rather than left to the
+     * pure table, because what broke was not the predicate but the reader
+     * throwing on the first member and taking the archive with it.
+     */
+    const into = target();
+    const out = await send(
+      into,
+      buildTarGz([
+        { name: "./", dir: true },
+        { name: "./src/", dir: true },
+        { name: "./README.md", data: Buffer.from("# app\n") },
+        { name: "./src/index.js", data: Buffer.from("console.log(1)\n") },
+      ]),
+      "myproj.tar.gz",
+    );
+    check("an archive of `.` is imported rather than refused", out.status, 201);
+    check("its members are loose at the root, so it takes the archive's name", out.body.import.name, "myproj");
+    check("and the root member is not counted as one", out.body.import.entries, 3);
+    check("the nested file arrived", readFileSync(join(into, "myproj/src/index.js"), "utf8"), "console.log(1)\n");
+    check("and no folder was made for the dot itself", readdirSync(join(into, "myproj")).sort(), ["README.md", "src"]);
     // The other half of the same rule: a name the *folder* takes, which is the
     // one place a query parameter becomes a directory.
     check("a folder named .git is refused whatever its case", importFolderName(".GIT.zip"), "imported");
