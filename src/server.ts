@@ -826,9 +826,19 @@ export function createApp(options: ServerOptions): AppBundle {
     }
     credentials.remove(agent, envName);
     registry.sessionRuntime.forgetAvailability();
-    // Removing one is the same fact as saving one: the agents already running
-    // still hold it in their environment, and only a relaunch takes it away.
-    const restarting = registry.reloadCredentials(agent);
+    /*
+     * Removing one is the same fact as saving one *for the sessions still
+     * running*: the agents already up still hold it in their environment, and
+     * only a relaunch takes it away.
+     *
+     * ⚠ **It is the opposite fact for the ones already ended, which is what the
+     * `false` says.** Left to default, this resumed every conversation carrying
+     * `agent_signed_out` — conversations this daemon ended *because the
+     * credential went away* — and handed each a fresh agent with nothing to
+     * authenticate with. Deleting a credential is a sign-out's second half, not
+     * its reversal.
+     */
+    const restarting = registry.reloadCredentials(agent, false);
     return c.json({ removed: true, agent, envName, restarting });
   });
 
@@ -1124,61 +1134,71 @@ export function createApp(options: ServerOptions): AppBundle {
       );
     }
 
-    let target: string;
-    try {
-      target = await resolveCwd(path);
-    } catch (error) {
-      if (error instanceof PathError) {
-        return refuse(() => jsonError(c, pathErrorStatus(error, 400), error.code, error.message));
-      }
-      const errno = errnoError(c, error, 400);
-      if (errno) return refuse(() => errno);
-      await cancelBody(c.req.raw.body as ReadableStream<Uint8Array> | null);
-      throw error;
-    }
-
-    const body = c.req.raw.body;
-    if (body === null) return jsonError(c, 400, "bad_request", "expected a request body");
-
+    /*
+     * ⚠ **Claimed here, before the first `await`, and that placement is the whole
+     * guard.** The check above and this line used to have `resolveCwd` between
+     * them, which is a `realpath` — a real suspension, and one `stall.ts` records
+     * as able to queue for ever against a mount that has gone away. Every request
+     * that arrived while it was in flight read `importing` as `false`, so the
+     * bound this is here to enforce did not hold for the case it was written for:
+     * the 256 the relay allows arriving together all passed. Nothing between the
+     * test and the set may suspend, so everything that can is below it, inside
+     * the `finally` that releases it.
+     */
     importing = true;
-    let outcome: ImportOutcome;
     try {
-      outcome = await importArchive({ target, name: named.name, body });
+      let target: string;
+      try {
+        target = await resolveCwd(path);
+      } catch (error) {
+        if (error instanceof PathError) {
+          return refuse(() => jsonError(c, pathErrorStatus(error, 400), error.code, error.message));
+        }
+        const errno = errnoError(c, error, 400);
+        if (errno) return refuse(() => errno);
+        await cancelBody(c.req.raw.body as ReadableStream<Uint8Array> | null);
+        throw error;
+      }
+
+      const body = c.req.raw.body;
+      if (body === null) return jsonError(c, 400, "bad_request", "expected a request body");
+
+      const outcome: ImportOutcome = await importArchive({ target, name: named.name, body });
+
+      switch (outcome.kind) {
+        case "ok":
+          return c.json({ import: outcome.result }, 201);
+        case "too_large":
+          return jsonError(c, 413, "import_too_large", `an archive may not exceed ${MAX_IMPORT_BYTES} bytes`, {
+            limit: MAX_IMPORT_BYTES,
+          });
+        case "unsupported":
+          return jsonError(c, 400, "unsupported_archive", "that is not a .zip or a .tar.gz");
+        case "exists":
+          return jsonError(c, 409, "import_exists", `${outcome.name} is already here`, { name: outcome.name });
+        case "refused": {
+          const { error } = outcome;
+          if (error.code === "too_large") {
+            return jsonError(c, 413, "import_unpacked_too_large", error.message, {
+              limit: MAX_IMPORT_UNPACKED_BYTES,
+            });
+          }
+          if (error.code === "too_many") {
+            return jsonError(c, 413, "import_too_many_entries", error.message, { limit: MAX_IMPORT_ENTRIES });
+          }
+          if (error.code === "unsafe") {
+            return jsonError(c, 400, "archive_unsafe", error.message, error.refusal);
+          }
+          if (error.code === "empty") return jsonError(c, 400, "archive_empty", error.message);
+          return jsonError(c, 400, "archive_unreadable", error.message);
+        }
+        case "write_failed":
+          return jsonError(c, 503, "import_write_failed", "could not unpack that here", {
+            detail: outcome.detail,
+          });
+      }
     } finally {
       importing = false;
-    }
-
-    switch (outcome.kind) {
-      case "ok":
-        return c.json({ import: outcome.result }, 201);
-      case "too_large":
-        return jsonError(c, 413, "import_too_large", `an archive may not exceed ${MAX_IMPORT_BYTES} bytes`, {
-          limit: MAX_IMPORT_BYTES,
-        });
-      case "unsupported":
-        return jsonError(c, 400, "unsupported_archive", "that is not a .zip or a .tar.gz");
-      case "exists":
-        return jsonError(c, 409, "import_exists", `${outcome.name} is already here`, { name: outcome.name });
-      case "refused": {
-        const { error } = outcome;
-        if (error.code === "too_large") {
-          return jsonError(c, 413, "import_unpacked_too_large", error.message, {
-            limit: MAX_IMPORT_UNPACKED_BYTES,
-          });
-        }
-        if (error.code === "too_many") {
-          return jsonError(c, 413, "import_too_many_entries", error.message, { limit: MAX_IMPORT_ENTRIES });
-        }
-        if (error.code === "unsafe") {
-          return jsonError(c, 400, "archive_unsafe", error.message, error.refusal);
-        }
-        if (error.code === "empty") return jsonError(c, 400, "archive_empty", error.message);
-        return jsonError(c, 400, "archive_unreadable", error.message);
-      }
-      case "write_failed":
-        return jsonError(c, 503, "import_write_failed", "could not unpack that here", {
-          detail: outcome.detail,
-        });
     }
   });
 

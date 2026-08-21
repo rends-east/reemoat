@@ -9,6 +9,7 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import type { Server } from "node:http";
@@ -34,9 +35,14 @@ import {
 } from "../src/acp/agents.js";
 import { AgentLoginRuns, readFrom, sanitize } from "../src/agentauth.js";
 import {
+  importFolderName,
   MAX_IMPORT_BYTES,
+  MAX_IMPORT_DEPTH,
   MAX_IMPORT_ENTRIES,
+  MAX_IMPORT_PATH_CHARS,
   MAX_IMPORT_UNPACKED_BYTES,
+  safeMemberPath,
+  settleFolderName,
 } from "../src/archive.js";
 import { SignedTokenVerifier, type Scope } from "../src/auth.js";
 import { forgetStalled, isStalled, listDirs, makeDir, PathError, probeExists, resolveCwd } from "../src/browse.js";
@@ -3600,14 +3606,45 @@ process.stdout.write("\na credential saved while an agent is already running\n")
    * return — so every refusal was still counted as a restart and the screen would
    * have reported chats it never touched.
    */
-  const fan = /reloadCredentials\(agent: AgentId\): number \{[\s\S]*?\n  \}/.exec(src)?.[0] ?? "";
+  /*
+   * The parameter list is matched loosely on purpose: what these assertions are
+   * about is the body, and pinning the signature here meant that adding `revive`
+   * emptied `fan` — which the positive `.test()` checks below caught loudly, being
+   * `false` against an expected `true`. The one that does **not** is the negated
+   * one, `!/void session\.applyCredentialChange\(\)/`, which is vacuously true
+   * against `""` and would have gone on passing while asserting nothing at all.
+   * That asymmetry is the reason for the guard on the next line rather than for
+   * the loosened regex: one negated assertion over an extracted string is enough
+   * to need it.
+   */
+  const fan = /reloadCredentials\([^)]*\): number \{[\s\S]*?\n  \}/.exec(src)?.[0] ?? "";
+  check("the fan-out was found at all, so the checks below mean something", fan.length > 0, true);
   check("the fan-out counts what it filtered", /session\.takesCredentialChange/.test(fan), true);
   check(
     "and returns that, not a number it hoped to correct later",
     /return restarting\.length \+ returning\.length;/.test(fan),
     true,
   );
-  check("without awaiting the restarts", /void session\.applyCredentialChange\(\)/.test(fan), true);
+  /*
+   * Detached, and *within* that, serialised — two properties that pull opposite
+   * ways and are both required.
+   *
+   * Detached is the old rule and the reason this method returns `number` rather
+   * than `Promise<number>`: the caller answers with the count and does not wait
+   * for a single teardown. Serialised is the new one. Each of these restarts is a
+   * SIGTERM, a process teardown, a spawn and an ACP handshake; issued as N bare
+   * `void` calls they all began at once, so one credential save on a full machine
+   * was `DEFAULT_MAX_SESSIONS` of them against this one event loop — the
+   * thundering herd `signOutSessions` refuses in this same file, over this same
+   * work. The `void` therefore has to sit on the *loop* rather than on each call,
+   * which is what these two assertions pin between them.
+   */
+  check("without awaiting the restarts", /void \(async \(\) => \{/.test(fan), true);
+  check(
+    "but one at a time inside that, not a herd of SIGTERMs at once",
+    /await session\.applyCredentialChange\(\)/.test(fan) && !/void session\.applyCredentialChange\(\)/.test(fan),
+    true,
+  );
   /*
    * **Signing in reverses a sign-out and nothing else.** The reason is the record
    * of who ended a session: one this daemon ended because the credential went
@@ -3631,6 +3668,38 @@ process.stdout.write("\na credential saved while an agent is already running\n")
   const routes = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
   check("saving a credential relaunches and says how many", /saved: true, agent, envName, restarting/.test(routes), true);
   check("and so does removing one", /removed: true, agent, envName, restarting/.test(routes), true);
+
+  /*
+   * ⚠ **Which direction the credential went, which both routes used to lose.**
+   *
+   * `reloadCredentials` does two things: it restarts the sessions still running,
+   * because a secret is injected at spawn and neither a save nor a removal reaches
+   * one that is already up; and it resumes the sessions that were ended *because
+   * there was no credential*. The first is right for both callers. The second is
+   * right for exactly one — and DELETE reached it too, so removing a credential
+   * revived every `agent_signed_out` conversation and handed each a fresh agent
+   * with nothing to authenticate with, which is the `Internal error: Failed to
+   * authenticate` this file argues against elsewhere. A removal is a sign-out's
+   * second half, never its reversal.
+   *
+   * Three assertions rather than one, because each half can regress alone: that
+   * the resume is gated at all, that DELETE asks for it not to happen, and that
+   * PUT still leaves it on.
+   */
+  check("the resume half is gated on which way the change went", /revive\s*\?/.test(fan), true);
+  check("and the default is the one that revives, so a save needs no argument", /revive = true/.test(fan), true);
+
+  /*
+   * Anchored to each handler rather than grepped over the whole file, because the
+   * two calls differ only in an argument and the lines around them are identical
+   * — so a file-wide test for both strings passes just as happily with the PUT and
+   * the DELETE swapped, which is the one mistake these assertions exist to catch.
+   */
+  const put = /app\.put\("\/agent-auth\/:agent"[\s\S]*?\n  \}\);/.exec(routes)?.[0] ?? "";
+  const del = /app\.delete\("\/agent-auth\/:agent"[\s\S]*?\n  \}\);/.exec(routes)?.[0] ?? "";
+  check("both agent-auth handlers were found, so the two below mean something", [put.length > 0, del.length > 0], [true, true]);
+  check("removing a credential does not revive what a sign-out ended", /reloadCredentials\(agent, false\)/.test(del), true);
+  check("and saving one still does", /reloadCredentials\(agent\)/.test(put), true);
 }
 
 /* ------------------------------------------------------------------ *
@@ -3732,6 +3801,14 @@ process.stdout.write("\nimporting a codebase\n");
     encrypted?: boolean;
     /** Raw name bytes, which also clears the UTF-8 flag. */
     rawName?: Buffer;
+    /**
+     * A tar size field that disagrees with the bytes that follow it.
+     *
+     * The whole point of a header field somebody else wrote: every archive this
+     * driver builds honestly is one the reader could have trusted. Only a member
+     * that *declares* more than it carries exercises the bound.
+     */
+    declaredSize?: number;
   }
 
   const tarHeader = (name: string, size: number, type: string, link = ""): Buffer => {
@@ -3758,7 +3835,7 @@ process.stdout.write("\nimporting a codebase\n");
     for (const m of members) {
       const type = m.type ?? (m.dir === true ? "5" : "0");
       const data = m.dir === true || type === "2" || type === "1" ? Buffer.alloc(0) : (m.data ?? Buffer.alloc(0));
-      parts.push(tarHeader(m.name, data.length, type, m.link ?? ""));
+      parts.push(tarHeader(m.name, m.declaredSize ?? data.length, type, m.link ?? ""));
       if (data.length > 0) parts.push(data, Buffer.alloc(pad512(data.length)));
     }
     parts.push(Buffer.alloc(1024)); // the two zero blocks that end an archive
@@ -3883,6 +3960,25 @@ process.stdout.write("\nimporting a codebase\n");
     ["a tar hardlink", buildTarGz([...good, { name: "app/hard", type: "1", link: "/etc/passwd" }]), "not_a_regular_file", 400, "archive_unsafe"],
     ["a device node", buildTarGz([...good, { name: "app/dev", type: "3" }]), "not_a_regular_file", 400, "archive_unsafe"],
     ["a .git the daemon would run hooks out of", buildZip([...good, { name: "app/.git/hooks/post-checkout", data: Buffer.from("#!/bin/sh\n") }]), "git_directory", 400, "archive_unsafe"],
+    /*
+     * ⚠ **The case variants, and they are not pedantry.** The exact-case
+     * comparison these replaced was measured letting `.GIT/config` through, on
+     * the APFS this is developed on — where the imported directory is then
+     * reachable as `.git`, `git rev-parse --git-dir` answers `.git`, and the
+     * `git status` in `changes.ts` runs the `core.fsmonitor` out of it. Both
+     * readers, because the refusal is shared and a regression could reach either.
+     */
+    ["the same .git spelled .GIT, which APFS does not tell apart", buildZip([...good, { name: "app/.GIT/config", data: Buffer.from("[core]\n") }]), "git_directory", 400, "archive_unsafe"],
+    ["and .Git in a tar", buildTarGz([...good, { name: "app/.Git/config", data: Buffer.from("[core]\n") }]), "git_directory", 400, "archive_unsafe"],
+    /*
+     * The one member body read whole rather than streamed, so the one whose
+     * declared size becomes an allocation. Declared 200 MiB, carries nothing:
+     * unbounded, this exact archive was measured at 2.2 GB resident and three
+     * minutes of synchronous copying with the event loop stopped throughout,
+     * and it finished by calling the archive *empty*.
+     */
+    ["a pax header that declares more than this daemon will hold", buildTarGz([{ name: "app/", dir: true }, { name: "PaxHeader/x", type: "x", data: Buffer.from("x"), declaredSize: 200 * 1024 * 1024 }]), "path_too_long", 400, "archive_unsafe"],
+    ["and the GNU long-name header beside it", buildTarGz([{ name: "app/", dir: true }, { name: "././@LongLink", type: "L", data: Buffer.from("x"), declaredSize: 200 * 1024 * 1024 }]), "path_too_long", 400, "archive_unsafe"],
     ["an encrypted member", buildZip([...good, { name: "app/s", data: Buffer.from("x"), encrypted: true }]), "encrypted", 400, "archive_unsafe"],
     ["a compression this daemon does not read", buildZip([...good, { name: "app/b", data: Buffer.from("x"), method: 12 }]), "unsupported_method", 400, "archive_unsafe"],
     ["a name that is not UTF-8", buildZip([...good, { name: "x", rawName: Buffer.from([0x61, 0xff]), data: Buffer.from("x") }]), "unsupported_name_encoding", 400, "archive_unsafe"],
@@ -3924,6 +4020,157 @@ process.stdout.write("\nimporting a codebase\n");
     const out = await send(into, buildZip([{ name: "a.txt", data: Buffer.from("x") }, { name: "b.txt", data: Buffer.from("y") }]), "my-thing.zip");
     check("loose members at the root are gathered under the archive's own name", out.body.import.name, "my-thing");
     check("and that is the one folder in the target", out.left, ["my-thing"]);
+  }
+
+  /*
+   * The containment gate itself, held against strings rather than archives.
+   *
+   * `safeMemberPath` is pure precisely so this is possible — its docblock says a
+   * driver "can hold every hostile string ever published against it without a
+   * temp directory" — and four of its eleven refusals had no assertion anywhere,
+   * because reaching them through a built archive is awkward and reaching them
+   * here is one line each.
+   */
+  {
+    const rows: [string, string, string | null][] = [
+      ["a plain member is allowed through", "app/src/index.ts", null],
+      ["a NUL in a name", "app/a\0b.ts", "control_char"],
+      ["and any other control character", "app/ab.ts", "control_char"],
+      ["a backslash, never translated to a slash", "app\\b.ts", "backslash"],
+      ["deeper than this daemon will nest", `${"a/".repeat(MAX_IMPORT_DEPTH + 1)}f.ts`, "too_deep"],
+      ["exactly at the depth bound is still fine", `${"a/".repeat(MAX_IMPORT_DEPTH - 1)}f.ts`, null],
+      ["longer than this daemon will read", "a".repeat(MAX_IMPORT_PATH_CHARS + 1), "path_too_long"],
+      ["exactly at the length bound is still fine", "a".repeat(MAX_IMPORT_PATH_CHARS), null],
+      [".git by any spelling — this one lower", "app/.git/config", "git_directory"],
+      ["this one upper", "app/.GIT/config", "git_directory"],
+      ["and this one mixed", "app/.GiT/config", "git_directory"],
+      ["`..` refused rather than resolved", "app/../../x", "escapes_root"],
+    ];
+    for (const [label, raw, reason] of rows) {
+      const verdict = safeMemberPath(raw);
+      check(label, verdict.ok ? null : verdict.reason, reason);
+    }
+    // The other half of the same rule: a name the *folder* takes, which is the
+    // one place a query parameter becomes a directory.
+    check("a folder named .git is refused whatever its case", importFolderName(".GIT.zip"), "imported");
+    check("and so is the lowercase one", importFolderName(".git.tar.gz"), "imported");
+  }
+
+  /*
+   * The last word on a folder name, which the *archive's* own choice used to skip.
+   *
+   * Both sources reach `settleFolderName` now; only the query parameter also gets
+   * `importFolderName`'s allowlist in front of it. The pair of tables below is
+   * that split: what must be settled either way, and what must survive when the
+   * name came out of the archive rather than off the wire.
+   */
+  {
+    const settled: [string, string, string][] = [
+      ["a leading dash, which is what makes a name an option", "-rf", "rf"],
+      ["several of them", "---exclude=x", "exclude=x"],
+      ["a name that is nothing but dashes", "---", "imported"],
+      ["an empty name", "", "imported"],
+      ["a lone dot", ".", "imported"],
+      ["two of them", "..", "imported"],
+      [".git by any spelling, here too", ".GIT", "imported"],
+      ["a name longer than anybody meant", "a".repeat(200), "a".repeat(100)],
+      /*
+       * ⚠ A hazard the sweeper created rather than one it found. `sweepStaleStaging`
+       * deletes anything under the target wearing this exact name and older than an
+       * hour, on the reasoning that only this daemon ever generates one. Publishing
+       * an archive's folder under it would make that false — and the folder would be
+       * deleted by the next import into the same directory, an hour after somebody
+       * was told it existed.
+       */
+      ["a name this daemon would later mistake for its own litter", ".reemoat-import-00112233445566aa", "imported"],
+      ["but only the exact shape of it", ".reemoat-import-nothex", ".reemoat-import-nothex"],
+    ];
+    for (const [label, raw, want] of settled) check(label, settleFolderName(raw), want);
+
+    /*
+     * And what it must NOT do, which is why this is not `importFolderName`.
+     * Running the allowlist over an archive's own folder would answer `My-Project`
+     * and turn every non-Latin name into a row of dashes — a worse answer than the
+     * question deserves, and one nobody asked for.
+     */
+    check("a space is not a threat", settleFolderName("My Project"), "My Project");
+    check("nor is an alphabet", settleFolderName("проект"), "проект");
+    check("a cap never splits a surrogate pair", [...settleFolderName("🙂".repeat(200))].length, 100);
+  }
+
+  {
+    const into = target();
+    const out = await send(into, buildTarGz([{ name: "-rf/", dir: true }, { name: "-rf/a.txt", data: Buffer.from("x") }]), "app.tar.gz");
+    check("an archive may not publish a folder that is an option", out.status, 201);
+    check("the dash is taken off rather than the import refused", out.body.import.name, "rf");
+    check("and that is what is on disk", out.left, ["rf"]);
+  }
+
+  /*
+   * ⚠ **Litter from a run that never reached its `finally`.**
+   *
+   * `discardStaging` cleans up on every path the process survives, and an OOM is
+   * not one — which the unbounded extended header above made reachable. Swept on
+   * the way in, because staging lives inside a target this daemon only learns
+   * about when somebody names it, so the next import is the one moment the path
+   * is known. Three narrowings, one case each.
+   */
+  {
+    const into = target();
+    const hex = (n: string) => join(into, `.reemoat-import-${n}`);
+    const old = Date.now() / 1000 - 7200;
+
+    const stale = hex("00112233445566aa");
+    mkdirSync(stale);
+    writeFileSync(join(stale, "archive.bin"), "half an import");
+    utimesSync(stale, old, old);
+
+    const fresh = hex("00112233445566bb");
+    mkdirSync(fresh);
+
+    // Wearing the name but not a directory: `lstat` says so, and it is neither
+    // followed nor removed.
+    const elsewhere = join(into, "not-staging");
+    mkdirSync(elsewhere);
+    writeFileSync(join(elsewhere, "keep.txt"), "mine");
+    symlinkSync(elsewhere, hex("00112233445566cc"));
+
+    // Shaped almost right, which is the whole reason the test is exact.
+    const notOurs = join(into, ".reemoat-import-nothex");
+    mkdirSync(notOurs);
+    utimesSync(notOurs, old, old);
+
+    const out = await send(into, buildZip(good));
+    check("an import still succeeds with litter in the folder", out.status, 201);
+    check("a stale staging directory is swept", existsSync(stale), false);
+    check("one too young to be litter is left alone", existsSync(fresh), true);
+    check("a symlink wearing the name is not followed", readFileSync(join(elsewhere, "keep.txt"), "utf8"), "mine");
+    check("nor removed", existsSync(hex("00112233445566cc")), true);
+    check("and a name this daemon never generates is not ours to delete", existsSync(notOurs), true);
+  }
+
+  /*
+   * ⚠ **Two imports in flight at once, which is the assertion the 409 never had.**
+   *
+   * The guard used to read `importing` and then `await resolveCwd` before writing
+   * it, so every request that arrived during that suspension read `false` — the
+   * bound did not hold for the case the route's own docblock is about, which is
+   * the 256 streams the relay allows arriving together. Firing without awaiting
+   * is what tells the two apart: serialised, this passes either way.
+   */
+  {
+    const first = target();
+    const second = target();
+    const [a, b] = await Promise.all([send(first, buildZip(good)), send(second, buildZip(good))]);
+    const statuses = [a.status, b.status].sort((x, y) => x - y);
+    check("two imports at once: one is taken", statuses, [201, 409]);
+    const refused = a.status === 409 ? a : b;
+    check("and the other is told the machine is busy", refused.body.error.code, "import_busy");
+    check("and the refused one created nothing", refused.left, []);
+    // The flag is released rather than wedged: a third import after both settle
+    // must still be accepted, or the route is dead for the daemon's whole life.
+    const third = target();
+    check("a later import still works", (await send(third, buildZip(good))).status, 201);
   }
 
   {

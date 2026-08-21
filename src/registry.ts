@@ -4682,8 +4682,14 @@ export class SessionRegistry {
    * The count is what came back, and is deliberately the number of sessions that
    * **will** restart rather than the number that finished — the caller answers a
    * request, not a fleet.
+   *
+   * ⚠ **`revive` is which direction the change went, and it is not a convenience.**
+   * A credential arriving and a credential going away reach the running sessions
+   * the same way — both are invisible until a relaunch — so both callers want the
+   * restart half. Only one of them wants the resume half, which is the `returning`
+   * filter below and the whole of what this argument decides.
    */
-  reloadCredentials(agent: AgentId): number {
+  reloadCredentials(agent: AgentId, revive = true): number {
     const mine = [...this.sessions.values()].filter((session) => session.agent === agent);
     const restarting = mine.filter((session) => session.takesCredentialChange);
     /*
@@ -4700,24 +4706,77 @@ export class SessionRegistry {
      * tension with this: nothing may bring these back *on its own*. This is not
      * on its own — it is the same person, on the same machine, undoing the thing
      * that ended them.
+     *
+     * ⚠ **And only when a credential *arrived*, which is what `revive` carries.**
+     * Both routes reach this function, and reading the change as symmetric made
+     * `DELETE /agent-auth/:agent` resume every conversation that had been ended
+     * *because there was no credential* — spawning agents with nothing to
+     * authenticate with, straight into the `Internal error: Failed to
+     * authenticate` this file argues against three docblocks up. A removal is a
+     * sign-out's second half, never its reversal: the restart half still runs, so
+     * a session holding the old secret in its environment still loses it.
      */
-    const returning = mine.filter(
-      (session) => session.terminal && session.exit?.reason === "agent_signed_out",
-    );
+    const returning = revive
+      ? mine.filter((session) => session.terminal && session.exit?.reason === "agent_signed_out")
+      : [];
 
-    for (const session of restarting) {
-      /*
-       * Each independently, and a failure in one may not take the others with it.
-       * A refused session never reaches here — `takesCredentialChange` decided
-       * that above — so what this swallows is a stop or a resume that genuinely
-       * threw, which the session reports through its own state the way any failed
-       * resume does.
-       */
-      void session.applyCredentialChange().catch(() => undefined);
-    }
-    for (const session of returning) {
-      void session.resume().catch(() => undefined);
-    }
+    /*
+     * ⚠ **One at a time, and still without making the caller wait.**
+     *
+     * Each of these is a SIGTERM and a process teardown followed by a fresh spawn
+     * and an ACP handshake. Issued as N bare `void` calls they all started at
+     * once, so saving or deleting one credential on a full machine was up to
+     * `DEFAULT_MAX_SESSIONS` simultaneous teardowns and as many spawns against
+     * this one event loop — which is exactly the thundering herd `signOutSessions`
+     * refuses sixty lines up, in the same file, over the same work.
+     *
+     * The `void` stays where it matters: the loop is detached, so the route still
+     * answers with the count immediately and the restarts proceed behind it. What
+     * changed is that they now proceed in a queue rather than in a stampede.
+     *
+     * Each independently, and a failure in one may not take the others with it. A
+     * refused session never reaches here — `takesCredentialChange` decided that
+     * above — so what this swallows is a stop or a resume that genuinely threw,
+     * which the session reports through its own state the way any failed resume
+     * does.
+     */
+    void (async () => {
+      for (const session of restarting) {
+        if (this.shuttingDown) return;
+        await session.applyCredentialChange().catch(() => undefined);
+      }
+      for (const session of returning) {
+        /*
+         * ⚠ **Both of these are debts serialising this loop took on**, and neither
+         * was payable before it: the old bare-`void` form did all of this in the
+         * tick that decided it, so there was no "later" for anything to change in.
+         *
+         * The shutdown check is the same one the boot resume pass makes per
+         * attempt, for the reason it states there — starting an agent we are about
+         * to kill is worse than not starting it. It matters *more* here. That pass
+         * notes a resume already in flight is safe without it, because `resume()`
+         * clears `exitRecord` synchronously and `shutdown()` then collects the
+         * session; a *queued* one has not run at all, so it is in neither
+         * `shutdown()`'s list nor anything else's, and the agent it spawns is
+         * `detached` and outlives `process.exit(0)`. The restart half above is
+         * incidentally safe — `applyCredentialChange` re-tests
+         * `takesCredentialChange`, whose first line refuses a terminal session —
+         * but it is written out there too rather than relied on silently.
+         *
+         * The predicate is re-tested for the same reason `applyCredentialChange`
+         * re-tests its own: "Re-checked, never assumed." `returning` was decided
+         * before the restarts ran, and by the time a queue of process teardowns and
+         * ACP handshakes reaches the end of it, a session may have been reconnected
+         * and then stopped by hand. `doResume` refuses only a non-terminal session
+         * and never looks at the reason, so without this it would be revived —
+         * which is the docblock's own line about a conversation carrying `stopped`
+         * staying stopped, and the daemon not overruling a person.
+         */
+        if (this.shuttingDown) return;
+        if (!(session.terminal && session.exit?.reason === "agent_signed_out")) continue;
+        await session.resume().catch(() => undefined);
+      }
+    })();
     return restarting.length + returning.length;
   }
 

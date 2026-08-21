@@ -48,7 +48,7 @@ So containment here is **not** built out of `realpath` comparisons at all.
   (`O_CREAT|O_EXCL`), the same flag `Uploads.receive` uses, which never follows a
   link and never truncates. A link planted between the check and the write is an
   `EEXIST`, not a write through it.
-- **`.git` is refused**, and it is the one refusal that is about this product
+- **`.git` is refused, case-folded**, and it is the one refusal that is about this product
   rather than about archives. The daemon runs `git worktree add` on the directory
   somebody picks, and `git.ts` deletes `GIT_NO_EXEC_CONFIG` on purpose so a
   repository's own `post-checkout` and its LFS filters run — as you. That is
@@ -58,6 +58,15 @@ So containment here is **not** built out of `realpath` comparisons at all.
   legitimate is lost: the export skill excludes `.git`, and somebody who wants
   history asks the agent to clone, which is on screen while it happens.
   **Reversible — one clause — but deliberately.**
+  ⚠ **The comparison is `toLowerCase()`, and the exact-case version it replaced was
+  a bypass rather than a nicety.** `.GIT/config` passed this check, and on the
+  case-insensitive filesystem this is developed and run on (APFS; NTFS likewise) the
+  directory it created *is* `.git` — measured, `git rev-parse --git-dir` answers
+  `.git` and `--is-inside-work-tree` answers `true`, after which the `git status` in
+  `changes.ts:200` executes a `core.fsmonitor` out of the imported config. No
+  executable bit is needed, which is why writing members `0o600` did not save it.
+  `importFolderName` and `settleFolderName` carry the same fold, being the other
+  place a name becomes a directory.
 
 ## The target is untouched until the last moment
 
@@ -93,6 +102,28 @@ other two rather than on the strength of having just made the directory: `lstat`
 refuse a symlink, `containedIn`, then remove. It runs on every path including the
 successful one.
 
+**And `sweepStaleStaging` is the fourth, which reverses a decision this file used
+to record.** It said a `.reemoat-import-*` directory surviving a crash was accepted
+rather than fixed, because "sweeping directories the daemon does not own is worse
+than the defect". Two things changed. The defect got larger: `discardStaging` lives
+in a `finally`, which an OOM does not reach, and the unbounded extended header this
+reader now refuses was measured taking the process past two gigabytes — so a crash
+mid-import stopped being the rare event that argument assumed, and what it strands
+is up to `MAX_IMPORT_BYTES` of `archive.bin` inside somebody's repository, where it
+shows up untracked and gets committed. And the remedy got smaller: what runs is not
+a sweep of directories the daemon does not own, but a sweep of **names only this
+daemon generates** — `/^\.reemoat-import-[0-9a-f]{16}$/` exactly, `lstat`-confirmed
+a directory so a symlink wearing the name is neither followed nor removed,
+`containedIn` the target, and older than an hour when no honest import can still be
+running. It runs on the way *into* an import rather than on a timer, because
+staging lives inside the target and the daemon only learns that path when somebody
+names it.
+
+**`settleFolderName` refuses that same pattern**, and that is the hazard the sweeper
+created rather than a pre-existing one: an archive whose top-level folder is called
+`.reemoat-import-<16 hex>` would otherwise be published under its own name and then
+deleted by the next import into the same folder.
+
 ## Facts about the formats, each of which cost a measurement
 
 - **Read the zip's central directory and nothing else.** A zip states every member
@@ -122,6 +153,28 @@ successful one.
   declared size. A member's declared length was written by whoever built the
   archive; only the decompressor's output is a number nobody else chose. That is
   the whole bomb guard.
+  ⚠ **Charged against everything it produces, not against what reaches a file** —
+  which is `Budget.countProduced` against `countWritten`, and the distinction is the
+  guard rather than bookkeeping. Charging only bytes on their way into a file left
+  every other consumer of the tar stream free: extended-header bodies, skipped `g`
+  headers, a refused member's drain and block padding. So the counter sits on the
+  whole gunzip stream, above the tar parsing, which is the only height that can see
+  a header body at all; in zip it stays inside each member's own pipeline, where
+  everything through it is that member's content and is both. `countWritten` has no
+  ceiling of its own on purpose — it reports, and a second bound over a subset of
+  the same bytes is only a second place to get the arithmetic wrong.
+- **A tar extended header is the one body read whole, so it has its own bound.**
+  `MAX_TAR_HEADER_BYTES`, checked before the read rather than after. Unbounded, a
+  204 KiB archive declaring a 200 MiB pax header was measured at 2.2 GB resident and
+  three minutes of synchronous `Buffer.concat` — with the event loop that owns every
+  session, every socket and the tunnel stopped throughout — finishing by calling the
+  archive *empty*, because the bytes it spent were never charged to anything.
+- **`tarNumber` is forgiving and its output is therefore checked.** A negative octal
+  parses (`-1` measured), a malformed one truncates to a plausible number
+  (`0000000012x` → 10), and the GNU base-256 form reaches past
+  `Number.MAX_SAFE_INTEGER`. A negative size makes `padding` non-zero and
+  desynchronises the block stream from that member on, so every name after it is
+  read out of the middle of somebody's file.
 - **Never `handle.createReadStream` per member.** Each call registers a `close`
   listener on the shared `FileHandle`, so a zip of twenty thousand members
   registers twenty thousand of them and releases none until the import ends. Node
@@ -194,11 +247,15 @@ slowest step.
 
 ## Known limitations
 
-- **A daemon restart mid-import leaves a `.reemoat-import-*` directory behind.**
-  It is dot-prefixed so `/fs/list` hides it, and it is named unmistakably. The
-  alternative — sweeping directories the daemon does not own — is worse than the
-  defect, so this is accepted rather than fixed.
 - **Q7.62 applies here too, and is still unmeasured.** This route stacks the same
   auth and scope middlewares above the same body-cancel discipline as the upload
   route, so whether a refusal past those middlewares really does release the
   stream is the same open question, now asked in two places.
+- **Nothing verifies a member's CRC.** A zip states one per member and this reader
+  discards it, so transport corruption or a malformed producer yields a file that
+  is silently wrong rather than an import that fails. The bytes are bounded and
+  contained; they are not checked.
+- **An imported file loses its executable bit.** Every member is written `0o600`,
+  so a `gradlew` or a shell entrypoint arrives non-executable. Deliberate for now —
+  the alternative is honouring a mode field somebody else wrote — but it is a
+  papercut a person hits on the first real import, not a theoretical one.

@@ -88,6 +88,16 @@ export const MAX_IMPORT_PATH_CHARS = 1024;
 export const MAX_IMPORT_DEPTH = 64;
 
 /**
+ * How large a tar extended header (pax `x`, GNU `L`) may be.
+ *
+ * The only member body this reader buffers whole, so the only one whose declared
+ * size becomes an allocation. What it carries is a path, so the bound is
+ * {@link MAX_IMPORT_PATH_CHARS} with generous room for the record framing around
+ * it — a header past this is not a long name, it is a number chosen to be large.
+ */
+export const MAX_TAR_HEADER_BYTES = 64 * 1024;
+
+/**
  * How large the zip central directory may be.
  *
  * The one structure read whole into memory, so it needs its own ceiling: it is
@@ -192,7 +202,15 @@ export function safeMemberPath(raw: string): MemberPath {
      * somebody who wants history asks the agent to clone it, which is the
      * existing path and is on screen while it happens.
      */
-    if (segment === ".git") return { ok: false, reason: "git_directory" };
+    /*
+     * ⚠ **Case-folded, because the filesystem this runs on is.** The exact-case
+     * comparison this replaced was measured passing `.GIT/config` straight
+     * through on APFS — where `.GIT` is then reachable as `.git`, `git rev-parse
+     * --git-dir` answers `.git`, and `changes.ts`'s own `git status` executes a
+     * `core.fsmonitor` out of the imported config. One letter defeated the whole
+     * refusal, and the same is true on NTFS.
+     */
+    if (segment.toLowerCase() === ".git") return { ok: false, reason: "git_directory" };
     segments.push(segment);
   }
 
@@ -246,7 +264,10 @@ export class ArchiveError extends Error {
 /** What has been produced so far, against what may be. */
 class Budget {
   entries = 0;
+  /** Bytes that reached a file. What the import reports, and never a bound. */
   bytes = 0;
+  /** Everything a decompressor emitted, header bodies and padding included. What is bounded. */
+  produced = 0;
 
   countEntry(): void {
     this.entries += 1;
@@ -255,11 +276,35 @@ class Budget {
     }
   }
 
-  countBytes(n: number): void {
-    this.bytes += n;
-    if (this.bytes > MAX_IMPORT_UNPACKED_BYTES) {
+  /**
+   * Charge bytes a decompressor produced, whether or not any of them reach a file.
+   *
+   * ⚠ **The ceiling is charged here and nowhere else**, and the distinction from
+   * {@link countWritten} is the whole guard rather than bookkeeping. Charging only
+   * bytes on their way into a file left every other consumer of the tar stream
+   * free: a pax or GNU long-name header body, a skipped `g` header, a refused
+   * member's drain, and block padding. Measured, that was not a small gap — a 204
+   * KiB archive declaring one 200 MiB pax header drove 2.2 GB of resident memory
+   * and three minutes of synchronous `Buffer.concat` on the one event loop that
+   * owns every session, and finished by reporting the archive *empty*, because
+   * `bytes` had never been touched.
+   */
+  countProduced(n: number): void {
+    this.produced += n;
+    if (this.produced > MAX_IMPORT_UNPACKED_BYTES) {
       throw new ArchiveError("too_large", `an archive may not unpack to more than ${MAX_IMPORT_UNPACKED_BYTES} bytes`);
     }
+  }
+
+  /**
+   * Charge bytes on their way into a file, which is the number the import reports.
+   *
+   * No ceiling of its own: everything counted here has already been charged
+   * against {@link countProduced}, and a second bound on a subset of the same
+   * bytes would only be a second place to get the arithmetic wrong.
+   */
+  countWritten(n: number): void {
+    this.bytes += n;
   }
 }
 
@@ -270,12 +315,20 @@ class Budget {
  * member declares its uncompressed size and a tar member declares its length, and
  * in both cases the declaration was written by whoever built the archive. Only
  * the decompressor's own output is a number nobody else chose.
+ *
+ * `written` because the two formats attach this at different heights. In zip it
+ * sits inside one member's own pipeline, so everything through it is that
+ * member's content and counts as both produced and written. In tar it sits on the
+ * whole gunzip stream — above the header parsing, which is the only place it can
+ * see a header body at all — so what passes through it is produced, and
+ * `extractTgz` says separately which of it landed in a file.
  */
-function counting(budget: Budget): Transform {
+function counting(budget: Budget, written: boolean): Transform {
   return new Transform({
     transform(chunk: Buffer, _encoding, done): void {
       try {
-        budget.countBytes(chunk.length);
+        budget.countProduced(chunk.length);
+        if (written) budget.countWritten(chunk.length);
       } catch (error) {
         done(error as Error);
         return;
@@ -328,7 +381,7 @@ async function writeMember(
   try {
     const stages: (Readable | Transform | Writable)[] = [source];
     if (inflate) stages.push(createInflateRaw());
-    stages.push(counting(budget));
+    stages.push(counting(budget, true));
     stages.push(handle.createWriteStream());
     await pipeline(stages as [Readable, ...Writable[]]);
   } finally {
@@ -736,6 +789,18 @@ async function extractTgz(source: AsyncIterable<Buffer>, root: string, budget: B
 
     const size = tarNumber(header.subarray(124, 136));
     const typeflag = String.fromCharCode(header[156] ?? 0);
+    /*
+     * Refused before it is arithmetic. `tarNumber` answers for a field somebody
+     * else wrote and is deliberately forgiving — a negative octal parses (`-1`
+     * measured), a malformed one truncates to a plausible number (`0000000012x`
+     * → 10), and the base-256 form reaches past `Number.MAX_SAFE_INTEGER`. A
+     * negative size makes `padding` non-zero and desynchronises the block stream
+     * from that member on, so every name after it is read out of the middle of
+     * somebody's file.
+     */
+    if (!Number.isSafeInteger(size) || size < 0) {
+      throw new ArchiveError("unreadable", "this archive has a member whose size is not a number");
+    }
     const padding = (TAR_BLOCK - (size % TAR_BLOCK)) % TAR_BLOCK;
 
     const readBody = async (): Promise<Buffer> => {
@@ -754,6 +819,25 @@ async function extractTgz(source: AsyncIterable<Buffer>, root: string, budget: B
     };
 
     if (typeflag === "x" || typeflag === "L") {
+      /*
+       * ⚠ **The one member whose body is read whole, so it is the one that needs
+       * a ceiling of its own.** Everything else here streams; this is buffered to
+       * a single `Buffer` at the size the header declares, and that number was
+       * written by whoever built the archive. Unbounded, a 204 KiB archive
+       * declaring 200 MiB here was measured at 2.2 GB resident and three minutes
+       * of synchronous copying, with the whole daemon — every session, every
+       * socket, the tunnel — stopped for the duration.
+       *
+       * `MAX_IMPORT_PATH_CHARS` is what the body is *for*, so the bound is that
+       * plus room for the records around it. A header past this is not a long
+       * path, it is a claim about memory.
+       */
+      if (size > MAX_TAR_HEADER_BYTES) {
+        throw new ArchiveError("unsafe", "this archive has an extended header this daemon will not read", {
+          reason: "path_too_long",
+          entry: tarString(header.subarray(0, 100)),
+        });
+      }
       const body = await readBody();
       overrideName = typeflag === "L" ? tarString(body) : paxPath(body);
       continue;
@@ -807,17 +891,48 @@ async function extractTgz(source: AsyncIterable<Buffer>, root: string, budget: B
     budget.countEntry();
 
     const handle = await open(join(root, safe.path), "wx", 0o600);
+    let failed = false;
     try {
       let left = size;
       while (left > 0) {
         const chunk = await reader.some(left);
         if (chunk === null) throw new ArchiveError("unreadable", "this archive is truncated");
-        budget.countBytes(chunk.length);
+        // Written only. The ceiling was charged on the stream above, where the
+        // bytes came out of the decompressor — counting again here would charge
+        // every file twice and refuse an archive at half the stated bound.
+        budget.countWritten(chunk.length);
         await handle.write(chunk);
         left -= chunk.length;
       }
+    } catch (error) {
+      failed = true;
+      throw error;
     } finally {
-      await handle.close();
+      /*
+       * Swallowed only while already unwinding, and the asymmetry with
+       * `writeMember` is the point rather than an inconsistency.
+       *
+       * There, the write stream has already closed the descriptor by the time the
+       * `finally` runs, so every close is a second one and an `EBADF` says
+       * nothing. Here nothing else closes it, so this call is the *first* — and on
+       * a filesystem that reports a deferred write error at close, which is what
+       * `ENOSPC` and `EDQUOT` over NFS do, it is the only place that error is ever
+       * going to appear. Catching it unconditionally would publish a truncated
+       * file inside a `201`.
+       *
+       * So: while unwinding, the close error is noise hiding the real one — a
+       * budget overrun would surface as `import_write_failed` (503) instead of
+       * `import_unpacked_too_large` (413). On the way out clean, it *is* the real
+       * one and must be allowed to fail the import.
+       */
+      if (failed) {
+        await handle.close().catch(() => {
+          // The descriptor died with the write that failed; the error that
+          // brought us here is the one worth reporting.
+        });
+      } else {
+        await handle.close();
+      }
     }
     if (padding > 0) await reader.exact(padding);
   }
@@ -853,6 +968,15 @@ export type ImportOutcome =
   | { kind: "write_failed"; detail: string };
 
 /**
+ * A staging directory this daemon left behind, by the only name it ever gives one.
+ *
+ * Exact rather than a prefix test, because what this decides is whether something
+ * inside somebody's own project may be deleted. `randomBytes(8).toString("hex")`
+ * is sixteen hex characters and nothing else ever is.
+ */
+const STAGING_NAME = /^\.reemoat-import-[0-9a-f]{16}$/;
+
+/**
  * The folder to make when the archive does not name one.
  *
  * Somebody who selects a project's *contents* and compresses those gets an
@@ -866,10 +990,62 @@ export type ImportOutcome =
  */
 export function importFolderName(archiveName: string): string {
   const leaf = basename(archiveName).replace(/\.(tar\.gz|tar\.bz2|tgz|tar|zip)$/i, "");
-  const cleaned = leaf.trim().replace(/[^A-Za-z0-9._-]/g, "-").replace(/^-+/, "");
-  if (cleaned.length === 0 || cleaned === "." || cleaned === ".." || cleaned === ".git") return "imported";
-  return cleaned.slice(0, 100);
+  return settleFolderName(leaf.trim().replace(/[^A-Za-z0-9._-]/g, "-"));
 }
+
+/**
+ * The last word on any name this import is about to make a directory out of.
+ *
+ * **Split out of {@link importFolderName} because the archive names the folder
+ * too, and that path had none of this.** When an archive holds exactly one
+ * top-level directory it keeps its own name — the ordinary case, somebody
+ * compressed a folder — and that name went to `rename` untouched. It is the
+ * *more* hostile of the two sources, not the less: the query parameter is at
+ * least a string somebody typed, while this one was chosen by whoever built the
+ * archive. Measured, `tar -czf x.tar.gz -- -rf` published a folder called `-rf`
+ * into somebody's project, where it is argv to every glob an agent expands.
+ *
+ * What it deliberately does **not** do is apply `importFolderName`'s allowlist.
+ * That one narrows a query parameter down to characters that are certainly fine
+ * in a directory name; running it over an archive's own folder would rewrite
+ * `My Project` to `My-Project` and every non-Latin name to a row of dashes, which
+ * is a worse answer than the question deserves. Everything here already came
+ * through `safeMemberPath` — no separator, no `..`, no control character, no
+ * `.git` — so what is left to settle is the leading `-` that makes a name an
+ * option, the empty and dot-only names `rename` would answer strangely, and a
+ * length nobody meant.
+ *
+ * Sliced by code point rather than by UTF-16 unit, so a cap never lands in the
+ * middle of a surrogate pair and leaves a lone half in a filename.
+ */
+export function settleFolderName(name: string): string {
+  const trimmed = name.trim().replace(/^-+/, "");
+  if (trimmed.length === 0 || trimmed === "." || trimmed === ".." || trimmed.toLowerCase() === ".git") {
+    return "imported";
+  }
+  /*
+   * ⚠ **And never this daemon's own staging name**, which is a hazard the sweeper
+   * created and only this line closes. `sweepStaleStaging` deletes anything under
+   * the target matching {@link STAGING_NAME} and older than an hour, on the
+   * reasoning that nothing else ever wears that name. An archive whose top-level
+   * folder is called `.reemoat-import-<16 hex>` would make that false: it would be
+   * published under its own name, sit there, and be deleted by the next import
+   * into the same folder — the daemon removing something it had itself put there
+   * and told somebody about.
+   */
+  if (STAGING_NAME.test(trimmed)) return "imported";
+  return [...trimmed].slice(0, 100).join("");
+}
+
+/**
+ * How long one may sit before it is somebody's litter rather than somebody's import.
+ *
+ * The route serialises imports and both ends are bounded — 50 MiB in, 500 MiB out
+ * — so no honest import is still running an hour later. Generous on purpose: the
+ * cost of waiting too long is a directory nobody looks at, and the cost of not
+ * waiting long enough is deleting a live import's staging out from under it.
+ */
+const STALE_STAGING_MS = 60 * 60 * 1000;
 
 /**
  * Remove a directory this import created.
@@ -889,6 +1065,57 @@ async function discardStaging(staging: string, target: string): Promise<void> {
   } catch {
     // Already gone, or never made. Either way there is nothing to remove and
     // nothing a caller could do about it.
+  }
+}
+
+/**
+ * Remove staging directories a previous import did not live to clean up.
+ *
+ * **`discardStaging` runs in a `finally`, and a `finally` is exactly what an OOM
+ * and a `SIGKILL` do not reach** — which is not hypothetical here, since the
+ * unbounded extended header this file now refuses was measured taking the whole
+ * process past two gigabytes. Every crashed import left an `archive.bin` of up to
+ * `MAX_IMPORT_BYTES` plus a half-written `tree/` sitting inside somebody's
+ * repository, where it shows up as untracked and gets committed. `Uploads` has a
+ * sweeper for the same reason; this had nothing.
+ *
+ * Swept here, on the way in, rather than on a timer: staging lives inside the
+ * *target*, which is an arbitrary directory this daemon learns about only when
+ * somebody names it, so there is no set of places a timer could walk. The next
+ * import into the same folder is the one moment the path is known again.
+ *
+ * Three narrowings, because this deletes inside a directory the daemon does not
+ * own: the name must be exactly what this code generates, `lstat` must say
+ * directory — so a symlink wearing the name is neither followed nor removed — and
+ * it must be old enough that no live import could own it. Failure is silent by
+ * design; a leftover directory must never be the reason an import is refused.
+ */
+async function sweepStaleStaging(target: string): Promise<void> {
+  let entries: string[];
+  try {
+    entries = await readdir(target);
+  } catch {
+    // Unreadable, or gone between the caller's resolve and here. The import
+    // itself is about to fail on the same directory and say so properly.
+    return;
+  }
+
+  const cutoff = Date.now() - STALE_STAGING_MS;
+  for (const entry of entries) {
+    if (!STAGING_NAME.test(entry)) continue;
+    const full = join(target, entry);
+    try {
+      const info = await lstat(full);
+      // `lstat`, so a symlink answers `false` here rather than being followed to
+      // whatever it points at. Same rule as `discardStaging`, one line over.
+      if (!info.isDirectory()) continue;
+      if (info.mtimeMs > cutoff) continue;
+      if (!containedIn(full, target)) continue;
+      await rm(full, { recursive: true, force: true });
+    } catch {
+      // Removed by something else between the listing and the removal, or not
+      // ours to touch. Neither is worth failing an import over.
+    }
   }
 }
 
@@ -918,6 +1145,10 @@ async function discardStaging(staging: string, target: string): Promise<void> {
 export async function importArchive(request: ImportRequest): Promise<ImportOutcome> {
   const { target } = request;
   const staging = join(target, `.reemoat-import-${randomBytes(8).toString("hex")}`);
+
+  // Before anything is created, so a folder that has collected litter from a
+  // crashed run is cleaned by the next honest import into it rather than by hand.
+  await sweepStaleStaging(target);
 
   try {
     await mkdir(staging, { mode: 0o700 });
@@ -963,9 +1194,16 @@ export async function importArchive(request: ImportRequest): Promise<ImportOutco
       if (kind === "zip") {
         await extractZip(handle, written, tree, budget);
       } else {
-        await pipeline(handle.createReadStream({ autoClose: false }), createGunzip(), async (source) => {
-          await extractTgz(source as AsyncIterable<Buffer>, tree, budget);
-        });
+        await pipeline(
+          handle.createReadStream({ autoClose: false }),
+          createGunzip(),
+          // Above the tar parsing rather than inside it, which is the only height
+          // that sees a header body. See `Budget.countProduced`.
+          counting(budget, false),
+          async (source) => {
+            await extractTgz(source as AsyncIterable<Buffer>, tree, budget);
+          },
+        );
       }
     } finally {
       await handle.close().catch(() => {
@@ -988,7 +1226,10 @@ export async function importArchive(request: ImportRequest): Promise<ImportOutco
      */
     const top = await readdir(tree, { withFileTypes: true });
     const only = top.length === 1 && top[0]?.isDirectory() === true ? top[0].name : null;
-    const name = only ?? importFolderName(request.name);
+    // Both sources through the same last word. `only` is the archive's own choice
+    // and used to reach `rename` untouched — see `settleFolderName` for what that
+    // let an archive publish into somebody's project.
+    const name = only === null ? importFolderName(request.name) : settleFolderName(only);
     const from = only === null ? tree : join(tree, only);
     const to = join(target, name);
 
