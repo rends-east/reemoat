@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useSyncExternalStore, type ReactNode } from "react";
-import { upFrom } from "./nav";
+import { isSheet, upFrom } from "./nav";
 import { navigate, parsePath, useRoute, useUnder, type Route } from "./router";
 import { setTelegramBack } from "./telegram";
 import { store } from "./store";
@@ -37,6 +37,12 @@ import { Spinner } from "./ui/bits";
  */
 const SessionView = lazy(async () => ({ default: (await import("./ui/SessionView")).SessionView }));
 const Settings = lazy(async () => ({ default: (await import("./ui/settings/Settings")).Settings }));
+/*
+ * Lazy for `Settings`' reason, and with a stronger case: a plugin screen carries
+ * the whole declarative renderer, and the great majority of sign-ins never open
+ * one. Nothing on the sign-in or session path imports it.
+ */
+const PluginScreen = lazy(async () => ({ default: (await import("./ui/PluginScreen")).PluginScreen }));
 
 /**
  * Three phases, and — new here — two routes at once.
@@ -133,7 +139,10 @@ export function App(): ReactNode {
    */
   if (state.me?.mustChangePassword === true) return <ForcedPasswordChange me={state.me} />;
 
-  const overlay = route.name === "settings" || route.name === "new";
+  // `isSheet` rather than a third literal here: this list and `isOverlayPath` and
+  // `nav.ts` all answer the same question, and three copies of it is two chances
+  // for a pop-up to be drawn with no background behind it.
+  const overlay = isSheet(route);
   // On a cold deep link there is no recorded underlay and `under` is `/`, so a
   // shared `/settings` link opens the sheet over the list — which is the right
   // background for a cold start rather than a blank one.
@@ -151,6 +160,16 @@ export function App(): ReactNode {
       )}
       {route.name === "new" && (
         <NewSession state={state} machineId={route.machineId} cwd={route.cwd} />
+      )}
+      {route.name === "plugin" && (
+        <Suspense fallback={<Waiting />}>
+          {/*
+           * Keyed on the pair, so moving from one plugin's screen to another
+           * remounts rather than carrying the first one's view and form state into
+           * the second's name. `AgentDetail` is keyed for the same reason.
+           */}
+          <PluginScreen key={`${route.machineId}:${route.pluginId}`} machineId={route.machineId} pluginId={route.pluginId} />
+        </Suspense>
       )}
       <ToastHost />
     </>

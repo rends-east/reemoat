@@ -43,7 +43,7 @@ below the auth gate.
 
 ---
 
-## The daemon — 37 routes
+## The daemon — 43 routes
 
 Runs on your machine, reachable through the relay. `pnpm client` drives all of it.
 
@@ -103,6 +103,29 @@ Runs on your machine, reachable through the relay. `pnpm client` drives all of i
 | `GET /sessions/:id/commands` | The agent's slash commands. Refetched when `commandsRevision` differs |
 | `GET /sessions/:id/changes` · `GET /sessions/:id/changes/diff` | git's own numbers |
 | `GET /sessions/:id/workspace` · `DELETE /sessions/:id/workspace` | The worktree's path and branch; the delete removes the worktree, not the session |
+
+### Plugins
+
+Installed per machine, and they run there. What a *caller* may do is the scope on
+the route; what the *plugin* may do is `scopes` in its manifest, which applies
+inside a hook where there is no caller at all. Neither implies the other. See
+`docs/PLUGINS.md`.
+
+| | |
+|---|---|
+| `GET /plugins` | What is installed, what each may reach, and the plugin API this daemon speaks |
+| `POST /plugins` | Install **or update** — one verb, because the manifest says which. The archive is the body and `?name=` is the filename it arrived as, sanitized like an upload's and recorded as the row's `source`; it is the sole cause of `400 invalid_name`, and omitting it is one. Streams its body past the 1 MiB bound and cancels it on every refusal; `409 plugin_start_failed` means the tree is unchanged and the old version is still running |
+| `DELETE /plugins/:pluginId` | Uninstall, and drop everything it kept. An update keeps that; this does not |
+| `POST /plugins/:pluginId/state` | `{enabled}`. The state a caller wants rather than the transition, so a lost answer is safe to send again |
+| `GET /plugins/:pluginId/views/:viewId` | `screen` or `settings`. A **read** by contract — `isReplayable` lets the transport repeat it |
+| `POST /plugins/:pluginId/actions/:actionId` | Press something. Refused unless the manifest declared that action |
+
+Both of the last two answer through one plugin, so both carry its failures:
+`503 plugin_unavailable` (not running), `504 plugin_timeout` (did not answer inside the
+invoke deadline), `503 plugin_overloaded` (already answering as many calls as the channel
+holds in flight), `503 plugin_request_too_large` (what was sent does not fit one IPC
+message — the remedy is to send less, which is why it is not a timeout) and `502
+plugin_failed` for anything the plugin's own code raised.
 
 ### Files
 

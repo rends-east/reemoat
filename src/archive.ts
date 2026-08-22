@@ -109,6 +109,52 @@ const MAX_CENTRAL_DIRECTORY_BYTES = 16 * 1024 * 1024;
 /** The largest zip trailer, being the 22-byte EOCD plus the largest comment. */
 const MAX_EOCD_SEARCH_BYTES = 22 + 0xffff;
 
+/**
+ * What one unpacking may spend.
+ *
+ * A parameter rather than three module constants read straight out of
+ * {@link Budget}, because there are two callers now and their numbers are not the
+ * same question. An import is somebody's whole source tree; a plugin is a manifest
+ * and a file of JavaScript, and giving it the import's headroom would mean the
+ * bound that stops a zip bomb is 500 MiB for a thing that is never past a few
+ * hundred KiB.
+ *
+ * What is deliberately **not** parameterised is anything in `safeMemberPath` —
+ * the depth, the path length, and every refusal. Those are about what a member
+ * path may *be*, which does not depend on who is unpacking, and a caller able to
+ * relax them would be a caller able to accept `..`.
+ */
+export interface ArchiveLimits {
+  /** Bytes on the wire. Charged before each write, so no over-limit chunk lands. */
+  maxBytes: number;
+  /** Bytes the decompressor may produce, files and header bodies alike. */
+  maxUnpackedBytes: number;
+  /** How many members. Bytes cannot see a hundred thousand empty files. */
+  maxEntries: number;
+}
+
+/** What `POST /fs/import` spends: a source tree. */
+export const IMPORT_LIMITS: ArchiveLimits = {
+  maxBytes: MAX_IMPORT_BYTES,
+  maxUnpackedBytes: MAX_IMPORT_UNPACKED_BYTES,
+  maxEntries: MAX_IMPORT_ENTRIES,
+};
+
+/**
+ * What `POST /plugins` spends: a manifest and a file of JavaScript.
+ *
+ * 2 MiB is far past anything real — the demo plugin is under 8 KiB — and the
+ * point of it being far past is that the number never has to be argued about
+ * again. The 4:1 unpacked ratio is the same shape as the import's 10:1 and
+ * tighter for the same reason the wire bound is: there is nothing in a plugin
+ * that compresses like a source tree.
+ */
+export const PLUGIN_LIMITS: ArchiveLimits = {
+  maxBytes: 2 * 1024 * 1024,
+  maxUnpackedBytes: 8 * 1024 * 1024,
+  maxEntries: 500,
+};
+
 export type ArchiveKind = "zip" | "tgz";
 
 /**
@@ -294,6 +340,15 @@ export class ArchiveError extends Error {
 
 /** What has been produced so far, against what may be. */
 class Budget {
+  /**
+   * What this unpacking may spend.
+   *
+   * Held rather than read from module scope, so the two callers' numbers cannot
+   * be confused: a `Budget` is created per unpacking and carries the only limits
+   * it will ever charge against.
+   */
+  constructor(private readonly limits: ArchiveLimits) {}
+
   entries = 0;
   /** Bytes that reached a file. What the import reports, and never a bound. */
   bytes = 0;
@@ -302,8 +357,8 @@ class Budget {
 
   countEntry(): void {
     this.entries += 1;
-    if (this.entries > MAX_IMPORT_ENTRIES) {
-      throw new ArchiveError("too_many", `an archive may not hold more than ${MAX_IMPORT_ENTRIES} files`);
+    if (this.entries > this.limits.maxEntries) {
+      throw new ArchiveError("too_many", `an archive may not hold more than ${this.limits.maxEntries} files`);
     }
   }
 
@@ -322,8 +377,8 @@ class Budget {
    */
   countProduced(n: number): void {
     this.produced += n;
-    if (this.produced > MAX_IMPORT_UNPACKED_BYTES) {
-      throw new ArchiveError("too_large", `an archive may not unpack to more than ${MAX_IMPORT_UNPACKED_BYTES} bytes`);
+    if (this.produced > this.limits.maxUnpackedBytes) {
+      throw new ArchiveError("too_large", `an archive may not unpack to more than ${this.limits.maxUnpackedBytes} bytes`);
     }
   }
 
@@ -1185,49 +1240,91 @@ async function sweepStaleStaging(target: string): Promise<void> {
  *      somebody picked exactly as it was.
  *   6. The staging directory goes, on every path.
  */
-export async function importArchive(request: ImportRequest): Promise<ImportOutcome> {
-  const { target } = request;
-  const staging = join(target, `.reemoat-import-${randomBytes(8).toString("hex")}`);
+/**
+ * What one unpacking produced, or why it did not.
+ *
+ * A union rather than a throw, because two of these are ordinary answers about
+ * somebody's archive rather than failures of this daemon: an unrecognised format
+ * and a body over the wire bound are things a person did, and every caller has to
+ * turn them into a sentence. `refused` carries an {@link ArchiveError} because
+ * that type already names which rule was broken.
+ */
+export type UnpackOutcome =
+  | { kind: "ok"; tree: string; entries: number; bytes: number }
+  | { kind: "too_large" }
+  | { kind: "unsupported" }
+  | { kind: "empty" }
+  | { kind: "refused"; error: ArchiveError }
+  | { kind: "write_failed"; detail: string };
 
-  // Before anything is created, so a folder that has collected litter from a
-  // crashed run is cleaned by the next honest import into it rather than by hand.
-  await sweepStaleStaging(target);
+export interface UnpackRequest {
+  /**
+   * A directory **this daemon just created and owns**, which is what lets
+   * everything below make ordinary filesystem calls — the rule about bounding
+   * them is about paths somebody else named.
+   *
+   * The caller makes it and the caller removes it. Not made here, because where
+   * it sits is the caller's decision and it is a load-bearing one: `importArchive`
+   * puts it inside the target so the final `rename` is within one filesystem, and
+   * the plugin host puts it inside the plugin root for exactly the same reason.
+   */
+  staging: string;
+  body: ReadableStream<Uint8Array>;
+  limits: ArchiveLimits;
+}
 
+/**
+ * An archive on the wire, unpacked into `<staging>/tree`.
+ *
+ * **Extracted from `importArchive` rather than copied into the plugin installer,
+ * and that is the whole point of it being a function.** Everything here is a
+ * containment rule — `..` refused rather than normalised, `.git` refused
+ * case-folded, backslashes never translated, the ceiling charged against what the
+ * decompressor produced rather than against what a member declares — and a second
+ * implementation of those is how one of them comes to be missing from one of them.
+ * `paths.ts` already wrote this argument out for `containedIn`.
+ *
+ * What is left to the caller is everything that is *not* a containment rule: what
+ * the result is called, where it is published, and whether something is already
+ * there. Those differ between the two callers and nothing is shared by pretending
+ * they do not.
+ *
+ * ⚠ **The body is not cancelled here.** The caller cancels it, on every path,
+ * because the caller is also the one that has to cancel on refusals raised
+ * *before* this function is reached — and two places doing it is one place
+ * forgetting.
+ */
+export async function unpackArchive(request: UnpackRequest): Promise<UnpackOutcome> {
+  const { staging, limits } = request;
+  const archivePath = join(staging, "archive.bin");
+  let written = 0;
+  let refusal: UnpackOutcome | null = null;
+
+  const sink = await open(archivePath, "wx", 0o600);
   try {
-    await mkdir(staging, { mode: 0o700 });
+    for await (const chunk of request.body) {
+      written += chunk.byteLength;
+      if (written > limits.maxBytes) {
+        refusal = { kind: "too_large" };
+        break;
+      }
+      await sink.write(chunk);
+    }
   } catch (error) {
-    await cancelBody(request.body);
-    return { kind: "write_failed", detail: describeError(error) };
+    refusal = { kind: "write_failed", detail: describeError(error) };
+  } finally {
+    await sink.close().catch(() => {
+      // Already closed, or the descriptor died with the write that failed.
+    });
   }
 
+  if (refusal !== null) return refusal;
+
+  const tree = join(staging, "tree");
+  const budget = new Budget(limits);
+
   try {
-    const archivePath = join(staging, "archive.bin");
-    let written = 0;
-    let refusal: ImportOutcome | null = null;
-
-    const sink = await open(archivePath, "wx", 0o600);
-    try {
-      for await (const chunk of request.body) {
-        written += chunk.byteLength;
-        if (written > MAX_IMPORT_BYTES) {
-          refusal = { kind: "too_large" };
-          break;
-        }
-        await sink.write(chunk);
-      }
-    } catch (error) {
-      refusal = { kind: "write_failed", detail: describeError(error) };
-    } finally {
-      await sink.close().catch(() => {
-        // Already closed, or the descriptor died with the write that failed.
-      });
-    }
-
-    if (refusal !== null) return refusal;
-
-    const tree = join(staging, "tree");
     await mkdir(tree, { mode: 0o700 });
-    const budget = new Budget();
 
     const handle = await open(archivePath, "r");
     try {
@@ -1253,10 +1350,37 @@ export async function importArchive(request: ImportRequest): Promise<ImportOutco
         // As above.
       });
     }
+  } catch (error) {
+    if (error instanceof ArchiveError) return { kind: "refused", error };
+    return { kind: "write_failed", detail: describeError(error) };
+  }
 
-    if (budget.entries === 0) {
+  if (budget.entries === 0) return { kind: "empty" };
+  return { kind: "ok", tree, entries: budget.entries, bytes: budget.bytes };
+}
+
+export async function importArchive(request: ImportRequest): Promise<ImportOutcome> {
+  const { target } = request;
+  const staging = join(target, `.reemoat-import-${randomBytes(8).toString("hex")}`);
+
+  // Before anything is created, so a folder that has collected litter from a
+  // crashed run is cleaned by the next honest import into it rather than by hand.
+  await sweepStaleStaging(target);
+
+  try {
+    await mkdir(staging, { mode: 0o700 });
+  } catch (error) {
+    await cancelBody(request.body);
+    return { kind: "write_failed", detail: describeError(error) };
+  }
+
+  try {
+    const unpacked = await unpackArchive({ staging, body: request.body, limits: IMPORT_LIMITS });
+    if (unpacked.kind === "empty") {
       return { kind: "refused", error: new ArchiveError("empty", "there is nothing in this archive") };
     }
+    if (unpacked.kind !== "ok") return unpacked;
+    const { tree } = unpacked;
 
     /*
      * What to publish, decided by what was actually written rather than by
@@ -1308,7 +1432,7 @@ export async function importArchive(request: ImportRequest): Promise<ImportOutco
       return { kind: "write_failed", detail: describeError(error) };
     }
 
-    return { kind: "ok", result: { path: to, name, entries: budget.entries, bytes: budget.bytes } };
+    return { kind: "ok", result: { path: to, name, entries: unpacked.entries, bytes: unpacked.bytes } };
   } catch (error) {
     if (error instanceof ArchiveError) return { kind: "refused", error };
     return { kind: "write_failed", detail: describeError(error) };

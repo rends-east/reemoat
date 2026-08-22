@@ -1,4 +1,4 @@
-import { MoreVertical, Pencil, Pin, PinOff, Play, Square } from "lucide-react";
+import { MoreVertical, Pencil, Pin, PinOff, Play, Puzzle, Square } from "lucide-react";
 import { useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { errorText } from "../http";
 import { keyOf, type SessionRef } from "../ids";
@@ -7,6 +7,7 @@ import { isResumable, isTerminal } from "../wire";
 import { Icon, IconButton, MENU_PANEL } from "./bits";
 import { useDismissible } from "./overlay";
 import { toast } from "./Toast";
+import { pluginFailure, sessionActions } from "../plugins";
 
 /**
  * Ask the daemon to put an agent back on this session.
@@ -118,6 +119,41 @@ export function SessionMenu({
       .finally(() => setBusy(false));
   };
 
+  /**
+   * What plugins on this machine offer for a session.
+   *
+   * Read from the store's copy rather than fetched here: this menu is mounted on
+   * every row of the list, and a fetch per row would be a request per session per
+   * poll for a list that changes only when somebody installs something.
+   */
+  const offers = sessionActions(state.pluginsByMachine.get(sessionRef.machineId) ?? []);
+
+  const press = (pluginId: string, actionId: string): void => {
+    const daemon = store.daemonFor(sessionRef.machineId);
+    if (daemon === undefined) {
+      toast("error", "that machine is not reachable");
+      return;
+    }
+    setBusy(true);
+    void daemon
+      .pluginAction(pluginId, actionId, { session: sessionRef.sessionId })
+      .then((answer) => {
+        /*
+         * A toast either way, and **never a navigation**. A plugin returning a view
+         * from a session's menu has nowhere to draw it — there is no plugin screen
+         * under this press — and opening one would be a plugin choosing where
+         * somebody goes, which no control in this app does. The plugin's own screen
+         * is a tap away in the rail, and it will be redrawn when they get there.
+         */
+        toast(
+          answer.result.kind === "toast" && answer.result.tone === "danger" ? "error" : "ok",
+          answer.result.kind === "toast" ? answer.result.text : "Done",
+        );
+      })
+      .catch((cause: unknown) => toast("error", pluginFailure(cause)))
+      .finally(() => setBusy(false));
+  };
+
   if (session === undefined) return null;
 
   return (
@@ -180,6 +216,29 @@ export function SessionMenu({
               }}
             />
           )}
+
+          {/*
+           * Plugins, below everything this app does itself and behind their own
+           * rule, because these are somebody else's words on a menu whose other
+           * rows are ours. Never above Stop: the rows a person reaches for without
+           * reading must not move because a plugin was installed.
+           *
+           * The plugin's name is drawn beside the action's title — two plugins may
+           * both offer "Move on", and a menu row that does not say whose it is is a
+           * row somebody presses twice to find out.
+           */}
+          {offers.length > 0 && <div className="my-1 border-t border-edge/60" />}
+          {offers.map((offer) => (
+            <MenuItem
+              key={`${offer.plugin.id}:${offer.actionId}`}
+              icon={Puzzle}
+              label={`${offer.title} · ${offer.plugin.name}`}
+              onClick={() => {
+                setOpen(false);
+                press(offer.plugin.id, offer.actionId);
+              }}
+            />
+          ))}
         </div>
       )}
     </div>

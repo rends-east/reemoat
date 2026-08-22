@@ -11606,6 +11606,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     SECTION_SPECS,
     parseSettingsRoute,
     parseSettingsSection,
+    pluginSettingsPath,
     settingsPath,
     sectionAllowed,
     visibleSections,
@@ -11635,12 +11636,20 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   );
 
   /* ---------------------------------------------------------------- *
-   * The two depths under `machines`
+   * The depths under `machines`
    *
-   * Agent settings live inside a machine now, so a settings URL carries a
-   * machine and an agent. Everything about those is here rather than in
+   * Agent settings live inside a machine, and plugins do too — for the same
+   * argument, stated on `MachineAgentsSection`: what is configured belongs to
+   * one daemon's database and one host's disk, so a fleet-wide screen would
+   * open with a machine dropdown, which is a screen asking a question its own
+   * copy answers. Everything about those segments is here rather than in
    * `router.ts` precisely so it can be asserted — that file cannot be imported
    * at all, for the reason this section's own header gives.
+   *
+   * `agent` and `plugin` are **never both set**, and that is asserted below
+   * rather than expressed in the type: a discriminated union would make every
+   * consumer narrow before it could read the section, for a rule with exactly
+   * one producer.
    * ---------------------------------------------------------------- */
 
   const seg = (path: string): string[] => path.split("/").filter((part) => part.length > 0).slice(1);
@@ -11656,12 +11665,12 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "a machine path round-trips",
     parseSettingsRoute(seg(settingsPath("machines", "m_1" as never))),
-    { section: "machines", machineId: "m_1", agent: null },
+    { section: "machines", machineId: "m_1", agent: null, plugin: null },
   );
   check(
     "an agent path round-trips",
     parseSettingsRoute(seg(settingsPath("machines", "m_1" as never, "kimi"))),
-    { section: "machines", machineId: "m_1", agent: "kimi" },
+    { section: "machines", machineId: "m_1", agent: "kimi", plugin: null },
   );
   // Three refusals, each falling *up* to the nearest real screen rather than to
   // a 404 — `parseSettingsSection`'s posture, one level down.
@@ -11678,12 +11687,12 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "a segment that is not `agents` drops to the machine",
     parseSettingsRoute(["machines", "m_1", "sessions", "kimi"]),
-    { section: "machines", machineId: "m_1", agent: null },
+    { section: "machines", machineId: "m_1", agent: null, plugin: null },
   );
   check(
     "a machine id under another section is ignored",
     parseSettingsRoute(["account", "m_1", "agents", "kimi"]),
-    { section: "account", machineId: null, agent: null },
+    { section: "account", machineId: null, agent: null, plugin: null },
   );
   /*
    * The decoder is threaded in rather than applied inside, so the one place that
@@ -11695,6 +11704,76 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     "the caller's decoder is what runs",
     parseSettingsRoute(["machines", "m%201", "agents"], decodeURIComponent).machineId,
     "m 1",
+  );
+
+  check("one plugin's path", pluginSettingsPath("m_1" as never, "board"), "/settings/machines/m_1/plugins/board");
+  check(
+    "one plugin's path round-trips",
+    parseSettingsRoute(seg(pluginSettingsPath("m_1" as never, "board"))),
+    { section: "machines", machineId: "m_1", agent: null, plugin: "board" },
+  );
+  /*
+   * A bare `…/plugins` falls to the machine, which is the screen the list is
+   * drawn on — the same answer `…/agents` gives, and the reason there is no
+   * builder for either list: the machine's path is the list's path.
+   */
+  check(
+    "a bare plugins segment is the machine",
+    parseSettingsRoute(["machines", "m_1", "plugins"]),
+    { section: "machines", machineId: "m_1", agent: null, plugin: null },
+  );
+  /*
+   * A plugin id is **not** validated against a known set, unlike an agent id, and
+   * this is the assertion that says so on purpose. An agent id is handed to
+   * `PUT /agent-auth/:agent`, which refuses an unknown one — so an unvalidated id
+   * would draw a screen whose every control 400s. The set of plugin ids is
+   * whatever is installed on that daemon, which this client cannot know before it
+   * has asked, so an unknown one reaches the screen and the screen says it is not
+   * installed.
+   */
+  check(
+    "an unknown plugin id survives the parse",
+    parseSettingsRoute(["machines", "m_1", "plugins", "not-installed"]).plugin,
+    "not-installed",
+  );
+  check(
+    "a plugin id is decoded like every other segment",
+    parseSettingsRoute(["machines", "m_1", "plugins", "a%20b"], decodeURIComponent).plugin,
+    "a b",
+  );
+  /*
+   * The rule the type deliberately does not express, asserted over every shape
+   * this parser can produce rather than over the two that would break it today.
+   */
+  check(
+    "agent and plugin are never both set",
+    [
+      ["machines", "m_1", "agents", "kimi"],
+      ["machines", "m_1", "plugins", "board"],
+      ["machines", "m_1", "plugins"],
+      ["machines", "m_1"],
+      ["machines", "m_1", "sessions", "x"],
+      ["account", "m_1", "plugins", "board"],
+    ]
+      .map((segments) => parseSettingsRoute(segments))
+      .filter((route) => route.agent !== null && route.plugin !== null),
+    [],
+  );
+  /*
+   * One plugin and one agent walk to the same place, because both lists are drawn
+   * on it. Asserted as a *pair* rather than twice, so the day one of them grows a
+   * list depth of its own the other is visibly the odd one out.
+   */
+  check(
+    "a plugin and an agent both go up to their machine",
+    [
+      settingsUp({ section: "machines", machineId: "m_1" as never, agent: null, plugin: "board" }),
+      settingsUp({ section: "machines", machineId: "m_1" as never, agent: "kimi", plugin: null }),
+    ],
+    [
+      { path: "/settings/machines/m_1", withinNav: false },
+      { path: "/settings/machines/m_1", withinNav: false },
+    ],
   );
 
   const plain = { id: "u_1", name: "ada", isAdmin: false };
@@ -14651,12 +14730,13 @@ process.stdout.write("\nwhat a navigation moves\n");
   const session = { name: "session", ref: { machineId: "m", sessionId: "s" } } as never;
   const other = { name: "session", ref: { machineId: "m", sessionId: "t" } } as never;
   const gate = { name: "gate", screen: "register" } as never;
-  const index = { name: "settings", section: null, machineId: null, agent: null } as never;
-  const account = { name: "settings", section: "account", machineId: null, agent: null } as never;
-  const users = { name: "settings", section: "users", machineId: null, agent: null } as never;
-  const machines = { name: "settings", section: "machines", machineId: null, agent: null } as never;
-  const oneMachine = { name: "settings", section: "machines", machineId: "m", agent: null } as never;
-  const oneAgent = { name: "settings", section: "machines", machineId: "m", agent: "claude" } as never;
+  const index = { name: "settings", section: null, machineId: null, agent: null, plugin: null } as never;
+  const account = { name: "settings", section: "account", machineId: null, agent: null, plugin: null } as never;
+  const users = { name: "settings", section: "users", machineId: null, agent: null, plugin: null } as never;
+  const machines = { name: "settings", section: "machines", machineId: null, agent: null, plugin: null } as never;
+  const oneMachine = { name: "settings", section: "machines", machineId: "m", agent: null, plugin: null } as never;
+  const oneAgent = { name: "settings", section: "machines", machineId: "m", agent: "claude", plugin: null } as never;
+  const onePlugin = { name: "settings", section: "machines", machineId: "m", agent: null, plugin: "board" } as never;
 
   check("opening a conversation pushes a screen", navMove(home, session), "push");
   check("and leaving it pops one", navMove(session, home), "pop");
@@ -14672,6 +14752,16 @@ process.stdout.write("\nwhat a navigation moves\n");
   check("a machine's agents are deeper still", navMove(machines, oneMachine), "section-push");
   check("and one agent deeper again", navMove(oneMachine, oneAgent), "section-push");
   check("walking back up pops each time", navMove(oneAgent, oneMachine), "section-pop");
+  /*
+   * Plugins are the second list under a machine and sit at the *same* depths as
+   * agents, so the sheet moves the same way into and out of both. Asserted rather
+   * than assumed, because `depthOf` decides it with two tests that could easily
+   * have been written as one — and one of them would have made every navigation
+   * into a plugin's settings `null`, i.e. a teleport.
+   */
+  check("a machine's plugins are the same depth as its agents", navMove(oneMachine, onePlugin), "section-push");
+  check("and walking back out pops", navMove(onePlugin, oneMachine), "section-pop");
+  check("switching between the two lists moves nothing", navMove(oneAgent, onePlugin), null);
 
   /*
    * **Closing goes down, opening does not go anywhere.** The enter is
@@ -15021,11 +15111,12 @@ process.stdout.write("\nwhat Telegram's own control does\n");
   const home = { name: "home" } as never;
   const gate = { name: "gate", screen: "register" } as never;
   const session = { name: "session", ref: { machineId: "m", sessionId: "s" } } as never;
-  const index = { name: "settings", section: null, machineId: null, agent: null } as never;
-  const account = { name: "settings", section: "account", machineId: null, agent: null } as never;
-  const machines = { name: "settings", section: "machines", machineId: null, agent: null } as never;
-  const oneMachine = { name: "settings", section: "machines", machineId: "m", agent: null } as never;
-  const oneAgent = { name: "settings", section: "machines", machineId: "m", agent: "claude" } as never;
+  const index = { name: "settings", section: null, machineId: null, agent: null, plugin: null } as never;
+  const account = { name: "settings", section: "account", machineId: null, agent: null, plugin: null } as never;
+  const machines = { name: "settings", section: "machines", machineId: null, agent: null, plugin: null } as never;
+  const oneMachine = { name: "settings", section: "machines", machineId: "m", agent: null, plugin: null } as never;
+  const oneAgent = { name: "settings", section: "machines", machineId: "m", agent: "claude", plugin: null } as never;
+  const onePlugin = { name: "settings", section: "machines", machineId: "m", agent: null, plugin: "board" } as never;
 
   /*
    * **`null` is the answer, not the absence of one.** Telegram has one control:
@@ -15047,6 +15138,10 @@ process.stdout.write("\nwhat Telegram's own control does\n");
    */
   check("a section goes up to the section list", upFrom(account, "/m/m_1/s/s_1"), "/settings");
   check("an agent goes up to its machine", upFrom(oneAgent, "/"), "/settings/machines/m");
+  // Two lists under a machine, and each walks one level rather than jumping to
+  // the section — the same rule the agent depths keep, which is what stops the
+  // ◀ and the ✕ becoming the same control.
+  check("a plugin goes up to its machine, like an agent", upFrom(onePlugin, "/"), "/settings/machines/m");
   check("a machine goes up to Machines", upFrom(oneMachine, "/"), "/settings/machines");
   check("and Machines goes up to the list", upFrom(machines, "/"), "/settings");
   // At the index there is no level left inside the sheet, so up leaves it — for
@@ -15172,5 +15267,545 @@ process.stdout.write("\nwhat Telegram's own control does\n");
 }
 
 wss.close();
+process.stdout.write("\nwhat a plugin may make this client draw\n");
+{
+  const {
+    readBlock,
+    readView,
+    seedForm,
+    pluginFailure,
+    pluginPath,
+    pluginDestination,
+    pluginStateText,
+    pluginUsable,
+    screenPlugins,
+    sessionActions,
+    MIN_REFRESH_MS,
+  } = await import("../src/plugins.js");
+  const { ApiError } = await import("../src/http.js");
+
+  /* ---------------------------------------------------------------- *
+   * Everything here fails open.
+   *
+   * A plugin is a **third** release schedule: the web client ships with the
+   * control plane weekly, a daemon ships when its owner runs `deploy.sh`, and a
+   * plugin ships when its author feels like it — coordinated with neither. So
+   * meeting output this client does not recognise is not an edge case, and a
+   * narrowing that threw would take a whole screen away for one unknown field.
+   * The failure that taught this is `endedWithDaemon`, which answered *no* for a
+   * reason it had never heard of and took the composer off screen for a live
+   * conversation.
+   * ---------------------------------------------------------------- */
+
+  check("a block type this client has never heard of is dropped", readBlock({ type: "canvas", data: 1 }), null);
+  check("and so is something that is not a block at all", [readBlock(null), readBlock("text"), readBlock(7)], [null, null, null]);
+  check(
+    "a view whose blocks are all unknown is an empty view rather than a throw",
+    readView({ title: "T", blocks: [{ type: "canvas" }, { type: "webgl" }] }),
+    { title: "T", refreshMs: null, blocks: [] },
+  );
+  check("a view that is not an object at all", readView(null), { title: null, refreshMs: null, blocks: [] });
+  check("a view whose blocks are not an array", readView({ blocks: "nope" }), { title: null, refreshMs: null, blocks: [] });
+
+  check(
+    "a text block with nothing in it still draws",
+    readBlock({ type: "text" }),
+    { type: "text", text: "", tone: "default" },
+  );
+  /*
+   * A tone this client does not know falls to the ordinary one, and the direction
+   * is chosen: a plugin can fail to make a control *look* dangerous and cannot
+   * make a destructive one look harmless.
+   */
+  check("an unknown tone is the ordinary one", readBlock({ type: "notice", text: "x", tone: "nuclear" }), {
+    type: "notice",
+    text: "x",
+    tone: "default",
+  });
+  check("and a known one survives", readBlock({ type: "notice", text: "x", tone: "danger" })?.type === "notice", true);
+
+  const list = readBlock({ type: "list", rows: [{ id: "a" }, null, "x"], empty: "" });
+  check(
+    "rows that are not rows become empty rows rather than holes",
+    list?.type === "list" ? list.rows.map((row) => [row.id, row.title, row.subtitle]) : null,
+    [
+      ["a", "", null],
+      ["", "", null],
+      ["", "", null],
+    ],
+  );
+  check(
+    "a row action's tone is the safe one unless it says otherwise",
+    (() => {
+      const one = readBlock({ type: "list", rows: [{ id: "a", actions: [{ id: "x" }, { id: "y", tone: "destructive" }] }], empty: "" });
+      return one?.type === "list" ? one.rows[0]?.actions.map((action) => action.tone) : null;
+    })(),
+    ["plain", "destructive"],
+  );
+
+  const form = readBlock({
+    type: "form",
+    action: "save",
+    fields: [{ key: "a", label: "A", kind: "quantum" }, { key: "b", label: "B", kind: "toggle", value: "true" }],
+  });
+  check(
+    "a field kind this client cannot draw becomes a text input",
+    form?.type === "form" ? form.fields.map((field) => field.kind) : null,
+    ["text", "toggle"],
+  );
+  // It still round-trips, which is the whole of failing open: a field too new to
+  // draw properly is still one somebody can read and submit.
+  check("and its value survives", form?.type === "form" ? form.fields[0]?.value : null, null);
+  check("a form with no submit label still has one", form?.type === "form" ? form.submit : null, "Save");
+
+  /*
+   * Every field is a string on the wire, including a toggle, so there is one
+   * narrowing rather than five — and an unset toggle is off rather than empty.
+   */
+  check(
+    "a form seeds from what the plugin sent",
+    seedForm([
+      { key: "a", label: "", kind: "text", value: "x", options: [], placeholder: null, help: null },
+      { key: "b", label: "", kind: "toggle", value: null, options: [], placeholder: null, help: null },
+      { key: "c", label: "", kind: "text", value: null, options: [], placeholder: null, help: null },
+    ]),
+    { a: "x", b: "false", c: "" },
+  );
+
+  /* ---------------------------------------------------------------- *
+   * What a refusal says, and the one that is not about plugins at all.
+   * ---------------------------------------------------------------- */
+  const failed = (status: number, code: string, message = "m"): string =>
+    pluginFailure(new ApiError(status, code, message));
+
+  /*
+   * ⚠ **A daemon that predates plugins is recognised by the shape of its refusal,
+   * never by its version.** `parseBody` turns Hono's bare 404 — no envelope, so no
+   * code of this system's own — into `http_404`, and that is the whole test.
+   * Branching on `DAEMON_VERSION` is what compatibility rule 1 forbids, and this
+   * assertion is what stops somebody "simplifying" it into one.
+   */
+  check("an old daemon is told apart from a missing plugin", failed(404, "http_404"), "This machine's daemon is too old for plugins. Update it and try again.");
+  check("while a real 404 is about the plugin", failed(404, "plugin_not_found"), "That plugin is not installed on this machine any more.");
+  check("a read-only grant", failed(403, "insufficient_scope"), "You have read-only access to this machine.");
+  report(
+    "a failed install says the machine was not changed",
+    failed(409, "plugin_start_failed", "SyntaxError").includes("nothing was changed"),
+    failed(409, "plugin_start_failed", "SyntaxError"),
+  );
+  // The daemon's own sentence names the field, which is the only useful thing to
+  // say to whoever is holding the manifest.
+  check("a bad manifest keeps the daemon's words", failed(400, "manifest_invalid", "id must be…"), "id must be…");
+  check("a code this client has never seen falls through to the message", failed(400, "brand_new_code", "the daemon's words"), "the daemon's words");
+  check("and something that is not an ApiError at all", pluginFailure(new Error("x")), "That did not work. Try again.");
+
+  /* ---------------------------------------------------------------- *
+   * Which plugins are offered where.
+   * ---------------------------------------------------------------- */
+  const plugin = (patch: Record<string, unknown>): never =>
+    ({
+      id: "p",
+      name: "P",
+      version: "1.0.0",
+      description: null,
+      scopes: [],
+      net: [],
+      contributes: { screen: null, settings: false, actions: [], hooks: [] },
+      enabled: true,
+      state: "running",
+      failure: null,
+      installedAt: 0,
+      updatedAt: 0,
+      ...patch,
+    }) as never;
+
+  const withScreen = plugin({ id: "a", contributes: { screen: { title: "A" }, settings: false, actions: [], hooks: [] } });
+  const noScreen = plugin({ id: "b" });
+  const off = plugin({ id: "c", enabled: false, contributes: { screen: { title: "C" }, settings: false, actions: [], hooks: [] } });
+  const failing = plugin({ id: "d", state: "failed", contributes: { screen: { title: "D" }, settings: false, actions: [], hooks: [] } });
+
+  /*
+   * A launcher is a door. A door onto a sentence saying the plugin is not running
+   * is worse than no door, and that sentence belongs on the plugin's row in
+   * settings — where it is drawn.
+   */
+  check(
+    "only plugins that draw a screen and are usable are launchable",
+    screenPlugins([withScreen, noScreen, off, failing]).map((one) => one.id),
+    ["a"],
+  );
+  check("and both halves of usable are asked", [pluginUsable(off), pluginUsable(failing), pluginUsable(withScreen)], [false, false, true]);
+
+  const acting = plugin({
+    id: "e",
+    name: "E",
+    contributes: {
+      screen: null,
+      settings: false,
+      actions: [
+        { id: "one", title: "One", on: "session" },
+        { id: "two", title: "Two", on: "screen" },
+      ],
+      hooks: [],
+    },
+  });
+  check(
+    "only session-surface actions reach a session's menu",
+    sessionActions([acting, off]).map((offer) => [offer.plugin.id, offer.actionId]),
+    [["e", "one"]],
+  );
+
+  check(
+    "a plugin's state is words rather than a colour",
+    [
+      pluginStateText(plugin({ state: "running" })),
+      pluginStateText(plugin({ state: "starting" })),
+      pluginStateText(plugin({ state: "failed" })),
+      pluginStateText(plugin({ state: "stopped" })),
+      pluginStateText(plugin({ enabled: false, state: "running" })),
+    ],
+    ["Running", "Starting", "Failed", "Idle", "Switched off"],
+  );
+
+  /* ---------------------------------------------------------------- *
+   * What v2 added: a tone, a destination, and a refresh.
+   * ---------------------------------------------------------------- */
+
+  /*
+   * ⚠ **All three, not one and a stranger.** This asserted only `danger` plus an
+   * unknown word, so a typo in either narrowing list — `["ok", "warning",
+   * "danger"]` — would have dropped every warn row's ink and left both drivers
+   * green. The whole point of `ok|warn|danger` is that a plugin names meaning and
+   * the host picks the ink; a member that silently stops surviving is the ink
+   * going missing for a state nobody can see is missing.
+   */
+  check(
+    "every tone this client knows survives, and one it does not is no tone",
+    (() => {
+      const one = readBlock({
+        type: "list",
+        empty: "",
+        rows: [
+          { id: "a", tone: "ok" },
+          { id: "b", tone: "warn" },
+          { id: "c", tone: "danger" },
+          { id: "d", tone: "chartreuse" },
+          { id: "e" },
+        ],
+      });
+      return one?.type === "list" ? one.rows.map((row) => row.tone) : null;
+    })(),
+    ["ok", "warn", "danger", null, null],
+  );
+
+  /*
+   * ⚠ **The field a plugin would most like to put a URL in.** Both known shapes
+   * survive and everything else — a URL above all — becomes a row that is simply
+   * not tappable. The daemon narrows this too; this is the second of the two,
+   * because `wire.ts` is a hand mirror and trusting the daemon's narrowing would
+   * be trusting a copy.
+   */
+  check(
+    "only the two destinations this app has survive",
+    (() => {
+      const one = readBlock({
+        type: "list",
+        empty: "",
+        rows: [
+          { id: "a", open: { session: "s_1" } },
+          { id: "b", open: { screen: true } },
+          { id: "c", open: { url: "https://evil.example" } },
+          { id: "d", open: "https://evil.example" },
+          { id: "e", open: { session: "" } },
+          { id: "f", open: { screen: false } },
+          { id: "g" },
+        ],
+      });
+      return one?.type === "list" ? one.rows.map((row) => row.open) : null;
+    })(),
+    [{ session: "s_1" }, { screen: true }, null, null, null, null, null],
+  );
+
+  check(
+    "a destination resolves against the machine it was read on",
+    [
+      pluginDestination("m_1" as never, { session: "s_9" }),
+      pluginDestination("m_1" as never, { screen: true }),
+      pluginDestination("m_1" as never, null),
+    ],
+    [{ kind: "session", sessionId: "s_9" }, { kind: "screen" }, null],
+  );
+
+  /*
+   * The floor is re-applied on the side that owns the timer. The daemon clamps
+   * too, but that constant belongs to the *daemon* — an older one with a lower
+   * floor, or a field arriving from a build that predates the clamp, would
+   * otherwise set an interval this tab has to honour.
+   */
+  check(
+    "a refresh interval is floored here as well as there",
+    [
+      readView({ refreshMs: 100, blocks: [] }).refreshMs,
+      readView({ refreshMs: 9_000, blocks: [] }).refreshMs,
+      readView({ refreshMs: 0, blocks: [] }).refreshMs,
+      readView({ refreshMs: -5, blocks: [] }).refreshMs,
+      readView({ refreshMs: "fast", blocks: [] }).refreshMs,
+      readView({ blocks: [] }).refreshMs,
+    ],
+    [MIN_REFRESH_MS, 9_000, null, null, null, null],
+  );
+
+  check("a plugin's screen is a short, shared path", pluginPath("m_1" as never, "board"), "/p/m_1/board");
+  check("and every segment is encoded", pluginPath("m 1" as never, "a/b"), "/p/m%201/a%2Fb");
+}
+
+process.stdout.write("\nwhat somebody is shown before a plugin is sent anywhere\n");
+{
+  const { peekPluginArchive } = await import("../src/pluginArchive.js");
+  const { gzipSync, deflateRawSync, crc32 } = await import("node:zlib");
+
+  const MANIFEST = JSON.stringify({
+    id: "board",
+    name: "Task board",
+    version: "0.3.0",
+    api: 2,
+    description: "One card per session.",
+    scopes: ["sessions.read", "store"],
+    net: ["api.example.com"],
+    contributes: {
+      screen: { title: "Board" },
+      settings: true,
+      actions: [{ id: "advance", title: "Move card on", on: "session" }],
+      hooks: ["turn.ended"],
+    },
+  });
+
+  /*
+   * Two archive writers, small enough to read, and separate from the import
+   * section's for its reason: that one exists to write archives no honest tool
+   * would produce, and coupling a consent screen's happy path to a fixture whose
+   * job is to be malformed would be reading the wrong thing.
+   */
+  const tarOf = (files: Record<string, string>): Buffer => {
+    const parts: Buffer[] = [];
+    for (const [name, body] of Object.entries(files)) {
+      const data = Buffer.from(body, "utf8");
+      const head = Buffer.alloc(512);
+      head.write(name, 0, "utf8");
+      head.write("000644 \0", 100);
+      head.write("000000 \0", 108);
+      head.write("000000 \0", 116);
+      head.write(data.length.toString(8).padStart(11, "0") + " ", 124);
+      head.write("00000000000 ", 136);
+      head.write("        ", 148);
+      head.write("0", 156);
+      head.write("ustar\0", 257);
+      head.write("00", 263);
+      let sum = 0;
+      for (const byte of head) sum += byte;
+      head.write(sum.toString(8).padStart(6, "0") + "\0 ", 148);
+      parts.push(head, data, Buffer.alloc((512 - (data.length % 512)) % 512));
+    }
+    parts.push(Buffer.alloc(1024));
+    return gzipSync(Buffer.concat(parts));
+  };
+
+  const zipOf = (files: Record<string, string>): Buffer => {
+    const locals: Buffer[] = [];
+    const central: Buffer[] = [];
+    let at = 0;
+    for (const [name, body] of Object.entries(files)) {
+      const raw = Buffer.from(body, "utf8");
+      const packed = deflateRawSync(raw);
+      const named = Buffer.from(name, "utf8");
+      const local = Buffer.alloc(30);
+      local.writeUInt32LE(0x04034b50, 0);
+      local.writeUInt16LE(20, 4);
+      local.writeUInt16LE(8, 8);
+      local.writeUInt32LE(crc32(raw), 14);
+      local.writeUInt32LE(packed.length, 18);
+      local.writeUInt32LE(raw.length, 22);
+      local.writeUInt16LE(named.length, 26);
+      const entry = Buffer.alloc(46);
+      entry.writeUInt32LE(0x02014b50, 0);
+      entry.writeUInt16LE(20, 6);
+      entry.writeUInt16LE(8, 10);
+      entry.writeUInt32LE(crc32(raw), 16);
+      entry.writeUInt32LE(packed.length, 20);
+      entry.writeUInt32LE(raw.length, 24);
+      entry.writeUInt16LE(named.length, 28);
+      entry.writeUInt32LE(at, 42);
+      locals.push(local, named, packed);
+      central.push(entry, named);
+      at += local.length + named.length + packed.length;
+    }
+    const directory = Buffer.concat(central);
+    const end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50, 0);
+    end.writeUInt16LE(Object.keys(files).length, 8);
+    end.writeUInt16LE(Object.keys(files).length, 10);
+    end.writeUInt32LE(directory.length, 12);
+    end.writeUInt32LE(at, 16);
+    return Buffer.concat([Buffer.concat(locals), directory, end]);
+  };
+
+  const peek = (bytes: Buffer): ReturnType<typeof peekPluginArchive> =>
+    peekPluginArchive(new Blob([bytes as unknown as BlobPart]));
+
+  const flat = await peek(tarOf({ "plugin.json": MANIFEST, "server.js": "export {}" }));
+  check(
+    "a .tar.gz says what the plugin asks for, before anything is sent",
+    flat.kind === "ok" ? [flat.manifest.id, flat.manifest.scopes, flat.manifest.net] : flat,
+    ["board", ["sessions.read", "store"], ["api.example.com"]],
+  );
+  check(
+    "including what it will be told, which asks for no scope at all",
+    flat.kind === "ok" ? [flat.manifest.hooks, flat.manifest.screen, flat.manifest.settings] : flat,
+    [["turn.ended"], "Board", true],
+  );
+
+  const folded = await peek(tarOf({ "board/plugin.json": MANIFEST, "board/server.js": "export {}" }));
+  check("an archive holding one folder reads the same", folded.kind === "ok" ? folded.manifest.id : folded, "board");
+
+  const zipped = await peek(zipOf({ "plugin.json": MANIFEST, "server.js": "export {}" }));
+  check("and a .zip does too, since the daemon takes both", zipped.kind === "ok" ? zipped.manifest.id : zipped, "board");
+
+  const deep = await peek(tarOf({ "a/b/plugin.json": MANIFEST }));
+  check(
+    "nothing deeper than the daemon itself will look for",
+    deep.kind,
+    "unreadable",
+  );
+
+  /*
+   * ⚠ **Unreadable is never a refusal, and it may never be a guess.** The daemon
+   * is the authority and takes shapes this reader may not, so refusing here would
+   * make the browser a second and stricter gate. What it may not do is invent —
+   * hence a reason, and a caller that draws the reason rather than an empty list.
+   */
+  const garbage = await peek(Buffer.from("this is not an archive at all"));
+  check("something that is not an archive says so", garbage.kind === "unreadable" ? garbage.reason : garbage, "that is not a .tar.gz or a .zip");
+  const broken = await peek(tarOf({ "plugin.json": "{not json" }));
+  check("and so does a plugin.json that will not parse", broken.kind === "unreadable" ? broken.reason : broken, "that plugin.json is not valid JSON");
+
+  /*
+   * A manifest declaring nothing must read as declaring nothing, never as
+   * unreadable: "it asks for nothing" is a true and useful thing to show, and
+   * conflating it with "I cannot tell" would put the weakest plugin behind the
+   * scariest sentence.
+   */
+  const bare = await peek(tarOf({ "plugin.json": JSON.stringify({ id: "x", name: "X", version: "1.0.0" }) }));
+  check(
+    "a plugin that asks for nothing reads as asking for nothing",
+    bare.kind === "ok" ? [bare.manifest.scopes, bare.manifest.hooks, bare.manifest.net] : bare,
+    [[], [], []],
+  );
+
+  /*
+   * ⚠ **The ceiling is charged against what the decompressor produced**, not
+   * against what arrived — the whole point being that a few kilobytes on the wire
+   * must not become eight megabytes in a phone's tab.
+   */
+  const bomb = (() => {
+    const head = Buffer.alloc(512);
+    const data = Buffer.alloc(12 * 1024 * 1024, 0x41);
+    head.write("filler.bin", 0, "utf8");
+    head.write("000644 \0", 100);
+    head.write("000000 \0", 108);
+    head.write("000000 \0", 116);
+    head.write(data.length.toString(8).padStart(11, "0") + " ", 124);
+    head.write("00000000000 ", 136);
+    head.write("        ", 148);
+    head.write("0", 156);
+    head.write("ustar\0", 257);
+    head.write("00", 263);
+    let sum = 0;
+    for (const byte of head) sum += byte;
+    head.write(sum.toString(8).padStart(6, "0") + "\0 ", 148);
+    return gzipSync(Buffer.concat([head, data, Buffer.alloc(1024)]));
+  })();
+  check(
+    "a small archive that unpacks to a large one is stopped at the ceiling",
+    (await peek(bomb)).kind === "unreadable",
+    true,
+  );
+
+  /* ---------------------------------------------------------------- *
+   * The rules that live only in a component, asserted against its source.
+   *
+   * `webcheck` has no DOM, so these are read the way `Composer.tsx`'s are. Each
+   * one fails silently and in a direction nobody would notice from a screenshot,
+   * which is why a source assertion is worth more here than it looks.
+   * ---------------------------------------------------------------- */
+  const screenSrc = readFileSync(new URL("../src/ui/PluginScreen.tsx", import.meta.url), "utf8");
+  report(
+    "the view is cleared on a switch and never on a refresh",
+    /if \(round === 0\) setView\(null\)/.test(screenSrc),
+    "round === 0 guard on setView",
+  );
+  report(
+    "a failed tick leaves what is on screen",
+    /if \(live && round === 0\) setError/.test(screenSrc),
+    "round === 0 guard on setError",
+  );
+  report("and it only ticks while somebody is looking", /if \(document\.hidden\) return/.test(screenSrc), "document.hidden");
+  report(
+    "a tick that lands during a read is dropped rather than queued",
+    /if \(reading\.current > 0\) return/.test(screenSrc),
+    "in-flight guard",
+  );
+  report(
+    "and an answer for a plugin somebody has navigated away from is not drawn",
+    /liveRoute\.current !== issuedFor/.test(screenSrc),
+    "route identity on the action answer",
+  );
+
+  const panelSrc = readFileSync(new URL("../src/ui/settings/PluginsPanel.tsx", import.meta.url), "utf8");
+  report(
+    "nothing is sent from the picker: the file goes to the manifest reader first",
+    /onChange=\{\(event\) => \{[\s\S]{0,400}?choose\(file\)/.test(panelSrc) && !/onChange=[\s\S]{0,400}?send\(file\)/.test(panelSrc),
+    "the picker calls choose(), not send()",
+  );
+  report(
+    "and an archive nobody could read takes a second, named press",
+    /Install without reading it/.test(panelSrc),
+    "the unreadable path is a separate control",
+  );
+}
+
+process.stdout.write("\nwhich routes are pop-ups, asked from both directions\n");
+{
+  const { isSheet } = await import("../src/nav.js");
+  const { isOverlayPath } = await import("../src/ui/overlay.js");
+
+  /*
+   * ⚠ **These two answer one question from two directions and must hold the same
+   * set** — `isSheet` from a parsed route, `isOverlayPath` from a path. A route in
+   * one and not the other is a pop-up that either forgets what it was drawn over
+   * (so its ✕ goes home) or records one while being a screen (so Back leaves the
+   * app). Both were reachable when the path list was two literals.
+   *
+   * Asserted as a table of route-and-its-path rather than on the one that was
+   * added, so the next pop-up is covered by being written down here at all.
+   */
+  const cases: [unknown, string, boolean][] = [
+    [{ name: "home" }, "/", false],
+    [{ name: "session", ref: { machineId: "m", sessionId: "s" } }, "/m/m/s/s", false],
+    [{ name: "gate", screen: "register" }, "/register", false],
+    [{ name: "new", machineId: null, cwd: null }, "/new", true],
+    [{ name: "settings", section: null, machineId: null, agent: null, plugin: null }, "/settings", true],
+    [{ name: "plugin", machineId: "m", pluginId: "board" }, "/p/m/board", true],
+  ];
+  check(
+    "every route agrees with its own path about being a pop-up",
+    cases.filter(([route, path, want]) => isSheet(route as never) !== want || isOverlayPath(path) !== want),
+    [],
+  );
+  // Whole-segment matching, so a future `/pinned` is not mistaken for a plugin
+  // screen — the same rule `/settingsomething` already had.
+  check("a path that merely starts with the same letters is not one", isOverlayPath("/pinned"), false);
+  check("nor is a plugin id at the root", isOverlayPath("/board"), false);
+}
+
 process.stdout.write(failures === 0 ? "\nall green\n\n" : `\n${failures} FAILED\n\n`);
 process.exit(failures === 0 ? 0 : 1);

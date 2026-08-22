@@ -16,7 +16,7 @@ import { LocalRuntime } from "../src/runtime/local.js";
 import { resolveRoots } from "../src/browse.js";
 import { codeFingerprint, enroll, EnrollError } from "../src/enroll.js";
 import { boundedInt } from "../src/http.js";
-import { atOrUnder } from "../src/paths.js";
+import { atOrUnder, expandHome } from "../src/paths.js";
 import {
   MAX_LIVE_SESSIONS,
   SESSION_CREATE_BURST,
@@ -27,6 +27,7 @@ import {
 import { RelayTunnel } from "../src/relay/tunnel.js";
 import { createApp } from "../src/server.js";
 import { openStores, type StoreBundle, type StoredIdentity } from "../src/store/sqlite.js";
+import { PluginHost } from "../src/plugins/host.js";
 import { resolveUploadRoot, Uploads } from "../src/uploads.js";
 import { DEFAULT_BRANCH_PREFIX, resolveWorktreeRoot } from "../src/worktree.js";
 
@@ -294,23 +295,35 @@ try {
   process.exit(2);
 }
 
+const pluginRoot = expandHome(process.env["REEMOAT_PLUGIN_ROOT"] ?? join(homedir(), ".reemoat", "plugins"));
+
 /*
- * Two remover trees, and they must not nest.
+ * **Three** remover trees now, and no two of them may nest.
  *
  * `removeWorkspace` guards the codebase's original `rm` with
- * `containedIn(root, worktreeRoot)`, and the upload sweep guards the second one
- * with the mirror of that. If either root sits at or under the other, one remover
- * can reach into the other's tree and neither guard means what it says any more —
- * a worktree removal could take somebody's staged files, or a session sweep could
- * take a checkout. Refused at startup, where it is one line, rather than
- * discovered at the moment something is deleted.
+ * `containedIn(root, worktreeRoot)`, the upload sweep guards the second with the
+ * mirror of that, and `PluginHost.discard` guards the third the same way. If any
+ * root sits at or under another, one remover can reach into another's tree and
+ * none of the guards means what it says any more — a worktree removal could take
+ * somebody's staged files, an uninstall could take a checkout. Refused at startup,
+ * where it is a loop, rather than discovered at the moment something is deleted.
+ *
+ * ⚠ The rule did not change when the third arrived; its *arity* did. Written as a
+ * pairwise loop over a named list for exactly that reason: a fourth tree is one
+ * entry here rather than three more `if`s somebody has to remember to write.
  */
-if (atOrUnder(uploadRoot, workspacePolicy.worktreeRoot) || atOrUnder(workspacePolicy.worktreeRoot, uploadRoot)) {
-  console.error(
-    `REEMOAT_UPLOAD_ROOT (${uploadRoot}) and REEMOAT_WORKTREE_ROOT ` +
-      `(${workspacePolicy.worktreeRoot}) must not contain one another`,
-  );
-  process.exit(2);
+const REMOVER_TREES: readonly { name: string; path: string }[] = [
+  { name: "REEMOAT_UPLOAD_ROOT", path: uploadRoot },
+  { name: "REEMOAT_WORKTREE_ROOT", path: workspacePolicy.worktreeRoot },
+  { name: "REEMOAT_PLUGIN_ROOT", path: pluginRoot },
+];
+for (const [index, tree] of REMOVER_TREES.entries()) {
+  for (const other of REMOVER_TREES.slice(index + 1)) {
+    if (atOrUnder(tree.path, other.path) || atOrUnder(other.path, tree.path)) {
+      console.error(`${tree.name} (${tree.path}) and ${other.name} (${other.path}) must not contain one another`);
+      process.exit(2);
+    }
+  }
 }
 
 let uploads: Uploads;
@@ -437,6 +450,44 @@ registry.setSessionLimits({
   refillMs: boundedInt(process.env["REEMOAT_SESSION_CREATE_REFILL_MS"], SESSION_CREATE_REFILL_MS),
 });
 
+/*
+ * Plugins, if this machine wants them.
+ *
+ * `REEMOAT_PLUGINS=0` is a real switch rather than a courtesy: a plugin is
+ * somebody else's code running as this user, and an operator who does not want
+ * that on a particular host should not have to uninstall anything to say so. With
+ * it off the routes answer `503` — the shape `credentials`, `logins` and
+ * `uploads` already use — instead of reporting an empty list, because "there are
+ * none" and "this daemon does not do that" are different answers.
+ *
+ * Opened **after** the registry has restored, so `PluginHost.open` sees every
+ * session this daemon already knows about and a hook does not have to be told
+ * about them one at a time. Not awaited into the listener: a plugin that will not
+ * start must not hold up a boot `deploy.sh` is polling `/health` for.
+ */
+let pluginHost: PluginHost | null = null;
+if (process.env["REEMOAT_PLUGINS"] !== "0") {
+  try {
+    pluginHost = await PluginHost.open({
+      root: pluginRoot,
+      records: stores.plugins,
+      data: stores.pluginData,
+      registry,
+      api: {
+        git: registry.sessionRuntime.git(),
+        maxChangedFiles: positiveInt(process.env["REEMOAT_CHANGES_MAX_FILES"]),
+        maxDiffBytes: positiveInt(process.env["REEMOAT_DIFF_MAX_BYTES"]),
+      },
+      onWarning: (detail: string) => console.error(`plugins: ${detail}`),
+    });
+  } catch (error) {
+    // Not fatal, and deliberately so: a plugin root that cannot be made is a
+    // reason to run without plugins, never a reason to leave somebody's sessions
+    // unreachable on a machine nobody is sitting in front of.
+    console.error(`plugins: cannot open ${pluginRoot}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 const { app, injectWebSocket } = createApp({
   registry,
   verifier,
@@ -448,6 +499,7 @@ const { app, injectWebSocket } = createApp({
   logins: agentLogins,
   uploads,
   roots,
+  plugins: pluginHost,
 });
 
 /*
@@ -735,6 +787,10 @@ async function shutdown(signal: string): Promise<void> {
   // this daemon is gone. Stopped before the sessions because it is cheap and
   // unconditional, and because it is not on the 20s session budget.
   await agentLogins.shutdown();
+  // Before the sessions, because a plugin's hooks are driven by session events
+  // and stopping the sessions first would spend the shutdown budget delivering
+  // exit notices to children that are about to be killed anyway.
+  await pluginHost?.shutdown();
   // Only stops the sweep timer. Staged files are deliberately left on disk —
   // they outlive a restart by design, which is the whole reason the index is on
   // disk rather than in memory.

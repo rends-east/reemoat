@@ -4131,8 +4131,27 @@ export interface AutoResumeReport {
   failed: number;
 }
 
+/**
+ * Somebody watching sessions appear on this daemon.
+ *
+ * `arrival` is what happened rather than what it looks like: a `restored` session
+ * is one this daemon already had before it was last stopped, and an observer that
+ * treats it as new writes a duplicate of everything it wrote last week. There is
+ * no observer for a session *ending* — that is an event in the session's own log,
+ * where an observer is already subscribed and where it is ordered against
+ * everything else the session said.
+ */
+export type SessionObserver = (managed: ManagedSession, arrival: "created" | "restored") => void;
+
 export class SessionRegistry {
   private readonly sessions = new Map<string, ManagedSession>();
+  /**
+   * Who is told when a session appears. See {@link SessionRegistry.watchSessions}.
+   *
+   * A set rather than one callback because there is one observer today — the
+   * plugin host — and "one" is not a property worth building a type around.
+   */
+  private readonly observers = new Set<SessionObserver>();
   private shuttingDown = false;
   /**
    * Whether the daemon may bring sessions back by itself, on both paths.
@@ -4200,6 +4219,34 @@ export class SessionRegistry {
      */
     private readonly onWarning: ((detail: string) => void) | undefined = undefined,
   ) {}
+
+  /**
+   * Be told when a session appears, until the returned function is called.
+   *
+   * ⚠ **A throwing observer is reported and kept, never evicted**, which is the
+   * opposite of what `SessionLog.append` does to a throwing listener — and the
+   * difference is deliberate. There, a listener is one WebSocket and evicting it
+   * costs that socket its events; here, the observer is a whole subsystem, and
+   * dropping it on one bad frame would silently stop every plugin hook on the
+   * machine for the life of the daemon with nothing anywhere saying so. So the
+   * guard reports through `onWarning` and the observer stays.
+   */
+  watchSessions(observer: SessionObserver): () => void {
+    this.observers.add(observer);
+    return () => {
+      this.observers.delete(observer);
+    };
+  }
+
+  private announce(managed: ManagedSession, arrival: "created" | "restored"): void {
+    for (const observer of this.observers) {
+      try {
+        observer(managed, arrival);
+      } catch (error) {
+        this.onWarning?.(`session observer threw: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
 
   get workspacePolicy(): WorkspacePolicy {
     return this.policy;
@@ -4385,6 +4432,10 @@ export class SessionRegistry {
     // Before start(), so it precedes `status: starting` and a since=0 attach sees
     // where the session lives before it sees anything the agent said.
     managed.recordWorkspace(warnings);
+    // After the workspace is recorded and before the agent is launched, so an
+    // observer subscribing to this session's log is attached before the first
+    // thing the agent says — the same ordering `recordWorkspace` is placed for.
+    this.announce(managed, "created");
 
     // If this throws, the worktree is deliberately left in place. Tearing it down
     // on an error path is how you eventually delete a directory you did not
@@ -4428,6 +4479,10 @@ export class SessionRegistry {
         onWarning: this.onWarning,
       });
       this.sessions.set(row.id, managed);
+      // Announced for every restored row, terminal ones included: an observer
+      // rebuilding its own index after a restart needs the sessions that ended
+      // while the daemon was down as much as the ones that did not.
+      this.announce(managed, "restored");
       if (row.exit !== null) continue;
 
       // The runtime owns the fence, because only it knows what makes a recorded

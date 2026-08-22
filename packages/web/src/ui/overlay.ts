@@ -117,11 +117,19 @@ export function decisionShortcutsEnabled(layers: readonly Layer[]): boolean {
  * record what is *underneath*.
  *
  * Whole-segment matching, not `startsWith` alone: a future `/settingsomething`
- * must not be mistaken for a settings route.
+ * must not be mistaken for a settings route — which is also why `/p` is a whole
+ * segment here rather than a prefix, `/pinned` being a plausible future route.
+ *
+ * **The list must hold every route `isSheet` in `nav.ts` holds.** They answer the
+ * same question from two directions — this one from a path, that one from a
+ * parsed route — and a route in one and not the other is a pop-up that either
+ * forgets what it was drawn over (so its ✕ goes home) or records one while being
+ * a screen (so Back leaves the app). Both were reachable when this list was two
+ * literals and `isSheet` was three.
  */
 export function isOverlayPath(pathname: string): boolean {
   const first = pathname.split("/")[1] ?? "";
-  return first === "settings" || first === "new";
+  return first === "settings" || first === "new" || first === "p";
 }
 
 /**

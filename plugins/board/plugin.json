@@ -1,0 +1,18 @@
+{
+  "id": "board",
+  "name": "Task board",
+  "version": "0.1.0",
+  "api": 2,
+  "description": "One card per session, moved by what the agent does.",
+  "scopes": ["sessions.read", "store"],
+  "contributes": {
+    "screen": { "title": "Board" },
+    "settings": true,
+    "actions": [
+      { "id": "advance", "title": "Move card on", "on": "session" },
+      { "id": "forget", "title": "Forget this session", "on": "session" },
+      { "id": "save", "title": "Save", "on": "screen" }
+    ],
+    "hooks": ["session.created", "turn.ended", "session.ended"]
+  }
+}

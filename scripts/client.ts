@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
+import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import { createInterface, type Interface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { WebSocket } from "ws";
@@ -12,6 +16,9 @@ import type { PendingPermissionSnapshot, SessionSnapshot } from "../src/registry
 // package boundary — but this file can, so a drift that is invisible there is a
 // type error here.
 import type { AgentAvailability } from "../src/runtime/types.js";
+import { PLUGIN_LIMITS, unpackArchive } from "../src/archive.js";
+import { parseManifest } from "../src/plugins/manifest.js";
+import type { PluginManifest, PluginSummary } from "../src/plugins/protocol.js";
 import type { WorkspaceStatus } from "../src/worktree.js";
 
 const STATIC_TOKEN = process.env["REEMOAT_TOKEN"] ?? "";
@@ -94,6 +101,15 @@ const USAGE = `Reemoat client — drive the daemon from a terminal
   diff <id> <path>                 a unified diff for one file, on stdout
   workspace <id>                   where the session runs, and what is in it
   rmworkspace <id> [--force]       remove the worktree; refuses if it holds work
+
+  plugins                          what is installed, and what each may reach
+  plugin install <archive>         install or update one; a .tar.gz or a .zip.
+                                   The same verb for both — the manifest says which
+  plugin remove <id>               uninstall it, and everything it kept
+  plugin enable <id> | disable <id>
+                                   switch one off without losing its data
+  plugin view <id> [screen|settings]
+                                   what one of its screens would draw, as JSON
 
   --json                           attach emits {seq,ts,event} NDJSON on stdout
   --prompt <text>                  with new: send this once the session is up
@@ -299,7 +315,15 @@ async function probe(base: string, token: string | null): Promise<boolean> {
 async function api<T>(path: string, init: RequestInit = {}, firstAttempt = true): Promise<T> {
   const base = await resolveRoute();
   const headers: Record<string, string> = { authorization: `Bearer ${await currentToken()}` };
-  if (init.body !== undefined) headers["content-type"] = "application/json";
+  // The caller's own headers, then the default. JSON is what every verb here
+  // sends bar one — `plugin install` posts an archive — and a body whose type is
+  // announced wrongly is a lie this client would be telling on every install.
+  for (const [key, value] of Object.entries((init.headers ?? {}) as Record<string, string>)) {
+    headers[key.toLowerCase()] = value;
+  }
+  if (init.body !== undefined && headers["content-type"] === undefined) {
+    headers["content-type"] = "application/json";
+  }
 
   let response: Response;
   try {
@@ -367,6 +391,39 @@ function fail(message: string): never {
 }
 
 let rlInstance: Interface | null = null;
+/**
+ * Where `plugin.json` is, for the disclosure `plugin install` prints before it
+ * sends anything.
+ *
+ * The two shapes the daemon accepts and no others: loose members, or exactly one
+ * folder holding them — which is what somebody who compressed a directory
+ * produces. Nothing deeper is searched, because nothing deeper is searched
+ * on arrival either, and a preview that found a manifest the daemon will not is
+ * worse than one that finds none.
+ *
+ * ⚠ **Restated rather than imported.** `findManifestRoot` is private to
+ * `src/plugins/host.ts`, and a preview in a CLI is not a good enough reason for
+ * that file to grow a public surface. Seven lines, and the shape it mirrors is
+ * named here so the next person changing one finds the other.
+ */
+async function manifestRoot(tree: string): Promise<string | null> {
+  const there = async (at: string): Promise<boolean> => {
+    try {
+      return (await stat(join(at, "plugin.json"))).isFile();
+    } catch {
+      // Absent, or a directory wearing the name. Either way there is no manifest
+      // at this level, which is the only question being asked.
+      return false;
+    }
+  };
+  if (await there(tree)) return tree;
+  const top = await readdir(tree, { withFileTypes: true });
+  const only = top.length === 1 && top[0]?.isDirectory() === true ? top[0].name : null;
+  if (only === null) return null;
+  const nested = join(tree, only);
+  return (await there(nested)) ? nested : null;
+}
+
 function rl(): Interface {
   // Created lazily: an open readline holds stdin, which would stop commands that
   // never ask a question from exiting on their own.
@@ -1026,6 +1083,7 @@ async function main(): Promise<void> {
       "delete-branch": { type: "boolean", default: false },
       worktree: { type: "boolean", default: false },
       "no-worktree": { type: "boolean", default: false },
+      yes: { type: "boolean", short: "y", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
   });
@@ -1459,6 +1517,163 @@ async function main(): Promise<void> {
       if (status.commitsAhead !== null) out(`commits   ${status.commitsAhead} since base`);
       out(`unpushed  ${status.hasRemote ? String(status.unpushed) : "(no remote)"}`);
       return;
+    }
+
+    case "plugins": {
+      const { plugins, api: apiVersion } = await api<{ plugins: PluginSummary[]; api: number }>("/plugins");
+      if (plugins.length === 0) {
+        out(`no plugins installed  (this daemon speaks plugin API ${apiVersion})`);
+        return;
+      }
+      for (const plugin of plugins) {
+        const state = plugin.enabled ? plugin.state : "off";
+        out(`${plugin.id.padEnd(20)} ${plugin.version.padEnd(10)} ${state.padEnd(9)} ${plugin.name}`);
+        // The scopes on their own line, because they are the thing worth reading
+        // before anything else: this is what the plugin may reach on this machine.
+        if (plugin.scopes.length > 0) out(`  scopes  ${plugin.scopes.join(", ")}`);
+        if (plugin.net.length > 0) out(`  net     ${plugin.net.join(", ")}`);
+        if (plugin.failure !== null) warn(`  !! ${plugin.failure}`);
+      }
+      return;
+    }
+
+    case "plugin": {
+      const action = positionals[1];
+      const id = positionals[2];
+
+      if (action === "install") {
+        if (!id) fail("plugin install requires a path to a .tar.gz or a .zip");
+        /*
+         * Read whole and sent as one body rather than streamed off disk.
+         *
+         * A plugin is bounded at 2 MiB on the wire, so this is a couple of
+         * megabytes at worst — and `fetch` with a `ReadableStream` body needs
+         * `duplex: "half"` and HTTP/2 all the way through, which is exactly the
+         * thing that fails differently against a relay than against a loopback
+         * daemon. The upload route streams because it carries 100 MiB; this one
+         * has no reason to.
+         */
+        const bytes = readFileSync(id);
+
+        /*
+         * ⚠ **What it asks for is read here, before anything is sent.**
+         *
+         * The scopes used to be printed from the *answer* — after the archive had
+         * been unpacked on the machine, the row written and the plugin started —
+         * with a comment arguing that was "the moment somebody is deciding". It
+         * was not: by then there was nothing left to decide. `SECURITY.md` says
+         * the blast radius is named *before* somebody consents to it, and this is
+         * one of the two places that has to be true.
+         *
+         * Read locally rather than asked of the daemon, because the manifest is
+         * inside the archive and the only reader that can run before the upload is
+         * this one. `unpackArchive` and `parseManifest` rather than a second
+         * reader: this is the same hardened path the daemon uses, spent on a
+         * temporary directory on the operator's own machine, under their own hand,
+         * and removed either way. The browser cannot do this — it may not import
+         * from `src/` — which is why `packages/web/src/pluginArchive.ts` exists and
+         * why the two are not shared.
+         */
+        const staging = await mkdtemp(join(tmpdir(), "reemoat-plugin-peek-"));
+        let declared: PluginManifest | null = null;
+        try {
+          const unpacked = await unpackArchive({
+            staging,
+            // Built directly rather than through `Blob`, which is a DOM type this
+            // package's lib does not carry.
+            body: new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(new Uint8Array(bytes));
+                controller.close();
+              },
+            }),
+            limits: PLUGIN_LIMITS,
+          });
+          if (unpacked.kind === "ok") {
+            const found = await manifestRoot(unpacked.tree);
+            if (found !== null) {
+              const parsed = parseManifest(await readFile(join(found, "plugin.json"), "utf8"));
+              if (parsed.ok) declared = parsed.manifest;
+            }
+          }
+        } catch {
+          // Unreadable here is not a refusal: the daemon is the authority and may
+          // well accept a shape this read did not survive. It only means nobody
+          // can be told what the plugin asks for, which the prompt below says.
+        } finally {
+          await rm(staging, { recursive: true, force: true });
+        }
+
+        if (declared === null) {
+          warn(`could not read ${basename(id)} here, so nobody can say what it asks for`);
+        } else {
+          out(`${declared.name} ${declared.version}  (${declared.id})`);
+          if (declared.description !== null) out(`  ${declared.description}`);
+          out(`  it may:  ${declared.scopes.length > 0 ? declared.scopes.join(", ") : "(nothing)"}`);
+          if (declared.net.length > 0) out(`  reach:   ${declared.net.join(", ")}`);
+          // Hooks beside the scopes rather than under contributions: a plugin
+          // declaring only hooks asks for no scopes and is still sent every
+          // session's title, agent and workspace, and every permission an agent
+          // raises. That belongs where somebody reading scopes will see it.
+          if (declared.contributes.hooks.length > 0) out(`  told of: ${declared.contributes.hooks.join(", ")}`);
+        }
+
+        /*
+         * Asked only when somebody is there to answer. A CLI that blocked on a
+         * prompt would break every script that installs a plugin, so a
+         * non-interactive stdin proceeds — the disclosure above still happened, and
+         * `--yes` is how an interactive caller says the same thing on purpose.
+         */
+        if (!values.yes && process.stdin.isTTY === true) {
+          const said = (await rl().question("install it? [y/N]> ")).trim().toLowerCase();
+          if (said !== "y" && said !== "yes") {
+            out("nothing was sent");
+            return;
+          }
+        }
+
+        const answer = await api<{ plugin: PluginSummary; replaced: string | null }>(
+          `/plugins?name=${encodeURIComponent(basename(id))}`,
+          { method: "POST", body: bytes, headers: { "content-type": "application/octet-stream" } },
+        );
+        const { plugin, replaced } = answer;
+        out(
+          replaced === null
+            ? `installed  ${plugin.id} ${plugin.version}`
+            : `updated    ${plugin.id} ${replaced} -> ${plugin.version}`,
+        );
+        if (plugin.state === "failed" && plugin.failure !== null) warn(`  !! ${plugin.failure}`);
+        return;
+      }
+
+      if (action === "remove") {
+        if (!id) fail("plugin remove requires a plugin id");
+        await api(`/plugins/${encodeURIComponent(id)}`, { method: "DELETE" });
+        out(`removed  ${id}  (and everything it kept)`);
+        return;
+      }
+
+      if (action === "enable" || action === "disable") {
+        if (!id) fail(`plugin ${action} requires a plugin id`);
+        const { plugin } = await api<{ plugin: PluginSummary }>(`/plugins/${encodeURIComponent(id)}/state`, {
+          method: "POST",
+          body: JSON.stringify({ enabled: action === "enable" }),
+        });
+        out(`${plugin.id}  ${plugin.enabled ? plugin.state : "off"}`);
+        return;
+      }
+
+      if (action === "view") {
+        if (!id) fail("plugin view requires a plugin id");
+        const which = positionals[3] === "settings" ? "settings" : "screen";
+        const { result } = await api<{ result: unknown }>(
+          `/plugins/${encodeURIComponent(id)}/views/${which}`,
+        );
+        out(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      fail("plugin takes install, remove, enable, disable or view");
     }
 
     case "rmworkspace": {

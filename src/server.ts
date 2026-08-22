@@ -25,8 +25,12 @@ import {
   MAX_IMPORT_BYTES,
   MAX_IMPORT_ENTRIES,
   MAX_IMPORT_UNPACKED_BYTES,
+  PLUGIN_LIMITS,
   type ImportOutcome,
 } from "./archive.js";
+import { PluginApiError } from "./plugins/api.js";
+import type { LivePlugin, PluginHost } from "./plugins/host.js";
+import { PLUGIN_API_VERSION, type PluginResult } from "./plugins/protocol.js";
 import { listDirs, makeDir, PathError, resolveCwd } from "./browse.js";
 import { DESCRIBE_TIMEOUT_MS, probeExists, probeFile, probeRealpath } from "./stall.js";
 import {
@@ -221,12 +225,14 @@ const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
  * still be a number. The largest non-upload body any route reads today is a
  * prompt, and `MAX_PROMPT_CHARS` bounds it well under this.
  *
- * **The streaming routes are excluded and must stay excluded.** `POST
- * /sessions/:id/uploads` streams to disk against `MAX_UPLOAD_BYTES` (25 MiB) with
- * its own counter, and `POST /fs/import` does the same against
- * `MAX_IMPORT_BYTES`; both cancel the body themselves on every refusal. Wrapping
- * either here would refuse every legitimate request at 1 MiB, or buffer the whole
- * thing to check a limit the route is already enforcing a better way.
+ * **The streaming routes are excluded and must stay excluded**, and there are
+ * three: `POST /sessions/:id/uploads` streams to disk against
+ * `MAX_UPLOAD_BYTES` (25 MiB) with its own counter, `POST /fs/import` does the
+ * same against `MAX_IMPORT_BYTES`, and `POST /plugins` against
+ * `PLUGIN_LIMITS.maxBytes`. Wrapping any of them here would refuse every
+ * legitimate request at 1 MiB, or buffer the whole thing to check a limit the
+ * route is already enforcing a better way. What replaces the bound for them is
+ * the release below — see the middleware that grants the exemption.
  */
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -234,14 +240,23 @@ const MAX_BODY_BYTES = 1024 * 1024;
  * The routes that read their body as a stream, and so may not be bounded above.
  *
  * A predicate rather than a condition inlined into the middleware, because there
- * are two of them now and the rule they share — *this route counts its own bytes
- * and cancels its own body* — is the kind that gets half-applied when a third
- * arrives. Both are POST; matching the method as well keeps a GET on the same
- * path from inheriting the exemption.
+ * are three of them now and the rule they share — *this route counts its own
+ * bytes, and its body is released however it is refused* — is the kind that gets
+ * half-applied when a fourth arrives. All three are POST; matching the method as
+ * well keeps a GET on the same path from inheriting the exemption.
+ *
+ * **Adding a route here is the whole of adding a route here.** The second half of
+ * the rule used to be the handler's to keep, one `refuse()` wrapper per route,
+ * which is why it was kept for the three handlers and by nothing above them; it
+ * now hangs off this predicate, so a fourth string in this `return` buys both
+ * halves at once.
  */
 function isStreamingRoute(method: string, path: string): boolean {
   if (method !== "POST") return false;
-  return /^\/sessions\/[^/]+\/uploads$/.test(path) || path === "/fs/import";
+  // `POST /plugins` is the third, and it owes what the other two owe: its own
+  // counter (`PLUGIN_LIMITS.maxBytes`, charged before each write) and a body
+  // cancelled on every refusal. See `PluginHost.install`.
+  return /^\/sessions\/[^/]+\/uploads$/.test(path) || path === "/fs/import" || path === "/plugins";
 }
 
 /**
@@ -297,6 +312,15 @@ export interface ServerOptions {
    * confined to these. Defaults to the daemon user's home.
    */
   roots?: string[];
+  /**
+   * Where plugins live, or nothing.
+   *
+   * Optional like `credentials`, `logins` and `uploads`, and for their reason: a
+   * daemon built without one answers `503` on the plugin routes rather than
+   * pretending there are none. `REEMOAT_PLUGINS=0` is what produces that on a real
+   * machine, and every driver that does not care gets it by omission.
+   */
+  plugins?: PluginHost | null;
 }
 
 export interface AppBundle {
@@ -310,6 +334,7 @@ export function createApp(options: ServerOptions): AppBundle {
   const logins = options.logins ?? null;
   const uploads = options.uploads ?? null;
   const roots = options.roots ?? [homedir()];
+  const plugins = options.plugins ?? null;
   const maxChangedFiles = options.maxChangedFiles ?? DEFAULT_MAX_CHANGED_FILES;
   const maxDiffBytes = options.maxDiffBytes ?? DEFAULT_MAX_DIFF_BYTES;
   const app = new Hono<AppEnv>();
@@ -434,9 +459,10 @@ export function createApp(options: ServerOptions): AppBundle {
    * driver calls `app.fetch` directly and reads a body no browser would have
    * shown it.
    *
-   * The upload route carries its own — see `MAX_BODY_BYTES` — so it is skipped by
-   * path rather than by re-registering this on every other route, which would be
-   * a list that silently stops covering a route somebody adds later.
+   * The streaming routes carry their own — see `MAX_BODY_BYTES` — so they are
+   * skipped by path rather than by re-registering this on every other route,
+   * which would be a list that silently stops covering a route somebody adds
+   * later.
    */
   const boundedBody = bodyLimit({
     maxSize: MAX_BODY_BYTES,
@@ -445,9 +471,73 @@ export function createApp(options: ServerOptions): AppBundle {
         limit: MAX_BODY_BYTES,
       }),
   });
+  /*
+   * The exemption and the obligation it creates, in one middleware, because they
+   * are one rule: **a route nothing bounds above must have its body released, by
+   * whoever ends up answering.**
+   *
+   * ⚠ **The obligation used to live in the three handlers and therefore did not
+   * hold.** Each of them wraps its refusals in a `refuse()` that cancels first,
+   * and that half was complete. The gap was everything *above* a handler: the
+   * auth gate and `requireScope` both answer with a bare
+   * `return jsonError(...)`, having never touched the stream. So a caller with an
+   * expired token, or a valid one lacking `machine:admin`, could open `POST
+   * /plugins` — or `/fs/import`, or an upload — with an arbitrarily large body,
+   * be refused in about a millisecond, and leave every byte of it unread. The
+   * relay grants a stream's h2 window **on consumption**, so a reader that stops
+   * parks the sender at one `STREAM_WINDOW_BYTES` (1 MiB); the next valve is the
+   * tunnel's `MAX_TUNNEL_BUFFERED_BYTES` (8 MiB) socket check, and that closes the
+   * **whole tunnel for this machine** — every other session on it goes too. One
+   * caller may hold `MAX_STREAMS_PER_SUBJECT` (64) streams to spend on it.
+   *
+   * **Here rather than inside each middleware, and that is the point of the
+   * shape.** Cancelling in the auth gate and in `requireScope` fixes today's two
+   * refusals and is silently incomplete the day a third middleware refuses above
+   * a handler — the same half-application `isStreamingRoute`'s docblock worries
+   * about one axis over. Attached to the exemption, the two halves cannot come
+   * apart: whatever earns the exemption on the way down pays for it on the way
+   * up, for every answer produced by anything below this line, and a fourth
+   * streaming route inherits both by adding one string to the predicate.
+   *
+   * `finally` rather than a line after `await next()`, because `next()` is not
+   * guaranteed to return normally and the throwing path is the one where the body
+   * is least likely to have been read. Stated as the property rather than as a
+   * claim about how `compose` routes a particular error — the mechanism differs by
+   * whether what was thrown is an `Error`, and `finally` is correct without
+   * needing to know which.
+   *
+   * Unconditional rather than "only when the answer is a refusal", and measured
+   * on this adapter (`@hono/node-server` 1.19.17) rather than assumed: cancelling
+   * a body the handler already drained resolves in 0 ms and changes nothing — a
+   * fully-read `IncomingMessage` is `complete`, so the `destroy()` underneath
+   * never reaches the socket — and cancelling one a handler left locked rejects
+   * with `TypeError: Invalid state: ReadableStream is locked`, which `cancelBody`
+   * swallows. ⚠ **That last one is the state where this guard silently does not
+   * release the body**, and it is harmless only because every streaming handler
+   * reads with `for await`, which releases its reader at the end. A handler that
+   * took a `getReader()` and abandoned it would leave a parked sender that looks
+   * exactly like the defect this guard exists to prevent. A 64 MiB body refused 403 by a middleware that cancels here still
+   * arrives at the client as that 403 and not as a reset connection, which is the
+   * property that lets this be unconditional at all. Testing the status instead
+   * would be a second copy of "which answers are refusals", and this needs none.
+   *
+   * The `.catch` is not superstition. This runs on the **response** path, where a
+   * throw does not merely fail a request that was going to fail anyway: it
+   * replaces a refusal the client can read with `internal_error`. `cancelBody` is
+   * `async`, so it converts even a synchronous throw from `cancel()` into a
+   * rejection, and this is where that rejection stops.
+   */
   app.use("*", async (c, next) => {
-    if (isStreamingRoute(c.req.method, c.req.path)) return next();
-    return boundedBody(c, next);
+    if (!isStreamingRoute(c.req.method, c.req.path)) return boundedBody(c, next);
+    try {
+      await next();
+    } finally {
+      await cancelBody(c.req.raw.body as ReadableStream<Uint8Array> | null).catch(() => {
+        // Deliberately nothing: see above. A body we could not release is a
+        // parked sender, which is bad, but an unreadable answer is worse and
+        // there is nothing in `src/` to print it to either way.
+      });
+    }
   });
 
   /**
@@ -2478,6 +2568,269 @@ export function createApp(options: ServerOptions): AppBundle {
   });
 
   /* ---------------------------------------------------------------- *
+   * Plugins
+   *
+   * Six routes, and the scope on each is written here rather than derived
+   * from the manifest — a table mapping method and path to a scope is one
+   * edit away from describing routes that have moved, which is the argument
+   * `requireScope` already makes above.
+   *
+   * ⚠ **Two axes of authorization meet here and neither implies the other.**
+   * These scopes decide what the *caller* may do. `manifest.scopes` decides
+   * what the *plugin* may do, and it is the only one that applies inside a
+   * hook, where nobody called anything. A read-only grant can look at a
+   * plugin's screen and cannot press anything on it; a plugin without
+   * `sessions.write` cannot send a prompt however the caller got here.
+   * ---------------------------------------------------------------- */
+
+  /**
+   * A handler that only runs where there *is* a plugin host.
+   *
+   * `withSession`'s shape, for `withSession`'s reason, and it is now what its
+   * docblock claimed: this used to be a call-site helper one of six routes went
+   * through, while the other five hand-wrote the identical 503 — a "shared"
+   * refusal that five copies were free to drift away from, which is the failure
+   * `sessionOf` was collapsed into `withSession` to stop.
+   *
+   * A wrapper rather than a middleware because `plugins` is a closure variable
+   * rather than a request property: a middleware would have to put the host on
+   * `c.var` and every handler would read it back out untyped, which is a longer
+   * way to say `(c, host)`.
+   *
+   * **`POST /plugins` goes through it too, with no streaming variant**, and that
+   * is the exemption middleware paying for itself: the body of a request refused
+   * here is released on the way back up, by the same guard that covers the auth
+   * gate and `requireScope`. A cancel-first copy of this helper would be a fourth
+   * place that has to be remembered, for a refusal that is already covered.
+   */
+  const withPlugins =
+    <P extends string>(
+      handler: (c: Context<AppEnv, P>, host: PluginHost) => Response | Promise<Response>,
+    ): Handler<AppEnv, P> =>
+    (c) => {
+      if (!plugins) return jsonError(c, 503, "plugins_unavailable", "this daemon has no plugin host");
+      return handler(c, plugins);
+    };
+
+  /**
+   * The other refusal four of these routes share.
+   *
+   * Written out four times, with the sentence retyped each time. It is one
+   * answer — "no such plugin on this machine" — and a client reads the code, so
+   * four independently-typed copies of the message are four chances for one of
+   * them to say something slightly different about the same state.
+   */
+  const pluginNotFound = (c: Context<AppEnv>): Response =>
+    jsonError(c, 404, "plugin_not_found", "no such plugin on this machine");
+
+  /**
+   * A handler that only runs for a plugin that is loaded, by the id in the path.
+   *
+   * The view and action routes had this preamble written out verbatim — find,
+   * 404, then their own work — which is `withSession`'s argument a second time.
+   *
+   * **Deliberately not applied to `DELETE /plugins/:pluginId` or to the state
+   * route.** `find` answers from `live`, and `remove` deliberately reaches
+   * further: it also removes a plugin whose tree is installed but unreadable,
+   * which is never in `live` and which this wrapper would answer 404 for. The
+   * state route is left alone for an ordering reason instead — it validates its
+   * body before it looks the plugin up, so wrapping it would turn a request that
+   * is wrong in both ways from a `400` into a `404`.
+   */
+  const withPlugin =
+    <P extends string>(
+      handler: (c: Context<AppEnv, P>, plugin: LivePlugin) => Response | Promise<Response>,
+    ): Handler<AppEnv, P> =>
+    withPlugins((c, host) => {
+      const plugin = host.find(c.req.param("pluginId") ?? "");
+      if (plugin === null) return pluginNotFound(c);
+      return handler(c, plugin);
+    });
+
+  app.get(
+    "/plugins",
+    read,
+    withPlugins((c, host) => c.json({ plugins: host.list(), api: PLUGIN_API_VERSION })),
+  );
+
+  /**
+   * Install a plugin, or update one — one verb, because they are one act.
+   *
+   * A separate `PUT` would need the caller to know whether the plugin is already
+   * there, which is a question the archive answers on arrival: the id is in the
+   * manifest, and whether a row exists is this daemon's business rather than the
+   * caller's. `replaced` on the answer is what says which of the two happened.
+   *
+   * Streaming, so `isStreamingRoute` exempts it from the 1 MiB body bound and
+   * `PluginHost.install` carries its own counter. Every refusal below cancels the
+   * body first, for the reason the upload and import routes state at length: the
+   * relay grants a stream's window on consumption, so a reader that stops parks
+   * the sender, and the valve after that closes the whole tunnel for this machine.
+   * `refuse()` is kept where the refusals are large and local; what it never
+   * covered — an answer from a middleware above this handler — is the exemption
+   * middleware's `finally`, which is also what lets `withPlugins` wrap a
+   * streaming route with no variant of its own.
+   */
+  app.post(
+    "/plugins",
+    admin,
+    withPlugins(async (c, host) => {
+      const refuse = async <T,>(answer: () => T): Promise<T> => {
+        await cancelBody(c.req.raw.body as ReadableStream<Uint8Array> | null);
+        return answer();
+      };
+
+      if (registry.isShuttingDown) {
+        return refuse(() => jsonError(c, 503, "shutting_down", "the daemon is shutting down"));
+      }
+
+      // The same sanitizer the upload and import routes use, and for the same
+      // reason: this string is a *label* — it is recorded beside the row and never
+      // becomes a path — but it is echoed back, and a control character in an echoed
+      // string is the response-splitting the sanitizer exists to refuse.
+      const named = sanitizeUploadName(c.req.query("name") ?? "");
+      if (!named.ok) {
+        return refuse(() =>
+          jsonError(c, 400, "invalid_name", "that filename cannot be stored", { reason: named.reason }),
+        );
+      }
+
+      /*
+       * Honoured to refuse, never to accept. Refusing on a `content-length` we
+       * believe costs nothing; trusting one would let a body that lies walk past the
+       * counter that is actually enforcing this.
+       */
+      const declared = Number.parseInt(c.req.header("content-length") ?? "", 10);
+      if (Number.isFinite(declared) && declared > PLUGIN_LIMITS.maxBytes) {
+        return refuse(() =>
+          jsonError(c, 413, "plugin_too_large", `a plugin archive may not exceed ${PLUGIN_LIMITS.maxBytes} bytes`, {
+            limit: PLUGIN_LIMITS.maxBytes,
+            declared,
+          }),
+        );
+      }
+
+      const body = c.req.raw.body;
+      if (body === null) return jsonError(c, 400, "bad_request", "expected a request body");
+
+      const outcome = await host.install({ body, name: named.name });
+      if (outcome.kind === "ok") {
+        return c.json({ plugin: outcome.summary, replaced: outcome.replaced }, outcome.replaced === null ? 201 : 200);
+      }
+      if (outcome.kind === "busy") {
+        return jsonError(c, 409, "plugin_busy", "this machine is already installing a plugin");
+      }
+      return jsonError(c, pluginInstallStatus(outcome.code), outcome.code, outcome.message);
+    }),
+  );
+
+  /*
+   * `remove` rather than a `withPlugin` lookup, and the difference is load-bearing:
+   * it also removes a plugin whose tree is on disk and unreadable, which never
+   * reached `live` and which a `find` would answer 404 for while leaving the
+   * directory and the row behind. The 404 here means "nothing of that id anywhere",
+   * which is a wider claim than the wrapper's and the only one that makes an
+   * uninstall able to finish.
+   */
+  app.delete(
+    "/plugins/:pluginId",
+    admin,
+    withPlugins(async (c, host) => {
+      const removed = await host.remove(c.req.param("pluginId") ?? "");
+      // The same 409 `POST /plugins` answers, for the same fact: one mutation at a
+      // time for the whole daemon. Asked before the 404, because "there is no such
+      // plugin" is not what this machine knows right now.
+      if (removed === "busy") return jsonError(c, 409, "plugin_busy", "this machine is already installing a plugin");
+      if (!removed) return pluginNotFound(c);
+      return c.json({ removed: true });
+    }),
+  );
+
+  /**
+   * Switched on or off, without losing anything.
+   *
+   * A route rather than two (`/enable`, `/disable`) because the body is the state
+   * a caller wants rather than the transition it thinks it is making — which is
+   * what makes it idempotent, and therefore what makes a client that lost the
+   * answer safe to send it again.
+   *
+   * Not `withPlugin`, and the reason is ordering rather than reach: the body is
+   * validated before the id is looked up, so a request that names an unknown
+   * plugin *and* sends a body without `enabled` is a `400`. Hoisting the lookup
+   * into a wrapper would quietly turn that into a `404`.
+   */
+  app.post(
+    "/plugins/:pluginId/state",
+    admin,
+    withPlugins(async (c, host) => {
+      const body = await requireJson(c);
+      if (body instanceof Response) return body;
+      const enabled = body["enabled"];
+      if (typeof enabled !== "boolean") return jsonError(c, 400, "bad_request", "enabled must be true or false");
+      const summary = await host.setEnabled(c.req.param("pluginId") ?? "", enabled);
+      if (summary === "busy") return jsonError(c, 409, "plugin_busy", "this machine is already installing a plugin");
+      if (summary === null) return pluginNotFound(c);
+      return c.json({ plugin: summary });
+    }),
+  );
+
+  /**
+   * What one of a plugin's screens looks like right now.
+   *
+   * `GET`, and therefore replayable — `isReplayable` lets the transport repeat it
+   * after a failure that said nothing about whether the daemon acted. So a view is
+   * a **read** by contract, and a plugin that writes in one has a bug a retry will
+   * find. Nothing here can enforce that; what it can do is tell the child which
+   * kind of call this is, which `runner.ts` passes on.
+   */
+  app.get(
+    "/plugins/:pluginId/views/:viewId",
+    read,
+    withPlugin((c, plugin) => {
+      const viewId = c.req.param("viewId") ?? "";
+      if (viewId !== "screen" && viewId !== "settings") {
+        return jsonError(c, 404, "view_not_found", "a plugin draws a screen and a settings pane, and no other view");
+      }
+      return pluginAnswer(c, () => plugin.invoke("view", viewId, { view: viewId }));
+    }),
+  );
+
+  app.post(
+    "/plugins/:pluginId/actions/:actionId",
+    write,
+    withPlugin(async (c, plugin) => {
+      const actionId = c.req.param("actionId") ?? "";
+      const body = await requireJson(c);
+      if (body instanceof Response) return body;
+      /*
+       * The action must be one the manifest declared, and that check is here rather
+       * than inside the plugin: an action id reaching a plugin's `action` export is
+       * a string somebody put in a URL, and a plugin author writing a `switch` over
+       * their own ids should not also have to defend against ones they never
+       * declared. `contributes.actions` is the list a person approved at install.
+       */
+      if (!plugin.record.manifest.contributes.actions.some((one) => one.id === actionId)) {
+        return jsonError(c, 404, "action_not_found", "this plugin declares no such action");
+      }
+      /*
+       * Three optional pieces of context, and the plugin gets whichever the surface
+       * had: `session` when the press came from a session's menu, `row` when it came
+       * from a row on the plugin's own screen, `form` when it was a form's submit.
+       * All three are passed through as sent — they are the plugin's own vocabulary,
+       * and this daemon validating them would be validating a shape it does not own.
+       */
+      return pluginAnswer(c, () =>
+        plugin.invoke("action", actionId, {
+          action: actionId,
+          session: typeof body["session"] === "string" ? body["session"] : null,
+          row: typeof body["row"] === "string" ? body["row"] : null,
+          form: body["form"] ?? null,
+        }),
+      );
+    }),
+  );
+
+  /* ---------------------------------------------------------------- *
    * The stream. Read-only: everything that mutates is an HTTP request,
    * because a send into a half-open socket succeeds silently.
    * ---------------------------------------------------------------- */
@@ -3333,3 +3686,67 @@ function worktreeError(c: Context, error: WorktreeError): Response {
 }
 
 export type { SessionSnapshot };
+
+/**
+ * A plugin's answer, or the refusal it turned into.
+ *
+ * One place, because there are two routes and the interesting part is identical:
+ * a plugin can be missing, stopped, broken, slow, or simply wrong about what it
+ * returns, and every one of those has to become an error envelope somebody can
+ * read rather than a 500 with a stack in it. `PluginApiError` carries the code;
+ * anything else is this daemon's own fault and reaches `app.onError`.
+ */
+async function pluginAnswer(c: Context, run: () => Promise<PluginResult>): Promise<Response> {
+  try {
+    const result = await run();
+    return c.json({ result });
+  } catch (error) {
+    if (error instanceof PluginApiError) {
+      return jsonError(c, pluginErrorStatus(error.code), error.code, error.message);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Which status a plugin's refusal is.
+ *
+ * ⚠ Read the **code**, never the status — this function exists so the statuses
+ * are at least not misleading, not so anybody branches on them. The split is by
+ * *whose problem it is*: a plugin that is off or broken is `503`, because the
+ * remedy is on this machine and the request itself was fine; everything else is a
+ * `502`, because something downstream of this daemon answered badly.
+ */
+function pluginErrorStatus(code: string): 403 | 502 | 503 | 504 {
+  if (code === "plugin_unavailable") return 503;
+  if (code === "plugin_timeout") return 504;
+  // Busy rather than broken, and the remedy is to ask again — which is what 503
+  // says and 502 does not.
+  if (code === "plugin_overloaded") return 503;
+  if (code === "plugin_scope_denied") return 403;
+  return 502;
+}
+
+/**
+ * Which status an install refusal is.
+ *
+ * `413` for the bounds, so a client can tell "too big" from "wrong", `409` for a
+ * plugin that will not start — the tree is unchanged and the old version is still
+ * running, which is a conflict rather than a failure — and `400` for everything
+ * about the archive or the manifest, all of which are things the person who built
+ * it can fix.
+ */
+function pluginInstallStatus(code: string): 400 | 409 | 413 | 503 {
+  switch (code) {
+    case "plugin_too_large":
+    case "plugin_unpacked_too_large":
+    case "plugin_too_many_entries":
+      return 413;
+    case "plugin_start_failed":
+      return 409;
+    case "plugin_write_failed":
+      return 503;
+    default:
+      return 400;
+  }
+}

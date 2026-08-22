@@ -18,6 +18,7 @@ import {
 } from "../bits";
 import { toast } from "../Toast";
 import { MachineAgentsSection } from "./MachineAgentsSection";
+import { MachinePluginsSection } from "./MachinePluginsSection";
 import { OneTimeSecret } from "./OneTimeSecret";
 
 /**
@@ -153,6 +154,22 @@ export function MachineSection({
       <section className={SETTINGS_SECTION}>
         <h2 className={SETTINGS_HEADING}>Agents</h2>
         <MachineAgentsSection state={state} machineId={machineId} agent={null} />
+      </section>
+
+      {/* The machine's second list, drawn here for the reason Agents is: what is
+          installed lives on this host's disk and what it stores lives in this
+          daemon's database, so there is nowhere else it could honestly go. Below
+          Agents rather than above, because an agent is what the machine is *for*
+          and a plugin is something added to it.
+
+          Outside the ownership gate for Agents' reason as well: installing a
+          plugin is an act on the daemon, reached with a grant, while renaming and
+          retiring are acts on the registry the owner alone can perform. The
+          daemon's own `machine:admin` scope is what actually decides, and it
+          answers `403 insufficient_scope` to a read-only grant. */}
+      <section className={SETTINGS_SECTION}>
+        <h2 className={SETTINGS_HEADING}>Plugins</h2>
+        <MachinePluginsSection state={state} machineId={machineId} plugin={null} />
       </section>
 
       {/*

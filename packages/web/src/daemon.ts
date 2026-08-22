@@ -18,6 +18,10 @@ import type {
   SessionList,
   SessionSnapshot,
   ImportAccepted,
+  PluginInstalled,
+  PluginListing,
+  PluginResult,
+  PluginSummary,
   UploadAccepted,
 } from "./wire";
 
@@ -311,6 +315,72 @@ export class DaemonClient {
   ): Promise<ImportAccepted> {
     const query = `path=${encodeURIComponent(path)}&name=${encodeURIComponent(name)}`;
     return this.machine.upload<ImportAccepted>(`/fs/import?${query}`, file, onProgress, signal);
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Plugins
+   * ---------------------------------------------------------------- */
+
+  plugins(): Promise<PluginListing> {
+    return this.machine.request<PluginListing>("/plugins");
+  }
+
+  /**
+   * Install a plugin, or update one — the same call, because they are one act.
+   *
+   * Through `upload` rather than `request` for `importArchive`'s reason one method
+   * up: it is the only path in this client that reports progress, and a person
+   * watching an archive move wants to see it move. The name rides the query string
+   * because the relay answers preflights from a fixed header list.
+   */
+  installPlugin(
+    file: File,
+    onProgress: (fraction: number) => void,
+    signal: AbortSignal,
+  ): Promise<PluginInstalled> {
+    return this.machine.upload<PluginInstalled>(`/plugins?name=${encodeURIComponent(file.name)}`, file, onProgress, signal);
+  }
+
+  removePlugin(pluginId: string): Promise<{ removed: boolean }> {
+    return this.machine.request<{ removed: boolean }>(`/plugins/${encodeURIComponent(pluginId)}`, { method: "DELETE" });
+  }
+
+  setPluginEnabled(pluginId: string, enabled: boolean): Promise<{ plugin: PluginSummary }> {
+    return this.machine.request<{ plugin: PluginSummary }>(`/plugins/${encodeURIComponent(pluginId)}/state`, {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    });
+  }
+
+  /**
+   * What one of a plugin's screens draws right now.
+   *
+   * A `GET`, so `isReplayable` lets the transport repeat it — which is the wire's
+   * way of saying a view must be a read. The plugin's contract, not this client's
+   * to enforce.
+   */
+  pluginView(pluginId: string, view: "screen" | "settings"): Promise<{ result: PluginResult }> {
+    return this.machine.request<{ result: PluginResult }>(
+      `/plugins/${encodeURIComponent(pluginId)}/views/${view}`,
+    );
+  }
+
+  /**
+   * Press something on a plugin.
+   *
+   * All three pieces of context are optional and the surface decides which are
+   * sent: `session` from a session's menu, `row` from a row on the plugin's own
+   * screen, `form` from a form's submit.
+   */
+  pluginAction(
+    pluginId: string,
+    actionId: string,
+    context: { session?: SessionId; row?: string; form?: Record<string, string> },
+  ): Promise<{ result: PluginResult }> {
+    return this.machine.request<{ result: PluginResult }>(
+      `/plugins/${encodeURIComponent(pluginId)}/actions/${encodeURIComponent(actionId)}`,
+      { method: "POST", body: JSON.stringify(context) },
+    );
   }
 
   /** The bytes of one file in the session's tree, by workspace-relative path. */

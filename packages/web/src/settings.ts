@@ -43,10 +43,21 @@ export type SettingsGroup = "server";
  */
 export interface SettingsRoute {
   section: SettingsSection | null;
-  /** The machine whose agents are being configured, if the URL names one. */
+  /** The machine whose agents or plugins are being configured, if the URL names one. */
   machineId: MachineId | null;
   /** The agent being configured, if the URL names one. Never without a machine. */
   agent: AgentId | null;
+  /**
+   * The plugin being configured, if the URL names one. Never without a machine.
+   *
+   * A **sibling of `agent` rather than a widening of it**, and never both at once:
+   * they are two lists under one machine, and one field holding either would make
+   * every consumer ask which kind it is before it could do anything. `agent` is
+   * validated against a closed set because it is handed to `PUT /agent-auth/:agent`;
+   * a plugin id is not — the set is whatever is installed on that daemon, so an
+   * unknown one draws the chooser rather than being refused here.
+   */
+  plugin: string | null;
 }
 
 export interface SectionSpec {
@@ -153,17 +164,27 @@ export function parseSettingsRoute(
 ): SettingsRoute {
   const section = parseSettingsSection(segments[0]);
   if (section !== "machines" || segments[1] === undefined) {
-    return { section, machineId: null, agent: null };
+    return { section, machineId: null, agent: null, plugin: null };
   }
   const machine = machineId(decode(segments[1]));
+  /*
+   * Two lists under a machine now, and the segment after it is what says which.
+   * Anything else — including the machine's own screen — drops to the machine, which
+   * is the "fall up to the nearest real screen" posture this function already had.
+   */
+  if (segments[2] === "plugins") {
+    const wanted = segments[3] === undefined ? null : decode(segments[3]);
+    return { section, machineId: machine, agent: null, plugin: wanted };
+  }
   if (segments[2] !== "agents" || segments[3] === undefined) {
-    return { section, machineId: machine, agent: null };
+    return { section, machineId: machine, agent: null, plugin: null };
   }
   const wanted = decode(segments[3]);
   return {
     section,
     machineId: machine,
     agent: isAgentId(wanted) ? wanted : null,
+    plugin: null,
   };
 }
 
@@ -195,6 +216,24 @@ export function settingsPath(
 }
 
 /**
+ * The path for one plugin's settings, on one machine.
+ *
+ * A separate builder rather than a fourth positional on {@link settingsPath},
+ * because the two leaves are **mutually exclusive** and a signature able to take
+ * both would be a signature able to express a URL nothing parses. Same reason
+ * `SettingsRoute` keeps them as two fields.
+ *
+ * **There is no path for "this machine's plugins" and that is deliberate**, in
+ * exactly the way there is none for its agents: both lists are drawn *inside* the
+ * machine's own screen, so the machine's path is the list's path. A bare
+ * `…/plugins` still parses — to the machine, which is the screen holding the list
+ * — for the same reason `…/agents` does, and the round trip is asserted.
+ */
+export function pluginSettingsPath(machine: MachineId, plugin: string): string {
+  return `/settings/machines/${encodeURIComponent(machine)}/plugins/${encodeURIComponent(plugin)}`;
+}
+
+/**
  * One level up from a settings screen, or `null` at the index.
  *
  * This is `Settings.tsx`'s `closeTo` expression, lifted out of the component —
@@ -221,7 +260,11 @@ export function settingsPath(
 export function settingsUp(route: SettingsRoute): { path: string; withinNav: boolean } | null {
   if (route.section === null) return null;
   if (route.section === "machines" && route.machineId !== null) {
-    if (route.agent !== null) {
+    // One plugin goes up to its machine, exactly as one agent does — both lists
+    // are drawn on that screen, so there is no list depth in between. `false`
+    // because neither is a row the nav draws, which makes the chevron the only
+    // way back at every width.
+    if (route.plugin !== null || route.agent !== null) {
       return { path: settingsPath("machines", route.machineId), withinNav: false };
     }
     return { path: settingsPath("machines"), withinNav: false };

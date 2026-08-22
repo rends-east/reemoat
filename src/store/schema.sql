@@ -320,3 +320,53 @@ CREATE TABLE IF NOT EXISTS daemon (
   pid         INTEGER NOT NULL,
   started_at  INTEGER NOT NULL
 );
+
+-- Plugins installed on this machine.
+--
+-- A new *table* again, so `schema.sql` alone is enough and `SCHEMA_VERSION` stays
+-- 6, for the reason the `uploads` comment above already gives in full: a bump
+-- turns every rollback into a daemon that will not start, to buy nothing.
+--
+-- One row per plugin rather than one per version, and that is the update story
+-- rather than a space saving: an update *replaces* this row, and the only thing
+-- that survives it is `plugin_data`, which is keyed on the id below. Two rows
+-- would make "which version is installed" a query with an answer that can be two.
+--
+-- `manifest_json` is the validated manifest, stored whole rather than exploded
+-- into columns. It is read back through `parseManifest` on every open — so a row
+-- written by a newer build whose manifest this one cannot validate is refused as
+-- a plugin rather than half-understood as a set of columns, which is what a
+-- column per field would silently produce.
+CREATE TABLE IF NOT EXISTS plugins (
+  id            TEXT PRIMARY KEY,
+  version       TEXT    NOT NULL,
+  manifest_json TEXT    NOT NULL,
+  -- Switched off by a person, and it survives an update: re-enabling somebody's
+  -- disabled plugin because they updated it would be this daemon deciding
+  -- something on their behalf.
+  enabled       INTEGER NOT NULL DEFAULT 1,
+  installed_at  INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL,
+  -- The archive's filename. A forensic trail; nothing reads it for a decision.
+  source        TEXT
+);
+
+-- What a plugin has put here.
+--
+-- **Keyed on the plugin's id and never on its version**, which is the whole of
+-- what makes an update an update: a board keeps its cards across 0.1.0 → 0.2.0
+-- because no part of this key mentions a version. Dropped only when the plugin is
+-- uninstalled — a board whose cards outlive the board is litter nothing collects.
+--
+-- A table rather than a JSON blob on the `plugins` row, for the bound rather than
+-- for the shape: the per-plugin byte and key ceilings are enforced by counting
+-- rows, and a blob makes "how many keys does this plugin hold" a parse.
+CREATE TABLE IF NOT EXISTS plugin_data (
+  plugin_id  TEXT    NOT NULL,
+  key        TEXT    NOT NULL,
+  -- JSON, serialized on the host side so the byte the quota counts is the byte
+  -- that lands here.
+  value      TEXT    NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (plugin_id, key)
+);

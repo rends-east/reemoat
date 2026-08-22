@@ -25,6 +25,97 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-22
+
+### Added
+
+- **Plugins.** A machine can be given a plugin: a `.tar.gz` holding a manifest and
+  a file of JavaScript, installed by whoever owns that machine. A plugin can draw
+  a screen, draw its own settings pane, put an action on a session's menu, and run
+  code when a session starts, a turn ends, a session ends or an agent asks a
+  question. It reads sessions, transcripts, diffs and workspace files, creates and
+  prompts and stops sessions, keeps its own data, and reaches host names it
+  declared — each behind a scope it names in its manifest and that is shown to
+  whoever installs it. `docs/PLUGINS.md` is the author's guide and
+  `plugins/board/` is a working one.
+- **`pnpm client plugins`, and `plugin install | remove | enable | disable | view`.**
+  Installing an id that is already there updates it, and what the plugin stored
+  survives that — if the new version will not start, the old one keeps running and
+  nothing on disk changes. That holds for a reinstall of the version already
+  installed, and for a plugin that is switched off: the build is started long
+  enough to prove it runs and stopped again before the row is written, so an
+  update nobody could have noticed was broken is refused rather than committed. Six new daemon routes under `/plugins`.
+- **Plugins on the machine's settings screen**, beside its agents, with each
+  plugin's scopes written out as sentences on its row. A plugin that draws a
+  screen gets a launcher in the rail's footer and a route of its own at
+  `/p/:machineId/:pluginId`.
+- **A plugin's row can go somewhere, and a screen can keep up.** A row names a
+  session on the machine or the plugin's own screen — a destination this app has,
+  never a URL — and tapping it opens that. A view can ask to be re-read on an
+  interval, floored at two seconds and spent only while somebody is looking; the
+  old view stays until the new one arrives, and a failed tick says nothing.
+- **A row can say what it means** — `ok`, `warn`, `danger` — and the app picks the
+  ink. This is the answer to "let a plugin send CSS", which it may not: naming
+  meaning survives a refactor and cannot put a value below the contrast floor.
+- **`permission.resolved`, `sessions.answerElicitation` and `agents.list`**, each
+  closing an asymmetry: a plugin could learn a question was asked and not how it
+  ended, could answer a permission but not a form, and could start a session
+  without being able to ask which agents this machine has.
+- Plugin API **2**. The floor stays at 1, so a plugin written for 1 runs
+  untouched; one that needs the new fields declares 2 and is refused by an older
+  daemon with a sentence rather than losing its navigation quietly.
+
+### Fixed
+
+- **A plugin's lifecycle now knows which child it is talking about.** Every launch
+  carries a generation and every late callback is gated on its own, which closes
+  three separate defects that shared one cause: a dead child's exit could null the
+  reference to its live replacement and leave an unreachable process behind; a
+  child's call ids restart at 1 each launch, so a slow `net.fetch` from a crashed
+  plugin could resolve a *different* call in its replacement with the wrong data;
+  and timers left over from a crash could stop the healthy child that replaced it.
+- **`plugin install` and `plugin remove` no longer leave a child nobody holds.**
+  A stop cancels a scheduled restart on every call rather than only when it does
+  real work, and a stop that supersedes one still in flight waits for both — so
+  `shutdown` no longer returns while a process is still being killed.
+- **A refusal from the auth or scope check on a streaming route releases the
+  request body.** The three routes that stream their own bodies cancel them on
+  every refusal *they* make, but the middlewares above them answered without
+  releasing anything, and an unread body parks the sender against the relay's
+  window. The obligation now hangs off the same guard that grants the exemption,
+  so a fourth streaming route gets both halves by adding one string.
+- **The plugin data quota counts bytes.** It counted UTF-16 units on one side and
+  SQLite characters on the other, so ten emoji were charged 12 or 22 against the
+  42 they actually occupy — roughly three times the ceiling was reachable.
+- **An oversized message no longer looks like a hang.** Anything past the 256 KiB
+  IPC bound was dropped in silence and charged to the plugin as a timeout, so three
+  large form submissions from a `session:write` caller would stop a plugin that had
+  done nothing wrong. It now fails at once and says what happened.
+- `ctx.agents.list()` and `ctx.sessions.answerElicitation()` are reachable from a
+  plugin, and `ctx.files.list` — which never had a host method — is gone.
+- **`ctx.store.entries(prefix)`**, a paged batched read, because the reference
+  plugin's own screen was a thousand round trips per redraw with no other option.
+
+### Security
+
+- **Nothing is sent until you have read what the plugin asks for.** Choosing a file
+  no longer uploads it: the manifest is read where you are — in the browser, and by
+  `pnpm client plugin install` at a terminal — and its scopes, the hosts it named and
+  the events it asks to be told about are drawn before anything crosses the network.
+  This is what `SECURITY.md` meant by "named before somebody consents to it", which
+  until now was not true: the archive was unpacked, the row written and the plugin
+  started, and the scopes appeared afterwards on the row of something already
+  running. Neither reader validates — the machine still refuses authoritatively —
+  and an archive that cannot be read says so rather than guessing, with a separate
+  named press as the way past.
+- **A plugin runs as you, and the browser runs none of it.** A plugin is a child
+  process of the daemon with your uid and your files — the same trade an agent
+  already makes on the same machine. Its declared scopes are hygiene rather than a
+  fence, and `SECURITY.md` says so in those words. What is a real boundary: a
+  plugin returns a *description* of a screen and the app draws it, so the origin
+  holding your credential executes nothing a plugin author wrote. There is no
+  registry, nothing downloads a plugin, and nothing updates one by itself.
+
 ## [0.2.0] - 2026-08-21
 
 ### Added

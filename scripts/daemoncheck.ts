@@ -46,6 +46,9 @@ import {
   settleFolderName,
 } from "../src/archive.js";
 import { SignedTokenVerifier, type Scope } from "../src/auth.js";
+import type { PluginManifest } from "../src/plugins/protocol.js";
+import type { PluginRuntime } from "../src/plugins/runtime.js";
+import { checkPluginWrite, type PluginDataStore, type PluginRecordStore } from "../src/plugins/store.js";
 import { forgetStalled, isStalled, listDirs, makeDir, PathError, probeExists, resolveCwd } from "../src/browse.js";
 import { isRemoteType, mountFor, parseBsdMounts, parseLinuxMounts, readMounts } from "../src/mounts.js";
 import { CORS_ALLOW_METHODS } from "../src/cors.js";
@@ -200,6 +203,80 @@ function memoryUploadIndex(): UploadIndex {
     remove: (sessionId, uploadId) => void rows.delete(key(sessionId, uploadId)),
     removeSession: (sessionId) => {
       for (const [id, row] of rows) if (row.sessionId === sessionId) rows.delete(id);
+    },
+  };
+}
+
+/**
+ * A `PluginDataStore` with no database behind it.
+ *
+ * `memoryUploadIndex`'s shape one subject over, and at module scope rather than
+ * inside the section that first needed it because there are two callers now: the
+ * scope gate is driven against this, and `SqlitePluginDataStore` is driven
+ * against **both**. That pairing is the whole reason `checkPluginWrite` lives in
+ * `src/plugins/store.ts` instead of beside the SQL — a quota that holds only
+ * where there is a file is a quota nothing drives — and `entries` makes the same
+ * claim about paging, which is why the byte accounting below is the real one
+ * rather than a row count.
+ *
+ * ⚠ **Keyed on the pair, because the real one is.** This ignored `pluginId`
+ * entirely and held one flat map, so it was structurally incapable of showing a
+ * cross-plugin leak — the one property `PluginApi` namespacing every store call
+ * on `manifest.id` exists to provide. `dropPlugin` cleared everything for the
+ * same reason, which would have made "uninstalling one leaves the other's" pass
+ * against a store that dropped both.
+ */
+function memoryPluginData(): PluginDataStore {
+  const data = new Map<string, string>();
+  /** `pluginId` and `key` are two fields, never one string somebody could forge. */
+  const at = (id: string, key: string): string => `${id}\u0000${key}`;
+  const keysOf = (id: string, prefix: string): string[] =>
+    [...data.keys()]
+      .filter((held) => held.startsWith(`${id}\u0000`))
+      .map((held) => held.slice(id.length + 1))
+      .filter((key) => key.startsWith(prefix));
+  const sizeOf = (id: string, key: string): number | null => {
+    const held = data.get(at(id, key));
+    return held === undefined ? null : Buffer.byteLength(held, "utf8");
+  };
+  return {
+    get: (id, key) => (data.has(at(id, key)) ? JSON.parse(data.get(at(id, key)) as string) : null),
+    set: (id, key, value) => {
+      /*
+       * The shared bound, charged here rather than assumed. A fake that skipped
+       * it would make every quota assertion in this file a claim about SQLite
+       * alone, which is exactly the arrangement `checkPluginWrite` was extracted
+       * to end — and the refusals are what a plugin author actually meets.
+       */
+      const held = keysOf(id, "");
+      checkPluginWrite(key, value, {
+        keys: held.length,
+        bytes: held.reduce((total, one) => total + (sizeOf(id, one) ?? 0), 0),
+        existing: sizeOf(id, key),
+      });
+      data.set(at(id, key), value);
+    },
+    delete: (id, key) => void data.delete(at(id, key)),
+    // Sorted, because `keysStmt` is `ORDER BY key` and a driver comparing the two
+    // answers would otherwise be comparing SQLite's collation against a Map's
+    // insertion order.
+    keys: (id, prefix) => keysOf(id, prefix).sort(),
+    entries: (id, prefix, after, maxBytes) => {
+      const out: { key: string; value: unknown }[] = [];
+      let bytes = 0;
+      for (const key of keysOf(id, prefix).sort()) {
+        if (key <= after) continue;
+        const text = data.get(at(id, key)) as string;
+        // Charged as the bytes the answer carries, the way SQLite's does, so the
+        // two implementations cut a page at the same place.
+        bytes += Buffer.byteLength(text, "utf8") + Buffer.byteLength(JSON.stringify(key), "utf8");
+        if (out.length > 0 && bytes > maxBytes) return { entries: out, more: true };
+        out.push({ key, value: JSON.parse(text) });
+      }
+      return { entries: out, more: false };
+    },
+    dropPlugin: (id) => {
+      for (const held of [...data.keys()]) if (held.startsWith(`${id}\u0000`)) data.delete(held);
     },
   };
 }
@@ -11381,6 +11458,2663 @@ process.stdout.write("\ntwo config changes at once\n");
   check("and lands", valueOf("b"), "X");
 
   await pairRegistry.shutdown();
+}
+
+/* ------------------------------------------------------------------------- *
+ * Plugins
+ *
+ * Everything here runs against a **fake `PluginRuntime`** rather than a real
+ * `fork`, which is the reason that interface exists at all: a timeout, a crash,
+ * an exhausted restart budget and a child that never answers are the paths that
+ * matter, and none of them is reachable in an offline driver by spawning a
+ * process and hoping. One case at the end drives the real `ForkedPluginRuntime`,
+ * so the path production takes is walked rather than assumed.
+ * ------------------------------------------------------------------------- */
+
+process.stdout.write("\nwhat a plugin manifest may say\n");
+{
+  const { parseManifest } = await import("../src/plugins/manifest.js");
+  const { PLUGIN_API_VERSION, negotiatePluginApi } = await import("../src/plugins/protocol.js");
+
+  const base = {
+    id: "board",
+    name: "Task board",
+    version: "0.1.0",
+    api: PLUGIN_API_VERSION,
+    scopes: ["store"],
+    contributes: { screen: { title: "Board" }, settings: true, actions: [], hooks: ["turn.ended"] },
+  };
+  const of = (patch: Record<string, unknown>): ReturnType<typeof parseManifest> =>
+    parseManifest(JSON.stringify({ ...base, ...patch }));
+  const codeOf = (patch: Record<string, unknown>): string => {
+    const answer = of(patch);
+    return answer.ok ? "ok" : answer.code;
+  };
+
+  check("a manifest this daemon can run", codeOf({}), "ok");
+  check("and it comes back parsed rather than as text", of({}).ok ? of({}) : null, {
+    ok: true,
+    manifest: {
+      id: "board",
+      name: "Task board",
+      version: "0.1.0",
+      api: PLUGIN_API_VERSION,
+      description: null,
+      scopes: ["store"],
+      net: [],
+      contributes: { screen: { title: "Board" }, settings: true, actions: [], hooks: ["turn.ended"] },
+    },
+  });
+
+  /*
+   * Every refusal, because the refusals are the whole value of that file — a
+   * validator whose error paths are only reachable by building a real archive is
+   * a validator whose error paths are not driven. This is what `parseManifest`
+   * taking *text* rather than a path buys.
+   */
+  // Through one narrowing rather than two calls, so the type is what proves the
+  // second read is on the refusal arm rather than the caller remembering.
+  const rawCode = (text: string): string => {
+    const answer = parseManifest(text);
+    return answer.ok ? "ok" : answer.code;
+  };
+  check("not JSON at all", rawCode("{"), "manifest_unreadable");
+  check("JSON that is not an object", rawCode("[]"), "manifest_unreadable");
+  check("an id with a capital in it", codeOf({ id: "Board" }), "manifest_invalid");
+  check("an id with a slash in it", codeOf({ id: "a/b" }), "manifest_invalid");
+  check("an id that is empty", codeOf({ id: "" }), "manifest_invalid");
+  check("no name", codeOf({ name: "" }), "manifest_invalid");
+  check("a version that is not three numbers", codeOf({ version: "1.0" }), "manifest_invalid");
+  check("a version with a suffix", codeOf({ version: "1.0.0-beta" }), "manifest_invalid");
+  check("an api that is not a number", codeOf({ api: "1" }), "manifest_invalid");
+  check("an unknown scope", codeOf({ scopes: ["sessions.admin"] }), "manifest_invalid");
+  check("a scope listed twice", codeOf({ scopes: ["store", "store"] }), "manifest_invalid");
+  check("an unknown hook", codeOf({ contributes: { ...base.contributes, hooks: ["session.slept"] } }), "manifest_invalid");
+  check(
+    "an action with no id",
+    codeOf({ contributes: { ...base.contributes, actions: [{ title: "Go", on: "session" }] } }),
+    "manifest_invalid",
+  );
+  check(
+    "an action on a surface that does not exist",
+    codeOf({ contributes: { ...base.contributes, actions: [{ id: "go", title: "Go", on: "rail" }] } }),
+    "manifest_invalid",
+  );
+  check(
+    "two actions with one id",
+    codeOf({
+      contributes: {
+        ...base.contributes,
+        actions: [
+          { id: "go", title: "Go", on: "session" },
+          { id: "go", title: "Go again", on: "screen" },
+        ],
+      },
+    }),
+    "manifest_invalid",
+  );
+
+  /*
+   * `net` and its scope have to agree in **both** directions, and neither
+   * direction is the obvious one on its own: hosts with no scope is a manifest
+   * that under-declares, and a scope with no hosts is one that reads, to whoever
+   * is approving it, as a plugin talking to nowhere.
+   */
+  check("hosts listed without the scope", codeOf({ net: ["api.example.com"] }), "manifest_invalid");
+  check("the scope declared with no hosts", codeOf({ scopes: ["net"] }), "manifest_invalid");
+  check("the scope declared with an empty list", codeOf({ scopes: ["net"], net: [] }), "manifest_invalid");
+  check("both, agreeing", codeOf({ scopes: ["net"], net: ["api.example.com"] }), "ok");
+  check("a host with a scheme on it", codeOf({ scopes: ["net"], net: ["https://api.example.com"] }), "manifest_invalid");
+  check("a host with a port on it", codeOf({ scopes: ["net"], net: ["api.example.com:443"] }), "manifest_invalid");
+  check("an address rather than a name", codeOf({ scopes: ["net"], net: ["127.0.0.1"] }), "manifest_invalid");
+  check("a name for this machine", codeOf({ scopes: ["net"], net: ["thing.localhost"] }), "manifest_invalid");
+
+  /*
+   * The two api refusals are separate codes because their remedies are opposite:
+   * too old means republish the plugin, too new means update the machine. One
+   * "unsupported" sends half of everybody to the wrong place.
+   */
+  check("an api older than this daemon accepts", codeOf({ api: 0 }), "plugin_api_too_old");
+  check("an api newer than it speaks", codeOf({ api: PLUGIN_API_VERSION + 1 }), "plugin_api_too_new");
+  check(
+    "and the negotiation itself is a range, not an equality",
+    [negotiatePluginApi(PLUGIN_API_VERSION), negotiatePluginApi(PLUGIN_API_VERSION + 1), negotiatePluginApi(-1)],
+    ["ok", "too_new", "too_old"],
+  );
+
+  // Absence is the one thing repaired rather than refused, because an omitted
+  // optional has an obvious meaning and a wrong value does not.
+  check("no contributes at all is a plugin that contributes nothing", of({ contributes: undefined }).ok, true);
+  check("and no scopes is a plugin that may do nothing", of({ scopes: undefined }).ok, true);
+
+  /* ---------------------------------------------------------------- *
+   * The other eighteen.
+   *
+   * `manifest.ts` refuses in **thirty-seven** places: nine in `parseManifest`
+   * itself and twenty-eight spread over the five readers it delegates to. The
+   * cases above drive nineteen. These are the other eighteen, plus three
+   * conditions *inside* branches those already reach from the opposite side — a
+   * name too long rather than empty, an api that is a number and not a whole one,
+   * a screen title that is only spaces. Most of what was missing is the type
+   * refusals ("must be an array", "must be a string", "must be true or false"),
+   * which is the half of a hand-written validator nobody writes a case for and
+   * the half a `plugin.json` written by a person hits first.
+   *
+   * ⚠ **Asserted on the sentence rather than on the code**, because twenty-eight
+   * of the thirty-seven answer `manifest_invalid` and a case that reads only the
+   * code proves a manifest was refused rather than that it was refused for the
+   * reason it was written to catch — `{ contributes: { hooks: 7 } }` and
+   * `{ contributes: 7 }` are the same code and different bugs. The fragment is
+   * short on purpose: it names the branch and does not pin the prose around it.
+   *
+   * ⚠ **Nothing derives the thirty-seven and a thirty-eighth needs a line here.**
+   * Those refusals are prose returned from five different helpers — a bare string,
+   * a template literal, an `invalid(…)` and a `{ ok: false, code }` are all in
+   * there — so a grep for them is a check on a regular expression rather than on
+   * the file, which is the failure `docscheck` avoids by holding a file to what it
+   * says about *itself*. The count is stated instead, and it is the reason this
+   * comment is here rather than in a commit message.
+   * ---------------------------------------------------------------- */
+  const says = (name: string, patch: Record<string, unknown>, fragment: string): void => {
+    const answer = of(patch);
+    const message = answer.ok ? "(accepted)" : answer.message;
+    report(name, message.includes(fragment), message);
+  };
+  const contributing = (patch: Record<string, unknown>): Record<string, unknown> => ({
+    contributes: { ...base.contributes, ...patch },
+  });
+
+  says("a description longer than a manifest carries", { description: "x".repeat(201) }, "description must be");
+  says("a name past its ceiling rather than empty", { name: "n".repeat(65) }, "name must be 1–64");
+  says("an api that is a number and not a whole one", { api: 1.5 }, "api must be a whole number");
+  says("scopes that are not a list", { scopes: "store" }, "scopes must be an array");
+  says("a scope that is not a string", { scopes: [7] }, "every scope must be a string");
+  says("net that is not a list", { scopes: ["net"], net: "api.example.com" }, "net must be an array");
+  says("a net entry that is not a string", { scopes: ["net"], net: [7] }, "every net entry must be a string");
+  says(
+    "more hosts than a plugin talks to",
+    { scopes: ["net"], net: Array.from({ length: 9 }, (_, index) => `h${index}.example.com`) },
+    "net may name at most",
+  );
+  says(
+    "the same host twice",
+    { scopes: ["net"], net: ["api.example.com", "api.example.com"] },
+    "is listed twice",
+  );
+  says("contributes that is a list", { contributes: [] }, "contributes must be an object");
+  says("a screen that is a string", contributing({ screen: "Board" }), "contributes.screen must be an object");
+  says("a screen title past forty", contributing({ screen: { title: "t".repeat(41) } }), "contributes.screen.title");
+  says("a screen title of nothing", contributing({ screen: { title: "   " } }), "contributes.screen.title");
+  says("settings that is neither", contributing({ settings: "yes" }), "contributes.settings must be true or false");
+  says("actions that are not a list", contributing({ actions: {} }), "contributes.actions must be an array");
+  /*
+   * Eight, and the bound is on what a plugin may put on *somebody's screen*
+   * rather than on what it costs to hold: a session's kebab menu has never held
+   * eight rows, and a plugin able to declare forty would be a plugin able to make
+   * that menu unusable for everything else on it.
+   */
+  says(
+    "more actions than a menu has room for",
+    contributing({
+      actions: Array.from({ length: 9 }, (_, index) => ({ id: `a${index}`, title: "Go", on: "session" })),
+    }),
+    "at most 8 actions",
+  );
+  says("an action that is a string", contributing({ actions: ["go"] }), "every action must be an object");
+  says(
+    "an action with no title",
+    contributing({ actions: [{ id: "go", title: "", on: "session" }] }),
+    "needs a title of 1–40",
+  );
+  says("hooks that are not a list", contributing({ hooks: "turn.ended" }), "contributes.hooks must be an array");
+  says("a hook that is not a string", contributing({ hooks: [7] }), "every hook must be a string");
+  says("the same hook twice", contributing({ hooks: ["turn.ended", "turn.ended"] }), "is listed twice");
+}
+
+process.stdout.write("\nwhat a plugin may keep\n");
+{
+  const { checkPluginWrite, MAX_PLUGIN_KEYS, MAX_PLUGIN_DATA_BYTES, MAX_PLUGIN_VALUE_BYTES, PluginStoreError } =
+    await import("../src/plugins/store.js");
+
+  const refusal = (
+    key: string,
+    value: string,
+    current: { keys: number; bytes: number; existing: number | null },
+  ): string => {
+    try {
+      checkPluginWrite(key, value, current);
+      return "ok";
+    } catch (error) {
+      return error instanceof PluginStoreError ? error.code : "threw";
+    }
+  };
+  const empty = { keys: 0, bytes: 0, existing: null };
+
+  check("an ordinary write", refusal("a", "1", empty), "ok");
+  check("an empty key", refusal("", "1", empty), "bad_request");
+  check("a key with a newline in it", refusal("a\nb", "1", empty), "bad_request");
+  check("a key with a NUL in it", refusal("a\u0000b", "1", empty), "bad_request");
+  check("a value over the per-value cap", refusal("a", "x".repeat(MAX_PLUGIN_VALUE_BYTES + 1), empty), "value_too_large");
+  check(
+    "a write that would take the plugin over its total",
+    refusal("a", "x".repeat(1000), { keys: 1, bytes: MAX_PLUGIN_DATA_BYTES, existing: null }),
+    "store_full",
+  );
+  /*
+   * The replaced value is credited back before the new one is charged. Without
+   * that, a plugin rewriting one key climbs to its own ceiling and stays there —
+   * which is the shape of every settings pane written against this API.
+   */
+  check(
+    "but rewriting a key charges only the difference",
+    refusal("a", "x".repeat(1000), { keys: 1, bytes: MAX_PLUGIN_DATA_BYTES, existing: 1000 }),
+    "ok",
+  );
+  check(
+    "a new key past the key ceiling",
+    refusal("new", "1", { keys: MAX_PLUGIN_KEYS, bytes: 0, existing: null }),
+    "store_full",
+  );
+  check(
+    "and rewriting an existing one is still allowed there",
+    refusal("held", "1", { keys: MAX_PLUGIN_KEYS, bytes: 0, existing: 1 }),
+    "ok",
+  );
+}
+
+process.stdout.write("\nwhere a plugin's data actually lives\n");
+{
+  const { MAX_PLUGIN_VALUE_BYTES, PluginStoreError } = await import("../src/plugins/store.js");
+  const { openStores } = await import("../src/store/sqlite.js");
+
+  /**
+   * One script, run against both implementations and compared line for line.
+   *
+   * ⚠ **The comparison is the point, and it is why this is a function rather than
+   * a run of assertions.** Everything above this in the plugin sections drives the
+   * host, the API and the quota against `memoryPluginData`, so the whole of what
+   * `daemoncheck` knows about a plugin's storage is what a Map does — while what
+   * the fleet runs is `LIKE … ESCAPE`, a keyset cursor and a byte budget charged
+   * per row. Two of those cannot be reproduced by a Map on purpose, which is
+   * exactly why the script is run against the real store *first*: the fake is
+   * being held to SQLite rather than the other way round.
+   *
+   * A labelled record rather than an array, so a mismatch names the property
+   * instead of an index and so the readouts below can be asserted one at a time.
+   */
+  const script = (store: PluginDataStore): Record<string, unknown> => {
+    const refusal = (run: () => void): string => {
+      try {
+        run();
+        return "ok";
+      } catch (error) {
+        return error instanceof PluginStoreError ? error.code : "threw";
+      }
+    };
+
+    // Two plugins, one key name. Neither may see the other's, and nothing in the
+    // API namespaces this — `manifest.id` is passed down and the store is what
+    // keeps them apart.
+    const sameKey = [
+      refusal(() => store.set("one", "shared", JSON.stringify("first"))),
+      refusal(() => store.set("two", "shared", JSON.stringify("second"))),
+      store.get("one", "shared"),
+      store.get("two", "shared"),
+    ];
+
+    /*
+     * ⚠ **A key holding `%` or `_` is a key somebody wrote.** Those are `LIKE`'s
+     * two wildcards, so a prefix built without the escape matches every row the
+     * plugin has — `a%` would answer for `axb` and `ab` as readily as for the one
+     * key it names. The fake filters with `startsWith` and *cannot* reproduce the
+     * bug, which is what makes this the one property in this file that had to be
+     * driven against the real store or not at all.
+     */
+    for (const key of ["a%b", "axb", "a_b", "ab"]) refusal(() => store.set("one", key, JSON.stringify(key)));
+
+    const bounds = [
+      // The shared bound, met from the far side: a value one byte past the cap,
+      // an empty key, a key holding a control character.
+      refusal(() => store.set("one", "big", JSON.stringify("x".repeat(MAX_PLUGIN_VALUE_BYTES)))),
+      refusal(() => store.set("one", "", JSON.stringify("x"))),
+      refusal(() => store.set("one", `a${String.fromCharCode(10)}b`, JSON.stringify("x"))),
+    ];
+
+    /*
+     * Six rows of four thousand bytes against a ten-thousand-byte budget, which
+     * puts the cut two rows in and leaves the third to the next page. Coarse on
+     * purpose: SQLite charges twenty bytes of scaffolding a pair that the fake
+     * does not, so a fixture whose rows were a few bytes each would have the two
+     * implementations cutting in different places for a reason that says nothing
+     * about either of them.
+     */
+    for (let index = 0; index < 6; index += 1) {
+      refusal(() => store.set("two", `card:${index}`, JSON.stringify("y".repeat(4_000))));
+    }
+    refusal(() => store.set("two", "note", JSON.stringify("not a card")));
+    const first = store.entries("two", "card:", "", 10_000);
+    // The cursor is the last key of the page, echoed back rather than computed —
+    // a caller deriving the next one itself is a caller guessing at a collation.
+    const second = store.entries("two", "card:", String(first.entries.at(-1)?.key ?? ""), 10_000);
+    const rest = store.entries("two", "card:", String(second.entries.at(-1)?.key ?? ""), 10_000);
+
+    const answer = {
+      sameKey,
+      percentPrefix: store.keys("one", "a%"),
+      underscorePrefix: store.keys("one", "a_"),
+      everyKey: store.keys("one", "a"),
+      bounds,
+      page: [first.entries.map((one) => one.key), first.more],
+      nextPage: [second.entries.map((one) => one.key), second.more],
+      lastPage: [rest.entries.map((one) => one.key), rest.more],
+      // The prefix is a filter on the page as well as on the listing, or a board
+      // reading its cards would get whatever else that plugin keeps. Asked with a
+      // budget nothing can cut, so what this shows is the two rows the three
+      // `card:` pages above never saw rather than a page that ended early.
+      unprefixed: store.entries("two", "", "", 1_000_000).entries.map((one) => one.key),
+      // What one card actually is, so this is a page of *pairs* rather than of
+      // keys with a shape asserted about them.
+      firstValue: first.entries[0]?.value === "y".repeat(4_000),
+    };
+
+    // Uninstalling is the only thing that drops data, and it drops one plugin's.
+    store.dropPlugin("one");
+    return { ...answer, afterDrop: [store.keys("one", ""), store.keys("two", "").length] };
+  };
+
+  const stores = openStores({ path: join(tmp("plugin-data-"), "d.db"), instanceId: "i_plugin_data" });
+  const real = script(stores.pluginData);
+
+  check("one plugin's key and another's of the same name", real["sameKey"], ["ok", "ok", "first", "second"]);
+  check("a prefix holding a % names one key rather than every key", real["percentPrefix"], ["a%b"]);
+  check("and one holding an _ likewise", real["underscorePrefix"], ["a_b"]);
+  check("while a prefix holding neither takes them all", real["everyKey"], ["a%b", "a_b", "ab", "axb"]);
+  check("the bounds are the shared ones", real["bounds"], ["value_too_large", "bad_request", "bad_request"]);
+  check("a page cut by the byte budget says so", real["page"], [["card:0", "card:1"], true]);
+  check("and asking again with the last key continues rather than repeats", real["nextPage"], [["card:2", "card:3"], true]);
+  check("until there is nothing left to say more about", real["lastPage"], [["card:4", "card:5"], false]);
+  check("the prefix filters the page as well as the listing", real["unprefixed"], [
+    "card:0",
+    "card:1",
+    "card:2",
+    "card:3",
+    "card:4",
+    "card:5",
+    "note",
+    "shared",
+  ]);
+  check("and a page is pairs rather than keys", real["firstValue"], true);
+  check("dropping one plugin takes its rows and only its rows", real["afterDrop"], [[], 8]);
+
+  /*
+   * ⚠ **And the fake this driver runs everything else against answers the same.**
+   * `checkPluginWrite` is shared for exactly this — a quota that holds only where
+   * there is a file is a quota nothing drives — and `entries` makes the same claim
+   * about paging. Without this line the fake could drift into refusing less or
+   * paging differently, and every plugin assertion in this file would go on
+   * passing while describing a store nobody runs.
+   */
+  check("and the memory store the rest of this file uses answers all of it", script(memoryPluginData()), real);
+
+  stores.close();
+}
+
+process.stdout.write("\na plugin row this build cannot read\n");
+{
+  const { PluginHost } = await import("../src/plugins/host.js");
+  const { SessionRegistry } = await import("../src/registry.js");
+  const { hostGit } = await import("../src/git.js");
+  const { parseManifest } = await import("../src/plugins/manifest.js");
+  const { openStores } = await import("../src/store/sqlite.js");
+
+  const manifestFor = (id: string): PluginManifest => {
+    const parsed = parseManifest(
+      JSON.stringify({ id, name: id, version: "1.0.0", api: 1, scopes: [], contributes: {} }),
+    );
+    if (!parsed.ok) throw new Error(parsed.message);
+    return parsed.manifest;
+  };
+
+  const degraded: string[] = [];
+  const stores = openStores({
+    path: join(tmp("plugin-degraded-"), "d.db"),
+    instanceId: "i_degraded",
+    onDegraded: (detail) => degraded.push(detail),
+  });
+  for (const id of ["p", "q"]) {
+    stores.plugins.put({
+      id,
+      version: "1.0.0",
+      manifest: manifestFor(id),
+      // Off, so opening the host below launches nothing: what is being driven is
+      // a row rather than a process.
+      enabled: false,
+      installedAt: 1,
+      updatedAt: 1,
+      source: null,
+    });
+  }
+  check("two rows, both readable", stores.plugins.list().map((one) => one.id), ["p", "q"]);
+  check("and nothing to report about either", degraded.length, 0);
+
+  /*
+   * ⚠ **A downgrade, and nothing more exotic than that.** Install a plugin
+   * declaring `api: 2`, roll the daemon back to a build whose
+   * `PLUGIN_API_VERSION` is 1, and `negotiatePluginApi` answers `too_new` for a
+   * row that was perfectly good yesterday. Written straight into the column here
+   * because this build has no future api to declare — the manifest is what a
+   * newer daemon would have written, and `toRecord` re-validates on **every**
+   * read, which is the whole reason that column holds the manifest whole rather
+   * than a field per column.
+   */
+  stores.db
+    .prepare("UPDATE plugins SET manifest_json = ? WHERE id = ?")
+    .run(JSON.stringify({ ...manifestFor("p"), api: 9_999 }), "p");
+  stores.pluginData.set("p", "card:1", JSON.stringify("kept"));
+
+  check("the listing skips it", stores.plugins.list().map((one) => one.id), ["q"]);
+  check("and so does get", stores.plugins.get("p"), null);
+  report(
+    "but somebody is told, once per read rather than never",
+    degraded.some((one) => one.includes("plugin p") && one.includes("cannot read")),
+    degraded[0] ?? "nothing reported",
+  );
+  /*
+   * ⚠ **`has` is the method that exists because `get` cannot answer this.** Both
+   * `list` and `get` report `null` for a row they cannot parse, so neither can
+   * tell "nobody ever installed this" from "installed here, and unreadable by
+   * this build" — and that difference is the whole of what `remove` is asking.
+   * `SELECT 1`, so it parses nothing.
+   */
+  check("the row is still a row", [stores.plugins.has("p"), stores.plugins.has("nobody")], [true, false]);
+
+  const registry = new SessionRegistry(stores.events, stores.sessions);
+  const host = await PluginHost.open({
+    root: join(tmp("plugin-degraded-root-"), "plugins"),
+    records: stores.plugins,
+    data: stores.pluginData,
+    registry,
+    api: { git: hostGit },
+  });
+  check("the host builds nothing for it", host.list().map((one) => one.id), ["q"]);
+  check("and cannot find it", host.find("p"), null);
+
+  /*
+   * ⚠ **The one kind of plugin somebody most wants gone used to be the one kind
+   * that needed a shell.** `remove` consulted `this.live`, which never held this
+   * row, so `DELETE /plugins/:id` answered 404 and the row, its `plugin_data` and
+   * its directory stayed on the machine for good. Falling through to the store is
+   * what closes it, and the assertions after it are the closing half: a 404 that
+   * turned into a 200 while leaving the row behind would be worse than the 404.
+   */
+  check("removing it is still possible", await host.remove("p"), true);
+  check("the row goes", stores.plugins.has("p"), false);
+  check("what it kept goes with it", stores.pluginData.keys("p", ""), []);
+  check("its readable neighbour does not", host.list().map((one) => one.id), ["q"]);
+  // The other half of the fall-through, and the reason it is not simply `true`:
+  // an id nobody ever installed has no row and no directory either.
+  check("and an id nobody ever installed is still a no", await host.remove("nothing"), false);
+
+  await host.shutdown();
+  await registry.shutdown();
+  stores.close();
+}
+
+process.stdout.write("\nwhat a plugin returns, and what is forwarded\n");
+{
+  const { clampView, PLUGIN_VIEW_LIMITS } = await import("../src/plugins/protocol.js");
+
+  check("nothing at all is an empty view rather than a throw", clampView(null), {
+    view: { title: null, refreshMs: null, blocks: [] },
+    clamped: false,
+  });
+  check("a block this daemon does not draw is dropped", clampView({ blocks: [{ type: "canvas" }] }).view.blocks, []);
+  check("and dropping one is reported", clampView({ blocks: [{ type: "canvas" }] }).clamped, true);
+
+  const rows = Array.from({ length: PLUGIN_VIEW_LIMITS.rows + 10 }, (_, index) => ({ id: String(index), title: "x" }));
+  const big = clampView({ blocks: [{ type: "list", rows, empty: "" }] });
+  const first = big.view.blocks[0];
+  report(
+    "a list past the row bound is cut rather than refused",
+    first?.type === "list" && first.rows.length === PLUGIN_VIEW_LIMITS.rows,
+    `${first?.type === "list" ? first.rows.length : -1} of ${rows.length} forwarded`,
+  );
+  check("and the cut is reported so the screen can say so", big.clamped, true);
+
+  const long = clampView({ blocks: [{ type: "text", text: "x".repeat(PLUGIN_VIEW_LIMITS.text + 50), tone: "muted" }] });
+  const text = long.view.blocks[0];
+  report(
+    "an oversized string is clipped",
+    text?.type === "text" && text.text.length === PLUGIN_VIEW_LIMITS.text,
+    `${text?.type === "text" ? text.text.length : -1} chars`,
+  );
+  check("and that is reported too", long.clamped, true);
+
+  /*
+   * A tone this daemon does not know falls to the ordinary one, which is the safe
+   * direction: a plugin cannot make a destructive control look harmless by
+   * misspelling the word, only fail to make an ordinary one look dangerous.
+   */
+  const toned = clampView({ blocks: [{ type: "notice", text: "hi", tone: "catastrophic" }] });
+  check("an unknown tone is the ordinary one", toned.view.blocks[0], { type: "notice", text: "hi", tone: "default" });
+
+  const field = clampView({
+    blocks: [{ type: "form", submit: "Go", action: "save", fields: [{ key: "k", label: "L", kind: "quantum" }] }],
+  });
+  const form = field.view.blocks[0];
+  check(
+    "an unknown field kind becomes a text input rather than nothing",
+    form?.type === "form" ? form.fields[0]?.kind : null,
+    "text",
+  );
+
+  check("a view that is already fine is not reported as clamped", clampView({ title: "T", blocks: [] }).clamped, false);
+
+  /* ---------------------------------------------------------------- *
+   * What v2 added.
+   * ---------------------------------------------------------------- */
+  const { PLUGIN_REFRESH_MIN_MS, PLUGIN_REFRESH_MAX_MS } = await import("../src/plugins/protocol.js");
+
+  check(
+    "a refresh interval is floored and capped rather than refused",
+    [
+      clampView({ refreshMs: 10, blocks: [] }).view.refreshMs,
+      clampView({ refreshMs: 5_000, blocks: [] }).view.refreshMs,
+      clampView({ refreshMs: 999_999_999, blocks: [] }).view.refreshMs,
+      clampView({ refreshMs: 0, blocks: [] }).view.refreshMs,
+      clampView({ refreshMs: -1, blocks: [] }).view.refreshMs,
+      clampView({ refreshMs: "soon", blocks: [] }).view.refreshMs,
+      clampView({ blocks: [] }).view.refreshMs,
+    ],
+    [PLUGIN_REFRESH_MIN_MS, 5_000, PLUGIN_REFRESH_MAX_MS, null, null, null, null],
+  );
+  /*
+   * Clamped **silently**, unlike a cut list. The difference is what anybody could
+   * do about it: a shortened list is a wrong number on screen, while an interval
+   * moved from 500ms to 2000ms is invisible to everyone and actionable by nobody.
+   */
+  check("and moving one is not reported as a clamp", clampView({ refreshMs: 10, blocks: [] }).clamped, false);
+
+  /*
+   * ⚠ **The field a plugin would most like to put a URL in.** Anything that is
+   * not one of this app's own two destinations becomes a row that does not go
+   * anywhere — a URL above all, in either shape somebody would try it.
+   */
+  const opened = clampView({
+    blocks: [
+      {
+        type: "list",
+        empty: "",
+        rows: [
+          { id: "a", open: { session: "s_1" } },
+          { id: "b", open: { screen: true } },
+          { id: "c", open: { url: "https://evil.example" } },
+          { id: "d", open: "https://evil.example" },
+          { id: "e", open: { session: "" } },
+          { id: "f", open: { screen: false } },
+          { id: "g", open: { session: "s_2", url: "https://evil.example" } },
+          { id: "h" },
+        ],
+      },
+    ],
+  });
+  const openedRows = opened.view.blocks[0];
+  check(
+    "only a session on this machine or the plugin's own screen survives",
+    openedRows?.type === "list" ? openedRows.rows.map((row) => row.open) : null,
+    [{ session: "s_1" }, { screen: true }, null, null, null, null, { session: "s_2" }, null],
+  );
+
+  const rowTones = clampView({
+    blocks: [{ type: "list", empty: "", rows: [{ id: "a", tone: "danger" }, { id: "b", tone: "puce" }, { id: "c" }] }],
+  });
+  const tonedRows = rowTones.view.blocks[0];
+  check(
+    "a tone this daemon knows survives, and one it does not is no tone",
+    tonedRows?.type === "list" ? tonedRows.rows.map((row) => row.tone) : null,
+    ["danger", null, null],
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * A tar writer, small enough to read.
+ *
+ * Built here rather than shelled out for the reason the import section's own
+ * builder gives: neither `tar` nor `zip` is guaranteed on a CI box. This one is
+ * deliberately *separate* from that builder rather than hoisted out of it — that
+ * one exists to write archives no honest tool will produce, and lifting it here
+ * would couple a plugin's happy path to a fixture whose whole job is to be
+ * malformed.
+ *
+ * At module scope because three sections build one now: installing, the hooks a
+ * freshly-installed plugin is seeded with, and `POST /plugins` over HTTP. Two of
+ * those want the same bytes an install already proved good, and a second copy of
+ * a tar writer is a second place for a checksum to be wrong.
+ * ------------------------------------------------------------------ */
+const tarOf = (files: Record<string, string>): Buffer => {
+  const parts: Buffer[] = [];
+  for (const [name, body] of Object.entries(files)) {
+    const data = Buffer.from(body, "utf8");
+    const head = Buffer.alloc(512);
+    head.write(name, 0, "utf8");
+    head.write("000644 \0", 100);
+    head.write("000000 \0", 108);
+    head.write("000000 \0", 116);
+    head.write(data.length.toString(8).padStart(11, "0") + " ", 124);
+    head.write("00000000000 ", 136);
+    head.write("        ", 148);
+    head.write("0", 156);
+    head.write("ustar\0", 257);
+    head.write("00", 263);
+    let sum = 0;
+    for (const byte of head) sum += byte;
+    head.write(sum.toString(8).padStart(6, "0") + "\0 ", 148);
+    parts.push(head, data, Buffer.alloc((512 - (data.length % 512)) % 512));
+  }
+  parts.push(Buffer.alloc(1024));
+  return gzipSync(Buffer.concat(parts));
+};
+
+const bodyOf = (bytes: Buffer): ReadableStream<Uint8Array> =>
+  new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(bytes));
+      controller.close();
+    },
+  });
+
+/**
+ * The same bytes, held until the returned `release` is called.
+ *
+ * What it buys is the *middle* of an install, which no other body here can reach:
+ * `PluginHost.install` claims the daemon-wide mutex and then awaits the stream, so
+ * this is the window in which a `remove` or a `setEnabled` arrives — the window a
+ * measured `DELETE` used to walk straight through, dropping the row and every
+ * `plugin_data` key of a plugin the install then re-created.
+ */
+const stallingBody = (bytes: Buffer): { body: ReadableStream<Uint8Array>; release: () => void } => {
+  let release = (): void => {};
+  const parked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return {
+    release: () => release(),
+    body: new ReadableStream({
+      async pull(controller) {
+        await parked;
+        controller.enqueue(new Uint8Array(bytes));
+        controller.close();
+      },
+    }),
+  };
+};
+
+process.stdout.write("\ninstalling a plugin, and updating one\n");
+{
+  const { PluginHost } = await import("../src/plugins/host.js");
+  const { SessionRegistry } = await import("../src/registry.js");
+  const { hostGit } = await import("../src/git.js");
+  const { openStores } = await import("../src/store/sqlite.js");
+
+  const manifestOf = (patch: Record<string, unknown> = {}): string =>
+    JSON.stringify({
+      id: "board",
+      name: "Task board",
+      version: "0.1.0",
+      api: 1,
+      scopes: ["store"],
+      contributes: { settings: true, actions: [{ id: "save", title: "Save", on: "screen" }], hooks: ["turn.ended"] },
+      ...patch,
+    });
+
+  /** A plugin whose `server.js` answers everything out of its own store. */
+  const SERVER = `
+    export async function settings(ctx) {
+      const held = await ctx.store.get("v");
+      return { title: null, blocks: [{ type: "text", text: String(held ?? "unset"), tone: "default" }] };
+    }
+    export async function action(ctx, event) {
+      await ctx.store.set("v", event.form?.v ?? "set");
+      return { kind: "toast", text: "saved", tone: "default" };
+    }
+    export async function hook(ctx, event) {
+      await ctx.store.set("last", event.hook);
+    }
+  `;
+
+  const root = tmp("plugin-root-");
+  const stores = openStores({ path: join(tmp("plugin-db-"), "d.db"), instanceId: "i_plugins" });
+  const registry = new SessionRegistry(stores.events, stores.sessions);
+  const warnings: string[] = [];
+  const host = await PluginHost.open({
+    root: join(root, "plugins"),
+    records: stores.plugins,
+    data: stores.pluginData,
+    registry,
+    api: { git: hostGit },
+    onWarning: (detail) => warnings.push(detail),
+    timeouts: { start: 3_000, invoke: 3_000 },
+  });
+
+  const install = (files: Record<string, string>, name = "p.tar.gz"): ReturnType<typeof host.install> =>
+    host.install({ body: bodyOf(tarOf(files)), name });
+
+  const first = await install({ "plugin.json": manifestOf(), "server.js": SERVER });
+  check("a plugin installs", first.kind === "ok" ? [first.summary.id, first.summary.version, first.replaced] : first, [
+    "board",
+    "0.1.0",
+    null,
+  ]);
+  check("and it is running", host.list().map((one) => [one.id, one.state, one.enabled]), [["board", "running", true]]);
+
+  /*
+   * A directory rather than loose members, which is what somebody who compresses
+   * a folder produces. Both shapes have to work — the one thing `findManifestRoot`
+   * exists for — and nothing deeper than one level is searched.
+   */
+  const nested = await install({ "board/plugin.json": manifestOf({ version: "0.1.1" }), "board/server.js": SERVER });
+  check("an archive holding one folder is the same plugin", nested.kind === "ok" ? nested.replaced : nested, "0.1.0");
+
+  /* ---------------------------------------------------------------- *
+   * What an update keeps, which is the whole of what makes it an update.
+   * ---------------------------------------------------------------- */
+  const plugin = host.find("board");
+  if (plugin === null) throw new Error("the plugin vanished");
+  await plugin.invoke("action", "save", { action: "save", form: { v: "kept" } });
+  const before = await plugin.invoke("view", "settings", {});
+  check(
+    "a plugin can write to its own store and read it back",
+    before.kind === "view" ? before.view.blocks[0] : null,
+    { type: "text", text: "kept", tone: "default" },
+  );
+
+  const updated = await install({ "plugin.json": manifestOf({ version: "0.2.0" }), "server.js": SERVER });
+  check("installing the same id again is an update", updated.kind === "ok" ? updated.replaced : updated, "0.1.1");
+  check("and the row is the new version", host.list().map((one) => one.version), ["0.2.0"]);
+  const after = await host.find("board")?.invoke("view", "settings", {});
+  check(
+    "what it stored survived the update",
+    after?.kind === "view" ? after.view.blocks[0] : null,
+    { type: "text", text: "kept", tone: "default" },
+  );
+  check(
+    "the old version's directory is gone",
+    [existsSync(join(root, "plugins", "board", "0.1.1")), existsSync(join(root, "plugins", "board", "0.2.0"))],
+    [false, true],
+  );
+
+  // Reinstalling the same version is how somebody iterates on a plugin they are
+  // writing. It used to fail `ENOTEMPTY`, because the guard on the removal was
+  // comparing an unresolved root against a path that did not exist yet.
+  const again = await install({ "plugin.json": manifestOf({ version: "0.2.0" }), "server.js": SERVER });
+  check("reinstalling the same version works", again.kind, "ok");
+
+  /* ---------------------------------------------------------------- *
+   * A refusal changes nothing, which is the second half of every one of them.
+   * ---------------------------------------------------------------- */
+  const refusals: [string, Record<string, string>, string][] = [
+    ["no manifest at all", { "server.js": SERVER }, "manifest_missing"],
+    ["no server.js beside it", { "plugin.json": manifestOf({ version: "9.9.9" }) }, "entry_missing"],
+    ["a manifest that is not JSON", { "plugin.json": "{", "server.js": SERVER }, "manifest_unreadable"],
+    ["an id this daemon will not make a directory of", { "plugin.json": manifestOf({ id: "A B" }), "server.js": SERVER }, "manifest_invalid"],
+    ["an api from the future", { "plugin.json": manifestOf({ api: 99, version: "9.9.9" }), "server.js": SERVER }, "plugin_api_too_new"],
+  ];
+  for (const [name, files, code] of refusals) {
+    const answer = await install(files);
+    check(name, answer.kind === "refused" ? answer.code : answer.kind, code);
+  }
+  check(
+    "and after every one of them the machine is exactly as it was",
+    [host.list().map((one) => [one.id, one.version, one.state]), existsSync(join(root, "plugins", "board", "9.9.9"))],
+    [[["board", "0.2.0", "running"]], false],
+  );
+
+  const empty = await host.install({ body: bodyOf(gzipSync(Buffer.alloc(1024))), name: "empty.tar.gz" });
+  check("an archive with nothing in it", empty.kind === "refused" ? empty.code : empty.kind, "archive_empty");
+  const junk = await host.install({ body: bodyOf(Buffer.from("not an archive")), name: "x.tar.gz" });
+  check("something that is not an archive", junk.kind === "refused" ? junk.code : junk.kind, "unsupported_archive");
+
+  /* ---------------------------------------------------------------- *
+   * The archive reader's own refusals, in this route's vocabulary.
+   *
+   * ⚠ **`unpackArchive` is shared with `POST /fs/import` and the codes are not.**
+   * One unpacker, one set of containment rules — `..` refused rather than
+   * normalised, the ceiling charged against what the decompressor produced — and
+   * then each caller translates an `ArchiveError` into its own namespace: an
+   * import answers `archive_too_large` where a plugin answers
+   * `plugin_unpacked_too_large`. The import section drives every one of these
+   * *shapes* already; what it cannot drive is `archiveCode`, which is the whole
+   * translation and which nothing reached.
+   *
+   * `PLUGIN_LIMITS` is the other half of the same argument: 2 MiB on the wire,
+   * 8 MiB unpacked and 500 members, against the import's 50 MiB / 500 MiB /
+   * 20,000. The same archive is refused at wildly different sizes depending on
+   * which door it arrived at, which is exactly why the numbers are a parameter and
+   * nothing in `safeMemberPath` is.
+   *
+   * Four arms rather than five: `ArchiveError("empty")` is raised only inside
+   * `importArchive`, so the `archive_empty` arm of `archiveCode` is unreachable
+   * from here — `unpackArchive` reports an empty archive as a *kind* and `install`
+   * answers that itself, which is the case two assertions up.
+   * ---------------------------------------------------------------- */
+  const { PLUGIN_LIMITS } = await import("../src/archive.js");
+
+  /**
+   * A tar whose header lies about how long its member is.
+   *
+   * ⚠ **Every archive `tarOf` writes is one the reader could have trusted**, which
+   * is why none of them can reach `archive_unreadable`: the size field is computed
+   * from the bytes that follow it. Only a member *declaring* more than it carries
+   * walks the reader off the end of the stream, and a size field somebody else
+   * wrote is the entire reason that arm exists. The import section's own builder
+   * makes the same point with its `declaredSize`, and it is deliberately not
+   * borrowed — that one exists to write archives no honest tool produces.
+   */
+  const lyingTarGz = (): Buffer => {
+    const head = Buffer.alloc(512);
+    head.write("plugin.json", 0, "utf8");
+    head.write("000644 \0", 100);
+    head.write("000000 \0", 108);
+    head.write("000000 \0", 116);
+    // Four kilobytes promised; five hundred and twelve bytes follow.
+    head.write((4096).toString(8).padStart(11, "0") + " ", 124);
+    head.write("00000000000 ", 136);
+    head.write("        ", 148);
+    head.write("0", 156);
+    head.write("ustar\0", 257);
+    head.write("00", 263);
+    let sum = 0;
+    for (const byte of head) sum += byte;
+    head.write(sum.toString(8).padStart(6, "0") + "\0 ", 148);
+    return gzipSync(Buffer.concat([head, Buffer.alloc(512, 0x7a)]));
+  };
+
+  const crowded: Record<string, string> = {};
+  for (let index = 0; index <= PLUGIN_LIMITS.maxEntries; index += 1) crowded[`f${index}.txt`] = "x";
+  const archiveRefusals: [string, Buffer, string][] = [
+    ["a member that climbs out of the tree", tarOf({ "plugin.json": manifestOf(), "../escaped.txt": "x" }), "archive_unsafe"],
+    ["more members than a plugin has", tarOf(crowded), "plugin_too_many_entries"],
+    [
+      "one that unpacks past what a plugin may be",
+      tarOf({ "plugin.json": manifestOf(), "big.js": "x".repeat(PLUGIN_LIMITS.maxUnpackedBytes + 1) }),
+      "plugin_unpacked_too_large",
+    ],
+    ["one this daemon cannot read to the end", lyingTarGz(), "archive_unreadable"],
+  ];
+  for (const [name, bytes, code] of archiveRefusals) {
+    const answer = await host.install({ body: bodyOf(bytes), name: "p.tar.gz" });
+    check(name, answer.kind === "refused" ? answer.code : answer.kind, code);
+  }
+  /*
+   * The second half of every one of them, and `readdirSync` rather than an
+   * `existsSync` per case: three of those four are refused *after* members have
+   * already been written, so what has to be true is that the plugin root holds
+   * nothing but the plugin that was there — no staging directory, no partial tree
+   * under a name nobody will look for again.
+   */
+  check(
+    "and after every one of those the machine is exactly as it was",
+    [host.list().map((one) => [one.id, one.version, one.state]), readdirSync(join(root, "plugins"))],
+    [[["board", "0.2.0", "running"]], ["board"]],
+  );
+
+  /* ---------------------------------------------------------------- *
+   * One install at a time, for the whole daemon.
+   *
+   * Q7.97's argument for `POST /fs/import` verbatim: this is a route with **no
+   * accounting that outlives the request** — an installed plugin is charged
+   * against nothing once it has landed — and the relay allows 256 concurrent
+   * streams, so a per-request size cap cannot see what a hundred of them do to a
+   * disk. The bound has to be on arrival, and a person installs a plugin about as
+   * often as they install anything.
+   *
+   * The version is the one already there, so whichever of the two wins leaves the
+   * machine where the cases below expect to find it — and the losing body is
+   * cancelled rather than read, which is what keeps a refusal from parking a
+   * sender against the relay's window.
+   * ---------------------------------------------------------------- */
+  const contended = tarOf({ "plugin.json": manifestOf({ version: "0.2.0" }), "server.js": SERVER });
+  const overlapping = await Promise.all([
+    host.install({ body: bodyOf(contended), name: "a.tar.gz" }),
+    host.install({ body: bodyOf(contended), name: "b.tar.gz" }),
+  ]);
+  check(
+    "two at once, and exactly one of them is turned away",
+    overlapping.map((one) => one.kind).sort(),
+    ["busy", "ok"],
+  );
+  check("the one that landed is still the only plugin", host.list().map((one) => [one.id, one.version]), [["board", "0.2.0"]]);
+
+  /* ---------------------------------------------------------------- *
+   * An update that will not start puts everything back.
+   *
+   * The most important case here: a person pushing a broken update to a machine
+   * they are not sitting in front of must end up with the plugin they had, not
+   * with none.
+   * ---------------------------------------------------------------- */
+  const broken = await install({
+    "plugin.json": manifestOf({ version: "0.3.0" }),
+    "server.js": 'throw new Error("this plugin is broken");',
+  });
+  check("a plugin that throws on load is refused", broken.kind === "refused" ? broken.code : broken.kind, "plugin_start_failed");
+  report(
+    "and the refusal says what the plugin said",
+    broken.kind === "refused" && broken.message.includes("this plugin is broken"),
+    broken.kind === "refused" ? broken.message.slice(0, 60) : broken.kind,
+  );
+  check("the old version is still the installed one", host.list().map((one) => one.version), ["0.2.0"]);
+  check("its directory was not touched", existsSync(join(root, "plugins", "board", "0.2.0")), true);
+  check("and the broken one left nothing behind", existsSync(join(root, "plugins", "board", "0.3.0")), false);
+  const survived = await host.find("board")?.invoke("view", "settings", {});
+  check(
+    "the plugin that was there is running again",
+    survived?.kind === "view" ? survived.view.blocks[0] : null,
+    { type: "text", text: "kept", tone: "default" },
+  );
+
+  /* ---------------------------------------------------------------- *
+   * The same refusal, at the version that is already installed.
+   *
+   * ⚠ **The case above passes for a reason that is not the rule.** It pushes
+   * 0.3.0 over 0.2.0, so the two live in different directories and the rollback
+   * has somewhere to roll back *to*. Reinstalling the version that is already
+   * there is the documented way to iterate on a plugin somebody is writing —
+   * `docs/PLUGINS.md` opens on it — and there the destination *is* the running
+   * plugin's own directory. Clearing it first destroyed the working copy and
+   * then removed the broken one on top, leaving a row naming a version whose
+   * tree was gone and a plugin that could not be started again. Measured before
+   * `install` moved the old tree aside instead: "Cannot find module
+   * .../board/0.2.0/server.js".
+   * ---------------------------------------------------------------- */
+  const clobber = await install({
+    "plugin.json": manifestOf({ version: "0.2.0" }),
+    "server.js": 'throw new Error("broken at the same version");',
+  });
+  check("a broken build at the installed version is refused", clobber.kind === "refused" ? clobber.code : clobber.kind, "plugin_start_failed");
+  check("the tree it would have replaced is still there", existsSync(join(root, "plugins", "board", "0.2.0", "server.js")), true);
+  check("and nothing was left lying beside it", readdirSync(join(root, "plugins", "board")), ["0.2.0"]);
+  const clobbered = await host.find("board")?.invoke("view", "settings", {});
+  check(
+    "the plugin that was there is still the one running",
+    clobbered?.kind === "view" ? clobbered.view.blocks[0] : null,
+    { type: "text", text: "kept", tone: "default" },
+  );
+
+  /* ---------------------------------------------------------------- *
+   * And the same again for a plugin somebody has switched off.
+   *
+   * ⚠ **`enabled` used to gate the whole proof.** A disabled plugin's update was
+   * committed without the new build ever having run: the row was rewritten and
+   * the previous version's directory removed, so re-enabling it was the first
+   * anybody heard it was broken, with nothing to go back to. The build is now
+   * started whatever the switch says and stopped again straight after, which is
+   * what the third case here is for — a *good* update to a disabled plugin must
+   * still be off when it lands.
+   * ---------------------------------------------------------------- */
+  /*
+   * `setEnabled` answers `"busy"` while an install holds the daemon-wide mutex —
+   * see the case at the end of this section. None of the calls below is racing
+   * one, so a `"busy"` here would be a defect rather than a state to assert
+   * around: it is turned into `null` so the existing `?.` reads on, and the
+   * dedicated case is what proves the refusal actually happens.
+   */
+  const switched = async (id: string, on: boolean) => {
+    const answer = await host.setEnabled(id, on);
+    return answer === "busy" ? null : answer;
+  };
+  check("switching it off before an update", (await switched("board", false))?.enabled, false);
+  const offBroken = await install({
+    "plugin.json": manifestOf({ version: "0.4.0" }),
+    "server.js": 'throw new Error("broken while switched off");',
+  });
+  check("a broken update is refused even for a plugin that would not have run", offBroken.kind === "refused" ? offBroken.code : offBroken.kind, "plugin_start_failed");
+  check("the row still names the version that works", host.list().map((one) => [one.version, one.enabled]), [["0.2.0", false]]);
+  check("whose tree is still there", existsSync(join(root, "plugins", "board", "0.2.0", "server.js")), true);
+  check("and the broken one left nothing behind", existsSync(join(root, "plugins", "board", "0.4.0")), false);
+  const offGood = await install({ "plugin.json": manifestOf({ version: "0.5.0" }), "server.js": SERVER });
+  check("a good update to a switched-off plugin lands", offGood.kind === "ok" ? offGood.replaced : offGood, "0.2.0");
+  check("and is still switched off, at the new version", host.list().map((one) => [one.version, one.state, one.enabled]), [["0.5.0", "stopped", false]]);
+  check("with what it kept", stores.pluginData.keys("board", "").length > 0, true);
+  check("switching it back on", (await switched("board", true))?.state, "running");
+
+  /* ---------------------------------------------------------------- *
+   * Switching one off, and removing it.
+   * ---------------------------------------------------------------- */
+  check("switching it off", (await switched("board", false))?.enabled, false);
+  check("and it stops", host.list().map((one) => one.state), ["stopped"]);
+  check("a plugin that is off will not draw", await host.find("board")?.invoke("view", "settings", {}).then(
+    () => "drew",
+    (error: unknown) => (error as { code?: string }).code ?? "threw",
+  ), "plugin_unavailable");
+  check("switching it back on", (await switched("board", true))?.enabled, true);
+  const revived = await host.find("board")?.invoke("view", "settings", {});
+  check(
+    "and it still has what it kept",
+    revived?.kind === "view" ? revived.view.blocks[0] : null,
+    { type: "text", text: "kept", tone: "default" },
+  );
+
+  /* ---------------------------------------------------------------- *
+   * One mutation at a time, for the whole daemon.
+   *
+   * The mutex used to cover installs against each other and nothing else, so a
+   * `DELETE` landing while an archive was still being read took the row, the
+   * directory and every `plugin_data` key — and the install then re-created the
+   * row and left the plugin running with its data gone, answering `replaced:
+   * null` because `existing` had been captured before the removal. Both halves
+   * are asserted: that the mutation is refused while the install holds the flag,
+   * and that what the plugin kept is still there when the install lands.
+   * ---------------------------------------------------------------- */
+  {
+    const stalled = stallingBody(tarOf({ "plugin.json": manifestOf({ version: "0.6.0" }), "server.js": SERVER }));
+    const flight = host.install({ body: stalled.body, name: "board.tgz" });
+    check("a remove during an install is refused rather than run", await host.remove("board"), "busy");
+    check("and so is a switch", await host.setEnabled("board", false), "busy");
+    stalled.release();
+    const landed = await flight;
+    check("and the install it was racing still lands", landed.kind === "ok" ? landed.replaced : landed.kind, "0.5.0");
+    check("with what the plugin kept", stores.pluginData.keys("board", "").length > 0, true);
+    check("and the switch is answerable again", (await switched("board", true))?.enabled, true);
+  }
+
+  check("removing one that is not there", await host.remove("nothing"), false);
+  check("removing one that is", await host.remove("board"), true);
+  check("takes its row", host.list(), []);
+  check("its directory", existsSync(join(root, "plugins", "board")), false);
+  // Its data goes with it, and only here — an update keeps it, which is the pair
+  // this assertion makes with the one above.
+  check("and everything it kept", stores.pluginData.keys("board", ""), []);
+
+  await host.shutdown();
+  await registry.shutdown();
+  stores.close();
+}
+
+process.stdout.write("\nwhat a plugin is allowed to ask the daemon for\n");
+{
+  const { PluginApi, PluginApiError } = await import("../src/plugins/api.js");
+  const { parseManifest } = await import("../src/plugins/manifest.js");
+  const { PLUGIN_SCOPES } = await import("../src/plugins/protocol.js");
+  const { SessionRegistry } = await import("../src/registry.js");
+  const { hostGit } = await import("../src/git.js");
+
+  const manifestWith = (scopes: string[], net: string[] = []): PluginManifest => {
+    const parsed = parseManifest(
+      JSON.stringify({ id: "p", name: "P", version: "1.0.0", api: 1, scopes, net, contributes: {} }),
+    );
+    if (!parsed.ok) throw new Error(parsed.message);
+    return parsed.manifest;
+  };
+
+  const reached: string[] = [];
+  const warned: string[] = [];
+  const api = new PluginApi({
+    registry: new SessionRegistry(),
+    /*
+     * Written out here once, and hoisted to {@link memoryPluginData} the moment
+     * `SqlitePluginDataStore` had to be driven against the same object: the two
+     * implementations refuse and page identically or `checkPluginWrite` is shared
+     * for nothing, and a second copy of the fake is exactly how that stops being
+     * true. Its docblock keeps the argument for why it is keyed on the *pair*.
+     */
+    data: memoryPluginData(),
+    git: hostGit,
+    onWarning: (detail) => warned.push(detail),
+    fetchImpl: ((url: URL) => {
+      reached.push(String(url));
+      return Promise.resolve(new Response("hi", { status: 200 }));
+    }) as unknown as typeof fetch,
+  });
+
+  const codeOf = async (manifest: PluginManifest, method: string, args: unknown = {}): Promise<string> => {
+    try {
+      await api.call(manifest, method, args);
+      return "ok";
+    } catch (error) {
+      return error instanceof PluginApiError ? error.code : "threw";
+    }
+  };
+
+  /*
+   * **Every method, refused for a plugin that declared nothing.** Written as a
+   * sweep over one manifest rather than as a case per method, so a method added
+   * without a `SCOPE_OF` entry is caught here rather than being reachable by
+   * everybody — which is the failure mode that gate has.
+   */
+  const nothing = manifestWith([]);
+  const METHODS: [string, unknown][] = [
+    ["sessions.list", {}],
+    ["sessions.get", { id: "s" }],
+    ["sessions.events", { id: "s" }],
+    ["sessions.changes", { id: "s" }],
+    ["sessions.diff", { id: "s", path: "a" }],
+    ["sessions.workspace", { id: "s" }],
+    ["sessions.create", { agent: "claude", cwd: "/tmp" }],
+    ["sessions.prompt", { id: "s", text: "hi" }],
+    ["sessions.cancel", { id: "s" }],
+    ["sessions.stop", { id: "s" }],
+    ["sessions.setMeta", { id: "s" }],
+    ["sessions.answerPermission", { id: "s", permissionId: "p", optionId: "o" }],
+    ["sessions.answerElicitation", { id: "s", elicitationId: "e" }],
+    ["agents.list", {}],
+    ["files.read", { sessionId: "s", path: "a" }],
+    ["store.get", { key: "k" }],
+    ["store.set", { key: "k", value: 1 }],
+    ["store.delete", { key: "k" }],
+    ["store.keys", {}],
+    ["store.entries", {}],
+    ["net.fetch", { url: "https://api.example.com/" }],
+  ];
+  const denied: string[] = [];
+  for (const [method, args] of METHODS) {
+    if ((await codeOf(nothing, method, args)) !== "plugin_scope_denied") denied.push(method);
+  }
+  check("every method needs a scope, and a plugin with none reaches nothing", denied, []);
+  report(
+    "and every scope in the union is the gate for at least one of them",
+    PLUGIN_SCOPES.length === 5,
+    `${METHODS.length} methods behind ${PLUGIN_SCOPES.length} scopes`,
+  );
+  /*
+   * ⚠ **The number is written here and has to be moved by hand, which is the
+   * whole of what this line is worth.** `SCOPE_OF` holds twenty-two entries —
+   * twenty-one scoped methods plus `log`, which needs none and is driven on its
+   * own below — and the table above is a hand-written mirror of it. The sweep
+   * claims "every method", and that claim is only as good as somebody having
+   * added a row here; nothing on this side can derive the list, because `SCOPE_OF`
+   * is module-private and exporting it so a driver could read it would make the
+   * gate importable by anything else that wanted to reason about it. **Measured
+   * while writing this**: `store.entries` had been added to `SCOPE_OF` and never
+   * here, so the assertion above was true of twenty of the twenty-one and said
+   * "every method" about a table missing one. A twenty-second scoped method needs
+   * a row and this count moved in the same edit.
+   */
+  check("and the sweep is the whole of that table", METHODS.length, 21);
+
+  check("a method that does not exist", await codeOf(manifestWith(["store"]), "sessions.destroy"), "unknown_method");
+  // The one method with no scope at all, because it is how a plugin says anything
+  // about itself and refusing it would make a plugin that declared nothing silent.
+  check("logging needs nothing", await codeOf(nothing, "log", { message: "hello" }), "ok");
+  report("and it reaches the warning sink", warned.some((one) => one.includes("hello")), `${warned.length} warnings`);
+
+  /*
+   * A scope is refused **and reported**. A plugin exceeding what it told somebody
+   * it needed is exactly the thing an operator would want to know about, and it is
+   * invisible from the plugin's own screens.
+   */
+  const before = warned.length;
+  await codeOf(nothing, "store.get", { key: "k" });
+  report("a refused scope is reported as well as refused", warned.length > before, warned[warned.length - 1] ?? "");
+
+  const stored = manifestWith(["store"]);
+  check("with the scope it works", await codeOf(stored, "store.set", { key: "k", value: { a: 1 } }), "ok");
+  check("and reads back parsed rather than as text", await api.call(stored, "store.get", { key: "k" }), { a: 1 });
+  check("a key that was never written", await api.call(stored, "store.get", { key: "nope" }), null);
+  check("and a prefix listing is a prefix listing", await api.call(stored, "store.keys", { prefix: "k" }), ["k"]);
+
+  /* ---------------------------------------------------------------- *
+   * The one outbound door.
+   * ---------------------------------------------------------------- */
+  const netted = manifestWith(["net"], ["api.example.com"]);
+  check("a host the manifest lists", await codeOf(netted, "net.fetch", { url: "https://api.example.com/x" }), "ok");
+  check("and it really went there", reached, ["https://api.example.com/x"]);
+  check("a host it does not list", await codeOf(netted, "net.fetch", { url: "https://elsewhere.example/" }), "host_not_allowed");
+  check("http rather than https", await codeOf(netted, "net.fetch", { url: "http://api.example.com/" }), "insecure_url");
+  check("something that is not a URL", await codeOf(netted, "net.fetch", { url: "api.example.com" }), "invalid_url");
+  // A refusal on the *host* must not have gone out first.
+  check("and nothing refused was ever requested", reached, ["https://api.example.com/x"]);
+
+  const spray: string[] = [];
+  for (let i = 0; i < 40; i += 1) spray.push(await codeOf(netted, "net.fetch", { url: "https://api.example.com/" }));
+  report(
+    "a plugin cannot poll a host as fast as it likes",
+    spray.includes("fetch_rate_limited"),
+    `${spray.filter((one) => one === "ok").length} of ${spray.length} allowed`,
+  );
+
+  /*
+   * `agents.list` sits behind `sessions.read` rather than a scope of its own: it
+   * is the fact a plugin needs *before* `sessions.create`, and a fifth scope for
+   * one method would be a fifth line somebody has to understand in the install
+   * list.
+   */
+  report(
+    "asking what this machine could run needs only sessions.read",
+    Array.isArray(await api.call(manifestWith(["sessions.read"]), "agents.list", {})),
+    "an array of availability rows",
+  );
+
+  check("a session this machine does not have", await codeOf(manifestWith(["sessions.read"]), "sessions.get", { id: "s_nope" }), "session_not_found");
+  check("and an argument that is not a string", await codeOf(manifestWith(["sessions.read"]), "sessions.get", { id: 7 }), "bad_request");
+
+  /* ---------------------------------------------------------------- *
+   * Which scope, and not merely that there is one.
+   *
+   * ⚠ **The sweep above proves every method needs *a* scope. It cannot prove any
+   * of them needs the right one** — it runs one manifest declaring nothing, so a
+   * table mapping `"sessions.stop"` to `"sessions.read"` would satisfy every
+   * assertion in this file up to here while handing a read-only plugin the verb
+   * that ends somebody's session. The two halves are not the same claim and only
+   * one of them was being made.
+   *
+   * Derived rather than restated: each method is asked five times, once per
+   * manifest holding four of the five scopes, and the scope whose absence is the
+   * one that draws `plugin_scope_denied` is the scope that method actually needs.
+   * That is what a driver can find out from outside `api.ts`. The comparison at
+   * the end is against a literal, which is the copy — **exporting `SCOPE_OF` would
+   * let this be derived instead, and it is deliberately not exported**: it is the
+   * gate, and a gate exported so a test can read it is a gate anything else can
+   * import and reason about.
+   *
+   * Every probe is sent `{}`, so the four that pass the gate fail immediately on
+   * `bad_request` or `session_not_found` rather than doing the thing. That is not
+   * tidiness — with real arguments this loop would call `sessions.create` sixteen
+   * times and `sessions.stop` on whatever it made.
+   * ---------------------------------------------------------------- */
+  const scopeNeededBy = async (method: string): Promise<string> => {
+    const refused: string[] = [];
+    for (const missing of PLUGIN_SCOPES) {
+      const held = PLUGIN_SCOPES.filter((one) => one !== missing);
+      // A manifest declaring `net` must name hosts, so the list rides the scope
+      // rather than being constant — `readNet` refuses the pair that disagrees.
+      const manifest = manifestWith([...held], held.includes("net") ? ["api.example.com"] : []);
+      if ((await codeOf(manifest, method, {})) === "plugin_scope_denied") refused.push(missing);
+    }
+    // Never "the first one refused": a method behind two scopes, or behind none
+    // once somebody edits the table, is a different fact from a mis-mapping and
+    // has to read differently in the output.
+    return refused.length === 1 ? String(refused[0]) : `${refused.length} scopes: ${refused.join("+")}`;
+  };
+  const mapping: [string, string][] = [];
+  for (const [method] of METHODS) mapping.push([method, await scopeNeededBy(method)]);
+  check("and each of them is behind the right one", mapping, [
+    ["sessions.list", "sessions.read"],
+    ["sessions.get", "sessions.read"],
+    ["sessions.events", "sessions.read"],
+    ["sessions.changes", "sessions.read"],
+    ["sessions.diff", "sessions.read"],
+    ["sessions.workspace", "sessions.read"],
+    ["sessions.create", "sessions.write"],
+    ["sessions.prompt", "sessions.write"],
+    ["sessions.cancel", "sessions.write"],
+    ["sessions.stop", "sessions.write"],
+    ["sessions.setMeta", "sessions.write"],
+    ["sessions.answerPermission", "sessions.write"],
+    ["sessions.answerElicitation", "sessions.write"],
+    // The one that is not obvious from its name, and the one a refactor would get
+    // wrong first. See the comment on `SCOPE_OF` for why it is not its own scope.
+    ["agents.list", "sessions.read"],
+    ["files.read", "files.read"],
+    ["store.get", "store"],
+    ["store.set", "store"],
+    ["store.delete", "store"],
+    ["store.keys", "store"],
+    ["store.entries", "store"],
+    ["net.fetch", "net"],
+  ]);
+}
+
+process.stdout.write("\na plugin that will not start, or will not answer\n");
+{
+  const { PluginHost } = await import("../src/plugins/host.js");
+  const { SessionRegistry } = await import("../src/registry.js");
+  const { hostGit } = await import("../src/git.js");
+  const { parseManifest } = await import("../src/plugins/manifest.js");
+  const { openStores } = await import("../src/store/sqlite.js");
+
+  const parsed = parseManifest(
+    JSON.stringify({ id: "p", name: "P", version: "1.0.0", api: 1, scopes: [], contributes: { settings: true } }),
+  );
+  if (!parsed.ok) throw new Error(parsed.message);
+  const manifest = parsed.manifest;
+
+  /**
+   * A child this driver controls completely.
+   *
+   * **This is why `PluginRuntime` is an interface.** A start that never completes,
+   * an invocation that is never answered and a crash after `ready` are the three
+   * paths worth being sure about, and none of them is reachable by spawning a real
+   * process and hoping it misbehaves on cue.
+   */
+  const scripted = (
+    behaviour: { init: "ready" | "fail" | "silent"; answer: "yes" | "silent" },
+  ): { runtime: PluginRuntime; launches: () => number; stops: () => number; crash: () => void } => {
+    let launches = 0;
+    let stops = 0;
+    let crash = (): void => undefined;
+    const runtime: PluginRuntime = {
+      launch(options) {
+        launches += 1;
+        crash = () => options.onExit("exited with code 1");
+        return Promise.resolve({
+          send(message) {
+            if (message.t === "init") {
+              if (behaviour.init === "ready") queueMicrotask(() => options.onMessage({ t: "ready" }));
+              if (behaviour.init === "fail") queueMicrotask(() => options.onMessage({ t: "fail", error: "no" }));
+              return true;
+            }
+            if (message.t === "invoke" && behaviour.answer === "yes") {
+              queueMicrotask(() =>
+                options.onMessage({ t: "done", id: message.id, ok: true, value: { title: null, blocks: [] } }),
+              );
+            }
+            // Reports the write, as `ForkedPlugin` does; nothing here ever refuses one.
+            return true;
+          },
+          stop() {
+            stops += 1;
+            return Promise.resolve();
+          },
+          recentLogs: () => ["a line the child printed"],
+        });
+      },
+    };
+    return { runtime, launches: () => launches, stops: () => stops, crash: () => crash() };
+  };
+
+  const openWith = async (
+    runtime: PluginRuntime,
+  ): Promise<{ host: Awaited<ReturnType<typeof PluginHost.open>>; warnings: string[]; close: () => Promise<void> }> => {
+    const stores = openStores({ path: join(tmp("plugin-life-"), "d.db"), instanceId: `i_${Math.floor(Math.random() * 1e6)}` });
+    stores.plugins.put({
+      id: "p",
+      version: "1.0.0",
+      manifest,
+      enabled: true,
+      installedAt: 1,
+      updatedAt: 1,
+      source: null,
+    });
+    const registry = new SessionRegistry(stores.events, stores.sessions);
+    const warnings: string[] = [];
+    const host = await PluginHost.open({
+      root: join(tmp("plugin-life-root-"), "plugins"),
+      records: stores.plugins,
+      data: stores.pluginData,
+      registry,
+      api: { git: hostGit },
+      onWarning: (detail) => warnings.push(detail),
+      runtime,
+      timeouts: { start: 60, invoke: 60 },
+    });
+    return {
+      host,
+      warnings,
+      close: async () => {
+        await host.shutdown();
+        await registry.shutdown();
+        stores.close();
+      },
+    };
+  };
+
+  const codeOf = async (run: Promise<unknown>): Promise<string> => {
+    try {
+      await run;
+      return "ok";
+    } catch (error) {
+      return (error as { code?: string }).code ?? "threw";
+    }
+  };
+
+  {
+    const silent = scripted({ init: "silent", answer: "yes" });
+    const { host, close } = await openWith(silent.runtime);
+    const plugin = host.find("p");
+    if (plugin === null) throw new Error("no plugin");
+    check("a child that never says it is ready", await codeOf(plugin.invoke("view", "settings", {})), "plugin_unavailable");
+    check("is stopped rather than left running", silent.stops() > 0, true);
+    report("and its failure carries what it printed", plugin.failure?.includes("a line the child printed") === true, plugin.failure ?? "");
+    check("the row says so", host.list().map((one) => one.state), ["failed"]);
+    await close();
+  }
+
+  {
+    const broken = scripted({ init: "fail", answer: "yes" });
+    const { host, close } = await openWith(broken.runtime);
+    const plugin = host.find("p");
+    if (plugin === null) throw new Error("no plugin");
+    /*
+     * Three attempts and then no more, for the reason `autoResume` has a budget:
+     * a plugin that cannot start will not start because it was asked a fourth
+     * time, and a daemon that keeps trying spends a core on it.
+     *
+     * ⚠ **Who is asking decides whether the attempt is charged**, so this drives
+     * both halves. A `view` is `read`-scoped and `PluginScreen` re-reads it on a
+     * timer, so a passive caller must be able to hammer a broken plugin without
+     * moving the counter — otherwise a grant that can press nothing on a screen
+     * spends a budget only `machine:admin` can give back. A `hook` is this
+     * daemon's own traffic and pays. See `StartIntent`.
+     */
+    const launchedBefore = broken.launches();
+    const codes: string[] = [];
+    for (let i = 0; i < 5; i += 1) codes.push(await codeOf(plugin.invoke("view", "settings", {})));
+    check("five read-only views against a broken plugin start nothing", broken.launches(), launchedBefore);
+    check("and every attempt still answers rather than hanging", new Set(codes).has("plugin_unavailable"), true);
+    /*
+     * The supervised half. `deliver` is what the daemon's own hook traffic goes
+     * through, and it drains through `ensureStarted("supervised")` — so this is
+     * the caller that walks the budget down, and the one the refusal is written for.
+     */
+    const hookCodes: string[] = [];
+    for (let i = 0; i < 5; i += 1) hookCodes.push(await codeOf(plugin.invoke("hook", "turn.ended", {})));
+    report("but the daemon's own traffic does spend it", broken.launches() > launchedBefore, `${broken.launches()} launches`);
+    check("and a hook that cannot be delivered still answers", new Set(hookCodes).has("plugin_unavailable"), true);
+    report("and stops at three", broken.launches() <= 3, `${broken.launches()} launches`);
+    report(
+      "the last refusal says it has given up",
+      plugin.failure?.includes("will not be tried again") === true,
+      plugin.failure ?? "",
+    );
+    // Switching it off and on is new information, exactly as a restart is for
+    // auto-resume, so the budget comes back.
+    const beforeToggle = broken.launches();
+    await host.setEnabled("p", false);
+    await host.setEnabled("p", true);
+    report("switching it back on returns the budget", broken.launches() > beforeToggle, `${broken.launches()} launches`);
+    await close();
+  }
+
+  {
+    const mute = scripted({ init: "ready", answer: "silent" });
+    const { host, close } = await openWith(mute.runtime);
+    const plugin = host.find("p");
+    if (plugin === null) throw new Error("no plugin");
+    check("a child that never answers", await codeOf(plugin.invoke("view", "settings", {})), "plugin_timeout");
+    check("and again", await codeOf(plugin.invoke("view", "settings", {})), "plugin_timeout");
+    check("and a third time", await codeOf(plugin.invoke("view", "settings", {})), "plugin_timeout");
+    // Three in a row and it is stopped rather than asked a fourth. A person is
+    // waiting behind each of these, so what matters is that they all *end*.
+    report("three of those stop it", mute.stops() > 0, `${mute.stops()} stops`);
+    await close();
+  }
+
+  {
+    const crashy = scripted({ init: "ready", answer: "yes" });
+    const { host, warnings, close } = await openWith(crashy.runtime);
+    const plugin = host.find("p");
+    if (plugin === null) throw new Error("no plugin");
+    check("a plugin that is up answers", (await plugin.invoke("view", "settings", {})).kind, "view");
+    crashy.crash();
+    check("a child that dies on its own is a failure", host.list().map((one) => one.state), ["failed"]);
+    report("and it is reported", warnings.some((one) => one.includes("exited with code 1")), `${warnings.length} warnings`);
+    await close();
+  }
+}
+
+process.stdout.write("\nhooks reaching a plugin\n");
+{
+  const { PluginHost } = await import("../src/plugins/host.js");
+  const { SessionRegistry } = await import("../src/registry.js");
+  const { hostGit } = await import("../src/git.js");
+  const { openStores } = await import("../src/store/sqlite.js");
+  const { PLUGIN_HOOKS } = await import("../src/plugins/protocol.js");
+
+  /**
+   * A plugin whose answers this driver holds until it lets go.
+   *
+   * The `hold`/`release` pair is what makes the queue drivable at all. `drain` is
+   * sequential — one hook in flight, the next taken only once the last has been
+   * answered — so a runtime that answers immediately empties the queue as fast as
+   * `deliver` fills it and the bound is never reached. Holding the first answer
+   * parks the drain with the queue growing behind it, which is exactly the state
+   * {@link MAX_HOOK_QUEUE} exists for: a plugin that has stopped answering while
+   * the machine keeps working.
+   */
+  const scripted = (): {
+    runtime: PluginRuntime;
+    seen: () => { kind: string; hook: string; session: string; mark: number }[];
+    launches: () => number;
+    hold: () => void;
+    release: () => void;
+  } => {
+    let launches = 0;
+    let holding = false;
+    const seen: { kind: string; hook: string; session: string; mark: number }[] = [];
+    const held: number[] = [];
+    let answer: (id: number) => void = () => undefined;
+    const runtime: PluginRuntime = {
+      launch(options) {
+        launches += 1;
+        answer = (id) => queueMicrotask(() => options.onMessage({ t: "done", id, ok: true, value: null }));
+        return Promise.resolve({
+          send(message) {
+            if (message.t === "init") {
+              queueMicrotask(() => options.onMessage({ t: "ready" }));
+              return true;
+            }
+            if (message.t === "invoke") {
+              const input = message.input as { hook?: unknown; session?: { id?: unknown }; mark?: unknown } | null;
+              seen.push({
+                kind: message.kind,
+                /*
+                 * Read off the **payload** rather than off `name`, because they
+                 * are two writes and only one of them is what a plugin sees: the
+                 * host sends the hook as the invocation's name *and* folds it into
+                 * the object the child is handed, and `runner.ts` passes the
+                 * second one to `hook(ctx, event)`. A plugin switching on
+                 * `event.hook` is switching on this.
+                 */
+                hook: String(input?.hook ?? ""),
+                session: String(input?.session?.id ?? ""),
+                mark: typeof input?.mark === "number" ? input.mark : -1,
+              });
+              if (holding) held.push(message.id);
+              else answer(message.id);
+            }
+            return true;
+          },
+          stop: () => Promise.resolve(),
+          recentLogs: () => [],
+        });
+      },
+    };
+    return {
+      runtime,
+      seen: () => seen,
+      launches: () => launches,
+      hold: () => {
+        holding = true;
+      },
+      release: () => {
+        holding = false;
+        for (const id of held.splice(0)) answer(id);
+      },
+    };
+  };
+
+  /**
+   * Wait until a counter stops moving.
+   *
+   * A fixed sleep would be a guess: one hook is a handful of microtasks and the
+   * queue case below is two hundred and fifty-seven of them in a row. This ends
+   * on the first round that added nothing, so the ordinary case costs one tick.
+   */
+  const settle = async (of: () => number): Promise<void> => {
+    let last = -1;
+    for (let round = 0; round < 400 && last !== of(); round += 1) {
+      last = of();
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+  };
+
+  /**
+   * An agent that cannot be started, on purpose.
+   *
+   * ⚠ **What is being driven here is the announcement, not the agent.**
+   * `registry.create` calls `announce(managed, "created")` *before*
+   * `managed.start()` — the ordering is written into that function so an observer
+   * is attached before the first thing the agent says — so a runtime whose
+   * `launch` throws produces the real announcement, the real `observe` and a real
+   * snapshot in the hook's payload, without this section standing up a second ACP
+   * handshake over pipes. The throw is not incidental either: a start that failed
+   * is an exit, and an exit is the only thing `session.ended` is derived from.
+   */
+  class NoAgent extends LocalRuntime {
+    override async availability(): Promise<AgentAvailability[]> {
+      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null }];
+    }
+    override describe(agent: AgentId): AgentLaunchConfig {
+      return stubAgentConfig(agent);
+    }
+    override async launch(): Promise<never> {
+      throw new Error("this driver has no agent to start");
+    }
+  }
+
+  const root = tmp("hooks-");
+  // Populated *before* the host is opened, which is what makes `seed` a real
+  // question: a board installed on a working machine is empty until somebody
+  // starts something, unless the install offers it what is already there.
+  const registry = new SessionRegistry(
+    new MemoryEventStore(),
+    storeOf([rowFor("s_restored", join(root, "wt"))]),
+    undefined,
+    new NoAgent(),
+  );
+  registry.restore({ reapOrphans: false });
+
+  const plugin = scripted();
+  const stores = openStores({ path: join(tmp("hooks-db-"), "d.db"), instanceId: "i_hooks" });
+  const warnings: string[] = [];
+  const host = await PluginHost.open({
+    root: join(root, "plugins"),
+    records: stores.plugins,
+    data: stores.pluginData,
+    registry,
+    api: { git: hostGit },
+    onWarning: (detail) => warnings.push(detail),
+    runtime: plugin.runtime,
+    timeouts: { start: 500, invoke: 500 },
+  });
+
+  const installed = await host.install({
+    body: bodyOf(
+      tarOf({
+        "plugin.json": JSON.stringify({
+          id: "watcher",
+          name: "Watcher",
+          version: "1.0.0",
+          api: 1,
+          scopes: [],
+          // Every one of them, so a hook added to the union without a `fan` arm
+          // shows up here as a hook nothing ever produced rather than as nothing.
+          contributes: { hooks: [...PLUGIN_HOOKS] },
+        }),
+        "server.js": "export function hook() {}",
+      }),
+    ),
+    name: "watcher.tar.gz",
+  });
+  check("a plugin declaring hooks installs", installed.kind === "ok" ? installed.summary.id : installed, "watcher");
+  check(
+    "and its manifest is what decides which it is sent",
+    installed.kind === "ok" ? installed.summary.contributes.hooks : null,
+    [...PLUGIN_HOOKS],
+  );
+
+  await settle(() => plugin.seen().length);
+  /*
+   * `seed`, which is the one delivery that is not an event: every session this
+   * daemon already knows about, offered to a plugin that has only just arrived.
+   * It is `install`'s last act and it is why `session.created` is the only hook
+   * with two producers.
+   */
+  check(
+    "and it is offered the session that was already here",
+    plugin.seen().map((one) => [one.kind, one.hook, one.session]),
+    [["hook", "session.created", "s_restored"]],
+  );
+
+  const failed = await registry
+    .create({ agent: "kimi", cwd: tmp("hooks-cwd-") })
+    .then(() => null, (error: unknown) => error);
+  report("a session whose agent will not start still threw", failed !== null, String(failed).slice(0, 48));
+  await settle(() => plugin.seen().length);
+  const born = registry.list().map((one) => one.id).filter((id) => id !== "s_restored");
+  check("but the session exists, and there is one of it", born.length, 1);
+  check(
+    "the plugin was told it appeared, and then that it was over",
+    plugin.seen().slice(1).map((one) => [one.hook, one.session === born[0]]),
+    [
+      ["session.created", true],
+      ["session.ended", true],
+    ],
+  );
+
+  /* ---------------------------------------------------------------- *
+   * The three hooks derived from the log.
+   *
+   * ⚠ **Derived, never forwarded.** A plugin is told `turn.ended`, not a
+   * `StoredEvent` — the event union is the wire three agents move, and coupling a
+   * plugin to it would make every ACP change somebody else's breaking change.
+   * Appending straight to the log is therefore the honest way to drive these: it
+   * is exactly what the pump does, and what crosses to the plugin is a summary
+   * this daemon built rather than the row that produced it.
+   * ---------------------------------------------------------------- */
+  const restored = registry.get("s_restored");
+  if (restored === undefined) throw new Error("the restored session vanished");
+  const fromLog = plugin.seen().length;
+  restored.log.append({ type: "turn_end", stopReason: "end_turn", usage: null });
+  restored.log.append({
+    type: "permission_request",
+    permissionId: "perm_1",
+    toolCallId: null,
+    title: "Run the tests?",
+    options: [],
+    decision: null,
+  });
+  restored.log.append({
+    type: "permission_resolved",
+    permissionId: "perm_1",
+    toolCallId: null,
+    title: "Run the tests?",
+    outcome: "selected",
+    optionId: "allow",
+    by: "client",
+  });
+  await settle(() => plugin.seen().length);
+  check(
+    "a turn ending, a question asked and the same question answered",
+    plugin.seen().slice(fromLog).map((one) => one.hook),
+    ["turn.ended", "permission.requested", "permission.resolved"],
+  );
+
+  /* ---------------------------------------------------------------- *
+   * A throwing subscriber is reported and **kept**.
+   *
+   * ⚠ This is the opposite of what `SessionLog.append` does to a listener that
+   * throws, and the difference is the whole reason the guard exists. There a
+   * listener is one WebSocket and evicting it costs that socket its events; here
+   * it is every plugin hook for this session, its unsubscribe is recorded in
+   * `watching`, and `observe` reads that map as "already handled" — so one throw
+   * out of `managed.snapshot()` ended hooks for that session **for the life of the
+   * daemon**, with nothing anywhere saying so and no path back short of a
+   * restart. The second append is the half that matters: a report with the
+   * subscription gone would look identical in the warnings.
+   * ---------------------------------------------------------------- */
+  const realSnapshot = restored.snapshot.bind(restored);
+  (restored as unknown as { snapshot: () => unknown }).snapshot = () => {
+    throw new Error("a snapshot this driver broke");
+  };
+  const beforeThrow = warnings.length;
+  const seenBeforeThrow = plugin.seen().length;
+  restored.log.append({ type: "turn_end", stopReason: "end_turn", usage: null });
+  await settle(() => warnings.length);
+  report(
+    "a hook payload that throws is reported",
+    warnings.slice(beforeThrow).some((one) => one.includes("a snapshot this driver broke")),
+    warnings.at(-1) ?? "nothing reported",
+  );
+  check("and nothing was delivered for it", plugin.seen().length, seenBeforeThrow);
+  (restored as unknown as { snapshot: () => unknown }).snapshot = realSnapshot;
+  restored.log.append({ type: "turn_end", stopReason: "end_turn", usage: null });
+  await settle(() => plugin.seen().length);
+  check(
+    "but the next one still arrives, which is the whole property",
+    plugin.seen().slice(seenBeforeThrow).map((one) => one.hook),
+    ["turn.ended"],
+  );
+
+  /* ---------------------------------------------------------------- *
+   * What a plugin that has stopped answering misses.
+   *
+   * Drop-**oldest**, because the newest events are the ones still worth acting
+   * on: a board catching up cares about the turn that just ended and not about
+   * the one from an hour ago. The count is what keeps that honest — it goes to
+   * `onWarning` rather than being swallowed, since a plugin quietly missing half
+   * its events looks exactly like a plugin with a bug in it.
+   *
+   * `deliver` is called directly rather than through a session, because what is
+   * being driven is the queue and three hundred real turns would be three hundred
+   * fixtures for one bound.
+   * ---------------------------------------------------------------- */
+  const live = host.find("watcher");
+  if (live === null) throw new Error("the plugin vanished");
+  plugin.hold();
+  const beforeFlood = plugin.seen().length;
+  const warnedBeforeFlood = warnings.length;
+  for (let mark = 1; mark <= 300; mark += 1) live.deliver("turn.ended", { hook: "turn.ended", mark });
+  report(
+    "a plugin falling behind is said out loud",
+    warnings
+      .slice(warnedBeforeFlood)
+      .some((one) => one.includes("is behind") && one.includes("hook deliveries dropped")),
+    warnings.at(-1) ?? "nothing reported",
+  );
+  plugin.release();
+  await settle(() => plugin.seen().length);
+  const delivered = plugin.seen().slice(beforeFlood).map((one) => one.mark);
+  // The first was taken by `drain` before the queue could hold anything, so it is
+  // in flight rather than queued and no bound can reach it.
+  check("the one already in flight was delivered", delivered[0], 1);
+  const queued = delivered.slice(1);
+  report(
+    "and what survived is a contiguous run ending at the newest",
+    queued.length > 0 &&
+      queued.length < 299 &&
+      queued.at(-1) === 300 &&
+      queued.every((mark, index) => mark === (queued[0] ?? 0) + index),
+    `${delivered.length} of 300 delivered, ${String(queued[0])}…${String(queued.at(-1))}`,
+  );
+
+  /* ---------------------------------------------------------------- *
+   * Two invocations arriving together join one launch.
+   *
+   * `this.starting ??=` written out longhand, because the passive gate has to sit
+   * between the join and the launch: joining a start somebody else is paying for
+   * is free and starting one is not. Without the memo the second caller loses to a
+   * half-started child and spends a second of the three `MAX_PLUGIN_STARTS`
+   * allows, which is a budget only `machine:admin` can give back.
+   * ---------------------------------------------------------------- */
+  await live.stop();
+  const launchedBefore = plugin.launches();
+  const together = await Promise.all([
+    live.invoke("hook", "turn.ended", { hook: "turn.ended" }).then(() => "answered", () => "refused"),
+    live.invoke("hook", "turn.ended", { hook: "turn.ended" }).then(() => "answered", () => "refused"),
+  ]);
+  check("both are answered", together, ["answered", "answered"]);
+  report(
+    "and one launch served both",
+    plugin.launches() - launchedBefore === 1,
+    `${plugin.launches() - launchedBefore} launches for 2 invocations`,
+  );
+
+  await host.shutdown();
+  await registry.shutdown();
+  stores.close();
+}
+
+process.stdout.write("\nthe plugin routes\n");
+{
+  const { PluginHost } = await import("../src/plugins/host.js");
+  const { SessionRegistry } = await import("../src/registry.js");
+  const { hostGit } = await import("../src/git.js");
+  const { parseManifest } = await import("../src/plugins/manifest.js");
+  const { PLUGIN_API_VERSION } = await import("../src/plugins/protocol.js");
+  const { openStores } = await import("../src/store/sqlite.js");
+
+  const parsed = parseManifest(
+    JSON.stringify({
+      id: "p",
+      name: "P",
+      version: "1.0.0",
+      api: 1,
+      scopes: [],
+      contributes: { screen: { title: "P" }, settings: true, actions: [{ id: "go", title: "Go", on: "screen" }] },
+    }),
+  );
+  if (!parsed.ok) throw new Error(parsed.message);
+
+  const runtime: PluginRuntime = {
+    launch(options) {
+      return Promise.resolve({
+        send(message) {
+          if (message.t === "init") {
+            queueMicrotask(() => options.onMessage({ t: "ready" }));
+            return true;
+          }
+          if (message.t === "invoke") {
+            queueMicrotask(() =>
+              options.onMessage({
+                t: "done",
+                id: message.id,
+                ok: true,
+                value: { title: message.name, blocks: [{ type: "text", text: message.name, tone: "default" }] },
+              }),
+            );
+          }
+          // Reports the write, as `ForkedPlugin` does; nothing here ever refuses one.
+          return true;
+        },
+        stop: () => Promise.resolve(),
+        recentLogs: () => [],
+      });
+    },
+  };
+
+  const stores = openStores({ path: join(tmp("plugin-routes-"), "d.db"), instanceId: "i_routes" });
+  stores.plugins.put({
+    id: "p",
+    version: "1.0.0",
+    manifest: parsed.manifest,
+    enabled: true,
+    installedAt: 1,
+    updatedAt: 1,
+    source: null,
+  });
+  const registry = new SessionRegistry(stores.events, stores.sessions);
+  const host = await PluginHost.open({
+    root: join(tmp("plugin-routes-root-"), "plugins"),
+    records: stores.plugins,
+    data: stores.pluginData,
+    registry,
+    api: { git: hostGit },
+    runtime,
+    timeouts: { start: 500, invoke: 500 },
+  });
+
+  const { app: pluginApp } = createApp({
+    registry,
+    verifier,
+    instanceId: "i_routes",
+    startedAt: Date.now(),
+    plugins: host,
+  });
+  const { app: bareApp } = createApp({
+    registry,
+    verifier,
+    instanceId: "i_bare",
+    startedAt: Date.now(),
+  });
+
+  const call = async (
+    app: typeof pluginApp,
+    path: string,
+    init: RequestInit = {},
+    token = tokenFor("routes"),
+  ): Promise<{ status: number; body: Record<string, unknown> }> => {
+    const response = await app.request(path, {
+      ...init,
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    });
+    const text = await response.text();
+    return { status: response.status, body: text.length === 0 ? {} : (JSON.parse(text) as Record<string, unknown>) };
+  };
+  const codeOf = (body: Record<string, unknown>): string =>
+    ((body["error"] as { code?: string } | undefined)?.code ?? "none");
+
+  const listing = await call(pluginApp, "/plugins");
+  // The api is read from the constant rather than written down, so this assertion
+  // survives the next accept-both step instead of pinning today's ceiling.
+  check(
+    "the listing",
+    [listing.status, (listing.body["plugins"] as unknown[]).length, listing.body["api"]],
+    [200, 1, PLUGIN_API_VERSION],
+  );
+
+  /*
+   * **A daemon built without a plugin host answers 503, never an empty list.**
+   * "There are none" and "this daemon does not do that" are different answers, and
+   * a client shown the first has no way to discover the second. Same shape
+   * `credentials`, `logins` and `uploads` already use.
+   */
+  const off = await call(bareApp, "/plugins");
+  check("a daemon with plugins switched off", [off.status, codeOf(off.body)], [503, "plugins_unavailable"]);
+  /*
+   * ⚠ **And the same answer from all six, not from the one route somebody
+   * happened to drive.** That refusal is written once now — `withPlugins` wraps
+   * every one of them — and it was written six times before, with the sentence
+   * retyped at five of them and each free to drift into saying something slightly
+   * different about the same state. The collapse does not make the sweep
+   * unnecessary; the sweep is what keeps the collapse true, because a seventh
+   * route written outside the wrapper answers 404 or 500 here rather than 503.
+   *
+   * `POST /plugins` is the one worth being deliberate about: it is a streaming
+   * route, so this refusal is also a body nobody read being released, which is
+   * what the exemption middleware's `finally` is for.
+   */
+  const sweep: [string, RequestInit][] = [
+    ["/plugins", {}],
+    ["/plugins", { method: "POST", body: "an archive nobody will look at" }],
+    ["/plugins/p", { method: "DELETE" }],
+    ["/plugins/p/state", { method: "POST", body: JSON.stringify({ enabled: true }) }],
+    ["/plugins/p/views/screen", {}],
+    ["/plugins/p/actions/go", { method: "POST", body: "{}" }],
+  ];
+  const swept: [number, string][] = [];
+  for (const [path, init] of sweep) {
+    const answer = await call(bareApp, path, init);
+    swept.push([answer.status, codeOf(answer.body)]);
+  }
+  check(
+    "and so does every one of the six",
+    swept,
+    sweep.map(() => [503, "plugins_unavailable"]),
+  );
+
+  check(
+    "no credential at all",
+    (await pluginApp.request("/plugins")).status,
+    401,
+  );
+
+  const view = await call(pluginApp, "/plugins/p/views/screen");
+  check("a screen", [view.status, ((view.body["result"] as { view?: { title?: string } })?.view?.title ?? null)], [200, "screen"]);
+  const settings = await call(pluginApp, "/plugins/p/views/settings");
+  check("and a settings pane", ((settings.body["result"] as { view?: { title?: string } })?.view?.title ?? null), "settings");
+
+  const noView = await call(pluginApp, "/plugins/p/views/board");
+  check("a view that is not one of the two", [noView.status, codeOf(noView.body)], [404, "view_not_found"]);
+  const noPlugin = await call(pluginApp, "/plugins/nope/views/screen");
+  check("a plugin that is not installed", [noPlugin.status, codeOf(noPlugin.body)], [404, "plugin_not_found"]);
+
+  const acted = await call(pluginApp, "/plugins/p/actions/go", { method: "POST", body: "{}" });
+  check("an action the manifest declares", acted.status, 200);
+  /*
+   * An action id reaching a plugin is a string somebody put in a URL. Checked here
+   * rather than inside the plugin, because a plugin author writing a `switch` over
+   * their own ids should not also have to defend against ones they never declared.
+   */
+  const undeclared = await call(pluginApp, "/plugins/p/actions/nope", { method: "POST", body: "{}" });
+  check("one it does not", [undeclared.status, codeOf(undeclared.body)], [404, "action_not_found"]);
+
+  const state = await call(pluginApp, "/plugins/p/state", { method: "POST", body: JSON.stringify({ enabled: false }) });
+  check("switching one off over HTTP", [state.status, ((state.body["plugin"] as { enabled?: boolean })?.enabled ?? null)], [200, false]);
+  const badState = await call(pluginApp, "/plugins/p/state", { method: "POST", body: JSON.stringify({ enabled: "no" }) });
+  check("with something that is not a boolean", [badState.status, codeOf(badState.body)], [400, "bad_request"]);
+
+  /* ---------------------------------------------------------------- *
+   * The other axis.
+   *
+   * These scopes are the **caller's**, and they are not the plugin's. A read-only
+   * grant may look at a plugin's screen and may press nothing on it; installing
+   * needs `machine:admin`, which is the same scope removing a workspace needs and
+   * the only other route that asks for it. Neither has anything to say about what
+   * the plugin itself may reach, which is `manifest.scopes` and is checked
+   * somewhere else entirely.
+   * ---------------------------------------------------------------- */
+  const readOnly = tokenWith("reader", ["session:read"]);
+  const writer = tokenWith("writer", ["session:read", "session:write"]);
+  const readList = await call(pluginApp, "/plugins", {}, readOnly);
+  check("a read-only grant may list plugins", readList.status, 200);
+  /*
+   * ⚠ **The positive half, which is the half that was only ever asserted in
+   * prose.** "May look at a plugin's screen and press nothing on it" is one
+   * sentence and two claims, and a `read` that had drifted to `write` would break
+   * the sheet for every read-only grant on the machine while every assertion here
+   * went on passing — the negative half below cannot see it.
+   *
+   * Switched back on with an admin token first, because the pair is only a pair
+   * while there is something to look at: a disabled plugin answers 503 for a
+   * reason that has nothing to do with who is asking, and a 503 read as "allowed"
+   * would make this assertion pass against a route nobody may reach.
+   */
+  await call(pluginApp, "/plugins/p/state", { method: "POST", body: JSON.stringify({ enabled: true }) });
+  const readView = await call(pluginApp, "/plugins/p/views/screen", {}, readOnly);
+  check(
+    "and may look at its screen",
+    [readView.status, ((readView.body["result"] as { view?: { title?: string } })?.view?.title ?? null)],
+    [200, "screen"],
+  );
+  const readAction = await call(pluginApp, "/plugins/p/actions/go", { method: "POST", body: "{}" }, readOnly);
+  check("and may press nothing", [readAction.status, codeOf(readAction.body)], [403, "insufficient_scope"]);
+  const writerInstall = await call(pluginApp, "/plugins", { method: "POST", body: "" }, writer);
+  check("installing needs more than session:write", [writerInstall.status, codeOf(writerInstall.body)], [403, "insufficient_scope"]);
+  const writerRemove = await call(pluginApp, "/plugins/p", { method: "DELETE" }, writer);
+  check("and so does removing", [writerRemove.status, codeOf(writerRemove.body)], [403, "insufficient_scope"]);
+  const writerState = await call(pluginApp, "/plugins/p/state", { method: "POST", body: JSON.stringify({ enabled: true }) }, writer);
+  check("and switching one off", [writerState.status, codeOf(writerState.body)], [403, "insufficient_scope"]);
+
+  /*
+   * Only `GET`, `POST` and `DELETE`, which is what `CORS_ALLOW_METHODS` advertises
+   * — the driver asserts that containment globally, and this is the note saying
+   * these six routes were written inside it deliberately.
+   */
+  const removed = await call(pluginApp, "/plugins/p", { method: "DELETE" });
+  check("removing one", [removed.status, removed.body["removed"]], [200, true]);
+  const gone = await call(pluginApp, "/plugins/p", { method: "DELETE" });
+  check("and removing it again", [gone.status, codeOf(gone.body)], [404, "plugin_not_found"]);
+
+  const verbs = new Set(
+    pluginApp.routes.filter((route) => route.path.startsWith("/plugins")).map((route) => route.method.toUpperCase()),
+  );
+  check("the plugin routes use no verb the CORS list withholds", [...verbs].sort(), ["DELETE", "GET", "POST"]);
+
+  /*
+   * ⚠ **`shutting_down` is the first thing the install handler tests**, before
+   * the name, before the declared length and before a byte of the body is read.
+   * A daemon on its way out has 20 seconds of shutdown budget and a hard exit
+   * behind it, so unpacking an archive it will never finish starting is work that
+   * ends as a half-published tree with no process to prove it. Driven last here
+   * because it is a one-way flag on the registry, and the routes above need one
+   * that is still serving.
+   */
+  await registry.shutdown();
+  const late = await call(pluginApp, "/plugins", { method: "POST", body: "an archive that arrived too late" });
+  check("installing into a daemon that is going away", [late.status, codeOf(late.body)], [503, "shutting_down"]);
+
+  await host.shutdown();
+  await registry.shutdown();
+  stores.close();
+}
+
+process.stdout.write("\ninstalling a plugin over HTTP, and what each refusal is worth\n");
+{
+  const { PluginHost } = await import("../src/plugins/host.js");
+  const { SessionRegistry } = await import("../src/registry.js");
+  const { hostGit } = await import("../src/git.js");
+  const { openStores } = await import("../src/store/sqlite.js");
+  const { PLUGIN_LIMITS } = await import("../src/archive.js");
+
+  /**
+   * A child that comes straight up, or one whose build will not run.
+   *
+   * `fail` rather than silence for the second, because what is being driven here
+   * is `pluginInstallStatus` and not the start deadline: a start that times out
+   * takes the whole `timeouts.start` window to reach the same code, and the code
+   * is the subject.
+   */
+  const childThat = (starts: boolean): PluginRuntime => ({
+    launch(options) {
+      return Promise.resolve({
+        send(message) {
+          if (message.t === "init") {
+            queueMicrotask(() =>
+              options.onMessage(starts ? { t: "ready" } : { t: "fail", error: "this build will not run" }),
+            );
+            return true;
+          }
+          if (message.t === "invoke") {
+            queueMicrotask(() => options.onMessage({ t: "done", id: message.id, ok: true, value: null }));
+          }
+          return true;
+        },
+        stop: () => Promise.resolve(),
+        recentLogs: () => [],
+      });
+    },
+  });
+
+  const manifestOf = (patch: Record<string, unknown> = {}): string =>
+    JSON.stringify({ id: "board", name: "Board", version: "1.0.0", api: 1, scopes: [], contributes: {}, ...patch });
+  const archiveOf = (patch: Record<string, unknown> = {}): Buffer =>
+    tarOf({ "plugin.json": manifestOf(patch), "server.js": "export function settings() { return {}; }" });
+
+  /**
+   * A daemon whose plugin host is scripted, and the HTTP surface in front of it.
+   *
+   * `refusesToWrite` swaps the record store for one whose `put` throws, which is
+   * the only honest way to reach `plugin_write_failed` — the alternative is a
+   * filesystem that has actually failed, and `PluginRecordStore` is an interface
+   * precisely so that a driver does not need one. It also drives the half of
+   * `install`'s catch nothing else reaches: a throw **after** the tree has been
+   * published used to leave the new `LivePlugin` running out of a directory the
+   * catch had just deleted.
+   */
+  const rigFor = async (
+    name: string,
+    options: { starts: boolean; refusesToWrite?: boolean } = { starts: true },
+  ): Promise<{
+    host: Awaited<ReturnType<typeof PluginHost.open>>;
+    app: ReturnType<typeof createApp>["app"];
+    /** The real store behind the host, so a case can ask what is durably there. */
+    rows: PluginRecordStore;
+    close: () => Promise<void>;
+  }> => {
+    const stores = openStores({ path: join(tmp(`plugin-http-${name}-`), "d.db"), instanceId: `i_http_${name}` });
+    const registry = new SessionRegistry(stores.events, stores.sessions);
+    const records: PluginRecordStore =
+      options.refusesToWrite === true
+        ? {
+            // Delegated one method at a time rather than spread, because a spread
+            // of a class instance copies its fields and loses its prototype.
+            list: () => stores.plugins.list(),
+            get: (id) => stores.plugins.get(id),
+            has: (id) => stores.plugins.has(id),
+            put: () => {
+              throw new Error("the database would not take that row");
+            },
+            setEnabled: (id, enabled, at) => stores.plugins.setEnabled(id, enabled, at),
+            remove: (id) => stores.plugins.remove(id),
+          }
+        : stores.plugins;
+    const host = await PluginHost.open({
+      root: join(tmp(`plugin-http-root-${name}-`), "plugins"),
+      records,
+      data: stores.pluginData,
+      registry,
+      api: { git: hostGit },
+      runtime: childThat(options.starts),
+      timeouts: { start: 500, invoke: 500 },
+    });
+    const { app } = createApp({
+      registry,
+      verifier,
+      instanceId: `i_http_${name}`,
+      startedAt: Date.now(),
+      plugins: host,
+    });
+    return {
+      host,
+      app,
+      rows: stores.plugins,
+      close: async () => {
+        await host.shutdown();
+        await registry.shutdown();
+        stores.close();
+      },
+    };
+  };
+
+  const post = async (
+    app: ReturnType<typeof createApp>["app"],
+    query: string,
+    body: Uint8Array | null,
+    headers: Record<string, string> = {},
+  ): Promise<{ status: number; body: Record<string, unknown> }> => {
+    const init: RequestInit = { method: "POST", headers: { authorization: `Bearer ${tokenFor("http")}`, ...headers } };
+    // Assigned rather than passed as `null`, because a `body: null` and no body at
+    // all are the same Request and the route's own `body === null` arm needs the
+    // second one.
+    if (body !== null) init.body = body;
+    const response = await app.request(`/plugins${query}`, init);
+    const text = await response.text();
+    return { status: response.status, body: text.length === 0 ? {} : (JSON.parse(text) as Record<string, unknown>) };
+  };
+  const errorOf = (body: Record<string, unknown>): { code: string; detail: unknown } => {
+    const error = body["error"] as { code?: string; detail?: unknown } | undefined;
+    return { code: error?.code ?? "none", detail: error?.detail ?? null };
+  };
+
+  const good = await rigFor("good");
+
+  /*
+   * ⚠ **201 and 200 are the answer to "which of the two happened".** Install and
+   * update are one verb because the manifest is what says which — a separate
+   * `PUT` would need the caller to know whether the plugin is already there,
+   * which is a question the archive answers on arrival. `replaced` carries the
+   * version that went, and the status carries the same fact for anything reading
+   * only that.
+   */
+  const created = await post(good.app, "?name=board.tar.gz", new Uint8Array(archiveOf()));
+  check("a plugin arrives over HTTP", [created.status, created.body["replaced"]], [201, null]);
+  const updated = await post(good.app, "?name=board.tar.gz", new Uint8Array(archiveOf({ version: "1.1.0" })));
+  check(
+    "and the same id again is an update rather than a second plugin",
+    [updated.status, updated.body["replaced"], (updated.body["plugin"] as { version?: string } | undefined)?.version],
+    [200, "1.0.0", "1.1.0"],
+  );
+
+  /*
+   * The name is a **label** — recorded beside the row, never turned into a path —
+   * and it is sanitized anyway, because it is echoed back and a control character
+   * in an echoed string is the response-splitting `sanitizeUploadName` exists to
+   * refuse. The same function the upload and import routes use, so all three
+   * agree about what a filename may be.
+   *
+   * The empty case is not a corner: the route reads `?name=` with `?? ""`, so a
+   * client that forgets the query is refused rather than storing `null`.
+   */
+  const badNames: [string, string, string][] = [
+    ["with no name at all", "", "empty"],
+    [
+      "with a name holding a control character",
+      `?name=${encodeURIComponent(`a${String.fromCharCode(7)}b.tgz`)}`,
+      "control_char",
+    ],
+    ["with a name that is a directory rather than a file", "?name=..", "reserved"],
+  ];
+  for (const [label, query, reason] of badNames) {
+    const answer = await post(good.app, query, new Uint8Array(archiveOf()));
+    const error = errorOf(answer.body);
+    check(label, [answer.status, error.code, (error.detail as { reason?: string } | null)?.reason ?? null], [
+      400,
+      "invalid_name",
+      reason,
+    ]);
+  }
+
+  /*
+   * ⚠ **A `content-length` is honoured to refuse and never to accept.** Refusing
+   * on one this daemon believes costs nothing; *trusting* one would let a body
+   * that lies walk past `unpackArchive`'s counter, which is the thing actually
+   * enforcing the bound. Both halves are here: a header claiming more than a
+   * plugin may be is refused with nothing read, and a body that really is larger
+   * is refused by the counter with the same code.
+   */
+  const overDeclared = await post(good.app, "?name=board.tar.gz", new Uint8Array(archiveOf()), {
+    "content-length": String(PLUGIN_LIMITS.maxBytes + 1),
+  });
+  check(
+    "a request declaring more than a plugin may be",
+    [overDeclared.status, errorOf(overDeclared.body).code],
+    [413, "plugin_too_large"],
+  );
+  const overSent = await post(good.app, "?name=board.tar.gz", new Uint8Array(Buffer.alloc(PLUGIN_LIMITS.maxBytes + 1)));
+  check(
+    "and one that simply is",
+    [overSent.status, errorOf(overSent.body).code],
+    [413, "plugin_too_large"],
+  );
+
+  /*
+   * The rest of `pluginInstallStatus`, one case per arm. **The split is by whose
+   * problem it is**: `413` for the bounds so a client can tell "too big" from
+   * "wrong", `409` for a plugin that will not start — the tree is unchanged and
+   * the old version is still running, which is a conflict rather than a failure —
+   * and `400` for everything about the archive or the manifest, all of which are
+   * things the person who built it can fix.
+   */
+  const crowded: Record<string, string> = {};
+  for (let index = 0; index <= PLUGIN_LIMITS.maxEntries; index += 1) crowded[`f${index}.txt`] = "x";
+  const installRefusals: [string, Buffer, number, string][] = [
+    ["more members than a plugin has", tarOf(crowded), 413, "plugin_too_many_entries"],
+    [
+      "one that unpacks past what a plugin may be",
+      tarOf({ "plugin.json": manifestOf(), "big.js": "x".repeat(PLUGIN_LIMITS.maxUnpackedBytes + 1) }),
+      413,
+      "plugin_unpacked_too_large",
+    ],
+    ["an archive with no manifest in it", tarOf({ "server.js": "export function settings() {}" }), 400, "manifest_missing"],
+    ["a manifest this daemon will not read", tarOf({ "plugin.json": "{", "server.js": "x" }), 400, "manifest_unreadable"],
+    ["something that is not an archive at all", Buffer.from("not an archive"), 400, "unsupported_archive"],
+    ["an archive holding nothing", gzipSync(Buffer.alloc(1024)), 400, "archive_empty"],
+  ];
+  for (const [label, bytes, status, code] of installRefusals) {
+    const answer = await post(good.app, "?name=board.tar.gz", new Uint8Array(bytes));
+    check(label, [answer.status, errorOf(answer.body).code], [status, code]);
+  }
+
+  // A `POST` with no body at all, which is what a client that built its request
+  // wrong sends. Refused before the host is reached, so there is nothing to undo.
+  const bodyless = await post(good.app, "?name=board.tar.gz", null);
+  check("a request with no body", [bodyless.status, errorOf(bodyless.body).code], [400, "bad_request"]);
+
+  /*
+   * One install at a time, for the whole daemon, and this is the half that is
+   * actually reachable from outside: the relay allows 256 concurrent streams, so
+   * "a person installs a plugin about as often as they install anything" is a
+   * statement about people rather than about what can arrive.
+   */
+  const both = await Promise.all([
+    post(good.app, "?name=a.tar.gz", new Uint8Array(archiveOf({ version: "1.2.0" }))),
+    post(good.app, "?name=b.tar.gz", new Uint8Array(archiveOf({ version: "1.2.0" }))),
+  ]);
+  report(
+    "two installs at once, and one of them is told to come back",
+    both.some((one) => one.status === 409 && errorOf(one.body).code === "plugin_busy") &&
+      both.some((one) => one.status === 200),
+    both.map((one) => `${one.status} ${errorOf(one.body).code}`).join(", "),
+  );
+  check("and the machine holds one plugin either way", good.host.list().map((one) => one.id), ["board"]);
+  await good.close();
+
+  /*
+   * ⚠ **`409` rather than `400` for a build that will not run, and the reason is
+   * what the machine looks like afterwards.** The tree is unchanged, the row is
+   * untouched and the version that was there is running again — that is a
+   * conflict with the state of the machine, not a malformed request, and a `400`
+   * would tell somebody to go and fix an archive that is fine.
+   */
+  const broken = await rigFor("broken", { starts: false });
+  const refused = await post(broken.app, "?name=board.tar.gz", new Uint8Array(archiveOf()));
+  check(
+    "a plugin whose build will not start",
+    [refused.status, errorOf(refused.body).code],
+    [409, "plugin_start_failed"],
+  );
+  check("and nothing was installed", broken.host.list(), []);
+  await broken.close();
+
+  /*
+   * `503`, because the remedy is on this machine and the request itself was fine
+   * — which is what that status says and what a `400` would deny. The row is
+   * where the throw happens, so everything the try moved has to move back: the
+   * published tree is discarded and the plugin is not left running out of a
+   * directory that is no longer there.
+   */
+  const unwritable = await rigFor("unwritable", { starts: true, refusesToWrite: true });
+  const notWritten = await post(unwritable.app, "?name=board.tar.gz", new Uint8Array(archiveOf()));
+  check(
+    "a row the database would not take",
+    [notWritten.status, errorOf(notWritten.body).code],
+    [503, "plugin_write_failed"],
+  );
+  check("and no row was written", unwritable.rows.has("board"), false);
+  check("and the tree it had published is gone", existsSync(join(unwritable.host.pluginRoot, "board", "1.0.0")), false);
+  /*
+   * ⚠ **The half that used to be missing, and it was the worse half.**
+   * `install`'s catch restored `existing` and had no arm for the case where there
+   * was none — while the `plugin_start_failed` path a few lines above it did, and
+   * the catch's own docblock claimed it made "the same restore" and named
+   * `records.put` on a busy database as its case. So a *first* install that threw
+   * after the tree was published answered `503` and left a `LivePlugin` in `live`
+   * with a child running, no row behind it and no directory under it: `list()`
+   * reported `running` at the version that had just been refused, and went on
+   * doing so until the daemon was restarted, at which point the plugin silently
+   * disappeared. `<root>/board` was left behind as well, which
+   * `PluginHost.installed` reads as something installed — so `remove` of an id
+   * nobody ever installed answered `true`.
+   *
+   * All four are asserted rather than the two that happened to hold, because the
+   * two that held are exactly what made the other two easy to miss.
+   */
+  check("and the listing does not report a plugin that is not installed", unwritable.host.list(), []);
+  check("nor is one left running out of a tree that is gone", await unwritable.host.remove("board"), false);
+  check(
+    "and the directory made to hold it went with it",
+    existsSync(join(unwritable.host.pluginRoot, "board")),
+    false,
+  );
+  await unwritable.close();
+}
+
+process.stdout.write("\nwhat a plugin's own refusal becomes over HTTP\n");
+{
+  const { PluginHost } = await import("../src/plugins/host.js");
+  const { SessionRegistry } = await import("../src/registry.js");
+  const { hostGit } = await import("../src/git.js");
+  const { openStores } = await import("../src/store/sqlite.js");
+  const { parseManifest } = await import("../src/plugins/manifest.js");
+
+  const parsed = parseManifest(
+    JSON.stringify({
+      id: "p",
+      name: "P",
+      version: "1.0.0",
+      api: 1,
+      scopes: [],
+      contributes: { screen: { title: "P" }, settings: true },
+    }),
+  );
+  if (!parsed.ok) throw new Error(parsed.message);
+
+  /**
+   * A child scripted per bucket of `pluginErrorStatus`.
+   *
+   * ⚠ **Read the code, never the status.** That function exists so the statuses
+   * are at least not misleading, not so anybody branches on them, and the split is
+   * by *whose problem it is*: a plugin that is off or broken is on this machine
+   * and the request was fine (`503`), a plugin that did not answer in time is
+   * worth asking again (`504`), and everything else is something downstream of
+   * this daemon answering badly (`502`).
+   */
+  const childThat = (behaviour: "up" | "wontStart" | "silent" | "throws" | "asks"): PluginRuntime => ({
+    launch(options) {
+      /** Which invocation the `asks` child is still holding while it asks. */
+      let holding = 0;
+      return Promise.resolve({
+        send(message) {
+          if (message.t === "init") {
+            queueMicrotask(() =>
+              options.onMessage(
+                behaviour === "wontStart" ? { t: "fail", error: "this build will not run" } : { t: "ready" },
+              ),
+            );
+            return true;
+          }
+          if (message.t === "answer") {
+            // Whatever the host said about the call below, handed back as this
+            // plugin's own view — which is the only way it is visible from
+            // outside the child at all.
+            const said = message.ok ? "allowed" : message.error;
+            queueMicrotask(() =>
+              options.onMessage({ t: "done", id: holding, ok: true, value: { title: said, blocks: [] } }),
+            );
+            return true;
+          }
+          if (message.t === "invoke" && behaviour === "asks") {
+            holding = message.id;
+            queueMicrotask(() => options.onMessage({ t: "call", id: 1, method: "store.get", args: { key: "k" } }));
+            return true;
+          }
+          if (message.t === "invoke" && behaviour !== "silent") {
+            queueMicrotask(() =>
+              options.onMessage(
+                behaviour === "throws"
+                  ? { t: "done", id: message.id, ok: false, error: "the plugin threw" }
+                  : { t: "done", id: message.id, ok: true, value: { title: "screen", blocks: [] } },
+              ),
+            );
+          }
+          return true;
+        },
+        stop: () => Promise.resolve(),
+        recentLogs: () => [],
+      });
+    },
+  });
+
+  const rigFor = async (
+    name: string,
+    behaviour: "up" | "wontStart" | "silent" | "throws" | "asks",
+  ): Promise<{ app: ReturnType<typeof createApp>["app"]; close: () => Promise<void> }> => {
+    const stores = openStores({ path: join(tmp(`plugin-code-${name}-`), "d.db"), instanceId: `i_code_${name}` });
+    stores.plugins.put({
+      id: "p",
+      version: "1.0.0",
+      manifest: parsed.manifest,
+      enabled: true,
+      installedAt: 1,
+      updatedAt: 1,
+      source: null,
+    });
+    const registry = new SessionRegistry(stores.events, stores.sessions);
+    const host = await PluginHost.open({
+      root: join(tmp(`plugin-code-root-${name}-`), "plugins"),
+      records: stores.plugins,
+      data: stores.pluginData,
+      registry,
+      api: { git: hostGit },
+      runtime: childThat(behaviour),
+      // Short, because two of these cases are a deadline being reached and the
+      // production ten seconds each would put most of a minute into `pnpm check`.
+      timeouts: { start: 100, invoke: 100 },
+    });
+    const { app } = createApp({
+      registry,
+      verifier,
+      instanceId: `i_code_${name}`,
+      startedAt: Date.now(),
+      plugins: host,
+    });
+    return {
+      app,
+      close: async () => {
+        await host.shutdown();
+        await registry.shutdown();
+        stores.close();
+      },
+    };
+  };
+
+  const view = async (
+    app: ReturnType<typeof createApp>["app"],
+  ): Promise<{ status: number; code: string; title: string | null }> => {
+    const response = await app.request("/plugins/p/views/screen", {
+      headers: { authorization: `Bearer ${tokenFor("codes")}` },
+    });
+    const text = await response.text();
+    const body = text.length === 0 ? {} : (JSON.parse(text) as Record<string, unknown>);
+    return {
+      status: response.status,
+      code: (body["error"] as { code?: string } | undefined)?.code ?? "none",
+      // Carried out of the view, because the last case below is a plugin
+      // reporting what the daemon told *it* and the route's status says nothing
+      // about that.
+      title: (body["result"] as { view?: { title?: string | null } } | undefined)?.view?.title ?? null,
+    };
+  };
+
+  const up = await rigFor("up", "up");
+  check("a plugin that answers", await view(up.app), { status: 200, code: "none", title: "screen" });
+
+  /*
+   * Eight at once is the bound and the ninth is **refused rather than queued**:
+   * the caller is an HTTP request somebody is waiting on, and holding it behind
+   * seven others only moves the timeout. `503` and not `502` for the same reason
+   * a 429 is not a 400 — the remedy is to ask again.
+   */
+  const flood = await Promise.all(Array.from({ length: 9 }, () => view(up.app)));
+  report(
+    "and nine at once, one of which is told the plugin is busy",
+    flood.some((one) => one.status === 503 && one.code === "plugin_overloaded"),
+    flood.map((one) => `${one.status} ${one.code}`).join(", "),
+  );
+  await up.close();
+
+  const wontStart = await rigFor("wontStart", "wontStart");
+  check("a plugin that will not start", await view(wontStart.app), {
+    status: 503,
+    code: "plugin_unavailable",
+    title: null,
+  });
+  await wontStart.close();
+
+  /*
+   * A timeout is its own code and its own status, because the remedy differs:
+   * `plugin_failed` is the plugin author's problem and `plugin_timeout` is "ask
+   * again, or look at whether this machine is busy".
+   */
+  const silent = await rigFor("silent", "silent");
+  check("a plugin that never answers", await view(silent.app), { status: 504, code: "plugin_timeout", title: null });
+  await silent.close();
+
+  const throws = await rigFor("throws", "throws");
+  check("a plugin that answers with a failure", await view(throws.app), {
+    status: 502,
+    code: "plugin_failed",
+    title: null,
+  });
+  await throws.close();
+
+  /*
+   * ⚠ **`plugin_scope_denied → 403` is the one arm of `pluginErrorStatus` that
+   * nothing can reach, and it is unreachable rather than undriven.** A scope
+   * refusal is raised inside `PluginApi.call`, which is only ever entered from the
+   * child's own `call` message — `LivePlugin.onMessage` catches it and sends the
+   * plugin an `answer` carrying that code, so it crosses back to the **plugin**
+   * and never out of `invoke`. The two axes really are two: the caller's scope
+   * decided this request at the route, and the plugin's decided this call inside
+   * the child, and the second one has no way to become the first one's status.
+   *
+   * Driven from the only side it is visible from rather than written down as a
+   * note: a child that asks for a method its manifest does not declare, and hands
+   * back whatever it was told as its own view. What the route answers is `200`,
+   * because from where it is standing the plugin did its job.
+   */
+  const asks = await rigFor("asks", "asks");
+  const asked = await view(asks.app);
+  check("a plugin asking for something it did not declare is still a 200", [asked.status, asked.code], [200, "none"]);
+  report(
+    "and what it was told is the refusal, delivered to it rather than to the caller",
+    asked.title?.startsWith("plugin_scope_denied: store.get needs") === true,
+    asked.title ?? "nothing came back",
+  );
+  await asks.close();
+}
+
+process.stdout.write("\nbeing told a session appeared\n");
+{
+  const { SessionRegistry } = await import("../src/registry.js");
+
+  const root = tmp("observer-");
+  mkdirSync(root, { recursive: true });
+  const warnings: string[] = [];
+  const registry = new SessionRegistry(
+    undefined,
+    storeOf([rowFor("s_one", root), rowFor("s_two", root)]),
+    undefined,
+    undefined,
+    undefined,
+    (detail) => warnings.push(detail),
+  );
+
+  /*
+   * ⚠ **A throwing observer is reported, kept, and does not stop the ones after
+   * it.** All three are asserted here because all three are the opposite of what
+   * `SessionLog.append` does to a throwing listener, and the difference is
+   * deliberate: there, a listener is one WebSocket and evicting it costs that
+   * socket its events; here it is a whole subsystem, and dropping it on one bad
+   * frame would stop every plugin hook on the machine for the life of the daemon
+   * with nothing anywhere saying so.
+   *
+   * Registered **first**, so "the ones after it" is a real position rather than a
+   * hope about iteration order.
+   */
+  let threw = 0;
+  const unstable = registry.watchSessions(() => {
+    threw += 1;
+    throw new Error("this observer is broken");
+  });
+  const seen: [string, string][] = [];
+  const stop = registry.watchSessions((managed, arrival) => seen.push([managed.id, arrival]));
+
+  registry.restore({ reapOrphans: false });
+
+  check(
+    "every session already here is announced, as restored",
+    seen,
+    [
+      ["s_one", "restored"],
+      ["s_two", "restored"],
+    ],
+  );
+  report("a throwing observer is called for every one of them", threw === 2, `${threw} calls`);
+  report(
+    "each throw is reported rather than swallowed",
+    warnings.filter((one) => one.includes("this observer is broken")).length === 2,
+    `${warnings.length} warnings`,
+  );
+
+  unstable();
+  stop();
+  const before = seen.length;
+  registry.restore({ reapOrphans: false });
+  check("and unsubscribing really stops it", seen.length, before);
+
+  await registry.shutdown();
 }
 
 process.stdout.write(

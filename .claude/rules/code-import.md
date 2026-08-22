@@ -260,10 +260,12 @@ slowest step.
 
 ## Known limitations
 
-- **Q7.62 applies here too, and is still unmeasured.** This route stacks the same
-  auth and scope middlewares above the same body-cancel discipline as the upload
-  route, so whether a refusal past those middlewares really does release the
-  stream is the same open question, now asked in two places.
+- **Q7.62 applied here too and is now enforced, though not through a relay.** This
+  route stacks the same auth and scope middlewares above the same body-cancel
+  discipline as the upload route. A refusal past those middlewares released
+  nothing; the obligation now hangs off the streaming exemption itself, so it
+  covers this route without this route being told. Measured in one process against
+  all three; what a parked sender costs a real tunnel is still not measured.
 - **Nothing verifies a member's CRC.** A zip states one per member and this reader
   discards it, so transport corruption or a malformed producer yields a file that
   is silently wrong rather than an import that fails. The bytes are bounded and

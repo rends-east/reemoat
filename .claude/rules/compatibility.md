@@ -85,6 +85,32 @@ included, because the machine that decides whether `RELAY_PROTOCOL_MIN_VERSION`
 can move is the one that has been dark for a month. The numbers come off the
 handshake, not from asking a daemon anything.
 
+## Which side ships first
+
+**Whoever has to be able to *answer* ships first. Whoever will *ask* ships
+second.** One rule, and the two orders it produces read as contradictory advice
+until you notice which way the call goes:
+
+| The change | Who answers | Ships first |
+|---|---|---|
+| A new relay protocol version | the relay, on the tunnel handshake | **control plane** |
+| A new route on the daemon (`/plugins`, …) | the daemon | **the daemons** |
+
+⚠ **"New client against old daemon is the normal state of the fleet" is a
+statement about what this system *tolerates*, and not a recommendation about what
+to choose.** Tolerating a skew and electing to create one are different acts, and
+reading the first as the second is exactly how a release ships the control plane
+— which carries the web client — ahead of the daemons that would have to answer
+it. The cost of getting it backwards is not breakage, because the client degrades
+by design: it is every user being offered a feature that answers *"update your
+machine"* for as long as the slowest owner takes to do it.
+
+Where **both** apply in one release the protocol half forces control-plane-first,
+and that is not a tie being broken by preference: a relay that cannot accept what
+a daemon offers is a daemon that cannot dial in **at all**, while a route that is
+not there yet is a screen with a sentence on it. The hard requirement wins and the
+soft degrade is the price. Q4.105.
+
 ## Making a breaking change, in order
 
 Q7.71 wrote this shape down before there was any mechanism for it — *"accept-both

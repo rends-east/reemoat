@@ -1144,7 +1144,16 @@ export function slowRoute(method: string | undefined, path: string): boolean {
     // Both spawn a CLI: `/agents` runs the login probe, and `/agent-auth`
     // drives a login under a pty.
     (verb === "GET" && path === "/agents") ||
-    path.startsWith("/agent-auth")
+    path.startsWith("/agent-auth") ||
+    // Switching a plugin on forks a child and waits for its `ready`, and the
+    // daemon's budget for that is `PLUGIN_START_TIMEOUT_MS` (10s) *after* up to
+    // `PLUGIN_STOP_DEADLINE_MS` (4s) waiting out a stop already in flight, plus
+    // another 4s stopping it again if it fails: 18s worst case against this
+    // client's 15s. Same defect `/config` records one line up, and the same
+    // consequence — a `POST` is not replayable, so the abort takes the
+    // `forgetRoute` arm and marks a healthy machine unreachable, for the crime of
+    // toggling a plugin that was hanging, which is exactly why somebody would.
+    (verb === "POST" && /^\/plugins\/[^/]+\/state$/.test(path))
   );
 }
 

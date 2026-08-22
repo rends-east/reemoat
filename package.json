@@ -1,6 +1,6 @@
 {
   "name": "reemoat",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A daemon that owns coding-agent sessions and exposes them over HTTP and WebSocket, a control plane that issues identity and relays every request, and a web UI that supervises all of it from a phone.",
   "license": "AGPL-3.0-only",
   "author": "rends-east",

@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 104 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 69 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 191 | `####` |
-| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 41 | `###` |
-| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 96 | `####` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 110 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 70 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 197 | `####` |
+| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 44 | `###` |
+| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 102 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 64 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 103 | `###` |
-| | | **668** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 106 | `###` |
+| | | **693** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 668 rather than the 381
+dividers. So the count is over **both** depths, and it says 693 rather than the 394
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -2411,6 +2411,198 @@ tunnel is gone.
 
 **Status.** Current
 
+
+### Q1.612 — What is a plugin trusted with?
+
+**Position.** A plugin runs as you. It is a child process of the daemon, with your
+uid, your `HOME`, your files and your keys — the same trade an agent already makes
+on the same machine, and for the same reason: this is one person's own computer.
+
+**Why the scope table is not a fence.** `manifest.scopes` is declared, shown at
+install, and refused when exceeded. None of that stops anything: the child can
+`import("node:fs")` and read everything the daemon can. The standing is exactly
+`agentEnv()`'s — **hygiene, not a fence** — and the comment saying so is in
+`api.ts` next to the gate, so nobody restores the stronger claim by reading the
+code alone.
+
+**What it does buy, which is three things and all of them real.** The blast radius
+is *named*, which is what makes an install a decision somebody can take rather
+than a leap. A plugin that hangs or crashes cannot take the daemon's single event
+loop with it — that is what the child process is for, and it is the property that
+matters most on a machine also running four agents. And the plugin never holds the
+daemon's token or its database handle, because `pluginEnv()` strips every
+`REEMOAT_*` name before the child starts.
+
+**Rejected.** Claiming a sandbox. Node's permission model is process-wide rather
+than per-worker, so a `Worker` cannot be confined at all and a child process could
+only be confined by flags this daemon would have to guarantee across every
+platform it runs on. Writing "sandboxed" over that would be the same lie the
+settings screen refuses to tell next to a `~/.claude/settings.json` that has
+already answered. The seam if one is ever wanted is `PluginRuntime` (Q1.616).
+
+**Status.** Current
+
+### Q1.613 — Why does no plugin code run in the browser?
+
+**Decision.** A plugin returns a **description** of a screen and the web client
+draws it with its own components. No plugin JavaScript is loaded, evaluated or
+framed.
+
+**Why.** `reemoat.credential` lives in that origin's `localStorage` and is the one
+credential in this system that reaches the control plane. A plugin bundle
+executing there would hold it, and every mitigation for that is a mitigation
+rather than a boundary: a sandboxed iframe needs a second CSP, a versioned
+`postMessage` bridge, and a decision about `frame-ancestors 'none'`, and it still
+ends with somebody else's code running in a page this app also draws approvals in.
+Refusing to run it at all is the only version of this that is a property rather
+than a defence.
+
+**What it costs, stated rather than hidden.** A plugin screen is a list, a form, a
+set of columns and some text. It is not a canvas, and no amount of manifest will
+make it one. That is written into `docs/PLUGINS.md` in those words, because an
+author who discovers it after building something is an author who was misled.
+
+**What it buys beyond the boundary.** Three things that would each have been work:
+a plugin screen matches the rest of the app without its author thinking about it,
+it works on a phone without its author thinking about it, and it cannot make the
+session list slow.
+
+**Precedent.** The app already renders a form somebody else described —
+`ElicitationCard` draws an ACP elicitation from a schema an agent sent. The idea
+is borrowed; the *type* deliberately is not, because that shape belongs to ACP and
+one type serving two wires is one type changed by the wrong release.
+
+**Status.** Current
+
+### Q1.614 — A plugin has scopes and so does the caller. Which decides what?
+
+**Rule.** Two axes, and neither implies the other. The scope on the route —
+`session:read`, `session:write`, `machine:admin` — decides what the **caller** may
+do. `manifest.scopes` decides what the **plugin** may do.
+
+**Why both are needed.** A read-only grant may look at a plugin's screen and press
+nothing on it; that is the caller axis, and it is the same one every other route
+uses. But a hook has no caller at all — it runs because an agent finished a turn —
+so the manifest is the only authority there is on that path. A design with one
+axis either leaves hooks unauthorized or makes a plugin's authority depend on who
+happened to open a screen.
+
+**Measured consequence.** `daemoncheck` drives both: a read-only token listing
+plugins and being refused an action, and a manifest declaring nothing being
+refused every method in `SCOPE_OF` — swept over the table rather than asserted one
+at a time, so a method added without an entry fails there rather than being
+reachable by everybody.
+
+**Rejected.** A new token scope for plugins. Unknown scope strings are dropped
+rather than rejected on the way in, so a daemon that had not learnt it would
+silently treat every plugin call as unauthorized — and the three that exist
+already describe what a caller is doing here.
+
+**Status.** Current
+
+### Q1.615 — `src/` held exactly one `fetch`. It now holds two.
+
+**Decision.** `enroll.ts`, and `net.fetch` made on a plugin's behalf in
+`plugins/api.ts`. Both are named, here and in `.claude/rules/plugins.md`.
+
+**Why the count mattered.** *"The daemon makes exactly one control-plane request,
+ever"* is what makes a control-plane outage cost reachability rather than work in
+flight (Q1.9), and the way that property was kept true was by counting: one
+`fetch` in `src/`, and the count *was* the property.
+
+**Why this one does not break it.** The substance is unchanged. This call is never
+made by the daemon on its own behalf, never on a start path, never on a session
+path, and only ever to a host somebody wrote into a manifest and approved at
+install. A control plane that is down changes nothing about it.
+
+**What is conceded.** The number is two, and a number is a worse guard than a
+zero. So both are written down in two places, and the rule file says in as many
+words that a count nobody restates is a count that becomes three. A plugin
+*registry* to poll would be exactly that third one, and is refused for it
+(Q7.104).
+
+**Why the host makes the request rather than the plugin.** The plugin could open
+its own socket — see Q1.612 — so this is not a fence either. It is a **tap**: one
+place a plugin's outbound traffic can be seen, and one place the allowlist,
+the https rule, the redirect refusal and the rate window are applied. Q7.86 is the
+same lesson learnt the expensive way, when agent markdown could fetch from
+anywhere with nothing watching.
+
+**Status.** Current
+
+### Q1.616 — Is `PluginRuntime` a sandbox seam or leftovers?
+
+**Decision.** An interface with one implementation, kept as one deliberately —
+the same standing `SessionRuntime` has, and written down for the same reason.
+
+**Why.** It is the single place a confined plugin would be built, and naming it
+now is cheaper than finding it later. But it earns its keep today without any of
+that: it is what lets `daemoncheck` drive a start that never completes, an
+invocation that is never answered, a crash after `ready` and an exhausted restart
+budget — none of which is reachable by spawning a real process and hoping it
+misbehaves on cue. Four lifecycle paths are asserted rather than hoped for
+because this interface exists.
+
+**Rejected.** A `kind` discriminant on it, for `SessionRuntime`'s stated reason:
+an unread discriminant on the one interface that survived a deletion is how an
+`if (kind === "sandboxed")` branch against nothing comes to be written.
+
+**Status.** Current
+
+
+### Q1.617 — Why can a plugin not send CSS?
+
+**Question.** A plugin returns a description and the app draws it. Why not let it
+send stylesheets, or restyle the app?
+
+**The argument that does not carry the decision.** "CSS is dangerous" is mostly
+untrue here. `expression()` is dead, `url(javascript:)` is dead, and the classic
+selector-based exfiltration — `input[value^="a"] { background: url(https://…) }`
+— is **already blocked by the CSP this app sends**: `default-src 'self'`,
+`img-src 'self' blob:`. Refusing on those grounds would be overstating a narrow
+risk, so it is written down here that it was considered and is not the reason.
+
+**What is genuinely dangerous, and it is one thing.** This page approves shell
+commands with a tap. Anything able to move pixels near that control is a
+tap-jacking surface — cover the card, shift Approve under a thumb, make Deny
+transparent. Scoping does not close it: Shadow DOM isolates *styles*, not
+positioning, and a `position: fixed; inset: 0` element inside a plugin's own root
+still paints over the whole app. It can be contained (`contain: paint`), and the
+shape of that sentence is the tell: it is a defence being built around somebody
+else's stylesheet rather than a property.
+
+**Three reasons that outrank the security one.**
+
+*The class names become a public API.* A plugin able to target `bg-surface`,
+`edge-strong` or `--rail-w` is a plugin that breaks when `Sheet` or `bits.tsx` is
+refactored — and unlike a protocol, CSS has no version to negotiate. This is
+`DAEMON_VERSION`'s lockstep problem arriving through the stylesheet.
+
+*Consistency is the feature.* A plugin screen currently gets a phone layout, the
+monochrome palette, 44px on decision controls and legible type for free. CSS opts
+its author out of all of it, and the first thing most would do is make their thing
+**stand out** — in an interface built around *does anything need me*, where
+attention is the scarce resource.
+
+*The measured decisions stop binding.* Q3.205–Q3.210 carry chroma in OKLCH, a
+≥3:1 floor on `edge-strong`, and the rule that `bg-fg` is only the affirmative
+action inside a decision. A plugin with CSS violates all of them, and **its author
+cannot see it**: they are on a desktop, and the failure is somebody outdoors with
+a phone.
+
+**What people actually want, and what is offered instead.** Almost always meaning
+rather than pixels — *this row is urgent, this one is broken*. So the answer is
+**more vocabulary, in tokens**: `PluginRowTone` is `ok|warn|danger` and the host
+picks the ink, exactly as `PluginRowAction.tone` already did one field over. A
+vocabulary is versioned, driven, and lands for every plugin at once.
+
+**Reconsider if** a real plugin is blocked by the vocabulary — at which point the
+answer is a block type for what it needs, not a stylesheet. The honest escape
+hatch already exists: something needing full visual control is a web application,
+and the plugin is the integration with it.
+
+**Status.** Current
+
 ## Session lifecycle, questions and attachments
 
 ### Q2.1 — What happens to a live session when the daemon restarts?
@@ -4125,6 +4317,31 @@ positionally and has no such bookkeeping.
 
 **Status.** Current
 
+
+
+### Q2.212 — A plugin child is not detached and nothing reaps it. Why is that not the gap it looks like?
+
+**Decision.** A plugin's child process is spawned **without** `detached`, no pid
+is recorded, and there is no reaper. `runner.ts` exits when its IPC channel
+closes, and that is the whole of plugin cleanup.
+
+**Why it is the opposite of an agent's.** An agent is spawned `detached` because
+`claude-agent-acp` runs the CLI as its own child and cleans up only on
+`process.on("exit")`, which does not run under SIGKILL — so the process *group* is
+the only thing that can be killed reliably. That is why `sessions` has a pid
+column, why the reaper exists and why it is fenced by `os.uptime()`: a pid
+recorded before a reboot names somebody else's process afterwards.
+
+A plugin has none of those problems. It spawns nothing, holds no conversation, and
+its channel dies with the daemon — gracefully or not. A daemon that crashes leaves
+children whose `disconnect` fires, and they go. The next daemon start spawns fresh
+ones from the rows.
+
+**What this means for a change.** If a plugin ever needs to outlive the daemon —
+it should not — the pid column, the fence and the reaper all come back with it,
+and this entry is where the argument for the current shape is.
+
+**Status.** Current
 
 ## The web client
 
@@ -9180,6 +9397,171 @@ section, and `sheet` with **no body group at all** for a close.
 
 **Status.** Current
 
+
+#### Q3.446 — Four places a plugin may appear. Why is the set closed?
+
+**Rule.** A screen, a settings pane, an action on a session's menu, and
+server-side hooks. There are no others, and adding one is a decision rather than
+an implementation.
+
+**Why.** This client is shaped around one question — *does anything anywhere need
+me* — and the three signals answering it are held together by `waitingFloor`,
+which is computed by **subtraction**: everything blocked, minus everything this
+view can draw. That is what makes it impossible for a new section, filter or
+needle to open a gap by accident. A contribution point able to insert rows into
+the session list would be a contribution point able to open exactly that gap, and
+nothing downstream could see it.
+
+The four that exist all sit somewhere the subtraction does not reach: a sheet, a
+settings pane, a row below everything the app draws itself, and the server.
+
+**Rejected, with the seams named rather than half-built.** A card in the
+transcript (`renderEvent` in `EventList.tsx`) and a slash command
+(`buildCommands` in `ui/commands.ts`). Both are recorded as non-goals in Q7.105
+with their addresses, so widening later is an addition rather than a rewrite.
+
+**Status.** Current
+
+#### Q3.447 — Where does a plugin's screen live?
+
+**Decision.** A plugin's **settings** are at
+`/settings/machines/:machineId/plugins/:pluginId`, inside the machine, beside that
+machine's agents. Its **screen** is at `/p/:machineId/:pluginId`, a route-backed
+sheet of its own.
+
+**Why the settings are inside a machine.** `MachineAgentsSection`'s argument,
+unchanged: what is configured lives in one daemon's database and on one host's
+disk, so a fleet-wide screen would have to open with a machine dropdown — a screen
+asking a question its own copy answers. A plugin's code and its stored data are
+per-machine in exactly the way an agent's credentials are.
+
+**Why the screen is not there too.** They are different things. Settings are
+configuration, visited when something needs changing. A board is opened several
+times a day, from a phone, to look at — and four taps into a settings sheet is
+filing a bookmark under a preference. `/p/…` is short because it is typed and
+shared.
+
+**What it inherits by being a route.** Deep links, survival across the reload a
+phone performs on its own, and the Back button closing it for free. `isSheet` and
+`isOverlayPath` both had to learn it, and `webcheck` asserts they agree — a route
+in one and not the other is a pop-up that either forgets what it was drawn over or
+records one while being a screen.
+
+**Rejected.** A fifth top-level settings section. The machine is where the answer
+already lives, and a section would have needed the dropdown.
+
+**Status.** Current
+
+#### Q3.448 — What does a narrowing over a plugin's output owe?
+
+**Rule.** Everything in `packages/web/src/plugins.ts` fails open. An unknown block
+is dropped, an unknown field kind becomes a text input and still round-trips, a
+missing string becomes an empty one, and nothing throws.
+
+**Why this is rule 2 again rather than a new rule.** `compatibility.md` already
+says an unknown value must fail toward "keep working", and the failure that taught
+it is on record: `endedWithDaemon` asked "is this a daemon reason?", answered *no*
+for a reason it had never heard of, and took the composer off the screen for a
+conversation that was coming back.
+
+**Why it binds harder here.** A plugin is a **third** release schedule. The web
+client ships with the control plane weekly, a daemon ships when its owner runs
+`deploy.sh`, and a plugin ships when its author feels like it — coordinated with
+neither. So a client meeting output it does not recognise is not an edge case, it
+is Tuesday.
+
+**The direction of every guess is chosen.** An unrecognised tone falls to the
+ordinary one, which means a plugin can fail to make a control *look* dangerous and
+cannot make a destructive one look harmless.
+
+**Status.** Current
+
+#### Q3.449 — What may a plugin's screen draw before the plugin has answered?
+
+**Rule.** Nothing. No skeleton board, no optimistic row, no locally applied
+action.
+
+**Why, and why it differs from the config chip.** The app does draw optimistically
+in one place — a config choice, where `withChoice` overrides the drawn value and
+nothing is claimed about what the *agent* is doing (Q3.408). The line that
+decision drew is exactly the one here: a client may draw a local intention it can
+retract, and may never draw an assertion about what something else did.
+
+A plugin's view **is** that assertion. It is the plugin's statement about its own
+state, computed from data this client has no second copy of, so there is nothing
+to guess from and nothing to retract. Pressing something therefore replaces the
+view with what came back — which is also why an action may return a whole view
+rather than only a sentence, and why a row disappears rather than being reported
+gone.
+
+**Where a clamp is drawn instead.** A view over the bounds is cut and a notice is
+appended saying so. A list silently shortened is a list showing a wrong number,
+and the person reading it has no way to find out.
+
+**Status.** Current
+
+
+#### Q3.450 — Where may a plugin send somebody?
+
+**Rule.** A row names `{session}` or `{screen}`. It cannot name a URL, and
+`{url: …}` is not a shape — it narrows to `null` and the row is simply not
+tappable.
+
+**Why.** A board whose cards could not open the session they are about was a dead
+end, so the capability had to exist; the question was only how wide. Two things
+close it at "destinations this app already has". A link chosen by a plugin is a
+phishing surface **on the page that approves shell commands** — the one page in
+this product where being somewhere unexpected is expensive. And "a plugin deciding
+where somebody goes" was already refused for a session-menu action, so allowing it
+here would have made that refusal arbitrary rather than a rule.
+
+What is permitted is a pointer into what the plugin can already *read*: a plugin
+holding `sessions.read` knows those ids, and opening one is what a board is for.
+
+**Narrowed twice, deliberately.** On the daemon in `clampView`, and again in
+`packages/web/src/plugins.ts`. `wire.ts` is a hand mirror, so a client trusting
+the daemon's narrowing would be trusting a copy of a rule rather than the rule;
+`daemoncheck` and `webcheck` each drive their own side against a URL in both
+shapes somebody would try it.
+
+**A `<button>` rather than an `<a>`**, because there is no href — the destination
+is resolved at the call site from an id. Pretending otherwise would put a
+middle-clickable link on the one thing this entry exists to keep from being one.
+
+**Status.** Current
+
+#### Q3.451 — A plugin screen was a photograph. What made it a window?
+
+**Rule.** A view may declare `refreshMs`. The host floors it at
+`PLUGIN_REFRESH_MIN_MS`, caps it, and spends it **only while somebody is looking**
+— stopped on `document.hidden`, stopped when the sheet closes.
+
+**Why it was needed.** The screen read once, when it was opened, and was stale
+from the next turn onward. For a board whose entire job is watching agents work,
+that is the wrong medium: it was a photograph of the moment the sheet opened.
+
+**Why polling rather than a subscription.** A push would mean the daemon holding a
+per-plugin channel open to every tab, and a new frame type on a socket that is
+deliberately read-only. This is a `GET` the client already makes, on a screen that
+is on the screen. The cost is bounded by the same thing that bounds its value:
+nobody is looking at a background tab.
+
+**Two rules that make it usable rather than merely correct.** A refresh **never
+blanks the view** — the old one stays until the new one arrives, or the board
+flashes every five seconds. And a failed refresh is **silent**: a machine dropping
+off LTE for one tick is not news, and a board that replaced itself with an error
+every time a train entered a tunnel would be worse than one briefly stale.
+
+**Clamped silently, unlike a cut list.** The difference is what anybody could do
+about it: a shortened list is a wrong number on screen, while an interval moved
+from 500 ms to 2 s is invisible to everyone and actionable by nobody.
+
+**A settings pane is not refreshed, whatever it asks.** It is a form somebody is
+typing into, and re-reading it under them either discards what they typed or keeps
+it over a value the plugin has since changed.
+
+**Status.** Current
+
 ## Deployment, packaging and code layout
 
 ### Q4.1 — Is this one deployment or two, and why can the two services not be checked out separately?
@@ -9953,16 +10335,32 @@ starting a second teardown.
 ### Q4.29 — May anything in `src/` write to stdout or stderr?
 
 **Decision.** No. Everything reports through an injected callback
-(`onDegraded`, `onWarning`), and only `scripts/` print. There is exactly one
-sanctioned exception: `store/sqlite.ts`'s v6 migration prints when it destroys
-something — a dropped forge account, a collapsed credential, sessions cut by a
-cap that used to be per-person.
+(`onDegraded`, `onWarning`), and only `scripts/` print. There are exactly two
+sanctioned exceptions, and both are places where no callback exists to report
+through:
+
+1. `store/sqlite.ts`'s v6 migration prints when it destroys something — a
+   dropped forge account, a collapsed credential, sessions cut by a cap that
+   used to be per-person.
+2. `src/plugins/runner.ts`'s `unhandledRejection` handler writes to the child's
+   own stderr.
 
 **Why.** Those migration prints happen inside `openStores`, before any callback
 the daemon could have wired, so they are the only moment anybody can be told
 that data was destroyed.
 
-**Status.** Current
+The second is a different argument for the same reason. `runner.ts` runs in the
+**child** process, not the daemon: it has no `onWarning` to reach, because the
+callback lives on the other side of an IPC channel a floated rejection may have
+nothing to do with. What it writes goes to the stderr `runtime.ts` already
+captures into a ring of `PLUGIN_LOG_LINES`, which is what a failed plugin's row
+shows — so the write *is* the report, arriving by the only route there is.
+Deliberately not fatal: a floated promise in one hook must not take a plugin's
+screens down with it.
+
+**Status.** Current — amended when the plugin subsystem landed. The count is
+stated here rather than only in `CLAUDE.md` because a rule with a number in it
+is a rule that goes stale silently, and this is the sentence people quote.
 
 ### Q4.30 — What is a comment required to say?
 
@@ -10128,6 +10526,106 @@ differs only in that it does not share a restart (Q4.33). Every value it reads
 was already answered by the control plane's own interview, so a third arm would
 present a configuration decision that does not exist and a fourth question with
 no answer of its own.
+
+**Status.** Current
+
+
+### Q4.103 — Why does a plugin ship as one artifact?
+
+**Decision.** One archive holds the manifest, the server half and — by way of the
+descriptions that server half returns — the screens. There is no separate client
+package and no version negotiation between the two halves.
+
+**Why.** Three things ship on three schedules here and nothing coordinates them:
+the control plane weekly from a tag, the web client **inside that image**, and a
+daemon whenever its owner runs `deploy.sh`. That is what
+`.claude/rules/compatibility.md` calls the fact that decides everything else, and
+a plugin split across two of those schedules would inherit the whole problem —
+plus a third schedule of its own.
+
+A plugin whose halves arrive together cannot see the skew at all: whatever
+`server.js` returns is drawn by whatever client is loaded, through a vocabulary
+whose version is negotiated once, at install, as a **range**
+(`PLUGIN_API_VERSION` / `PLUGIN_API_MIN_VERSION`). That is rule 1 applied
+honestly — negotiated, never a label — and it is why nothing in this subsystem
+reads `DAEMON_VERSION`.
+
+**What that forced.** The UI had to be declarative, since a bundle is a second
+artifact by definition. Q1.613 is the security half of that same decision; this is
+the packaging half, and either one alone would have led here.
+
+**Status.** Current
+
+### Q4.104 — Why does the control plane host no plugins?
+
+**Decision.** Plugins are installed on a daemon, per machine. The control plane
+holds none, runs none, and has no route for them.
+
+**Why.** It has nothing a plugin wants. There are no sessions there, no
+transcripts, no worktrees and no files — it issues identity and relays bytes it is
+written never to parse. An integration that reacts to what an agent did cannot be
+built from anything the control plane can see.
+
+And it ships differently: that image is rebuilt by a release, so "installing"
+something into it would be a deploy rather than an install, performed by whoever
+owns the box rather than by the person who wants the plugin.
+
+**What is genuinely lost.** An admin cannot install something for everybody at
+once. That is the same shape as fleet rollout (Q7.42) and is refused for the same
+reason — a daemon is updated by its owner, and nothing here is a step toward
+changing that. What a future distribution mechanism could do without touching any
+of this is carry the *archive*, with the browser as the courier and the install
+still an act on the machine; that costs no daemon change and is recorded as
+Q7.106.
+
+**Status.** Current
+
+
+### Q4.105 — Which side of the fleet ships first?
+
+**Rule.** Whoever has to be able to **answer** ships first. Whoever will **ask**
+ships second.
+
+**Why it needed saying.** The procedure for a breaking change was already written
+down — *accept-both first, send-new second* — but only for the relay protocol,
+where the answering side happens to be the control plane. Read as a fact about
+*the control plane* rather than about *the answering side*, it generalises exactly
+backwards, and the first advice given about deploying plugins was that backwards
+generalisation: control plane first, then daemons.
+
+For a new route on the daemon the direction is reversed. The web client calls
+`GET /plugins`; the daemon answers it. So a control plane deployed first — and it
+carries the web client — hands every user a Plugins screen that says *"update your
+machine"* until each owner gets round to it, which for a fleet whose daemons are
+updated by hand is measured in weeks.
+
+**The mistake underneath it, because it is the part worth not repeating.**
+`compatibility.md` states that *new client against old daemon is the normal state
+of the fleet*. That is a claim about what this system **tolerates** — the client
+degrades by design, `fetchPlugins` treats an old daemon and a machine with nothing
+installed as the same thing, and `pluginFailure` says the honest sentence. It is
+not a claim about what to **choose**. Tolerating a skew and electing to create one
+are different acts, and collapsing them is how the tolerance gets spent for
+nothing.
+
+**What the right order buys, beyond avoiding the window.** With daemons first, a
+plugin can be installed before any screen exists — `pnpm client plugin install`
+needs no UI — so its hooks are already writing by the time the control plane
+ships, and the first board anybody opens is populated rather than empty with an
+invitation.
+
+**Where the two rules meet, the protocol wins.** In a release carrying both a new
+protocol version and a new daemon route, control-plane-first is forced, and not as
+a tie broken by taste: a relay that cannot accept what a daemon offers is a daemon
+that cannot dial in **at all**, while a route that is not there yet is a screen
+with a sentence on it. The hard requirement takes the order and the soft degrade
+is the price.
+
+**What made this release unambiguous.** Nothing forced the other way:
+`RELAY_PROTOCOL_VERSION` stayed `1`, `CP_SCHEMA_VERSION` stayed `1`, and the
+control plane's image never reaches `src/plugins` — checked rather than assumed,
+by walking the import closure of the five files `deploy/docker/Dockerfile` copies.
+Its deploy here is the web client and nothing else.
 
 **Status.** Current
 
@@ -11810,6 +12308,164 @@ allocating the whole cap on the heap, and drives `uploadRateVerdict` — pure, s
 the window is asserted at the real numbers without writing 300 MiB to a temp
 directory, which is the only alternative and enough of a cost that it would have
 gone unasserted instead.
+
+**Status.** Current
+
+
+#### Q5.102 — Two callers unpack somebody else's archive. Why is there one unpacker?
+
+**Rule.** `unpackArchive` is the middle of `importArchive`, extracted rather than
+copied. `POST /fs/import` and `POST /plugins` both go through it, with their own
+`ArchiveLimits`.
+
+**Why.** Everything in that function is a containment rule: `..` refused rather
+than normalised — normalising is how every surviving zip-slip works — `.git`
+refused case-folded, backslashes never translated to slashes, absolute paths and
+`C:` refused, and the size ceiling charged against what the **decompressor
+produced** rather than against what a member declares. A second implementation of
+that list is how one of the rules comes to be missing from one of them, which is
+the argument `paths.ts` already wrote out for `containedIn` and the reason there
+is exactly one containment primitive file.
+
+**What is parameterised and what is not.** The *numbers* differ and are passed in:
+`IMPORT_LIMITS` is somebody's whole source tree, `PLUGIN_LIMITS` is a manifest and
+a file of JavaScript, and giving the second the first's headroom would mean the
+bound that stops a zip bomb is 500 MiB for a thing never past a few hundred KiB.
+Nothing in `safeMemberPath` is parameterised, because what a member path may *be*
+does not depend on who is unpacking — a caller able to relax it would be a caller
+able to accept `..`.
+
+**What each caller keeps.** Where the result is published, what it is called, and
+whether something is already there. Those genuinely differ, and nothing is shared
+by pretending otherwise.
+
+**Status.** Current
+
+#### Q5.103 — An update that will not start must change nothing
+
+**Rule.** If the newly installed version fails to start, the new directory is
+removed, the row is left untouched, the previous version is started again, and the
+refusal carries what the child actually said.
+
+**Why.** The person installing is often not sitting in front of the machine — that
+is the entire premise of this product — so the failure mode being designed against
+is *a broken update leaves you with nothing*, discovered from a phone. Leaving the
+plugin that was there is the only acceptable outcome, and it is only achievable
+because the old version's directory is not removed until the new one is known to
+run.
+
+**Two defects this shape had while it was being built, both found by driving it.**
+The failed start called `child.stop()` rather than `this.stop()` — and `stop()` is
+what sets `stopping`, which is the only thing telling `onExit` a kill we asked for
+from a crash. Without it the rollback **scheduled a restart for the plugin it was
+in the middle of discarding**, which would have brought a broken update back to
+life minutes after it was refused. And the surviving plugin's restart budget was
+being spent by the rollback, so three refused updates left a working plugin that
+would no longer start; it is returned before the restart now.
+
+**What the refusal carries.** The child's last twenty lines of output, stdout as
+well as stderr. "did not start within 10000ms" says nothing anybody can act on;
+the `SyntaxError` their `server.js` threw says everything.
+
+**Status.** Current
+
+#### Q5.104 — What survives an update, and what is keyed on what
+
+**Rule.** `plugin_data` is keyed on the plugin's **id** and never on its version.
+An update replaces the row in `plugins` and touches nothing in `plugin_data`; an
+uninstall drops both.
+
+**Why.** This is the whole of what makes an update an update rather than a
+reinstall. A board keeps its cards across `0.1.0` → `0.2.0` because no part of the
+key mentions a version, and the demo plugin exists partly to make that
+demonstrable in two commands.
+
+**Why two tables rather than a JSON column on the row.** For the bound rather than
+the shape: the per-plugin byte and key ceilings are enforced by counting rows, and
+a blob makes "how many keys does this plugin hold" a parse. `checkPluginWrite`
+lives beside the interface rather than inside the SQLite implementation, so the
+memory implementation a driver uses refuses exactly what the real one refuses — a
+quota that holds only where there is a file is a quota nothing drives.
+
+**One arithmetic detail that is load-bearing.** The replaced value's length is
+credited back before the new one is charged. Without it a plugin rewriting a
+single key climbs to its own ceiling and stays there, which is the shape of every
+settings pane written against this API.
+
+**Status.** Current
+
+#### Q5.105 — A root, compared against a path that does not exist yet
+
+**Rule.** A component holding a root it will build paths under must resolve that
+root **once**, at open, and keep the resolved form.
+
+**Why.** `containedIn` resolves both sides and falls back to comparing as written
+when `realpath` throws — which it does for every path about to be *created*. So a
+caller keeping an unresolved root and joining onto it is comparing a resolved root
+against an unresolved child, and the guard correctly answers no.
+
+**Measured.** On macOS, where `/var` is a symlink to `/private/var`: the plugin
+host refused to remove its own directory on **every** reinstall of a version it
+already had — `refused to remove …/plugins/board/0.1.0, which is not under the
+plugin root` — and the `rename` that followed then failed `ENOTEMPTY`. The symptom
+was a warning nobody would have read and an install that worked the first time.
+
+**Where this was already known.** `createWorkspace` solves the identical problem
+for worktrees: it resolves the deepest component that exists and rebuilds the
+not-yet-created leaves onto that answer, *or every `POST /sessions` throws
+`outside_worktree_root` wherever the worktree root traverses a symlink*. That
+sentence was in `files-paths-git.md` before this bug was written; the general form
+is now stated at the primitive itself, and `worktree.ts`'s private twin of the
+resolver is marked as the copy to delete next.
+
+**Status.** Current
+
+#### Q5.106 — A hook must never reach the emit path
+
+**Rule.** Hook delivery is queued and drained on its own. Nothing on that path
+awaits inside `SessionLog.append`, and the queue is bounded drop-oldest with the
+drops reported.
+
+**Why.** `append` is synchronous by contract and runs inside the agent's own RPC
+handler — that is what makes gap-free attach true by construction. A hook that
+blocked there would put a plugin between an agent and its transcript, and a plugin
+that hangs would stop the session's events rather than its own screens.
+
+**Why drop-oldest rather than drop-newest or unbounded.** Unbounded means a plugin
+that stopped answering grows a queue for the life of the daemon. Between the two
+directions, the newest events are the ones still worth acting on: a board catching
+up cares about the turn that just ended, not the one from an hour ago.
+
+**Why the drops are reported.** A plugin quietly missing half its events looks
+exactly like a plugin with a bug in it, and the person who would investigate has
+no way to tell the difference. It goes to `onWarning`.
+
+**What crosses, and what deliberately does not.** A derived summary, never a
+`StoredEvent`. The session event union is a wire three coding agents move, so
+coupling a plugin to it would make every ACP change somebody else's breaking
+change.
+
+**Status.** Current
+
+#### Q5.107 — A throwing observer is reported and kept
+
+**Rule.** `SessionRegistry.watchSessions` guards each observer, reports a throw
+through `onWarning`, and **does not evict it**.
+
+**Why this is the opposite of the neighbouring rule, deliberately.**
+`SessionLog.append` evicts a listener that throws, and is right to: there a
+listener is one WebSocket, and evicting it costs that one socket its events while
+every other listener carries on.
+
+An observer here is a whole *subsystem*. Dropping the plugin host on one bad frame
+would stop every hook on the machine for the life of the daemon, with nothing
+anywhere saying so — the same shape of silent, permanent loss that the fan-out
+guard's own comment warns about for sockets, one level larger.
+
+**Asserted rather than assumed.** `daemoncheck` registers a throwing observer
+**first**, so "the ones after it" is a real position rather than a hope about
+iteration order, and checks that a second observer still sees every session, that
+the thrower is called for each of them, and that each throw is reported.
 
 **Status.** Current
 
@@ -14268,34 +14924,71 @@ reset that replaced it leaves enrollment codes alone on purpose
 
 ### Q7.62 — Is the upload route's body-cancel discipline reachable past the middlewares above it?
 
-**Position.** Unverified, not fixed, and worth measuring against a real relayed
-upload before anybody patches it.
+**Position.** Answered, and the question named the wrong half. The handlers'
+discipline was complete; the middlewares above them were the gap. The obligation
+now hangs off the exemption that creates it rather than off each handler.
 
 **The claim.** `POST /sessions/:id/uploads` reasons carefully about always
 cancelling a body it refuses (Q5.72), and the auth gate and the scope check sit
 *above* it — so a 401 or a 403 answers without reading or cancelling the 25 MiB
 the client is still sending.
 
-**Why it was not acted on.** Two things have to be true for the described outcome
-and neither is established: that the daemon holds the loopback socket open without
-reading after answering (Node's `resOnFinish` calls `req._dump()` for a body
-nothing consumed, and otherwise closes the connection rather than parking), and
-that the sender therefore stalls until the tunnel's 8 MiB connection valve fires.
+**What was found.** The claim is right about the gap and wrong about where to look
+for it. Every refusal *inside* the three streaming handlers already cancels —
+`refuse()` at `/sessions/:id/uploads`, at `/fs/import` and at `POST /plugins` —
+and there is no path through any of those three that answers with a body it has
+neither read nor released. What has no wrapper is everything above them: the auth
+gate's `return jsonError(c, 401, …)` and `requireScope`'s
+`return jsonError(c, 403, "insufficient_scope", …)` both answer having never
+touched the stream. So the reachable case is not "a handler forgot one", it is
+"the handler never ran" — a bad token, or a valid one without `machine:admin`,
+refused in about a millisecond with the whole body still to come.
 
-**And the proposed remedy is worse than the defect.** `cancelBody` in the global
-`app.use("*")` gate destroys the request stream on *every* refusal carrying a
-body, which through the relay surfaces as `502 tunnel_failed` instead of the
-daemon's own status — the exact trade the upload route's "honoured to refuse,
-never to accept" comment reasons about — and it would break `401 token_expired` on
-`POST /sessions/:id/prompt`, which `machine.ts`'s single-retry refresh depends on
-receiving as a readable envelope. Narrowing to just the scope half fixes one of the
-two named paths, leaves the clock-skew 401 untouched, and moves a scope check off
-its registration line, which Q4.28's convention places there deliberately.
+**Decision.** The cancel goes where the exemption is granted: the one
+`app.use("*")` that consults `isStreamingRoute` now runs `next()` in a `try` and
+releases `c.req.raw.body` in the `finally`. Two halves of one rule, in one place,
+so the fourth streaming route inherits both by adding one string to the predicate
+— which matters because `isStreamingRoute`'s own docblock had already predicted
+this failure one axis over, and the third route had just arrived.
 
-**What would settle it.** A real 25 MiB upload through the relay with a read-only
-grant, watching whether the sender stalls and what the browser is told.
+**Why not the remedy this entry refused.** That objection was to `cancelBody` in
+the *global* gate, which would destroy the request stream on every refusal
+carrying a body and break `401 token_expired` on `POST /sessions/:id/prompt`,
+which `machine.ts`'s single-retry refresh depends on receiving as a readable
+envelope. It still would. This is the narrow version: the guard is inside the
+`isStreamingRoute` branch, so it is reachable **only** on the three routes
+`boundedBody` does not wrap, and a prompt's 401 never meets it. Nothing moved off
+a route's registration line either, so Q4.28's convention is untouched.
 
-**Status.** Open.
+**What is measured.** 2026-08-22, against this adapter (`@hono/node-server`
+1.19.17) with a `serve()` on loopback, in the four states the guard can find a
+body in. A middleware that cancels an untouched body and *then* answers 403, and
+one that answers 403 and then cancels, both deliver the 403 to the client — a
+64 MiB streamed body, refused after 1.4–2.1 MiB had been sent, arrived as
+`{"error":{"code":"insufficient_scope"}}` and not as a reset connection. A body
+the handler had already drained cancels in 0 ms and changes nothing, because a
+fully-read request is `complete` and the `destroy()` underneath never reaches the
+socket — the 64 MiB case still answered 200 with all 67108864 bytes counted. A
+body the handler left locked rejects with `TypeError: Invalid state:
+ReadableStream is locked`, which `cancelBody` swallows. That last one is why the
+guard is unconditional rather than gated on a status: there is no state it can
+find the stream in that costs anything, so it needs no second copy of "which
+answers are refusals".
+
+**What is still not measured**, and it is the half this entry was originally
+about: the same refusal *through a real relay*. Whether destroying a half-sent
+body on an h2 CONNECT stream reaches the browser as the daemon's own status or as
+the relay's `502 tunnel_failed` is the trade the upload route's "honoured to
+refuse, never to accept" comment reasons about, and loopback cannot answer it.
+What has changed is which way the risk runs: before, an unread body parked the
+sender and the tunnel's 8 MiB valve took **every session on the machine** down
+with it; now the worst case is one caller told the wrong thing about one refused
+request. That is the right way round even unmeasured.
+
+**What would still settle it.** A 25 MiB upload and a 2 MiB plugin archive pushed
+through the relay under a read-only grant, watching what the browser is told.
+
+**Status.** Fixed — with the relayed half of the measurement still outstanding.
 
 ### Q7.63 — Does BSD `script` survive a full device flow with no stdin?
 
@@ -15888,7 +16581,14 @@ What the second route changes is only the arithmetic: the remedy, whenever someb
 measures it, now fixes two places instead of one. It is not a reason to measure it
 sooner than Q7.62 already argues.
 
-**Status.** Open
+**Since.** A third route arrived (`POST /plugins`) and the remedy was written: the
+cancel hangs off `isStreamingRoute` rather off each handler, so all three are
+covered by one guard and the arithmetic this entry was about stopped being a
+reason to wait. Q7.62 carries the finding, the measurement and what is still
+missing; this entry's answer — *the same question, not a new one* — is unchanged
+and was right.
+
+**Status.** Closed by Q7.62
 
 ### Q7.97 — Import is serialised for the whole daemon. Is that a bound or a bottleneck?
 
@@ -16274,3 +16974,81 @@ suppress fired anyway, saying "this session has ended" over a notice already
 saying it better. The assertion reads the code off `src/server.ts` now.
 
 **Status.** Reversed an earlier decision
+
+### Q7.104 — Is there a plugin market, and why not?
+
+**Position.** There is no registry, no directory, no search and no signature
+checking. A plugin is a file somebody has, installed by somebody who chose it.
+
+**Why not, and this is the strongest of the reasons.** A registry is something to
+poll, and polling it would be a **second** request the daemon makes on its own
+behalf — against the property that a control-plane outage costs reachability
+rather than work in flight (Q1.9, Q1.615). It would also be a channel by which
+code arrives on somebody's machine without them naming it, which is Q7.42's
+argument about fleet rollout wearing different clothes.
+
+**What is deliberately not conceded either.** Signature verification. It sounds
+like the missing safety and is not: the thing a signature proves is *who built
+this*, and the trust decision here is already "I chose this file", which is the
+same decision `npm i` and a git clone present. A signature scheme with no registry
+to anchor it is ceremony.
+
+**What would change the answer.** Somebody wanting to hand one plugin to a whole
+company. That is Q7.106, and it needs no registry inside the daemon — the browser
+already talks to both sides.
+
+**Status.** Deliberate non-goal
+
+### Q7.105 — Should a plugin be able to draw in the transcript, or add a slash command?
+
+**Position.** Neither, in the first version, and the seams are named rather than
+half-built: `renderEvent` in `EventList.tsx` for a transcript card, `buildCommands`
+in `ui/commands.ts` for a slash command.
+
+**Why not yet.** Both are inside the two screens with the most rules attached to
+them and the least room for somebody else's content. `buildTail` rebuilds the
+whole node array on every streamed token, and what keeps that cheap is a memo
+comparator over a closed node union; a plugin-supplied card lands inside that.
+Commands are a merge of what the agent published with controls synthesized by
+*category* rather than by id, with a precedence rule between them — a third source
+needs its own place in that order, decided rather than appended.
+
+**What it would take.** For a card: a `TailNode` member that `sameNode` can
+compare without allocating, and a decision about what a plugin's card does when it
+is inside a folded run. For a command: a third source in `buildCommands` with a
+stated precedence against the other two, and an answer for what happens when two
+plugins claim one name.
+
+**Why the four that exist were enough to ship.** The demo plugin uses all of them
+and wants neither of these. Until something real does, adding them is guessing at
+the shape.
+
+**Status.** Not built
+
+### Q7.106 — Could an organisation hand one plugin to everybody?
+
+**Position.** Not today, and the shape it would take is known and needs **no
+change to the daemon at all**.
+
+**What it would be.** The control plane holds a catalogue — an archive and its
+manifest, with a rule about who may see it — and the *browser* is the courier: it
+already talks to the control plane and to each daemon, so it fetches the archive
+from one and `POST /plugins` it to the other. Paid works by the catalogue refusing
+to serve the bytes, which is a `403` on a route below the auth gate rather than
+any new mechanism.
+
+**Why that keeps every property.** The daemon still makes exactly one
+control-plane request ever (Q1.9): it is not the one fetching. Installing is still
+an act by whoever owns the machine, so Q7.42 is untouched. And it is additive —
+new tables on the control plane, which its schema rule already allows, plus a
+screen.
+
+**What it does not do, and would not.** Install silently on somebody's machine.
+That is fleet rollout, and it is refused for Q7.42's reasons rather than because
+nobody has written it.
+
+**Why it is not built.** Nobody has needed it yet, and building a catalogue before
+there is a plugin worth distributing is building the market this record has
+already declined once (Q7.104).
+
+**Status.** Not built

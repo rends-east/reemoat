@@ -46,23 +46,45 @@ export function depthOf(route: Route): number {
     case "session":
       return 1;
     /*
-     * Inside a sheet, and the four depths are the four screens somebody walks
-     * through: the section list, a section, a machine's agents, one agent.
-     * `/new` has one screen and therefore one depth, which is what makes every
-     * navigation within it `null`.
+     * A plugin's screen is one depth inside its own stack and has nothing deeper,
+     * which is what makes every navigation *within* it `null` — the same shape
+     * `/new` has, and for the same reason: there is one screen.
+     */
+    case "plugin":
+      return 1;
+    /*
+     * Inside a sheet, and the depths are the screens somebody walks through: the
+     * section list, a section, a machine, then one of the two lists under it —
+     * that machine's agents or its plugins — and one of those. `/new` has one
+     * screen and therefore one depth, which is what makes every navigation within
+     * it `null`.
+     *
+     * **Agents and plugins sit at the same depths as each other**, which is what
+     * makes the animation right in both directions: walking from a machine into
+     * either list is a push, and walking back out of either is a pop. They are
+     * never both set — `parseSettingsRoute` is the one producer and `webcheck`
+     * asserts it over every shape — so the order of these tests decides nothing.
      */
     case "new":
       return 1;
     case "settings":
-      if (route.agent !== null) return 4;
+      if (route.agent !== null || route.plugin !== null) return 4;
       if (route.machineId !== null) return 3;
       return route.section !== null ? 2 : 1;
   }
 }
 
-/** Whether a route is drawn as a pop-up over something else. */
+/**
+ * Whether a route is drawn as a pop-up over something else.
+ *
+ * The other half of `isOverlayPath` in `overlay.ts`, which answers the same
+ * question from a path rather than from a parsed route. `webcheck` asserts the
+ * two agree over every route shape, because a route in one and not the other is a
+ * pop-up that either forgets what it was drawn over or records one while being a
+ * screen.
+ */
 export function isSheet(route: Route): boolean {
-  return route.name === "settings" || route.name === "new";
+  return route.name === "settings" || route.name === "new" || route.name === "plugin";
 }
 
 /**
@@ -131,6 +153,9 @@ export function upFrom(route: Route, under: string): string | null {
     case "session":
       return "/";
     case "new":
+    case "plugin":
+      // Nothing deeper inside either, so up is out — onto whatever it was opened
+      // over, which is what the sheet's own ✕ does.
       return under;
     case "settings": {
       // A section walks one level up inside the sheet; the index leaves it. Both

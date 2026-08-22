@@ -13,6 +13,7 @@ import { IconButton } from "../bits";
 import { Sheet } from "../Sheet";
 import { AccountSection } from "./AccountSection";
 import { MachineAgentsSection } from "./MachineAgentsSection";
+import { MachinePluginsSection } from "./MachinePluginsSection";
 import { MachineSection } from "./MachineSection";
 import { MachinesSection } from "./MachinesSection";
 import { SettingsNav } from "./SettingsNav";
@@ -156,9 +157,13 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
               <p className="hidden text-sm text-muted sm:block">Pick a setting from the list.</p>
             </>
           ) : drilled && route.machineId !== null ? (
-            /* The machine's own screen, and one level in, its agents. Both parse to
-               the same `machineId`; the agent segment is what tells them apart. */
-            route.agent === null ? (
+            /* The machine's own screen, and one level in, one of its two lists.
+               All three parse to the same `machineId`; the segment after it is
+               what tells them apart, and `parseSettingsRoute` guarantees `agent`
+               and `plugin` are never both set. */
+            route.plugin !== null ? (
+              <MachinePluginsSection state={state} machineId={route.machineId} plugin={route.plugin} />
+            ) : route.agent === null ? (
               <MachineSection state={state} machineId={route.machineId} />
             ) : (
               <MachineAgentsSection state={state} machineId={route.machineId} agent={route.agent} />

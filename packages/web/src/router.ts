@@ -48,6 +48,25 @@ export type Route =
    */
   | ({ name: "settings" } & SettingsRoute)
   /**
+   * `/p/:machineId/:pluginId` — one plugin's own screen.
+   *
+   * A pop-up, like `/settings` and `/new`, and a route for their reasons: it deep
+   * links, it survives the reload a phone performs on its own, and the phone's
+   * Back button closes it because closing it is popping a history entry.
+   *
+   * **Short, and outside `/settings`.** A plugin's *settings* are configuration of
+   * one daemon and live inside that machine beside its agents; its screen is a
+   * thing somebody opens to look at, from a phone, several times a day. Those are
+   * different enough that putting the second four segments inside the first would
+   * be filing a bookmark under a preference.
+   *
+   * The plugin id is **not** validated here, unlike an agent id: the set is
+   * whatever is installed on that daemon, which this client cannot know before it
+   * asks. An unknown one reaches the screen, and the screen says it is not
+   * installed.
+   */
+  | { name: "plugin"; machineId: MachineId; pluginId: string }
+  /**
    * `/register`, `/confirm`, `/forgot`, `/reset`, `/verify`.
    *
    * The token these carry is **not here**: it rides the URL fragment, which
@@ -119,6 +138,13 @@ function parse(pathname: string): Route {
     // `decodeSegment` is passed in rather than applied here, so the one place
     // that knows a segment may not decode stays the one place.
     return { name: "settings", ...parseSettingsRoute(parts.slice(1), decodeSegment) };
+  }
+  if (parts[0] === "p" && parts[1] !== undefined && parts[2] !== undefined) {
+    return {
+      name: "plugin",
+      machineId: machineId(decodeSegment(parts[1])),
+      pluginId: decodeSegment(parts[2]),
+    };
   }
   if (parts[0] === "m" && parts[1] !== undefined && parts[2] === "s" && parts[3] !== undefined) {
     return {
