@@ -10,16 +10,17 @@ import { PluginApi, PluginApiError, type PluginApiOptions } from "./api.js";
 import { parseManifest } from "./manifest.js";
 import {
   clampView,
-  type ClampedView,
+  noteClamp,
   type PluginHook,
   type PluginManifest,
   type PluginResult,
   type PluginState,
   type PluginSummary,
-  type PluginView,
-  PLUGIN_VIEW_LIMITS,} from "./protocol.js";
+  PLUGIN_VIEW_LIMITS,
+} from "./protocol.js";
 import {
   ForkedPluginRuntime,
+  MAX_INFLIGHT_HOST_CALLS,
   MAX_INFLIGHT_INVOCATIONS,
   MAX_PLUGIN_MESSAGE_BYTES,
   PLUGIN_INVOKE_TIMEOUT_MS,
@@ -55,7 +56,15 @@ import type { InstalledPlugin, PluginDataStore, PluginRecordStore } from "./stor
  *     all three.
  */
 
-/** How many times a plugin may be restarted before it is left alone. */
+/**
+ * How many times a plugin may be **launched** before it is left alone — the first
+ * one included, so it buys two restarts rather than three.
+ *
+ * Said as launches because that is what `starts` counts, and the message on the
+ * row says the same ("failed to start 3 times"). `resetBudget` returns it, which
+ * is deliberate and is not a way around this: being stopped so somebody else's
+ * update could be tried is not one of this plugin's own failures.
+ */
 const MAX_PLUGIN_STARTS = 3;
 /** Backoff between restarts. Full jitter, the shape `autoResume` uses. */
 const RESTART_BASE_MS = 2_000;
@@ -483,12 +492,6 @@ export class PluginHost {
 
       this.options.records.put(record);
       wrote = true;
-      // Only after the new one is known to run — the old tree is what made the
-      // rollback above possible, and until here it was still the way back.
-      if (aside !== null) {
-        await this.discard(aside);
-        aside = null;
-      }
       if (replaced !== null && replaced !== record.version) {
         await this.discard(join(this.root, manifest.id, replaced));
       }
@@ -510,6 +513,40 @@ export class PluginHost {
        * restarted, and a real stop when something did.
        */
       if (existing !== null) await existing.stop();
+      /*
+       * ⚠ **The way back, destroyed last — after every statement that can throw
+       * and after the incumbent is certainly down.** It used to run immediately
+       * after `records.put`, with three fallible statements behind it, and both
+       * halves of that were wrong.
+       *
+       * **The rollback half.** `target` carries the version, so `aside` is
+       * non-null on exactly one path: reinstalling the version already there,
+       * which is the documented way somebody iterates on a plugin they are
+       * writing. On that path `aside` *is* the running plugin's directory and
+       * `published` is the same path — so a throw from `discard`, from `seed`
+       * (which the catch's own docblock names as a real source) or from the stop
+       * above ran a catch that discarded the new tree and then found `aside`
+       * already gone. Both trees lost, the row naming a directory that is not
+       * there, and the plugin permanently failed. The catch's order —
+       * `discard(published)` and *then* `rename(aside, target)` — was always
+       * right; it just had nothing left to put back.
+       *
+       * **The live-process half, which is independent of any throw.** The
+       * docblock above this line is about the incumbent coming back through
+       * `deliver`'s drain between the first stop and the swap. If it did, it is
+       * running out of the tree `rename` moved to `aside` — and deleting that
+       * while a child is executing from it is its own defect, whether or not
+       * anything fails afterwards. Hence *after* `existing.stop()` specifically,
+       * rather than merely later.
+       *
+       * The cost is the whole of it: the old tree occupies disk for a few
+       * milliseconds more. Nothing reads it in that window, and on POSIX the
+       * rename never disturbed the descriptors the child already holds.
+       */
+      if (aside !== null) {
+        await this.discard(aside);
+        aside = null;
+      }
       return { kind: "ok", summary: plugin.summary(), replaced };
     } catch (error) {
       /*
@@ -545,7 +582,28 @@ export class PluginHost {
        */
       if (wrote) {
         if (existing !== null) this.options.records.put(existing.record);
-        else if (planted !== null) this.options.records.remove(planted.record.id);
+        else if (planted !== null) {
+          this.options.records.remove(planted.record.id);
+          /*
+           * ⚠ **Paired with the row, which is what `remove` does and this did
+           * not.** `doRemove` writes these two together and says why: "Its data
+           * goes with it, and only here." This arm was the second `records.remove`
+           * in the file and the only unpaired one — and unpaired here is
+           * permanent, because afterwards `installed()` is false on both halves
+           * (no row, and the directory below is gone), so `DELETE /plugins/:id`
+           * answers 404 and nothing can ever reach `dropPlugin` again. The keys
+           * then reappear under the next install of the same id, since
+           * `plugin_data` is keyed by id rather than by version — deliberately, so
+           * that an update keeps them.
+           *
+           * Safe for the reason that same comment gives from the other side: "an
+           * update keeps the data — that is what makes it an update." A **first**
+           * install that failed is not an update; before it there was no data of
+           * this id to keep. Deliberately not added to the `existing !== null`
+           * arm, where the plugin really is being updated.
+           */
+          this.options.data.dropPlugin(planted.record.id);
+        }
       }
       if (published !== null) await this.discard(published);
       if (aside !== null && target !== null) {
@@ -1003,6 +1061,15 @@ class LivePlugin {
    * Requests written to a child and not yet answered, each stamped with the launch
    * it was written to. See {@link settlePending} for why the stamp is load-bearing.
    */
+  /**
+   * How many host-API calls this plugin has out right now. See
+   * {@link MAX_INFLIGHT_HOST_CALLS}.
+   *
+   * A count rather than a `Map` because nothing here needs to find one again: the
+   * child's own id is what settles it, and the only question this answers is
+   * whether to take another.
+   */
+  private hostCalls = 0;
   private readonly pending = new Map<
     number,
     { settle: (answer: InvokeAnswer) => void; timer: NodeJS.Timeout; generation: number }
@@ -1312,9 +1379,41 @@ class LivePlugin {
   private onChildMessage(message: ChildMessage, target: PluginProcess, generation: number): void {
     if (message.t === "call") {
       const { id } = message;
+      /*
+       * ⚠ **Refused rather than queued, and counted here rather than inside
+       * `callApi`.** Here is where the fan-out is: `callApi` is a dispatcher that
+       * does not know which plugin's budget it is spending, and by the time a call
+       * reaches `sessions.changes` the git process is the next statement. Refusing
+       * is also the honest answer to the child, which asked for something now — a
+       * queue would only move the cost to the invoke deadline the caller is
+       * already waiting on.
+       */
+      if (this.hostCalls >= MAX_INFLIGHT_HOST_CALLS) {
+        target.send({
+          t: "answer",
+          id,
+          ok: false,
+          error: `this plugin already has ${MAX_INFLIGHT_HOST_CALLS} calls out; wait for one before making another`,
+        });
+        this.host.warn(
+          `plugin ${this.record.id} asked for more than ${MAX_INFLIGHT_HOST_CALLS} host calls at once`,
+        );
+        return;
+      }
+      this.hostCalls += 1;
+      /*
+       * Released on both arms and before the generation check, because the count is
+       * about *this* process's load rather than about who deserves an answer: a
+       * superseded child's call still finished, and leaving its slot spent would
+       * bleed the successor's budget one call per replaced generation.
+       */
+      const release = (): void => {
+        this.hostCalls = Math.max(0, this.hostCalls - 1);
+      };
       void this.host
         .callApi(this.record.manifest, message.method, message.args)
         .then((value) => {
+          release();
           if (generation !== this.generation) return;
           if (target.send({ t: "answer", id, ok: true, value }) === false) {
             // The value fits what the API allows and not what the channel
@@ -1329,6 +1428,7 @@ class LivePlugin {
           }
         })
         .catch((error: unknown) => {
+          release();
           if (generation !== this.generation) return;
           const detail =
             error instanceof PluginApiError
@@ -1708,26 +1808,6 @@ class LivePlugin {
 function withLogs(detail: string, child: PluginProcess): string {
   const logs = child.recentLogs();
   return logs.length === 0 ? detail : `${detail}\n${logs.join("\n")}`;
-}
-
-/**
- * A clamped view, with a line saying it was clamped.
- *
- * **Said rather than hidden**, which is the same rule the transcript keeps about a
- * conversation it could not draw in full: a list silently cut is a list showing a
- * wrong number, and the person reading it has no way to find that out. One notice
- * at the foot costs a row and makes the screen honest.
- */
-function noteClamp(clamped: ClampedView): PluginView {
-  if (!clamped.clamped) return clamped.view;
-  return {
-    title: clamped.view.title,
-    refreshMs: clamped.view.refreshMs,
-    blocks: [
-      ...clamped.view.blocks,
-      { type: "notice", text: "Some of what this plugin returned was too large to show.", tone: "default" },
-    ],
-  };
 }
 
 function refuse(code: string, message: string): InstallOutcome {

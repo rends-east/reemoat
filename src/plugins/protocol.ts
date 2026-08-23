@@ -309,16 +309,6 @@ export type PluginResult =
 /* ── Bounds ──────────────────────────────────────────────────────────────── */
 
 /**
- * How much of a view this daemon will forward.
- *
- * A plugin is a child process that can return anything, and the thing on the
- * other end is a phone holding 16 MiB for a whole conversation. Clamped here
- * rather than refused, because a board with 300 cards is somebody's real board
- * and answering `500` to it is worse than drawing 200 of them — but clamped
- * *visibly*, which is what `clampView` reports so the screen can say a list was
- * cut rather than quietly showing a wrong number.
- */
-/**
  * How often a view may ask to be re-read.
  *
  * A floor because the number is the plugin's to choose and a request rate is a
@@ -330,6 +320,16 @@ export type PluginResult =
 export const PLUGIN_REFRESH_MIN_MS = 2_000;
 export const PLUGIN_REFRESH_MAX_MS = 300_000;
 
+/**
+ * How much of a view this daemon will forward.
+ *
+ * A plugin is a child process that can return anything, and the thing on the
+ * other end is a phone holding 16 MiB for a whole conversation. Clamped here
+ * rather than refused, because a board with 300 cards is somebody's real board
+ * and answering `500` to it is worse than drawing 200 of them — but clamped
+ * *visibly*, which is what `clampView` reports so the screen can say a list was
+ * cut rather than quietly showing a wrong number.
+ */
 export const PLUGIN_VIEW_LIMITS = {
   blocks: 24,
   rows: 200,
@@ -427,6 +427,106 @@ export function clampView(raw: unknown): ClampedView {
 
   const title = source.title === null || source.title === undefined ? null : clip(source.title, PLUGIN_VIEW_LIMITS.short);
   return { view: { title, refreshMs: clampRefresh(source.refreshMs), blocks }, clamped };
+}
+
+/**
+ * A clamped view, with a line saying it was clamped.
+ *
+ * **Said rather than hidden**, which is the same rule the transcript keeps about a
+ * conversation it could not draw in full: a list silently cut is a list showing a
+ * wrong number, and the person reading it has no way to find that out. One notice
+ * at the foot costs a row and makes the screen honest.
+ *
+ * Here rather than in `host.ts` because {@link fitView} runs in the **child**, and
+ * a notice added on one side of the channel and not the other is a cut nobody is
+ * told about. Applying it twice is a no-op: the host's own pass finds nothing left
+ * to clamp and adds nothing.
+ */
+export function noteClamp(clamped: ClampedView): PluginView {
+  if (!clamped.clamped) return clamped.view;
+  return {
+    title: clamped.view.title,
+    refreshMs: clamped.view.refreshMs,
+    blocks: [
+      ...clamped.view.blocks,
+      { type: "notice", text: "Some of what this plugin returned was too large to show.", tone: "default" },
+    ],
+  };
+}
+
+/** The rows of every block that has any, as one number. */
+function rowsIn(view: PluginView): number {
+  let most = 0;
+  for (const block of view.blocks) {
+    if (block.type === "list") most = Math.max(most, block.rows.length);
+    else if (block.type === "columns") for (const column of block.columns) most = Math.max(most, column.rows.length);
+  }
+  return most;
+}
+
+/** The same view with no list or column longer than `cap`. */
+function withRowCap(view: PluginView, cap: number): PluginView {
+  return {
+    title: view.title,
+    refreshMs: view.refreshMs,
+    blocks: view.blocks.map((block) => {
+      if (block.type === "list") return { ...block, rows: block.rows.slice(0, cap) };
+      if (block.type === "columns") {
+        return { ...block, columns: block.columns.map((column) => ({ ...column, rows: column.rows.slice(0, cap) })) };
+      }
+      return block;
+    }),
+  };
+}
+
+/** What this view costs on the wire, in bytes rather than in characters. */
+function wireBytes(view: PluginView): number {
+  return new TextEncoder().encode(JSON.stringify(view)).length;
+}
+
+/**
+ * A view cut until it **fits the channel**, rather than refused for not fitting.
+ *
+ * ⚠ **`PLUGIN_VIEW_LIMITS` was enforced on the wrong side of the wire, and could
+ * therefore never do its job.** {@link clampView} ran in the host — after the
+ * child's answer had already crossed IPC — while the child refuses to send
+ * anything over `MAX_PLUGIN_MESSAGE_BYTES`. So the two bounds sit two lines apart
+ * in the author's guide as though both applied, and only the smaller one ever
+ * did: a view inside every documented limit was refused with "this plugin
+ * returned more than can be sent", and the clamp that exists to cut it never saw
+ * it.
+ *
+ * Measured 2026-08-23 against a real forked child, the reference plugin and a
+ * real store: its board fits at 903 cards and does not at 904, while the store
+ * lets a plugin keep 1000 keys and the session prune never removes them. So a
+ * plugin doing exactly what the guide walks through reaches a screen that cannot
+ * be drawn — permanently, and with nothing in the interface able to shrink it,
+ * because the only control that deletes a card belongs to a session that by then
+ * no longer exists.
+ *
+ * **Rows are the only unbounded dimension**, which is why they are the lever.
+ * Blocks, text, fields and columns are each bounded by a count that is small
+ * enough to be irrelevant against 256 KiB; the number of rows a plugin has is
+ * whatever its data grew to. So the cap is halved until the message fits, which
+ * is at most eight measurements and terminates at zero rows.
+ *
+ * Both bounds still hold afterwards, and neither is now a claim the other
+ * quietly overrules.
+ */
+export function fitView(raw: unknown, budget: number): ClampedView {
+  const first = clampView(raw);
+  if (wireBytes(first.view) <= budget) return first;
+
+  let cap = rowsIn(first.view);
+  let cut = first.view;
+  while (cap > 0) {
+    cap = Math.floor(cap / 2);
+    cut = withRowCap(first.view, cap);
+    if (wireBytes(cut) <= budget) break;
+  }
+  // `clamped` unconditionally: reaching here means something was dropped, and at
+  // `cap === 0` it means every row was — which the notice must still say.
+  return { view: cut, clamped: true };
 }
 
 /**

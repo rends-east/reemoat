@@ -90,7 +90,7 @@ const storage = new Map<string, string>();
 
 // Dynamic, so the stub above is in place before any module body runs.
 const { SessionStream } = await import("../src/stream.js");
-const { askedQuestion, drawableOptions, essentialContext, formatLocation, hasInput, optionLabel, permissionButtons, permissionContext, permissionHeadline, detailContext, readInput, withheldDetail } = await import(
+const { askedQuestion, drawableOptions, essentialContext, formatLocation, hasInput, optionLabel, permissionButtons, permissionContext, permissionHeadline, planControls, detailContext, readInput, withheldDetail } = await import(
   "../src/permission.js"
 );
 const { changeCounts, diffLines } = await import("../src/diff.js");
@@ -1666,8 +1666,20 @@ process.stdout.write("\nthe permission card's context\n");
     } as never,
     [],
   );
-  check("the readable copy of the plan stays", planned.text, [plan]);
-  check("the escaped copy of it does not", planned.rawInput?.includes("# Plan"), false);
+  /*
+   * **The plan is its own field now, and that is what lets it be *rendered*.**
+   *
+   * It used to sit in `text`, which the card draws verbatim in a 160px monospace
+   * `<pre>` — the right treatment for a text block, because for kimi that block
+   * *is* the shell command and a markdown renderer eats the characters somebody
+   * is approving. A `plan` is the opposite kind of thing: a document, named by
+   * the tool's own schema, on a request that authorizes nothing. So it moves out
+   * of `text` (which is why this now asserts `[]`) and into `plan`, and the
+   * `<pre>` rule is left governing every other request untouched.
+   */
+  check("the plan is read as a document", planned.plan, plan);
+  check("and is not also drawn as a block of prose", planned.text, []);
+  check("the escaped copy of it does not survive either", planned.rawInput?.includes("# Plan"), false);
   check("and the one field the prose never said survives", planned.rawInput, '{\n  "planFilePath": "/Users/x/.claude/plans/p.md"\n}');
   check(
     "a blob whose every field is echoed becomes nothing at all",
@@ -1683,6 +1695,257 @@ process.stdout.write("\nthe permission card's context\n");
     '{\n  "abc": "x"\n}',
   );
   check("and is not also shown as prose", jsonProse.text, []);
+
+  /* ---- plan mode: what makes a plan a plan, and what it costs to be wrong ---- */
+
+  /*
+   * **Everything here is verbatim from this daemon's own database** — seqs 46-48
+   * of a real claude session, `claude-agent-acp` on a `switch_mode` tool call
+   * titled "Ready to code?". Only the plan's *wording* is a stand-in; every id,
+   * every kind and the shape of both events are what was measured.
+   */
+  const planned2 = "# Plan\n\n1. Do the thing\n2. Then the other";
+  const planCall = (kind: string, extra: Record<string, unknown> = {}): never =>
+    ({
+      seq: 1,
+      ts: 1000,
+      event: {
+        type: "tool_call",
+        toolCallId: "t1",
+        title: "Ready to code?",
+        kind,
+        status: "pending",
+        locations: [],
+        rawInput: {},
+        parentToolCallId: null,
+        subagent: false,
+        ...extra,
+      },
+    }) as never;
+  const planUpdate = (rawInput: unknown): never =>
+    ({
+      seq: 2,
+      ts: 2000,
+      event: {
+        type: "tool_call_update",
+        toolCallId: "t1",
+        title: "Ready to code?",
+        status: null,
+        locations: [],
+        rawInput,
+        content: null,
+      },
+    }) as never;
+  const planPending = (over: Record<string, unknown> = {}): never =>
+    ({
+      ...base,
+      toolCallId: "t1",
+      title: "Ready to code?",
+      rawInput: { plan: planned2, planFilePath: "/p.md" },
+      content: [{ type: "content", content: { type: "text", text: planned2 } }],
+      ...over,
+    }) as never;
+
+  {
+    const withKind = permissionContext(planPending(), [planCall("switch_mode")]);
+    check("a plan on a switch_mode call is a plan", withKind.plan, planned2);
+    check("and the kind rides the tool call", withKind.kind, "switch_mode");
+
+    /*
+     * **The card opens before the transcript pages in**, which is why
+     * `PermissionCard` calls `loadAll` at all — so a plan whose `tool_call` has
+     * not arrived must still render as a document. Requiring the kind here would
+     * mean a plan drawn as monospace on a cold open and as markdown a moment
+     * later, which is a worse rendering than either.
+     */
+    check("a plan with no tool call loaded is still a plan", permissionContext(planPending(), []).plan, planned2);
+
+    /*
+     * **The gate, and the only reason rendering markdown here is safe.** A
+     * request that authorizes a concrete action is not a document — the same test
+     * `askedQuestion` makes, and the case that would otherwise hand a shell
+     * command to a renderer that is free to eat its asterisks.
+     */
+    check(
+      "a plan field beside a command is not a plan",
+      permissionContext(planPending({ rawInput: { plan: planned2, command: "rm -rf /tmp/x" }, content: null }), []).plan,
+      null,
+    );
+    check(
+      "nor beside a body about to be written",
+      permissionContext(planPending({ rawInput: { plan: planned2, content: "hello" }, content: null }), []).plan,
+      null,
+    );
+    check(
+      "nor beside a diff",
+      permissionContext(
+        planPending({
+          content: [{ type: "diff", path: "a.ts", oldText: "a", newText: "b" }],
+        }),
+        [],
+      ).plan,
+      null,
+    );
+    check(
+      "nor beside a location the tool named",
+      permissionContext(planPending(), [planCall("switch_mode", { locations: [{ path: "/a.ts", line: null }] })]).plan,
+      null,
+    );
+
+    /*
+     * **The partition, and for a plan it moves the *source* rather than hiding
+     * it.** Above the disclosure the plan is a rendered document; below it are the
+     * characters it was written with, in the same verbatim `<pre>` every other
+     * payload on this card gets. Nothing is drawn twice, which is what the
+     * `essential`/`detail` pair means everywhere else in this file.
+     */
+    const essential = essentialContext(withKind);
+    check("a plan is what the card always shows", essential.plan, planned2);
+    check("and its source is not inline beside it", essential.text, []);
+    const detail = detailContext(withKind);
+    check("the disclosure never repeats the rendered plan", detail.plan, null);
+    check("it holds the source instead", detail.text, [planned2]);
+    check("and it is drawn at all", withheldDetail(withKind), true);
+    /*
+     * A plan with no `planFilePath` has a `null` arguments blob, so without its
+     * own clause the disclosure would not be drawn — hiding the one thing it
+     * exists to reveal.
+     */
+    const bare = permissionContext(planPending({ rawInput: { plan: planned2 } }), [planCall("switch_mode")]);
+    check("a plan carrying nothing else still gets a disclosure", withheldDetail(bare), true);
+    check("and its blob really is empty", bare.rawInput, null);
+
+    /*
+     * ⚠ **The document ends with a newline, and `pick` trims what it extracts.**
+     * Measured against a real 11 KiB plan: the field came out 6818 characters and
+     * the content block that echoed it was 6819, so strict equality said
+     * "different" and the card drew the rendered plan with its own source
+     * underneath it. Both halves of the echo test are trimmed now, and this is
+     * the shape that proves it — the fixture above has no trailing newline and
+     * passed throughout.
+     */
+    const ends = "# Plan\n\n1. Do the thing\n";
+    const withNewline = permissionContext(
+      planPending({
+        rawInput: { plan: ends, planFilePath: "/p.md" },
+        content: [{ type: "content", content: { type: "text", text: ends } }],
+      }),
+      [planCall("switch_mode")],
+    );
+    check("a plan ending in a newline is read without it", withNewline.plan, ends.trim());
+    check("and the block that echoed it is still recognised", withNewline.text, []);
+    // The second half, which fails only once the first is fixed: with the echo
+    // gone from `prose`, nothing else would drop the field from the blob.
+    check("and the escaped copy does not come back in the arguments", withNewline.rawInput, '{\n  "planFilePath": "/p.md"\n}');
+  }
+
+  /* ---- the plan-mode decision, curated ---- */
+
+  /*
+   * The measured option set. Three `allow_always`, which is the whole reason this
+   * has to read ids: ACP's own enum separates none of them.
+   */
+  const PLAN_OPTIONS = [
+    { optionId: "bypassPermissions", name: "Yes, and bypass permissions", kind: "allow_always" },
+    { optionId: "auto", name: 'Yes, and use "auto" mode', kind: "allow_always" },
+    { optionId: "acceptEdits", name: "Yes, and auto-accept edits", kind: "allow_always" },
+    { optionId: "default", name: "Yes, and manually approve edits", kind: "allow_once" },
+    { optionId: "plan", name: "No, keep planning", kind: "reject_once" },
+  ];
+
+  {
+    const context = permissionContext(planPending({ options: PLAN_OPTIONS }), [planCall("switch_mode")]);
+    const controls = planControls(context, PLAN_OPTIONS as never);
+    check("a measured plan request draws three controls", controls?.length, 3);
+    check("in this order", controls?.map((c) => c.option.optionId), ["plan", "acceptEdits", "auto"]);
+    check("the refusal alone on the left", controls?.map((c) => c.leading), [true, false, false]);
+    check(
+      "and auto mode is the one filled button",
+      controls?.filter((c) => c.primary).map((c) => c.option.optionId),
+      ["auto"],
+    );
+    /*
+     * **Every control here is one of the agent's own options**, and nothing
+     * synthetic sits among them. A fourth button that opened a text field was
+     * built and taken back out: saying what to change is the message box, which
+     * takes over while a plan is on screen. Q3.454.
+     */
+    check(
+      "and every one of them is an option the agent sent",
+      controls?.every((c) => PLAN_OPTIONS.some((o) => o.optionId === c.option.optionId)),
+      true,
+    );
+
+    /*
+     * **`null` is today's card, and that fallback is the whole safety story.**
+     * Driven as a sweep over one-field deviations rather than as four hand-written
+     * cases, because what is being asserted is the *property*: anything that is
+     * not exactly the shape that was measured is drawn the way it always was.
+     */
+    const deviations: [string, unknown[]][] = [
+      ["an id renamed", PLAN_OPTIONS.map((o) => (o.optionId === "auto" ? { ...o, optionId: "autoMode" } : o))],
+      ["a kind changed", PLAN_OPTIONS.map((o) => (o.optionId === "auto" ? { ...o, kind: "allow_once" } : o))],
+      ["an option removed", PLAN_OPTIONS.filter((o) => o.optionId !== "bypassPermissions")],
+      ["an option added", [...PLAN_OPTIONS, { optionId: "extra", name: "Something else", kind: "allow_once" }]],
+    ];
+    for (const [what, options] of deviations) {
+      const ctx = permissionContext(planPending({ options }), [planCall("switch_mode")]);
+      check(`${what} falls back to the agent's own buttons`, planControls(ctx, options as never), null);
+    }
+
+    /*
+     * The structural gates, asked separately. The kind is demanded *here* and not
+     * for the rendering because this is where the consequence is: drawing a
+     * document cannot approve anything, removing two of five options can.
+     */
+    check(
+      "an option set this shape on a tool call that is not switch_mode is not curated",
+      planControls(
+        permissionContext(planPending({ options: PLAN_OPTIONS }), [planCall("edit")]),
+        PLAN_OPTIONS as never,
+      ),
+      null,
+    );
+    check(
+      "and neither is one carrying no plan",
+      planControls(
+        permissionContext(planPending({ options: PLAN_OPTIONS, rawInput: null, content: null }), [
+          planCall("switch_mode"),
+        ]),
+        PLAN_OPTIONS as never,
+      ),
+      null,
+    );
+
+    // And the path it falls back *to* is untouched: five buttons, the agent's own
+    // words, the reversible `allow_once` filled. This is what proves the carve-out
+    // lives beside `permissionButtons` rather than inside it.
+    check("the fallback still draws all five", permissionButtons(PLAN_OPTIONS as never).order.length, 5);
+    check("with the reversible one primary", permissionButtons(PLAN_OPTIONS as never).primaryId, "default");
+    check("and drops none of them", drawableOptions(PLAN_OPTIONS as never).length, 5);
+  }
+
+  /* ---- a payload the snapshot was too small to carry ---- */
+
+  /*
+   * **8 KiB is the snapshot's cap, and 128 KiB is the log's** — so a plan too big
+   * for `PendingPermissionSnapshot` is sitting whole on the `tool_call_update`.
+   * The stand-in used to win the `??` chain anyway, and the card apologised for a
+   * request whose arguments it could have had for free.
+   */
+  {
+    const clamped = { truncated: true, bytes: 9000 };
+    const recovered = permissionContext(planPending({ rawInput: clamped, content: clamped }), [
+      planCall("switch_mode"),
+      planUpdate({ plan: planned2, planFilePath: "/p.md" }),
+    ]);
+    check("a clamped plan is recovered from the log", recovered.plan, planned2);
+    check("and the card stops apologising for it", recovered.truncated, false);
+
+    const lost = permissionContext(planPending({ rawInput: clamped, content: clamped }), []);
+    check("with nothing in the log it is still reported as clipped", lost.truncated, true);
+    check("and there is no plan to draw", lost.plan, null);
+  }
 
   /* ---- a permission that is really a question ---- */
 
@@ -3061,6 +3324,84 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
   // failure mode of every source-text assertion in this file.
   check("the scan actually found the controls", scanned >= 6, true);
   check("nothing a person taps to answer an agent is under 44px", short, []);
+
+  /*
+   * ⚠ **The plugin surface, held to the same floor by a different argument.**
+   *
+   * It is deliberately not added to `DECISION_CARDS` above: that list is narrow
+   * on purpose, and its reason is that a mis-tap there *answers the agent*. This
+   * is a second consequence rather than a widening of that one. Uninstalling a
+   * plugin takes everything it stored and nothing brings it back, and a plugin
+   * author can mark any row action `destructive` — so the two files below carry
+   * irreversible controls drawn by somebody who is not this app.
+   *
+   * Two sweeps, because the controls fail two different ways. The hand-rolled
+   * ones reach the `tap` scan and were 20px: `PluginView`'s row opener claimed
+   * "`tap` for the 44px reach", and `.tap` in `index.css` is three `transition`
+   * properties with no height at all. The rest go through `Button` at
+   * `size="sm"` — 36px — which `BUTTON_SIZE` licenses only for "the only thing on
+   * that row", and these sit four abreast.
+   *
+   * The `size="sm"` sweep reads an *element* rather than a line, tracking brace
+   * depth to find the tag's own `>`: the prop and the escape are on different
+   * lines of the same tag, and an arrow function in `onClick` puts a `>` inside
+   * the props that a line- or regex-based scan stops at.
+   */
+  const PLUGIN_SURFACE: readonly (readonly [string, URL])[] = [
+    ["PluginView.tsx", new URL("../src/ui/PluginView.tsx", import.meta.url)],
+    ["PluginsPanel.tsx", new URL("../src/ui/settings/PluginsPanel.tsx", import.meta.url)],
+  ];
+  // The documented escape, spelled once: `sm` keeps the desktop density and the
+  // media query puts the platform minimum back wherever there is a finger.
+  const COARSE_FLOOR = /pointer:coarse\)\]:min-h-11/;
+
+  const shortPlugin: string[] = [];
+  const bareSmall: string[] = [];
+  let tapped = 0;
+  let small = 0;
+  for (const [label, url] of PLUGIN_SURFACE) {
+    const src = readFileSync(url, "utf8");
+    for (const match of src.matchAll(CLASS_ATTR)) {
+      const classes = match[1] ?? match[2] ?? "";
+      if (!/\btap\b|\bpress\b/.test(classes)) continue;
+      /*
+       * `LINK` is excluded, and it is the one exclusion here. It is the shared
+       * class for a link *inside running text* — "Drawn by board on this machine.
+       * All plugins" — and the scan this one is modelled on already argues that
+       * case in its own docblock, beside `SessionBrowser`'s two-line rows and
+       * `AgentsPanel`'s `<summary>` elements. A 44px box around three words in the
+       * middle of a sentence is not a bigger target, it is a broken paragraph.
+       * Everything that is a control somebody aims at still has to answer.
+       */
+      if (classes.includes("${LINK}")) continue;
+      tapped += 1;
+      if (!REACHES_44.test(classes)) shortPlugin.push(`${label}: ${classes.slice(0, 60)}`);
+    }
+    for (const piece of src.split(/<(?=Button\b|DangerButton\b)/).slice(1)) {
+      let depth = 0;
+      let end = -1;
+      for (let i = 0; i < piece.length; i += 1) {
+        const ch = piece.charAt(i);
+        if (ch === "{" || ch === "(") depth += 1;
+        else if (ch === "}" || ch === ")") depth -= 1;
+        else if (ch === ">" && depth === 0) {
+          end = i;
+          break;
+        }
+      }
+      if (end < 0) continue;
+      const props = piece.slice(0, end);
+      if (!/size="sm"/.test(props)) continue;
+      small += 1;
+      if (!COARSE_FLOOR.test(props)) bareSmall.push(`${label}: ${props.slice(0, 60).replace(/\s+/g, " ")}`);
+    }
+  }
+
+  // Both counts, for the reason the sweep above states: a pattern that matches
+  // nothing passes silently, and this one has two patterns to get wrong.
+  check("the plugin sweep actually found the controls", [tapped >= 1, small >= 8], [true, true]);
+  check("nothing on a plugin's own surface is under 44px", shortPlugin, []);
+  check("and every small control there keeps the coarse-pointer floor", bareSmall, []);
 
   /*
    * ⚠ **And the other half of the exemption above, which was written down as a
@@ -6083,6 +6424,84 @@ process.stdout.write("\na run of tool calls, folded into one row\n");
     seq = 0;
     const plan = buildTail([toolCall("a", "grep"), ev({ type: "plan", entries: [] }), toolCall("b", "ls")], []);
     check("a plan breaks a run", keys(plan.rows), ["e1", "e2", "e3"]);
+
+    /*
+     * **And the surviving one of a collapsed pair still breaks it**, which is the
+     * sibling of the assertion above and the one that fails if somebody ever
+     * "fixes" the duplicate checklist by making a plan foldable. It would collapse
+     * two plans for free — and let a run of tool calls swallow the whole plan.
+     */
+    seq = 0;
+    const foldedPlans = buildTail(
+      [toolCall("a", "grep"), ev({ type: "plan", entries: [] }), ev({ type: "plan", entries: [] }), toolCall("b", "ls")],
+      [],
+    );
+    check("and the survivor of a collapsed pair still breaks it", keys(foldedPlans.rows), ["e1", "e3", "e4"]);
+  }
+
+  /* ---- one TodoWrite is many plan events, and one checklist ---- */
+
+  /*
+   * **Measured: one `TodoWrite` emits a `plan` per streaming refinement — nine
+   * events for a three-item list — each a full replacement.** So the transcript
+   * drew the same checklist nine times in a row, and a screenshot of three
+   * identical tables stacked on top of each other is what this collapses.
+   *
+   * "Consecutive" is defined over **emitted nodes**, which is the only definition
+   * that means what a reader sees. Over raw events, a codex `session_info_update`
+   * — about five a turn, and invisible — would save a stale card. Over *drawable*
+   * events it would too, since `showsInTranscript` answers true for things
+   * `nodeFor` then merges away.
+   */
+  {
+    const entries = (n: number) => [{ content: `step ${n}`, priority: "medium", status: "pending" }];
+    const plan = (n: number): never => ev({ type: "plan", entries: entries(n) });
+    const thought = (text: string): never => ev({ type: "text", role: "agent", thought: true, text });
+    const silent = (): never => ev({ type: "other", sessionUpdate: "session_info_update", raw: null });
+    const entriesOf = (rows: BuiltRows, at = 0): unknown =>
+      (rows[at] as { stored?: { event?: { entries?: unknown } } }).stored?.event?.entries;
+
+    seq = 0;
+    const pair = buildTail([plan(1), plan(2)], []);
+    check("two plan updates in a row are one card", keys(pair.rows), ["e2"]);
+    check("and it is the newest one", entriesOf(pair.rows), entries(2));
+
+    seq = 0;
+    const nine = buildTail([plan(1), plan(2), plan(3), plan(4), plan(5), plan(6), plan(7), plan(8), plan(9)], []);
+    check("the measured nine-for-three shape is one card", keys(nine.rows), ["e9"]);
+
+    // A plan is the *first* thing in the transcript: the `-1` sentinel rather
+    // than `0`, since `collected.length` is 0 before anything has been drawn.
+    seq = 0;
+    check("a transcript that opens with a plan still draws it", keys(buildTail([plan(1)], []).rows), ["e1"]);
+
+    /*
+     * What separates two plans is anything the reader can see. Real work between
+     * them is a history worth keeping, and the card stays where it happened.
+     */
+    seq = 0;
+    check(
+      "work between two plans keeps both",
+      keys(buildTail([plan(1), toolCall("a", "grep"), plan(2)], []).rows),
+      ["e1", "e2", "e3"],
+    );
+    seq = 0;
+    check("and so does a message", keys(buildTail([plan(1), say("done"), plan(2)], []).rows), ["e1", "t2", "e3"]);
+
+    // ...and what does not separate them is anything invisible.
+    seq = 0;
+    check("a thought does not save a stale checklist", keys(buildTail([plan(1), thought("hm"), plan(2)], []).rows), ["e3"]);
+    seq = 0;
+    check("nor does an event nobody draws", keys(buildTail([plan(1), silent(), silent(), plan(2)], []).rows), ["e4"]);
+
+    /*
+     * The cut is a wall in both directions and needs no clause of its own: the
+     * walk `break`s below it, so a plan on the far side is never reached and can
+     * neither suppress nor be suppressed.
+     */
+    seq = 0;
+    const across = [plan(1), ev({ type: "context_cleared", reason: "clear" }), plan(2)] as never[];
+    check("a plan below the cut is not drawn at all", keys(buildTail(across, [], 3).rows), ["e3"]);
     seq = 0;
     const gap = buildTail([toolCall("a", "grep"), toolCall("b", "ls"), toolCall("c", "bash")], [
       { from: 3, to: 4, reason: "evicted" } as never,
@@ -6797,6 +7216,40 @@ process.stdout.write("\nan event nobody draws does not break the message\n");
 
   {
     /*
+     * **A suppressed plan still flushes, and that is provably free.**
+     *
+     * The worry is real of the *wrong* rule: a row that draws nothing and still
+     * cuts the run splits one streamed message into two independently parsed
+     * `<Markdown>` blocks with nothing on screen to explain the break — which is
+     * the whole point of the two cases above. It cannot happen here, and the
+     * proof is the collapse rule itself: a plan is suppressed only when
+     * `collected` did not grow between it and its successor, and `flush()` runs
+     * *before* the node decision — so an open text run is pushed at that exact
+     * moment and the older plan is drawn. A plan with a message on either side of
+     * it is always a real boundary.
+     *
+     * Asserted as a **pair**, because each half passes with the other's rule
+     * installed: the first is what fails if `plan` is added to
+     * `TRANSCRIPT_SILENT` to "make the suppressed one stop flushing", and the
+     * second is what fails if the suppression is moved above the flush.
+     */
+    const plan = (): never => at({ type: "plan", entries: [] });
+    seq = 0;
+    check(
+      "a drawn plan is a real boundary between two messages",
+      texts([say("here is the pl"), plan(), say("an:")]),
+      ["here is the pl", "[event]", "an:"],
+    );
+    seq = 0;
+    check(
+      "and a suppressed one does not silently join them",
+      texts([say("a"), plan(), plan(), say("b")]),
+      ["a", "[event]", "b"],
+    );
+  }
+
+  {
+    /*
      * codex's own case, and the one that fires several times per turn. A fenced
      * block is the fixture rather than a plain sentence because it is the visible
      * worst case: split here, the first half renders as an unterminated fence.
@@ -7041,7 +7494,7 @@ process.stdout.write("\nwho is working, and what the box says\n");
   );
 
   const say = (over: Record<string, boolean>): string =>
-    composerPlaceholder({ blocked: false, reconnecting: false, working: false, ...over });
+    composerPlaceholder({ blocked: false, reconnecting: false, working: false, revising: false, ...over });
   check("an idle box asks for a message", say({}), "message…");
   check("a working one says so", say({ working: true }), "agent is working…");
   // Wins over `working`: it is the rarer fact, and the one explaining the spinner.
@@ -7056,6 +7509,90 @@ process.stdout.write("\nwho is working, and what the box says\n");
     say({ working: true, reconnecting: true, blocked: true }),
     "answer the request above first",
   );
+  /*
+   * **And a plan outranks even that, because it is the one blocked state where
+   * this box is an answer rather than something to wait behind.** A message
+   * written in front of a plan stops the turn and goes, which refuses the plan
+   * and says why in one gesture — so telling somebody to go and answer the card
+   * above would be pointing them away from the control they are already in.
+   */
+  check(
+    "a plan on screen asks for the correction instead",
+    say({ blocked: true, revising: true }),
+    "say what to change…",
+  );
+  check(
+    "and it says so whatever else is true",
+    say({ blocked: true, working: true, reconnecting: true, revising: true }),
+    "say what to change…",
+  );
+
+  /* ---- the three places that state has to hold together ---- */
+
+  /*
+   * All source-text, in the idiom this file already uses for class strings:
+   * these are JSX-level decisions with no pure function behind them, and the
+   * failure mode is silent — a gate left reading `blocked || working` refuses the
+   * send that this whole state exists to allow, and nothing else would notice.
+   */
+  const composerSrc = readFileSync(new URL("../src/ui/Composer.tsx", import.meta.url), "utf8");
+  check(
+    "a plan lifts the send gate rather than being gated by it",
+    /const sendRefused = revising \? false : blocked \|\| working;/.test(composerSrc),
+    true,
+  );
+  check(
+    "and takes the Stop slot for Send",
+    /const stoppable = canCancelTurn\(session\) && !revising;/.test(composerSrc),
+    true,
+  );
+  /*
+   * The ordering that makes it land: the daemon refuses a prompt inside a turn,
+   * and a parked permission is one. Measured — rejecting the plan does *not* end
+   * the turn, so the cancel is what the operator was pressing by hand.
+   */
+  check(
+    "and a send from that state cancels the turn first",
+    /const settled = revising\s*\n\s*\? daemon\.cancelTurn\(/.test(composerSrc),
+    true,
+  );
+  check(
+    "with the prompt behind it rather than beside it",
+    /\.then\(\(\) => daemon\.prompt\(sessionRef\.sessionId, body, sending\)\)/.test(composerSrc),
+    true,
+  );
+  // And the blur rule stands down, or the caret is taken out from under somebody
+  // the placeholder has just invited to type.
+  check(
+    "a plan does not release the caret",
+    /needsHuman\(row\.snapshot\) && !revising;/.test(composerSrc),
+    true,
+  );
+
+  /*
+   * ⚠ **Every hook in `SessionView` runs before its guard clause, and nothing
+   * else in this repository checks that.**
+   *
+   * There is no eslint, `tsc` does not model hook order, and this driver has no
+   * DOM — a sentence `Composer.tsx` already writes over its own release effect,
+   * and which was true in the worst way: a `useMemo` added below `row.snapshot`
+   * sat *after* `if (row === undefined) return`, so a cold-opened session
+   * rendered three hooks while it said "loading" and four once its row landed.
+   * That is React #310, thrown the moment the row arrives, and it takes the whole
+   * screen down.
+   *
+   * `SessionView` is the one component in this package with a guard clause
+   * between its hooks and its body. A second one owes this check.
+   */
+  const sessionViewSrc = readFileSync(new URL("../src/ui/SessionView.tsx", import.meta.url), "utf8");
+  const body = sessionViewSrc.slice(
+    sessionViewSrc.indexOf("export function SessionView("),
+    sessionViewSrc.indexOf("\nfunction SessionTitle("),
+  );
+  const guard = body.indexOf("\n  if (row === undefined) {");
+  check("the guard clause is still where this check thinks it is", guard > 0, true);
+  const late = [...body.matchAll(/\buse[A-Z]\w*\(/g)].filter((m) => (m.index ?? 0) > guard);
+  check("no hook runs after SessionView's guard clause", late.map((m) => m[0]), []);
 }
 
 process.stdout.write("\nwho gets the caret on a session switch\n");
@@ -7645,6 +8182,11 @@ process.stdout.write("\nwhether a message can be sent at all\n");
    * open — a parked question keeps one open — so every message typed then came
    * back `409 turn_in_flight` as a red toast, under a button whose own tooltip
    * claimed it queued. Nothing queues anywhere in this system.
+   *
+   * ⚠ That sentence briefly stopped being true and is true again. A correction
+   * typed on the plan card used to be *held* by the client and sent when the
+   * agent stopped; it is now an ordinary message in the ordinary box, gated by
+   * the ordinary rule. See Q3.454 for what that bought and what it cost.
    */
   check("a turn in flight refuses the send", canSend("hello", [], true), false);
   check("and so does a parked question, which is the same open turn", canSend("hello", [chip("ready", "u_1")], true), false);
@@ -7654,6 +8196,7 @@ process.stdout.write("\nwhether a message can be sent at all\n");
   check("a failed chip does not", canSend("hello", [chip("failed")]), true);
   // But it is not a message either.
   check("and cannot be the whole message", canSend("", [chip("failed")]), false);
+
 }
 
 /* ------------------------------------------------------------------ *
@@ -12225,6 +12768,41 @@ process.stdout.write("\nwho owns Escape, and what paints above what\n");
    */
   check("and it paints its own ground, so a slide covers what it replaces", bodyClasses.includes("bg-surface"), true);
   check("a sheet's height is definite at both widths", /(^|\s)h-\[/.test(SHEET_PANEL) && /\ssm:h-\[/.test(SHEET_PANEL), true);
+
+  /*
+   * **The ask card's two ceilings are whole strings, and that has to be asserted
+   * as *text*.** Tailwind v4 scans source files rather than evaluating them, so a
+   * class assembled from fragments — `max-h-[min(${n}dvh,100%)]` — emits no CSS at
+   * all, and the failure is a card with no height rule rather than an error
+   * anybody sees. Same class of hazard as a utility naming a token that does not
+   * exist, and the same remedy.
+   *
+   * `tall` is spent on a plan and nothing else, which is a decision about
+   * `PermissionCard` rather than about this table — so the pin below reads that
+   * file for the *reason* the size is chosen: `context.plan`, never the title
+   * "Ready to code?", which is what a later tidy-up would quietly reach for.
+   */
+  const askCardSrc = readFileSync(new URL("../src/ui/AskCard.tsx", import.meta.url), "utf8");
+  check(
+    "the ask card's height ceilings are literal classes",
+    ["max-h-[min(70dvh,100%)]", "max-h-[min(88dvh,100%)]"].map((cls) => askCardSrc.includes(`"${cls}"`)),
+    [true, true],
+  );
+  check("and neither is built out of an interpolation", /max-h-\[min\(\$\{/.test(askCardSrc), false);
+  /*
+   * The digit beside an answer is a **keyboard** shortcut, so it is hidden on a
+   * touch device — on the pointer and never on a breakpoint, since a half-width
+   * desktop window still has a keyboard. The handler is deliberately untouched.
+   */
+  check("the answer numbers are hidden on a coarse pointer", askCardSrc.includes('"pointer-coarse:hidden"'), true);
+  check("and that is asked of the pointer, not of the width", /sm:hidden[^"]*\{index \+ 1\}/.test(askCardSrc), false);
+  const permissionCardSrc = readFileSync(new URL("../src/ui/PermissionCard.tsx", import.meta.url), "utf8");
+  check(
+    "a plan gets the room because it is a plan, not because of what it is titled",
+    /size=\{context\.plan !== null \? "tall" : "normal"\}/.test(permissionCardSrc),
+    true,
+  );
+  check("and nothing on that card matches a plan by its title", permissionCardSrc.includes("Ready to code?"), false);
   check("and never a ceiling it can shrink under", /(^|\s)(sm:)?max-h-/.test(SHEET_PANEL), false);
 
   check(
@@ -15269,6 +15847,70 @@ process.stdout.write("\nwhat Telegram's own control does\n");
 wss.close();
 process.stdout.write("\nwhat a plugin may make this client draw\n");
 {
+  /*
+   * ⚠ **The hand mirror against the thing it mirrors, read off disk.**
+   *
+   * `wire.ts` copies `src/plugins/protocol.ts` by hand — `packages/web` may not
+   * import from `src/`, which is the standing reason its header gives — and a copy
+   * is only worth having while it *is* the copy. `ExitReason` is the precedent and
+   * the post-mortem: a member was added on the daemon's side and not the client's,
+   * every assertion in that section passed throughout because they all read the
+   * same wrong copy, and a session the daemon was deliberately restarting lost its
+   * composer.
+   *
+   * Five unions crossed the package boundary with this feature and `pincheck`
+   * pins none of them — its own docblock explains, correctly, that
+   * `PLUGIN_API_VERSION` has no second copy to drift, and then checks nothing
+   * between the two files at all. These are the five that would drift silently:
+   * a scope missing here is a permission the install list cannot name, a hook is
+   * a row nothing draws, a state is a plugin whose row says the wrong thing, and
+   * a block or field member is a narrowing that quietly discards content.
+   */
+  {
+    const daemonSrc = readFileSync(new URL("../../../src/plugins/protocol.ts", import.meta.url), "utf8");
+    const clientSrc = readFileSync(new URL("../src/wire.ts", import.meta.url), "utf8");
+    // The members of one exported union, by name. Read as text on both sides
+    // because these are types: there is nothing to import and enumerate.
+    /*
+     * ⚠ **Ended at the blank line, never at the first `;`.** A `;` terminates the
+     * plain string unions, but `PluginBlock`'s members are object literals with
+     * `;` *inside* them — so a `;` bound read one member and stopped. Both files
+     * were then truncated identically, the comparison of the two truncations
+     * passed, and only the "readable at all" assertion below noticed. That is the
+     * precedent's own post-mortem happening inside its own replacement.
+     */
+    const declaration = (src: string, head: string): string | null => {
+      const at = src.indexOf(head);
+      if (at < 0) return null;
+      const body = src.slice(at + head.length);
+      const end = body.search(/\n\s*\n/);
+      return end === -1 ? body : body.slice(0, end);
+    };
+    const membersOf = (src: string, name: string): string[] => {
+      const body = declaration(src, `export type ${name} =`);
+      if (body === null) return [`<no ${name}>`];
+      return [...body.matchAll(/"([a-z_.]+)"/g)].map((one) => one[1] ?? "").sort();
+    };
+    // `PluginBlock`'s members are objects, so its discriminant is what identifies
+    // them — every other string in that declaration is a tone or a field name.
+    const tagsOf = (src: string): string[] => {
+      const body = declaration(src, "export type PluginBlock =");
+      if (body === null) return ["<no PluginBlock>"];
+      return [...body.matchAll(/\btype: "([a-z_]+)"/g)].map((one) => one[1] ?? "").sort();
+    };
+
+    for (const name of ["PluginScope", "PluginHook", "PluginState", "PluginFieldKind"]) {
+      const theirs = membersOf(daemonSrc, name);
+      // A pattern that matches nothing passes silently, which is the failure mode
+      // of every source-text assertion in this file.
+      check(`${name} is readable on the daemon's side at all`, theirs.length > 0 && theirs[0]?.startsWith("<") !== true, true);
+      check(`and the client's ${name} holds exactly the same members`, membersOf(clientSrc, name), theirs);
+    }
+    const daemonTags = tagsOf(daemonSrc);
+    check("the block union is readable on the daemon's side at all", daemonTags, ["columns", "form", "list", "notice", "text"]);
+    check("and the client draws exactly the blocks the daemon can send", tagsOf(clientSrc), daemonTags);
+  }
+
   const {
     readBlock,
     readView,
@@ -15343,6 +15985,37 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
     ["plain", "destructive"],
   );
 
+  /*
+   * ⚠ **`columns` — one of the five block members, and the only one nothing
+   * asked about on either side.** The board plugin in this repository is three
+   * columns, so this is the shape the reference plugin actually draws, and the
+   * client's arm and the daemon's `clampView` arm were both undriven: a change
+   * that dropped `columns` entirely, or that forwarded an unbounded column list
+   * to a phone, passed both drivers.
+   *
+   * Same narrowing rule as `list`, one level deeper — a column that is not a
+   * column becomes an empty one rather than a hole, and its rows go through the
+   * same reader, so `tone` is narrowed inside them too.
+   */
+  const columns = readBlock({
+    type: "columns",
+    columns: [{ title: "Todo", rows: [{ id: "a", tone: "puce" }] }, null, { rows: [{ id: "b" }] }],
+  });
+  check(
+    "a column that is not a column becomes an empty one rather than a hole",
+    columns?.type === "columns" ? columns.columns.map((one) => [one.title, one.rows.length]) : null,
+    [
+      ["Todo", 1],
+      ["", 0],
+      ["", 1],
+    ],
+  );
+  check(
+    "and a column's rows are narrowed exactly as a list's are",
+    columns?.type === "columns" ? columns.columns[0]?.rows[0]?.tone : "unset",
+    null,
+  );
+
   const form = readBlock({
     type: "form",
     action: "save",
@@ -15375,8 +16048,8 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
   /* ---------------------------------------------------------------- *
    * What a refusal says, and the one that is not about plugins at all.
    * ---------------------------------------------------------------- */
-  const failed = (status: number, code: string, message = "m"): string =>
-    pluginFailure(new ApiError(status, code, message));
+  const failed = (status: number, code: string, message = "m", detail: unknown = null): string =>
+    pluginFailure(new ApiError(status, code, message, detail));
 
   /*
    * ⚠ **A daemon that predates plugins is recognised by the shape of its refusal,
@@ -15387,7 +16060,28 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
    */
   check("an old daemon is told apart from a missing plugin", failed(404, "http_404"), "This machine's daemon is too old for plugins. Update it and try again.");
   check("while a real 404 is about the plugin", failed(404, "plugin_not_found"), "That plugin is not installed on this machine any more.");
-  check("a read-only grant", failed(403, "insufficient_scope"), "You have read-only access to this machine.");
+  /*
+   * ⚠ **Three arms, because three of the six plugin routes want `machine:admin`
+   * and three want a session scope.** One sentence for all of them told a grant
+   * that really did hold `session:write` it was read-only, and pointed at a
+   * remedy that would not have worked. `requireScope` puts the scope it wanted in
+   * the envelope's detail; this is the assertion that it is still read.
+   */
+  check(
+    "a grant that cannot install is told it needs admin, not that it is read-only",
+    failed(403, "insufficient_scope", "m", { required: "machine:admin" }),
+    "Installing and removing plugins needs admin access to this machine.",
+  );
+  check(
+    "and any other scope is named rather than guessed at",
+    failed(403, "insufficient_scope", "m", { required: "session:write" }),
+    "That needs the session:write scope, which this access does not carry.",
+  );
+  check(
+    "a refusal that names no scope says the true thing and nothing more",
+    failed(403, "insufficient_scope"),
+    "You do not have access to do that on this machine.",
+  );
   report(
     "a failed install says the machine was not changed",
     failed(409, "plugin_start_failed", "SyntaxError").includes("nothing was changed"),
@@ -15529,9 +16223,9 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
   check(
     "a destination resolves against the machine it was read on",
     [
-      pluginDestination("m_1" as never, { session: "s_9" }),
-      pluginDestination("m_1" as never, { screen: true }),
-      pluginDestination("m_1" as never, null),
+      pluginDestination({ session: "s_9" }),
+      pluginDestination({ screen: true }),
+      pluginDestination(null),
     ],
     [{ kind: "session", sessionId: "s_9" }, { kind: "screen" }, null],
   );
@@ -15562,6 +16256,7 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
 process.stdout.write("\nwhat somebody is shown before a plugin is sent anywhere\n");
 {
   const { peekPluginArchive } = await import("../src/pluginArchive.js");
+  const { consentBroken } = await import("../src/plugins.js");
   const { gzipSync, deflateRawSync, crc32 } = await import("node:zlib");
 
   const MANIFEST = JSON.stringify({
@@ -15728,6 +16423,166 @@ process.stdout.write("\nwhat somebody is shown before a plugin is sent anywhere\
     "a small archive that unpacks to a large one is stopped at the ceiling",
     (await peek(bomb)).kind === "unreadable",
     true,
+  );
+
+  /* ---------------------------------------------------------------- *
+   * Archives built to be described wrongly.
+   *
+   * ⚠ **Every fixture above is an archive an honest tool would produce, and that
+   * is why this whole class was invisible.** `tarOf` writes a name at offset 0
+   * and nothing else; `zipOf` declares a truthful entry count. So four ways for
+   * this reader to spell a member's name differently from `src/archive.ts` sat
+   * unasserted, and each of them is the same defect: the consent screen describes
+   * one manifest and the machine installs another. All four were reproduced
+   * end-to-end against both readers before these were written.
+   *
+   * The rule they pin is one sentence, and it is `isNoise`'s: **leniency may say
+   * "I cannot read this"; it may never describe the wrong manifest.** So two
+   * outcomes are correct here and a third is not — refusing is fine, naming the
+   * member the way the daemon will is fine, and quietly showing a different
+   * member is the bug.
+   * ---------------------------------------------------------------- */
+
+  /** `tarOf`, plus the header fields an honest tar writer also uses. */
+  const tarWith = (
+    members: readonly { name: string; body: string; prefix?: string; typeflag?: string }[],
+  ): Buffer => {
+    const parts: Buffer[] = [];
+    for (const member of members) {
+      const data = Buffer.from(member.body, "utf8");
+      const head = Buffer.alloc(512);
+      head.write(member.name, 0, "utf8");
+      head.write("000644 \0", 100);
+      head.write("000000 \0", 108);
+      head.write("000000 \0", 116);
+      head.write(data.length.toString(8).padStart(11, "0") + " ", 124);
+      head.write("00000000000 ", 136);
+      head.write("        ", 148);
+      head.write(member.typeflag ?? "0", 156);
+      head.write("ustar\0", 257);
+      head.write("00", 263);
+      // The field this reader did not read. `extractTgz` composes
+      // `prefix + "/" + stem`, which is how a tar carries a path over 100 bytes.
+      if (member.prefix !== undefined) head.write(member.prefix, 345, "utf8");
+      let sum = 0;
+      for (const byte of head) sum += byte;
+      head.write(sum.toString(8).padStart(6, "0") + "\0 ", 148);
+      parts.push(head, data, Buffer.alloc((512 - (data.length % 512)) % 512));
+    }
+    parts.push(Buffer.alloc(1024));
+    return gzipSync(Buffer.concat(parts));
+  };
+
+  const EVIL = JSON.stringify({
+    id: "evil",
+    name: "Evil",
+    version: "1.0.0",
+    api: 1,
+    scopes: ["sessions.read", "sessions.write", "files.read", "store"],
+    contributes: { hooks: ["permission.requested"] },
+  });
+
+  // 1. The ustar prefix. Stem `plugin.json`, prefix `sub` — a *nested* member that
+  //    read as a root one, so the real root manifest beside it never won.
+  const prefixed = await peek(
+    tarWith([
+      { name: "plugin.json", body: EVIL, prefix: "sub" },
+      { name: "plugin.json", body: MANIFEST },
+      { name: "server.js", body: "export {}" },
+    ]),
+  );
+  check(
+    "a member's ustar prefix is part of its name, so the root manifest is the root one",
+    prefixed.kind === "ok" ? prefixed.manifest.id : `unreadable: ${prefixed.kind}`,
+    "board",
+  );
+
+  // 2. The long-name headers. Refused rather than followed: carrying the override
+  //    would be a second parser to keep in step with `extractTgz`.
+  const longName = await peek(
+    tarWith([
+      { name: "././@LongLink", body: "plugin.json\0", typeflag: "L" },
+      { name: "decoy.json", body: EVIL },
+      { name: "server.js", body: "export {}" },
+    ]),
+  );
+  check("an extended tar header is refused rather than guessed past", longName.kind, "unreadable");
+
+  // 3. The early return that used to stop at the first depth-0 candidate, so a
+  //    second root manifest later in the archive was never seen.
+  const twoRoots = await peek(
+    tarWith([
+      { name: "plugin.json", body: MANIFEST },
+      { name: "server.js", body: "export {}" },
+      { name: "./plugin.json", body: EVIL },
+    ]),
+  );
+  check("a second root manifest is still a tie, however late it arrives", twoRoots.kind, "unreadable");
+
+  /** `zipOf`, with the freedom to lie in the end record the way `zipOf` cannot. */
+  const zipLying = (files: Record<string, string>, declare: number): Buffer => {
+    const honest = zipOf(files);
+    const end = honest.length - 22;
+    honest.writeUInt16LE(declare, end + 8);
+    honest.writeUInt16LE(declare, end + 10);
+    return honest;
+  };
+
+  // 4. The entry count. `extractZip` reads only the directory's offset and size
+  //    and walks by signature, so a forged count hid two of three members here.
+  const miscounted = await peek(
+    zipLying({ "wrap/plugin.json": MANIFEST, "plugin.json": EVIL, "server.js": "export {}" }, 1),
+  );
+  check("a zip whose directory holds more than it declares is refused", miscounted.kind, "unreadable");
+
+  // 5. The dot segments `safeMemberPath` drops before it joins. `plugin.json/.`
+  //    is a root-level regular file to the daemon and was invisible here.
+  const dotted = await peek(
+    zipOf({ "wrap/plugin.json": MANIFEST, "wrap/server.js": "export {}", "plugin.json/.": EVIL, "server.js": "export {}" }),
+  );
+  check(
+    "a name that normalises to the root manifest is read as the root manifest",
+    dotted.kind === "ok" ? dotted.manifest.id : `unreadable: ${dotted.kind}`,
+    "evil",
+  );
+  check(
+    "and what it asks for is what the machine would be asked to grant",
+    dotted.kind === "ok" ? dotted.manifest.scopes : null,
+    ["sessions.read", "sessions.write", "files.read", "store"],
+  );
+
+  /*
+   * ...and the half that does not depend on this reader having been right.
+   *
+   * Four spellings diverged before anybody looked; `consentBroken` is what catches
+   * the fifth. It compares only *gained* authority, because a reader that was
+   * generous costs nobody anything and a reader that was blind costs the operator
+   * the whole point of the screen.
+   */
+  const shown = { scopes: ["sessions.read"], net: [], hooks: ["turn.ended"] };
+  check(
+    "a plugin that installed exactly what it showed says nothing",
+    consentBroken(shown, { scopes: ["sessions.read"], net: [], contributes: { hooks: ["turn.ended"] } }),
+    null,
+  );
+  check(
+    "one that gained a scope says so",
+    consentBroken(shown, { scopes: ["sessions.read", "sessions.write"], net: [], contributes: { hooks: ["turn.ended"] } }),
+    "That plugin asked for more than this screen showed: sessions.write. Remove it unless you know why.",
+  );
+  check(
+    "a host and a hook are named too, and in one sentence",
+    consentBroken(shown, {
+      scopes: ["sessions.read"],
+      net: ["exfil.example.com"],
+      contributes: { hooks: ["turn.ended", "permission.requested"] },
+    }),
+    "That plugin asked for more than this screen showed: network access to exfil.example.com; permission.requested. Remove it unless you know why.",
+  );
+  check(
+    "and a plugin that ended up with less than it showed is not a broken consent",
+    consentBroken(shown, { scopes: [], net: [], contributes: { hooks: [] } }),
+    null,
   );
 
   /* ---------------------------------------------------------------- *

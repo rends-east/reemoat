@@ -57,7 +57,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 693 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 704 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -337,14 +337,15 @@ measurement** — it asked whether an admin password reset should burn the
 account's enrollment codes, and there is no admin password reset any more; the
 mailed reset that replaced it deliberately leaves codes alone, because proving
 control of your own address is not evidence that a daemon you enrolled is
-compromised. One is still open because the *measurement* is missing rather than
-the code: whether the upload route's body-cancel discipline survives the auth and
-scope middlewares stacked above it (Q7.62 — the obvious remedy is worse than the
-defect, and nobody has yet pushed a whole upload through the relay under a read-only
-grant to find out).
+compromised. **Q7.62 is closed too, and by the plugin work rather than by a
+measurement** — it asked whether the upload route's body-cancel discipline
+survived the auth and scope middlewares above it, and the answer was that the
+handlers were never the gap: the middlewares were. The cancel now hangs off the
+`isStreamingRoute` exemption that creates the obligation, so all three streaming
+routes inherit both halves and Q7.96 closes with it.
 
-Three more are open for the same reason — the code is written and the measurement
-is not — and all three are settled by the same run: one real device-code login on
+Three are open because the *measurement* is missing rather than the code, and all
+three are settled by the same run: one real device-code login on
 macOS from a signed-out agent. Whether BSD `script` survives a 15-minute flow with
 `/dev/null` on stdin, which is what `loginStdio`'s macOS fix rests on and which is
 measured only as far as the spawn succeeding (Q7.63). What those flows actually

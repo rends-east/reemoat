@@ -120,11 +120,19 @@ inside a hook where there is no caller at all. Neither implies the other. See
 | `GET /plugins/:pluginId/views/:viewId` | `screen` or `settings`. A **read** by contract — `isReplayable` lets the transport repeat it |
 | `POST /plugins/:pluginId/actions/:actionId` | Press something. Refused unless the manifest declared that action |
 
+All six answer `503 plugins_unavailable` where the daemon was built without a plugin
+host or started with `REEMOAT_PLUGINS=0`, and the three that mutate — install, remove
+and the state switch — answer `409 plugin_busy` while another one is in flight, since
+one mutation at a time is a property of the whole daemon rather than of a plugin. A
+first install answers `201` and an update answers `200`; `replaced` on the body is
+which of the two it was.
+
 Both of the last two answer through one plugin, so both carry its failures:
 `503 plugin_unavailable` (not running), `504 plugin_timeout` (did not answer inside the
 invoke deadline), `503 plugin_overloaded` (already answering as many calls as the channel
-holds in flight), `503 plugin_request_too_large` (what was sent does not fit one IPC
-message — the remedy is to send less, which is why it is not a timeout) and `502
+holds in flight), `413 plugin_request_too_large` (what was sent does not fit one IPC
+message — the remedy is to send less, which is why it is neither a timeout nor a
+`502`: nothing downstream answered, because nothing reached the child) and `502
 plugin_failed` for anything the plugin's own code raised.
 
 ### Files

@@ -227,7 +227,7 @@ const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
  *
  * **The streaming routes are excluded and must stay excluded**, and there are
  * three: `POST /sessions/:id/uploads` streams to disk against
- * `MAX_UPLOAD_BYTES` (25 MiB) with its own counter, `POST /fs/import` does the
+ * `MAX_UPLOAD_BYTES` (100 MiB) with its own counter, `POST /fs/import` does the
  * same against `MAX_IMPORT_BYTES`, and `POST /plugins` against
  * `PLUGIN_LIMITS.maxBytes`. Wrapping any of them here would refuse every
  * legitimate request at 1 MiB, or buffer the whole thing to check a limit the
@@ -3717,13 +3717,25 @@ async function pluginAnswer(c: Context, run: () => Promise<PluginResult>): Promi
  * remedy is on this machine and the request itself was fine; everything else is a
  * `502`, because something downstream of this daemon answered badly.
  */
-function pluginErrorStatus(code: string): 403 | 502 | 503 | 504 {
+function pluginErrorStatus(code: string): 403 | 413 | 502 | 503 | 504 {
   if (code === "plugin_unavailable") return 503;
   if (code === "plugin_timeout") return 504;
   // Busy rather than broken, and the remedy is to ask again — which is what 503
   // says and 502 does not.
   if (code === "plugin_overloaded") return 503;
   if (code === "plugin_scope_denied") return 403;
+  /*
+   * ⚠ **The one code the split above has no arm for, and it fell to the wrong
+   * half.** With no entry here it took the `502` default, whose stated reason is
+   * "something downstream of this daemon answered badly" — and nothing downstream
+   * answered at all: the message never reached the child, because it does not fit
+   * one IPC frame. It is neither this machine's fault nor the plugin's; the
+   * remedy is on the caller's side, which is what `413` says and is already this
+   * daemon's word for it at `payload_too_large`, `import_too_large` and
+   * `import_unpacked_too_large`. `docs/API.md` said `503`, which was a third
+   * answer agreeing with neither.
+   */
+  if (code === "plugin_request_too_large") return 413;
   return 502;
 }
 

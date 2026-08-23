@@ -493,6 +493,13 @@ export class PluginApi {
 
     const declared = Number(response.headers.get("content-length") ?? "0");
     if (Number.isFinite(declared) && declared > MAX_PLUGIN_FETCH_BYTES) {
+      // Cancelled before the throw, which is {@link readBounded}'s own rule one
+      // refusal further on: a body nobody releases sits on its socket until the
+      // 10s `AbortSignal.timeout` collects it, and a plugin may spend
+      // `PLUGIN_FETCH_BURST` of them a minute.
+      await response.body?.cancel().catch(() => {
+        // Already ended or already errored; there is nothing left to release.
+      });
       throw new PluginApiError("response_too_large", `a plugin may read at most ${MAX_PLUGIN_FETCH_BYTES} bytes`);
     }
     /*

@@ -48,9 +48,9 @@ import { cancelBody } from "./uploads.js";
 /**
  * How large the archive itself may be, on the wire.
  *
- * **Deliberately not `MAX_UPLOAD_BYTES`.** That constant's own comment places 25
- * MiB "above any screenshot, below anything that is a transfer rather than an
- * attachment" — and this is the transfer it was drawing a line under. A source
+ * **Deliberately not `MAX_UPLOAD_BYTES`.** That constant bounds an attachment
+ * riding a message — a screenshot, a log, a file dropped on a session — and this
+ * is a transfer rather than an attachment, which is the line it draws. A source
  * tree with no history and no dependencies is a few MiB for almost every project;
  * 50 MiB is the number at which somebody is shipping build output they did not
  * mean to, and the message says so.

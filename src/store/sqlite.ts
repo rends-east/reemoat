@@ -1850,7 +1850,7 @@ export class SqlitePluginDataStore implements PluginDataStore {
       "SELECT key FROM plugin_data WHERE plugin_id = ? AND key >= ? AND (? IS NULL OR key < ?) ORDER BY key",
     );
     /*
-     * The same prefix and the same escape, widened to the value and given a
+     * The same range and the same bounds, widened to the value and given a
      * cursor. Kept as its own statement rather than widening `keysStmt` to
      * `SELECT key, value`: `keys` is still the right call for a plugin that wants
      * names, and reading every value to answer it would make the cheap call pay

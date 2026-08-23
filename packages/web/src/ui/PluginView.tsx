@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { seedForm } from "../plugins";
 import type { PluginBlock, PluginField, PluginOpen, PluginRow, PluginView as PluginViewShape } from "../wire";
-import { Button, DangerButton, Dot, Empty, FIELD } from "./bits";
+import { Button, DangerButton, Dot, Empty, FIELD, Spinner } from "./bits";
 import { Trash2 } from "lucide-react";
 
 /**
@@ -230,11 +230,16 @@ function Row({
          * wrote — there is no URL here for a middle-click to open, and pretending
          * there is would be the one thing this shape exists to refuse.
          *
-         * `tap` for the 44px reach: this is a control somebody presses on a phone.
+         * ⚠ **`min-h-11` spelled out, because `tap` does not carry it.** `.tap` in
+         * `index.css` is three `transition` properties and nothing else — no
+         * height, no padding, no `::after` growth — so this said it had the 44px
+         * reach while being one line of `text-sm`, about 20px, on the control that
+         * navigates to a session from a phone. The `<li>` is `items-start`, so the
+         * button does not stretch to the row either.
          */
         <button
           type="button"
-          className="tap min-w-0 flex-1 basis-40 text-left"
+          className="tap min-h-11 min-w-0 flex-1 basis-40 text-left"
           onClick={() => onOpen?.(where)}
         >
           {body}
@@ -248,6 +253,7 @@ function Row({
               <Button
                 tone={pending.tone === "destructive" ? "destructive" : "plain"}
                 size="sm"
+                className="[@media(pointer:coarse)]:min-h-11"
                 disabled={busy}
                 onClick={() => {
                   setConfirming(null);
@@ -256,20 +262,38 @@ function Row({
               >
                 {pending.label}
               </Button>
-              <Button tone="primary" size="sm" onClick={() => setConfirming(null)}>
+              <Button tone="primary" size="sm" className="[@media(pointer:coarse)]:min-h-11" onClick={() => setConfirming(null)}>
                 Cancel
               </Button>
             </>
           ) : (
             row.actions.map((action) =>
+              /*
+               * ⚠ **`sm` keeps the desktop density and the coarse-pointer floor
+               * puts the 44px back.** `BUTTON_SIZE`'s docblock licenses `sm` for
+               * one shape — "a confirmation that has replaced the controls on a
+               * settings row, so it is the only thing on that row and has nothing
+               * adjacent to mis-hit" — which is the *confirming* branch above, not
+               * this one. These are several resting controls, `gap-1.5` apart, and
+               * a plugin may mark any of them destructive. `AgentsPanel` already
+               * spells the same escape at its own `sm` button.
+               */
               action.confirm !== null && action.tone === "destructive" ? (
-                <DangerButton key={action.id} icon={Trash2} size="sm" disabled={busy} onClick={() => setConfirming(action.id)}>
+                <DangerButton
+                  key={action.id}
+                  icon={Trash2}
+                  size="sm"
+                  className="[@media(pointer:coarse)]:min-h-11"
+                  disabled={busy}
+                  onClick={() => setConfirming(action.id)}
+                >
                   {action.label}
                 </DangerButton>
               ) : (
                 <Button
                   key={action.id}
                   size="sm"
+                  className="[@media(pointer:coarse)]:min-h-11"
                   tone={action.tone === "destructive" ? "destructive" : "plain"}
                   disabled={busy}
                   onClick={() => (action.confirm === null ? onAction(action.id, { row: row.id }) : setConfirming(action.id))}
@@ -295,10 +319,17 @@ function Form({
   onAction: (actionId: string, context: { form: Record<string, string> }) => void;
 }): ReactNode {
   /*
-   * Seeded once, from the fields as they arrived, and **keyed on what the plugin
-   * sent** so a redraw after a save re-seeds rather than keeping what was typed
-   * over a value the plugin has since changed. Without the key, a plugin that
-   * normalises a value on save would show the un-normalised one until reload.
+   * Seeded once per mount, from the fields as they arrived.
+   *
+   * ⚠ **Once per mount is the whole contract, and the re-seed is the caller's.**
+   * This said it was "keyed on what the plugin sent" and nothing keyed it — the
+   * only ancestor key is `Block`'s positional index — so a plugin that normalised
+   * a value on save showed the un-normalised one until reload. The key is not put
+   * here because this component also draws a plugin's *screen*, which
+   * `PluginScreen` re-reads on `refreshMs`: a content-derived key there would wipe
+   * what somebody was typing every two seconds. `PluginSettings` has no timer and
+   * remounts this on its own save counter, which is the only moment a re-seed is
+   * both wanted and safe.
    */
   const [values, setValues] = useState<Record<string, string>>(() => seedForm(block.fields));
   const set = (key: string, value: string): void => setValues((held) => ({ ...held, [key]: value }));
@@ -317,8 +348,14 @@ function Form({
         <Field key={field.key} field={field} value={values[field.key] ?? ""} onChange={(value) => set(field.key, value)} />
       ))}
       <div>
+        {/*
+          The spinner, not just `disabled`'s dimming: an action goes over the
+          relay against the daemon's 10s call deadline, so Save can sit unchanged
+          for seconds. `AgentsPanel`'s own submit and `InstallPlugin` one file
+          over both swap the label the same way.
+        */}
         <Button type="submit" tone="primary" disabled={busy}>
-          {block.submit}
+          {busy ? <Spinner /> : block.submit}
         </Button>
       </div>
     </form>
@@ -338,7 +375,12 @@ function Field({
 
   if (field.kind === "toggle") {
     return (
-      <label className="flex items-start gap-3">
+      /*
+       * The same coarse-pointer floor every other field gets through `FIELD`. A
+       * toggle drawn without it is a ~20px target sitting beside 44px text inputs
+       * in the same form.
+       */
+      <label className="flex items-start gap-3 [@media(pointer:coarse)]:min-h-11">
         <input
           type="checkbox"
           className="mt-0.5 size-4 shrink-0 accent-fg"

@@ -215,7 +215,7 @@ export function PluginScreen({ machineId, pluginId }: { machineId: MachineId; pl
    * route over the pop-up would leave the board on top of the thing it opened.
    */
   const go = (where: PluginOpen): void => {
-    const target = pluginDestination(machineId, where);
+    const target = pluginDestination(where);
     if (target === null) return;
     if (target.kind === "screen") {
       navigate(pluginPath(machineId, pluginId), true);

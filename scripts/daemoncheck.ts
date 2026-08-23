@@ -11962,7 +11962,8 @@ process.stdout.write("\na plugin row this build cannot read\n");
 
 process.stdout.write("\nwhat a plugin returns, and what is forwarded\n");
 {
-  const { clampView, PLUGIN_VIEW_LIMITS } = await import("../src/plugins/protocol.js");
+  const { clampView, fitView, noteClamp, PLUGIN_VIEW_LIMITS } = await import("../src/plugins/protocol.js");
+  const { MAX_PLUGIN_MESSAGE_BYTES } = await import("../src/plugins/runtime.js");
 
   check("nothing at all is an empty view rather than a throw", clampView(null), {
     view: { title: null, refreshMs: null, blocks: [] },
@@ -12007,6 +12008,88 @@ process.stdout.write("\nwhat a plugin returns, and what is forwarded\n");
     form?.type === "form" ? form.fields[0]?.kind : null,
     "text",
   );
+
+  /* ---------------------------------------------------------------- *
+   * ...and the bound that was enforced on the wrong side of the wire.
+   *
+   * ⚠ **`PLUGIN_VIEW_LIMITS` could never do its job, because `clampView` ran in
+   * the host — one hop after the child had already refused to send.** The two
+   * bounds sit two lines apart in the author's guide as though both applied, and
+   * only `MAX_PLUGIN_MESSAGE_BYTES` ever fired: a view inside every documented
+   * limit came back as "this plugin returned more than can be sent", and the
+   * clamp that exists to cut it never saw it.
+   *
+   * Measured 2026-08-23 against a real forked child, the reference plugin and a
+   * real store: its board fits at 903 cards and not at 904, while the store lets
+   * a plugin keep 1000 and the session prune never removes them. `fitView` runs
+   * in the child now, so the count bound applies first and a byte bound finishes
+   * the job — and rows are the lever because they are the only dimension a
+   * plugin's data grows without limit.
+   * ---------------------------------------------------------------- */
+  {
+    const budget = MAX_PLUGIN_MESSAGE_BYTES - 1024;
+    const bytesOf = (value: unknown): number => new TextEncoder().encode(JSON.stringify(value)).length;
+    const rowsOf = (n: number): unknown[] =>
+      Array.from({ length: n }, (_, i) => ({ id: `s_${i}`, title: "an ordinary session title", subtitle: "claude" }));
+
+    const small = fitView({ title: "T", blocks: [{ type: "list", rows: rowsOf(10), empty: "" }] }, budget);
+    check("a view that already fits is passed through untouched", small.clamped, false);
+
+    // The board's own shape: three columns, more cards than a column may hold.
+    const board = fitView(
+      { title: "Board", blocks: [{ type: "columns", columns: [0, 1, 2].map(() => ({ title: "c", rows: rowsOf(400) })) }] },
+      budget,
+    );
+    const cols = board.view.blocks[0];
+    check(
+      "a column past the row bound is cut to it, and says so",
+      [cols?.type === "columns" ? cols.columns.map((one) => one.rows.length) : null, board.clamped],
+      [[PLUGIN_VIEW_LIMITS.rows, PLUGIN_VIEW_LIMITS.rows, PLUGIN_VIEW_LIMITS.rows], true],
+    );
+
+    /*
+     * A view at every documented ceiling — which the counts alone do **not** make
+     * fit, and which is the half a smaller `PLUGIN_VIEW_LIMITS` could not have
+     * fixed without making the honest cases smaller too.
+     */
+    const worst = {
+      title: "W",
+      blocks: Array.from({ length: PLUGIN_VIEW_LIMITS.blocks }, () => ({
+        type: "columns",
+        columns: Array.from({ length: PLUGIN_VIEW_LIMITS.columns }, () => ({ title: "c", rows: rowsOf(PLUGIN_VIEW_LIMITS.rows) })),
+      })),
+    };
+    report("every count at its ceiling is still too large for the channel", bytesOf(clampView(worst).view) > budget, `${bytesOf(clampView(worst).view)} bytes clamped by counts alone`);
+    const fitted = noteClamp(fitView(worst, budget));
+    report("but it is cut until it fits rather than refused", bytesOf(fitted) <= budget, `${bytesOf(fitted)} bytes`);
+    report(
+      "and the cut is said rather than swallowed",
+      JSON.stringify(fitted).includes("too large to show"),
+      "the notice rides the view",
+    );
+
+    /*
+     * The tail of the halving, at budgets no real channel has. It keeps the
+     * largest cap that fits rather than the first that is small — one row at 200
+     * bytes, none at 120 — and at a budget below even the empty block it stops
+     * with nothing left rather than spinning. That last case is where `post`'s own
+     * refusal is still the answer, which is why it was kept after `fitted`.
+     */
+    const tight = fitView({ blocks: [{ type: "list", rows: rowsOf(PLUGIN_VIEW_LIMITS.rows), empty: "" }] }, 200);
+    const kept = tight.view.blocks[0];
+    check(
+      "the cut keeps as many rows as the budget allows, not as few",
+      [kept?.type === "list" ? kept.rows.length : -1, bytesOf(tight.view) <= 200, tight.clamped],
+      [1, true, true],
+    );
+    const airless = fitView({ blocks: [{ type: "list", rows: rowsOf(PLUGIN_VIEW_LIMITS.rows), empty: "" }] }, 50);
+    const nothing = airless.view.blocks[0];
+    check(
+      "and a budget that not even an empty block fits stops with no rows rather than spinning",
+      [nothing?.type === "list" ? nothing.rows.length : -1, airless.clamped],
+      [0, true],
+    );
+  }
 
   check("a view that is already fine is not reported as clamped", clampView({ title: "T", blocks: [] }).clamped, false);
 
@@ -12122,6 +12205,36 @@ const bodyOf = (bytes: Buffer): ReadableStream<Uint8Array> =>
       controller.close();
     },
   });
+
+/**
+ * The same bytes, plus whether anybody released the stream.
+ *
+ * ⚠ **The one property of this route that is argued everywhere and asserted
+ * nowhere.** `PluginHost.install` cancels the request body on the busy path and
+ * again in its `finally`, and `POST /plugins`'s own docblock spends a paragraph
+ * on why: the relay grants a stream's window on consumption, so a reader that
+ * stops parks the sender at one window, and the valve after that closes the
+ * **whole tunnel for this machine**. Every plugin fixture here used `bodyOf` or
+ * `stallingBody`, neither of which records a cancel — so both calls could have
+ * been deleted and this driver would have stayed green. The uploads section has
+ * had exactly this fixture since Q5.72.
+ */
+const watchedBody = (bytes: Buffer): { body: ReadableStream<Uint8Array>; state: { cancelled: boolean; pulled: number } } => {
+  const state = { cancelled: false, pulled: 0 };
+  return {
+    state,
+    body: new ReadableStream<Uint8Array>({
+      pull(controller) {
+        state.pulled += 1;
+        controller.enqueue(new Uint8Array(bytes));
+        controller.close();
+      },
+      cancel() {
+        state.cancelled = true;
+      },
+    }),
+  };
+};
 
 /**
  * The same bytes, held until the returned `release` is called.
@@ -12386,6 +12499,154 @@ process.stdout.write("\ninstalling a plugin, and updating one\n");
   check("the one that landed is still the only plugin", host.list().map((one) => [one.id, one.version]), [["board", "0.2.0"]]);
 
   /* ---------------------------------------------------------------- *
+   * A throw *after* the row is written, which is the window the rollback
+   * exists for and the one nothing reached.
+   *
+   * ⚠ **`target` carries the version, so the incumbent is only ever moved aside
+   * on a reinstall of the version already there** — which is the documented way
+   * somebody iterates on a plugin they are writing, not a rare race. On that path
+   * `aside` is the running plugin's own directory and `published` is the same
+   * path, so destroying `aside` before the last fallible statement meant a throw
+   * from `seed` ran a catch that discarded the new tree and found the old one
+   * already gone: both trees lost, the row naming a directory that is not there,
+   * the plugin permanently failed.
+   *
+   * A registry whose `list()` throws is how `seed` is made to fail, and `seed`
+   * is not an invented source — the catch's own docblock names it.
+   * ---------------------------------------------------------------- */
+  {
+    let listThrows = false;
+    const shaky = {
+      watchSessions: () => () => {},
+      list: () => {
+        if (listThrows) throw new Error("the registry was being torn down");
+        return [];
+      },
+      get: () => undefined,
+    } as unknown as SessionRegistry;
+
+    const shakyStores = openStores({ path: join(tmp("plugin-shaky-db-"), "d.db"), instanceId: "i_shaky" });
+    const shakyRoot = join(tmp("plugin-shaky-root-"), "plugins");
+    const shakyHost = await PluginHost.open({
+      root: shakyRoot,
+      records: shakyStores.plugins,
+      data: shakyStores.pluginData,
+      registry: shaky,
+      api: { git: hostGit },
+      timeouts: { start: 3_000, invoke: 3_000 },
+    });
+    const put = (files: Record<string, string>): ReturnType<typeof shakyHost.install> =>
+      shakyHost.install({ body: bodyOf(tarOf(files)), name: "p.tar.gz" });
+
+    await put({ "plugin.json": manifestOf({ version: "2.0.0" }), "server.js": SERVER });
+    shakyStores.pluginData.set("board", "card:1", JSON.stringify({ keep: true }));
+
+    listThrows = true;
+    const blown = await put({ "plugin.json": manifestOf({ version: "2.0.0" }), "server.js": SERVER });
+    listThrows = false;
+
+    check(
+      "a reinstall that throws after the row is written is refused",
+      blown.kind === "refused" ? blown.code : blown.kind,
+      "plugin_write_failed",
+    );
+    /*
+     * Id and version, and that it is not `failed` — deliberately not `running`.
+     * The rollback restarts the incumbent with `void existing.ensureStarted(...)`,
+     * so `install` answers without waiting to find out: at this instant the state
+     * is `starting`, and asserting `running` here would be pinning the scheduler
+     * rather than the recovery. (That the answer goes out before the restart is
+     * known to have worked is its own open question, and a separate one.)
+     */
+    const back = shakyHost.list().map((one) => [one.id, one.version, one.state !== "failed"]);
+    check("and the plugin somebody was iterating on is still there, and not failed", back, [["board", "2.0.0", true]]);
+    // The half that used to be gone: the row named this directory and nothing was
+    // in it, so every start burned a budget on ENOENT.
+    check("with the tree its row names", existsSync(join(shakyRoot, "board", "2.0.0")), true);
+    check("and nothing moved aside left behind", readdirSync(join(shakyRoot, "board")), ["2.0.0"]);
+    check("and its data untouched", shakyStores.pluginData.keys("board", ""), ["card:1"]);
+
+    /*
+     * The other half of the same catch. A **first** install that fails is
+     * documented to leave nothing — and it left the `plugin_data` rows, which
+     * afterwards nothing can reach: no row and no directory means `installed()`
+     * is false on both halves, so `DELETE /plugins/:id` answers 404 and
+     * `dropPlugin` is unreachable for good. They then reappear under the next
+     * install of that id, because `plugin_data` is keyed by id rather than by
+     * version.
+     */
+    shakyStores.pluginData.set("ghost", "card:9", JSON.stringify({ stale: true }));
+    listThrows = true;
+    const fresh = await put({ "plugin.json": manifestOf({ id: "ghost", version: "1.0.0" }), "server.js": SERVER });
+    listThrows = false;
+    check(
+      "a first install that throws after the row is written is refused too",
+      fresh.kind === "refused" ? fresh.code : fresh.kind,
+      "plugin_write_failed",
+    );
+    check(
+      "and leaves nothing — the row, the tree and the data",
+      [
+        shakyStores.plugins.has("ghost"),
+        existsSync(join(shakyRoot, "ghost")),
+        shakyStores.pluginData.keys("ghost", "").length,
+      ],
+      [false, false, 0],
+    );
+
+    await shakyHost.shutdown();
+    shakyStores.close();
+  }
+
+  /*
+   * ...and the sentence above about the losing body, now asserted rather than
+   * asserted-in-prose. Two paths, because they cancel in two different places:
+   * the busy arm cancels before it returns (`install`'s first statement), and a
+   * refusal cancels in the `finally` that covers every other exit.
+   */
+  {
+    const held = stallingBody(tarOf({ "plugin.json": manifestOf({ version: "0.2.0" }), "server.js": SERVER }));
+    const flight = host.install({ body: held.body, name: "held.tar.gz" });
+    const turned = watchedBody(tarOf({ "plugin.json": manifestOf({ version: "0.2.0" }), "server.js": SERVER }));
+    const busy = await host.install({ body: turned.body, name: "turned.tar.gz" });
+    check(
+      "an install turned away for busy is released rather than left parked",
+      [busy.kind, turned.state.cancelled, turned.state.pulled],
+      ["busy", true, 0],
+    );
+    held.release();
+    await flight;
+
+    /*
+     * ⚠ **A refusal that stops *mid-stream*, which is the only kind that has
+     * anything left to release.** `manifest_missing` and its neighbours are
+     * decided after the whole archive has been unpacked, so by then the body has
+     * ended on its own and `cancelBody` is correctly a no-op — asserting a cancel
+     * there would pin the wrong thing. The reachable case is the ceiling:
+     * `unpackArchive` stops reading at `PLUGIN_LIMITS.maxBytes` and refuses, and
+     * everything the sender still has queued is what parks against the relay's
+     * window if nobody releases it.
+     */
+    let sent = 0;
+    const endless = { cancelled: false };
+    const flood = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        sent += 1;
+        controller.enqueue(new Uint8Array(64 * 1024));
+      },
+      cancel() {
+        endless.cancelled = true;
+      },
+    });
+    const answer = await host.install({ body: flood, name: "endless.tar.gz" });
+    check(
+      "and one refused while the sender was still sending is released mid-stream",
+      [answer.kind === "refused" ? answer.code : answer.kind, endless.cancelled, sent > 0],
+      ["plugin_too_large", true, true],
+    );
+  }
+
+  /* ---------------------------------------------------------------- *
    * An update that will not start puts everything back.
    *
    * The most important case here: a person pushing a broken update to a machine
@@ -12538,9 +12799,17 @@ process.stdout.write("\nwhat a plugin is allowed to ask the daemon for\n");
   const { SessionRegistry } = await import("../src/registry.js");
   const { hostGit } = await import("../src/git.js");
 
-  const manifestWith = (scopes: string[], net: string[] = []): PluginManifest => {
+  /*
+   * `id` is a parameter because `PluginApi` keys its fetch window on it and
+   * nothing gives the window back: the 40-request spray below spends `p`'s budget
+   * for the rest of the process, so a later section wanting a real `net.fetch`
+   * answer has to ask under a different name. (That the window outlives the
+   * plugin is its own finding — a plugin uninstalled and reinstalled under one id
+   * inherits the previous one's spent budget.)
+   */
+  const manifestWith = (scopes: string[], net: string[] = [], id = "p"): PluginManifest => {
     const parsed = parseManifest(
-      JSON.stringify({ id: "p", name: "P", version: "1.0.0", api: 1, scopes, net, contributes: {} }),
+      JSON.stringify({ id, name: "P", version: "1.0.0", api: 1, scopes, net, contributes: {} }),
     );
     if (!parsed.ok) throw new Error(parsed.message);
     return parsed.manifest;
@@ -12548,6 +12817,15 @@ process.stdout.write("\nwhat a plugin is allowed to ask the daemon for\n");
 
   const reached: string[] = [];
   const warned: string[] = [];
+  /*
+   * What the far end says, swappable — because the *response* half of `net.fetch`
+   * was driven by nothing at all. This answered `"hi"` and only ever `"hi"`, so
+   * neither the `content-length` refusal nor `readBounded` — a function whose
+   * whole reason for existing is that `response.text()` arrived too late to be a
+   * measurement — was ever reached.
+   */
+  let answers: () => Response = () => new Response("hi", { status: 200 });
+
   const api = new PluginApi({
     registry: new SessionRegistry(),
     /*
@@ -12562,7 +12840,7 @@ process.stdout.write("\nwhat a plugin is allowed to ask the daemon for\n");
     onWarning: (detail) => warned.push(detail),
     fetchImpl: ((url: URL) => {
       reached.push(String(url));
-      return Promise.resolve(new Response("hi", { status: 200 }));
+      return Promise.resolve(answers());
     }) as unknown as typeof fetch,
   });
 
@@ -12671,6 +12949,115 @@ process.stdout.write("\nwhat a plugin is allowed to ask the daemon for\n");
     spray.includes("fetch_rate_limited"),
     `${spray.filter((one) => one === "ok").length} of ${spray.length} allowed`,
   );
+
+  /* ---------------------------------------------------------------- *
+   * `files.read`, which had no behavioural assertion at all.
+   *
+   * ⚠ **The one host method that hands a plugin the contents of a file, and it
+   * appeared in this section exactly twice — both times as a row in the scope
+   * table.** So what was proven is that it needs the `files.read` scope, and
+   * nothing whatever about what it does once it has it. Its five refusals include
+   * the pair `files-paths-git.md` calls load-bearing: `safeRelPath` refuses a
+   * `.git` segment somebody *typed*, and the resolved re-test through
+   * `probeRequestable` is what refuses the same directory reached through a
+   * symlink. `server.ts` has a second caller of that pair and drives it; this one
+   * did not, and it is the caller that answers a plugin rather than a person.
+   *
+   * A stub registry rather than the section's real one: this method reads exactly
+   * `managed.workspace.root`, and standing up a real session to hand it one path
+   * would be a fixture about `SessionRegistry` rather than about this arm.
+   * ---------------------------------------------------------------- */
+  {
+    const tree = join(homedir(), ".reemoat-check-files");
+    rmSync(tree, { recursive: true, force: true });
+    mkdirSync(join(tree, "sub"), { recursive: true });
+    mkdirSync(join(tree, ".git"), { recursive: true });
+    writeFileSync(join(tree, "notes.txt"), "hello\n");
+    writeFileSync(join(tree, ".git", "config"), "[core]\n");
+    writeFileSync(join(tree, "fat.bin"), "z".repeat(64 * 1024 + 1));
+    // The link is the whole reason the resolved re-test exists.
+    symlinkSync(join(tree, ".git"), join(tree, "g"));
+
+    const filed = new PluginApi({
+      registry: {
+        get: (id: string) => (id === "s" ? { workspace: { root: tree } } : undefined),
+      } as unknown as SessionRegistry,
+      data: memoryPluginData(),
+      git: hostGit,
+      onWarning: () => {},
+    });
+    const reads = async (path: string): Promise<string> => {
+      try {
+        return String(await filed.call(manifestWith(["files.read"], [], "files"), "files.read", { sessionId: "s", path }));
+      } catch (error) {
+        return error instanceof PluginApiError ? error.code : String(error);
+      }
+    };
+
+    check("a file inside the tree reads", await reads("notes.txt"), "hello\n");
+    check("one above it does not", await reads("../secret"), "invalid_path");
+    check("nor an absolute path", await reads("/etc/hosts"), "invalid_path");
+    check("nor .git spelled out", await reads(".git/config"), "invalid_path");
+    // The half `safeRelPath` alone cannot answer, and the reason `probeRequestable`
+    // is called at all.
+    check("nor .git reached through a link", await reads("g/config"), "invalid_path");
+    check("a directory is not a file", await reads("sub"), "not_a_file");
+    check("and a file past the ceiling is refused rather than truncated", await reads("fat.bin"), "file_too_large");
+    // The stub answers `undefined` for every other id, which is what a registry
+    // does for a session that is not here.
+    check("and a path is never even looked at for a session this machine does not have", await (async () => {
+      try {
+        await filed.call(manifestWith(["files.read"], [], "files"), "files.read", { sessionId: "gone", path: "notes.txt" });
+        return "no refusal";
+      } catch (error) {
+        return error instanceof PluginApiError ? error.code : String(error);
+      }
+    })(), "session_not_found");
+    rmSync(tree, { recursive: true, force: true });
+  }
+
+  /* ---------------------------------------------------------------- *
+   * What comes back, which nothing asked about.
+   *
+   * Two bounds and they catch different servers: a `content-length` is refused
+   * before a byte is read, and a server that declares nothing is refused *while*
+   * it is still sending. The second is the one that matters — a plugin's own
+   * allowlisted host answering an endless chunked body could otherwise spend the
+   * whole 10s window growing this daemon's heap, which is the measurement
+   * `readBounded`'s docblock records.
+   * ---------------------------------------------------------------- */
+  {
+    const fresh = manifestWith(["net"], ["late.example.com"], "late");
+    answers = () =>
+      new Response("x", { status: 200, headers: { "content-length": String(8 * 1024 * 1024) } });
+    check(
+      "a response that declares more than a plugin may read",
+      await codeOf(fresh, "net.fetch", { url: "https://late.example.com/a" }),
+      "response_too_large",
+    );
+
+    // The case the header cannot see: no `content-length`, and it never stops.
+    let pulls = 0;
+    answers = () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            pulls += 1;
+            controller.enqueue(new Uint8Array(64 * 1024));
+          },
+        }),
+        { status: 200 },
+      );
+    check(
+      "and one that simply keeps sending",
+      await codeOf(fresh, "net.fetch", { url: "https://late.example.com/b" }),
+      "response_too_large",
+    );
+    // Charged per chunk rather than once the body is whole, which is the whole
+    // point: a bound that reads everything first is not a bound.
+    report("refused while it was still arriving", pulls > 0 && pulls < 64, `${pulls} chunks read`);
+    answers = () => new Response("hi", { status: 200 });
+  }
 
   /*
    * `agents.list` sits behind `sessions.read` rather than a scope of its own: it
@@ -13880,10 +14267,13 @@ process.stdout.write("\nwhat a plugin's own refusal becomes over HTTP\n");
    * worth asking again (`504`), and everything else is something downstream of
    * this daemon answering badly (`502`).
    */
-  const childThat = (behaviour: "up" | "wontStart" | "silent" | "throws" | "asks"): PluginRuntime => ({
+  const childThat = (behaviour: "up" | "wontStart" | "silent" | "throws" | "asks" | "oversize" | "greedy"): PluginRuntime => ({
     launch(options) {
       /** Which invocation the `asks` child is still holding while it asks. */
       let holding = 0;
+      /** The `greedy` child's tally: how many answers came back, and how many said no. */
+      let answered = 0;
+      let refused = 0;
       return Promise.resolve({
         send(message) {
           if (message.t === "init") {
@@ -13895,6 +14285,18 @@ process.stdout.write("\nwhat a plugin's own refusal becomes over HTTP\n");
             return true;
           }
           if (message.t === "answer") {
+            if (behaviour === "greedy") {
+              // Counted rather than reported one at a time: the question is how
+              // many of the twenty-four the host would carry at once.
+              if (message.ok === false && String(message.error).includes("calls out")) refused += 1;
+              answered += 1;
+              if (answered === 24) {
+                queueMicrotask(() =>
+                  options.onMessage({ t: "done", id: holding, ok: true, value: { title: `refused ${refused}`, blocks: [] } }),
+                );
+              }
+              return true;
+            }
             // Whatever the host said about the call below, handed back as this
             // plugin's own view — which is the only way it is visible from
             // outside the child at all.
@@ -13907,6 +14309,33 @@ process.stdout.write("\nwhat a plugin's own refusal becomes over HTTP\n");
           if (message.t === "invoke" && behaviour === "asks") {
             holding = message.id;
             queueMicrotask(() => options.onMessage({ t: "call", id: 1, method: "store.get", args: { key: "k" } }));
+            return true;
+          }
+          /*
+           * ⚠ **A channel that refuses the write, which every fake here reported
+           * as succeeding.** `plugin_request_too_large` is raised where
+           * `child.send` answers `false`, so with five runtimes all returning
+           * `true` the arm — and the status it maps to — was unreachable from
+           * this driver. It settles the invocation immediately on purpose: the
+           * measured defect it replaced was three oversized forms spending the
+           * whole invoke deadline each and exhausting the timeout budget.
+           */
+          if (message.t === "invoke" && behaviour === "oversize") return false;
+          /*
+           * A plugin doing the obvious thing an author of a task board does:
+           * asking about every session at once. All of them are emitted inside a
+           * single microtask, so every one is counted before the first answer
+           * releases its slot — which is exactly the fan-out
+           * `MAX_INFLIGHT_HOST_CALLS` exists to bound, and which nothing bounded
+           * before. What the child hands back is how many it was refused.
+           */
+          if (message.t === "invoke" && behaviour === "greedy") {
+            holding = message.id;
+            queueMicrotask(() => {
+              for (let i = 1; i <= 24; i += 1) {
+                options.onMessage({ t: "call", id: i, method: "store.get", args: { key: `k${i}` } });
+              }
+            });
             return true;
           }
           if (message.t === "invoke" && behaviour !== "silent") {
@@ -13928,7 +14357,7 @@ process.stdout.write("\nwhat a plugin's own refusal becomes over HTTP\n");
 
   const rigFor = async (
     name: string,
-    behaviour: "up" | "wontStart" | "silent" | "throws" | "asks",
+    behaviour: "up" | "wontStart" | "silent" | "throws" | "asks" | "oversize" | "greedy",
   ): Promise<{ app: ReturnType<typeof createApp>["app"]; close: () => Promise<void> }> => {
     const stores = openStores({ path: join(tmp(`plugin-code-${name}-`), "d.db"), instanceId: `i_code_${name}` });
     stores.plugins.put({
@@ -14028,6 +14457,42 @@ process.stdout.write("\nwhat a plugin's own refusal becomes over HTTP\n");
     title: null,
   });
   await throws.close();
+
+  /*
+   * ⚠ **`413`, and it used to be `502` by falling off the end.**
+   * `pluginErrorStatus` had no arm for `plugin_request_too_large`, so it took the
+   * default — whose stated reason is "something downstream of this daemon
+   * answered badly", when nothing downstream answered at all: the message never
+   * reached the child because it does not fit one IPC frame. `docs/API.md` said
+   * `503`, a third answer agreeing with neither. `413` is what this daemon already
+   * says for `payload_too_large` and both import ceilings, and it is the one that
+   * points at the caller, where the remedy is.
+   */
+  const oversize = await rigFor("oversize", "oversize");
+  check("a request too large for the channel", await view(oversize.app), {
+    status: 413,
+    code: "plugin_request_too_large",
+    title: null,
+  });
+  await oversize.close();
+
+  /*
+   * ⚠ **The other direction, which had no ceiling at all.**
+   * `MAX_INFLIGHT_INVOCATIONS` bounds host → child and was published in both
+   * bounds tables; nothing bounded child → host, and the two are not symmetric in
+   * cost — `sessions.changes` and `sessions.diff` each fork git. Twenty-four at
+   * once is one line an author of a task board writes without thinking about it,
+   * and the answer is a refusal per excess call rather than a queue: the child
+   * asked for them now, and holding them only moves the deadline it is already
+   * waiting on.
+   */
+  const greedy = await rigFor("greedy", "greedy");
+  check("a plugin that asks for everything at once is answered, and told no past the bound", await view(greedy.app), {
+    status: 200,
+    code: "none",
+    title: "refused 8",
+  });
+  await greedy.close();
 
   /*
    * ⚠ **`plugin_scope_denied → 403` is the one arm of `pluginErrorStatus` that

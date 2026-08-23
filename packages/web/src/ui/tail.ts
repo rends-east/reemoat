@@ -1610,6 +1610,54 @@ export function buildTail(
   const collected: TailNode[] = [];
   /** See {@link Tail.taskFloor}. Raised once, by the newest marker the walk meets. */
   let taskFloor = 0;
+  /**
+   * `collected.length` as it stood when the newest surviving plan was pushed.
+   *
+   * **One `TodoWrite` is many `plan` events**, each a full replacement of the
+   * list — measured at nine for a three-item plan — so a transcript drew the same
+   * checklist three, five, nine times in a row. This collapses a run of them to
+   * the newest, which is the only one that says anything the others do not.
+   *
+   * **"Consecutive" means over *emitted nodes*, and none of the other two
+   * definitions works.** Over raw events it fails the moment anything invisible
+   * interleaves — a codex `session_info_update` lands about five times a turn —
+   * and the reader still sees two identical cards touching. Over *drawable*
+   * events (`showsInTranscript`) it fails the other way: that answers true for a
+   * `permission_request` this walk merges away and for a superseded
+   * `tool_call_update` it drops, so a card the reader cannot distinguish from the
+   * one above it would be kept. Emitted nodes is what "the reader sees something
+   * between them" actually means.
+   *
+   * It is therefore one integer compare, because `collected.length` already *is*
+   * that count and `flush()` runs before `nodeFor` — so a text run lying between
+   * two plans has already been pushed by the time the older one is judged.
+   *
+   * **Which is also why the flush at the bottom of this loop is untouched.** The
+   * worry is real in the abstract — a row that draws nothing but still cuts the
+   * run splits one streamed message into two independently parsed `<Markdown>`
+   * blocks — and it is unreachable here: a plan is suppressed only when
+   * `collected` did not grow between it and its successor, and an open run
+   * flushing *is* `collected` growing. A plan with text on either side of it is
+   * always drawn. `plan` therefore stays out of `TRANSCRIPT_SILENT`, where it
+   * would be a lie — that set means "this type never draws a row".
+   *
+   * `-1` and not `0`: `collected.length` is 0 before anything has been drawn, so
+   * a `0` sentinel would suppress the first plan in a transcript that opens with
+   * one.
+   *
+   * Nothing is said about what was absorbed, and the house idiom that a number
+   * survives a collapse does not extend here. `1 failed` counts an outcome,
+   * `N approved` a decision somebody made, `… N more changed lines` content
+   * withheld; a superseded plan update is none of those. The card on screen
+   * already contains everything every absorbed update said, so there is nothing
+   * to count — which is exactly why `supersedes` folds hundreds of streaming tool
+   * drafts one screen over and says nothing about how many either.
+   *
+   * The `cut` needs no clause: the loop `break`s below `cut`, so a plan on the
+   * far side of a `/clear` is never reached and can neither suppress nor be
+   * suppressed.
+   */
+  let planFloor = -1;
   let run: { seq: number; role: string; thought: boolean; parts: string[] } | null = null;
 
   const updates = new Map<
@@ -1849,7 +1897,14 @@ export function buildTail(
       resolvedElicitations,
       askedThrough,
     );
-    if (node !== null) collected.push(node);
+    if (node !== null) {
+      // See {@link planFloor}. `continue` rather than a null node, because the
+      // node has already been built and the only question left is whether the
+      // reader would be able to tell it from the one above it.
+      if (stored.event.type === "plan" && collected.length === planFloor) continue;
+      collected.push(node);
+      if (stored.event.type === "plan") planFloor = collected.length;
+    }
   }
   flush();
 

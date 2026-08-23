@@ -332,7 +332,8 @@ Q4.105.
 | `store.entries` | A **page**, bounded by bytes rather than rows, with `more` and an `after` cursor. The lot does not fit: a plugin may keep four times what one IPC message carries |
 | A view | 24 blocks, 200 rows, 8 columns, 40 fields, 40 options, 4 actions per row, 4000 chars of text, 200 of anything short. **Clamped and reported**, never refused |
 | Refresh | 2 s floor, 5 min cap. Clamped **silently**, unlike a cut list — an interval nobody can see moved is not a wrong number on screen |
-| IPC | 256 KiB per message (**enforced**, and a refused message settles its waiter rather than letting it time out), 8 invocations in flight (`MAX_INFLIGHT_INVOCATIONS`, refused with `plugin_overloaded`), 20 lines of the child's own output kept |
+| IPC | 256 KiB per message (**enforced**, and a refused message settles its waiter rather than letting it time out, with `413` rather than a `502` since nothing downstream answered), 8 invocations in flight (`MAX_INFLIGHT_INVOCATIONS`, refused with `plugin_overloaded`), **16 host calls in flight the other way** (`MAX_INFLIGHT_HOST_CALLS` — the direction that had no ceiling, and the one where a method forks git), 20 lines of the child's own output kept |
+| A view | `PLUGIN_VIEW_LIMITS`, applied by `fitView` **in the child, before the message is sent** — it ran in the host, one hop after the message had already been refused, so the published bound could never fire and the byte bound was the only real one. Rows are the lever because they are the only dimension a plugin's data grows without limit |
 | Deadlines | 10 s to start, 10 s per call, 2 s of grace before SIGKILL. Both overridable **only** by a driver — there is no environment variable |
 | Restarts | 3 per daemon life, full jitter 2s→60s. Three consecutive timeouts stops it. Switching it off and on returns the budget |
 | `net.fetch` | https only, no redirects, 10 s, 1 MiB, 30 requests a minute per plugin |

@@ -167,20 +167,23 @@ export function readView(raw: unknown): PluginView {
 export const MIN_REFRESH_MS = 2_000;
 
 /**
- * A destination, resolved against the machine the plugin is on.
+ * Where a row's `open` goes, as a destination rather than as a path.
  *
  * Returns what to navigate to rather than a path, so this module stays DOM-free
  * and the path builders stay in one place each — `sessionPath` in `router.ts` and
  * `pluginPath` below. A second copy of either would be a second thing to get
  * wrong about encoding.
+ *
+ * ⚠ **The machine is the caller's, and deliberately not an argument here.** A
+ * plugin runs on one daemon and every destination it names is on that daemon, so
+ * the id would be a parameter this function could only pass back out — which it
+ * was, ignored behind a `void`, reading to the next person as if it did work.
  */
 export function pluginDestination(
-  machineId: MachineId,
   where: PluginOpen | null,
 ): { kind: "session"; sessionId: string } | { kind: "screen" } | null {
   if (where === null) return null;
   if ("screen" in where) return { kind: "screen" };
-  void machineId;
   return { kind: "session", sessionId: where.session };
 }
 
@@ -210,6 +213,52 @@ export function seedForm(fields: readonly PluginField[]): Record<string, string>
  * than restating the failure, and anything unrecognised falls through to the
  * message the daemon sent rather than to "something went wrong".
  */
+/**
+ * What the machine says it installed, against what somebody was shown — and the
+ * words for the difference, or `null` when there is none.
+ *
+ * ⚠ **The belt on the whole consent screen, and it exists because that screen has
+ * now been wrong four separate ways.** `pluginArchive.ts` re-implements enough of
+ * tar and zip to name the member the daemon will pick, and every time the two
+ * spellings diverged the result was the same: a manifest declaring nothing drawn
+ * under the plain "Install it" button while the machine installed one holding
+ * every scope plus `permission.requested`. Each of the four was fixed in the
+ * reader and pinned in `webcheck`; this is the half that does not depend on
+ * having thought of the fifth.
+ *
+ * It compares only what the reader claims to know and the daemon actually
+ * returns — the authority a plugin gets. Names and versions are deliberately not
+ * compared: a manifest is free to say what it likes about itself, and the
+ * question here is not "is this the file I picked" but "is this what I agreed
+ * to give it".
+ */
+export function consentBroken(
+  shown: { scopes: readonly string[]; net: readonly string[]; hooks: readonly string[] },
+  installed: { scopes: readonly string[]; net: readonly string[]; contributes: { hooks: readonly string[] } },
+): string | null {
+  const gained = (theirs: readonly string[], ours: readonly string[]): string[] =>
+    [...theirs].filter((one) => !ours.includes(one)).sort();
+  // Only what it *gained*. A plugin that ends up with less than the screen showed
+  // is not a broken consent — it is a manifest this reader read generously, which
+  // costs nobody anything.
+  const scopes = gained(installed.scopes, shown.scopes);
+  const net = gained(installed.net, shown.net);
+  const hooks = gained(installed.contributes.hooks, shown.hooks);
+  if (scopes.length === 0 && net.length === 0 && hooks.length === 0) return null;
+  const parts: string[] = [];
+  if (scopes.length > 0) parts.push(scopes.join(", "));
+  if (net.length > 0) parts.push(`network access to ${net.join(", ")}`);
+  if (hooks.length > 0) parts.push(hooks.join(", "));
+  return `That plugin asked for more than this screen showed: ${parts.join("; ")}. Remove it unless you know why.`;
+}
+
+/** Which scope a `403 insufficient_scope` said it wanted, or `null` if it did not say. */
+function requiredScope(detail: unknown): string | null {
+  if (detail === null || typeof detail !== "object") return null;
+  const named = (detail as Record<string, unknown>)["required"];
+  return typeof named === "string" && named.length > 0 ? named : null;
+}
+
 export function pluginFailure(error: unknown): string {
   if (!(error instanceof ApiError)) return "That did not work. Try again.";
 
@@ -274,8 +323,21 @@ export function pluginFailure(error: unknown): string {
       return "That was more than this plugin can be sent in one go.";
     case "plugin_scope_denied":
       return "That plugin asked for something it did not declare, and was refused.";
-    case "insufficient_scope":
-      return "You have read-only access to this machine.";
+    /*
+     * ⚠ **Read off `required`, because three of these six routes want
+     * `machine:admin` rather than `session:write`.** Install, remove and the
+     * state switch are the admin ones, so a grant that really does hold
+     * `session:write` was being told it was read-only — a sentence naming the
+     * wrong permission is worse than one naming none, since the remedy it points
+     * at is not the one that would work. The daemon already sends which scope it
+     * wanted; `requireScope` puts it in the envelope's detail.
+     */
+    case "insufficient_scope": {
+      const required = requiredScope(error.detail);
+      if (required === "machine:admin") return "Installing and removing plugins needs admin access to this machine.";
+      if (required !== null) return `That needs the ${required} scope, which this access does not carry.`;
+      return "You do not have access to do that on this machine.";
+    }
     default:
       return error.message;
   }

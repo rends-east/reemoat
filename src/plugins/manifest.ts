@@ -196,17 +196,20 @@ function readScopes(raw: unknown): PluginScope[] | string {
   return out;
 }
 
+/** One sentence, two ways to reach it: `net` absent entirely, and `net` present but empty. */
+const NET_NEEDS_HOSTS = 'the "net" scope needs a net list naming the hosts it reaches';
+
 function readNet(raw: unknown, scopes: readonly PluginScope[]): string[] | string {
   if (raw === undefined || raw === null) {
     // Declaring `net` and listing nothing is refused rather than treated as "any
     // host": a scope whose allowlist is empty reads, to whoever is approving the
     // install, as a plugin that talks to nowhere. It has to say where.
-    return scopes.includes("net") ? 'the "net" scope needs a net list naming the hosts it reaches' : [];
+    return scopes.includes("net") ? NET_NEEDS_HOSTS : [];
   }
   if (!Array.isArray(raw)) return "net must be an array of host names";
   if (raw.length > 0 && !scopes.includes("net")) return 'net lists hosts but the "net" scope is not declared';
   if (raw.length === 0 && scopes.includes("net")) {
-    return 'the "net" scope needs a net list naming the hosts it reaches';
+    return NET_NEEDS_HOSTS;
   }
   if (raw.length > MAX_NET_HOSTS) return `net may name at most ${MAX_NET_HOSTS} hosts`;
   const out: string[] = [];

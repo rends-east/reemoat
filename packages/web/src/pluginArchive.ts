@@ -52,6 +52,16 @@ export interface ManifestPreview {
   hooks: string[];
 }
 
+/**
+ * The one refusal both readers make, written once.
+ *
+ * The tar walk and the zip walk reach it independently — the zip path returns
+ * before it ever gets to `finish` — so it was typed out twice, and two copies of
+ * a sentence somebody reads before deciding whether to install something is one
+ * rewording away from the two paths refusing the same fact differently.
+ */
+const TWO_MANIFESTS = "that archive holds more than one plugin.json and nothing can say which one would be installed";
+
 export type ArchivePeek =
   | { kind: "ok"; manifest: ManifestPreview }
   /**
@@ -130,13 +140,41 @@ async function peekTarGz(blob: Blob): Promise<ArchivePeek> {
       // Walk every whole header (and its body) currently held, and keep the rest.
       for (;;) {
         if (held.byteLength < TAR_BLOCK) break;
-        const name = tarString(held.subarray(0, 100));
+        const stem = tarString(held.subarray(0, 100));
         // Two zero blocks end a tar; one is enough to know there is no more.
-        if (name.length === 0) return finish(best);
+        if (stem.length === 0) return finish(best);
         const size = tarOctal(held.subarray(124, 136));
         const typeflag = String.fromCharCode(held[156] ?? 0);
         const padded = TAR_BLOCK + Math.ceil(size / TAR_BLOCK) * TAR_BLOCK;
         if (held.byteLength < padded) break;
+
+        /*
+         * ⚠ **Two ways this reader used to spell a name differently from the
+         * daemon, and both of them were spoofs.**
+         *
+         * The first is the ustar `prefix` field. `extractTgz` composes
+         * `prefix + "/" + stem` when it is set; this read the 100-byte stem alone,
+         * so a member with stem `plugin.json` and prefix `sub` previewed as a
+         * *root* manifest while the daemon wrote it to `sub/plugin.json` — and a
+         * real root `plugin.json` elsewhere in the archive was what actually
+         * installed.
+         *
+         * The second is the pax `x` and GNU `L` long-name headers, which the
+         * daemon honours as an override on the member that follows. Carrying that
+         * state here would be a second parser to keep in step; refusing is the
+         * answer this file already gives for anything it cannot name exactly, and
+         * it costs the operator the named "Install without reading it" path rather
+         * than a wrong description. `K` and `g` go with them: a linkname override
+         * and a global header are both constructs this reader does not follow.
+         */
+        if (typeflag === "x" || typeflag === "L" || typeflag === "K" || typeflag === "g") {
+          return {
+            kind: "unreadable",
+            reason: "that archive uses extended tar headers this screen cannot follow",
+          };
+        }
+        const prefix = tarString(held.subarray(345, 500));
+        const name = prefix.length > 0 ? `${prefix}/${stem}` : stem;
 
         // Plain files only. A directory has no body worth reading and everything
         // else — symlink, hardlink, device — is refused by the daemon anyway, so
@@ -144,23 +182,43 @@ async function peekTarGz(blob: Blob): Promise<ArchivePeek> {
         // `7` is contiguous, which `unpackArchive` writes out as a file: a
         // typeflag this reader skipped and the daemon accepted was a second way
         // to be shown one manifest and sent another. See {@link isNoise}.
+        const spelled = canonical(name) ?? name;
         if ((typeflag === "0" || typeflag === "\0" || typeflag === "7") && isManifestPath(name)) {
-          const depth = depthOf(name);
+          // Depth and the tie are both read off the canonical spelling: two names
+          // that reach the same path are the same candidate, not two of them.
+          const depth = depthOf(spelled);
           if (best === null || depth < best.depth) {
-            best = { depth, name, body: held.slice(TAR_BLOCK, TAR_BLOCK + size), rival: false };
-          } else if (depth === best.depth && name !== best.name) {
-            // Two candidates the daemon would have to choose between, and it does
-            // not: `findManifestRoot` takes a root `plugin.json`, or the single
-            // top-level directory holding one, and answers `null` for anything
-            // else. So there is no tie to break here either — guessing is exactly
-            // how this reader comes to describe a manifest that is not the one
-            // installed.
+            best = { depth, name: spelled, body: held.slice(TAR_BLOCK, TAR_BLOCK + size), rival: false };
+          } else if (depth === best.depth) {
+            /*
+             * Two candidates at the same depth, and **the name no longer has to
+             * differ** for this to be a refusal.
+             *
+             * Different names are the original case: `findManifestRoot` takes a
+             * root `plugin.json`, or the single top-level directory holding one,
+             * and answers `null` for anything else — so there is no tie to break
+             * here either, and guessing is exactly how this reader comes to
+             * describe a manifest that is not the one installed.
+             *
+             * The *same* canonical name is the case the old `name !== best.name`
+             * let through, and it arrived with `canonical`: two members that
+             * normalise to one path — `plugin.json` and `./plugin.json` — are two
+             * writes to the same file, which the daemon refuses outright because
+             * it opens members `O_EXCL`. Describing the first of them would be
+             * describing an archive that cannot install.
+             */
             best.rival = true;
           }
         }
         held = held.slice(padded);
-        // Depth 0 is the shallowest there is, so nothing later can beat it.
-        if (best?.depth === 0) return finish(best);
+        /*
+         * ⚠ **No early return on depth 0.** It said "nothing later can beat it",
+         * which is true of *depth* and false of the thing that matters: a second
+         * root `plugin.json` later in the archive is not a worse candidate, it is
+         * the tie `finish` refuses — and stopping here meant it was never seen.
+         * The whole archive is walked, which it was going to be anyway on every
+         * input that did not happen to put the manifest first.
+         */
       }
 
       if (done) return finish(best);
@@ -193,29 +251,57 @@ async function peekZip(blob: Blob): Promise<ArchivePeek> {
   }
   if (eocd < 0) return { kind: "unreadable", reason: "that zip has no central directory" };
 
-  const count = view.getUint16(eocd + 10, true);
-  let at = view.getUint32(eocd + 16, true);
+  /*
+   * ⚠ **Bounded by the central directory's declared *size*, and walked by
+   * signature — never by the entry count.** This read `total entries` at
+   * `eocd + 10` and stopped there; `extractZip` reads only `offset` and `size`,
+   * hands `readZipMembers` a buffer of exactly `cdSize`, and walks `SIG_CENTRAL`
+   * until that buffer ends. So an archive declaring one entry while carrying three
+   * inside `cdSize` was read as one member here and as three by the daemon: the
+   * consent screen described a benign nested manifest and the machine installed
+   * an evil root one holding every scope plus `permission.requested`. Reproduced
+   * end-to-end against both readers; the daemon's own `parseManifest` accepts the
+   * evil manifest.
+   *
+   * The count is still read, and disagreement is a refusal rather than a
+   * preference: a zip whose header and whose contents describe different archives
+   * is one this screen cannot honestly speak for, whichever of the two is "right".
+   */
+  const declared = view.getUint16(eocd + 10, true);
+  const cdSize = view.getUint32(eocd + 12, true);
+  const cdStart = view.getUint32(eocd + 16, true);
+  const cdEnd = Math.min(bytes.byteLength, cdStart + cdSize);
+  let at = cdStart;
+  let seen = 0;
   let best: { depth: number; name: string; at: number; rival: boolean } | null = null;
 
-  for (let i = 0; i < count; i += 1) {
-    if (at + 46 > bytes.byteLength || view.getUint32(at, true) !== 0x02014b50) break;
+  while (at + 46 <= cdEnd && view.getUint32(at, true) === 0x02014b50) {
+    seen += 1;
     const nameLen = view.getUint16(at + 28, true);
     const extraLen = view.getUint16(at + 30, true);
     const commentLen = view.getUint16(at + 32, true);
-    const name = utf8(bytes.subarray(at + 46, at + 46 + nameLen));
-    if (isManifestPath(name)) {
+    const raw = utf8(bytes.subarray(at + 46, at + 46 + nameLen));
+    const name = canonical(raw) ?? raw;
+    if (isManifestPath(raw)) {
       const depth = depthOf(name);
       if (best === null || depth < best.depth) best = { depth, name, at, rival: false };
-      // See the tar walker: the daemon breaks no tie, so neither may this.
-      else if (depth === best.depth && name !== best.name) best.rival = true;
+      // See the tar walker: the daemon breaks no tie and refuses a duplicate
+      // member outright, so neither of those may be resolved here.
+      else if (depth === best.depth) best.rival = true;
     }
     at += 46 + nameLen + extraLen + commentLen;
+  }
+  if (seen !== declared) {
+    return {
+      kind: "unreadable",
+      reason: "that zip's directory does not hold the number of entries it declares",
+    };
   }
   if (best === null) return finish(null);
   // The zip path reaches `read` without going through `finish`, so the refusal
   // `finish` makes for a tie has to be made here as well.
   if (best.rival) {
-    return { kind: "unreadable", reason: "that archive holds more than one plugin.json and nothing can say which one would be installed" };
+    return { kind: "unreadable", reason: TWO_MANIFESTS };
   }
 
   const method = view.getUint16(best.at + 10, true);
@@ -268,7 +354,7 @@ async function peekZip(blob: Blob): Promise<ArchivePeek> {
 function finish(best: { body: Uint8Array; rival: boolean } | null): ArchivePeek {
   if (best === null) return { kind: "unreadable", reason: "that archive has no plugin.json at its top level" };
   if (best.rival) {
-    return { kind: "unreadable", reason: "that archive holds more than one plugin.json and nothing can say which one would be installed" };
+    return { kind: "unreadable", reason: TWO_MANIFESTS };
   }
   return read(best.body);
 }
@@ -320,11 +406,37 @@ function read(body: Uint8Array): ArchivePeek {
   };
 }
 
+/**
+ * A member's name as **the daemon will spell it**, or `null` for one this reader
+ * may not describe.
+ *
+ * ⚠ **The half that was missing, and it was a spoof rather than a nuisance.**
+ * `safeMemberPath` drops empty and `.` segments before it joins, so the member
+ * `plugin.json/.` lands on disk as a root-level regular file `plugin.json` — while
+ * this reader compared the raw name, matched neither of its two arms, and left it
+ * out of the candidates entirely. An archive holding a benign `wrap/plugin.json`
+ * beside an evil `plugin.json/.` therefore showed the benign one under the plain
+ * "Install it" button and installed the other. Reproduced end-to-end against both
+ * readers, with a zip `unzip -t` and Python's `zipfile` both call well-formed.
+ * `./plugin.json/.` is the same trick with one more segment.
+ *
+ * Backslashes are never translated — `safeMemberPath`'s rule, and for its reason:
+ * a member called `a\b/plugin.json` is one name, not two.
+ */
+function canonical(name: string): string | null {
+  const out: string[] = [];
+  for (const segment of name.split("/")) {
+    if (segment.length === 0 || segment === ".") continue;
+    // The daemon refuses rather than normalising, so this must not describe it.
+    if (segment === "..") return null;
+    out.push(segment);
+  }
+  return out.length === 0 ? null : out.join("/");
+}
+
 function isManifestPath(name: string): boolean {
-  // Backslashes are never translated — `safeMemberPath`'s rule, and for its
-  // reason: a member called `a\b/plugin.json` is one name, not two.
-  const clean = name.replace(/\/+$/, "");
-  if (isNoise(clean)) return false;
+  const clean = canonical(name);
+  if (clean === null || isNoise(clean)) return false;
   return clean === "plugin.json" || (clean.endsWith("/plugin.json") && depthOf(clean) <= MAX_MANIFEST_DEPTH);
 }
 

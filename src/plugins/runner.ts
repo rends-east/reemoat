@@ -29,7 +29,7 @@ import {
   type HostMessage,
   type PluginInvokeKind,
 } from "./runtime.js";
-import type { PluginManifest } from "./protocol.js";
+import { fitView, noteClamp, type PluginManifest } from "./protocol.js";
 
 /** What a plugin's module may export. Every one is optional; missing means "not offered". */
 interface PluginModule {
@@ -185,6 +185,38 @@ function normalize(result: unknown): unknown {
   return result;
 }
 
+/**
+ * How much of a message a view may be.
+ *
+ * A little under the channel, because what is measured is the view and what is
+ * sent is the envelope around it — `{"t":"done","id":…,"ok":true,"value":…}`. A
+ * kilobyte is far more than that costs and far less than one row, so the margin
+ * can be generous without being a second bound anybody has to reason about.
+ */
+const VIEW_BUDGET = MAX_PLUGIN_MESSAGE_BYTES - 1024;
+
+/**
+ * A result, cut to fit the channel — and **cut here, in the child, because this
+ * is the side that sends.**
+ *
+ * `clampView` ran only in the host, which is one hop too late to help: a view
+ * over `MAX_PLUGIN_MESSAGE_BYTES` was refused by `post` below and the clamp that
+ * exists to cut it never saw it. So the bound the author's guide publishes was
+ * unenforceable and the one it does not emphasise was the only one that ever
+ * fired. See {@link fitView}.
+ *
+ * The three shapes are the host's own: a toast is not a view and is left alone, a
+ * `null` is an action that only changed state, and everything else is a view —
+ * which is exactly how `shape` discriminates on the other side.
+ */
+function fitted(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
+  const one = value as { kind?: unknown; view?: unknown };
+  if (one.kind === "toast") return value;
+  if (one.kind === "view") return { kind: "view", view: noteClamp(fitView(one.view, VIEW_BUDGET)) };
+  return noteClamp(fitView(value, VIEW_BUDGET));
+}
+
 process.on("message", (raw: unknown) => {
   if (typeof raw !== "string") return;
   let message: HostMessage;
@@ -222,14 +254,23 @@ process.on("message", (raw: unknown) => {
     const { id } = message;
     void (async () => {
       try {
-        const value = await dispatch(message.kind, message.name, message.input);
+        const value = fitted(await dispatch(message.kind, message.name, message.input));
         // Exactly once, and the fallback is still an answer: a result too large
-        // to send must not become an invocation that never returns.
+        // to send must not become an invocation that never returns. Still here
+        // after `fitted`, because a view is not the only thing a plugin may
+        // return and only views are cut to fit.
         if (!post({ t: "done", id, ok: true, value })) {
           post({ t: "done", id, ok: false, error: "this plugin returned more than can be sent" });
         }
       } catch (error) {
-        post({ t: "done", id, ok: false, error: describe(error) });
+        // The answer is the point: rule 2 is not "answers unless the failure path
+        // also fails". `describe` cannot throw any more and `post` catches its own
+        // send, so this is the belt on the one remaining way to owe an answer.
+        try {
+          post({ t: "done", id, ok: false, error: describe(error) });
+        } catch {
+          post({ t: "done", id, ok: false, error: "this plugin failed and could not say how" });
+        }
       }
     })();
   }
@@ -247,7 +288,24 @@ process.on("unhandledRejection", (reason) => {
   process.stderr.write(`[unhandled] ${describe(reason)}\n`);
 });
 
+/**
+ * What was thrown, as a string — and **never itself a throw**, which is rule 2.
+ *
+ * ⚠ `String(x)` runs `x[Symbol.toPrimitive]`/`x.toString`, and `error.message` is
+ * a getter. A plugin that rejects with an object whose either one throws made
+ * this function throw *inside the `catch` that was answering for it*, so no
+ * `done` was posted at all: the host waited the full invoke deadline and a person
+ * watched a spinner for ten seconds because a plugin threw the wrong shape. The
+ * same call is the `unhandledRejection` reporter, where a throw is worse still.
+ */
 function describe(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  return String(error);
+  try {
+    if (error instanceof Error) {
+      const message = error.message;
+      return typeof message === "string" ? message : "this plugin threw something that will not describe itself";
+    }
+    return String(error);
+  } catch {
+    return "this plugin threw something that will not describe itself";
+  }
 }

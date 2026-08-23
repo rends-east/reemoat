@@ -74,6 +74,60 @@ export interface AskOption {
 export type AskLayout = "rows" | "buttons";
 
 /**
+ * How much of the conversation this card may take, as **whole class strings**.
+ *
+ * Literal, and a table rather than an interpolation, because Tailwind v4 reads
+ * this file as *text*: a class assembled from fragments emits no CSS at all and
+ * fails by silently having no height rule, which is the worst possible way for a
+ * height to be wrong.
+ *
+ * ⚠ **`100%` is what actually governs, and the first number is a ceiling on it
+ * rather than a target.** The frame is `absolute inset-0` inside the conversation
+ * region, so `100%` *is* that region — roughly 640px of an 844px viewport on a
+ * 390×844 phone, i.e. about 76dvh, and less in a short desktop window. At `tall`
+ * the `min()` therefore resolves to `100%` in every realistic geometry, and the
+ * honest reading of it is *"as tall as the region allows, and not one pixel over
+ * the session header or the composer"*. Nobody should try to make 88 literal:
+ * the only routes out of the region are a `z-index` or a portal, and the docblock
+ * at the return statement records the measured regression that caused.
+ *
+ * `dvh` rather than `vh`: everything else in this app that measures the viewport
+ * is `dvh` (`h-dvh` on the shell, `92dvh` on a sheet), and on iOS `vh` is the
+ * *largest* viewport, so it over-measures whenever the URL bar is showing.
+ *
+ * `tall` is spent on a plan and nothing else. A `Bash` approval is one line; the
+ * paragraph below measures the ordinary card at 92% of the conversation already,
+ * and growing that for a one-line request buys nothing while costing the last
+ * transcript row on the requests that least need it.
+ */
+const BOX_MAX = {
+  normal: "max-h-[min(70dvh,100%)]",
+  tall: "max-h-[min(88dvh,100%)]",
+} as const;
+
+export type AskSize = keyof typeof BOX_MAX;
+
+/**
+ * The number beside an answer, which is a **keyboard** shortcut and nothing else.
+ *
+ * On a phone it is a digit next to every option that presses nothing, on the one
+ * card in this app where every glyph is competing for a 390px row — and beside a
+ * *refusal* it reads as an ordering somebody chose rather than as a key. The
+ * handler is left alone: a tablet with a bluetooth keyboard still answers on `2`,
+ * and hiding the label is the whole of what a touch device needs.
+ *
+ * **Keyed on the pointer and deliberately not on a breakpoint.** `sm:` would say
+ * "a narrow window has no keyboard", which is false and would take the numbers off
+ * a half-width desktop browser; `pointer: coarse` is the actual question. Same
+ * medium as `shouldFocusComposer`'s own `pointerCoarse` clause, which declines to
+ * raise a soft keyboard for the same class of reason.
+ *
+ * A whole class string in a table, for {@link BOX_MAX}'s reason: Tailwind reads
+ * this file as text.
+ */
+const KEYS_ONLY = "pointer-coarse:hidden";
+
+/**
  * An unpicked row, and there is exactly one look because **this card has no
  * colour on it**.
  *
@@ -165,6 +219,7 @@ export function AskCard({
   context,
   extra,
   actions,
+  size = "normal",
 }: {
   /** One line at the top: the question, or the tool being asked about. */
   title: string;
@@ -188,6 +243,8 @@ export function AskCard({
   extra?: ReactNode;
   /** The footer row: Back, Skip, Submit. Never scrolls. */
   actions?: ReactNode;
+  /** How much room the card may take. See {@link BOX_MAX}. */
+  size?: AskSize;
 }): ReactNode {
   /*
    * The number beside each row, wired.
@@ -408,16 +465,31 @@ export function AskCard({
          *
          * **The portrait budget, which the paragraph above works through landscape
          * in detail and never states: this card can take 92% of the conversation.**
-         * On a 390×844 phone the region is roughly 640px and `min(70vh,100%)`
+         * On a 390×844 phone the region is roughly 640px and `min(70dvh,100%)`
          * resolves to 590 of them, leaving about one transcript row visible behind
          * it. That is intended — a parked question is meant to be the loudest thing
          * in the app — but it is *why* the collapse control has to be a real 44px
          * target rather than the 26px one it was, and somebody asked to "make the
          * card smaller" should know which of the four numbers they are reaching for
          * before they start.
+         *
+         * At `size="tall"` — a plan, which is a document rather than a line — the
+         * ceiling rises to the region itself and the card takes all of it. That
+         * changes a `max-height` and nothing structural, which is the whole reason
+         * it is safe: raising a max can only ever give flexbox more room to resolve
+         * in. Re-run the landscape arithmetic above at its minimums — header ~44 +
+         * the context floor 48 + a shrinkable answer box + footer ~60 — and 227px
+         * of region still resolves without pushing the footer out, which is the
+         * failure that paragraph exists to prevent. See {@link BOX_MAX}.
+         *
+         * `max-h-[45vh]` on the answers is deliberately left in `vh` here: it
+         * governs every question card, its floor was measured in `vh`, and mixing
+         * a units change into a size change on the one region this does not need
+         * would make a regression there unattributable. It is the file's remaining
+         * outlier and is named so nobody thinks it was missed.
          */
         <div
-          className={`${COLUMN} animate-rise pointer-events-auto flex max-h-[min(70vh,100%)] min-h-0 flex-col overflow-hidden rounded-lg border border-edge-strong bg-surface shadow-2xl`}
+          className={`${COLUMN} animate-rise pointer-events-auto flex ${BOX_MAX[size]} min-h-0 flex-col overflow-hidden rounded-lg border border-edge-strong bg-surface shadow-2xl`}
         >
           <div className="flex shrink-0 items-start gap-1 px-3 pt-2.5 pb-2">
             <div className="mt-1 min-w-0 flex-1">
@@ -562,9 +634,7 @@ function OptionRow({
           <span className="mt-0.5 block text-2xs text-muted wrap-anywhere">{option.description}</span>
         )}
       </span>
-      {index < 9 && (
-        <span className="mt-0.5 shrink-0 text-2xs text-faint tabular-nums">{index + 1}</span>
-      )}
+      {index < 9 && <span className={`mt-0.5 shrink-0 text-2xs text-faint tabular-nums ${KEYS_ONLY}`}>{index + 1}</span>}
     </button>
   );
 }
@@ -615,7 +685,7 @@ function OptionButton({
       )}
       {option.label}
       {index < 9 && (
-        <span className={`tabular-nums ${option.primary === true ? "text-ink/50" : "text-faint"}`}>
+        <span className={`tabular-nums ${KEYS_ONLY} ${option.primary === true ? "text-ink/50" : "text-faint"}`}>
           {index + 1}
         </span>
       )}

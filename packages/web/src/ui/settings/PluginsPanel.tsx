@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Puzzle, Trash2, Upload } from "lucide-react";
-import { pluginFailure, pluginPath, pluginStateText, readView } from "../../plugins";
-import { peekPluginArchive, type ManifestPreview } from "../../pluginArchive";
+import { consentBroken, pluginFailure, pluginPath, pluginStateText, readView } from "../../plugins";
+import { peekPluginArchive, type ArchivePeek, type ManifestPreview } from "../../pluginArchive";
 import type { MachineId } from "../../ids";
 import { navigate } from "../../router";
 import { pluginSettingsPath, settingsPath } from "../../settings";
@@ -144,19 +144,39 @@ function PluginRow({
         </div>
       </div>
 
+      {/*
+       * ⚠ **`sm` with the coarse-pointer floor on the *resting* controls.**
+       * `BUTTON_SIZE` licenses `sm` for "a confirmation that has replaced the
+       * controls on a settings row, so it is the only thing on that row and has
+       * nothing adjacent to mis-hit" — which describes the confirming pair below
+       * and not these. Up to four of these sit adjacent at `gap-2`, and the last
+       * one removes the plugin and everything it stored. `AgentsPanel` spells the
+       * same escape at its own `sm` button; the confirming pair keeps bare `sm`,
+       * which is the shape the docblock actually blesses.
+       */}
       <div className="mt-2 flex flex-wrap items-center gap-2">
         {plugin.contributes.screen !== null && (
-          <Button size="sm" disabled={!plugin.enabled} onClick={() => navigate(pluginPath(machineId, plugin.id))}>
+          <Button
+            size="sm"
+            className="[@media(pointer:coarse)]:min-h-11"
+            disabled={!plugin.enabled}
+            onClick={() => navigate(pluginPath(machineId, plugin.id))}
+          >
             Open
           </Button>
         )}
         {plugin.contributes.settings && (
-          <Button size="sm" onClick={() => navigate(pluginSettingsPath(machineId, plugin.id))}>
+          <Button
+            size="sm"
+            className="[@media(pointer:coarse)]:min-h-11"
+            onClick={() => navigate(pluginSettingsPath(machineId, plugin.id))}
+          >
             Settings
           </Button>
         )}
         <Button
           size="sm"
+          className="[@media(pointer:coarse)]:min-h-11"
           disabled={busy || daemon === undefined}
           onClick={() => {
             if (daemon === undefined) return;
@@ -178,6 +198,7 @@ function PluginRow({
             <Button
               tone="destructive"
               size="sm"
+              className="[@media(pointer:coarse)]:min-h-11"
               disabled={busy || daemon === undefined}
               onClick={() => {
                 setConfirming(false);
@@ -186,12 +207,18 @@ function PluginRow({
             >
               Remove
             </Button>
-            <Button tone="primary" size="sm" onClick={() => setConfirming(false)}>
+            <Button tone="primary" size="sm" className="[@media(pointer:coarse)]:min-h-11" onClick={() => setConfirming(false)}>
               Cancel
             </Button>
           </>
         ) : (
-          <DangerButton icon={Trash2} size="sm" disabled={busy} onClick={() => setConfirming(true)}>
+          <DangerButton
+            icon={Trash2}
+            size="sm"
+            className="[@media(pointer:coarse)]:min-h-11"
+            disabled={busy}
+            onClick={() => setConfirming(true)}
+          >
             Remove
           </DangerButton>
         )}
@@ -294,7 +321,7 @@ function InstallPlugin({ machineId, onInstalled }: { machineId: MachineId; onIns
   const [phase, setPhase] = useState<
     | { kind: "idle" }
     | { kind: "reading" }
-    | { kind: "confirming"; file: File; peek: Awaited<ReturnType<typeof peekPluginArchive>> }
+    | { kind: "confirming"; file: File; peek: ArchivePeek }
     | { kind: "sending"; fraction: number }
     | { kind: "failed"; message: string }
   >({ kind: "idle" });
@@ -311,7 +338,12 @@ function InstallPlugin({ machineId, onInstalled }: { machineId: MachineId; onIns
     void peekPluginArchive(file).then((peek) => setPhase({ kind: "confirming", file, peek }));
   };
 
-  const send = (file: File): void => {
+  /*
+   * `shown` is what the consent screen described, carried through the send so the
+   * answer can be checked against it. `null` when nobody was shown anything — the
+   * "Install without reading it" path, where there is no claim to break.
+   */
+  const send = (file: File, shown: ManifestPreview | null): void => {
     const daemon = store.daemonFor(machineId);
     if (daemon === undefined) {
       setPhase({ kind: "failed", message: "That machine is not reachable right now." });
@@ -324,6 +356,20 @@ function InstallPlugin({ machineId, onInstalled }: { machineId: MachineId; onIns
       .installPlugin(file, (fraction) => setPhase({ kind: "sending", fraction }), controller.signal)
       .then((answer) => {
         setPhase({ kind: "idle" });
+        onInstalled();
+        /*
+         * ⚠ **Checked after the fact, because the reader can be wrong.** The
+         * daemon returns the manifest it really parsed; if it holds authority the
+         * screen did not show, that is said here rather than nowhere. `error`
+         * rather than `ok`, and it replaces the success line: "Installed Clock
+         * 1.0.0" beside a plugin that can answer every permission on the machine
+         * is the same lie one step later. See {@link consentBroken}.
+         */
+        const broken = shown === null ? null : consentBroken(shown, answer.plugin);
+        if (broken !== null) {
+          toast("error", broken);
+          return;
+        }
         // The verb the daemon decided, not the one this screen guessed: `replaced`
         // is how a client learns whether it installed or updated, and guessing from
         // the list it fetched before sending would be wrong for a concurrent tab.
@@ -333,7 +379,6 @@ function InstallPlugin({ machineId, onInstalled }: { machineId: MachineId; onIns
             ? `Installed ${answer.plugin.name} ${answer.plugin.version}`
             : `Updated ${answer.plugin.name} to ${answer.plugin.version}`,
         );
-        onInstalled();
       })
       .catch((cause: unknown) => {
         // An abort is somebody pressing Cancel, and `pluginFailure` has no arm for
@@ -404,7 +449,7 @@ function InstallPlugin({ machineId, onInstalled }: { machineId: MachineId; onIns
             // it". Returning here left the safe way out inert and the unsafe one
             // working, which is the opposite of what this screen is for.
             if (phase.kind === "confirming" && phase.peek.kind === "ok") {
-              send(phase.file);
+              send(phase.file, phase.peek.kind === "ok" ? phase.peek.manifest : null);
               return;
             }
             input.current?.click();
@@ -422,7 +467,7 @@ function InstallPlugin({ machineId, onInstalled }: { machineId: MachineId; onIns
                 : "Choose a file"}
         </Button>
         {phase.kind === "confirming" && phase.peek.kind === "unreadable" && (
-          <DangerButton icon={Upload} onClick={() => send(phase.file)}>
+          <DangerButton icon={Upload} onClick={() => send(phase.file, null)}>
             Install without reading it
           </DangerButton>
         )}
@@ -462,6 +507,24 @@ export function PluginSettings({ machineId, pluginId }: { machineId: MachineId; 
   const [view, setView] = useState<PluginViewShape | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /*
+   * ⚠ **What re-seeds the form after a save, and why it is a counter here rather
+   * than a key on the form itself.**
+   *
+   * `Form` seeds its state once per mount, so a plugin that normalises a value on
+   * save drew the un-normalised one until reload. Its own docblock claimed it was
+   * "keyed on what the plugin sent" and there was no key anywhere — but adding a
+   * content-derived one inside `PluginView` would have been worse than the bug:
+   * `PluginView` also draws the plugin's **screen**, which `PluginScreen` re-reads
+   * on `refreshMs` (floor 2s), so any poll that changed a field would have wiped
+   * what somebody was typing.
+   *
+   * The distinction the two callers already make is the answer. This pane has no
+   * timer, deliberately, so `view` changes only when the person here acted — and
+   * that is exactly the moment a re-seed is wanted. The screen passes nothing and
+   * keeps today's behaviour.
+   */
+  const [saves, setSaves] = useState(0);
 
   useEffect(() => {
     let live = true;
@@ -494,6 +557,7 @@ export function PluginSettings({ machineId, pluginId }: { machineId: MachineId; 
       .then((answer) => {
         if (answer.result.kind === "view") {
           setView(readView(answer.result.view));
+          setSaves((held) => held + 1);
           return;
         }
         toast(answer.result.tone === "danger" ? "error" : "ok", answer.result.text);
@@ -515,11 +579,22 @@ export function PluginSettings({ machineId, pluginId }: { machineId: MachineId; 
       <p className="mb-4 text-xs text-muted">
         <Puzzle size={12} className="mr-1 inline align-[-1px]" />
         Drawn by <code className="text-muted/80">{pluginId}</code> on this machine.{" "}
-        <button type="button" className={`${LINK} tap`} onClick={() => navigate(settingsPath("machines", machineId))}>
+        {/*
+          `replace`, like the chevron to the same destination in `Settings.tsx`, and
+          for the reason stated there: this moves *shallower* inside the sheet, and
+          pushing an entry to go up means Android's Back walks the sheet backwards
+          instead of popping out of it. Alternating this link with the pane it came
+          from grew the stack without bound.
+        */}
+        <button
+          type="button"
+          className={`${LINK} tap`}
+          onClick={() => navigate(settingsPath("machines", machineId), true)}
+        >
           All plugins
         </button>
       </p>
-      <PluginView view={view} busy={busy} onAction={act} />
+      <PluginView key={saves} view={view} busy={busy} onAction={act} />
     </div>
   );
 }

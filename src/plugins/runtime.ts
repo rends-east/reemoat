@@ -48,6 +48,25 @@ export const MAX_PLUGIN_MESSAGE_BYTES = 256 * 1024;
  */
 export const MAX_INFLIGHT_INVOCATIONS = 8;
 
+/**
+ * How many host-API calls one plugin may have in flight **towards** the daemon.
+ *
+ * ⚠ **The other direction, and it had no ceiling at all.**
+ * {@link MAX_INFLIGHT_INVOCATIONS} bounds host → child; nothing bounded child →
+ * host, and the two are not symmetric in cost. `sessions.changes` and
+ * `sessions.diff` each fork git, so one line an author of a task board would
+ * obviously write — `Promise.all(sessions.map((s) => ctx.sessions.changes(s.id)))`
+ * inside a single `turn.ended` hook — forks one git per session at once, against a
+ * registry that holds up to sixty of them, on the machine its owner is working on.
+ * No hostile plugin is needed to reach it.
+ *
+ * Higher than the inbound ceiling on purpose: this is a plugin doing its own work
+ * rather than tabs queueing on a slow child, and a plugin that legitimately reads
+ * a handful of sessions per hook should not meet the bound. What it stops is the
+ * unbounded fan-out, not concurrency.
+ */
+export const MAX_INFLIGHT_HOST_CALLS = 16;
+
 /** How long a plugin gets to answer before the request is abandoned. */
 export const PLUGIN_INVOKE_TIMEOUT_MS = 10_000;
 
@@ -117,7 +136,19 @@ export interface PluginProcess {
    * promise pending for ever. Both now fail at once and say why.
    */
   send(message: HostMessage): boolean;
-  /** Idempotent, and resolves once the child is gone. `this.x ??= this.doX()`. */
+  /**
+   * Idempotent, and resolves once **nothing more will be written to this child**.
+   * `this.x ??= this.doX()`.
+   *
+   * ⚠ Deliberately *not* "once the child is gone", which is what this said and is
+   * a promise the one implementation does not keep: `doStop` races the child's
+   * exit against `PLUGIN_STOP_DEADLINE_MS`, because `install` holds the daemon's
+   * only install slot across this call and a pid wedged on a hung mount would
+   * otherwise mean no more installs on this machine, ever. `send` refuses on
+   * `stopping` rather than on `gone`, which is what makes the weaker promise the
+   * true one — and it is the promise a second implementation of this seam has to
+   * keep, so it is the one stated here.
+   */
   stop(): Promise<void>;
   /** The last lines the child wrote to stdout or stderr. Shown on its row when it fails. */
   recentLogs(): readonly string[];

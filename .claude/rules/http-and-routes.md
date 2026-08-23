@@ -34,6 +34,12 @@ pnpm client changes <id> [--base head] [--ignored]
 pnpm client diff <id> <path>         # patch on stdout, header on stderr
 pnpm client workspace <id>
 pnpm client rmworkspace <id> [--force] [--delete-branch]
+
+pnpm client plugins                  # what is installed, and what each may reach
+pnpm client plugin install <archive> # install or update one; a .tar.gz or a .zip
+pnpm client plugin remove <id>       # uninstall it, and everything it kept
+pnpm client plugin enable <id> | disable <id>
+pnpm client plugin view <id> [screen|settings]
 ```
 
 ## Invariants

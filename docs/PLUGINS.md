@@ -404,9 +404,9 @@ answer `503` rather than reporting an empty list, because "there are none" and
 |---|---|
 | Archive | 2 MiB on the wire, 8 MiB unpacked, 500 entries. One install at a time per machine |
 | Store | 1 MiB per plugin, 64 KiB per value, 1000 keys, 200 characters per key, 128 KiB per `entries` page |
-| A view | 24 blocks, 200 rows, 8 columns, 40 fields, 4 actions per row, 4000 characters of text |
+| A view | 24 blocks, 200 rows per list or column, 8 columns, 40 fields, 4 actions per row, 4000 characters of text. Over any of them the view is **cut to fit and says so**, never refused — and cut again if it is still larger than one message |
 | Refresh | 2 s floor, 5 min cap, paused while the tab is in the background |
-| Answering | 10 s per call, 256 KiB per message, 8 calls in flight |
+| Answering | 10 s per call, 256 KiB per message (the harder of the two bounds, and what a view is cut to), 8 calls in flight to your plugin, 16 host calls in flight from it |
 | Starting | 10 s, then 3 restarts per daemon life with backoff; three timeouts in a row stops it |
 | `net.fetch` | https only, 10 s, 1 MiB, 30 requests a minute, no redirects |
 | Files | 64 KiB per read |

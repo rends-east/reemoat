@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { echoFor, echoVersion, subscribeEchoes } from "../echo";
+import { permissionContext } from "../permission";
 import { keyOf, type SessionRef } from "../ids";
 import { describe, missingRowReason } from "../machine";
 import { displayCwd, downloadablePath, relativeTo } from "../paths";
@@ -73,6 +74,42 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
     store.openSession(sessionRef);
   }, [sessionRef.machineId, sessionRef.sessionId]);
 
+  /*
+   * Whichever has waited longest, of either kind. Only one card at a time; the
+   * rest are counted in the strip below it.
+   *
+   * ⚠ **Read here rather than below `row.snapshot`, because the line under it
+   * holds a hook and there is an early return in between.** Placed after it, the
+   * `useMemo` ran only once a row existed — three hooks on the render that says
+   * "loading" and four on the one that draws the session — which is React #310,
+   * *"Rendered more hooks than during the previous render"*, thrown the moment a
+   * cold-opened session's row landed. Nothing in this repository catches that:
+   * there is no eslint, `tsc` does not model hook order, and `webcheck` has no
+   * DOM — the same sentence `Composer.tsx` already writes over its own release
+   * effect, one file over.
+   */
+  const asking = row === undefined ? undefined : humanRequests(row.snapshot)[0];
+  /*
+   * Is the thing waiting on you a plan?
+   *
+   * The one request whose answer may be prose, so the composer takes over: its
+   * placeholder changes, Stop becomes Send, and a message written there stops the
+   * turn and goes.
+   *
+   * **Memoised on the permission and the events rather than on `asking`**, which
+   * is a fresh object every render — so a dependency on it would re-walk the held
+   * transcript on every frame this session draws, which is the cost
+   * `PermissionCard` memoises its own copy of this call to avoid. Both are stable
+   * for as long as the snapshot is, and `null` short-circuits before any walk
+   * happens at all.
+   */
+  const pendingAsk = asking !== undefined && asking.kind === "permission" ? asking.permission : null;
+  const events = transcript?.events;
+  const awaitingPlan = useMemo(
+    () => pendingAsk !== null && events !== undefined && permissionContext(pendingAsk, events).plan !== null,
+    [pendingAsk, events],
+  );
+
   if (row === undefined) {
     /*
      * **Four answers, and `loading` is the one that used to be missing.**
@@ -110,9 +147,6 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
   }
 
   const session = row.snapshot;
-  // Whichever has waited longest, of either kind. Only one card at a time; the
-  // rest are counted in the strip below it.
-  const asking = humanRequests(session)[0];
   const stream = transcript?.stream ?? null;
 
   return (
@@ -292,7 +326,18 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
               ))}
       </div>
 
-      <Composer sessionRef={sessionRef} state={state} onSent={() => setTailRequest((n) => n + 1)} />
+      <Composer
+        sessionRef={sessionRef}
+        state={state}
+        /*
+         * **Computed above because that is the only place both halves are in
+         * scope**, and the composer must not learn to read a transcript. Whether
+         * a request is a plan is a question about its payload joined against the
+         * log — `permissionContext`'s whole job — and `Composer` holds neither.
+         */
+        revising={awaitingPlan}
+        onSent={() => setTailRequest((n) => n + 1)}
+      />
     </div>
   );
 }
