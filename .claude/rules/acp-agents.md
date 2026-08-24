@@ -108,13 +108,17 @@ what is used, lenient about what is ignored. The SDK's
 whole payload rather than the tag and an unexpected field then refuses the form for
 an unrelated reason. Q2.22.
 
-**Structure is refused and prose is truncated** — too many fields or options, an
-over-long option value, an unknown property type or an over-large projected total
-refuses the whole elicitation naming the cap, while `message`, `title` and
-`description` are clipped. A form missing a question is not a smaller form (its
-answer *means something different*) and an option value round-trips to the agent.
-`pattern` is dropped at ingest: an agent-chosen regex run here is a ReDoS on the
-event loop, and carrying it only moves the hazard into a tab. Q2.23.
+**Structure is refused and prose is carried whole** — too many fields or options,
+an over-long option value, an unknown property type or an over-large projected total
+refuses the whole elicitation naming the cap. A form missing a question is not a
+smaller form (its answer *means something different*) and an option value
+round-trips to the agent. ⚠ **Prose used to be clipped and is not any more**: with
+several questions on one form the adapter puts each *question* in its field's
+`description`, so a 300-character cap was a cap on the sentence somebody is being
+asked to answer — measured, one real option description was 318 characters and was
+being cut. The 32 KiB byte total is the only bound left. `pattern` is dropped at
+ingest: an agent-chosen regex run here is a ReDoS on the event loop, and carrying it
+only moves the hazard into a tab. Q2.23, Q2.214.
 
 **The form does not ride the snapshot**, and is therefore not on the *event*
 either: the snapshot carries `message` and a field count, and
@@ -229,10 +233,10 @@ handed the tool. Q2.28.
 
 | | |
 |---|---|
-| Permission payload | 8 KiB each for `rawInput` and `content` — far below the per-event cap because this rides the snapshot. `title` 200 chars, option name 200, **24 options**, `optionId` 256, all clamped at ingest in `session.ts`. The option cap is a **refusal** (`invalidParams` to the agent) where the strings are clips: an `optionId` round-trips verbatim, so a clipped one is an answer the agent cannot recognise and dropping options edits what it offered. Q7.82 |
+| Permission payload | 8 KiB each for `rawInput` and `content`, and **8 KiB over `{title, options}` together** (`MAX_PERMISSION_SNAPSHOT_BYTES`) — far below the per-event cap because all of it rides the snapshot. **24 options**, `optionId` 256. **Every one is a refusal now** (`invalidParams` to the agent): an `optionId` round-trips verbatim, so a clipped one is an answer the agent cannot recognise, and the two 200-character clips on `title` and an option `name` went in 0.3.0 — that name is a model-written *answer* wherever kimi asks a question down this channel, and clipping it broke `askedQuestion`'s identity match against the unclipped `rawInput`. Q7.82, Q2.214 |
 | Tool call locations | 64 per event, 1024 chars each, **and counted** — `estimateBytes` must charge for `locations` and `toolCallId`, since the per-event cap, the per-session byte budget and `MAX_QUEUE_BYTES` all read that number rather than the payload. Q7.83 |
 | Agent commands | 256 per session; 64 chars of name, 200 of description, 100 of hint, clamped at **ingest**. **The name cap is a refusal and the other two are truncations** — a command is invoked by *sending* `/<name>`, so a clipped name is broken rather than shorter. What is cut is *counted* into `dropped`, and the menu draws that count. Off the snapshot; only `commandsRevision` rides the poll. The hint cap sits *above* the longest real hint on purpose: a bound set to the largest thing you have seen clips the next one. Q6.18 |
-| Elicitation form | 24 fields, 24 options per field, **32 KiB** projected total, option value 512 — all four **refusals**. 512 chars of `message`, 100 of a title, 300 of a description, all clipped. 32 KiB rather than a permission's 8 because the form does **not** ride the snapshot. An answer over 2048 chars is refused on the route, never cut |
+| Elicitation form | 24 fields, 24 options per field, **32 KiB** projected total, option value 512 — all four **refusals**, and now the only bounds there are. **Prose is carried whole**: the 512/100/300 clips on `message`, a title and a description went in 0.3.0, because with several questions on one form the *question* is the field's description. 32 KiB rather than a permission's 8 because the form does **not** ride the snapshot. An answer over 2048 chars is refused on the route, never cut. Q2.214 |
 
 ## Known gotchas
 

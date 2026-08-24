@@ -502,7 +502,7 @@ function field(value: string, max: number): string {
 }
 
 /**
- * The key a sign-in attempt is counted against: **who was named, and from
+ * The key a sign-in attempt is counted against: **what was typed, and from
  * where**.
  *
  * The name alone made this a lockout weapon (see the header); the address alone
@@ -514,9 +514,25 @@ function field(value: string, max: number): string {
  * `address` is whatever `callerAddressOf` answered, including its literal
  * `"unknown"` — a bucket like any other, and the right one for callers nothing
  * can distinguish.
+ *
+ * ⚠ **The first half is what was *submitted*, not who it resolved to, and that
+ * matters now that `POST /v1/login` takes a name **or** a verified email.** One
+ * account named two ways therefore spends **two counters**, and that is chosen
+ * rather than overlooked: folding them means resolving the string to an account
+ * before the key exists, which is a counter keyed on the account — the bare-name
+ * key this whole file exists to have stopped having, arrived at from the other
+ * side. What bounds the doubling is {@link addressKey}, whose 30-per-address
+ * budget one caller shares across every spelling they try.
+ *
+ * ⚠ **Bounded by `MAX_EMAIL_KEY_CHARS` rather than `MAX_NAME_KEY_CHARS`**, for the
+ * reason that constant was introduced one value-kind along: at 120 an address
+ * longer than that is cut *at the point that throws the address half away*, and
+ * every long address guessing from anywhere shares one counter. `users.name` is
+ * 64 characters by `USER_NAME` and 200 by the route's own length check, so the
+ * wider bound loses nothing on the name half either.
  */
-export function loginKey(name: string, address: string): string {
-  return [LOGIN_NS, field(name, MAX_NAME_KEY_CHARS), field(address, MAX_ADDRESS_CHARS)].join(SEPARATOR);
+export function loginKey(identifier: string, address: string): string {
+  return [LOGIN_NS, field(identifier, MAX_EMAIL_KEY_CHARS), field(address, MAX_ADDRESS_CHARS)].join(SEPARATOR);
 }
 
 /**

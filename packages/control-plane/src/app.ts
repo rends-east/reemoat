@@ -45,7 +45,7 @@ import {
   VERIFY_TTL_MS,
   verifiedOwnerOf,
 } from "./emails.js";
-import { checkEmailAddress } from "./mail/address.js";
+import { checkEmailAddress, MAX_EMAIL_CHARS } from "./mail/address.js";
 import { mailHealth, NOTICE_INTERVAL_MS, sentRecently, type MailSender } from "./mail/outbox.js";
 import {
   emailChanged,
@@ -1110,8 +1110,19 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     if (!body) return jsonError(c, 400, "bad_request", "expected a JSON object body");
     const name = body["name"];
     const password = body["password"];
-    if (typeof name !== "string" || name.trim().length === 0 || name.length > 200) {
-      return jsonError(c, 400, "bad_request", "name is required");
+    /*
+     * ⚠ **The field is still called `name` and now takes a name *or* an email
+     * address.** Renaming it would break every older client and `cpctl` at once
+     * for the sake of a label, and there is one identifier on this wire either
+     * way — the lookup below decides which kind it turned out to be.
+     *
+     * `MAX_EMAIL_CHARS` rather than the 200 that used to be here: 200 is
+     * `users.name`'s own ceiling, and `mail/address.ts` allows an address 254, so
+     * leaving it refuses a legal address as `bad_request` — a *different* answer
+     * from `invalid_login`, i.e. an oracle that says "too long to be one of ours".
+     */
+    if (typeof name !== "string" || name.trim().length === 0 || name.length > MAX_EMAIL_CHARS) {
+      return jsonError(c, 400, "bad_request", "a name or email address is required");
     }
     if (typeof password !== "string" || password.length === 0) {
       return jsonError(c, 400, "bad_request", "password is required");
@@ -1161,7 +1172,42 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     throttle.fail(attemptKey);
     addressThrottle.fail(sprayKey);
 
-    const user = db.prepare("SELECT id, name, is_admin, disabled_at FROM users WHERE name = ?").get(name.trim());
+    /*
+     * **A name, then a verified address. In that order, and the order is the whole
+     * of the ambiguity rule.**
+     *
+     * `USER_NAME` has no `@` in its character class, so no name created through a
+     * validated route can also be an address — but names are checked at *creation
+     * only* and a row written before that rule keeps working, so a legacy name
+     * holding an `@` is reachable. Trying the name first makes that case
+     * deterministic without a new status code. A `409 user_ambiguous` — what
+     * `POST /v1/provision` answers for a name two accounts share bar case — would
+     * be wrong here twice over: this route is unauthenticated, so a distinguishable
+     * refusal is an oracle telling a stranger the string names *something*, and
+     * `webcheck` pins the set of codes that may end a browser session at six.
+     *
+     * **Verified addresses only**, through `verifiedOwnerOf`. `idx_user_emails_verified`
+     * is a *partial* unique index — uniqueness holds for `verified_at IS NOT NULL`
+     * and for nothing else — because an unverified claim arrives from the anonymous
+     * `/v1/register` and reserves nothing. Resolving on the address alone would let
+     * anybody claim a stranger's address unverified and become a second candidate
+     * for it, which is the squatting hazard that index was shaped against.
+     *
+     * Two indexed `.get()`s with no `await` between them, which is what keeps the
+     * decoy branch below honest: "no such name" and "no such address" cost the same
+     * handful of microseconds and both arrive at the same KDF.
+     */
+    const submitted = name.trim();
+    let user = db.prepare("SELECT id, name, is_admin, disabled_at FROM users WHERE name = ?").get(submitted);
+    if (user === undefined) {
+      const checked = checkEmailAddress(submitted);
+      if (checked.ok) {
+        const owner = verifiedOwnerOf(db, checked.folded);
+        if (owner !== null) {
+          user = db.prepare("SELECT id, name, is_admin, disabled_at FROM users WHERE id = ?").get(owner);
+        }
+      }
+    }
     const stored =
       user === undefined
         ? undefined
@@ -1184,13 +1230,13 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         // out of the defence against flooding, under load and therefore exactly
         // when somebody is looking.
         await verifyAgainstDecoy(password, "public");
-        return jsonError(c, 401, "invalid_login", "that name and password do not match");
+        return jsonError(c, 401, "invalid_login", "those sign-in details do not match");
       }
 
       const verified = await verifyPassword(password, String(stored["hash"]), "public");
       if (!verified.ok) {
         // No `fail` here — the attempt was recorded before the await.
-        return jsonError(c, 401, "invalid_login", "that name and password do not match");
+        return jsonError(c, 401, "invalid_login", "those sign-in details do not match");
       }
 
       /*

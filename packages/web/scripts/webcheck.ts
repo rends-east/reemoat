@@ -90,7 +90,7 @@ const storage = new Map<string, string>();
 
 // Dynamic, so the stub above is in place before any module body runs.
 const { SessionStream } = await import("../src/stream.js");
-const { askedQuestion, drawableOptions, essentialContext, formatLocation, hasInput, optionLabel, permissionButtons, permissionContext, permissionHeadline, planControls, detailContext, readInput, withheldDetail } = await import(
+const { askedQuestion, permissionLayout, essentialContext, formatLocation, hasInput, optionLabel, permissionButtons, permissionContext, permissionHeadline, planControls, detailContext, readInput, withheldDetail } = await import(
   "../src/permission.js"
 );
 const { changeCounts, diffLines } = await import("../src/diff.js");
@@ -1221,168 +1221,144 @@ process.stdout.write("\nthe permission card's context\n");
    * rendering that must never happen — the scope is the whole difference between
    * them.
    *
-   * Asked against the **full** set, which is what the card passes: one of the two
-   * is no longer drawn, but it was still sent, so the kind is still ambiguous and
-   * the survivor must keep the name that distinguishes it.
+   * Asked against the **full** set, which is what the card passes — and it is now
+   * also what the card *draws*: the sentence that used to sit here said "one of the
+   * two is no longer drawn, but it was still sent, so the kind is still ambiguous",
+   * which was the old filter's excuse for the ambiguity surviving its own removal.
+   * Both are on the card, both keep the scope that separates them, and the row
+   * became `rows` to fit them.
    */
   check(
     "with two of a kind, no label is replaced by our word for it",
     codexButtons.order.map((o: { optionId: string }) => optionLabel(codexOptions as never, o as never)),
-    ["Reject", "Allow for Session", "Allow Once"],
+    ["Reject", "Allow for Session", "Allow Commands Starting With `curl -sS`", "Allow Once"],
   );
 
   /*
-   * The option that broke the row, and the three narrowings on removing it.
+   * ⚠ **The option that broke the row, and the reversal: the row gives way now,
+   * not the option.**
    *
-   * The button row carries meaning by *position* — refusal alone on the left,
-   * reversible approval filled on the right — because the colour these buttons
-   * used to have was removed. A label that cannot fit a button wraps the row into
-   * an arrangement where that rule says nothing while still looking deliberate.
-   * Measured: codex's scoped grant embeds a command path, so it is unbounded by
-   * construction, and the row became `Reject` + `Allow for Session`, the grant
-   * alone, and the primary orphaned below.
+   * This block used to assert `drawableOptions` — four narrowings on *deleting* an
+   * approval whose rendered label exceeded `BUTTON_LABEL_MAX`. The button row does
+   * carry its meaning by position (refusal alone on the left, reversible approval
+   * filled on the right) because the colour those buttons had was removed, and
+   * `OptionButton` draws its label as a bare text child inside a `flex-wrap` group,
+   * so a long label really does wrap the row into an arrangement where the rule
+   * says nothing while still looking deliberate. Measured: codex's scoped grant
+   * embeds a command path and is unbounded by construction.
    *
-   * **By length, never by id.** Nothing knows the string
-   * `accept_execpolicy_amendment`; recognising an option by its id or wording is
-   * the guessing this codebase refuses everywhere, and it would miss the next
-   * agent to word one differently.
+   * What was wrong was the remedy. A layout is this app's problem and an option is
+   * the agent's, and the old rule removed a choice the agent offered so that this
+   * app could keep a layout — on the one channel where an option is a **model
+   * written answer**, deleting two of four with nothing said. `permissionLayout`
+   * switches to `rows` instead, which is the arrangement the card already draws for
+   * a question: full width, wrapping labels, descriptions.
+   *
+   * So every assertion here is now of one of two kinds: **nothing is ever removed**,
+   * and **the layout is `rows` exactly when a button row would not hold.** The
+   * fixtures are the same measured ones, because they are the shapes that found the
+   * problem in the first place.
    */
-  check(
-    "the label that cannot fit a button is not drawn",
-    permissionButtons(codexOptions as never).order.map((o: { optionId: string }) => o.optionId),
-    ["reject_once", "allow_always", "allow_once"],
-  );
-  check("and the row is three buttons again, refusal leading", permissionButtons(codexOptions as never).leading, 1);
-  check("with the reversible approval still primary", permissionButtons(codexOptions as never).primaryId, "allow_once");
+  const layoutOf = (options: unknown): string => permissionLayout(options as never);
+  const orderOf = (options: unknown): string[] =>
+    permissionButtons(options as never).order.map((o: { optionId: string }) => o.optionId);
+
+  check("every option codex offered is drawn", orderOf(codexOptions), ["reject_once", "allow_always", "accept_execpolicy_amendment", "allow_once"]);
+  check("and the card lays them out as rows rather than dropping one", layoutOf(codexOptions), "rows");
+  check("the refusal still leads", permissionButtons(codexOptions as never).leading, 1);
+  check("and the reversible approval is still primary", permissionButtons(codexOptions as never).primaryId, "allow_once");
   /*
-   * **A refusal is never dropped**, whatever it is called and however long. It is
-   * the one option whose absence could be read as "there was no way to say no".
+   * **A refusal never decides the layout.** It is one option in a group of one and
+   * has no sibling to line up against, so a long one is a wide button and nothing
+   * worse — and it was never droppable either, being the option whose absence reads
+   * as "there was no way to say no".
    */
   const longRefusal = [
     { optionId: "a", name: "Yes", kind: "allow_once" },
     { optionId: "b", name: "No, and stop asking me about this particular command for ever", kind: "reject_always" },
   ];
-  check(
-    "a refusal is kept however long its label",
-    drawableOptions(longRefusal as never).map((o: { optionId: string }) => o.optionId),
-    ["a", "b"],
-  );
+  check("a long refusal is kept and does not force rows", [orderOf(longRefusal), layoutOf(longRefusal)], [["b", "a"], "buttons"]);
   /*
-   * The same rule where deleting it would actually show, which the case above
-   * does not.
-   *
-   * Nothing is dropped unless a *same-kind* sibling survives it, so a lone
-   * over-long refusal is kept by that rule alone and the `startsWith("reject")`
-   * guard could be deleted with every fixture still green. Two refusals of one
-   * kind is the shape that needs the guard, and no agent has been measured
-   * sending it — which is the point: the guard is what says a refusal is never
-   * traded away, rather than happening not to be.
+   * Two refusals of one kind: the shape that used to need the `startsWith("reject")`
+   * guard, because with only one refusal on a card the "never a scope's only
+   * representative" rule kept it anyway. No agent has been measured sending it,
+   * which is the point — the guard is what says a refusal is never traded away,
+   * rather than happening not to be. It survives as the same clause in
+   * `permissionLayout`.
    */
   const twoRefusals = [
     { optionId: "a", name: "Yes", kind: "allow_once" },
     { optionId: "b", name: "No", kind: "reject_once" },
     { optionId: "c", name: "No, and never ask about /Users/u/reemoat/src again", kind: "reject_once" },
   ];
-  check(
-    "and a refusal is not traded away for a shorter refusal",
-    drawableOptions(twoRefusals as never).map((o: { optionId: string }) => o.optionId),
-    ["a", "b", "c"],
-  );
+  check("two refusals, one of them long, are both kept as buttons", [orderOf(twoRefusals), layoutOf(twoRefusals)], [["b", "c", "a"], "buttons"]);
   /*
-   * **Never the last approval.** Dropping down to refusal-only would leave a card
-   * that cannot be answered, so an over-long label is drawn badly instead — a
-   * rendering problem being the smaller of the two.
+   * **The only way to approve.** Under the old rule this was the case that had to
+   * be special-cased, because dropping it left a card that could not be answered.
+   * Under this one it needs no rule at all: it is kept because nothing is dropped,
+   * and it is drawn legibly because the card became rows.
    */
   const onlyLong = [
     { optionId: "a", name: "Always Allow Read(//tmp/svgout/**), Read(//private/tmp/svgout/**)", kind: "allow_always" },
     { optionId: "b", name: "No", kind: "reject_once" },
   ];
-  check(
-    "the only way to approve survives even when it does not fit",
-    drawableOptions(onlyLong as never).map((o: { optionId: string }) => o.optionId),
-    ["a", "b"],
-  );
-  // The shapes every other agent sends are untouched — nothing is removed from an
-  // ordinary approval.
-  check(
-    "claude's three are all drawn",
-    drawableOptions([
-      { optionId: "a", name: "Yes", kind: "allow_once" },
-      { optionId: "b", name: "Yes, and don't ask again", kind: "allow_always" },
-      { optionId: "c", name: "No", kind: "reject_once" },
-    ] as never).length,
-    3,
-  );
-  check(
-    "and kimi's three, whose longest is 24 characters",
-    drawableOptions([
-      { optionId: "a", name: "Approve", kind: "allow_once" },
-      { optionId: "b", name: "Approve for this session", kind: "allow_always" },
-      { optionId: "c", name: "Reject", kind: "reject_once" },
-    ] as never).length,
-    3,
-  );
+  check("the only way to approve is kept, and gets a row it fits in", [orderOf(onlyLong), layoutOf(onlyLong)], [["b", "a"], "rows"]);
+  // The shapes every other agent sends are untouched, and stay buttons.
+  const claudeThree = [
+    { optionId: "a", name: "Yes", kind: "allow_once" },
+    { optionId: "b", name: "Yes, and don't ask again", kind: "allow_always" },
+    { optionId: "c", name: "No", kind: "reject_once" },
+  ];
+  check("claude's three are three buttons", [orderOf(claudeThree).length, layoutOf(claudeThree)], [3, "buttons"]);
+  const kimiThree = [
+    { optionId: "a", name: "Approve", kind: "allow_once" },
+    { optionId: "b", name: "Approve for this session", kind: "allow_always" },
+    { optionId: "c", name: "Reject", kind: "reject_once" },
+  ];
+  check("and kimi's three, whose longest is 24 characters", [orderOf(kimiThree).length, layoutOf(kimiThree)], [3, "buttons"]);
   /*
-   * **claude's scoped grant, which is the shape a length-only filter took.**
+   * **claude's scoped grant, the shape a length-only filter took.**
    *
    * This is the fixture 200 lines below at `scoped`, where it pins `optionLabel`
-   * keeping the globs — and it was never passed to `drawableOptions`, so the
-   * driver asserted a label for a button the card had stopped drawing. Written as
-   * "drop everything that does not fit", the 64-character `allow_always` went and
-   * the card offered Deny and Allow once: a standing grant unreachable from a
-   * phone, on the one request where the scope *is* the decision.
-   *
-   * It survives because it is the only `allow_always` on the card. codex's
-   * amendment is dropped because "Allow for Session" is not.
+   * keeping the globs — and it was never passed to the old filter, so the driver
+   * asserted a label for a button the card had stopped drawing. Written as "drop
+   * everything that does not fit", the 64-character `allow_always` went and the
+   * card offered Deny and Allow once: a standing grant unreachable from a phone, on
+   * the one request where the scope *is* the decision.
    */
   const claudeScoped = [
     { optionId: "s1", name: "Always Allow Read(//tmp/svgout/**), Read(//private/tmp/svgout/**)", kind: "allow_always" },
     { optionId: "s2", name: "Allow", kind: "allow_once" },
     { optionId: "s3", name: "Reject", kind: "reject_once" },
   ];
-  check(
-    "a scope with no shorter sibling is drawn badly rather than dropped",
-    drawableOptions(claudeScoped as never).map((o: { optionId: string }) => o.optionId),
-    ["s1", "s2", "s3"],
-  );
+  check("a scope is kept, and the card takes rows to show it", [orderOf(claudeScoped), layoutOf(claudeScoped)], [["s3", "s1", "s2"], "rows"]);
   /*
-   * **The mirror, and the one that decides what the filled button means.**
+   * **The mirror, and the one that decides what the filled control means.**
    *
-   * Everything above is about losing the *broad* grant. Length alone is
-   * symmetrical, so an agent wording `allow_once` past the ceiling lost the
-   * narrow one instead — and `primaryId` is the last approval in the row, so the
-   * filled right-hand button became the permanent grant. `AskCard`'s whole
-   * left/right rule is "the reversible approval filled on the right"; that is the
-   * one thing this function must not be able to break.
+   * Length alone is symmetrical, so an agent wording `allow_once` past the ceiling
+   * used to lose the *narrow* grant — and `primaryId` is the last approval in the
+   * row, so the filled control became the permanent one. `AskCard`'s rule is "the
+   * reversible approval is the filled one", and that must hold in either layout;
+   * `OptionRow` draws `primary` filled for exactly this case.
    */
   const longAllowOnce = [
     { optionId: "r", name: "Deny", kind: "reject_once" },
     { optionId: "once", name: "Allow once for /Users/u/reemoat/src", kind: "allow_once" },
     { optionId: "always", name: "Approve", kind: "allow_always" },
   ];
-  check(
-    "the narrow grant is never traded for the permanent one",
-    drawableOptions(longAllowOnce as never).map((o: { optionId: string }) => o.optionId),
-    ["r", "once", "always"],
-  );
-  check(
-    "so the filled button is still the reversible approval",
-    permissionButtons(longAllowOnce as never).primaryId,
-    "once",
-  );
+  check("the narrow grant is kept, in rows", [orderOf(longAllowOnce), layoutOf(longAllowOnce)], [["r", "always", "once"], "rows"]);
+  check("and the filled control is still the reversible approval", permissionButtons(longAllowOnce as never).primaryId, "once");
   /*
-   * **Answers are not scopes, and they reach this function.**
+   * **Answers are not scopes, and they reach this path.**
    *
-   * kimi's `AskUserQuestion` arrives as a `session/request_permission` whose
-   * answers are `allow_once` options named by the model. `askedQuestion` returns
-   * null when `rawInput` was truncated at the 8 KiB pending-permission cap or the
-   * transcript has not paged in yet — the window `PermissionCard`'s `loadAll`
-   * exists to close — and the card then falls back to `layout: "buttons"`.
-   * Filtering there deleted two of the four answers, each a sentence and none of
-   * them a narrower version of another.
-   *
-   * More than one `allow_once` is the test `askedQuestion` itself makes for "this
-   * is a question", reused here rather than invented.
+   * kimi's `AskUserQuestion` arrives as a `session/request_permission` whose answers
+   * are `allow_once` options named by the model. `askedQuestion` returns null when
+   * `rawInput` was truncated at the 8 KiB pending-permission cap or the transcript
+   * has not paged in — the window `PermissionCard`'s `loadAll` exists to close — and
+   * the card then falls back to this. Filtering deleted two of the four answers,
+   * each a sentence and none of them a narrower version of another. Now they are all
+   * kept, and because two of them are over the ceiling the fallback is rows — which
+   * is what the card would have drawn had `askedQuestion` succeeded.
    */
   const kimiAnswers = [
     { optionId: "a1", name: "Use SQLite", kind: "allow_once" },
@@ -1392,10 +1368,11 @@ process.stdout.write("\nthe permission card's context\n");
     { optionId: "skip", name: "Skip", kind: "reject_once" },
   ];
   check(
-    "a question that fell back to buttons keeps every answer the model wrote",
-    drawableOptions(kimiAnswers as never).map((o: { optionId: string }) => o.optionId),
-    ["a1", "a2", "a3", "a4", "skip"],
+    "a question that fell back from a question keeps every answer the model wrote",
+    orderOf(kimiAnswers),
+    ["skip", "a1", "a2", "a3", "a4"],
   );
+  check("and is drawn as the rows it should have had", layoutOf(kimiAnswers), "rows");
   check(
     "and with no kind at all, a body is still enough to say what happens",
     permissionHeadline("kimi", "Write", { ...write, kind: null }),
@@ -1922,7 +1899,15 @@ process.stdout.write("\nthe permission card's context\n");
     // lives beside `permissionButtons` rather than inside it.
     check("the fallback still draws all five", permissionButtons(PLAN_OPTIONS as never).order.length, 5);
     check("with the reversible one primary", permissionButtons(PLAN_OPTIONS as never).primaryId, "default");
-    check("and drops none of them", drawableOptions(PLAN_OPTIONS as never).length, 5);
+    /*
+     * ⚠ **And it stays a button row, which is the interesting half.** All five of
+     * claude's own words fit — the longest, "Yes, and manually approve edits", is
+     * 31 characters against a ceiling of 32 — so the fallback is genuinely five
+     * buttons rather than five rows. One more word in any of them and the card
+     * would wrap instead, which is the behaviour that replaced *deleting* the
+     * option that did not fit.
+     */
+    check("and the fallback is still a button row, by one character", permissionLayout(PLAN_OPTIONS as never), "buttons");
   }
 
   /* ---- a payload the snapshot was too small to carry ---- */
@@ -3300,9 +3285,9 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
    * Only hand-rolled class strings reach the scan in this loop.
    */
   const DECISION_CARDS = ["AskCard.tsx", "PermissionCard.tsx", "ElicitationCard.tsx"];
-  // `min-h-14` is a taller row, `MENU_ROW` and `TAP_GROW_Y` are the two shared
+  // `min-h-14` is a taller row, `menuRow` and `TAP_GROW_Y` are the two shared
   // constants that reach 44 by themselves.
-  const REACHES_44 = /min-h-11|min-h-14|\bh-11\b|MENU_ROW|TAP_GROW_Y/;
+  const REACHES_44 = /min-h-11|min-h-14|\bh-11\b|menuRow|TAP_GROW_Y/;
   // Both spellings of the attribute. The template-literal arm stops at the first
   // backtick, which holds because every interpolation on these cards is a ternary
   // over double-quoted strings.
@@ -3406,7 +3391,7 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
    * `size="sm"` buttons in a wrap — Open, Settings, Switch off, Remove — which was
    * the standing counterexample to `web-shell.md`'s rule that everything else a
    * settings row can do sits behind **one kebab**. They are `RowAction`s now, and
-   * `MENU_ROW` is `min-h-11` at every pointer, so the four controls that left this
+   * `menuRow` is `min-h-11` at every pointer, so the four controls that left this
    * count did not get smaller: they stopped needing an escape hatch. What remains
    * is `PluginView`'s four (a plugin's own row actions, drawn by somebody who is
    * not this app) and the two-step confirm this row keeps — and the assertion
@@ -3868,6 +3853,146 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
     [],
   );
   check("and there are exactly as many as the list names", undersized.length, ICON_BUTTON_KNOWN_36.size);
+}
+
+/* ------------------------------------------------------------------ *
+ * A shared class string, and what a call site may add to it
+ * ------------------------------------------------------------------ */
+
+/*
+ * ⚠ **Appending a Tailwind utility to a shared class string does not override the
+ * one already in it, and seven call sites believed it did for a year.**
+ *
+ * `MENU_ROW` was `"… items-start …"`. `ProfileMenu`'s four rows, `SessionBrowser`'s
+ * filter, `RowAction` and `MachineInstalls`'s plugin row all wrote
+ * `` `${MENU_ROW} items-center` ``, and `RowAction`'s docblock said so in words —
+ * *"a menu act is one line, so this overrides it to `items-center`"*. None of them
+ * won. Tailwind v4 emits utilities in **alphabetical order**, so the generated
+ * stylesheet holds `.items-center` before `.items-start` and the constant outranks
+ * every append regardless of which way round the class attribute reads. Order
+ * inside `class` decides nothing; order inside the CSS decides everything.
+ *
+ * Reported as *"the text sits slightly below the icons to its left"* — a 14px icon
+ * pinned to the top of a `text-xs` line box while the glyphs beside it start a
+ * half-leading plus the ascender gap lower. Every pure assertion was green, the
+ * types were right, and the docblock claiming the behaviour was itself the bug.
+ *
+ * So the fix was `menuRow(align)` — the caller states it and cannot be overruled —
+ * and **this is the mechanism that keeps it stated**. It is deliberately a sweep
+ * over *every* shared class string rather than a check on `menuRow`: what failed
+ * was the idiom, not the constant, and the next shared string to grow an
+ * `items-`/`justify-`/`text-size` opinion inherits the same trap.
+ *
+ * Read off disk, like every other placement rule in this file, because nothing
+ * typed can hold "these two words are in the same CSS family".
+ */
+process.stdout.write("\nwhat a call site may append to a shared class string\n");
+{
+  const WEB_SRC = new URL("../src/", import.meta.url);
+  const sources: { file: string; text: string }[] = [];
+  const walk = (dir: URL, prefix: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        walk(new URL(`${entry.name}/`, dir), `${prefix}${entry.name}/`);
+      } else if (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx")) {
+        sources.push({
+          file: `${prefix}${entry.name}`,
+          text: readFileSync(new URL(entry.name, dir), "utf8"),
+        });
+      }
+    }
+  };
+  walk(WEB_SRC, "");
+
+  /*
+   * The families where two members cannot both apply, listed rather than derived:
+   * a derived list would need Tailwind's own table, and what is wanted here is the
+   * handful a shared row string actually sets. `text-` is split — a size and a
+   * colour are different properties and compose fine, so only the size half is a
+   * clash.
+   */
+/*
+   * `(?<![\w:-])` is what keeps a **variant** out of this. `sm:hidden` beside a base
+   * `flex` is the responsive idiom and it works — a variant is emitted after its
+   * bare form, so it really does win. What cannot win is a second *bare* utility of
+   * the same family, which is the whole subject here.
+   */
+  const FAMILIES: [string, RegExp][] = [
+    ["align-items", /(?<![\w:-])items-(?:start|end|center|baseline|stretch)\b/g],
+    ["justify-content", /(?<![\w:-])justify-(?:start|end|center|between|around|evenly)\b/g],
+    ["font-size", /(?<![\w:-])text-(?:2xs|xs|sm|base|lg|xl|2xl|3xl)\b/g],
+    ["display", /(?<![\w:-])(?:flex|grid|block|inline-flex|inline-block|hidden)\b/g],
+    ["white-space", /(?<![\w:-])whitespace-[a-z-]+\b/g],
+    ["text-align", /(?<![\w:-])text-(?:left|center|right)\b/g],
+  ];
+  const familiesOf = (text: string): Map<string, string[]> => {
+    const found = new Map<string, string[]>();
+    for (const [name, pattern] of FAMILIES) {
+      const hits = [...new Set(text.match(pattern) ?? [])];
+      if (hits.length > 0) found.set(name, hits);
+    }
+    return found;
+  };
+
+  /*
+   * What counts as a shared class string: an exported SCREAMING_CASE constant whose
+   * value is one literal, and an exported function returning one. Both live in
+   * `bits.tsx` today; the walk is over every file so that stops being an assumption.
+   */
+  const defined = new Map<string, { where: string; sets: Map<string, string[]> }>();
+  const CONST_DEF = /export const ([A-Z][A-Z0-9_]*)\s*=\s*(`[^`]*`|"[^"]*")/g;
+  const FN_DEF = /export function ([a-z][A-Za-z0-9]*)\([^)]*\): string \{([\s\S]*?)\n\}/g;
+  for (const { file, text } of sources) {
+    for (const match of text.matchAll(CONST_DEF)) {
+      const sets = familiesOf(match[2] ?? "");
+      if (sets.size > 0) defined.set(match[1] ?? "", { where: file, sets });
+    }
+    for (const match of text.matchAll(FN_DEF)) {
+      const sets = familiesOf(match[2] ?? "");
+      if (sets.size > 0) defined.set(match[1] ?? "", { where: file, sets });
+    }
+  }
+
+  /*
+   * A call site is `${NAME}` or `${name(…)}` inside a template literal, and what it
+   * "adds" is the rest of that literal. `[^`]*` ends at the closing backtick, which
+   * holds because no call site nests a second template inside the first.
+   */
+  const clashes: string[] = [];
+  let sites = 0;
+  const names = [...defined.keys()];
+  if (names.length > 0) {
+    const CALL = new RegExp(`\\$\\{(${names.join("|")})(?:\\([^)]*\\))?\\}([^\`]*)`, "g");
+    for (const { file, text } of sources) {
+      for (const match of text.matchAll(CALL)) {
+        const def = defined.get(match[1] ?? "");
+        if (def === undefined) continue;
+        sites += 1;
+        const added = familiesOf(match[2] ?? "");
+        for (const [family, addedHits] of added) {
+          const ownHits = def.sets.get(family);
+          if (ownHits === undefined) continue;
+          /*
+           * ⚠ **Overlap in the *family* is the failure, never a difference in the
+           * member** — and the first version of this check got that backwards. It
+           * let an append pass when the shared string already contained the same
+           * word somewhere, which is exactly true of `menuRow`: its body names both
+           * `items-center` and `items-start`, so `` `${menuRow("center")} items-start` ``
+           * — the original bug, re-typed — sailed through. Restating a utility the
+           * shared string already decides is dead text at best and a silent no-op at
+           * worst; both are worth a row here.
+           */
+          clashes.push(`${file}: ${match[1]} decides ${family} (${ownHits.join("/")}), the call site adds ${addedHits.join("/")}`);
+        }
+      }
+    }
+  }
+
+  // A sweep that found nothing to sweep passes silently, which is the failure mode
+  // of every source-text assertion in this file.
+  check("the sweep found the shared class strings", defined.size >= 5, true);
+  check("and found call sites interpolating them", sites >= 10, true);
+  check("no call site appends a utility the shared string already decides", clashes, []);
 }
 
 /* ------------------------------------------------------------------ *
@@ -6597,6 +6722,40 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
       [],
     );
     check("a subagent that gained a step is not equal", sameNode(oneStep.rows[0]!, twoSteps.rows[0]!), false);
+
+    /*
+     * ⚠ **A settled question's row carries a derived *array*, and that is exactly
+     * where reference equality would have quietly cost the whole optimisation.**
+     * `EventNode.asked` is rebuilt by `buildTail` on every streamed token, so
+     * `a.asked === b.asked` is false forever and this one row would re-render on
+     * every token of every reply after it — the failure `sameNode` exists to
+     * prevent, reintroduced by the field added to fix a different one. Compared by
+     * value instead, and driven here rather than trusted.
+     */
+    seq = 0;
+    const askEvents = () => [
+      toolCall("tq", "Asking for your input"),
+      { seq: (seq += 1), ts: seq, event: { type: "tool_call_update", toolCallId: "tq", title: null, status: null, locations: [], rawInput: { questions: [{ question: "Which one?", options: [{ label: "This one" }, { label: "The other" }] }] }, content: null, images: null, parentToolCallId: null } },
+      { seq: (seq += 1), ts: seq, event: { type: "elicitation_request", elicitationId: "eq", toolCallId: "tq", message: "Please answer the following questions." } },
+      { seq: (seq += 1), ts: seq, event: { type: "elicitation_resolved", elicitationId: "eq", toolCallId: "tq", message: "Please answer the following questions.", action: "accept", by: "client", answers: [{ key: "question_0", label: "Pick", value: "This one" }] } },
+    ];
+    // ⚠ **The same array twice**, because `sameNode`'s event arm compares
+    // `stored` by identity and the real client holds stable event objects across
+    // rebuilds. Two fresh fixtures would answer `false` for that reason alone and
+    // would be asserting nothing about `asked`.
+    seq = 0;
+    const askFixture = askEvents();
+    const askedOnce = buildTail(askFixture as never, []);
+    const askedTwice = buildTail(askFixture as never, []);
+    const askedRow = (t: { rows: unknown[] }): never =>
+      t.rows.find((r) => (r as { kind: string; stored?: { event: { type: string } } }).kind === "event" && (r as { stored: { event: { type: string } } }).stored.event.type === "elicitation_resolved") as never;
+    check(
+      "the question behind a settled answer is recovered at all",
+      (askedRow(askedOnce) as unknown as { asked: { question: string }[] | null }).asked?.map((a) => a.question),
+      ["Which one?"],
+    );
+    check("and two builds of it compare equal", sameNode(askedRow(askedOnce), askedRow(askedTwice)), true);
+    check("though the arrays are not the same object", (askedRow(askedOnce) as unknown as { asked: unknown }).asked === (askedRow(askedTwice) as unknown as { asked: unknown }).asked, false);
   }
 }
 
@@ -11201,23 +11360,122 @@ process.stdout.write("\nthe question an agent asked\n");
     // thing about what happened.
     ["answered", "skipped", "cancelled"],
   );
+  /*
+   * ⚠ **Two assertions stood here on a `summary` field nothing rendered.** It
+   * joined the answers and cut them at 160 characters; `ElicitationResolvedRow`
+   * draws `event.answers` itself and always did, so the only readers of that clip
+   * were these two checks — which pinned it in place rather than revealing it. The
+   * field is gone, and what replaces the coverage is `answeredQuestions` below,
+   * which is about a string somebody actually sees.
+   */
   check(
-    "one answer needs no label — the question is the row above it",
-    elicitationOutcome(resolvedOf({ answers: [{ key: "q", label: "Framework", value: "React" }] })).summary,
-    "React",
+    "an outcome says what happened and nothing about the answers",
+    Object.keys(elicitationOutcome(resolvedOf({ answers: [{ key: "q", label: "Framework", value: "React" }] }))).sort(),
+    ["tone", "verb"],
   );
-  check(
-    "several are labelled and joined with this app's own separator",
-    elicitationOutcome(
-      resolvedOf({
-        answers: [
-          { key: "a", label: "Framework", value: "React" },
-          { key: "b", label: "TTL", value: "5m" },
-        ],
-      }),
-    ).summary,
-    "Framework: React · TTL: 5m",
-  );
+
+  /* ---- the questions behind a settled form's answers ---- */
+
+  /*
+   * ⚠ **The defect: a settled `AskUserQuestion` kept the answers and lost the
+   * questions.** `ElicitationResolvedEvent` carries `message` plus `{key, label,
+   * value}` per answer, and for a multi-question form the adapter puts a preamble
+   * in `message` and each real question in its field's *description*, which the
+   * resolution does not carry. Measured on this machine's own log, session
+   * `s_5d26f98e`: the transcript read *"Please answer the following questions."*
+   * over four bare values, and the four questions appeared nowhere at all.
+   *
+   * `answeredQuestions` recovers them from the one place a client can reach — the
+   * arguments of the tool call the question was asked through, which `askedThrough`
+   * merges away — and matches **by identity on the chosen label**, never by parsing
+   * `question_0` / `<question>__other`, which are two adapters' spellings of the
+   * same idea.
+   */
+  {
+    const { answeredQuestions } = await import("../src/ui/tail.js");
+    const input = {
+      questions: [
+        {
+          question: "Which database should this use?",
+          options: [
+            { label: "Use SQLite", description: "One file, no server." },
+            { label: "Use Postgres with a connection pool", description: null },
+          ],
+        },
+        {
+          question: "How long should a session live?",
+          options: [{ label: "5m" }, { label: "An hour, so a laptop lid does not end it" }],
+        },
+      ],
+    };
+    const answers = [
+      { key: "question_0", label: "Database", value: "Use Postgres with a connection pool" },
+      { key: "question_1", label: "TTL", value: "5m" },
+    ];
+    check(
+      "each answer is drawn under the question it answered",
+      answeredQuestions(answers as never, input)?.map((a: { question: string | null }) => a.question),
+      ["Which database should this use?", "How long should a session live?"],
+    );
+    /*
+     * The answer nothing matched: claude gives every question its own free-text
+     * box, and what somebody types into one is by definition not an option. The
+     * row falls back to the field's own title, which is the only honest label a
+     * typed answer has — and the questions beside it are still real, so a partial
+     * match is kept rather than abandoning the whole join.
+     */
+    check(
+      "an answer somebody typed keeps its place with no question over it",
+      answeredQuestions(
+        [...answers, { key: "question_1_custom", label: "Other", value: "Until I say otherwise" }] as never,
+        input,
+      )?.map((a: { question: string | null }) => a.question),
+      ["Which database should this use?", "How long should a session live?", null],
+    );
+    /*
+     * ⚠ **A label two questions share matches neither**, and this is the case that
+     * makes the join safe rather than merely convenient. Attributing an answer to
+     * the wrong question would draw a confident record of an exchange that did not
+     * happen — worse than drawing no question at all, which is what a `null` here
+     * falls back to.
+     */
+    const collides = {
+      questions: [
+        { question: "Ship it?", options: [{ label: "Yes" }, { label: "No" }] },
+        { question: "Tag it?", options: [{ label: "Yes" }, { label: "Later" }] },
+      ],
+    };
+    check(
+      "an answer both questions offer is attributed to neither",
+      answeredQuestions([{ key: "a", label: "Ship", value: "Yes" }] as never, collides),
+      null,
+    );
+    check(
+      "while an answer only one of them offers is still attributed",
+      answeredQuestions([{ key: "a", label: "Tag", value: "Later" }] as never, collides)?.map(
+        (a: { question: string | null }) => a.question,
+      ),
+      ["Tag it?"],
+    );
+    /*
+     * The three ways this falls back to what the transcript drew before, all of
+     * them reachable: a call outside the loaded window (`undefined`), the 8 KiB
+     * truncation stand-in, and a question from an MCP server, which has no
+     * `{questions: […]}` shape and never will. `null` means "draw what you drew
+     * before", which is the direction `compatibility.md` requires an unknown value
+     * to fail in.
+     */
+    check(
+      "and nothing at all is drawn as it was before",
+      [
+        answeredQuestions(answers as never, undefined),
+        answeredQuestions(answers as never, { truncated: true, bytes: 9000 }),
+        answeredQuestions(answers as never, { schema: { type: "object" } }),
+        answeredQuestions(answers as never, { questions: [{ question: "Unrelated", options: [{ label: "x" }] }] }),
+      ],
+      [null, null, null, null],
+    );
+  }
 
   /* ---- the tool call a question came through ---- */
 
@@ -11485,7 +11743,21 @@ process.stdout.write("\nwhen a failed call ends the session\n");
     3,
   );
 
+  /*
+   * ⚠ **The refusal names no half of the form, and now it cannot.** `/v1/login`
+   * answers one `invalid_login` for a name nobody has, an address nobody proved, a
+   * user with no password row and a password that is simply wrong — so a sentence
+   * naming any one of them is the client putting the enumeration back that the
+   * server spends a decoy hash to avoid. It read *"That name and password do not
+   * match"*, which was merely narrow while the field took only a name and became
+   * misleading the moment it took an address too.
+   */
   check("a wrong password and an unknown name read the same", signInError(err(401, "invalid_login")), signInError(err(401, "invalid_login")));
+  check(
+    "and the sentence blames neither half of the form",
+    /\bname\b|\bemail\b|\busername\b|\baddress\b|\bpassword\b/i.test(signInError(err(401, "invalid_login"))),
+    false,
+  );
   check("a disabled account is told apart", signInError(err(403, "user_disabled")) !== signInError(err(401, "invalid_login")), true);
   check("a throttle says to wait", /wait/i.test(signInError(err(429, "too_many_attempts"))), true);
   check(
@@ -11567,7 +11839,8 @@ process.stdout.write("\nhow long the throttle said to wait\n");
 
   /*
    * One sentence for two forms, because it is one refusal from one throttle.
-   * `/v1/login` keys on the submitted name plus the caller's address;
+   * `/v1/login` keys on the submitted identifier — a name or an address, whichever
+   * was typed — plus the caller's address;
    * `passwordChangeKey` keys on the user id — different key spaces on the same
    * counter, and a person who meets both should not have to notice that they were
    * worded differently.
@@ -13208,6 +13481,41 @@ process.stdout.write("\nwho owns Escape, and what paints above what\n");
    */
   check("the answer numbers are hidden on a coarse pointer", askCardSrc.includes('"pointer-coarse:hidden"'), true);
   check("and that is asked of the pointer, not of the width", /sm:hidden[^"]*\{index \+ 1\}/.test(askCardSrc), false);
+  /*
+   * ⚠ **Nothing an agent asked reaches a person shortened, and the collapsed bar was
+   * the last place in this app that did it.** The daemon stopped clipping a
+   * question's prose and a permission's title in this release; a CSS ellipsis over
+   * the result would have moved the same loss one layer out, where it is worse
+   * because nothing can even say it happened. The bar is one line by intent and has
+   * a control that opens it, which is exactly why it looked defensible.
+   *
+   * Read off disk because `webcheck` has no DOM and this is a class string, and
+   * pinned as an *absence* — `truncate` anywhere on this file is the regression,
+   * since every other string on the card already wraps.
+   */
+  // Class attributes only, both spellings — the word survives in this file's own
+  // prose, twice, and it is *meant* to: both places argue why the thing it names is
+  // not there.
+  const askCardClasses = [...askCardSrc.matchAll(/className=(?:"([^"]*)"|\{`([^`]*)`)/g)].map(
+    (m) => m[1] ?? m[2] ?? "",
+  );
+  check("the scan found the card's class strings", askCardClasses.length >= 10, true);
+  check("and none of them clips text", askCardClasses.filter((cls) => /\btruncate\b/.test(cls)), []);
+  check("the collapsed bar wraps instead", askCardSrc.includes('text-xs font-medium wrap-anywhere">{title}'), true);
+  /*
+   * **The transcript's record of a settled question draws the question**, which it
+   * did not until 0.3.0 — see `answeredQuestions`. Source text, because the join is
+   * a prop and a component that simply stopped reading it would leave every pure
+   * assertion above green while the screen went back to "Please answer the following
+   * questions." over four bare values.
+   */
+  const eventListSrc = readFileSync(new URL("../src/ui/EventList.tsx", import.meta.url), "utf8");
+  check(
+    "a settled question's row is handed the questions rather than fetching them",
+    /<ElicitationResolvedRow event=\{event\} asked=\{node\.asked\} \/>/.test(eventListSrc),
+    true,
+  );
+  check("and draws each one over its answer", /answer\.question \?\? answer\.label/.test(eventListSrc), true);
   const permissionCardSrc = readFileSync(new URL("../src/ui/PermissionCard.tsx", import.meta.url), "utf8");
   check(
     "a plan gets the room because it is a plan, not because of what it is titled",
@@ -14863,6 +15171,22 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
    * restyling these back into plain text, not a pixel.
    */
   check("both doors wear the shared link look", signIn.split("${LINK}").length - 1, 2);
+
+  /*
+   * ⚠ **The identifier field says both, because the route takes both.** `/v1/login`
+   * resolves a name and then a *verified* address, and a field labelled `Username`
+   * in front of that is a feature nobody discovers — the only place this app can
+   * say so is the label, since there is no placeholder and no help text on this
+   * screen. Read off disk for the reason every other placement rule here is:
+   * nothing typed can hold what a label says.
+   *
+   * `autoComplete="username"` is asserted *unchanged* beside it, and that is the
+   * half a well-meaning edit takes: `email` there tells a password manager to stop
+   * offering a saved username, on a form where the username is still the primary
+   * way in.
+   */
+  check("the identifier field offers both ways in", /Username or email/.test(signIn), true);
+  check("and still autocompletes as the username it also is", /autoComplete="username"/.test(signIn), true);
 
   /*
    * **The gate screens do not narrate the implementation at the reader.**

@@ -260,7 +260,7 @@ function CreateUser({
        * **A 44px target on the control that decides whether somebody is an
        * admin.** It was a bare native checkbox — 16 to 20px depending on the
        * platform — inside a `text-xs` label, in an app where `Button` and
-       * `MENU_ROW` are both `min-h-11`. The `<label>` wraps the input, so the
+       * `menuRow` are both `min-h-11`. The `<label>` wraps the input, so the
        * whole 44px strip toggles it; `w-fit` keeps that strip the width of the
        * control and its words rather than the width of the form, since a
        * full-bleed toggle catches taps aimed at nothing.

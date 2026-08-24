@@ -179,10 +179,12 @@ export function signInError(error: unknown): string {
   }
   switch (error.code) {
     case "invalid_login":
-      // One sentence for a wrong name and a wrong password, because the server
-      // gives one answer for both and a client that split them would put the
-      // enumeration back.
-      return "That name and password do not match.";
+      // One sentence for every way in, because the server gives one answer for
+      // all of them and a client that split them would put the enumeration back.
+      // It stopped naming the *name* when the field grew to take an address too:
+      // "that name and password" in front of somebody who typed an address reads
+      // as the address having been the mistake.
+      return "Those sign-in details do not match.";
     case "user_disabled":
       return "This account has been disabled.";
     case "too_many_attempts":

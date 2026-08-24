@@ -29,6 +29,16 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Added
 
+- **Sign in with your username or your confirmed email address.** One field, one
+  answer to every refusal, and the address is accepted only once it has been
+  confirmed — an unconfirmed claim can be written by anyone from the anonymous
+  sign-up route, so it reserves nothing and opens nothing. The name is resolved
+  first, which settles the one ambiguous case (a legacy name holding an `@`) without
+  a new error code an unauthenticated caller could read as an existence oracle. One
+  account named two ways spends two guessing counters, deliberately: folding them
+  would key the counter on the account, which is the lockout weapon the throttle was
+  built to remove.
+
 - **Plugins.** A machine can be given a plugin: a `.tar.gz` holding a manifest and
   a file of JavaScript, installed by whoever owns that machine. A plugin can draw
   a screen, draw its own settings pane, put an action on a session's menu, and run
@@ -66,6 +76,35 @@ it — so a citation here would be the one kind nothing checks.
   daemon with a sentence rather than losing its navigation quietly.
 
 ### Fixed
+
+- **Nothing an agent asks you is shortened any more.** The daemon clipped a
+  question's prose at 512, 100 and 300 characters and a permission's title and
+  option names at 200; the browser deleted an answer whose label would not fit a
+  button, and clipped the collapsed question bar with CSS. All of it is gone. What
+  bounds a form now is one 32 KiB refusal over the whole thing, and what bounds a
+  permission is one 8 KiB refusal over its title and options together — a card that
+  large is declined *to the agent*, which is a sentence it can act on, rather than
+  delivered silently shortened. Measured on a real log, one option description was
+  318 characters against a 300 cap, and five of fifteen option labels were over the
+  button ceiling.
+- **An answer the agent offered is never removed to make the buttons fit.** Past the
+  label ceiling the card lays its options out as full-width rows instead — the same
+  arrangement it already uses for a question — keeping the refusal first and the
+  reversible approval filled. This mattered most where it was least visible: when a
+  question arrives down the permission channel and cannot be classified, the options
+  are the model's own written answers, and two of four were being deleted with
+  nothing said.
+- **A question you have already answered still says what was asked.** The transcript
+  showed the adapter's preamble — "Please answer the following questions." — over the
+  values you picked, because the questions themselves live in the tool call's
+  arguments and nothing was reading them. Each question is now drawn over its own
+  answer, matched by the words you tapped rather than by any adapter's field naming.
+- **Menu rows line their text up with their icons.** Seven rows across the account
+  menu, the chat filter, the settings kebab and the plugin menu asked to be centred
+  and none of them was: Tailwind emits its utilities alphabetically, so the shared
+  row's `items-start` outranked every `items-center` a call site appended, whichever
+  order they were written in. The shared string states no alignment now — the caller
+  does — and a check sweeps every call site for the same class of silent override.
 
 - **A plugin's lifecycle now knows which child it is talking about.** Every launch
   carries a generation and every late callback is gated on its own, which closes

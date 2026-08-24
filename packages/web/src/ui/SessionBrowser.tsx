@@ -10,7 +10,7 @@ import { humanRequests, needsHuman, resumeStalled } from "../wire";
 import {
   Button,
   Icon,
-  MENU_ROW,
+  menuRow,
   Menu,
   Skeleton,
   StatusDot,
@@ -796,7 +796,7 @@ function ChatSearch({ value }: { value: string }): ReactNode {
                   setFilter(item.value);
                   close();
                 }}
-                className={`${MENU_ROW} items-center hover:bg-raised ${
+                className={`${menuRow("center")} hover:bg-raised ${
                   item.value === filter ? "font-medium text-fg" : "text-muted"
                 }`}
               >

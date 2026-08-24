@@ -6193,14 +6193,54 @@ process.stdout.write("\nwhat a form is allowed to be\n");
     { value: "ok", label: "ok", description: null },
   ]);
 
-  check("prose is clipped rather than refused", (() => {
+  /*
+   * ⚠ **This asserted the opposite until 0.3.0: "prose is clipped rather than
+   * refused", at 512 / 100 / 300 characters for `message`, a title and a
+   * description.**
+   *
+   * What made those wrong is *where the question lives*. With several questions on
+   * one form the adapter puts each question in its field's `description` and leaves
+   * `message` as a preamble — so 300 was a cap on the sentence somebody is being
+   * asked to answer, and an option's `description` is the sentence explaining what
+   * one answer means. Measured against this machine's own log, one real option
+   * description was **318** characters and was being cut on screen. A question read
+   * half is a question answered wrongly, which is precisely the harm "structure is
+   * refused" exists to prevent, one field along.
+   *
+   * So the split runs between *structure* and *prose* rather than between refusing
+   * and clipping, and the byte backstop below is what bounds prose now — one
+   * whole-object number instead of three per-string ones.
+   */
+  check("prose arrives whole rather than clipped", (() => {
     const long = toElicitationForm({
       type: "object",
-      properties: { a: { type: "string", description: "x".repeat(5_000) } },
+      properties: {
+        a: {
+          type: "string",
+          title: "T".repeat(400),
+          description: "x".repeat(5_000),
+          oneOf: [{ const: "v", title: "L".repeat(400), description: "d".repeat(1_000) }],
+        },
+      },
     } as never);
-    const description = long.fields[0]?.description ?? "";
-    return description.length < 5_000 && description.startsWith("x");
+    const field = long.fields[0];
+    return (
+      field?.description === "x".repeat(5_000) &&
+      field?.title === "T".repeat(400) &&
+      field?.options?.[0]?.label === "L".repeat(400) &&
+      field?.options?.[0]?.description === "d".repeat(1_000)
+    );
   })(), true);
+  // An empty string and `null` are one absence to every reader, and `askTitle` in
+  // the web client falls through to its next source on `null` — so the half of
+  // `clipOrNull` that survived its budget is the half that had to.
+  check("but an empty string is still an absence", (() => {
+    const blank = toElicitationForm({
+      type: "object",
+      properties: { a: { type: "string", title: "", description: "" } },
+    } as never);
+    return [blank.fields[0]?.title, blank.fields[0]?.description];
+  })(), [null, null]);
 
   check("an empty form is a form, not an error", toElicitationForm({ type: "object", properties: {} } as never), {
     fields: [],
@@ -6342,6 +6382,23 @@ process.stdout.write("\nwhat a form is allowed to be\n");
   check(
     "and a form that is only large in total is refused by the byte backstop",
     refusalFrom({ type: "object", properties: heavy })?.includes("bytes"),
+    true,
+  );
+  /*
+   * ⚠ **The case the per-string caps used to catch, and the backstop is now the
+   * only thing that catches it.** With `MAX_ELICITATION_DESCRIPTION_CHARS` gone,
+   * one field can carry an arbitrarily long sentence — which is the point — so the
+   * assertion that matters is that *one* enormous string still meets the same 32
+   * KiB number a thousand small ones do. Without this, "prose arrives whole" above
+   * would be the only statement about prose in the file and the form would be
+   * unbounded in the direction nobody drives.
+   */
+  check(
+    "and one enormous string meets the same backstop the thousand small ones do",
+    refusalFrom({
+      type: "object",
+      properties: { a: { type: "string", description: "q".repeat(40_000) } },
+    })?.includes("bytes"),
     true,
   );
 }
@@ -8863,11 +8920,23 @@ process.stdout.write("\nanswering a permission the agent is waiting on\n");
                   { optionId: "o_never", name: "Never", kind: "reject_always" },
                 ];
             /*
-             * The two shapes an agent can send that nothing used to bound, and
+             * The three shapes an agent can send that nothing used to bound, and
              * they are here rather than in a pure case because the whole defect
              * was that the *route from the wire to the snapshot* had no cap on
              * it. Asserting `clip` would have passed all along.
+             *
+             * `wordy` is the pair `shouting` used to be half of. The two 200-char
+             * clips are gone — a clipped `name` broke `askedQuestion`'s identity
+             * match against `rawInput`, which is how a kimi question fell back to
+             * buttons — so a long-but-reasonable option name has to arrive whole,
+             * and only the *pair's* byte weight refuses.
              */
+            if (text.includes("wordy")) {
+              offer = [
+                { optionId: "o_yes", name: `Yes, and ${"scope ".repeat(60)}`.trim(), kind: "allow_once" },
+                { optionId: "o_no", name: "No", kind: "reject_once" },
+              ];
+            }
             if (text.includes("shouting")) {
               offer = [{ optionId: "o_yes", name: "Y".repeat(4_000), kind: "allow_once" }];
             }
@@ -8888,7 +8957,11 @@ process.stdout.write("\nanswering a permission the agent is waiting on\n");
                 sessionId,
                 toolCall: {
                   toolCallId: `tc_${mine}_${askId}`,
-                  title: text.includes("shouting") ? "T".repeat(50_000) : "Terminal",
+                  title: text.includes("shouting")
+                    ? "T".repeat(50_000)
+                    : text.includes("wordy")
+                      ? `Run ${"a long deliberate title ".repeat(20)}`.trim()
+                      : "Terminal",
                   rawInput: { command: "rm -rf /" },
                   content: [{ type: "content", content: { type: "text", text: "Requesting approval to run it" } }],
                 },
@@ -9215,23 +9288,49 @@ process.stdout.write("\nanswering a permission the agent is waiting on\n");
      *
      * Driven through the wire rather than asserted against `clip`, because what
      * was missing was a call site and every pure function involved was correct.
+     *
+     * ⚠ **This block used to assert a *clip* at 200 characters, and now asserts a
+     * refusal at 8 KiB over the pair.** Two things forced the change. A clipped
+     * `option.name` is a model-written *answer* whenever kimi asks a question down
+     * this channel, and `askedQuestion` recovers the question by matching that name
+     * against the same string in `rawInput` **by identity** — `rawInput` is bounded
+     * by bytes and never by characters, so past 200 the two disagreed and the whole
+     * question silently fell back to a row of buttons. And a person must never be
+     * shown a shortened version of what an agent asked. What the snapshot needed
+     * was never a per-string cap; it was one number over the thing that rides it.
      */
     const shouted = await permRegistry.create({ agent: "kimi", cwd: workdir });
     shouted.prompt("run it, shouting");
     await quiesce();
-    const parked = shouted.snapshot().pendingPermissions[0];
-    check("an agent shouting a 50 KB title is still asked", shouted.status, "blocked");
-    report(
-      "but the snapshot carries a clipped one",
-      (parked?.title.length ?? 0) <= 256,
-      `${parked?.title.length ?? -1} chars from 50000`,
-    );
-    report(
-      "and a 4 KB option name likewise",
-      (parked?.options[0]?.name.length ?? 0) <= 256,
-      `${parked?.options[0]?.name.length ?? -1} chars from 4000`,
-    );
+    check("a 50 KB title is refused rather than parked", shouted.snapshot().pendingPermissions.length, 0);
+    // The same property the swarming case below asserts, and for the same reason:
+    // the agent is told, the turn carries on, and nobody is left blocked on a card
+    // this daemon declined to carry.
+    check("so the session is not left blocked on it either", shouted.status === "blocked", false);
     await permRegistry.stop(shouted.id);
+
+    /*
+     * The other side of the same number, and it is the side that matters daily: a
+     * title and an option name far longer than anything measured — 480 and 350
+     * characters against a live-log maximum of 14 and 31 — arrive **whole**. Both
+     * would have been cut by the 200 that used to be here.
+     */
+    const wordy = await permRegistry.create({ agent: "kimi", cwd: workdir });
+    wordy.prompt("run it, wordy");
+    await quiesce();
+    const carried = wordy.snapshot().pendingPermissions[0];
+    check("a long title and a long option name are still asked", wordy.status, "blocked");
+    report(
+      "and the snapshot carries both of them whole",
+      (carried?.title.length ?? 0) > 400 && (carried?.options[0]?.name.length ?? 0) > 300,
+      `title ${carried?.title.length ?? -1}, option ${carried?.options[0]?.name.length ?? -1}`,
+    );
+    report(
+      "with no truncation marker anywhere in the pair",
+      !/\u2026\[truncated \d+ bytes\]/.test(`${carried?.title ?? ""}${carried?.options[0]?.name ?? ""}`),
+      "read off the snapshot the relay would send",
+    );
+    await permRegistry.stop(wordy.id);
   }
 
   {
@@ -9239,8 +9338,8 @@ process.stdout.write("\nanswering a permission the agent is waiting on\n");
      * **Refused whole rather than trimmed**, and this is the one arm where that
      * is the only honest answer: an `optionId` round-trips verbatim in the
      * response, so a clipped one is an answer the agent will not recognise, and
-     * dropping options removes choices it offered — the thing `drawableOptions`
-     * spends four rules being careful about one layer up.
+     * dropping options removes choices it offered — which the client stopped doing
+     * in this release, `permissionLayout` giving up a *layout* instead.
      *
      * What has to be true is that the session does not end up *blocked* on a
      * card nobody bounded: the agent is told, and the turn carries on.

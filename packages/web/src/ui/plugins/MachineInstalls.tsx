@@ -30,7 +30,7 @@ import { pluginFailure } from "../../plugins";
 import { machineBadgeText } from "../../quota";
 import { store, type AppState } from "../../store";
 import { ambiguousNames, type PluginSummary } from "../../wire";
-import { Badge, Button, DangerButton, Empty, Icon, IconButton, MENU_ROW, Menu, SEARCH_FIELD, SETTINGS_HEADING, Spinner } from "../bits";
+import { Badge, Button, DangerButton, Empty, Icon, IconButton, Menu, menuRow, SEARCH_FIELD, SETTINGS_HEADING, Spinner } from "../bits";
 
 /**
  * Where this plugin is, and changing that.
@@ -610,7 +610,7 @@ export function MachineInstalls({
                     setFilter(one.value);
                     close();
                   }}
-                  className={`${MENU_ROW} items-center hover:bg-raised ${
+                  className={`${menuRow("center")} hover:bg-raised ${
                     one.value === filter ? "font-medium text-fg" : "text-muted"
                   }`}
                 >

@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 113 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 71 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 215 | `####` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 114 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 72 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 217 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 44 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 106 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 64 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 112 | `###` |
-| | | **725** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 113 | `###` |
+| | | **730** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 725 rather than the 404
+dividers. So the count is over **both** depths, and it says 730 rather than the 407
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -2728,6 +2728,60 @@ fetcher and the policy will disagree about what is reachable.
 
 **Status.** Decided
 
+### Q1.621 — Signing in by email was refused as a labelling complaint. What changed?
+
+**Decision.** `POST /v1/login` resolves the submitted string as a `users.name`
+first and, failing that, as a **verified** email address through
+`verifiedOwnerOf`. The body field is still called `name`, the answer to every
+failure is still one `401 invalid_login`, and no new status code exists.
+
+**This reverses Q3.439**, which rejected it in one line — *"a control-plane schema
+and auth change for a labelling complaint"*. That was wrong on the premise rather
+than on the reasoning: it is not a schema change at all. `user_emails`,
+`email_folded`, `foldEmail` and `verifiedOwnerOf` all already exist and are already
+on the recovery path, so what was actually being asked for is a second call to a
+function `POST /v1/forgot` has been making all along. The complaint was also not
+about a label: an address the product asks for, mails a confirmation to, and then
+refuses as a way in is a door drawn on a wall.
+
+**Verified only, and the partial index is the reason.**
+`idx_user_emails_verified` is `UNIQUE … WHERE verified_at IS NOT NULL`, because
+`POST /v1/register` is anonymous and an unverified claim must reserve nothing.
+Resolving on `email_folded` alone therefore has no uniqueness behind it at all: a
+stranger claiming somebody's address unverified becomes a second candidate for it,
+and on an account nobody else has claimed, a way in. The rule the index states as a
+constraint is the rule this route has to state as a query.
+
+**Why name-then-address rather than a refusal on ambiguity.** `USER_NAME` has no
+`@` in its class, so no name a validated route created can also be an address —
+but names are checked at creation only, and `app.ts` says so, so a legacy row
+holding one is reachable. `POST /v1/provision` answers `409 user_ambiguous` for a
+name two accounts share bar case, and copying that here is wrong twice: this route
+takes no credential, so a distinguishable refusal is an oracle telling a stranger
+the string names *something*; and `webcheck` pins at six the set of error codes
+that may end a browser session. A fixed order settles the case for nothing.
+
+**The throttle is where the real cost is, and it is accepted rather than hidden.**
+`loginKey` is built from what was *submitted*, so one account named two ways spends
+**two** counters. Folding them means resolving the string to an account before the
+key exists — a counter keyed on the account, which is the lockout weapon
+`throttle.ts` exists to have removed, arrived at from the other side. What bounds
+the doubling is `addressKey`: 30 attempts per address whatever they name, shared by
+every spelling one caller tries. The identifier half also moved from
+`MAX_NAME_KEY_CHARS` (120) to `MAX_EMAIL_KEY_CHARS` (254), because at 120 a long
+address is cut at the point that throws the address half away and every host
+guessing at any long address shares one counter — the exact failure that second
+constant was introduced to end, one value-kind along.
+
+**Measured on the body limit.** The route validated `name.length > 200`, which is
+`users.name`'s ceiling; `mail/address.ts` allows 254. Left alone, a legal address
+between the two answers `400 bad_request` where an unknown one answers `401` — a
+smaller oracle than user enumeration and the same kind, so the limit moved with the
+meaning.
+
+**Status.** Reversed an earlier decision
+
+
 
 ## Session lifecycle, questions and attachments
 
@@ -3241,6 +3295,11 @@ projected total over 32 KiB refuses the whole elicitation with the cap named
 in the message; a long `message`, `title` or `description` is clipped.
 `pattern` is dropped at ingest and never carried.
 
+⚠ **The second half of that first sentence was taken back in Q2.214.** Prose is
+carried whole now — the three character caps are gone and the 32 KiB projected
+total is what bounds it. The half that stands is the first: structure is still
+refused, and for exactly the reason given below.
+
 **Why.** This is the `MAX_COMMAND_NAME_CHARS` asymmetry one level up. A form
 missing a question is not a smaller form, it is one whose answer *means
 something different*, and an option's value round-trips to the agent so a
@@ -3250,7 +3309,7 @@ above a form. An agent-chosen regular expression run in this process is a
 ReDoS on the event loop, and carrying it for a client to enforce only moves
 the hazard into a tab.
 
-**Status.** Current
+**Status.** Reversed in part — see Q2.214
 
 ### Q2.24 — Does an elicitation form ride the session snapshot?
 
@@ -4529,6 +4588,63 @@ should not ship without a driver that can walk it: a recovery path nothing
 exercises runs for the first time exactly when everything is already wrong.
 
 **Status.** Current
+
+### Q2.214 — Prose was clipped so a person would not be shown a wall of text. What did that cost?
+
+**Decision.** The three character caps on an elicitation's prose are gone —
+`MAX_ELICITATION_MESSAGE_CHARS` (512), `MAX_ELICITATION_TITLE_CHARS` (100) and
+`MAX_ELICITATION_DESCRIPTION_CHARS` (300). `message`, a field's `title` and
+`description`, and an option's `label` and `description` are carried exactly as the
+agent sent them. `MAX_ELICITATION_FORM_BYTES` — 32 KiB over the projected form — is
+the only bound left, and it **refuses** rather than shortening.
+
+**Why. Because that is where the question lives.** `askTitle` reads a step's
+heading from the field's `description` first, the form's `message` second and the
+field's `title` last, and the order is not arbitrary: with several questions on one
+form the adapter puts each *question* in its field's description and leaves
+`message` as a preamble. So `MAX_ELICITATION_DESCRIPTION_CHARS` was a 300-character
+cap on the sentence somebody is being asked to answer, and on the sentence
+explaining what each answer means. The asymmetry Q2.23 argued — *structure is
+refused because a form missing a question means something different* — applies word
+for word to a question missing its second half.
+
+**Measured 2026-08-24 against `~/.reemoat/reemoat.db`.** Over every
+`AskUserQuestion` in the log: questions 26 median and **155** longest, option labels
+29 median and **48** longest, option descriptions 139 median and **318** longest.
+One of fifteen option descriptions was over the cap and was being cut on screen —
+not a pathological case, an ordinary one, and the caps sat close enough to real
+values that the next one along would go too.
+
+**Why a byte backstop is enough, where three character caps were not.** The form
+does **not** ride `SessionSnapshot` (Q2.24) — it is fetched by
+`GET /sessions/:id/elicitations/:id` when a card opens — so the thing being bounded
+is one response to one request, not sixty rows every four seconds. 32 KiB was
+already the number for that, already a refusal, and already named in its own
+message. What it did not have was an assertion against a *single* enormous string,
+which the per-item caps used to catch; `daemoncheck` now drives both shapes.
+
+**What was kept.** Every refusal: 24 fields, 24 options, an option `value` over 512
+characters, an unknown property type, a list with no choices. A `value`
+round-trips to the agent verbatim, so a clipped one is an answer it cannot
+recognise — that argument is untouched and is why the split now runs between
+*structure* and *prose* rather than between refusing and clipping.
+
+**And the same measurement, one channel over.** `MAX_PERMISSION_TITLE_CHARS` and
+`MAX_PERMISSION_OPTION_NAME_CHARS` went with them, replaced by
+`MAX_PERMISSION_SNAPSHOT_BYTES` — 8 KiB over `{title, options}`, refused. Those two
+*do* ride the snapshot, which is why they were bounded at all (Q7.82), but the
+amplifier was never the string length: it was the pair being re-sent for sixty
+sessions every four seconds, and one whole-object number says that where two
+per-string ones only approximated it. Clipping `option.name` also had a cost nobody
+had noticed: kimi's `AskUserQuestion` arrives down the permission channel, so that
+name is a model-written *answer*, and `askedQuestion` recovers the question by
+matching it against the same string in `rawInput` **by identity** — `rawInput` is
+bounded by bytes and never by characters, so past 200 the two sides disagreed and
+the whole question fell back to a row of buttons. Measured maxima on the same log:
+title **14**, option name **31**.
+
+**Status.** Reversed an earlier decision
+
 
 ## The web client
 
@@ -6542,6 +6658,13 @@ the first paint.
 
 #### Q3.92 — May the card decline to draw an option the agent offered?
 
+⚠ **Reversed by Q3.470: no, and nothing does any more.** The problem stated here is
+unchanged and the entry is kept whole for it; what went is the remedy —
+`permissionLayout` gives up the *layout* instead, and the four narrowings below are
+the best evidence that removing an option was the wrong half to concede. The
+measurement that settled it is in Q3.470: five of fifteen real option labels in the
+log exceed this ceiling.
+
 **Decision.** Yes, and under four narrowings at once — `drawableOptions` in
 `permission.ts`. An approval whose rendered label exceeds `BUTTON_LABEL_MAX` (32)
 is not drawn **only if another option of the same `kind` survives it**. A refusal
@@ -6580,7 +6703,7 @@ size-based layout fallback to rows* — this was cited in a comment in `AskCard.
 as `permissionLayout`, a function that has never existed; the layout is chosen by
 `asked !== null` with no size input at all.
 
-**Status.** Current
+**Status.** Reversed by Q3.470
 
 #### Q3.93 — Why is a boolean refused on both sides of a nested control?
 
@@ -9252,10 +9375,14 @@ when mail is not configured, and password recovery here is by mail and by nothin
 else. So there is none on that instance — which is a thing to know before choosing
 a password, not after forgetting one.
 
-**Rejected — signing in by email.** It is a control-plane schema and auth change
+⚠ **Rejected — signing in by email.** It is a control-plane schema and auth change
 (`USER_NAME`, `nameTaken`, the sessions table, `cpctl`, every throttle key) for a
-labelling complaint. **Rejected — requiring SMTP for registration**, which closes
-sign-up on a local-only instance to fix a sentence.
+labelling complaint. **Taken back in Q1.621**, on the ground that the premise was
+wrong rather than the reasoning: it is no schema change at all — `verifiedOwnerOf`
+and `foldEmail` were already on the recovery path — and the sessions table never
+came into it. What survived the reversal is the throttle clause, which was the one
+real cost and is accepted there in as many words. **Rejected — requiring SMTP for
+registration**, which closes sign-up on a local-only instance to fix a sentence.
 
 **Status.** Current
 
@@ -10711,6 +10838,97 @@ somebody changing it is standing — but the file wanting a split is now costing
 rules their home, which is the signal `plugins.md` and `plugin-ui.md` acted on.
 
 **Status.** Decided
+
+#### Q3.470 — An option that could not be a button was deleted. What replaced it?
+
+**Decision.** Nothing is deleted. `drawableOptions` is gone and
+`permissionLayout` is what took its place: it reads the rendered labels and
+answers `rows` when a button row will not hold them, so the *layout* gives way
+instead of the agent's option.
+
+**This reverses Q3.92**, and only its remedy. The problem it named is real and
+unchanged: the button row carries its meaning by **position** — the refusal alone
+on the left, the reversible approval filled on the right — because the colour those
+buttons had was removed, and `OptionButton` draws its label as a bare text child
+inside a `flex-wrap` group, so a long one wraps the row into an arrangement where
+the rule says nothing while still looking deliberate. codex words a scoped grant as
+``Allow Commands Starting With `node /Users/…/fetch.mjs` ``, which embeds a path and
+is therefore unbounded by construction.
+
+**Why the remedy was wrong.** A layout is this app's problem and an option is the
+agent's, and Q3.92 resolved that by removing the option. Its own four narrowings
+are the evidence: each one is a case where deleting lost something that mattered —
+claude's path-scoped `allow_always` was the only one on its card, an over-long
+`allow_once` handed the filled button to the *permanent* grant, and kimi's
+`AskUserQuestion` arrives down this channel so two of four **model-written answers**
+were deleted with nothing said. Four narrowings on a rule is a rule arguing with
+itself.
+
+**Measured 2026-08-24 against `~/.reemoat/reemoat.db`.** Of fifteen option labels in
+the log, **five** exceed the 32-character ceiling — 34, 40, 43, 48 and one at
+exactly 32. Two more sit at 32 exactly. This was not a rare shape.
+
+**What `rows` is.** The arrangement the card already draws for a question: full
+width, wrapping labels, room for the description each option carries. Nothing was
+invented for it. The positional rule travels rather than being lost —
+`permissionButtons` still orders refusals first and still names one `primaryId`, and
+`OptionRow` draws that one filled, which is the same `bg-fg` licence Q3.209 gives
+the affirmative action inside a decision.
+
+**A refusal never decides the layout**, and that is the one narrowing that
+survives: it is one option in a group of one with no sibling to line up against, so
+a long refusal is a wide button and nothing worse.
+
+**And it closes a promise this codebase had been keeping open.** `AskCard.tsx` named
+`permissionLayout` as "the other half — past a certain size these stop being buttons
+at all", then carried a correction saying there was no such function and there never
+had been, and that `drawableOptions` had therefore been justified partly by a
+fallback nobody built. The correction stays written where it is; the function now
+exists under the name it was promised.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.471 — Seven call sites asked for `items-center` and none of them got it
+
+**Rule.** A shared class string states no utility a call site is expected to
+override. `MENU_ROW` is now `menuRow(align)`, and `webcheck` sweeps every call site
+of every exported class-string constant for an appended utility from a family the
+constant already sets.
+
+**Why.** Reported as *"the text sits slightly below the icons to its left"* on the
+account menu. `MENU_ROW` was `"… items-start …"` — right for a `Dropdown` row, which
+can carry a description under its label — and the four rows in `ProfileMenu`, the
+filter in `SessionBrowser`, `RowAction` and the plugin row in `MachineInstalls` all
+wrote `` `${MENU_ROW} items-center` ``. **None of them won.** Tailwind v4 emits
+utilities in alphabetical order, so the generated stylesheet holds `.items-center`
+*before* `.items-start` and the constant outranks every append regardless of which
+way round the class attribute reads. Order inside `class` decides nothing; order
+inside the CSS decides everything.
+
+What that draws is a 14px icon pinned to the top of a `text-xs` line box while the
+glyphs beside it start a half-leading plus the ascender gap lower — four pixels, on
+every menu in the app, for a year.
+
+**The docblock was part of the bug.** `RowAction`'s own comment read *"a menu act
+is one line, so this overrides it to `items-center`"*. Every type was right, every
+assertion was green, and the file said in words that the thing it was not doing was
+what it did. That is why the remedy is a sweep and not a fix: what failed is the
+**idiom**, and the next shared string to grow an `items-`/`justify-`/`text-size`
+opinion inherits the same trap.
+
+**Rejected — dropping `items-*` from the constant.** Flex defaults to `stretch`,
+which stretches the icon rather than aligning it, so a call site that forgot would
+fail in a way nobody reads as forgetting. A function with two values and no default
+makes the caller state it and makes the statement win.
+
+**Rejected — asserting the fixed call sites.** Seven checks that go stale the moment
+somebody adds an eighth. The sweep is over the property.
+
+**Measured.** The sweep over `packages/web/src` finds exactly those seven and no
+other family collision anywhere in the package.
+
+**Status.** Current
+
 
 ## Deployment, packaging and code layout
 
@@ -13368,7 +13586,7 @@ a clock.
 | Grants listing | 500 per page, 2000 max, with a `total` — the one admin list that grows as users × machines |
 | Uploads | **100 MiB per file**, 10 per message, **1 GiB** *and* 100 files per session — two bounds because a byte cap cannot see a hundred thousand one-byte uploads and each of those is a directory — plus **300 MiB per 5 minutes** per session (`UPLOAD_RATE_BYTES`), the one refusal here that expires on its own and the only one carrying `Retry-After`. 200 bytes of filename, 128 of mime, both clamped at ingest so `truncateEvent` never has to touch an attachment. Inline images 5 MiB raw *to* the agent (~6.8 MiB of base64 in one write to its stdin); **25 MiB *from* one** (`MAX_AGENT_IMAGE_BYTES` — its own constant since the per-file cap moved, sharing one having put a ~133 MiB string in the base64 pre-check on the emit path). Unconsumed uploads expire at 24h; consumed ones have no TTL and die with their session row. Q5.101 |
 | Downloads | 100 MiB, which **equals the upload cap by coincidence rather than by coupling** — this row said "deliberately not the upload number" and that was true at 25 MiB. Neither may be set by reading the other: that one bounds what a client may push onto disk against budgets outliving the request, this bounds a bearer-token-readable read of a whole workspace, where the cost of no bound is one of 256 tunnel streams held open for as long as somebody likes. The client refuses at the same number from `content-length`, before a `Blob` is resident on a phone |
-| Permission payload | 8 KiB each for `rawInput` and `content`, clamped by `clampBlob`. Far below the per-event cap because this rides the snapshot, which `GET /sessions` returns for every session at once |
+| Permission payload | 8 KiB each for `rawInput` and `content`, clamped by `clampBlob`, and **8 KiB over `{title, options}` together** (`MAX_PERMISSION_SNAPSHOT_BYTES`) — a **refusal**, not a clip. Far below the per-event cap because all of it rides the snapshot, which `GET /sessions` returns for every session at once. **24 options**, `optionId` 256, both refusals. The two 200-character clips on `title` and an option `name` are gone: they cut a model-written answer on the one channel where kimi asks a question, breaking `askedQuestion`'s identity match against `rawInput` — Q2.214, Q7.82 |
 | Session title | 120 characters accepted from a rename, 60 for the one derived from the first prompt. Bounded for the same reason as the row above: it rides the snapshot, which `GET /sessions` returns for sixty sessions every four seconds |
 | Agent login | one run per agent (a second supersedes), 64 KiB of transcript, 10 minute TTL. Pasted credentials capped at 8 KiB, which is far above an OAuth token and far below an argv |
 | Passwords | scrypt N=2^15 r=8 p=1 — ~51ms on the machine this was measured on (Node 26, 2026-08-07), against ~25ms at 2^14 and ~103ms at 2^16 — holding `128·N·r` = 32 MiB for the duration of each. `maxmem` is passed explicitly at **128 MiB**, because Node's default ceiling is 32 MiB and OpenSSL refuses *at* the boundary: measured, N=2^15 r=8 throws `memory limit exceeded` while N=2^14 succeeds, and a KDF that throws for some parameter sets looks like a wrong password on one deployment rather than a configuration error. 12–256 characters, NFKC and never trimmed; the maximum is not about KDF cost (scrypt passes the input through one PBKDF2 iteration, so bcrypt's folklore does not apply) but about not storing a string somebody else sized. **4 concurrent hashes, at most 2 of them public** (Q1.39); wait lists per lane, 32 authenticated and 16 public, then `503 overloaded` with `Retry-After: 1` |
@@ -13378,7 +13596,7 @@ a clock.
 | Control-plane bodies | 64 KiB above THE LINE and 256 KiB below it. The two public routes are the only places in this service where somebody with **no credential** decides how many bytes it reads, and neither had ever bounded it; below the line there was no bound at all, on the reasoning that a caller past the gate has a credential — a statement about *who* is asking and not about *how much*, when every route calls `readJsonObject`, which buffers before it looks. Both answer `413 payload_too_large` in the envelope every client here parses, because `bodyLimit`'s default `onError` is `text/plain` and none of them can read it. `currentPassword`/`newPassword` are refused over 512 characters |
 | Agent commands | 256 per session; 64 characters of name, 200 of description, 100 of hint — clamped at **ingest** in `session.ts`, like `MAX_PARENT_ID_CHARS`: the agent chooses the strings, the list rides no event so `truncateEvent` never sees it, and "bounded by what the agent sent" is not a bound. Measured 2026-08-03, claude publishes **100 commands / 18.7 KiB**, longest name 24, longest hint exactly 64, descriptions median 68 and max 1135. So 256 is for an MCP server publishing hundreds of prompts rather than for trimming a real list; the hint cap sits *above* the longest real one; the description cap is the only one that bites. **The name cap is a refusal and the other two are truncations** — `clip` appends `…[truncated N bytes]`, right for prose and wrong for a name, since a command is invoked by *sending* `/<name>`; dedup running on the unclipped name while the clipped one was stored made two long names collide with `dropped` reporting none. What is cut is *counted* into `dropped`, and the menu draws that count. Off the snapshot entirely; only `commandsRevision`, a number, rides the poll |
 | Web client | 3 live sockets (LRU by most recently viewed), **16 MiB held per session and every event of it drawn** (`MAX_TRANSCRIPT_BYTES`, the **only** ceiling — the event count beside it is deleted, see Q3.114) — there is no render window under it, and the only cut is the newest `context_cleared`. History pages backwards at **5000** (`EVENTS_PAGE_LIMIT`) and **does not stop until it reaches the log's start, that cut, or those bytes** — there is no per-run budget and no control that offers to fetch more; `MAX_AUTO_HISTORY` (5000) is only where the loop yields the main thread. A page that fails is retried at 500ms and 2s, transport failures only, and `attachWanted` re-drives a run that gave up on the next poll a session list survives. What pays for it is `sameNode`. **60 sessions per machine per poll** — a pinned row that falls out of that window is invisible until the daemon's `listRank` keeps it, which is why pinned outranks live there. 4s list poll while visible, 15s re-probe for an unreachable machine, 1.5s reachability probe, token refreshed at `exp − 90s`, socket rotated at `exp − 60s`. 15s per request, except those that spawn a process — `POST /sessions`, `POST /sessions/:id/resume`, `POST /sessions/:id/config`, `GET /agents`, `/agent-auth/*` **and `POST /sessions/:id/prompt`** — which get 90s; the prompt is on that list unconditionally, because `request` is handed a method and a path and a deadline that depended on session state would be state leaking into the transport. A login transcript is polled every 700ms while its wizard is open, and one `GET /sessions/:id/commands` per session per revision change — for the open session only |
-| Elicitation form | 24 fields, 24 options per field, **32 KiB** on the projected total, and an option value of 512 — all four **refusals**, because `clampBlob`'s `{truncated: true, bytes}` is fine above an Approve button and useless above a form. 512 characters of `message`, 100 of a field title, 300 of a description, all clipped: structure is refused and prose is truncated. 32 KiB rather than a permission's 8 because the form does **not** ride the snapshot. An answer over 2048 characters is refused on the route and never cut, while the *log's* rendering of it is clipped, visibly. Measured 2026-08-06 against live claude: a two-question `AskUserQuestion` is 4 fields, 4 options each, longest value 19 characters, ~2.5 KiB, and the tool's own schema caps it at 4 questions — so every one of these bounds the pathological case rather than a real form |
+| Elicitation form | 24 fields, 24 options per field, **32 KiB** on the projected total, and an option value of 512 — all four **refusals**, because `clampBlob`'s `{truncated: true, bytes}` is fine above an Approve button and useless above a form. **Prose is carried whole** — the three character caps on `message`, a field title and a description were removed in Q2.214, because with several questions on one form the *question itself* is the field's description and a 300-character cap was a cap on it. Structure is refused; the byte total is the only bound left, and it is asserted against one enormous string as well as a thousand small ones. 32 KiB rather than a permission's 8 because the form does **not** ride the snapshot. An answer over 2048 characters is refused on the route and never cut, while the *log's* rendering of it is clipped, visibly. Measured 2026-08-06 against live claude: a two-question `AskUserQuestion` is 4 fields, 4 options each, longest value 19 characters, ~2.5 KiB, and the tool's own schema caps it at 4 questions — so every one of these bounds the pathological case rather than a real form |
 | Auto-resume | 3 attempts per session per **daemon life** — in memory, so a restart tries again, deliberately: a restart is new information and refusing to retry would make the deploy that fixes the bug fix nothing. 2 agents starting at once, because each is a node subprocess with a `claude` grandchild. Backoff 2s→60s with **full** jitter, since the attempts start together and a narrow band keeps them synchronised. The failure on the snapshot is capped at 64 characters of code and 512 of message — an order tighter than a pending permission's 8 KiB, because unlike a permission nothing here has to be *acted on* from the list, only recognised |
 | Shutdown | 20s for the graceful stops, then a **bounded** 3s parallel SIGKILL sweep, inside `daemon.ts`'s 25s hard exit. The sweep is a syscall per session rather than an exec, so the bound costs nothing — and it stays, because the reason a teardown is bounded does not depend on what it costs |
 
@@ -18632,3 +18850,65 @@ person's own words back at them in three places and only this one does it throug
 a serialiser.
 
 **Status.** Not built — deferred at the 2026-08-24 design review
+
+### Q7.113 — A background task is visible when it starts and invisible when it ends. What was built?
+
+**Decision.** Nothing, deliberately. The transcript still says nothing about a
+background task, and this entry is the record of why — with the measurement, so the
+next person does not have to take it again.
+
+**Measured 2026-08-24 against `~/.reemoat/reemoat.db`**, the live log on the
+development machine, 5555 events.
+
+*The start is on the wire, verbatim.* Session `s_5d26f98e`: seq 103 is a
+`tool_call` — `Task`, `kind: "think"`, `subagent: true` — and seq 106-107 are
+`tool_call_update`s carrying `rawInput.run_in_background: true` beside
+`subagent_type: "Plan"`. That is the **only** occurrence of `run_in_background` in
+the whole database, and it is on a subagent spawn rather than on a `Bash` call; the
+tool names a background *shell* would leave behind — BashOutput, KillShell, neither
+of them ours — appear **zero** times.
+
+*The end is nowhere.* seq 110 is the same call reaching `status: "completed"` with
+`content: ["Async agent launched successfully. …agentId: a70f8b0…"]` — so
+`completed` means **started**, not finished. That `agentId` appears in no other
+event of the session, which runs to seq 271.
+
+*And the drain does not carry it either.* Over every `turn_end` in the database, the
+next event is `status` (17), `prompt` (17) or `agent_config` (1). Not one is a
+background agent reporting back. `ManagedSession.startIdleDrain` is doing its job;
+there is simply nothing to drain.
+
+*What the reader saw instead.* At seq 124-126 the agent wrote *"Plan-агент пока
+догоняет — интегрирую его дизайн, когда вернётся"* — the model knew it was waiting
+and said so in prose. The transcript's own machinery said nothing: the operator sent
+another message at seq 154 before anything acknowledged the return at seq 155.
+
+**Why nothing was built.** `outstandingTasks` counts a delegation between `pending`
+and `completed`, which for a backgrounded spawn is about one second. Extending it to
+count `run_in_background: true` calls is easy and is the wrong half of the problem:
+what has no answer is when to stop counting. Every candidate is a guess dressed as a
+signal — *until your next message*, *until the agent speaks again*, *never* — and a
+row that says "still running" about something that finished four minutes ago is
+worse than the silence it replaces, because silence is at least honest about being
+silence.
+
+**Rejected — reading Claude Code's own task files.** The daemon spawns the agent as
+a child on the same machine, so the files under its session directory are readable.
+They are a vendor's private state at an undocumented path, they change with any
+release, and the daemon would be reaching into another program's internals to
+recover a fact that program is not sending. The one boundary this codebase does keep
+around an agent is that it is driven over a protocol; this crosses it for a badge.
+
+**Rejected — ACP's terminal capability.** `AcpClient` declares `terminal: false`.
+Turning it on would make the daemon the owner of the agent's shells, which brings
+`terminal/wait_for_exit` and therefore an exact lifecycle. It is refused for two
+reasons and the second is decisive: it is a large change to how every command an
+agent runs is executed, and it is about **shells**, while the case measured above is
+a backgrounded *subagent*. It would not close this.
+
+**What would close it** is an ACP message for "I am waiting", or an agent that
+reports its background work as an ordinary tool call with an ordinary completing
+update. Neither exists, and neither is ours to add.
+
+**Status.** Deliberate non-goal
+

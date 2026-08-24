@@ -170,15 +170,31 @@ const MAX_COMMAND_HINT_CHARS = 100;
  *
  * Same placement and the same argument as the command caps above — the agent
  * chooses every string here, so "bounded by what the agent sent" is not a bound —
- * with the asymmetry one level up: **structure is refused and prose is clipped.**
+ * with the asymmetry one level up: **structure is refused and prose is carried
+ * whole.**
  *
  * A form missing a question is not a smaller form, it is a form whose answer
  * *means something different*, so a count over its cap refuses the whole
  * elicitation rather than delivering a form somebody can answer wrongly. An
  * option's `value` is refused for the reason a command's name is: it round-trips
- * to the agent, and a clipped one is a value the agent will not recognise. A
- * `message`, a `title` and a `description` are prose to read and are clipped
- * visibly.
+ * to the agent, and a clipped one is a value the agent will not recognise.
+ *
+ * ⚠ **`message`, `title` and `description` used to be clipped here — by
+ * `MAX_ELICITATION_MESSAGE_CHARS` at 512, `MAX_ELICITATION_TITLE_CHARS` at 100 and
+ * `MAX_ELICITATION_DESCRIPTION_CHARS` at 300 — and are not any more.** They are the *question*: with
+ * several questions on one form the adapter puts each one in a field's
+ * `description` and leaves `message` as a preamble, so a 300-character cap was a
+ * cap on the sentence somebody is being asked to answer, and an option's
+ * `description` is the sentence explaining what one answer means. Measured against
+ * the live log on this machine, one real option description was **318** characters
+ * and was being cut. A question a person reads half of is a question they answer
+ * wrongly, which is the same failure "structure is refused" exists to avoid, one
+ * field along — so the split now runs between *structure* and *prose* rather than
+ * between refusing and clipping.
+ *
+ * What still bounds it is `MAX_ELICITATION_FORM_BYTES` alone, and that is the
+ * point of the paragraph below: one whole-object number instead of five per-string
+ * ones, refused rather than silently altered.
  *
  * `MAX_ELICITATION_FORM_BYTES` is the backstop the per-item caps cannot be: they
  * stop one enormous string, this stops a thousand small ones. It is deliberately
@@ -208,9 +224,6 @@ const MAX_COMMAND_HINT_CHARS = 100;
 const MAX_ELICITATION_FIELDS = 24;
 const MAX_ELICITATION_OPTIONS = 24;
 const MAX_ELICITATION_FORM_BYTES = 32 * 1024;
-const MAX_ELICITATION_MESSAGE_CHARS = 512;
-const MAX_ELICITATION_TITLE_CHARS = 100;
-const MAX_ELICITATION_DESCRIPTION_CHARS = 300;
 const MAX_ELICITATION_VALUE_CHARS = 512;
 /** Cap on events buffered for a turn iterator that is not currently running. */
 const MAX_BUFFERED_EVENTS = 2_000;
@@ -260,22 +273,39 @@ const MAX_IMAGES_PER_UPDATE = 8;
  * So the comment is now correct rather than aspirational: bounded here, at
  * ingest, where `toCommands` and `toElicitationForm` already bound theirs.
  *
- * **The option cap is a refusal and the string caps are clips**, which is the
- * same split the command list makes and for the same reason one layer down: a
- * clipped `optionId` is an answer the agent will not recognise — it round-trips
- * verbatim in `session/request_permission`'s response — so a permission carrying
- * more than this, or an id longer than this, is refused whole rather than
- * silently altered into one that cannot be answered. `title` and `name` are read
- * by a human and nothing else, so those are clipped.
+ * **Everything here is a refusal now, and the two 200-character clips are gone.**
+ * They were `MAX_PERMISSION_TITLE_CHARS` and `MAX_PERMISSION_OPTION_NAME_CHARS`,
+ * and the argument for them — *these two are read by a human and nothing else, so
+ * clip them* — is exactly backwards for the one agent that asks a **question**
+ * down this channel. kimi surfaces its own `AskUserQuestion` as a
+ * `session/request_permission`, so `option.name` is a model-written answer, and
+ * `permission.ts`'s `askedQuestion` matches that name against the same string in
+ * `rawInput` **by identity** to recover the question. `rawInput` is bounded by
+ * bytes and was never clipped by characters, so past 200 the two sides disagreed,
+ * the match broke, and the whole question fell back to a row of buttons. A latent
+ * bug nothing asserted, removed by removing the clip rather than by teaching the
+ * join about it.
+ *
+ * ⚠ **What replaces them is one whole-object number, because the amplifier was
+ * never the string length — it was the snapshot.** `MAX_PERMISSION_SNAPSHOT_BYTES`
+ * is measured over the projected `{title, options}` and **refuses**, which is the
+ * same shape `MAX_ELICITATION_FORM_BYTES` has one section down and the same shape
+ * the option cap beside it already had. It is 8 KiB rather than the form's 32 for
+ * the reason the form's own note gives from the other side: a form is fetched when
+ * a card opens, and this pair rides `GET /sessions` for sixty sessions every four
+ * seconds, to every attached client, over the relay, to a phone. A card whose title
+ * alone is 50 KB is not one anybody can read; telling the agent so is a sentence it
+ * can act on, and it is what the 24-option cap beside it already does.
  *
  * 24 options matches `MAX_ELICITATION_OPTIONS`, and for the same reason: it is
  * far above every measured card (four is the most any agent has sent) and far
- * below a number that costs a phone anything.
+ * below a number that costs a phone anything. Measured on this machine's own log,
+ * the longest real title is **14** characters and the longest option name **31**,
+ * so 8 KiB is three orders of magnitude of headroom over anything observed.
  */
 const MAX_PERMISSION_OPTIONS = 24;
-const MAX_PERMISSION_TITLE_CHARS = 200;
-const MAX_PERMISSION_OPTION_NAME_CHARS = 200;
 const MAX_PERMISSION_OPTION_ID_CHARS = 256;
+const MAX_PERMISSION_SNAPSHOT_BYTES = 8 * 1024;
 
 /**
  * How many file locations one tool call may name, and how long each may be.
@@ -1529,7 +1559,7 @@ export class Session {
     return this.elicitations(
       {
         toolCallId: request.toolCallId ?? null,
-        message: clip(request.message, MAX_ELICITATION_MESSAGE_CHARS),
+        message: request.message,
         form,
       },
       signal,
@@ -1797,8 +1827,8 @@ export class Session {
      * is the only honest answer. An `optionId` round-trips verbatim in the
      * response below, so clipping one produces an answer the agent will not
      * recognise; dropping an option removes a choice the agent offered, which is
-     * the thing `drawableOptions` spends four rules being careful about one layer
-     * up. So a card past the cap is declined *to the agent*, which is a sentence
+     * the thing the client's `permissionLayout` gives up a *layout* rather than an
+     * option to avoid, one layer up. So a card past the cap is declined *to the agent*, which is a sentence
      * it can act on, rather than silently altered into one nobody can answer.
      *
      * `invalidParams` and never `methodNotFound`, matching the elicitation
@@ -1816,20 +1846,33 @@ export class Session {
     }
 
     /*
-     * Clipped, because these two are read by a person and by nothing else. The
-     * pair rides `SessionSnapshot`, so an unbounded title is not one large event
-     * but the same large string on every poll of every session — see the
-     * constants.
+     * **Carried exactly as sent, then the pair is weighed as one thing.**
+     *
+     * Neither string is shortened any more — see the constants for why clipping
+     * `name` broke `askedQuestion`'s identity match against `rawInput` — so what
+     * bounds them is the byte measure below, taken *after* projection so it counts
+     * what would actually ride `SessionSnapshot` rather than what arrived.
      */
     const options: PermissionOptionSummary[] = request.options.map((option) => ({
       optionId: option.optionId,
-      name: clip(option.name, MAX_PERMISSION_OPTION_NAME_CHARS),
+      name: option.name,
       kind: option.kind,
     }));
-    const title = clip(
-      request.toolCall.title ?? request.toolCall.toolCallId,
-      MAX_PERMISSION_TITLE_CHARS,
-    );
+    const title = request.toolCall.title ?? request.toolCall.toolCallId;
+    /*
+     * Refused rather than trimmed, for the reason the option cap above is: this is
+     * the pair that rides the snapshot, and a card nobody can read is better
+     * declined *to the agent* — which is a sentence it can act on — than delivered
+     * silently shortened. `invalidParams`, matching every other refusal on this
+     * path and on the elicitation one.
+     */
+    const weight = jsonSize(title) + jsonSize(options);
+    if (weight > MAX_PERMISSION_SNAPSHOT_BYTES) {
+      throw acp.RequestError.invalidParams(
+        `a permission's title and options come to at most ${MAX_PERMISSION_SNAPSHOT_BYTES} bytes, ` +
+          `and this one is ${weight}`,
+      );
+    }
     const choice =
       request.options.find((option) => option.kind === "allow_once") ??
       request.options.find((option) => option.kind === "allow_always") ??
@@ -2455,8 +2498,8 @@ function toElicitationField(
 ): ElicitationField {
   const base = {
     key,
-    title: clipOrNull(property.title, MAX_ELICITATION_TITLE_CHARS),
-    description: clipOrNull(property.description, MAX_ELICITATION_DESCRIPTION_CHARS),
+    title: textOrNull(property.title),
+    description: textOrNull(property.description),
     required,
   };
 
@@ -2573,7 +2616,7 @@ function toElicitationOptions(titled: unknown, bare: unknown): ElicitationOption
       source.push({
         value,
         label: typeof title === "string" && title.length > 0 ? title : value,
-        description: clipOrNull(entry["description"], MAX_ELICITATION_DESCRIPTION_CHARS),
+        description: textOrNull(entry["description"]),
       });
     }
   } else if (Array.isArray(bare)) {
@@ -2602,18 +2645,26 @@ function toElicitationOptions(titled: unknown, bare: unknown): ElicitationOption
       );
     }
     seen.add(option.value);
-    options.push({ ...option, label: clip(option.label, MAX_ELICITATION_TITLE_CHARS) });
+    options.push(option);
   }
   return options;
 }
 
 const FORMATS = new Set(["email", "uri", "date", "date-time"]);
 
-// Both take `unknown`, because `ElicitationPropertySchema`'s open catch-all arm
-// types every field that way and the base fields are read before the guards have
-// narrowed anything. Widening here rather than casting at each of their nine call sites.
-function clipOrNull(value: unknown, budget: number): string | null {
-  return typeof value === "string" && value.length > 0 ? clip(value, budget) : null;
+/*
+ * Both take `unknown`, because `ElicitationPropertySchema`'s open catch-all arm
+ * types every field that way and the base fields are read before the guards have
+ * narrowed anything. Widening here rather than casting at each of their nine call sites.
+ *
+ * ⚠ This was `clipOrNull(value, budget)` and the budget is gone, not forgotten —
+ * see the elicitation caps. **What survives is the empty-to-null half, and it is
+ * the load-bearing half**: `""` and `null` are the same absence to every reader,
+ * and letting an empty string through would make `askTitle` in the web client
+ * draw a blank heading instead of falling through to the next source.
+ */
+function textOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 function numberOrNull(value: unknown): number | null {

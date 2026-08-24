@@ -57,7 +57,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 725 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 730 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -74,8 +74,11 @@ pnpm authcheck                       # token verification and enrollment
 pnpm daemoncheck                     # the daemon's HTTP surface and durable state: routes,
                                      #   the v6 migration, the login pty, the WS, subagent lineage,
                                      #   permissions, stopping a turn, the SQLite log, changes/diff,
-                                     #   uploads — and the bounds an agent can push against:
-                                     #   a permission's title and options, `locations` in the
+                                     #   uploads — and the bounds an agent can push against,
+                                     #   all of them refusals now: a permission's title and
+                                     #   options weighed as one 8 KiB thing rather than clipped,
+                                     #   a form's prose carried whole against one 32 KiB
+                                     #   backstop, `locations` in the
                                      #   byte accounting, a `.git` reached through a symlink,
                                      #   and an upgrade target `new URL` refuses. Plus importing
                                      #   a codebase: both archive readers against archives it
@@ -335,7 +338,10 @@ short version of what is knowingly not built: no sandbox (the seam is
 `SessionRuntime`), no end-to-end
 encryption through the relay (the seam is `reemoat-enc: none` on the CONNECT
 handshake), no fleet rollout, no access log on the control plane, and
-no `@file` mentions. **Plugins have no market** — a registry would be a second
+no `@file` mentions, and **nothing says a background task is still running** — the
+spawn is on the wire (`run_in_background`) and its *end* is on no wire at all, so
+counting the starts would buy a row nothing could honestly take down (Q7.113).
+**Plugins have no market** — a registry would be a second
 control-plane request and a way for code to arrive on a machine nobody named it on
 (Q7.104) — and no plugin draws in the transcript or adds a slash command, both
 with their seams written down rather than half-built (Q7.105). **CD stops half-way on purpose**: nothing deploys on a push,

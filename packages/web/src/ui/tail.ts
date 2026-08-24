@@ -12,10 +12,11 @@
  * and draws; every decision about *what* a row is happens here.
  */
 
-import { formatLocation, hasInput, readInput } from "../permission";
+import { formatLocation, hasInput, readInput, readQuestions } from "../permission";
 import type { Gap } from "../store";
 import type {
   AnswerResolvedBy,
+  ElicitationAnswerSummary,
   ElicitationResolvedEvent,
   FileChangeEvent,
   FileLocation,
@@ -326,6 +327,62 @@ export interface EventNode {
    * one event drawn one-for-one; what it needed was a name.
    */
   heading: string | null;
+  /**
+   * What the agent actually **asked**, beside what was answered — set for a settled
+   * `elicitation_resolved` and `null` everywhere else.
+   *
+   * ⚠ **Without it the transcript keeps the answers and loses the questions**, which
+   * is the defect this exists for. `ElicitationResolvedEvent` carries `message` plus
+   * `{key, label, value}` per answer, and for a multi-question form the adapter puts
+   * a preamble in `message` and each question in its field's *description* — so a
+   * settled `AskUserQuestion` read, in full: *"Please answer the following
+   * questions."* followed by four picked values, with the four questions appearing
+   * nowhere at all. Answers to questions nobody can see.
+   *
+   * The wording exists in one place a client can reach: the arguments of the tool
+   * call the question was asked through, which `askedThrough` merges away. So the
+   * join is done here, where the window and the id both are, and handed down as a
+   * field — the same arrangement `heading` uses one line up, and for the same
+   * reason: `ElicitationResolvedRow` must not walk the log on every render.
+   *
+   * `null` is *"draw what you drew before"* and is reached three honest ways: the
+   * call is outside the loaded window, its `rawInput` came back as the
+   * `{truncated, bytes}` stand-in, or the question was not an `AskUserQuestion` at
+   * all — an MCP server's form has no `{questions: […]}` shape and never will.
+   */
+  asked: AnsweredQuestion[] | null;
+}
+
+/**
+ * One answered question, as the transcript draws it.
+ *
+ * `question` is `null` for an answer nothing could be matched to — a typed
+ * "something else" box, most often — and that row then draws exactly as it did
+ * before, which is why a partial match is still worth returning.
+ */
+export interface AnsweredQuestion {
+  key: string;
+  question: string | null;
+  /** The field's own title, as the daemon rendered it onto the resolution. */
+  label: string;
+  value: string;
+}
+
+/** Two joins are the same join. `sameNode` is the only caller. */
+function sameAsked(
+  a: readonly AnsweredQuestion[] | null,
+  b: readonly AnsweredQuestion[] | null,
+): boolean {
+  if (a === b) return true;
+  if (a === null || b === null || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const one = a[i];
+    const other = b[i];
+    if (one === undefined || other === undefined) return false;
+    if (one.key !== other.key || one.question !== other.question) return false;
+    if (one.label !== other.label || one.value !== other.value) return false;
+  }
+  return true;
 }
 
 export interface GapNode {
@@ -411,7 +468,19 @@ export function sameNode(a: TailNode, b: TailNode): boolean {
       // itself. `heading` is derived and can arrive later — a codex permission is
       // named by a `tool_call_update` that follows it — so it is compared too.
       const other = b as EventNode;
-      return a.stored === other.stored && a.heading === other.heading;
+      /*
+       * `asked` is derived like `heading` and can arrive later — the call carrying
+       * the questions pages in after the answer it explains — so it joins the
+       * compare rather than being assumed stable for the row's life.
+       *
+       * **By value and not by identity**, which is why it is a function call rather
+       * than a `===`: `buildTail` rebuilds its arrays on every streamed token, so
+       * reference equality is false forever and this would be the one row in the
+       * transcript that never memoises — the failure `sameNode` exists to prevent,
+       * reintroduced by the field added to fix a different one. `webcheck` drives
+       * two builds over **one** event array for exactly that reason.
+       */
+      return a.stored === other.stored && a.heading === other.heading && sameAsked(a.asked, other.asked);
     }
     case "gap": {
       const other = b as GapNode;
@@ -1375,6 +1444,13 @@ export interface OutstandingTask {
  *     finished, the number of open calls of any kind was **zero**. What it was
  *     waiting on was background shell work behind a call that had said it was done,
  *     and nothing in the ACP stream mentions it.
+ *     ⚠ **The *start* of such work is observable and the end is not**, which is why
+ *     this was left alone rather than extended. A backgrounded subagent arrives with
+ *     `rawInput.run_in_background: true` and then reaches `completed` at launch —
+ *     "Async agent launched successfully" — and no later event in the whole live log
+ *     names it again. Counting the starts is a line of code; taking the row down
+ *     again has no signal at all, and a row claiming work is still running four
+ *     minutes after it stopped is worse than saying nothing. Q7.113.
  *   anything the agent never announced as a tool call. There is no ACP message for
  *     "I am waiting", so silence and completion are one shape on the wire.
  *   the daemon's own backlog, if one ever forms again: a task's *completing* update
@@ -1676,6 +1752,26 @@ export function buildTail(
   const titleByCall = new Map<string, string>();
 
   /**
+   * The newest arguments each tool call carries, kept for the calls a question was
+   * asked *through*.
+   *
+   * ⚠ **`nodeFor` deletes those calls, and their `rawInput` with them** — an
+   * `AskUserQuestion` surfaces as an ordinary "Asking for your input" row, so
+   * `askedThrough` drops it rather than drawing the same thing twice. That is
+   * right for the row and wrong for the record: the arguments are the only copy of
+   * the questions anywhere on this wire. Collected here, during the same walk, so
+   * the drop stays a drop and nothing is deferred.
+   *
+   * The walk is backwards, so the **first** input seen for an id is the newest —
+   * `hasInput` rather than a null check, because arguments arrive as `{}` before
+   * they arrive filled in, which is the same rule `mergeUpdates` applies from the
+   * other end. Measured on codex, a call carries a placeholder object and the real
+   * arguments land on a later update; measured on claude, the call carries `{}`.
+   * Both are handled by taking the newest non-empty one.
+   */
+  const inputByCall = new Map<string, unknown>();
+
+  /**
    * Changes waiting for the call that made them, by `toolCallId`.
    *
    * Collected exactly like `updates` and claimed at the same place, because the
@@ -1840,6 +1936,14 @@ export function buildTail(
       titleByCall.set(event.toolCallId, event.title);
     }
 
+    if (
+      (event.type === "tool_call" || event.type === "tool_call_update") &&
+      !inputByCall.has(event.toolCallId) &&
+      hasInput(event.rawInput)
+    ) {
+      inputByCall.set(event.toolCallId, event.rawInput);
+    }
+
     if (event.type === "file_change" && event.toolCallId !== null) {
       let list = changesByCall.get(event.toolCallId);
       if (list === undefined) {
@@ -1926,6 +2030,24 @@ export function buildTail(
     // `title ?? toolCallId` fallback leaves behind, and it names no vendor.
     if (event.toolCallId === null || event.title !== event.toolCallId) continue;
     node.heading = titleByCall.get(event.toolCallId) ?? null;
+  }
+
+  /*
+   * The same post-pass shape, one event type along: a settled question is met
+   * before the call it was asked through, so the map is only complete once the walk
+   * is. `answers` being present is the whole gate — a declined or cancelled form has
+   * none, and there is nothing to attribute.
+   */
+  for (const node of collected) {
+    if (node.kind !== "event") continue;
+    const event = node.stored.event;
+    if (event.type !== "elicitation_resolved" || event.toolCallId === null) continue;
+    // `?? []` rather than `=== null`, for `wire.ts`'s standing rule: this file is a
+    // hand mirror of the daemon's vocabulary, so a field an older daemon does not
+    // send arrives `undefined` rather than as a type error.
+    const answers = event.answers ?? [];
+    if (answers.length === 0) continue;
+    node.asked = answeredQuestions(answers, inputByCall.get(event.toolCallId));
   }
 
   const rows = placeNodes(collected.reverse());
@@ -2135,8 +2257,53 @@ export function stopReasonText(stopReason: string): string {
   return STOP_REASON_TEXT[stopReason] ?? `turn ended: ${stopReason}`;
 }
 
-/** How long a rendered answer may run in one transcript row. */
-const ANSWER_SUMMARY_CHARS = 160;
+/**
+ * The questions behind a settled form's answers, matched by the words somebody
+ * tapped.
+ *
+ * **The join is by identity on the chosen label, and never by the field's key.**
+ * `answers[].key` is `question_0`, `question_0_custom`, `question_1`… on claude and
+ * `<question>__other` on codex; parsing either is keying a client on one adapter's
+ * spelling, which this codebase refuses everywhere and which `toElicitationForm`
+ * goes out of its way not to do at ingest. What both agents *do* agree on is that
+ * the value on the resolution is the option's own **label** — the words that were
+ * on screen — so the same string appears in the tool's arguments, and matching it
+ * needs no vocabulary at all.
+ *
+ * ⚠ **A label two questions share matches neither.** Attributing an answer to the
+ * wrong question is worse than not attributing it: the row would read as a
+ * confident record of an exchange that did not happen. `AMBIGUOUS` is how that is
+ * said, and such an answer falls back to the label-and-value row it drew before.
+ *
+ * `null` when *nothing* matched, which is the honest reading of "this `rawInput`
+ * is about something else" — an MCP form, a stale call id, a truncation stand-in.
+ * A partial match is kept, because a typed "let me describe something else" answer
+ * legitimately matches no option and the questions beside it are still real.
+ */
+const AMBIGUOUS = Symbol("two questions offer this answer");
+
+export function answeredQuestions(
+  answers: readonly ElicitationAnswerSummary[],
+  input: unknown,
+): AnsweredQuestion[] | null {
+  const questions = readQuestions(input);
+  if (questions === null) return null;
+  const byLabel = new Map<string, string | typeof AMBIGUOUS>();
+  for (const question of questions) {
+    for (const option of question.options) {
+      const seen = byLabel.get(option.label);
+      byLabel.set(option.label, seen === undefined || seen === question.question ? question.question : AMBIGUOUS);
+    }
+  }
+  let matched = 0;
+  const out = answers.map((answer) => {
+    const found = byLabel.get(answer.value);
+    const question = found === undefined || found === AMBIGUOUS ? null : found;
+    if (question !== null) matched += 1;
+    return { key: answer.key, question, label: answer.label, value: answer.value };
+  });
+  return matched === 0 ? null : out;
+}
 
 /**
  * What a settled question says in the transcript.
@@ -2152,29 +2319,24 @@ const ANSWER_SUMMARY_CHARS = 160;
  * `skipped` is the adapter's own word for `decline`: the tool runs with empty
  * answers and the model is told the person skipped, so the row and the model say
  * the same thing.
+ *
+ * ⚠ **It used to return a third field, `summary`, and that field was drawn
+ * nowhere.** It joined the answers with ` · ` and cut the result at 160 characters
+ * — a real truncation of a real conversation, computed on every settled question
+ * for the life of every tab and then thrown away, because `ElicitationResolvedRow`
+ * renders `event.answers` itself. Two `webcheck` assertions were the only readers,
+ * so the clip was pinned rather than noticed. What kept it invisible is that the
+ * rule it encoded — *one answer needs no label* — is written **twice**, and the
+ * live copy is the ternary in the JSX. A dead branch beside a live one is how a
+ * rule drifts without anybody being wrong.
  */
 export function elicitationOutcome(event: ElicitationResolvedEvent): {
   tone: "ok" | "quiet" | "warn";
   verb: "answered" | "skipped" | "cancelled";
-  summary: string | null;
 } {
-  if (event.action === "decline") return { tone: "quiet", verb: "skipped", summary: null };
-  if (event.action !== "accept") return { tone: "warn", verb: "cancelled", summary: null };
-
-  const answers = event.answers ?? [];
-  if (answers.length === 0) return { tone: "ok", verb: "answered", summary: null };
-  // One pair needs no label — the question is already the row above it. Several
-  // do, and ` · ` is this app's existing separator.
-  const text =
-    answers.length === 1
-      ? (answers[0]?.value ?? "")
-      : answers.map((answer) => `${answer.label}: ${answer.value}`).join(" · ");
-  return {
-    tone: "ok",
-    verb: "answered",
-    summary:
-      text.length > ANSWER_SUMMARY_CHARS ? `${text.slice(0, ANSWER_SUMMARY_CHARS)}…` : text,
-  };
+  if (event.action === "decline") return { tone: "quiet", verb: "skipped" };
+  if (event.action !== "accept") return { tone: "warn", verb: "cancelled" };
+  return { tone: "ok", verb: "answered" };
 }
 
 /** One event as a node, or `null` when it draws nothing on its own. */
@@ -2317,5 +2479,6 @@ function nodeFor(
     stored,
     // Filled in by `buildTail`'s naming pass, which needs the whole window.
     heading: null,
+    asked: null,
   };
 }

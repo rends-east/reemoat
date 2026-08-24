@@ -439,9 +439,26 @@ export function AskCard({
          * card cannot come back looking like something else.
          */
         <div
-          className={`${COLUMN} animate-rise pointer-events-auto flex min-h-11 shrink-0 items-center gap-1 rounded-lg border border-edge-strong bg-surface pr-1 pl-3 shadow-2xl`}
+          className={`${COLUMN} animate-rise pointer-events-auto flex min-h-11 shrink-0 items-center gap-1 rounded-lg border border-edge-strong bg-surface py-1.5 pr-1 pl-3 shadow-2xl`}
         >
-          <span className="min-w-0 flex-1 truncate text-xs font-medium">{title}</span>
+          {/*
+           * ⚠ **`wrap-anywhere`, not `truncate`, and this is the one place on this
+           * card where that was ever in question.**
+           *
+           * A collapsed bar is one line by intent and it has a control that opens
+           * it, so clipping looked defensible — and it is exactly what the rule
+           * this release is built on forbids: *nothing an agent asked may reach a
+           * person shortened.* The daemon stopped clipping a question's prose and a
+           * permission's title in the same commit; leaving a CSS ellipsis over the
+           * result would move the same loss one layer out, where it is worse
+           * because nothing can even say it happened.
+           *
+           * `min-h-11` stays the floor rather than the height, so a short title
+           * still draws the same 44px bar it always did and a long one grows the
+           * bar instead of hiding its own end. `py-1.5` is what makes the grown
+           * case sit off the edges; the controls are `shrink-0` and unaffected.
+           */}
+          <span className="min-w-0 flex-1 text-xs font-medium wrap-anywhere">{title}</span>
           {controls}
         </div>
       ) : (
@@ -534,15 +551,23 @@ export function AskCard({
                * group wrapping inside itself — so the rule holds at any width and a
                * wrap costs alignment rather than meaning.
                *
-               * This used to name `permissionLayout` as "the other half — past a
-               * certain size these stop being buttons at all". There is no such
-               * function and there never was: `layout` is chosen at
-               * `PermissionCard.tsx` by `asked !== null`, with no size input. The
-               * sentence mattered because it was load-bearing in an argument —
-               * `drawableOptions` was justified partly by a fallback that does not
-               * exist, and it grew wide enough to delete a model's own answers.
-               * Named here rather than deleted quietly, because a comment promising
-               * a safety net is worse than no comment.
+               * ⚠ **`permissionLayout` exists now, and this comment is the record of
+               * how long it did not.** It was named here for a release as "the other
+               * half — past a certain size these stop being buttons at all", then
+               * corrected to say there was no such function and there never had
+               * been: `layout` was chosen in `PermissionCard.tsx` by
+               * `asked !== null` with no size input at all. That mattered because
+               * the missing fallback was load-bearing in somebody else's argument —
+               * `drawableOptions` was justified partly by it, and in its absence
+               * grew wide enough to delete a model's own answers.
+               *
+               * It is built. `permissionLayout` reads the rendered labels and
+               * answers `rows` when a button row will not hold them, so an option
+               * is never removed for want of room. The correction stays written
+               * down rather than replaced with a clean sentence, because what it
+               * records is the shape of the mistake: a comment promising a safety
+               * net is worse than no comment, and the way that ends is somebody
+               * building the net.
                */}
               {layout === "buttons" && (
                 <>
@@ -614,8 +639,26 @@ function OptionRow({
     <button
       onClick={option.onPick}
       disabled={disabled}
+      title={option.hint !== undefined && option.hint !== null && option.hint !== option.label ? option.hint : undefined}
+      /*
+       * ⚠ **`primary` reaches this layout now, and it has to.** A decision whose
+       * labels will not fit a button row is drawn here instead of having an option
+       * deleted (see `permissionLayout`), and the whole reason a button row is
+       * legible without colour is *position plus the one filled control*. Carrying
+       * the order over and dropping the fill would land the reader on a column of
+       * identical rows where one of them writes a standing policy rule to the
+       * agent's disk. `bg-fg` is licensed here by the same clause it is licensed on
+       * the button — the affirmative action inside a decision, and nothing else.
+       *
+       * Inert for every other caller: an elicitation's answers and a kimi question
+       * set no `primary`, because none of their options is the reversible one.
+       */
       className={`tap press relative flex min-h-11 w-full items-start gap-2.5 rounded-md border px-3 py-2 text-left disabled:opacity-40 ${
-        option.chosen === true ? CHOSEN : ROW
+        option.primary === true
+          ? "border-fg bg-fg text-ink hover:bg-fg/90"
+          : option.chosen === true
+            ? CHOSEN
+            : ROW
       }`}
     >
       {/*
@@ -631,10 +674,22 @@ function OptionRow({
       <span className="min-w-0 flex-1">
         <span className="block text-xs font-medium wrap-anywhere">{option.label}</span>
         {option.description !== null && option.description !== undefined && (
-          <span className="mt-0.5 block text-2xs text-muted wrap-anywhere">{option.description}</span>
+          <span
+            className={`mt-0.5 block text-2xs wrap-anywhere ${option.primary === true ? "text-ink/70" : "text-muted"}`}
+          >
+            {option.description}
+          </span>
         )}
       </span>
-      {index < 9 && <span className={`mt-0.5 shrink-0 text-2xs text-faint tabular-nums ${KEYS_ONLY}`}>{index + 1}</span>}
+      {index < 9 && (
+        <span
+          className={`mt-0.5 shrink-0 text-2xs tabular-nums ${KEYS_ONLY} ${
+            option.primary === true ? "text-ink/50" : "text-faint"
+          }`}
+        >
+          {index + 1}
+        </span>
+      )}
     </button>
   );
 }

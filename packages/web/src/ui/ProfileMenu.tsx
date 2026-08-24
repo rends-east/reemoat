@@ -6,7 +6,7 @@ import { pluginPath, screenPlugins } from "../plugins";
 import { navigate } from "../router";
 import { settingsPath } from "../settings";
 import { store, type AppState } from "../store";
-import { Icon, MENU_HEADING, MENU_ROW, Menu } from "./bits";
+import { Icon, MENU_HEADING, Menu, menuRow } from "./bits";
 
 /**
  * Who you are signed in as, and the three things you can do about it.
@@ -137,7 +137,7 @@ export function ProfileMenu({
                 close();
                 navigate(settingsPath());
               }}
-              className={`${MENU_ROW} items-center text-fg hover:bg-raised`}
+              className={`${menuRow("center")} text-fg hover:bg-raised`}
             >
               <Icon as={SettingsIcon} size={14} className="text-muted" />
               Settings
@@ -151,7 +151,7 @@ export function ProfileMenu({
                 close();
                 navigate(marketPath());
               }}
-              className={`${MENU_ROW} items-center text-fg hover:bg-raised`}
+              className={`${menuRow("center")} text-fg hover:bg-raised`}
             >
               <Icon as={Puzzle} size={14} className="text-muted" />
               Plugins
@@ -176,7 +176,7 @@ export function ProfileMenu({
                     close();
                     navigate(pluginPath(machine, plugin.id));
                   }}
-                  className={`${MENU_ROW} items-center text-fg hover:bg-raised`}
+                  className={`${menuRow("center")} text-fg hover:bg-raised`}
                 >
                   <Icon as={Puzzle} size={14} className="text-muted" />
                   {/* The title the plugin chose, falling back to its name — the
@@ -205,7 +205,7 @@ export function ProfileMenu({
               close();
               void store.signOut();
             }}
-            className={`${MENU_ROW} mt-1 items-center border-t border-edge pt-3 text-danger hover:bg-danger/10`}
+            className={`${menuRow("center")} mt-1 border-t border-edge pt-3 text-danger hover:bg-danger/10`}
           >
             <Icon as={LogOut} size={14} />
             Sign out

@@ -104,11 +104,17 @@ export function SignIn({
         )}
 
         <form onSubmit={submit}>
+          {/* **Both, on one field, because the server takes both on one field.**
+              `autoComplete="username"` stays: it is the token a password manager
+              fills for the identifier of a sign-in form whichever kind it holds,
+              and `email` would tell one to stop offering a saved username. There
+              is no placeholder — the label is the whole hint, and this screen's
+              source text is read off disk by `webcheck`. */}
           <label
             htmlFor="signin-name"
             className="mt-4 block text-2xs font-semibold tracking-wider text-muted uppercase"
           >
-            Username
+            Username or email
           </label>
           <input
             id="signin-name"

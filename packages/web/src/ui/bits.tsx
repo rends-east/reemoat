@@ -1230,9 +1230,47 @@ export function Icon({
  * describes had already happened underneath it.
  */
 export const MENU_PANEL = `${LAYER.menu} max-h-72 overflow-y-auto overscroll-contain rounded-lg border border-edge bg-surface p-1.5 shadow-lg`;
-/** 44px, the one menu-row height in this app. See the note at `Dropdown`'s rows. */
-export const MENU_ROW =
-  "tap flex min-h-11 w-full items-start gap-2 rounded-md px-2.5 py-3 text-left text-xs";
+/**
+ * One row in a menu: 44px, and its cross-axis alignment stated rather than
+ * defaulted.
+ *
+ * ⚠ **A function rather than a constant, because a constant could not be
+ * overridden and seven call sites believed it could.** This was
+ * `MENU_ROW = "… items-start …"`, and the four rows in `ProfileMenu`, the filter
+ * in `SessionBrowser`, `RowAction` below and the plugin row in `MachineInstalls`
+ * all wrote `` `${MENU_ROW} items-center` `` — including {@link RowAction}, whose
+ * own docblock said so in words. **None of them won.** Tailwind v4 emits its
+ * utilities in alphabetical order, so `.items-center` is printed *before*
+ * `.items-start` in the stylesheet and the constant outranks the append no matter
+ * which way round the class string reads. Order inside a `class` attribute
+ * decides nothing; order inside the generated CSS decides everything.
+ *
+ * What that looked like: a 14px icon pinned to the top of a `text-xs` line box
+ * while the glyphs beside it start a half-leading plus the ascender/cap-height
+ * gap lower — reported as "the text sits slightly below the icons to its left".
+ *
+ * Two values and no default, which is the whole point of the pair. `start` is for
+ * a row that can carry a description under its label — `Dropdown`'s rows,
+ * `CommandMenu`'s, `AgentConfigBar`'s — and each of those pads its leading glyph
+ * with `mt-0.5` to match. `center` is for a row that is one line. Leaving
+ * `items-*` off altogether was the other candidate and is worse: flex defaults to
+ * `stretch`, which stretches the icon rather than aligning it, so a call site that
+ * forgot would fail in a way nobody reads as forgetting.
+ *
+ * `webcheck` sweeps every call site of every exported class-string constant for
+ * an appended utility from a family the constant already sets, which is the
+ * mechanism this comment cannot be.
+ */
+export function menuRow(align: "start" | "center"): string {
+  /*
+   * Both class names written out, never `items-${align}`. Tailwind extracts
+   * candidates by scanning source *text*, so an interpolated utility is a rule it
+   * never generates — and the failure is silent, since flex would then fall back
+   * to `stretch` and the icon would grow instead of moving.
+   */
+  const cross = align === "center" ? "items-center" : "items-start";
+  return `tap flex min-h-11 w-full ${cross} gap-2 rounded-md px-2.5 py-3 text-left text-xs`;
+}
 export const MENU_HEADING =
   "px-2.5 py-1.5 text-2xs font-semibold tracking-wider text-faint uppercase";
 
@@ -1343,9 +1381,10 @@ export function RailRow({
  * Promoted out of `UsersSection` when `MachinesSection` grew a kebab of its own,
  * rather than copied: a second hand-written copy is how one of the two loses
  * `role="menuitem"`, or picks a slightly different danger wash, and nothing
- * anywhere says they were meant to match. {@link MENU_ROW} is `items-start`
- * because a `Dropdown` row can carry a description under its label; a menu act
- * is one line, so this overrides it to `items-center`.
+ * anywhere says they were meant to match. A menu act is one line, so it asks
+ * {@link menuRow} for `center`; a `Dropdown` row, which can carry a description
+ * under its label, asks for `start`. ⚠ This sentence used to say "overrides it to
+ * `items-center`", and the override did not work for a year — see `menuRow`.
  *
  * **`danger` is a tone here and not a {@link DangerButton}, deliberately.** That
  * component's "must lead with a glyph" rule is about a *button among buttons* —
@@ -1374,7 +1413,7 @@ export function RowAction({
     <button
       role="menuitem"
       onClick={onClick}
-      className={`${MENU_ROW} items-center ${
+      className={`${menuRow("center")} ${
         danger ? "text-danger hover:bg-danger/15" : "text-fg hover:bg-raised"
       }`}
     >
@@ -1768,7 +1807,7 @@ export function Dropdown<T extends string>({
                   // Selection is weight, not colour, and the reserved 12px `Check`
                   // slot below was already doing most of the work — the accent
                   // text was a second mark for the same fact.
-                  className={`${MENU_ROW} text-fg hover:bg-raised disabled:opacity-40 disabled:hover:bg-transparent ${
+                  className={`${menuRow("start")} text-fg hover:bg-raised disabled:opacity-40 disabled:hover:bg-transparent ${
                     selected ? "font-medium" : ""
                   }`}
                 >

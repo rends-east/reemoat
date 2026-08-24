@@ -3005,6 +3005,73 @@ process.stdout.write("\nsigning in, sessions and passwords\n");
     return outcome(await send("/v1/me", { headers: bearer(live.token) }));
   })(), [403, "user_disabled"]);
 
+  /* -- signing in with the address instead of the name ----------------- */
+
+  /*
+   * **A name *or* a verified address, and the second half is the whole of the
+   * feature.** `verifiedOwnerOf` is the resolver, which means `verified_at IS NOT
+   * NULL` is the rule — and the cases below are the three shapes that rule has to
+   * survive, not one happy path.
+   *
+   * ⚠ **The refusals are compared against `wrongPassword` by value**, not merely
+   * asserted to be 401s. An address nobody has, an address nobody *proved*, and a
+   * password that is wrong must be one answer: any of the three answering
+   * differently is an oracle that tells a stranger which addresses exist on this
+   * server, from a route that needs no credential at all.
+   */
+  {
+    const claim = (userId: string, email: string, verified: boolean): void => {
+      db.prepare(
+        "INSERT INTO user_emails (user_id, email, email_folded, verified_at, updated_at) VALUES (?, ?, ?, ?, ?) " +
+          "ON CONFLICT(user_id) DO UPDATE SET email = excluded.email, email_folded = excluded.email_folded, " +
+          "verified_at = excluded.verified_at, updated_at = excluded.updated_at",
+      ).run(userId, email, email.toLowerCase(), verified ? now : null, now);
+    };
+    const whoIs = async (identifier: string, password: string): Promise<string> => {
+      const response = await login(identifier, password);
+      if (response.status !== 200) return `${response.status}`;
+      return ((await response.json()) as { user?: { name?: string } }).user?.name ?? "?";
+    };
+
+    claim(made.id, "Ada@Example.com", true);
+    check("a verified address signs in, and lands on its own account", await whoIs("Ada@Example.com", made.password), "ada");
+    /*
+     * The address is folded whole — local part included — by `foldEmail`, which
+     * `address.ts` argues is a uniqueness decision rather than an RFC claim. The
+     * stored `email` keeps the case somebody typed; the lookup does not read it.
+     */
+    check("in whatever case it is typed", await whoIs("ADA@EXAMPLE.COM", made.password), "ada");
+    check("and the name still works beside it", await whoIs("ada", made.password), "ada");
+    check("a real address with the wrong password reads like everything else", await outcome(await login("ada@example.com", "definitely-not-it")), wrongPassword);
+    check("and an address nobody has, likewise", await outcome(await login("nobody@example.com", "definitely-not-it")), wrongPassword);
+
+    /*
+     * ⚠ **An unverified claim reserves nothing, and this is the assertion that
+     * says so.** `idx_user_emails_verified` is a *partial* unique index for
+     * exactly this reason: `POST /v1/register` is anonymous, so anybody may write
+     * an unverified row naming any address. Were the lookup on `email_folded`
+     * alone, that row would be a second candidate for somebody else's address —
+     * and, on an account with no other claimant, a way in.
+     */
+    const carol = (await (await post("/v1/admin/users", { name: "carol" }, admin)).json()) as { id: string; password: string };
+    claim(carol.id, "carol@example.com", false);
+    check("an unverified address opens nothing", await outcome(await login("carol@example.com", carol.password)), wrongPassword);
+    check("while carol's own name still does", await whoIs("carol", carol.password), "carol");
+
+    /*
+     * The squat, driven end to end: a second account claims an address somebody
+     * else has already proved. The claim is unverified — the partial index would
+     * refuse it otherwise — so it must resolve to nobody, and in particular it
+     * must not steer the address away from the account that proved it.
+     */
+    const mallory = (await (await post("/v1/admin/users", { name: "mallory" }, admin)).json()) as { id: string; password: string };
+    claim(mallory.id, "ada@example.com", false);
+    check("claiming an address somebody proved does not borrow it", await outcome(await login("ada@example.com", mallory.password)), wrongPassword);
+    check("and the account that proved it still signs in", await whoIs("ada@example.com", made.password), "ada");
+
+    db.prepare("DELETE FROM password_obligations WHERE user_id IN (?, ?)").run(carol.id, mallory.id);
+  }
+
   /* -- sessions -------------------------------------------------------- */
 
   const phone = (await (await login("ada", made.password)).json()) as { token: string };
@@ -3475,6 +3542,42 @@ process.stdout.write("\nthe login throttle\n");
      */
     check("a login block does not follow the name to another address", throttle.check(loginKey("ada", addressB), T0).allowed, true);
     check("and cannot reach a password change at all", throttle.check(passwordChangeKey("u_ada"), T0).allowed, true);
+  }
+  /*
+   * ⚠ **One account named two ways spends two counters, and that is chosen.**
+   * `POST /v1/login` now takes a name *or* a verified address, and this key is
+   * built from what was *submitted* — so `ada` and `ada@example.com` are two
+   * buckets for one person. Folding them means resolving the string to an account
+   * before the key exists, which is a counter keyed on the account: the bare-name
+   * key this file exists to have stopped having, reached from the other side. What
+   * bounds the doubling is `addressKey`, whose budget one caller shares across
+   * every spelling they try, and which is asserted over the wire further down.
+   */
+  {
+    const throttle = new LoginThrottle();
+    for (let i = 0; i <= DEFAULT_THROTTLE.threshold; i += 1) throttle.fail(loginKey("ada", addressA), T0);
+    check("guessing at a name does not block that person's address", throttle.check(loginKey("ada@example.com", addressA), T0).allowed, true);
+  }
+  /*
+   * ⚠ **The address half survives an identifier long enough to be a real address.**
+   * At `MAX_NAME_KEY_CHARS` (120) the cut landed *inside* a 254-character address
+   * and threw the address half away — so every host guessing at any long address
+   * shared one counter, which is the exact failure `MAX_EMAIL_KEY_CHARS` was
+   * introduced to end one value-kind along. Two addresses agreeing for their first
+   * 120 characters are the shape that finds it.
+   */
+  {
+    const long = (tag: string): string => `${"a".repeat(140)}${tag}@example.com`;
+    check(
+      "two long addresses are two counters, not one",
+      loginKey(long("x"), addressA) === loginKey(long("y"), addressA),
+      false,
+    );
+    check(
+      "and the address half is still in the key",
+      loginKey(long("x"), addressA) === loginKey(long("x"), addressB),
+      false,
+    );
   }
   /*
    * The namespace is not decoration, because the address half is caller-supplied:

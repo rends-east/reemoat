@@ -868,82 +868,64 @@ export function optionLabel(
 const BUTTON_LABEL_MAX = 32;
 
 /**
- * The options the card will actually draw.
+ * Whether this card's options can be a **row of buttons**, or have to be a column
+ * of rows.
  *
- * **This removes a choice the agent offered, which is why the rule is narrow in
- * three separate directions.**
+ * ⚠ **This replaces `drawableOptions`, which answered the same question by
+ * deleting options, and that is a reversal of Q3.92 rather than a refactor of it.**
+ * The old function dropped an approval whose rendered label exceeded
+ * {@link BUTTON_LABEL_MAX} — under four narrowings, each of which was a real
+ * measured case and none of which made the underlying trade acceptable. It removed
+ * a choice the agent offered because *this app could not lay it out*, and on the
+ * one channel where an option is a model-written **answer** — kimi's
+ * `AskUserQuestion` arrives as a `session/request_permission`, and when
+ * `askedQuestion` cannot classify it the card falls back to buttons — it deleted
+ * two of four answers with nothing said.
  *
- * The card draws decisions as a row of buttons, and that row carries its meaning
- * by *position* — the refusal alone on the left, the reversible approval filled on
- * the right — because the colour these buttons used to have was removed. A label
- * that cannot fit a button breaks the row, and a broken row does not merely look
- * untidy: it puts the buttons in an arrangement where the left/right rule says
- * nothing while still looking deliberate. Measured against codex, which words a
- * scoped grant as "Allow Commands Starting With `node /Users/…/fetch-codex-manual
- * .mjs`" — a label containing a path, and therefore unbounded by construction.
+ * The reason it existed is still entirely real, so nothing about it is softened:
+ * the button row carries its meaning by **position** — the refusal alone on the
+ * left, the reversible approval filled on the right — because the colour those
+ * buttons had was removed, and `OptionButton` draws its label as a bare text child
+ * with no wrapping inside a `flex-wrap` group. codex words a scoped grant as
+ * ``Allow Commands Starting With `node /Users/…/fetch.mjs` ``, unbounded by
+ * construction because it embeds a path, and a label like that wraps the row into
+ * an arrangement where the left/right rule says nothing while still looking
+ * deliberate.
  *
- * The four narrowings:
+ * **What changes is which of the two gives way.** A layout is this app's problem
+ * and an option is the agent's, so the layout gives way: past the ceiling the card
+ * draws `rows`, which is the arrangement it already uses for a question — full
+ * width, wrapping labels, descriptions, twenty-four of them if need be. The
+ * positional rule travels with it rather than being lost: `permissionButtons`
+ * still orders refusals first and still names one `primaryId`, and `OptionRow`
+ * draws that one filled.
  *
- *   - **By length, never by id.** Nothing here knows `accept_execpolicy_amendment`
- *     or any other agent's vocabulary. Recognising an option by its id or its
- *     wording is the guessing this codebase refuses everywhere, and it would break
- *     on the next agent to word one differently. What is measured is the property
- *     that actually breaks the layout.
- *   - **Approvals only.** A refusal is never dropped, whatever it is called. That
- *     is the one option whose absence could be read as "there was no way to say
- *     no".
- *   - **Decisions only.** More than one `allow_once` means these are *answers to a
- *     question*, not scopes of one approval — the same structural test
- *     `askedQuestion` makes, reused rather than invented. That matters because a
- *     question reaches this function at all: kimi's `AskUserQuestion` arrives down
- *     the permission channel, and when its `rawInput` is truncated or the
- *     transcript has not paged in yet, `askedQuestion` answers null and the card
- *     falls back to buttons. Filtering there deletes the *model's own answers* —
- *     measured, two of four, each one a sentence and none of them a scope of
- *     another. There is also nothing to preserve by dropping: answers carry no
- *     left/right meaning, which is the whole thing this function protects.
- *   - **Never a scope's only representative.** An over-long approval is dropped
- *     only when another option of the *same kind* survives it. That is the case
- *     this exists for — codex sends two `allow_always` and the wide one goes —
- *     and it is the only case where dropping loses nothing a person can still
- *     reach. Written as "drop everything that does not fit", it also took
- *     claude's path-scoped `Always Allow Read(//tmp/svgout/**), …`, which is 64
- *     characters and the *only* `allow_always` on that card: a standing grant
- *     that became unreachable from a phone, on the one request where the scope is
- *     the thing being decided. Symmetrically, an agent wording `allow_once` long
- *     enough would have left the permanent grant as the filled primary button,
- *     which is the opposite of what that button promises.
+ * ⚠ **This is the function `AskCard.tsx` said had never existed.** Its footer
+ * comment named `permissionLayout` as "the other half — past a certain size these
+ * stop being buttons at all", and a correction was written beneath it recording
+ * that there was no such function and that `drawableOptions` had therefore been
+ * justified partly by a fallback nobody built. Building it is what lets the
+ * deletion go.
  *
- * What is lost when it fires: the *broadest* grant on offer — a standing policy
- * rule written to the agent's disk, outliving the session — and only ever while a
- * narrower grant of the same kind is still on the card. The wide one remains
- * available where it is legible, in the agent's own terminal.
+ * **Approvals only, and never by id.** A refusal is measured but never decides the
+ * layout on its own — it is one option in a group of one and has no sibling to line
+ * up against, so a long refusal is a wide button and nothing worse. Nothing here
+ * knows `accept_execpolicy_amendment` or any other agent's vocabulary; what is
+ * measured is the property that actually breaks the layout.
  */
-export function drawableOptions(
-  options: readonly PermissionOptionSummary[],
-): readonly PermissionOptionSummary[] {
-  // Answers, not scopes. See the third narrowing above.
-  if (options.filter((option) => option.kind === "allow_once").length > 1) return options;
-  const fits = (option: PermissionOptionSummary): boolean =>
-    optionLabel(options, option).length <= BUTTON_LABEL_MAX;
-  const kept = new Set(options.map((option) => option.optionId));
-  for (const option of options) {
-    if (option.kind.startsWith("reject") || fits(option)) continue;
-    // Dropped only if somebody can still choose this scope. `kept` rather than
-    // `options` so two over-long siblings cannot each justify the other's
-    // removal and take the kind with them.
-    const survivor = options.some(
-      (other) => other.kind === option.kind && other.optionId !== option.optionId && fits(other) && kept.has(other.optionId),
-    );
-    if (survivor) kept.delete(option.optionId);
-  }
-  return kept.size === options.length ? options : options.filter((option) => kept.has(option.optionId));
+export function permissionLayout(options: readonly PermissionOptionSummary[]): "buttons" | "rows" {
+  const wide = options.some(
+    (option) =>
+      !option.kind.startsWith("reject") && optionLabel(options, option).length > BUTTON_LABEL_MAX,
+  );
+  return wide ? "rows" : "buttons";
 }
 
 export function permissionButtons(options: readonly PermissionOptionSummary[]): PermissionButtons {
-  const drawable = drawableOptions(options);
-  const refusals = drawable.filter((option) => option.kind.startsWith("reject"));
-  const rest = drawable.filter((option) => !option.kind.startsWith("reject"));
+  // Every option the agent offered, ordered. Nothing is filtered any more — see
+  // `permissionLayout` for what took the filter's place.
+  const refusals = options.filter((option) => option.kind.startsWith("reject"));
+  const rest = options.filter((option) => !option.kind.startsWith("reject"));
   // Stable inside each group, so an unknown kind keeps the place the agent gave
   // it — only `allow_once` is deliberately moved, and only to the end.
   const approvals = [
@@ -965,9 +947,9 @@ export function permissionButtons(options: readonly PermissionOptionSummary[]): 
  * approvals and all three are `kind: "allow_always"` — "Yes, and bypass
  * permissions", "Yes, and use \"auto\" mode", "Yes, and auto-accept edits". ACP's
  * enum is therefore carrying nothing that separates them, and the id is the only
- * thing that does. `drawableOptions`' first narrowing ("by length, never by id")
- * is untouched and still governs every other card; this is a named exception on
- * one measured shape, not a softening of the rule.
+ * thing that does. `permissionLayout`'s rule ("by length, never by id") is untouched
+ * and still governs every other card; this is a named exception on one measured
+ * shape, not a softening of the rule.
  *
  * Everything about it is arranged so that being wrong costs nothing:
  *
@@ -989,9 +971,9 @@ export function permissionButtons(options: readonly PermissionOptionSummary[]): 
  * already has was built here and taken back out — see Q3.454.
  *
  * **What is given up when it fires, said plainly.** `bypassPermissions` — the
- * broadest grant on the card, and the one case `drawableOptions`' fourth
- * narrowing already licenses dropping, since two narrower `allow_always` survive
- * it. And `default`, "Yes, and manually approve edits" — the only `allow_once` in
+ * broadest grant on the card, and the one this table drops on purpose rather than
+ * for want of room; nothing else in this file removes an option any more. And
+ * `default`, "Yes, and manually approve edits" — the only `allow_once` in
  * the request, i.e. *"yes, but keep asking me about every edit"*. That one is
  * outside every existing rule: after this the narrowest grant the card offers is
  * `acceptEdits`, and the reversal is one entry in {@link PLAN_ORDER}.
@@ -1312,8 +1294,16 @@ export function askedQuestion(
   return null;
 }
 
-/** The `AskUserQuestion` tool's input, validated as a shape and never by key name. */
-function readQuestions(
+/**
+ * The `AskUserQuestion` tool's input, validated as a shape and never by key name.
+ *
+ * Exported because the *transcript* wants it too, and for the same reason the card
+ * does: a settled question's own wording exists in exactly one place a client can
+ * reach — the arguments of the tool call the question was asked through — and both
+ * readers must agree about what that shape is. `tail.ts` does the join and hands
+ * the result down as a node field; see `answeredQuestions` there.
+ */
+export function readQuestions(
   input: unknown,
 ): { question: string; options: { label: string; description: string | null }[] }[] | null {
   if (typeof input !== "object" || input === null || Array.isArray(input)) return null;

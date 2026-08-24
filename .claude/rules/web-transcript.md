@@ -112,6 +112,20 @@ stays off, because it is untrusted text quoting an untrusted repository.
   exists* rather than on the request's `decision` field, which the daemon leaves
   null for the request's whole life. A question is drawn as an exchange (the
   answer entered the model's context); an approval is drawn as one line.
+- **A settled question draws what was asked, not just what was picked.**
+  `ElicitationResolvedEvent` carries `message` plus `{key, label, value}` per
+  answer, and for a multi-question form `message` is the adapter's preamble while
+  each real question sits in its field's *description*, which the resolution does
+  not carry — so the row read *"Please answer the following questions."* over four
+  bare values. `answeredQuestions` recovers the wording from the arguments of the
+  tool call `askedThrough` merges away, joining **by identity on the chosen label**
+  and never by parsing `question_0` / `<question>__other`, which are two adapters'
+  spellings of one idea. A label two questions share matches neither, because
+  attributing an answer to the wrong question is worse than attributing it to none.
+  The join is in `tail.ts` and arrives as `EventNode.asked`, the same arrangement
+  `heading` uses; `null` means *draw what you drew before* and is reached three
+  honest ways — the call is outside the window, its `rawInput` is the
+  `{truncated, bytes}` stand-in, or the form was never an `AskUserQuestion`.
 - **Consecutive plan updates are one card, drawn where the newest one landed.**
   One `TodoWrite` emits a `plan` per streaming refinement — nine events for a
   three-item list, each a full replacement — so the same checklist was drawn nine
@@ -263,24 +277,30 @@ breakpoint** — `sm:` would claim a narrow desktop window has no keyboard. The
 handler is untouched: a tablet with a bluetooth keyboard still answers on `2`.
 
 **A row of buttons carries its meaning by position, so an option that cannot be a
-button is not drawn.** With the colour removed, what says which button is which is
-*where it is*: the refusal alone on the left, the reversible approval filled on the
-right — and the halves are **nested groups rather than one row with a `flex-1`
-spacer**, because a spacer only spaces the line it is on and any wrap at all
-dissolves the rule silently.
+button gets a different layout — never a deletion.** With the colour removed, what
+says which button is which is *where it is*: the refusal alone on the left, the
+reversible approval filled on the right — and the halves are **nested groups rather
+than one row with a `flex-1` spacer**, because a spacer only spaces the line it is
+on and any wrap at all dissolves the rule silently.
 
-`drawableOptions` is the removal, and it is narrowed four ways. *By length, never
-by id*: nothing knows the string `accept_execpolicy_amendment`, because
-recognising an option by its id or its wording is the guessing this codebase
-refuses everywhere. *Approvals only* — a refusal is kept whatever it is called,
-being the one option whose absence reads as "there was no way to say no".
-*Decisions only* — more than one `allow_once` means these are a question's
-**answers** rather than one approval's scopes, the same test `askedQuestion` makes,
-and nothing is filtered. *Never a scope's only representative* — an over-long
-approval goes only when another option of the **same kind** survives it. The last
-two are not decoration and `webcheck` fails in three places without them; what is
-lost when it fires is the **broadest** grant on offer, and only ever while a
-narrower one of the same kind is still on the card. Q3.92.
+`permissionLayout` is the decision, and it is one rule: *by length, never by id* —
+nothing knows the string `accept_execpolicy_amendment`, because recognising an
+option by its id or its wording is the guessing this codebase refuses everywhere.
+Past `BUTTON_LABEL_MAX` on any **approval's** rendered label the card draws `rows`
+instead, which is the arrangement it already uses for a question. A refusal never
+decides it: alone in its group it has no sibling to line up against, so a long one
+is a wide button and nothing worse. **The positional rule travels with the switch**
+— `permissionButtons` still orders refusals first and still names one `primaryId`,
+and `OptionRow` draws that one filled.
+
+⚠ **This replaced `drawableOptions`, which deleted the option instead, and the
+reversal is Q3.470.** That function was narrowed four separate ways and every
+narrowing was a case where deleting lost something: claude's path-scoped
+`allow_always` was the only one on its card, an over-long `allow_once` handed the
+filled button to the *permanent* grant, and kimi's `AskUserQuestion` arrives down
+this channel — so two of four **model-written answers** went with nothing said.
+Measured over the live log, five of fifteen real option labels exceed the ceiling.
+A layout is this app's problem and an option is the agent's. Q3.92, Q3.470.
 
 **Two options of one `kind` is why the labels there are the agent's own.**
 `optionLabel` substitutes our word only when the kind identifies the option;

@@ -10,6 +10,7 @@ import {
   permissionButtons,
   permissionContext,
   permissionHeadline,
+  permissionLayout,
   planControls,
   detailContext,
   withheldDetail,
@@ -257,10 +258,21 @@ export function PermissionCard({
       more={more}
       busy={busy !== null}
       options={options}
-      // An answer is a row; a decision is a button. kimi's `AskUserQuestion`
-      // arrives down this route and takes the same rows claude's elicitation
-      // does, and everything else takes the confirmation-dialog row.
-      layout={asked !== null ? "rows" : "buttons"}
+      /*
+       * An answer is a row; a decision is a button. kimi's `AskUserQuestion`
+       * arrives down this route and takes the same rows claude's elicitation
+       * does, and everything else takes the confirmation-dialog row.
+       *
+       * ⚠ **The second clause is new, and it is what let `drawableOptions` go.** A
+       * decision whose labels do not fit a button row also takes rows — because the
+       * alternative, which shipped for a year, was *deleting the option that did
+       * not fit*. `permissionLayout` decides it by length and never by id, and the
+       * plan card is exempt because `PLAN_ORDER` writes our own short labels for
+       * exactly this reason. The positional rule survives the switch: refusals are
+       * still first and one option is still `primary`, which `OptionRow` draws
+       * filled.
+       */
+      layout={asked !== null || (plan === null && permissionLayout(pending.options) === "rows") ? "rows" : "buttons"}
       /*
        * **A question hides its arguments and nothing else**, and that distinction
        * is load-bearing rather than tidy.
