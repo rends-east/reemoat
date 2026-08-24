@@ -2187,6 +2187,27 @@ function hasRpcCode(error: unknown, code: number): boolean {
   );
 }
 
+/**
+ * Whether a launch failure was the agent saying it is not signed in.
+ *
+ * ⚠ **Matched on the message because that is all there is**, and exported so
+ * there is one copy of that concession rather than two. `Session.start` and
+ * `Session.resume` rewrap the ACP refusal with the agent's own `authHint` and
+ * throw a plain `Error` — no typed class survives the rewrap — so every caller
+ * that wants to tell "not signed in" from "would not start" has to read the
+ * sentence. `registry.ts` was doing exactly this inline, and `agentask.ts` needed
+ * the same answer for a different vocabulary (`502 agent_auth_required` there, a
+ * plugin-facing `model_agent_signed_out` here). Two regexes for one fact is how
+ * one of them comes to be missing a word the other has.
+ *
+ * Here rather than in `registry.ts` because this file is where the message is
+ * *written*, and both callers already import from it — the dependency runs the
+ * right way for both.
+ */
+export function isAuthRequiredMessage(message: string): boolean {
+  return /authentication required/i.test(message);
+}
+
 function isAuthRequired(error: unknown): boolean {
   return hasRpcCode(error, AUTH_REQUIRED);
 }

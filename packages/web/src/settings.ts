@@ -45,19 +45,23 @@ export interface SettingsRoute {
   section: SettingsSection | null;
   /** The machine whose agents or plugins are being configured, if the URL names one. */
   machineId: MachineId | null;
-  /** The agent being configured, if the URL names one. Never without a machine. */
-  agent: AgentId | null;
   /**
-   * The plugin being configured, if the URL names one. Never without a machine.
+   * The agent being configured, if the URL names one. Never without a machine.
    *
-   * A **sibling of `agent` rather than a widening of it**, and never both at once:
-   * they are two lists under one machine, and one field holding either would make
-   * every consumer ask which kind it is before it could do anything. `agent` is
-   * validated against a closed set because it is handed to `PUT /agent-auth/:agent`;
-   * a plugin id is not — the set is whatever is installed on that daemon, so an
-   * unknown one draws the chooser rather than being refused here.
+   * ⚠ **There is no `plugin` beside it any more, and its absence is the
+   * decision.** A plugin used to have a leaf here — `…/plugins/:pluginId` — which
+   * is where its settings were drawn, four taps into a sheet, behind a kebab, on
+   * one machine at a time. Nobody found it. A plugin's settings now live on the
+   * plugin's own page under `/plugins`, which is the one screen in this app that
+   * is *about* a plugin and spans the machines it is on; this sheet keeps what is
+   * genuinely per-machine — what is installed, whether it is switched on, and
+   * taking it off — and links out for the rest.
+   *
+   * `…/plugins/:pluginId` still **parses**, to the machine holding the list, for
+   * the same reason `…/agents` does: an address that used to work should land on
+   * the nearest real screen rather than on nothing.
    */
-  plugin: string | null;
+  agent: AgentId | null;
 }
 
 export interface SectionSpec {
@@ -164,28 +168,27 @@ export function parseSettingsRoute(
 ): SettingsRoute {
   const section = parseSettingsSection(segments[0]);
   if (section !== "machines" || segments[1] === undefined) {
-    return { section, machineId: null, agent: null, plugin: null };
+    return { section, machineId: null, agent: null };
   }
   const machine = machineId(decode(segments[1]));
   /*
-   * Two lists under a machine now, and the segment after it is what says which.
-   * Anything else — including the machine's own screen — drops to the machine, which
-   * is the "fall up to the nearest real screen" posture this function already had.
+   * ⚠ **`…/plugins` and `…/plugins/:pluginId` both fall to the machine**, which
+   * is the "fall up to the nearest real screen" posture this function already
+   * had, applied to a leaf that has been taken away. The plugin list is drawn on
+   * the machine's own screen, so `…/plugins` was always the machine; the id below
+   * it used to open that plugin's settings and now opens nothing here, because
+   * those live on the plugin's page under `/plugins`.
+   *
+   * Landing on the machine rather than redirecting to the new address: this
+   * function is pure and a redirect is a navigation, and the machine's screen is
+   * one tap from the plugin anyway — every row on it is a link to exactly that
+   * page.
    */
-  if (segments[2] === "plugins") {
-    const wanted = segments[3] === undefined ? null : decode(segments[3]);
-    return { section, machineId: machine, agent: null, plugin: wanted };
-  }
   if (segments[2] !== "agents" || segments[3] === undefined) {
-    return { section, machineId: machine, agent: null, plugin: null };
+    return { section, machineId: machine, agent: null };
   }
   const wanted = decode(segments[3]);
-  return {
-    section,
-    machineId: machine,
-    agent: isAgentId(wanted) ? wanted : null,
-    plugin: null,
-  };
+  return { section, machineId: machine, agent: isAgentId(wanted) ? wanted : null };
 }
 
 /**
@@ -216,24 +219,6 @@ export function settingsPath(
 }
 
 /**
- * The path for one plugin's settings, on one machine.
- *
- * A separate builder rather than a fourth positional on {@link settingsPath},
- * because the two leaves are **mutually exclusive** and a signature able to take
- * both would be a signature able to express a URL nothing parses. Same reason
- * `SettingsRoute` keeps them as two fields.
- *
- * **There is no path for "this machine's plugins" and that is deliberate**, in
- * exactly the way there is none for its agents: both lists are drawn *inside* the
- * machine's own screen, so the machine's path is the list's path. A bare
- * `…/plugins` still parses — to the machine, which is the screen holding the list
- * — for the same reason `…/agents` does, and the round trip is asserted.
- */
-export function pluginSettingsPath(machine: MachineId, plugin: string): string {
-  return `/settings/machines/${encodeURIComponent(machine)}/plugins/${encodeURIComponent(plugin)}`;
-}
-
-/**
  * One level up from a settings screen, or `null` at the index.
  *
  * This is `Settings.tsx`'s `closeTo` expression, lifted out of the component —
@@ -260,11 +245,10 @@ export function pluginSettingsPath(machine: MachineId, plugin: string): string {
 export function settingsUp(route: SettingsRoute): { path: string; withinNav: boolean } | null {
   if (route.section === null) return null;
   if (route.section === "machines" && route.machineId !== null) {
-    // One plugin goes up to its machine, exactly as one agent does — both lists
-    // are drawn on that screen, so there is no list depth in between. `false`
-    // because neither is a row the nav draws, which makes the chevron the only
-    // way back at every width.
-    if (route.plugin !== null || route.agent !== null) {
+    // One agent goes up to its machine — the list is drawn on that screen, so
+    // there is no list depth in between. `false` because it is not a row the nav
+    // draws, which makes the chevron the only way back at every width.
+    if (route.agent !== null) {
       return { path: settingsPath("machines", route.machineId), withinNav: false };
     }
     return { path: settingsPath("machines"), withinNav: false };

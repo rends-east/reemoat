@@ -341,6 +341,52 @@ export class DaemonClient {
     return this.machine.upload<PluginInstalled>(`/plugins?name=${encodeURIComponent(file.name)}`, file, onProgress, signal);
   }
 
+  /**
+   * Install a plugin the *daemon* fetches, from a commit the catalogue pinned.
+   *
+   * ⚠ **The browser cannot be the courier here, and that is measured rather than
+   * chosen.** `codeload.github.com` answers `access-control-allow-origin:
+   * https://render.githubusercontent.com`, so a cross-origin fetch for the
+   * archive is refused before it leaves this page — there is no header the
+   * catalogue could send that would change it. So the machine fetches its own
+   * bytes, and what crosses this wire is a repository, a commit, and what the
+   * person was shown.
+   *
+   * `consent` is what the disclosure screen actually drew, read from
+   * `plugin.json` at that same commit. The daemon compares its own parse against
+   * it and refuses with `plugin_consent_broken` **before starting the plugin** —
+   * which is stronger than the upload path's after-the-fact `consentBroken`, and
+   * has to be, because nothing in this browser ever opened the archive.
+   *
+   * Answers `PluginInstalled`, exactly as {@link installPlugin} does, down to
+   * `replaced`. It is the same act on the same host reached by a different door,
+   * and a caller that can read one answer can read the other.
+   */
+  /**
+   * Install from a pinned commit, on this machine.
+   *
+   * ⚠ **`signal` is not optional decoration: without it this route was the one
+   * install in the client that could not be called off.** `request` already
+   * composes a caller's signal with its own deadline (`withTimeout(timeout,
+   * init.signal)`), so the plumbing was there and only this method declined to
+   * use it — which is invisible from the call site, because a `MachineInstalls`
+   * install closure that simply omits the parameter is still assignable to
+   * `InstallAct`. The daemon unpacks and starts the plugin either way, so an
+   * un-abortable fan-out is a plugin arriving on machines after somebody pressed
+   * Cancel.
+   */
+  installPluginFromSource(
+    source: { kind: "github"; repo: string; commit: string },
+    consent: { scopes: readonly string[]; net: readonly string[]; hooks: readonly string[] } | null,
+    signal?: AbortSignal,
+  ): Promise<PluginInstalled> {
+    return this.machine.request<PluginInstalled>("/plugins/source", {
+      method: "POST",
+      body: JSON.stringify({ source, ...(consent === null ? {} : { consent }) }),
+      ...(signal === undefined ? {} : { signal }),
+    });
+  }
+
   removePlugin(pluginId: string): Promise<{ removed: boolean }> {
     return this.machine.request<{ removed: boolean }>(`/plugins/${encodeURIComponent(pluginId)}`, { method: "DELETE" });
   }

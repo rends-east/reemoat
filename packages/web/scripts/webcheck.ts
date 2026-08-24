@@ -3397,11 +3397,255 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
     }
   }
 
-  // Both counts, for the reason the sweep above states: a pattern that matches
-  // nothing passes silently, and this one has two patterns to get wrong.
-  check("the plugin sweep actually found the controls", [tapped >= 1, small >= 8], [true, true]);
+  /*
+   * Both counts, for the reason the sweep above states: a pattern that matches
+   * nothing passes silently, and this one has two patterns to get wrong.
+   *
+   * ⚠ **`small` fell from 8 to 6, and the fall is the improvement rather than a
+   * regression to accommodate.** `PluginRow` used to draw up to four outlined
+   * `size="sm"` buttons in a wrap — Open, Settings, Switch off, Remove — which was
+   * the standing counterexample to `web-shell.md`'s rule that everything else a
+   * settings row can do sits behind **one kebab**. They are `RowAction`s now, and
+   * `MENU_ROW` is `min-h-11` at every pointer, so the four controls that left this
+   * count did not get smaller: they stopped needing an escape hatch. What remains
+   * is `PluginView`'s four (a plugin's own row actions, drawn by somebody who is
+   * not this app) and the two-step confirm this row keeps — and the assertion
+   * below is what proves the four went somewhere rather than away.
+   */
+  check("the plugin sweep actually found the controls", [tapped >= 1, small >= 6], [true, true]);
   check("nothing on a plugin's own surface is under 44px", shortPlugin, []);
   check("and every small control there keeps the coarse-pointer floor", bareSmall, []);
+
+  /*
+   * ⚠ **Where those four controls went, asserted off the file rather than
+   * assumed.** The count above dropping is only good news if the acts moved into
+   * a menu; if somebody deleted them instead, that check would go *greener* while
+   * the screen lost the only way to switch a plugin off. So this reads
+   * `PluginsPanel.tsx` off disk and requires the kebab and its four rows — the
+   * same shape `webcheck` already uses to hold `SessionBrowser` to calling
+   * `pinnedFor` and `orphansFor`.
+   *
+   * `Remove` carries `danger` because it is the one act here that destroys
+   * something: uninstalling takes the plugin's `plugin_data` with it and nothing
+   * brings that back. `RowAction`'s own docblock argues why that is a tone on a
+   * menu row rather than a `DangerButton`.
+   */
+  {
+    const panel = readFileSync(new URL("../src/ui/settings/PluginsPanel.tsx", import.meta.url), "utf8");
+    /*
+     * ⚠ **`Settings` is deliberately *not* in this list any more, and the check
+     * below is what stops it coming back.** A plugin's settings are on the
+     * plugin's own page; a second entry here would be a second door to one pane,
+     * which is how the one nobody uses drifts from the one they do.
+     */
+    const wanted = ['label="Open"', 'label="Remove"', "danger", "<Menu", "IconButton"];
+    check(
+      "a machine's plugin row keeps every act, behind one kebab",
+      wanted.filter((needle) => !panel.includes(needle)),
+      [],
+    );
+    check("and offers no settings of its own", panel.includes('label="Settings"'), false);
+    /*
+     * ⚠ **The row is a link, and the link is the whole answer to "where are this
+     * plugin's settings".** Without this, deleting the `Settings` entry above
+     * reads as an improvement while leaving a screen that lists plugins and can
+     * reach none of them.
+     */
+    check("and the row itself opens the plugin", /marketEntryPath\(plugin\.id\)/.test(panel), true);
+    /*
+     * ⚠ **The wall of scope prose is gone from this row and must not return.**
+     * Every scope was drawn here as a sentence, on every row, on every machine —
+     * identical text about a plugin whose permissions are one tap away on its own
+     * page. It is the table's only other reader that ever existed, so an import of
+     * it here is the shape the regression takes.
+     */
+    check("and does not restate every permission on it", panel.includes("PLUGIN_SCOPE_TEXT"), false);
+    // The switch is the one whose label is computed, so it cannot be a literal —
+    // and it is the act that would be silently lost by the deletion this guards.
+    check(
+      "including the switch, whose label depends on which way it is",
+      /label=\{plugin\.enabled \? "Switch off" : "Switch on"\}/.test(panel),
+      true,
+    );
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Where a plugin's settings are, and what the permissions line says.
+   *
+   * ⚠ **Three shapes read off disk, because all three are decisions about
+   * *placement* and nothing in the type system can hold one.** Each was asked for
+   * in as many words, and each has a plausible-looking edit that undoes it while
+   * everything still compiles and every other check stays green.
+   * ---------------------------------------------------------------- */
+  {
+    const sheet = readFileSync(new URL("../src/ui/plugins/PluginsSheet.tsx", import.meta.url), "utf8");
+    const entry = readFileSync(new URL("../src/ui/plugins/MarketEntry.tsx", import.meta.url), "utf8");
+    /*
+     * ⚠ **Settings are a screen of their own, reached by the gear in the head.**
+     * They were a section on the entry page — under a permissions fold, above an
+     * install control, on a page that also carries a version history, which is a
+     * form buried in a brochure. Both halves are asserted: the gear exists and
+     * goes to the settings path, and the page below no longer draws the pane. One
+     * without the other is either a control that goes nowhere or two doors to one
+     * screen.
+     */
+    check("the head carries a gear", /marketSettingsPath\(/.test(sheet), true);
+    check("and draws the settings screen", /<PluginSettingsScreen/.test(sheet), true);
+    check("and the entry page draws no settings of its own", /PluginSettings/.test(entry), false);
+    /*
+     * ⚠ **The gear is conditional on a machine actually reporting a pane.** Drawn
+     * unconditionally it opens a screen whose whole content is a sentence saying
+     * there is nothing here — a control that exists to disappoint.
+     */
+    check("the gear asks whether there is anything to configure", /offersSettings\(/.test(sheet), true);
+    /*
+     * ⚠ **An entry is drawn whether or not this instance has a catalogue, and the
+     * sheet testing `base` first is what made `Offline` unreachable.** An instance
+     * with no `REEMOAT_CP_PLUGIN_CATALOGUE_URL` is an ordinary deployment — the
+     * file says so two comments away — and on it every plugin row in the settings
+     * sheet and on the Installed tab opened the *market's* sentence, "there is
+     * nothing to browse", about a plugin sitting on the person's own disk. Removal
+     * across the fleet vanished with it, since that lives in `MachineInstalls`
+     * inside `MarketEntry`.
+     *
+     * Both halves, because either alone is the bug: the sheet must hand a nullable
+     * base straight to `MarketEntry`, and `MarketEntry` must answer a null one
+     * with `Offline` rather than a spinner that never resolves — `useCatalogue`
+     * answers `null` for ever on a null base by design.
+     */
+    /*
+     * ⚠ **Pinned positively, because the interesting failure is not restoring the
+     * old ternary.** Asserting the absence of `base === null ? <Empty>` is
+     * satisfied by `base={base ?? ""}`, which is the *worse* form of the same
+     * defect: `MarketEntry`'s null arm never fires, `useCatalogue` answers `null`
+     * for ever on an empty base, and every catalogue-less instance gets an entry
+     * screen that is a spinner which never resolves. So the base must reach the
+     * component untouched.
+     */
+    check("the base reaches the entry untouched", /<MarketEntry state=\{state\} base=\{base\}/.test(stripComments(sheet)), true);
+    check("and MarketEntry takes a nullable base", /base: string \| null;/.test(entry), true);
+    /*
+     * ⚠ **The market's own install closure must take and forward the signal.** It
+     * took two parameters against a four-parameter `InstallAct` and TypeScript
+     * accepted it — fewer parameters is assignable, silently — so the signal was
+     * dropped here while `MachineInstalls` drew the Cancel that belongs to it.
+     * Pressing it aborted controllers nothing listened to and the plugin landed on
+     * every ticked machine anyway. Both halves: the closure names the parameter,
+     * and the daemon call receives it.
+     */
+    check(
+      "and its install closure forwards the cancellation signal",
+      /const install: InstallAct = async \(daemon, machineId, _onProgress, signal\)/.test(stripComments(entry)) &&
+        /installPluginFromSource\([\s\S]{0,220}\n\s*signal,\n\s*\);/.test(stripComments(entry)),
+      true,
+    );
+    /*
+     * And the method it calls actually has somewhere to put it — a route that
+     * declines the parameter is the same defect one layer down, and `request`
+     * already composes a caller's signal with its own deadline.
+     */
+    {
+      const daemonSrc = stripComments(
+        readFileSync(new URL("../src/daemon.ts", import.meta.url), "utf8"),
+      );
+      check(
+        "and the source-install route accepts one",
+        /installPluginFromSource\([\s\S]{0,320}signal\?: AbortSignal,[\s\S]{0,320}signal \}\),/.test(daemonSrc),
+        true,
+      );
+    }
+    /*
+     * ⚠ **The sheet must consult the origin, not merely have one available.**
+     * `market.ts`'s own assertions cover `marketUpFrom` as a pure function; they
+     * say nothing about whether this file calls it, so reverting one import here
+     * left the ◀ pointing at the market again with every pure check still green.
+     */
+    check("the sheet resolves its way up through the origin", /marketUpFrom\(route, origin\)/.test(stripComments(sheet)), true);
+    check(
+      "and answers a missing catalogue with the page a file-installed plugin gets",
+      /if \(base === null\) \{[\s\S]{0,200}<Offline/.test(entry),
+      true,
+    );
+  }
+  {
+    const consent = readFileSync(new URL("../src/ui/PluginConsent.tsx", import.meta.url), "utf8");
+    /*
+     * ⚠ **The permissions are behind the fold, not on it.** The closed line
+     * carried a comma-separated summary of the scopes, which truncated mid-word in
+     * the width it actually has — so the closed state disclosed two capabilities
+     * out of four and hid the rest behind an ellipsis, while the control's own
+     * label shared the row with them. A truncated permission list is worse than no
+     * list, because it looks complete.
+     *
+     * Asserted on the *closed line's own children* rather than on the absence of a
+     * word: one element, and it says what the control is.
+     */
+    const opens = consent.indexOf("aria-expanded={open}");
+    const closed = consent.slice(opens, consent.indexOf("</button>", opens));
+    check("the closed line has one thing on it", (closed.match(/<span/g) ?? []).length, 1);
+    check("and it is the name of the control", />Permissions</.test(closed), true);
+    check("the fold takes no summary to draw there", /function Disclosure\(\{ first, children \}/.test(consent), true);
+    /*
+     * ⚠ **And nothing hangs under the closed line either.** The sentence that
+     * qualifies the whole list — *a plugin runs on this machine as you* — stood
+     * outside the fold, so the card's closed state was a collapsed row with a
+     * paragraph beneath it, which reads as a caption for a control rather than as
+     * a caveat about a list nobody has opened. It is the conclusion of that list
+     * and belongs at the end of it.
+     */
+    const honest = consent.indexOf("A plugin runs on this machine as you");
+    const closes = consent.indexOf("</Disclosure>");
+    check("the sentence about what a plugin really is exists", honest >= 0, true);
+    check("and it is inside the fold, not a caption under it", honest >= 0 && closes > honest, true);
+  }
+  {
+    /*
+     * Comments stripped before the search, because this file *argues* about the
+     * element it must not contain — and a lock that its own docblock satisfies is
+     * a lock that passes over the deleted code it was written to protect.
+     */
+    const view = readFileSync(new URL("../src/ui/PluginView.tsx", import.meta.url), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+    /*
+     * ⚠ **A plugin's `select` is drawn with this app's own picker, never a native
+     * `<select>`.** It was one, wearing the shared `FIELD` class — and a native
+     * select keeps the platform's chrome unless *every* one of `appearance`, the
+     * border, the radius and the arrow is overridden, so what shipped was a
+     * system-drawn outline in a form of `edge-strong` boxes, opening a menu in the
+     * operating system's colours. It read, in the screenshot that ended it, as a
+     * stylesheet that had failed to load.
+     *
+     * Asserted as the absence of the element rather than the presence of
+     * `Dropdown`: a second `<select>` added anywhere in this file is the same
+     * regression, and only the absence catches it.
+     */
+    check("no plugin field is a native select", /<select[\s>]/.test(view), false);
+    check("and the picker it uses is the app's own", /<Dropdown/.test(view), true);
+  }
+  {
+    const menu = readFileSync(new URL("../src/ui/SessionMenu.tsx", import.meta.url), "utf8");
+    /*
+     * ⚠ **Stop is the last row of this menu at every install.** Plugin rows used
+     * to sit *under* it, on a rule that read "never above Stop" — and what that
+     * produced is the opposite of what it was protecting: the red row with no way
+     * back stopped being last the moment anything was installed, and sat in the
+     * middle of a list of somebody else's words. Above the separator, Stop is last
+     * whatever is installed, which is a stronger version of the same property.
+     */
+    const offersAt = menu.indexOf("offers.map(");
+    const stopAt = menu.indexOf('label="Stop"');
+    check("a plugin's rows are drawn before Stop", offersAt >= 0 && stopAt > offersAt, true);
+    /*
+     * ⚠ **And the row cannot wrap.** `"Rename this session · Auto title"` in a
+     * 208px panel wrapped to a second line, which made one row twice the height of
+     * every other and moved Stop down by however long a plugin author's title
+     * happened to be. Two elements, so the plugin's name gives way before the verb
+     * does.
+     */
+    check("the action and the plugin's name are two elements", /note=\{offer\.plugin\.name\}/.test(menu), true);
+    check("and both of them truncate", (menu.match(/truncate/g) ?? []).length >= 2, true);
+  }
 
   /*
    * ⚠ **And the other half of the exemption above, which was written down as a
@@ -4524,6 +4768,8 @@ process.stdout.write("\nwhat is actually on screen\n");
       "m_b/other",
       "m_b/done",
     ]);
+    // Nothing is unreachable under All, so the band that exists because one
+    // machine is on screen at a time has nothing to lift.
     // Nothing is unreachable under All, so the band that exists because one
     // machine is on screen at a time has nothing to lift.
     check("and nothing has to be lifted, because nothing is elsewhere", waitingFloor(groups, view).length, 0);
@@ -12149,7 +12395,6 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     SECTION_SPECS,
     parseSettingsRoute,
     parseSettingsSection,
-    pluginSettingsPath,
     settingsPath,
     sectionAllowed,
     visibleSections,
@@ -12208,12 +12453,12 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "a machine path round-trips",
     parseSettingsRoute(seg(settingsPath("machines", "m_1" as never))),
-    { section: "machines", machineId: "m_1", agent: null, plugin: null },
+    { section: "machines", machineId: "m_1", agent: null },
   );
   check(
     "an agent path round-trips",
     parseSettingsRoute(seg(settingsPath("machines", "m_1" as never, "kimi"))),
-    { section: "machines", machineId: "m_1", agent: "kimi", plugin: null },
+    { section: "machines", machineId: "m_1", agent: "kimi" },
   );
   // Three refusals, each falling *up* to the nearest real screen rather than to
   // a 404 — `parseSettingsSection`'s posture, one level down.
@@ -12230,12 +12475,12 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "a segment that is not `agents` drops to the machine",
     parseSettingsRoute(["machines", "m_1", "sessions", "kimi"]),
-    { section: "machines", machineId: "m_1", agent: null, plugin: null },
+    { section: "machines", machineId: "m_1", agent: null },
   );
   check(
     "a machine id under another section is ignored",
     parseSettingsRoute(["account", "m_1", "agents", "kimi"]),
-    { section: "account", machineId: null, agent: null, plugin: null },
+    { section: "account", machineId: null, agent: null },
   );
   /*
    * The decoder is threaded in rather than applied inside, so the one place that
@@ -12249,74 +12494,54 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     "m 1",
   );
 
-  check("one plugin's path", pluginSettingsPath("m_1" as never, "board"), "/settings/machines/m_1/plugins/board");
-  check(
-    "one plugin's path round-trips",
-    parseSettingsRoute(seg(pluginSettingsPath("m_1" as never, "board"))),
-    { section: "machines", machineId: "m_1", agent: null, plugin: "board" },
-  );
   /*
-   * A bare `…/plugins` falls to the machine, which is the screen the list is
-   * drawn on — the same answer `…/agents` gives, and the reason there is no
-   * builder for either list: the machine's path is the list's path.
+   * ⚠ **There is no plugin leaf under a machine any more, and these are the
+   * assertions that say so rather than the absence of any.** A plugin's settings
+   * moved to the plugin's own page under `/plugins`; what stays here is the list,
+   * which is drawn on the machine's screen. So `…/plugins` and
+   * `…/plugins/:pluginId` both answer *the machine* — the "fall up to the nearest
+   * real screen" posture this parser already had, now covering an address that
+   * used to resolve to something.
+   *
+   * Both forms are pinned, not just the bare one: the deep form is the address
+   * somebody may have bookmarked or been linked, and the failure it must not have
+   * is landing nowhere.
    */
   check(
     "a bare plugins segment is the machine",
     parseSettingsRoute(["machines", "m_1", "plugins"]),
-    { section: "machines", machineId: "m_1", agent: null, plugin: null },
+    { section: "machines", machineId: "m_1", agent: null },
+  );
+  check(
+    "and so is one that still names a plugin",
+    parseSettingsRoute(["machines", "m_1", "plugins", "board"]),
+    { section: "machines", machineId: "m_1", agent: null },
+  );
+  check(
+    "including one nobody has installed",
+    parseSettingsRoute(["machines", "m_1", "plugins", "not-installed"]),
+    { section: "machines", machineId: "m_1", agent: null },
   );
   /*
-   * A plugin id is **not** validated against a known set, unlike an agent id, and
-   * this is the assertion that says so on purpose. An agent id is handed to
-   * `PUT /agent-auth/:agent`, which refuses an unknown one — so an unvalidated id
-   * would draw a screen whose every control 400s. The set of plugin ids is
-   * whatever is installed on that daemon, which this client cannot know before it
-   * has asked, so an unknown one reaches the screen and the screen says it is not
-   * installed.
+   * ⚠ **Nothing in this module builds that path any more.** `pluginSettingsPath`
+   * is gone, and this reads the file rather than the module because a deleted
+   * export cannot be asserted absent by importing it — `typecheck` catches a call
+   * site, and catches nothing about a *string* somebody hand-writes back into a
+   * `navigate`.
    */
-  check(
-    "an unknown plugin id survives the parse",
-    parseSettingsRoute(["machines", "m_1", "plugins", "not-installed"]).plugin,
-    "not-installed",
-  );
-  check(
-    "a plugin id is decoded like every other segment",
-    parseSettingsRoute(["machines", "m_1", "plugins", "a%20b"], decodeURIComponent).plugin,
-    "a b",
-  );
+  {
+    const source = readFileSync(new URL("../src/settings.ts", import.meta.url), "utf8");
+    check("settings.ts builds no path to a plugin", /plugins\/\$\{/.test(source), false);
+  }
   /*
-   * The rule the type deliberately does not express, asserted over every shape
-   * this parser can produce rather than over the two that would break it today.
+   * One agent walks up to its machine, because the list is drawn on it. It was a
+   * pair with a plugin's leaf; the plugin half is gone, and this is what is left
+   * of the rule rather than a rule that quietly stopped covering anything.
    */
   check(
-    "agent and plugin are never both set",
-    [
-      ["machines", "m_1", "agents", "kimi"],
-      ["machines", "m_1", "plugins", "board"],
-      ["machines", "m_1", "plugins"],
-      ["machines", "m_1"],
-      ["machines", "m_1", "sessions", "x"],
-      ["account", "m_1", "plugins", "board"],
-    ]
-      .map((segments) => parseSettingsRoute(segments))
-      .filter((route) => route.agent !== null && route.plugin !== null),
-    [],
-  );
-  /*
-   * One plugin and one agent walk to the same place, because both lists are drawn
-   * on it. Asserted as a *pair* rather than twice, so the day one of them grows a
-   * list depth of its own the other is visibly the odd one out.
-   */
-  check(
-    "a plugin and an agent both go up to their machine",
-    [
-      settingsUp({ section: "machines", machineId: "m_1" as never, agent: null, plugin: "board" }),
-      settingsUp({ section: "machines", machineId: "m_1" as never, agent: "kimi", plugin: null }),
-    ],
-    [
-      { path: "/settings/machines/m_1", withinNav: false },
-      { path: "/settings/machines/m_1", withinNav: false },
-    ],
+    "an agent goes up to its machine",
+    settingsUp({ section: "machines", machineId: "m_1" as never, agent: "kimi" }),
+    { path: "/settings/machines/m_1", withinNav: false },
   );
 
   const plain = { id: "u_1", name: "ada", isAdmin: false };
@@ -13665,10 +13890,17 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
   // the assertion — the AGPL §13 offer is drawn beside these screens and decides
   // none of them. A fixture carrying a URL here would hide a future predicate
   // that started keying on it.
-  const off = { registration: "off", email: false, source: null } as const;
-  const offMail = { registration: "off", email: true, source: null } as const;
-  const openLocal = { registration: "open", email: false, source: null } as const;
-  const openMail = { registration: "open", email: true, source: null } as const;
+  /*
+   * ⚠ **`catalogue` is on all four rather than on the one case that reads it**,
+   * and that is `parseSettingsRoute`'s `plugin` lesson arriving one file over: a
+   * fixture missing a field reads as `undefined`, `?? null` is true for that, and
+   * the assertion that was supposed to fail passes. The compiler is what catches
+   * it here, so the field is written out rather than spread in.
+   */
+  const off = { registration: "off", email: false, source: null, catalogue: null } as const;
+  const offMail = { registration: "off", email: true, source: null, catalogue: null } as const;
+  const openLocal = { registration: "open", email: false, source: null, catalogue: null } as const;
+  const openMail = { registration: "open", email: true, source: null, catalogue: null } as const;
 
   /* ---- the wire body actually becomes one of those ---- */
 
@@ -13709,7 +13941,19 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
   const VERSION = literalIn("VERSION");
   const wireSource = { url: SOURCE_URL, version: VERSION };
 
-  const instanceWireBody = (mode: { enabled: boolean; requiresEmail: boolean }, configured: boolean): unknown => {
+  /*
+   * ⚠ **`catalogue` is a third free variable, and it has to be supplied here for
+   * the same reason the §13 constants are.** The handler closes over
+   * `pluginCatalogueUrl`, so a `new Function` that did not pass it throws a
+   * `ReferenceError` at call time rather than asserting anything — which is what
+   * this span is *for*: a field added to that payload is a field this driver
+   * either spans or breaks on, never one it silently ignores.
+   */
+  const instanceWireBody = (
+    mode: { enabled: boolean; requiresEmail: boolean },
+    configured: boolean,
+    catalogue: string | null = null,
+  ): unknown => {
     const source = appSource.split("\n");
     const open = source.findIndex((line) => line.startsWith('  app.get("/v1/instance"'));
     if (open < 0) throw new Error("app.ts no longer registers GET /v1/instance at the top level of its routes");
@@ -13725,6 +13969,7 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
       "mailConfigured",
       "SOURCE_URL",
       "VERSION",
+      "pluginCatalogueUrl",
       "db",
       "c",
       source.slice(open + 1, close).join("\n"),
@@ -13734,6 +13979,7 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
       () => ({ configured }),
       SOURCE_URL,
       VERSION,
+      catalogue,
       {},
       { json: (value: unknown) => value },
     ) as unknown;
@@ -13749,6 +13995,39 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
     parseInstanceConfig(instanceWireBody({ enabled: false, requiresEmail: false }, false)),
     { ...off, source: wireSource },
   );
+  /*
+   * ⚠ **The catalogue address, across the same span, in both states.** The market
+   * is unreachable without it and the CSP is built from the same variable — so
+   * the field going missing from the payload, or arriving under a different key,
+   * is a Plugins pop-up that silently has no Market tab on every instance in the
+   * fleet. Asserted through the server's own handler rather than against a
+   * fixture, which is what makes it a span rather than a second transcription.
+   */
+  check(
+    "the catalogue address survives the wire",
+    parseInstanceConfig(instanceWireBody({ enabled: true, requiresEmail: true }, true, "https://plugins.example"))
+      ?.catalogue,
+    "https://plugins.example",
+  );
+  check(
+    "and an instance with none says so rather than leaving it undefined",
+    parseInstanceConfig(instanceWireBody({ enabled: true, requiresEmail: true }, true))?.catalogue,
+    null,
+  );
+  /*
+   * A scheme-less value is no catalogue. It would otherwise resolve **relative to
+   * this origin**, and the control plane's SPA fallback answers such a path with
+   * `index.html` — so the market would fetch the app's own HTML and report the
+   * catalogue as malformed, which is a confusing way to say "that URL is wrong".
+   * `isAbsoluteHttpUrl` is the same guard the §13 offer already gets, and for the
+   * same reason.
+   */
+  check(
+    "and a scheme-less one is refused rather than resolved against this origin",
+    parseInstanceConfig(instanceWireBody({ enabled: true, requiresEmail: true }, true, "plugins.example"))?.catalogue,
+    null,
+  );
+
   check(
     "registration off with mail configured survives the wire too",
     parseInstanceConfig(instanceWireBody({ enabled: false, requiresEmail: false }, true)),
@@ -15308,13 +15587,12 @@ process.stdout.write("\nwhat a navigation moves\n");
   const session = { name: "session", ref: { machineId: "m", sessionId: "s" } } as never;
   const other = { name: "session", ref: { machineId: "m", sessionId: "t" } } as never;
   const gate = { name: "gate", screen: "register" } as never;
-  const index = { name: "settings", section: null, machineId: null, agent: null, plugin: null } as never;
-  const account = { name: "settings", section: "account", machineId: null, agent: null, plugin: null } as never;
-  const users = { name: "settings", section: "users", machineId: null, agent: null, plugin: null } as never;
-  const machines = { name: "settings", section: "machines", machineId: null, agent: null, plugin: null } as never;
-  const oneMachine = { name: "settings", section: "machines", machineId: "m", agent: null, plugin: null } as never;
-  const oneAgent = { name: "settings", section: "machines", machineId: "m", agent: "claude", plugin: null } as never;
-  const onePlugin = { name: "settings", section: "machines", machineId: "m", agent: null, plugin: "board" } as never;
+  const index = { name: "settings", section: null, machineId: null, agent: null } as never;
+  const account = { name: "settings", section: "account", machineId: null, agent: null } as never;
+  const users = { name: "settings", section: "users", machineId: null, agent: null } as never;
+  const machines = { name: "settings", section: "machines", machineId: null, agent: null } as never;
+  const oneMachine = { name: "settings", section: "machines", machineId: "m", agent: null } as never;
+  const oneAgent = { name: "settings", section: "machines", machineId: "m", agent: "claude" } as never;
 
   check("opening a conversation pushes a screen", navMove(home, session), "push");
   check("and leaving it pops one", navMove(session, home), "pop");
@@ -15331,15 +15609,20 @@ process.stdout.write("\nwhat a navigation moves\n");
   check("and one agent deeper again", navMove(oneMachine, oneAgent), "section-push");
   check("walking back up pops each time", navMove(oneAgent, oneMachine), "section-pop");
   /*
-   * Plugins are the second list under a machine and sit at the *same* depths as
-   * agents, so the sheet moves the same way into and out of both. Asserted rather
-   * than assumed, because `depthOf` decides it with two tests that could easily
-   * have been written as one — and one of them would have made every navigation
-   * into a plugin's settings `null`, i.e. a teleport.
+   * ⚠ **A plugin is no longer a depth in this sheet, and the URL that used to be
+   * one has to agree.** Its settings moved to the plugin's own page under
+   * `/plugins`, so `…/plugins/:pluginId` parses to the machine — and `depthOf`
+   * has to answer the machine's depth for it, or a stale link animates against a
+   * screen nobody is on. Driven through the parser rather than through a
+   * hand-written literal, because the literal is what would keep agreeing with a
+   * shape that no longer exists.
    */
-  check("a machine's plugins are the same depth as its agents", navMove(oneMachine, onePlugin), "section-push");
-  check("and walking back out pops", navMove(onePlugin, oneMachine), "section-pop");
-  check("switching between the two lists moves nothing", navMove(oneAgent, onePlugin), null);
+  {
+    const { parseSettingsRoute } = await import("../src/settings.js");
+    const stale = { name: "settings", ...parseSettingsRoute(["machines", "m", "plugins", "board"]) } as never;
+    check("a stale plugin address is the machine's depth", navMove(oneMachine, stale), null);
+    check("and walking to it from Machines is one push, like the machine itself", navMove(machines, stale), "section-push");
+  }
 
   /*
    * **Closing goes down, opening does not go anywhere.** The enter is
@@ -15689,12 +15972,11 @@ process.stdout.write("\nwhat Telegram's own control does\n");
   const home = { name: "home" } as never;
   const gate = { name: "gate", screen: "register" } as never;
   const session = { name: "session", ref: { machineId: "m", sessionId: "s" } } as never;
-  const index = { name: "settings", section: null, machineId: null, agent: null, plugin: null } as never;
-  const account = { name: "settings", section: "account", machineId: null, agent: null, plugin: null } as never;
-  const machines = { name: "settings", section: "machines", machineId: null, agent: null, plugin: null } as never;
-  const oneMachine = { name: "settings", section: "machines", machineId: "m", agent: null, plugin: null } as never;
-  const oneAgent = { name: "settings", section: "machines", machineId: "m", agent: "claude", plugin: null } as never;
-  const onePlugin = { name: "settings", section: "machines", machineId: "m", agent: null, plugin: "board" } as never;
+  const index = { name: "settings", section: null, machineId: null, agent: null } as never;
+  const account = { name: "settings", section: "account", machineId: null, agent: null } as never;
+  const machines = { name: "settings", section: "machines", machineId: null, agent: null } as never;
+  const oneMachine = { name: "settings", section: "machines", machineId: "m", agent: null } as never;
+  const oneAgent = { name: "settings", section: "machines", machineId: "m", agent: "claude" } as never;
 
   /*
    * **`null` is the answer, not the absence of one.** Telegram has one control:
@@ -15716,10 +15998,17 @@ process.stdout.write("\nwhat Telegram's own control does\n");
    */
   check("a section goes up to the section list", upFrom(account, "/m/m_1/s/s_1"), "/settings");
   check("an agent goes up to its machine", upFrom(oneAgent, "/"), "/settings/machines/m");
-  // Two lists under a machine, and each walks one level rather than jumping to
-  // the section — the same rule the agent depths keep, which is what stops the
-  // ◀ and the ✕ becoming the same control.
-  check("a plugin goes up to its machine, like an agent", upFrom(onePlugin, "/"), "/settings/machines/m");
+  /*
+   * ⚠ **A plugin has no depth of its own here any more**, so the address that
+   * used to have one goes up wherever the machine goes — not to the machine.
+   * Driven through the parser rather than a literal: the literal is what would
+   * keep asserting a walk out of a screen that no longer exists.
+   */
+  {
+    const { parseSettingsRoute } = await import("../src/settings.js");
+    const stale = { name: "settings", ...parseSettingsRoute(["machines", "m", "plugins", "board"]) } as never;
+    check("a stale plugin address goes up wherever its machine does", upFrom(stale, "/"), "/settings/machines");
+  }
   check("a machine goes up to Machines", upFrom(oneMachine, "/"), "/settings/machines");
   check("and Machines goes up to the list", upFrom(machines, "/"), "/settings");
   // At the index there is no level left inside the sheet, so up leaves it — for
@@ -15906,8 +16195,299 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
       check(`${name} is readable on the daemon's side at all`, theirs.length > 0 && theirs[0]?.startsWith("<") !== true, true);
       check(`and the client's ${name} holds exactly the same members`, membersOf(clientSrc, name), theirs);
     }
+    /*
+     * ⚠ **Every interface mirrored on both sides, field for field — and until this
+     * existed, nothing compared a single one of them.**
+     *
+     * The four unions above were checked because a union member is a value that
+     * shows up in a `switch`. An *interface* field is not: a field added to
+     * `SessionSnapshot` on the daemon and not copied here compiles on both sides,
+     * ships, and is `undefined` at runtime on the one screen that reads it. This
+     * file's own header admits the hazard — *"this file can drift"* — and then
+     * nothing was watching the largest thing that can.
+     *
+     * ⚠ **`daemon ⊆ client`, never equality**, and the direction is the whole
+     * design: every field added after the first release is *optional* here on
+     * purpose, because an older daemon does not send it. Requiring the two sets to
+     * match would fail on that deliberate asymmetry and be turned off within a
+     * week. What is not allowed is the client knowing *less* than the daemon says.
+     *
+     * ⚠ **Two things this got wrong on its first run, and both were the check
+     * rather than the code.** `indexOf("export interface Me")` matched
+     * `MemoryEventStore`, so an unrelated type was compared against a
+     * control-plane one; and following `extends` was not implemented, so
+     * `AgentConfigEvent extends AgentConfig` read as a mirror missing two fields.
+     * Both reported drift that was not there. A checker that cries wolf is worse
+     * than none, so it resolves `extends` and anchors the name — and the fact that
+     * it currently finds **nothing** is the assertion, not a shrug.
+     */
+    /** Interfaces whose `extends` names something this reader could not find. */
+    const unresolvedParents: string[] = [];
+    const fieldsOf = (src: string, name: string, seen = new Set<string>()): string[] | null => {
+      if (seen.has(name)) return [];
+      seen.add(name);
+      const clean = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+      const head = new RegExp(`export interface ${name}\\s*(extends\\s+([\\w, ]+))?\\s*\\{`).exec(clean);
+      if (head === null) return null;
+      const out: string[] = [];
+      for (const parent of (head[2] ?? "").split(",").map((one) => one.trim()).filter(Boolean)) {
+        const inherited = fieldsOf(src, parent, seen);
+        /*
+         * ⚠ **A parent this cannot find is recorded, never treated as empty.**
+         * Silently contributing nothing makes an interface look *smaller* than it
+         * is — and on the daemon's side that means the sweep compares fewer
+         * fields and reports no drift about the half it could not read. That is
+         * the failure mode this whole sweep exists to prevent, reappearing inside
+         * it: the check goes quiet exactly where it stopped working.
+         */
+        if (inherited === null) unresolvedParents.push(`${name} extends ${parent}`);
+        else out.push(...inherited);
+      }
+      let depth = 0;
+      /*
+       * ⚠ **One rule with one name: what is inside a bracket belongs to the
+       * bracket, whichever bracket it is.**
+       *
+       * This began as a counter for parentheses alone, to stop a function-typed
+       * field's parameters being read as fields — a real hole, since `handler: (id:
+       * string) => void` is only refused on one line by the accident that the token
+       * reads `(id`, and across lines `id` arrives clean.
+       *
+       * Then the same shape turned up in square brackets. A labelled tuple —
+       * `pair: [label: string, other: number]` — leaks on **both** forms here:
+       * `{one, pair, other}` on one line, `{one, pair, label, other}` across
+       * several. A second private counter would have made three overlapping
+       * guards, so it is one instead. Nothing in either mirrored file uses either
+       * shape today; the one match in `registry.ts` is inside a docblock and is
+       * stripped before this reads.
+       *
+       * Braces stay separate because they are not only nesting: they also delimit
+       * the interface body, which is why knocking *them* out breaks the reader
+       * outright rather than isolating a property. See the fixtures.
+       *
+       * An index signature — `[key: string]: T` — yields nothing under this, and
+       * that is **correct by accident of the rule rather than by decision**: its
+       * name simply sits inside brackets. Written down so it is not read later as
+       * something anybody chose.
+       */
+      let inner = 0;
+      let token = "";
+      for (let i = clean.indexOf("{", head.index); i < clean.length; i += 1) {
+        const c = clean[i] ?? "";
+        if (c === "{") {
+          depth += 1;
+          token = "";
+          continue;
+        }
+        if (c === "}") {
+          depth -= 1;
+          token = "";
+          if (depth === 0) break;
+          continue;
+        }
+        if (c === "(" || c === "[") {
+          inner += 1;
+          token = "";
+          continue;
+        }
+        if (c === ")" || c === "]") {
+          inner -= 1;
+          token = "";
+          continue;
+        }
+        // Nothing inside a parameter list or a tuple is a field of this interface.
+        if (inner > 0) continue;
+        // Depth 1 only: a nested object type's own members belong to it, not here.
+        if (depth !== 1) continue;
+        if (c === ":") {
+          const field = token.trim().replace(/\?$/, "");
+          if (/^[A-Za-z_]\w*$/.test(field)) out.push(field);
+          token = "";
+        } else if (c === ";" || c === "\n" || c === ",") token = "";
+        else token += c;
+      }
+      return [...new Set(out)].sort();
+    };
+
+    const registrySrc = readFileSync(new URL("../../../src/registry.ts", import.meta.url), "utf8");
+    const eventsSrc = readFileSync(new URL("../../../src/events.ts", import.meta.url), "utf8");
+    const mirrored = [...new Set([...clientSrc.matchAll(/export interface (\w+)/g)].map((one) => one[1] ?? ""))];
+    const behind: string[] = [];
+    let compared = 0;
+    for (const name of mirrored) {
+      const theirs = [registrySrc, eventsSrc, daemonSrc].map((src) => fieldsOf(src, name)).find((one) => one !== null);
+      if (theirs === undefined || theirs === null) continue;
+      compared += 1;
+      const ours = fieldsOf(clientSrc, name) ?? [];
+      const missing = theirs.filter((field) => !ours.includes(field));
+      if (missing.length > 0) behind.push(`${name} lacks ${missing.join(", ")}`);
+    }
+    /*
+     * A floor on the count, because the sweep's failure mode is finding nothing to
+     * compare — a renamed file, a changed declaration spelling — and reporting
+     * "no drift" about zero interfaces. `SessionSnapshot` is named outright for
+     * the same reason: it is the one that matters most and the one whose absence
+     * from the sweep would be least visible.
+     */
+    /*
+     * ⚠ **The negative control, and without it "the anchor works" is a belief.**
+     *
+     * This reader matched with `indexOf` at first, so `"export interface Me"`
+     * found `MemoryEventStore` and compared two unrelated types. Anchoring the
+     * name fixed it — but a fix nothing exercises is indistinguishable from a fix
+     * that does nothing, and every assertion below would pass either way.
+     *
+     * So: a name that is a strict *prefix* of real declarations and is itself
+     * declared nowhere must resolve to **nothing**. `Session` is a prefix of
+     * `SessionSnapshot`, `SessionExit`, `SessionWorkspace` and more, and there is
+     * no `interface Session`. Unanchored, this returns `SessionSnapshot`'s fields.
+     *
+     * The second half is what stops the first from passing for the wrong reason:
+     * if the reader were simply broken, everything would return `null` and the
+     * prefix assertion would be green about a tool that reads nothing at all.
+     *
+     * ⚠ **Knocked out one defence at a time, because "will it fall" and "from
+     * what" are different questions and only the second is worth knowing.** There
+     * is exactly one thing separating `Session` from `SessionResumeState` here:
+     * the pattern requires the name to be followed immediately by whitespace, an
+     * `extends`, or the brace. There is no word boundary beside it doing the work
+     * in parallel. Measured both ways — replacing the whole pattern with an
+     * `indexOf`, and the narrower, likelier edit of allowing anything between the
+     * name and the brace (`[^{]*\{`) — and both fail this line, returning
+     * `SessionResumeState`'s four fields.
+     *
+     * So this is a fact about the reader as it stands, not a tripwire waiting for
+     * a future edit. That distinction is worth stating because the alternative is
+     * real: a control can survive its own defence being removed because some
+     * *other* strictness happens to hold, and then it reads for ever as proof of
+     * something it never tested.
+     */
+    check("a name that is only a prefix of real ones matches nothing", fieldsOf(registrySrc, "Session"), null);
+    check("while the real one it is a prefix of still reads", (fieldsOf(registrySrc, "SessionSnapshot") ?? []).length > 20, true);
+    /*
+     * An `extends` naming something unfindable is a refusal rather than a quiet
+     * shortfall — see `fieldsOf`. Empty today; the day it is not, the sweep says
+     * which interface it stopped being able to read instead of going quiet.
+     */
+    /*
+     * ⚠ **The second property of this reader, and the one whose failure is
+     * silent.** Depth-1 only: a nested object type's members belong to it, not to
+     * the interface around it. `contextUsage` on the client's snapshot is written
+     * inline — `{ used; size; cost: { amount; currency } }` — so the only thing
+     * keeping `used` and `amount` out of the field list is the depth guard.
+     *
+     * And a break there would go **unreported by everything else here**, which is
+     * why it earns a line of its own: the comparison asks whether the client is
+     * missing a field the daemon has, and a depth break makes the client's list
+     * *larger*. Bigger passes. The sweep would run, stay green, and be comparing
+     * a shape neither file declares.
+     *
+     * `used` and `amount` are named rather than a count, on the same grounds as
+     * the prefix control next door: a count survives the field list changing for
+     * any other reason, and these two names exist in exactly one place.
+     */
+    const clientSnapshot = fieldsOf(clientSrc, "SessionSnapshot") ?? [];
+    check(
+      "a nested object's members are not counted as the interface's own",
+      ["used", "size", "amount", "currency"].filter((field) => clientSnapshot.includes(field)),
+      [],
+    );
+    check("while the field that holds them is", clientSnapshot.includes("contextUsage"), true);
+    /*
+     * ⚠ **Three properties, three fixtures, each written in the form where a
+     * *different* defence is the only thing holding.**
+     *
+     * Two defences and one assertion is either redundancy or two properties under
+     * one name, and nothing but knocking them out one at a time tells you which.
+     * Here it is the second: single-line nesting is held by the depth counter, and
+     * a parameter list by the paren counter, and neither covers the other. Written
+     * only in the shapes the mirrored files happen to use today, one of the two
+     * could be deleted with every line below staying green — which is how a
+     * control comes to be named after a property it never touches.
+     *
+     * On fixtures rather than on the real files on purpose: these are claims about
+     * the *reader*, and a reader is not allowed to be correct only for the input
+     * it has been shown. None of these forms exists in `wire.ts` today.
+     *
+     * ⚠ **Measured, and one of the two cannot be isolated.** Removing the bracket
+     * rule fails exactly its own four — parameters, the tuple twice, the index
+     * signature — and nothing else. Removing the *brace* rule fails four as well,
+     * but they include the plain positive: braces are not only nesting here, they
+     * also delimit the interface body, so knocking them out stops the reader
+     * reading at all. That is loud, but it is weaker evidence than the other, and
+     * saying "each falls on its own" would overstate it.
+     */
+    const NESTED = "export interface Fixture {\n  one: string;\n  nest: {\n    inner: string;\n  } | null;\n}";
+    const PARAMS = "export interface Fixture {\n  one: string;\n  handler: (\n    id: string,\n    at: number,\n  ) => void;\n}";
+    const TUPLE = "export interface Fixture {\n  one: string;\n  pair: [\n    label: string,\n    other: number,\n  ];\n}";
+    const FLAT = "export interface Fixture {\n  one: string;\n  pair: [label: string, other: number];\n}";
+    check("it reads the fields of a plain interface", fieldsOf(NESTED, "Fixture"), ["nest", "one"]);
+    check(
+      "and does not count a nested object's members, when the nesting spans lines",
+      fieldsOf(NESTED, "Fixture")?.includes("inner"),
+      false,
+    );
+    check("and does not count a function-typed field's parameters", fieldsOf(PARAMS, "Fixture"), ["handler", "one"]);
+    check("nor a labelled tuple's, across lines", fieldsOf(TUPLE, "Fixture"), ["one", "pair"]);
+    /*
+     * ⚠ **The one-line form of the tuple is asserted too, unlike the one-line
+     * forms above, and the difference is measured rather than assumed.** A
+     * one-line parameter list is refused anyway — the token reads `(id`, which is
+     * not an identifier — so a fixture in that shape would assert nothing. A
+     * one-line tuple is *not*: the comma resets the token and `other` arrives
+     * clean, so this shape leaked `{one, pair, other}` and this line is the only
+     * thing that says it no longer does.
+     */
+    check("and not on one line either, where the comma used to let the second through", fieldsOf(FLAT, "Fixture"), ["one", "pair"]);
+    /*
+     * An index signature reads as nothing. Asserted so the behaviour is pinned,
+     * not because it was chosen — see `fieldsOf`, where it is called out as
+     * correct by accident of the bracket rule.
+     */
+    check("an index signature contributes no field", fieldsOf("export interface Fixture {\n  one: string;\n  [key: string]: unknown;\n}", "Fixture"), ["one"]);
+    check("no interface inherits from something this reader cannot find", unresolvedParents, []);
+    /*
+     * ⚠ **A lock on a named limit, not a control on a defence — and the two have
+     * different shelf lives.** A control asks whether a guard still works and
+     * breaks when the code breaks. This asks whether the behaviour is still the one
+     * anybody agreed to, and breaks when the *intent* changes.
+     *
+     * The limit: this reader follows `extends` to another **interface** and no
+     * further. `extends` naming a type alias — `type X = Omit<Y, "z">` — cannot be
+     * expanded, and the answer is a refusal carrying the name rather than an
+     * interface that silently reads short.
+     *
+     * ⚠ **That was written down in prose and pinned by nothing.** The line above
+     * asserts the list is *empty*, which stays true if the recording never
+     * happens at all — so the half that mattered, that an unfollowable parent is
+     * loud, was a sentence. Every place either of us got this wrong today was a
+     * property described in words and not asserted; prose about a tool is debt,
+     * because prose does not run.
+     */
+    const before = unresolvedParents.length;
+    const ALIAS = "type Base = { a: string };\nexport interface Child extends Base {\n  b: string;\n}";
+    check("an interface whose parent is not an interface still reads its own fields", fieldsOf(ALIAS, "Child"), ["b"]);
+    check("and the parent it could not follow is named rather than passed over", unresolvedParents.slice(before), [
+      "Child extends Base",
+    ]);
+    report("there are mirrored interfaces to compare at all", compared >= 40, `${compared} interfaces`);
+    check("and the session snapshot is one of them", fieldsOf(registrySrc, "SessionSnapshot") !== null, true);
+    check("no interface this client mirrors knows less than the daemon's own", behind, []);
+
     const daemonTags = tagsOf(daemonSrc);
-    check("the block union is readable on the daemon's side at all", daemonTags, ["columns", "form", "list", "notice", "text"]);
+    /*
+     * ⚠ **Compared against the daemon's own constant rather than a list typed out
+     * here.** It used to be a hand-written `["columns", "form", "list", "notice",
+     * "text"]`, which was a second copy of the union in the one file whose whole
+     * job is to catch second copies drifting.
+     *
+     * The constant exists because the five are now *printed to a person*: a view
+     * carrying a `type` nobody knows is answered with a notice naming it and
+     * naming these. A sentence that listed them separately would be a third copy,
+     * and the one that goes in front of somebody who is already confused.
+     */
+    const { PLUGIN_BLOCK_TYPES } = await import("../../../src/plugins/protocol.js");
+    check("the block union is readable on the daemon's side at all", daemonTags, [...PLUGIN_BLOCK_TYPES].sort());
     check("and the client draws exactly the blocks the daemon can send", tagsOf(clientSrc), daemonTags);
   }
 
@@ -15916,6 +16496,7 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
     readView,
     seedForm,
     pluginFailure,
+    ConsentBrokenError,
     pluginPath,
     pluginDestination,
     pluginStateText,
@@ -16031,6 +16612,104 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
   check("and its value survives", form?.type === "form" ? form.fields[0]?.value : null, null);
   check("a form with no submit label still has one", form?.type === "form" ? form.submit : null, "Save");
 
+  /* ---------------------------------------------------------------- *
+   * The settings surface, narrowed on this side as well as on the daemon's.
+   *
+   * ⚠ **Both halves are needed and they cover different moments.** The daemon
+   * clamps the view it answers a *read* with, which is what produces the notice a
+   * plugin author sees. It cannot clamp an **action's** answer, because an action
+   * reaches it as an action id that says which action and never which pane was
+   * pressed — the same submit comes from a form on a screen and from a form on a
+   * settings pane. The component drawing the pane is the only thing that knows,
+   * so this side is what makes the bound hold at all times rather than only on a
+   * reload.
+   *
+   * Every assertion is paired with its screen control: dropping a `list` is only
+   * right if a screen still draws one.
+   * ---------------------------------------------------------------- */
+  {
+    const listy = { type: "list", rows: [{ id: "a" }], empty: "" };
+    check("a screen draws a list", readBlock(listy, "screen")?.type ?? null, "list");
+    check("a settings pane does not", readBlock(listy, "settings"), null);
+    check("nor a two-column board", readBlock({ type: "columns", columns: [] }, "settings"), null);
+    /*
+     * `text` and `notice` are not settings — they are the sentence above a control
+     * and the warning beside it, and a form with no way to say anything about
+     * itself is a worse pane rather than a stricter one.
+     */
+    check(
+      "but the words around a form survive",
+      [readBlock({ type: "text", text: "x" }, "settings")?.type ?? null, readBlock({ type: "notice", text: "x" }, "settings")?.type ?? null],
+      ["text", "notice"],
+    );
+    /*
+     * ⚠ **With its tone, because for a plugin with no screen this is the whole
+     * diagnostic channel.** A hook's failure has nobody waiting on it — nothing
+     * asked, so nothing is owed an error, and there is no session left to warn
+     * through. The first plugin this narrowing hit kept its record of refusals in
+     * a `list` on its settings pane for exactly that reason. Drawn in the ordinary
+     * ink a danger notice is a diagnostic nobody reads, so the tone is asserted
+     * and not merely the block surviving.
+     */
+    const danger = readBlock({ type: "notice", text: "could not rename", tone: "danger" }, "settings");
+    check(
+      "and a danger notice keeps being one",
+      danger?.type === "notice" ? [danger.tone, danger.text] : null,
+      ["danger", "could not rename"],
+    );
+    const kinds = (surface: "screen" | "settings"): (string | null)[] => {
+      const one = readBlock(
+        {
+          type: "form",
+          action: "save",
+          fields: ["text", "password", "number", "toggle", "select"].map((kind) => ({ key: kind, label: kind, kind })),
+        },
+        surface,
+      );
+      return one?.type === "form" ? one.fields.map((field) => field.kind) : [];
+    };
+    check("a screen keeps all five field kinds", kinds("screen"), ["text", "password", "number", "toggle", "select"]);
+    /*
+     * ⚠ **`password` narrowing to a visible box is the one that looks like a
+     * regression and is not.** The value is kept in `plugin_data`, a column in a
+     * plaintext SQLite file every process running as this uid can read, so the
+     * mask was an assurance nothing here can keep — offered on the screen where a
+     * false one costs most.
+     */
+    check("a settings pane keeps three, and the other two are a text box", kinds("settings"), [
+      "text",
+      "text",
+      "text",
+      "toggle",
+      "select",
+    ]);
+    // Fail-open on both surfaces: an unsupported kind is still a control somebody
+    // can read and submit, never a dropped one.
+    check(
+      "and every field still round-trips",
+      (() => {
+        const one = readBlock(
+          { type: "form", action: "save", fields: [{ key: "k", label: "L", kind: "password", value: "v" }] },
+          "settings",
+        );
+        return one?.type === "form" ? [one.fields.length, one.fields[0]?.key ?? null, one.fields[0]?.value ?? null] : null;
+      })(),
+      [1, "k", "v"],
+    );
+    /*
+     * ⚠ **The default is the wide surface.** A call site that has not been told
+     * which pane it is drawing keeps today's behaviour rather than silently
+     * deleting somebody's controls — the same direction the daemon's default
+     * takes, for the same reason.
+     */
+    check("an untold caller gets the screen's vocabulary", readBlock(listy)?.type ?? null, "list");
+    check(
+      "and `readView` carries the surface down to every block",
+      readView({ blocks: [{ type: "text", text: "x" }, listy] }, "settings").blocks.map((one) => one.type),
+      ["text"],
+    );
+  }
+
   /*
    * Every field is a string on the wire, including a toggle, so there is one
    * narrowing rather than five — and an unset toggle is off rather than empty.
@@ -16092,6 +16771,19 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
   check("a bad manifest keeps the daemon's words", failed(400, "manifest_invalid", "id must be…"), "id must be…");
   check("a code this client has never seen falls through to the message", failed(400, "brand_new_code", "the daemon's words"), "the daemon's words");
   check("and something that is not an ApiError at all", pluginFailure(new Error("x")), "That did not work. Try again.");
+  /*
+   * ⚠ **The one sentence on the consent screen that may not be replaced.** The
+   * fan-out paths raise a broken consent by *throwing*, so the row lands on
+   * `failed` with its box unticked — and a plain `Error` fell through the arm
+   * above, deleting the naming of which scope was gained and telling the person to
+   * try the install again. The generic arm is asserted on the line above so that
+   * this one is the exception rather than a widening of it.
+   */
+  check(
+    "a broken consent keeps its words rather than becoming Try again",
+    pluginFailure(new ConsentBrokenError("That plugin asked for more than this screen showed: net.")),
+    "That plugin asked for more than this screen showed: net.",
+  );
 
   /* ---------------------------------------------------------------- *
    * Which plugins are offered where.
@@ -16445,7 +17137,19 @@ process.stdout.write("\nwhat somebody is shown before a plugin is sent anywhere\
 
   /** `tarOf`, plus the header fields an honest tar writer also uses. */
   const tarWith = (
-    members: readonly { name: string; body: string; prefix?: string; typeflag?: string }[],
+    members: readonly {
+      name: string;
+      body: string;
+      prefix?: string;
+      typeflag?: string;
+      /**
+       * The twelve raw bytes of the size field, for a fixture that has to spell a
+       * size the way an archiver would rather than the way this helper does —
+       * which today means GNU base-256. Written over the octal below, so the
+       * padding and the checksum are still computed the same way.
+       */
+      sizeField?: Buffer;
+    }[],
   ): Buffer => {
     const parts: Buffer[] = [];
     for (const member of members) {
@@ -16456,6 +17160,7 @@ process.stdout.write("\nwhat somebody is shown before a plugin is sent anywhere\
       head.write("000000 \0", 108);
       head.write("000000 \0", 116);
       head.write(data.length.toString(8).padStart(11, "0") + " ", 124);
+      if (member.sizeField !== undefined) member.sizeField.copy(head, 124, 0, 12);
       head.write("00000000000 ", 136);
       head.write("        ", 148);
       head.write(member.typeflag ?? "0", 156);
@@ -16551,6 +17256,72 @@ process.stdout.write("\nwhat somebody is shown before a plugin is sent anywhere\
     ["sessions.read", "sessions.write", "files.read", "store"],
   );
 
+  // 6. The GNU base-256 size field. `tarNumber` decodes it and `tarOctal` stripped
+  //    it to nothing and read zero, so this walk advanced one block instead of
+  //    past the member and resumed inside somebody's file body — where a synthetic
+  //    root manifest and a zero block are cheap to plant. Refused, like the long
+  //    names above, rather than decoded a second time.
+  const base256 = Buffer.alloc(12);
+  base256[0] = 0x80;
+  base256.writeUInt32BE(Buffer.byteLength(EVIL, "utf8"), 8);
+  const binarySize = await peek(
+    tarWith([
+      { name: "wrap/plugin.json", body: MANIFEST },
+      { name: "wrap/server.js", body: "export {}" },
+      { name: "big.bin", body: EVIL, sizeField: base256 },
+      { name: "server.js", body: "export {}" },
+    ]),
+  );
+  check("a binary tar size field is refused rather than read as zero", binarySize.kind, "unreadable");
+
+  // 7. The member named with spaces. `tarString` trimmed and an empty name ended
+  //    the walk, so this stopped where `extractTgz` carried on — and everything
+  //    after it was described to nobody. The end of a tar is an all-zero block.
+  const spacedName = await peek(
+    tarWith([
+      { name: "wrap/plugin.json", body: MANIFEST },
+      { name: "wrap/server.js", body: "export {}" },
+      { name: "   ", body: "not a terminator" },
+      { name: "plugin.json", body: EVIL },
+      { name: "server.js", body: "export {}" },
+    ]),
+  );
+  check(
+    "a member named with spaces does not end the walk, so the root manifest still wins",
+    spacedName.kind === "ok" ? spacedName.manifest.id : `unreadable: ${spacedName.kind}`,
+    "evil",
+  );
+  check(
+    "and it is that manifest's scopes on the screen",
+    spacedName.kind === "ok" ? spacedName.manifest.scopes : null,
+    ["sessions.read", "sessions.write", "files.read", "store"],
+  );
+
+  /** `zipOf`, with the last directory record claiming a name that runs off the end. */
+  const zipOverrunning = (files: Record<string, string>): Buffer => {
+    const honest = zipOf(files);
+    const end = honest.length - 22;
+    const cdOffset = honest.readUInt32LE(end + 16);
+    const cdSize = honest.readUInt32LE(end + 12);
+    let at = cdOffset;
+    let last = cdOffset;
+    while (at + 46 <= cdOffset + cdSize && honest.readUInt32LE(at) === 0x02014b50) {
+      last = at;
+      at += 46 + honest.readUInt16LE(at + 28) + honest.readUInt16LE(at + 30) + honest.readUInt16LE(at + 32);
+    }
+    honest.writeUInt16LE(honest.readUInt16LE(last + 28) + 4, last + 28);
+    return honest;
+  };
+
+  // 8. The over-declared central-directory name. `central` is directory-sized on
+  //    the daemon so `subarray` clamped and it read `plugin.json`; this slices the
+  //    same field out of the whole file and ran into the trailing end record,
+  //    getting four bytes of junk on the name and declining it. Both refuse now.
+  const overrun = await peek(
+    zipOverrunning({ "wrap/plugin.json": MANIFEST, "wrap/server.js": "export {}", "plugin.json": EVIL }),
+  );
+  check("a zip directory entry that runs past the directory is refused", overrun.kind, "unreadable");
+
   /*
    * ...and the half that does not depend on this reader having been right.
    *
@@ -16626,6 +17397,1500 @@ process.stdout.write("\nwhat somebody is shown before a plugin is sent anywhere\
     /Install without reading it/.test(panelSrc),
     "the unreadable path is a separate control",
   );
+
+  /*
+   * ⚠ **The same gate on the path that reaches a whole fleet, which is the one
+   * that did not have it.** `plugins.md`: an archive that cannot be read says so,
+   * and the way past is a separate, named press. `PluginsPanel` above kept that
+   * and was pinned; `InstalledList` drew its machine multi-select for an
+   * unreadable archive too, so every box was an ordinary install and the
+   * `consentBroken` check on the way back was skipped along with it — the wider
+   * blast radius with the weaker gate. This file was read by no driver at all,
+   * which is how it stayed that way.
+   */
+  const fleetSrc = readFileSync(new URL("../src/ui/plugins/InstalledList.tsx", import.meta.url), "utf8");
+  report(
+    "the fleet-wide import charges that press too",
+    /Install without reading it/.test(fleetSrc),
+    "the unreadable path is a separate control here as well",
+  );
+  report(
+    "and draws no machine list until it has been paid",
+    /peek\.kind === "ok" \|\| unread/.test(fleetSrc),
+    "MachineInstalls is gated on a readable archive or the named press",
+  );
+  /*
+   * ⚠ **The archive's own version reaches the draft, or an import cannot update
+   * anything.** Without `available`, `behind` is empty on every row, so an import
+   * of a plugin the fleet already has drafts nothing: `draftAct` answers
+   * `{act: "reinstall", ready: false}` and the button is drawn disabled, carrying
+   * a word for an act it will not perform. The only remaining route to an update
+   * was untick → Remove → re-tick, and Remove takes `plugin_data` with it — the
+   * destructive path as the only path, on the screen whose entire purpose is
+   * putting a build onto a fleet.
+   */
+  report(
+    "the archive's version reaches the draft, so an import can update",
+    /available=\{shown\?\.version \?\? null\}/.test(stripComments(fleetSrc)),
+    "MachineInstalls is told what version this file is",
+  );
+  /*
+   * ⚠ **The signal has to reach the request, not merely exist as a parameter.**
+   * The first version of this asserted only that no controller was minted here,
+   * which a caller satisfies by taking the parameter and then dropping it — and
+   * that is exactly what happened one file over, where a two-parameter closure was
+   * silently assignable to a four-parameter `InstallAct`. So this pins the whole
+   * expression: the signal this closure was handed is the signal the upload gets.
+   */
+  report(
+    "and the signal it is handed is the one the upload uses",
+    /daemon\.installPlugin\(file, onProgress, signal\)/.test(stripComments(fleetSrc)),
+    "the caller's signal reaches installPlugin verbatim",
+  );
+  /*
+   * ⚠ **A caller here may not construct its own controller.** This read
+   * `new AbortController().signal` — built and dropped on one expression, so
+   * nothing could ever abort it — which is the defect `PluginsPanel` describes in
+   * the past tense one file over while keeping a real one in a ref. The screen
+   * that reaches a *whole fleet* had it, so the wider blast radius carried the
+   * weaker control. The signal is the fourth argument of `InstallAct` now and
+   * `MachineInstalls` owns one per machine.
+   */
+  report(
+    "and it never mints an abort signal of its own",
+    // Comments stripped: the docblock at the call site quotes the old expression
+    // verbatim, which is the point of it, and an assertion that its own
+    // explanation trips is an assertion nobody can write the explanation for.
+    !/new AbortController\(\)/.test(stripComments(fleetSrc)),
+    "the signal comes from MachineInstalls, which can therefore cancel it",
+  );
+  /*
+   * ⚠ **The foot is inert while the fan-out runs.** Neither control was gated —
+   * `busy` lives inside `MachineInstalls` and this component could not see it — so
+   * "Done", a word that reads as *finish*, unmounted the component mid-flight:
+   * every remaining upload continued invisibly and every answer, a
+   * `ConsentBrokenError` naming a gained scope included, landed on nothing.
+   */
+  /*
+   * ⚠ **Every button in the foot's confirming branch, sliced and counted against
+   * itself.** Counting `disabled={sending}` twice is satisfied by writing it twice
+   * anywhere; what matters is that no `<Button>` in that branch lacks it. The
+   * slice runs from the ternary's else-arm to the end of the row, so a third
+   * control added there fails until it is gated too.
+   */
+  const foot = (() => {
+    const src = stripComments(fleetSrc);
+    const start = src.indexOf('phase.kind !== "confirming" ?');
+    return start < 0 ? "" : src.slice(start, src.indexOf("</div>", start));
+  })();
+  const footButtons = foot.match(/<Button[^>]*>/g) ?? [];
+  report(
+    "and its foot cannot abandon an act in flight",
+    footButtons.length >= 3 &&
+      footButtons.filter((b) => /disabled=/.test(b)).length === footButtons.length &&
+      /onBusyChange=\{setSending\}/.test(stripComments(fleetSrc)),
+    "every control in the foot is gated, and the busy flag is lifted from MachineInstalls",
+  );
+}
+
+process.stdout.write("\nwhere a failed install or removal is said, and how much of it survives\n");
+{
+  /*
+   * ⚠ **`MachineInstalls.tsx` was read by no driver at all**, which is how the
+   * whole of a failed fan-out came to be reported inside a panel that is collapsed
+   * and `inert` — with "All machines" sitting *above* the disclosure, so the one
+   * gesture that reaches the fleet is the one that never opens it. Nothing typed
+   * can hold a placement, so it is read off the file, the posture `InstalledList`
+   * and `PluginsPanel` are already held to a few lines up.
+   */
+  const installsSrc = readFileSync(new URL("../src/ui/plugins/MachineInstalls.tsx", import.meta.url), "utf8");
+
+  report(
+    "a row landing on failed opens the list holding the reason",
+    /if \(row\?\.kind === "failed"\) setOpen\(true\)/.test(installsSrc),
+    "write() opens the fold on a failure",
+  );
+  report(
+    "and nothing else moves the panel under a thumb",
+    (installsSrc.match(/setOpen\(true\)/g) ?? []).length === 1,
+    "exactly one unconditional open, and it is the failure's",
+  );
+  /*
+   * ⚠ **Anchored on the fold itself rather than on any prose.** `inert={!open}` is
+   * the collapsing container, so this asks a structural question — is the sentence
+   * drawn past the thing that hides it — and a rewording of the foot's comment
+   * cannot quietly turn the clause into a tautology that still reports ok.
+   */
+  report(
+    "the failure is named outside the collapsed panel as well",
+    installsSrc.indexOf("{failure}") > installsSrc.indexOf("inert={!open}") &&
+      installsSrc.indexOf("{failure}") > installsSrc.lastIndexOf("</ul>"),
+    "the summary line is drawn past the list and past the fold",
+  );
+  /*
+   * ⚠ **Mounted unconditionally, only its text swapping** — `Toast` and
+   * `EventList` both record that a `role="status"` inserted into the DOM in the
+   * same paint as its content is commonly not spoken at all, VoiceOver on iOS
+   * included. The conditional belongs on the class, never on the element.
+   */
+  /*
+   * ⚠ **The label stays beside the spinner rather than being replaced by it.**
+   * `Spinner` is `aria-hidden` and carries no text, so `{busy ? <Spinner /> :
+   * label}` produced a button with neither an accessible name nor a visible one —
+   * a grey box holding a glyph, on the control that puts somebody else's code onto
+   * a fleet. `PluginsPanel` already draws its spinner beside a percentage.
+   */
+  report(
+    "a working button still says what it is doing",
+    /\{busy && <Spinner \/>\}\s*\n\s*\{label\}/.test(installsSrc) && !/busy \? <Spinner \/> : label/.test(installsSrc),
+    "the spinner joins the label instead of replacing it",
+  );
+  /*
+   * ⚠ **A fan-out can be called off.** A 2 MiB archive going to twelve machines
+   * from a phone is minutes of upload with every box and the button disabled by
+   * `busy` and no third control — the act was unstoppable on the screen with the
+   * widest reach. One controller per machine, so cancelling or failing one does
+   * not abort the others, and the button is drawn only while there is something to
+   * abort.
+   */
+  /*
+   * ⚠ **A fan-out can be called off, and the assertion is the *linkage* rather
+   * than the presence of a controller.** Asserting only that a map of controllers
+   * exists is satisfied while the signal handed to the upload is some other
+   * signal — which is precisely how this shipped broken once: a two-parameter
+   * closure was silently assignable to a four-parameter `InstallAct`, so the
+   * signal went nowhere while Cancel was still drawn. So: the job's own controller
+   * is what goes into the map, and its signal is what the install is handed.
+   */
+  const installsBody = stripComments(installsSrc);
+  report(
+    "and it can be called off while it runs",
+    /const controller = what === "install" && install !== null \? new AbortController\(\) : null;/.test(installsBody) &&
+      /if \(controller !== null\) inFlight\.current\.set\(id, controller\);/.test(installsBody) &&
+      /controller\.signal,/.test(installsBody) &&
+      /onClick=\{cancelAll\}/.test(installsBody),
+    "one controller per install job, registered, and its signal is what the act uses",
+  );
+  /*
+   * ⚠ **Cancel is drawn from the act, never from the screen's capability.** It was
+   * gated on `install !== null` — a fact about which screen this is — so a
+   * removal-only act, which holds no controller at all, drew a live Cancel that
+   * did nothing. `cancellable` is set from the drafted jobs.
+   */
+  report(
+    "and the control appears only when something can be called off",
+    /\{busy && cancellable && \(/.test(installsBody) && /setCancellable\(adding\.length > 0\)/.test(installsBody),
+    "the button is derived from the act's own abortable jobs",
+  );
+  /*
+   * ⚠ **Called off is asked per request, not per act.** An act-wide flag silenced
+   * a *removal's* failure — which `cancelAll` promises to let run — and killed the
+   * `plugin_busy` retry, so a 409 arriving after Cancel cleared its row instead of
+   * asking again 1.5s later. `calledOff` reads the job's own signal, and a removal
+   * has no controller, so it is never called off and always reports.
+   */
+  report(
+    "and calling it off is not drawn as a failure",
+    /const calledOff = \(\): boolean => controller\?\.signal\.aborted === true;/.test(installsBody) &&
+      (installsBody.match(/if \(calledOff\(\)\)/g) ?? []).length === 3 &&
+      !/cancelled\.current/.test(installsBody),
+    "every arm that could write a failed row asks this request's own signal",
+  );
+  /*
+   * ⚠ **The busy flag is raised before the act and lowered inside its settle,
+   * under the epoch gate.** A caller drawing controls beside this one is gated on
+   * it, and the prop is optional — so a missing `onBusyChange?.(true)` leaves that
+   * gate dead on arrival with nothing failing.
+   */
+  report(
+    "and a caller beside it is told for exactly as long as the act runs",
+    /onBusyChange\?\.\(true\);/.test(installsBody) &&
+      /if \(generation\.current !== epoch\) return;\s*\n\s*onBusyChange\?\.\(false\);/.test(installsBody),
+    "raised in act(), lowered in the allSettled finally behind the epoch gate",
+  );
+  report(
+    "and it is a live region that is always mounted",
+    /role="status" aria-live="polite"/.test(installsSrc) &&
+      /className=\{failure\.length === 0 \? ""/.test(installsSrc) &&
+      !/\{failure\.length > 0 &&/.test(installsSrc),
+    "the ternary is on the className, not on the mount",
+  );
+  /*
+   * ⚠ **A failure is not clipped.** `pluginFailure` carries a daemon's own sentence
+   * through verbatim for four codes, and `plugin_consent_broken` names every scope
+   * the plugin gained — a paragraph, cut at one line, on a row with nothing to open
+   * to. `PluginView` argues the same thing one file over.
+   */
+  report(
+    "a failure keeps every character of itself",
+    /row\.kind === "failed" \? "wrap-anywhere text-fg" : "truncate text-muted"/.test(installsSrc) &&
+      !/block truncate text-2xs text-muted/.test(installsSrc),
+    "the failed arm wraps and takes full ink; the rest still truncate",
+  );
+}
+
+process.stdout.write("\nwhich plugins screen a URL names\n");
+{
+  const { MARKET_TABS, marketEntryPath, marketPaneTitle, marketPath, marketSettingsPath, marketUp, marketUpFrom, parseMarketRoute } =
+    await import("../src/market.js");
+  const { depthOf, navMove } = await import("../src/nav.js");
+
+  const seg = (path: string): string[] => path.split("/").filter((part) => part.length > 0).slice(1);
+
+  check("the bare path is the market", parseMarketRoute([]), { tab: "market", entry: null, settings: false });
+  check("the other tab", parseMarketRoute(["installed"]), { tab: "installed", entry: null, settings: false });
+  check("one entry", parseMarketRoute(["p", "autotitle"]), { tab: "market", entry: "autotitle", settings: false });
+  check("and its settings", parseMarketRoute(["p", "autotitle", "settings"]), {
+    tab: "market",
+    entry: "autotitle",
+    settings: true,
+  });
+  /*
+   * ⚠ **`settings` is never set without an `entry`**, which the type does not
+   * express — `MarketRoute.entry` makes the same trade one field up, and for its
+   * reason. Swept over every shape this parser can produce rather than over the
+   * two that would break it today.
+   */
+  check(
+    "settings never arrive without a plugin to be about",
+    [["settings"], ["p"], ["p", "", "settings"], ["installed", "settings"], []]
+      .map((segments) => parseMarketRoute(segments))
+      .filter((route) => route.settings && route.entry === null),
+    [],
+  );
+  /*
+   * ⚠ **An entry's tab is always `market`, at every depth.** That is what makes
+   * the ◀ land on a list with the plugin in it rather than on whichever tab
+   * somebody happened to be looking at. An entry is only ever reached from the
+   * market list, so there is no second answer to give.
+   */
+  check("and its tab is the one it was reached from", parseMarketRoute(["p", "x"]).tab, "market");
+
+  /*
+   * Three refusals, each falling *up* to the nearest real screen — the posture
+   * `parseSettingsRoute` already takes, and for its reason: a stale bookmark, or a
+   * plugin withdrawn from the catalogue, should land somewhere real rather than on
+   * a 404 this app does not have.
+   */
+  check(
+    "a bare /plugins/p, an unknown tab and junk all fall to the market",
+    [parseMarketRoute(["p"]), parseMarketRoute(["nonsense"]), parseMarketRoute(["installed", "extra"])].map(
+      (route) => route.entry,
+    ),
+    [null, null, null],
+  );
+  /*
+   * And a segment under an entry that is not `settings` falls to the entry, not
+   * to the market: the plugin in the URL is real and is the nearest real screen.
+   */
+  check(
+    "an unknown leaf under a plugin is that plugin",
+    parseMarketRoute(["p", "autotitle", "nonsense"]),
+    { tab: "market", entry: "autotitle", settings: false },
+  );
+  check("an unknown segment is the market rather than a tab nothing draws", parseMarketRoute(["nonsense"]).tab, "market");
+
+  /*
+   * ⚠ **Every tab has a row here, because the row is now the *heading*.** The
+   * strip of two equal pills became a title plus one link — the tab you are on is
+   * the screen's name, and the other is beside it — so a tab in the union with no
+   * entry in this list is a screen whose name falls through to "Plugins" and whose
+   * only way back is the browser's own.
+   *
+   * Read off the union in `market.ts` rather than typed out again: two lists of
+   * the same members is the pair this file spends its length on.
+   */
+  {
+    const src = readFileSync(new URL("../src/market.ts", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const union = src.slice(src.indexOf("export type MarketTab ="));
+    const members = [...union.slice(0, union.indexOf(";")).matchAll(/"([a-z]+)"/g)].map((one) => one[1] ?? "").sort();
+    check("the tab union is readable at all", members.length > 0, true);
+    check("and every one of its members is a drawable tab", MARKET_TABS.map((tab) => String(tab.id)).sort(), members);
+    check("each with a title to draw", MARKET_TABS.filter((tab) => tab.title.trim().length === 0), []);
+  }
+  check("both tabs round-trip", MARKET_TABS.map((tab) => parseMarketRoute(seg(marketPath(tab.id))).tab), [
+    "market",
+    "installed",
+  ]);
+  check(
+    "and an entry round-trips through its own builder",
+    parseMarketRoute(seg(marketEntryPath("autotitle"))),
+    { tab: "market", entry: "autotitle", settings: false },
+  );
+  check(
+    "and so do its settings",
+    parseMarketRoute(seg(marketSettingsPath("autotitle"))),
+    { tab: "market", entry: "autotitle", settings: true },
+  );
+  // Built on `marketEntryPath` rather than beside it, so the two cannot disagree
+  // about how an id is encoded.
+  check(
+    "a settings path is an entry path with one segment on it",
+    marketSettingsPath("a b"),
+    `${marketEntryPath("a b")}/settings`,
+  );
+  /*
+   * Encoded on the way out and decoded on the way in, like every other segment
+   * this app builds. A catalogue id is `^[a-z0-9][a-z0-9-]{0,31}$` on the service
+   * side, so nothing in practice needs it — which is exactly why it would go
+   * unnoticed if it broke.
+   */
+  check(
+    "an id is encoded and decoded like every other segment",
+    parseMarketRoute(seg(marketEntryPath("a b")), decodeURIComponent).entry,
+    "a b",
+  );
+
+  /*
+   * ⚠ **`marketUp` and `marketPaneTitle` are non-null on exactly the same
+   * depths**, asserted as a pairing rather than as two literals — `settingsUp`
+   * and `settingsPaneTitle` carry the identical invariant one pop-up over, and
+   * for the identical reason: a future depth must not arrive with a chevron over
+   * an unnamed screen, or a name with no way back.
+   */
+  const shapes = [
+    parseMarketRoute([]),
+    parseMarketRoute(["installed"]),
+    parseMarketRoute(["p"]),
+    parseMarketRoute(["p", "autotitle"]),
+    parseMarketRoute(["p", "autotitle", "settings"]),
+  ];
+  check(
+    "a way back and a name for the screen it leaves arrive together",
+    shapes.filter((route) => (marketUp(route) === null) !== (marketPaneTitle(route) === null)),
+    [],
+  );
+  check("a tab leaves the pop-up rather than moving inside it", marketUp(parseMarketRoute([])), null);
+  check("an entry walks back to the list", marketUp(parseMarketRoute(["p", "x"])), "/plugins");
+  /*
+   * One level at a time: settings walk to the plugin, and the plugin walks to the
+   * list. A settings screen that jumped straight to the market would make the ◀
+   * and the ✕ the same control at that depth.
+   */
+  check("and settings walk back to the plugin", marketUp(parseMarketRoute(["p", "x", "settings"])), "/plugins/p/x");
+
+  /*
+   * ⚠ **The origin, and the sweep is the point rather than the two cases somebody
+   * thought of.** `marketUpFrom` overrides exactly one of `marketUp`'s three
+   * answers — an entry's — because that one falls through to the market list on
+   * the reasoning that "an entry is only ever reached from that list", which
+   * `PluginsPanel` falsified the day it started linking here. The other two must
+   * be untouched: a tab still leaves the pop-up however it was reached, and
+   * settings still walk to their own plugin, which is a depth inside this pop-up
+   * and has nothing to do with where the pop-up was entered from.
+   *
+   * Driven over every shape × both origin states rather than by naming the arm,
+   * so a fourth depth cannot quietly acquire an override.
+   */
+  const ORIGIN = "/settings/machines/m_1/plugins";
+  check(
+    "an origin changes exactly one depth's answer",
+    shapes.filter((route) => marketUpFrom(route, ORIGIN) !== marketUp(route)).map((route) => marketUp(route)),
+    ["/plugins"],
+  );
+  check(
+    "and with no origin it is marketUp exactly",
+    shapes.filter((route) => marketUpFrom(route, null) !== marketUp(route)),
+    [],
+  );
+  check(
+    "an entry reached from the settings sheet walks back there",
+    marketUpFrom(parseMarketRoute(["p", "x"]), ORIGIN),
+    ORIGIN,
+  );
+  /*
+   * ⚠ **Settings are not overridden, and this is the half that would look like a
+   * tidy simplification.** Walking ◀ from a plugin's settings must reach the
+   * plugin, and only then the origin — one level at a time, which is the rule
+   * that stops the ◀ and the ✕ becoming the same control. Short-circuiting to the
+   * origin here would skip the screen the person was on two seconds ago.
+   */
+  check(
+    "but its settings still walk to the plugin first",
+    marketUpFrom(parseMarketRoute(["p", "x", "settings"]), ORIGIN),
+    "/plugins/p/x",
+  );
+  check("and a tab still leaves the pop-up", marketUpFrom(parseMarketRoute([]), ORIGIN), null);
+
+  /*
+   * ⚠ **`upFrom` is the other consumer, and the third argument defaults to
+   * `null`** — which is right for every pre-existing caller and is exactly why a
+   * caller that simply stops passing it typechecks clean. Telegram's arrow and the
+   * on-screen ◀ would then disagree, which is the one thing `nav.ts`'s docblock
+   * says this function exists to prevent. So both the function and its call site
+   * are pinned.
+   */
+  {
+    const { upFrom } = await import("../src/nav.js");
+    const asPluginsRoute = (segments: string[]): never =>
+      ({ name: "plugins", ...parseMarketRoute(segments) }) as never;
+    check(
+      "an entry's way up honours the origin",
+      upFrom(asPluginsRoute(["p", "x"]), "/m/m_1/s/s_1", ORIGIN),
+      ORIGIN,
+    );
+    check(
+      "and falls back to the market list without one",
+      upFrom(asPluginsRoute(["p", "x"]), "/m/m_1/s/s_1"),
+      "/plugins",
+    );
+    check(
+      "a tab still leaves the pop-up onto what it was drawn over",
+      upFrom(asPluginsRoute([]), "/m/m_1/s/s_1", ORIGIN),
+      "/m/m_1/s/s_1",
+    );
+    const appSrc = stripComments(readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8"));
+    check("and the app actually hands it the origin", /upFrom\(route, under, origin\)/.test(appSrc), true);
+
+    /*
+     * ⚠ **`originFor` is pure and lives in `nav.ts`, and that is the whole point
+     * of asserting it here.** It sat in `router.ts` for one round, where nothing
+     * offline can import it — the reason this module exists at all — and a
+     * mutation run inverted its comparison with every check still green. Driven
+     * over the cases rather than the one that was wrong.
+     */
+    const { originFor } = await import("../src/nav.js");
+    const SETTINGS = "/settings/machines/m_1/plugins";
+    const ENTRY = "/plugins/p/x";
+    check("crossing from one pop-up to another records where you came from", originFor(SETTINGS, ENTRY, null), SETTINGS);
+    /*
+     * Walking deeper inside one pop-up keeps the origin it already had, so the ◀
+     * reaches it at that pop-up's shallowest depth rather than short-circuiting.
+     */
+    check("walking deeper inside one pop-up keeps it", originFor(ENTRY, `${ENTRY}/settings`, SETTINGS), SETTINGS);
+    check("and records nothing where there was nothing", originFor(ENTRY, `${ENTRY}/settings`, null), null);
+    /* Opening a pop-up from a screen is not a crossing: there is no origin. */
+    check("opening a pop-up from a screen records none", originFor("/m/m_1/s/s_1", ENTRY, null), null);
+    check("and navigating to a screen records none", originFor(ENTRY, "/m/m_1/s/s_1", SETTINGS), null);
+    /*
+     * ⚠ **`/p/:machineId/:pluginId` and `/plugins` are two pop-ups sharing four
+     * letters.** A prefix comparison calls them one, which would make a plugin's
+     * own screen and the market indistinguishable to this rule.
+     */
+    check("a plugin's screen and the market are different pop-ups", originFor("/p/m_1/board", ENTRY, null), "/p/m_1/board");
+  }
+
+  /*
+   * ⚠ **Both tabs sit at one depth and an entry one deeper.** Equal depths make
+   * `navMove` answer `null`, which is right: switching tabs is the same pane with
+   * different contents, and that is not a direction. Walking into an entry is a
+   * `section-push` — the sheet's body slides while the panel stays put — and back
+   * out is its exact reverse, which is what stops the two animations drifting.
+   */
+  const asRoute = (route: unknown): never => ({ name: "plugins", ...(route as object) }) as never;
+  const market = asRoute(parseMarketRoute([]));
+  const installed = asRoute(parseMarketRoute(["installed"]));
+  const entry = asRoute(parseMarketRoute(["p", "autotitle"]));
+  const settings = asRoute(parseMarketRoute(["p", "autotitle", "settings"]));
+  check(
+    "the two tabs are one depth, an entry the next, its settings the next",
+    [depthOf(market), depthOf(installed), depthOf(entry), depthOf(settings)],
+    [1, 1, 2, 3],
+  );
+  check("switching tabs moves nothing", navMove(market, installed), null);
+  check("walking into an entry pushes the section", navMove(market, entry), "section-push");
+  check("and walking back out pops it", navMove(entry, market), "section-pop");
+  // The gear pushes and the ◀ pops, which is the pair an agent's screen already
+  // gives one pop-up over — so a plugin's settings animate like every other leaf.
+  check("pressing the gear pushes one more", navMove(entry, settings), "section-push");
+  check("and the way back pops it", navMove(settings, entry), "section-pop");
+  /*
+   * Leaving the pop-up entirely is a close, whichever depth it is left from —
+   * `isSheet` decides that before any depth is compared, which is why an entry
+   * (depth 2) closing onto a session (depth 1) is not a `pop`.
+   */
+  check(
+    "and leaving it is a close from either depth",
+    [navMove(market, { name: "home" } as never), navMove(entry, { name: "home" } as never)],
+    ["sheet-close", "sheet-close"],
+  );
+}
+
+process.stdout.write("\nwhat the catalogue says, and what this build will read of it\n");
+{
+  const { compareVersions, isNewer, catalogueNotice, catalogueEndpoint, previewOf, readCatalogue, readOne, readVersions } =
+    await import("../src/catalogue.js");
+
+  const PIN_REPO = "rends-east/autotitle";
+  const PIN_COMMIT = "b".repeat(40);
+  /*
+   * ⚠ **Every address is built from the pin rather than typed out, because the
+   * reader now insists they were.** They were spelled `…/tree/bbb` against a
+   * forty-`b` commit — readable, and exactly the divergence `readSource` drops an
+   * entry for the moment `manifestRaw` has to equal its derivation. A fixture with
+   * hand-typed addresses would have taken every assertion in this block with it,
+   * which is the wrong way for a driver to fail.
+   *
+   * `repo` and `commit` come out of the patch when it carries them, so a case that
+   * moves the pin moves the addresses with it and isolates the one rule it is
+   * about. `...patch` stays last so an explicit address still wins.
+   */
+  const source = (patch: Record<string, unknown> = {}): Record<string, unknown> => {
+    const repo = typeof patch["repo"] === "string" ? patch["repo"] : PIN_REPO;
+    const commit = typeof patch["commit"] === "string" ? patch["commit"] : PIN_COMMIT;
+    return {
+      kind: "github",
+      repo,
+      commit,
+      browse: `https://github.com/${repo}/tree/${commit}`,
+      manifest: `https://github.com/${repo}/blob/${commit}/plugin.json`,
+      manifestRaw: `https://raw.githubusercontent.com/${repo}/${commit}/plugin.json`,
+      archive: `https://codeload.github.com/${repo}/tar.gz/${commit}`,
+      archiveName: `autotitle-${commit}.tar.gz`,
+      archiveBytes: 14741,
+      icon: null,
+      sha256Seen: "deff37945c201",
+      ...patch,
+    };
+  };
+  const entry = (patch: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: "autotitle",
+    name: "Autotitle",
+    description: "Names a session from what the agent did.",
+    version: "0.2.1",
+    api: 2,
+    scopes: ["sessions.read", "sessions.write"],
+    net: [],
+    contributes: { screen: null, settings: true, actions: [], hooks: ["turn.ended"] },
+    source: source(),
+    homepage: null,
+    author: "rends-east",
+    license: "AGPL-3.0",
+    categories: ["sessions"],
+    publishedAt: "2026-08-20T10:00:00.000Z",
+    ...patch,
+  });
+
+  const read = readCatalogue({ schema: 1, plugins: [entry()] });
+  check("a catalogue reads", [read.kind, read.kind === "ok" ? read.entries.length : -1], ["ok", 1]);
+  check(
+    "and the fields somebody consents to survive it",
+    read.kind === "ok" ? [read.entries[0]?.scopes, read.entries[0]?.contributes.hooks] : null,
+    [["sessions.read", "sessions.write"], ["turn.ended"]],
+  );
+
+  /*
+   * ⚠ **An empty catalogue is `ok`, not an error.** A service that has published
+   * nothing is an ordinary state — `plugins.reemoat.com` is exactly that today —
+   * and drawing "something went wrong" over it sends somebody looking for a fault
+   * that is not there.
+   */
+  check("an empty catalogue is a state rather than a failure", readCatalogue({ schema: 1, plugins: [] }).kind, "ok");
+  check(
+    "and it says so in words",
+    catalogueNotice(readCatalogue({ schema: 1, plugins: [] })),
+    "There is nothing in the catalogue yet.",
+  );
+
+  /*
+   * ⚠ **This is the one reader in the client that fails *closed*, and these two
+   * cases are why.** Everything in `plugins.ts` fails open on purpose: an unknown
+   * block there costs a row nobody sees. Here a half-read entry is a half-read
+   * **permission list**, on the screen where somebody grants a stranger's code
+   * access to their sessions — and showing four of five scopes is worse than
+   * showing none, because the person cannot tell which they are looking at.
+   */
+  check("a schema this build does not speak is refused whole", readCatalogue({ schema: 2, plugins: [entry()] }), {
+    kind: "too_new",
+    schema: 2,
+  });
+  check(
+    "and it is never partially parsed",
+    (() => {
+      const answer = readCatalogue({ schema: 2, plugins: [entry()] });
+      return "entries" in answer;
+    })(),
+    false,
+  );
+  check("a document that is not one says so", readCatalogue({ plugins: [] }).kind, "malformed");
+  check("and so does a list that is not a list", readCatalogue({ schema: 1, plugins: "no" }).kind, "malformed");
+
+  /*
+   * ⚠ **"Fails closed" means *a required field is missing or wrong-typed*, and it
+   * must never come to mean *a field arrived that this build has not heard of*.**
+   *
+   * This is the assertion that keeps the two apart, and the failure it prevents is
+   * one nobody local would ever see. The service's rule is that fields are added
+   * and never repurposed, with `schema` moving only when that is not enough — so a
+   * reader that refused unknown keys would go dark on every **already-deployed**
+   * client the next time a field is added. Not immediately, not for whoever added
+   * it: for everyone whose web client is older than that deploy. `source.icon` was
+   * added exactly that way, in the service's own first commit.
+   *
+   * All three depths, because they are three separate readers and only one of them
+   * would have to get it wrong: the document beside `schema`/`plugins`, the entry,
+   * and `source`. `contributes` is in here too — a fifth contribution point is the
+   * likeliest next addition, and it must not take the market down with it.
+   */
+  {
+    const tomorrow = entry({
+      downloads: 4210,
+      source: source({ signature: "sig", mirrors: ["a"] }),
+      contributes: { screen: null, settings: false, actions: [], hooks: ["turn.ended"], commands: [{ id: "c" }] },
+    });
+    const answer = readCatalogue({ schema: 1, plugins: [tomorrow], generatedAt: "2026-08-23T00:00:00.000Z" });
+    check(
+      "a field this build has not heard of is ignored, never a refusal",
+      [answer.kind, answer.kind === "ok" ? answer.entries.length : -1],
+      ["ok", 1],
+    );
+    check(
+      "and the fields it does know survive beside it",
+      answer.kind === "ok" ? [answer.entries[0]?.id, answer.entries[0]?.contributes.hooks] : null,
+      ["autotitle", ["turn.ended"]],
+    );
+    check("the same holds for one plugin", readOne({ schema: 1, plugin: tomorrow, extra: 1 }).kind, "ok");
+    check(
+      "and for a version history",
+      readVersions({ schema: 1, id: "autotitle", versions: [tomorrow], extra: 1 }).kind,
+      "ok",
+    );
+  }
+
+  /*
+   * ⚠ **`too_new` is a branch with its own sentence, not the general refusal
+   * path.** A schema bump is the service saying "this needs a newer client", and if
+   * it drew the same words a corrupt document draws, the day somebody bumps it
+   * looks to every user like the market broke. The remedy differs too — one is
+   * "wait", the other is "somebody has to deploy" — so the two strings must not
+   * converge, which is what this asserts rather than the wording of either.
+   */
+  check(
+    "a schema bump reads as the app being behind, not as a broken catalogue",
+    catalogueNotice({ kind: "too_new", schema: 2 }) === catalogueNotice({ kind: "malformed", reason: "x" }),
+    false,
+  );
+  check(
+    "and it names the remedy rather than the fault",
+    (catalogueNotice({ kind: "too_new", schema: 2 }) ?? "").includes("updated"),
+    true,
+  );
+
+  /*
+   * ⚠ **A pin that is not a commit is dropped, by the daemon's own rule.** `POST
+   * /plugins/source` refuses anything but a full 40-character sha — a tag moves
+   * under `git tag -f`, and what is being pinned is code that runs as the machine's
+   * owner with no sandbox. An entry carrying a tag is therefore one this app could
+   * draw and never install, so it is not drawn.
+   */
+  /** How many entries a catalogue carrying exactly this one source produced. */
+  const admitted = (patch: Record<string, unknown> = {}): number => {
+    const answer = readCatalogue({ schema: 1, plugins: [entry({ source: source(patch) })] });
+    return answer.kind === "ok" ? answer.entries.length : -1;
+  };
+  /** That one source, as this build read it — or `null` for an entry it dropped. */
+  const sourceOf = (patch: Record<string, unknown> = {}) => {
+    const answer = readCatalogue({ schema: 1, plugins: [entry({ source: source(patch) })] });
+    return answer.kind === "ok" ? (answer.entries[0]?.source ?? null) : null;
+  };
+
+  check("an entry pinned to a tag rather than a commit is not offered", admitted({ commit: "v1.2.0" }), 0);
+
+  /*
+   * ⚠ **The repository is held to the daemon's own expression too, and it does a
+   * second job here.** `POST /plugins/source` 400s on anything but `owner/name`,
+   * so a row spelled otherwise has a button that cannot work — and every address
+   * in the entry is built by interpolating this string into a URL path, so
+   * `owner/name/tree` derives a `browse` of
+   * `https://github.com/owner/name/tree/tree/<sha>`: a third path segment, which
+   * is a different repository's file drawn under this plugin's name. Same
+   * sentence as `src/plugins/source.ts`'s — no part of the address may come from
+   * whoever sent it.
+   */
+  check("a repository that is not owner/name is not offered", admitted({ repo: "rends-east/autotitle/tree" }), 0);
+  check("and neither is one that is itself a URL", admitted({ repo: "https://evil.example/x" }), 0);
+
+  /*
+   * ⚠ **The manifest a *program* reads is derived from the pin, never taken from
+   * the catalogue.** `MarketEntry` fetches this address and the bytes that come
+   * back become the permission list somebody agrees to, so a catalogue-chosen
+   * value is a catalogue-chosen **disclosure** — and this app's own control plane
+   * puts the catalogue's origin in `connect-src`, so one pointing back at the
+   * service fetches perfectly and draws a hand-typed list under the words *the
+   * manifest at that commit*.
+   *
+   * ⚠ **The consent checks downstream do not restore it, and the reason is what
+   * they compare.** `consentGap` and `consentBroken` both compare *scopes, `net`
+   * and hooks* and nothing else, so a forged manifest that under-declares those
+   * three is refused before the plugin starts. What neither compares is the rest
+   * of what this screen draws — `id`, `name`, `version`, `description`, and the
+   * screens, settings pane and session actions a plugin contributes.
+   * `consentBroken`'s own docblock says names and versions are deliberately not
+   * compared. So the gap was never the scopes; it was everything beside them.
+   */
+  check(
+    "the manifest a program reads is derived from the pin",
+    sourceOf()?.manifestRaw,
+    `https://raw.githubusercontent.com/${PIN_REPO}/${PIN_COMMIT}/plugin.json`,
+  );
+  check(
+    "one the catalogue points somewhere else is not offered at all",
+    admitted({ manifestRaw: "https://plugins.example/manifests/autotitle.json" }),
+    0,
+  );
+  /*
+   * ⚠ **The sharp one: the right host, the wrong commit.** This is what a
+   * host-only check admits — it is inside `connect-src`, it is on
+   * `raw.githubusercontent.com`, and it is a `plugin.json` belonging to code
+   * nobody is about to install. Only comparing against the derivation catches it.
+   */
+  check(
+    "and neither is one on the right host at a commit that is not the pin",
+    admitted({ manifestRaw: `https://raw.githubusercontent.com/${PIN_REPO}/${"a".repeat(40)}/plugin.json` }),
+    0,
+  );
+
+  /*
+   * ⚠ **The two links a *person* reads fall back to the pin rather than dropping
+   * the plugin.** They are `<a href>`s labelled with the repository's own name, on
+   * the screen where somebody decides whether to trust a stranger's code, so one
+   * off `github.com` says it goes to the code and goes elsewhere. The derivation
+   * is already what an absent value takes and it is provably right, so the person
+   * gets the true link either way and no plugin goes dark over the spelling of a
+   * link.
+   */
+  check(
+    "a browse link off github.com is replaced by the pinned tree rather than honoured",
+    sourceOf({ browse: "https://evil.example/rends-east/autotitle" })?.browse,
+    `https://github.com/${PIN_REPO}/tree/${PIN_COMMIT}`,
+  );
+  check(
+    "and so is a manifest link that is merely http",
+    sourceOf({ manifest: `http://github.com/${PIN_REPO}/blob/${PIN_COMMIT}/plugin.json` })?.manifest,
+    `https://github.com/${PIN_REPO}/blob/${PIN_COMMIT}/plugin.json`,
+  );
+  /*
+   * ⚠ **Parsed, never prefix-matched, and these are the two cases that decide
+   * which.** `https://github.com@evil.example/…` begins with the right string and
+   * its host is `evil.example`; `https://github.com.evil.example/…` contains it.
+   * Both pass every hand-rolled test and neither is GitHub.
+   */
+  check(
+    "a host that only looks like github.com is not github.com",
+    [
+      sourceOf({ browse: "https://github.com@evil.example/x" })?.browse,
+      sourceOf({ browse: "https://github.com.evil.example/x" })?.browse,
+    ],
+    [`https://github.com/${PIN_REPO}/tree/${PIN_COMMIT}`, `https://github.com/${PIN_REPO}/tree/${PIN_COMMIT}`],
+  );
+
+  /*
+   * ⚠ **An icon is the one address whose failure costs the icon rather than the
+   * plugin.** `icon: null` is the commonest answer and the glyph beside it is the
+   * ordinary case, so a plugin vanishing from the market over its picture would be
+   * out of all proportion. `img-src` on this document lists exactly this host, so
+   * without the check the alternative was a broken image until `onError` fired.
+   */
+  check(
+    "an icon off the manifest host is no icon rather than no plugin",
+    (() => {
+      const answer = readCatalogue({
+        schema: 1,
+        plugins: [entry({ source: source({ icon: "https://evil.example/i.svg" }) })],
+      });
+      return answer.kind === "ok" ? [answer.entries.length, answer.entries[0]?.source.icon ?? null] : null;
+    })(),
+    [1, null],
+  );
+  check(
+    "and one at the pin is kept exactly as it was sent",
+    sourceOf({ icon: `https://raw.githubusercontent.com/${PIN_REPO}/${PIN_COMMIT}/icon.svg` })?.icon,
+    `https://raw.githubusercontent.com/${PIN_REPO}/${PIN_COMMIT}/icon.svg`,
+  );
+
+  /*
+   * ⚠ **Explicit `null`, and `??` rather than `||`.** Measured against the live
+   * service: every key is present on every read and the value is `T | null`, never
+   * absent. `archiveBytes: 0` is legitimate, and `||` would turn it into `null`.
+   */
+  check(
+    "a zero-byte archive keeps its zero",
+    (() => {
+      const answer = readCatalogue({ schema: 1, plugins: [entry({ source: source({ archiveBytes: 0 }) })] });
+      return answer.kind === "ok" ? answer.entries[0]?.source.archiveBytes : "missing";
+    })(),
+    0,
+  );
+  check(
+    "and a missing icon is null rather than a broken address",
+    (() => {
+      const answer = readCatalogue({ schema: 1, plugins: [entry()] });
+      return answer.kind === "ok" ? answer.entries[0]?.source.icon : "missing";
+    })(),
+    null,
+  );
+
+  check("one plugin answers the same union, with one entry", readOne({ schema: 1, plugin: entry() }).kind, "ok");
+  check(
+    "and a plugin this build cannot read is zero of them rather than an error",
+    (() => {
+      const answer = readOne({ schema: 1, plugin: { id: "x" } });
+      return answer.kind === "ok" ? answer.entries.length : -1;
+    })(),
+    0,
+  );
+  check(
+    "a version history is the same union too",
+    (() => {
+      const answer = readVersions({ schema: 1, id: "autotitle", versions: [entry(), entry({ version: "0.2.0" })] });
+      return answer.kind === "ok" ? answer.entries.map((one) => one.version) : null;
+    })(),
+    ["0.2.1", "0.2.0"],
+  );
+
+  /*
+   * ⚠ **Numeric, component by component.** `"0.10.0" < "0.9.0"` is true
+   * lexicographically because `"1" < "9"` — so a string compare reports an update
+   * available on the version already installed, for ever, from the tenth minor
+   * release onwards. That is the case worth pinning, because it is the first time
+   * it bites and it bites silently.
+   */
+  check("0.10.0 is newer than 0.9.0, which a string compare gets backwards", isNewer("0.10.0", "0.9.0"), true);
+  check("and 0.9.0 is not newer than 0.10.0", isNewer("0.9.0", "0.10.0"), false);
+  check("equal versions are neither", compareVersions("1.2.3", "1.2.3"), 0);
+  check("a shorter version is padded rather than refused", compareVersions("1.2", "1.2.0"), 0);
+  check("and something unreadable sorts as zero rather than throwing", compareVersions("what", "0.0.0"), 0);
+
+  // `new URL` against the base, so a trailing slash on either side is the same
+  // address — and so a base that is not a URL throws here rather than producing a
+  // relative path the SPA fallback would answer with index.html.
+  check(
+    "an endpoint is built the same way whether the base ends in a slash",
+    [
+      catalogueEndpoint("https://plugins.example", "api/plugins/list"),
+      catalogueEndpoint("https://plugins.example/", "/api/plugins/list"),
+    ],
+    ["https://plugins.example/api/plugins/list", "https://plugins.example/api/plugins/list"],
+  );
+
+  /*
+   * The fallback disclosure, when the manifest at the pinned commit could not be
+   * read. It has to carry the three fields somebody actually consents to, or the
+   * screen using it would disclose less than the catalogue knows.
+   */
+  const only = readCatalogue({ schema: 1, plugins: [entry()] });
+  const preview = previewOf((only.kind === "ok" ? only.entries[0] : null) as never);
+  check(
+    "the fallback preview carries what a person agrees to",
+    [preview.scopes, preview.net, preview.hooks, preview.settings],
+    [["sessions.read", "sessions.write"], [], ["turn.ended"], true],
+  );
+}
+
+process.stdout.write("\nwhich machines an act reaches, and what it says about the rest\n");
+{
+  const { failureSummary, installedSummary, outcomeText, planTargets, skipReasonFor, skipText } =
+    await import("../src/install.js");
+
+  const machine = (id: string, patch: Record<string, unknown> = {}): never =>
+    ({
+      id,
+      name: id,
+      relayUrl: "https://relay.example",
+      relayOnline: true,
+      enrolled: true,
+      lastSeenAt: null,
+      owned: true,
+      overLimit: false,
+      ownerDisabled: false,
+      scopes: ["session:read", "session:write", "machine:admin"],
+      route: null,
+      reach: "online",
+      offlineReason: null,
+      tokenDegraded: false,
+      tokenExpiresAt: null,
+      health: null,
+      lastError: null,
+      ...patch,
+    }) as never;
+
+  const fleet = [
+    machine("ok"),
+    machine("probing", { reach: "probing" }),
+    machine("asleep", { reach: "offline", offlineReason: "no_route" }),
+    machine("banned", { ownerDisabled: true }),
+    machine("over", { overLimit: true }),
+    machine("shared", { scopes: ["session:read", "session:write"], owned: false }),
+    machine("unchosen"),
+  ];
+  const chosen = new Set(["ok", "probing", "asleep", "banned", "over", "shared"] as never[]);
+  const plan = planTargets(fleet, chosen as never);
+
+  /*
+   * ⚠ **The partition is the property, not the four reasons.** Every chosen
+   * machine is in exactly one of the two lists — a machine that fell out of both
+   * would be one somebody ticked and never heard about again, which is the single
+   * failure this whole screen is shaped to prevent. Asserted over the set rather
+   * than over the cases, so a fifth reason cannot open a gap by being forgotten.
+   */
+  check(
+    "every chosen machine is either attempted or accounted for, and never both",
+    [...chosen]
+      .map((id) => (plan.eligible.includes(id) ? 1 : 0) + (plan.skipped.some((one) => one.id === id) ? 1 : 0))
+      .filter((count) => count !== 1),
+    [],
+  );
+  check("and a machine nobody chose is in neither", [
+    plan.eligible.includes("unchosen" as never),
+    plan.skipped.some((one) => one.id === ("unchosen" as never)),
+  ], [false, false]);
+
+  /*
+   * ⚠ **`probing` is attempted and `offline` is skipped, and both are
+   * deliberate.** `daemonReadable` treats `probing` as readable because a
+   * tab-switch must not unmount a panel; and an unreachable machine is *skipped*
+   * rather than refused at the checkbox, because a laptop with the lid shut is the
+   * ordinary case and a result line saying so beats a control that will not move.
+   */
+  check("a machine mid-probe is attempted", plan.eligible.includes("probing" as never), true);
+  check(
+    "a sleeping one is accounted for rather than attempted",
+    plan.skipped.find((one) => one.id === ("asleep" as never))?.reason,
+    "unreachable",
+  );
+
+  /*
+   * ⚠ **Ordered by remedy, `machineBadgeText`'s rule.** A machine in more than one
+   * of these states names the one that has to be fixed first — a banned owner
+   * needs an admin, and retiring another machine does nothing for it.
+   */
+  check(
+    "a machine in two bad states names the remedy that comes first",
+    skipReasonFor(machine("both", { ownerDisabled: true, overLimit: true })),
+    "owner_disabled",
+  );
+  /*
+   * ⚠ **`machine:admin`, not `session:write`.** A route's scope is the caller's,
+   * and installing is an act on the machine rather than on a session — so a shared
+   * machine somebody drives sessions on all day is one they may not put code on.
+   * Caught here rather than by the daemon's 403, which arrives after an upload.
+   */
+  check(
+    "a grant that drives sessions cannot install",
+    plan.skipped.find((one) => one.id === ("shared" as never))?.reason,
+    "not_admin",
+  );
+
+  /*
+   * ⚠ **The switch position, said out loud on the row.** Installing does not
+   * switch a plugin on, and an update **inherits** the switch — `host.ts` is
+   * explicit that re-enabling somebody's disabled plugin because they updated it
+   * would be the daemon deciding on their behalf. If this line does not say so,
+   * "I updated it and it does not work" is what arrives instead, and it is the
+   * most likely question this feature generates.
+   */
+  check(
+    "an update to a plugin somebody switched off says it is still off",
+    outcomeText({ kind: "updated", from: "0.2.0", to: "0.2.1", enabled: false }),
+    "updated 0.2.0 → 0.2.1, still switched off",
+  );
+  check(
+    "and one that is on just says what changed",
+    outcomeText({ kind: "updated", from: "0.2.0", to: "0.2.1", enabled: true }),
+    "updated 0.2.0 → 0.2.1",
+  );
+  check(
+    "a skipped machine says the remedy rather than the state",
+    outcomeText({ kind: "skipped", reason: "over_limit" }),
+    skipText("over_limit"),
+  );
+
+  /*
+   * ⚠ **What the collapsed machine row says, which is the line that replaced a
+   * results panel and a Clear button.**
+   *
+   * The screen used to answer "did that work" *after* the fact, with a notice
+   * somebody then had to dismiss. This is the same answer given *before* anybody
+   * presses anything and given again after — on the closed row, beside the word
+   * Machines — so there is nothing to announce and nothing to clear. The boxes
+   * inside are a draft of where the plugin should go; this line is where it is.
+   *
+   * Names while there are few enough to read, because "on laptop" answers the
+   * question somebody actually has and "on 1 of 3" makes them open the list to
+   * find out which. Three is where a phone's width turns the line into a
+   * paragraph.
+   */
+  check("nowhere", installedSummary(3, []), "not installed anywhere");
+  check("one of three, named", installedSummary(3, ["laptop"]), "on laptop");
+  check("three of four, still named", installedSummary(4, ["a", "b", "c"]), "on a, b, c");
+  check("four of six becomes a count", installedSummary(6, ["a", "b", "c", "d"]), "on 4 of 6 machines");
+  check("everywhere", installedSummary(3, ["a", "b", "c"]), "on all 3 machines");
+  /*
+   * A fleet of one never says "on all 1 machines", and never names the machine
+   * either: there is only one, and repeating its name in a line about it is the
+   * chrome restating the body.
+   */
+  check("a fleet of one", installedSummary(1, ["only"]), "installed");
+  /*
+   * ⚠ **The other half of that line: the machines the act did not reach.**
+   * `installedSummary` is derived from what is *installed*, so a machine that
+   * failed is left out of it rather than named — the closed row cannot report a
+   * failure at all, and the panel that can is collapsed and `inert`. Same shape as
+   * `removalQuestion`: one machine is named, several are named while they still
+   * fit a phone's width, and past that they are counted.
+   */
+  check("nothing failed, so there is nothing to say", failureSummary([]), "");
+  check("one machine is named", failureSummary(["laptop"]), "Failed on laptop — the row says why.");
+  check("two are still named", failureSummary(["laptop", "mini"]), "Failed on laptop, mini — each row says why.");
+  check(
+    "and past three they are counted",
+    failureSummary(["a", "b", "c", "d"]),
+    "Failed on 4 machines — each row says why.",
+  );
+  /*
+   * ⚠ **It never says what happened on the machine, only that the act failed
+   * there.** `MachineInstalls` retries nothing but `plugin_busy` because a `POST`
+   * that failed in transit says nothing about whether the daemon acted — it may be
+   * halfway through unpacking — so a line claiming nothing was installed would be a
+   * claim this client cannot make. The reason is the row's, and the row is open by
+   * then.
+   */
+  check(
+    "and it claims nothing about what the daemon did",
+    /installed|removed|updated|nothing happened/.test(failureSummary(["laptop"])),
+    false,
+  );
+  check("and no fleet at all", installedSummary(0, []), "no machines");
+}
+
+process.stdout.write("\nwhat the one button at the foot of the install screen says\n");
+{
+  const { draftAct, draftLabel, removalQuestion } = await import("../src/install.js");
+
+  /*
+   * ⚠ **The screen this covers stages a draft and applies it with one press**, so
+   * the button is the only place the act is named — and naming it wrongly is a
+   * person pressing a control that does something other than what it says. The
+   * decision lives in `install.ts` rather than in the JSX for exactly this: it can
+   * be swept.
+   */
+  const sizes = [0, 1, 2];
+  const acts = new Set<string>();
+  const wrongReady: string[] = [];
+  const unnamed: string[] = [];
+  let total = 0;
+  let ready = 0;
+  for (const adding of sizes) {
+    for (const updating of sizes) {
+      for (const removing of sizes) {
+        for (const canInstall of [true, false]) {
+          for (const anywhere of [true, false]) {
+            const answer = draftAct({ adding, updating, removing, canInstall, anywhere });
+            const cell = `${adding}+${updating}/${removing}${canInstall ? "" : " file"}${anywhere ? " somewhere" : ""}`;
+            total += 1;
+            acts.add(answer.act);
+            if (answer.ready) ready += 1;
+            /*
+             * ⚠ **`ready` is exactly "something is drafted", and this is the
+             * assertion the person's own rule turns into**: until a change has been
+             * made the button does not move. Recomputed here from the counts rather
+             * than read off the answer, with `canInstall` folded in the same way —
+             * a screen holding no archive can draft no install however many boxes
+             * are ticked.
+             */
+            const drafted = (canInstall ? adding + updating : 0) + removing > 0;
+            if (answer.ready !== drafted) wrongReady.push(cell);
+            // Every cell names something, and it is one of the four. A fifth arm,
+            // or a label that fell through to the empty string, is a button whose
+            // words nobody chose.
+            if (draftLabel(answer.act).length === 0) unnamed.push(cell);
+          }
+        }
+      }
+    }
+  }
+  // Collected rather than checked in the loop: 144 cells is 144 lines of `ok`,
+  // and a sweep whose output nobody reads is a sweep whose failure nobody sees.
+  check("every combination of the draft decides something", total, sizes.length ** 3 * 4);
+  check("the button moves exactly when something has been drafted", wrongReady, []);
+  check("and it carries a word in every one of them", unnamed, []);
+  check("all four acts are reachable", [...acts].sort().join(","), "install,reconfigure,reinstall,remove");
+  check("some cells are ready and some are not", ready > 0 && ready < total, true);
+
+  /*
+   * ⚠ **Both directions at once is its own word.** It is the act the staged draft
+   * exists for — moving a plugin from one machine to another in one press — and
+   * calling it "Install" would name the reversible half of something whose other
+   * half takes `plugin_data` with it.
+   */
+  check(
+    "adding and removing in one press is a reconfigure",
+    draftAct({ adding: 1, updating: 0, removing: 1, canInstall: true, anywhere: true }).act,
+    "reconfigure",
+  );
+  check(
+    "and so is an update alongside a removal",
+    draftAct({ adding: 0, updating: 1, removing: 1, canInstall: true, anywhere: true }).act,
+    "reconfigure",
+  );
+  check(
+    "taking it off and nothing else is a remove",
+    draftAct({ adding: 0, updating: 0, removing: 2, canInstall: true, anywhere: true }).act,
+    "remove",
+  );
+  check(
+    "a machine that has never had it is an install",
+    draftAct({ adding: 1, updating: 0, removing: 0, canInstall: true, anywhere: false }).act,
+    "install",
+  );
+  /*
+   * ⚠ **The update gesture, and the whole reason there is no second button.** A
+   * ticked box ticked again is nothing, so "0.2.1 is installed and 0.3.0 exists"
+   * had nowhere to be acted on and grew a strip of its own in the middle of the
+   * screen. It is this arm now.
+   */
+  check(
+    "an unchanged set with something behind is a reinstall",
+    draftAct({ adding: 0, updating: 2, removing: 0, canInstall: true, anywhere: true }).act,
+    "reinstall",
+  );
+  check(
+    "and it is ready, because there is something to do",
+    draftAct({ adding: 0, updating: 2, removing: 0, canInstall: true, anywhere: true }).ready,
+    true,
+  );
+
+  /*
+   * With nothing drafted the button still carries a word — a control with no
+   * label is one nobody can tell is disabled *for now* rather than broken — and
+   * what it carries is what it is for.
+   */
+  check(
+    "nothing drafted, nothing installed",
+    draftLabel(draftAct({ adding: 0, updating: 0, removing: 0, canInstall: true, anywhere: false }).act),
+    "Install",
+  );
+  check(
+    "nothing drafted, already somewhere",
+    draftLabel(draftAct({ adding: 0, updating: 0, removing: 0, canInstall: true, anywhere: true }).act),
+    "Reinstall",
+  );
+  /*
+   * ⚠ **A plugin that arrived as a file can only ever be removed**, because there
+   * is no `{repo, commit}` to hand a second daemon. Ticked boxes are forced to
+   * nothing rather than trusted: the caller derives them from the same flag, so
+   * agreeing is expected — and this is the one place where offering an install
+   * with nothing to send can be made unreachable rather than merely unlikely.
+   */
+  check(
+    "a plugin with no source offers only removal",
+    draftLabel(draftAct({ adding: 3, updating: 3, removing: 0, canInstall: false, anywhere: true }).act),
+    "Remove",
+  );
+  check(
+    "and it is not ready, because those ticks cannot be sent",
+    draftAct({ adding: 3, updating: 3, removing: 0, canInstall: false, anywhere: true }).ready,
+    false,
+  );
+  check(
+    "but a removal on it still is",
+    draftAct({ adding: 3, updating: 0, removing: 1, canInstall: false, anywhere: true }).ready,
+    true,
+  );
+
+  /*
+   * The question the foot asks in place of the button, and only ever about the
+   * removals: the install half of a reconfigure is undone by unticking and
+   * pressing again, and spending somebody's attention on that is how the prompt
+   * in front of the irreversible half stops being read.
+   */
+  check(
+    "one machine is named",
+    removalQuestion(["laptop"]),
+    "Remove it from laptop and everything it kept there?",
+  );
+  check(
+    "and several are counted",
+    removalQuestion(["laptop", "mini", "desktop"]),
+    "Remove it from 3 machines and everything it kept on them?",
+  );
+  check("the question always names the data, not just the plugin", /everything it kept/.test(removalQuestion(["a"])), true);
+}
+
+process.stdout.write("\nthe one mirror whose other half is in a different repository\n");
+{
+  /*
+   * ⚠ **`packages/web/src/catalogue.ts` is a hand mirror of a file this repository
+   * does not contain**, and that makes it the only mirror here neither side's CI
+   * can check. The original is `services/plugins/src/catalogue.ts` in
+   * `rends-east/reemoat-prod`; this is `rends-east/reemoat`. An import across that
+   * line compiles on the machine both are checked out on and fails in this repo's
+   * CI on the first run — and would publish a private service's shape besides.
+   *
+   * So the two copies can only be compared where both happen to be on one disk:
+   * the development box and the stand. Everywhere else this **must skip** — and
+   * the skip is the dangerous part, not the comparison.
+   *
+   * ⚠ **A skip that says nothing is a green tick about work nobody did.** It is
+   * the same shape as the assertion that read `.clamped === true` and stayed true
+   * while becoming meaningless: nothing fails, nothing is checked, and "skipped"
+   * and "agrees" are indistinguishable in the output. For this pair, skipping is
+   * not the edge case — in CI it is *every* run. So it prints a line of its own
+   * and says which file it wanted.
+   */
+  const ORIGINAL = new URL("../../../../services/plugins/src/catalogue.ts", import.meta.url);
+  let service: string | null = null;
+  try {
+    service = readFileSync(ORIGINAL, "utf8");
+  } catch {
+    // Absent is the ordinary state in CI and a real answer, not a failure — said
+    // out loud rather than passed over.
+    service = null;
+  }
+
+  if (service === null) {
+    report(
+      "the catalogue service is not on this disk, so its mirror is unchecked",
+      true,
+      "skipped: services/plugins/src/catalogue.ts — expected in CI, a problem on the box",
+    );
+  } else {
+    const clientSrc = readFileSync(new URL("../src/catalogue.ts", import.meta.url), "utf8");
+    const strip = (src: string): string => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+    /** Depth-1 field names of the object literal beginning at `from`. */
+    const membersAt = (clean: string, from: number): string[] => {
+      let depth = 0;
+      let token = "";
+      const out: string[] = [];
+      for (let i = clean.indexOf("{", from); i < clean.length; i += 1) {
+        const c = clean[i] ?? "";
+        if (c === "{") {
+          depth += 1;
+          token = "";
+          continue;
+        }
+        if (c === "}") {
+          depth -= 1;
+          token = "";
+          if (depth === 0) break;
+          continue;
+        }
+        if (depth !== 1) continue;
+        if (c === ":") {
+          const field = token.trim().replace(/\?$/, "");
+          if (/^[A-Za-z_]\w*$/.test(field)) out.push(field);
+          token = "";
+        } else if (c === ";" || c === "\n" || c === ",") token = "";
+        else token += c;
+      }
+      return [...new Set(out)].sort();
+    };
+    const declOf = (src: string, name: string): string[] | null => {
+      const clean = strip(src);
+      const head = new RegExp(`(?:export )?interface ${name}\\s*\\{`).exec(clean);
+      return head === null ? null : membersAt(clean, head.index);
+    };
+    const nestedOf = (src: string, iface: string, field: string): string[] | null => {
+      const clean = strip(src);
+      const head = new RegExp(`(?:export )?interface ${iface}\\s*\\{`).exec(clean);
+      if (head === null) return null;
+      const at = clean.indexOf(`${field}: {`, head.index);
+      return at < 0 ? null : membersAt(clean, at);
+    };
+
+    /*
+     * ⚠ **`client ⊆ service`, the opposite direction from the in-repo sweep.**
+     * There the client is allowed to be behind, because an older *daemon* sends
+     * less and the field is optional here. Here the client is allowed to be behind
+     * too — the service's contract is that fields are added and never repurposed,
+     * and `readCatalogue` tolerates ones it has never heard of. What it may not do
+     * is declare a field the service does not send: `readOne` fails **closed** on a
+     * required field, so a name this side invented or that was renamed over there
+     * does not degrade one row, it takes the whole market dark.
+     */
+    const halves: [string, string[] | null, string[] | null][] = [
+      ["the entry", declOf(service, "CatalogueEntry"), declOf(clientSrc, "CatalogueEntry")],
+      [
+        "its source",
+        nestedOf(service, "CatalogueEntry", "source"),
+        declOf(clientSrc, "CatalogueSource") ?? nestedOf(clientSrc, "CatalogueEntry", "source"),
+      ],
+    ];
+    const invented: string[] = [];
+    let read = 0;
+    for (const [name, theirs, ours] of halves) {
+      /*
+       * Unreadable is a failure here rather than a skip: the file *is* on this
+       * disk, so a declaration this cannot find means the shape changed under the
+       * pattern — which is precisely when the comparison is worth most and exactly
+       * when it would otherwise fall silent.
+       */
+      check(`${name} is readable on both sides`, theirs !== null && ours !== null, true);
+      if (theirs === null || ours === null) continue;
+      read += theirs.length;
+      for (const field of ours) if (!theirs.includes(field)) invented.push(`${name}: ${field}`);
+    }
+    // A floor, because "found no fields" and "found no drift" print the same.
+    report("there are fields to compare at all", read >= 20, `${read} fields across both halves`);
+    check("this client declares no catalogue field the service does not send", invented, []);
+  }
+}
+
+{
+  const { offersSettings } = await import("../src/plugins.js");
+  /*
+   * ⚠ **Whether the gear is drawn, as a pure decision.** Two rules, and both are
+   * the kind that reads as a bug when found without the argument.
+   *
+   * *Anywhere, not everywhere*: the screen it opens picks a machine, so one
+   * install with a pane is enough — and a fleet mid-update, one host on the new
+   * version and one on the old, is the ordinary case. Requiring all of them hides
+   * the control on exactly the fleet where somebody most wants to look.
+   *
+   * *`enabled` is not consulted*: a plugin somebody switched off is the commonest
+   * reason to open its settings, and a control that vanishes when a thing stops
+   * working is one they go looking for.
+   */
+  const row = (id: string, settings: boolean, enabled = true): never =>
+    ({ id, enabled, contributes: { screen: null, settings, actions: [], hooks: [] } }) as never;
+  check("no rows, no gear", offersSettings([], "autotitle"), false);
+  check("a plugin that declares none", offersSettings([row("autotitle", false)], "autotitle"), false);
+  check("one that does", offersSettings([row("autotitle", true)], "autotitle"), true);
+  check("another plugin's pane is not this one's", offersSettings([row("board", true)], "autotitle"), false);
+  check(
+    "one machine out of two is enough",
+    offersSettings([row("autotitle", false), row("autotitle", true)], "autotitle"),
+    true,
+  );
+  check("and being switched off changes nothing", offersSettings([row("autotitle", true, false)], "autotitle"), true);
+}
+
+process.stdout.write("\nfinding a plugin in the market, and what the headings are for\n");
+{
+  const { UNGROUPED, groupCatalogue, matchesQuery } = await import("../src/market.js");
+  {
+    const { PLUGIN_SCOPE_TEXT, PLUGIN_SCOPE_TEXT_MAX } = await import("../src/wire.js");
+    // Against the *daemon's* list rather than this file's own union, so the table
+    // is pinned to the thing it describes rather than to the mirror of it.
+    const { PLUGIN_SCOPES } = await import("../../../src/plugins/protocol.js");
+    /*
+     * ⚠ **One table now, and the second one was deleted rather than kept in
+     * step.** There were two — a long sentence per scope and a two-word form for
+     * the closed permissions line — and the closed line no longer draws anything
+     * but the word "Permissions", so the short table had exactly one reader and
+     * lost it. Two exhaustive records over one union is the pair that drifts by
+     * one, and the cheapest way to stop that pair drifting is for there to be one
+     * of them.
+     */
+    check("every scope has a line", Object.keys(PLUGIN_SCOPE_TEXT).sort(), [...PLUGIN_SCOPES].sort());
+    check("and none of them is blank", Object.values(PLUGIN_SCOPE_TEXT).filter((one) => one.trim().length === 0), []);
+    /*
+     * ⚠ **The length is the change, so the length is what is pinned.** These were
+     * sentences and six of them stacked was a wall of prose in the fold somebody
+     * opens before granting a stranger's code access to their sessions — which is
+     * the one screen where an unread disclosure discloses nothing. Nothing else in
+     * this build would notice them growing back one entry at a time; `webcheck` is
+     * the only thing that can, and `PLUGIN_SCOPE_TEXT_MAX` lives beside the table
+     * so the ceiling and the strings move together.
+     */
+    check(
+      "a permission is a line, not a paragraph",
+      Object.entries(PLUGIN_SCOPE_TEXT)
+        .filter(([, line]) => line.length > PLUGIN_SCOPE_TEXT_MAX)
+        .map(([scope, line]) => `${scope}: ${line.length}`),
+      [],
+    );
+    /*
+     * Whose money it is has to survive the shortening — that is the whole reason
+     * `model` was given a scope of its own rather than riding `sessions.write` —
+     * and so does the half of `sessions.write` that answers agents' questions,
+     * which is the capability that approves shell commands.
+     */
+    check("the one that spends money still says so", /you|your/.test(PLUGIN_SCOPE_TEXT.model), true);
+    check(
+      "and the one that answers permissions still says that",
+      /answer/.test(PLUGIN_SCOPE_TEXT["sessions.write"]),
+      true,
+    );
+  }
+  {
+    /*
+     * ⚠ **What a settings pane may draw, mirrored, and asserted as a *subset* of
+     * what a screen draws.** These are two vocabularies over one protocol: a
+     * plugin's screen keeps all five blocks and all five field kinds, and a
+     * settings pane is bounded to three controls and the words around them. The
+     * subset direction is the load-bearing half — a settings type that is not a
+     * screen type is a value `PluginView` has no arm for, which renders as
+     * nothing and says nothing about itself.
+     */
+    const { PLUGIN_SETTINGS_BLOCK_TYPES, PLUGIN_SETTINGS_FIELD_KINDS } = await import("../src/wire.js");
+    const { PLUGIN_BLOCK_TYPES, PLUGIN_SETTINGS_BLOCK_TYPES: daemonBlocks, PLUGIN_SETTINGS_FIELD_KINDS: daemonKinds } =
+      await import("../../../src/plugins/protocol.js");
+    check("a settings pane draws a subset of what a screen draws", PLUGIN_SETTINGS_BLOCK_TYPES.filter((one) => !PLUGIN_BLOCK_TYPES.some((two) => two === one)), []);
+    check("the block mirror agrees with the daemon", [...PLUGIN_SETTINGS_BLOCK_TYPES], [...daemonBlocks]);
+    check("and so does the field mirror", [...PLUGIN_SETTINGS_FIELD_KINDS], [...daemonKinds]);
+    /*
+     * The three the person asked for, named rather than counted: a box you type
+     * in, a switch, a dropdown. A fourth arriving without this failing would be a
+     * vocabulary that grew back without anybody deciding to.
+     */
+    check("and there are three of them", [...PLUGIN_SETTINGS_FIELD_KINDS].sort(), ["select", "text", "toggle"]);
+  }
+  const of = (id: string, name: string, categories: string[], description = "a plugin about sessions") =>
+    ({ id, name, categories, description }) as never;
+
+  const titles = of("autotitle", "Auto title", ["sessions"]);
+  const board = of("board", "Board", ["work"]);
+  const loose = of("loose", "Loose", []);
+
+  /*
+   * ⚠ **Names only, and the exclusion of the description is a decision rather
+   * than an oversight — so it is pinned rather than described.** A catalogue is a
+   * handful of entries and a needle matched against prose hits most of them:
+   * every one of these three has "sessions" somewhere in its description, so a
+   * search for it would return all three and the box would read as broken.
+   */
+  check("an empty needle is not a search", [matchesQuery(titles, ""), matchesQuery(titles, "   ")], [true, true]);
+  check("the name matches, whatever the case", matchesQuery(titles, "AUTO TIT"), true);
+  check("and so does the id, because that is a name people type", matchesQuery(titles, "autotit"), true);
+  check("a needle in the description alone matches nothing", matchesQuery(board, "sessions"), false);
+  check("and one that is in neither matches nothing either", matchesQuery(titles, "zzz"), false);
+
+  /*
+   * ⚠ **One group back means the caller draws no heading**, which is the rule the
+   * JSX reads rather than one it invents: a heading over the whole list labels
+   * "everything", and a single plugin under a category name reads as a section
+   * somebody forgot to fill.
+   */
+  check("a catalogue that agrees on one category is one group", groupCatalogue([titles, of("x", "X", ["sessions"])], "").length, 1);
+  check(
+    "and two categories are two, in name order",
+    groupCatalogue([board, titles], "").map((group) => group.name),
+    ["sessions", "work"],
+  );
+  /*
+   * `Other` is the *absence* of a category rather than one of them, so it goes
+   * last wherever it falls alphabetically — between `sessions` and `work` it would
+   * read as a category somebody chose.
+   */
+  check(
+    "the plugins that name none come last, never in the middle",
+    groupCatalogue([loose, board, titles], "").map((group) => group.name),
+    ["sessions", "work", UNGROUPED],
+  );
+  /*
+   * ⚠ **The first category only.** A plugin listing several drawn under each
+   * would put one row on screen twice in a list whose whole job is to be
+   * countable — the objection that stopped a pinned session being drawn twice in
+   * the rail.
+   */
+  const many = of("many", "Many", ["work", "sessions"]);
+  check(
+    "a plugin in several categories is drawn once, under the first",
+    groupCatalogue([many], "").map((group) => [group.name, group.entries.length]),
+    [["work", 1]],
+  );
+  check(
+    "rows inside a group are in name order rather than the service's",
+    groupCatalogue([of("z", "Zebra", ["work"]), of("a", "Apple", ["work"])], "")[0]?.entries.map((one) => one.name),
+    ["Apple", "Zebra"],
+  );
+  /*
+   * The needle and the grouping are one pass: a group that survives filtering
+   * down to nothing must not be drawn as an empty heading.
+   */
+  check("a group nothing matches is not a heading with nothing under it", groupCatalogue([board, titles], "auto").map((g) => g.name), ["sessions"]);
+  check("and a needle matching nothing is no groups at all", groupCatalogue([board, titles], "zzz"), []);
 }
 
 process.stdout.write("\nwhich routes are pop-ups, asked from both directions\n");
@@ -16648,8 +18913,14 @@ process.stdout.write("\nwhich routes are pop-ups, asked from both directions\n")
     [{ name: "session", ref: { machineId: "m", sessionId: "s" } }, "/m/m/s/s", false],
     [{ name: "gate", screen: "register" }, "/register", false],
     [{ name: "new", machineId: null, cwd: null }, "/new", true],
-    [{ name: "settings", section: null, machineId: null, agent: null, plugin: null }, "/settings", true],
+    [{ name: "settings", section: null, machineId: null, agent: null }, "/settings", true],
     [{ name: "plugin", machineId: "m", pluginId: "board" }, "/p/m/board", true],
+    // Both depths of the market, because they are different route shapes reaching
+    // the same predicate — and `/plugins` is one segment away from `/p`, which is
+    // exactly the neighbour a whole-segment rule exists for.
+    [{ name: "plugins", tab: "market", entry: null }, "/plugins", true],
+    [{ name: "plugins", tab: "installed", entry: null }, "/plugins/installed", true],
+    [{ name: "plugins", tab: "market", entry: "autotitle" }, "/plugins/p/autotitle", true],
   ];
   check(
     "every route agrees with its own path about being a pop-up",

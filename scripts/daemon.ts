@@ -2,6 +2,7 @@
 import { randomBytes } from "node:crypto";
 import type { Server } from "node:http";
 import { homedir } from "node:os";
+import { mkdirSync } from "node:fs";
 import { isAbsolute, join, sep } from "node:path";
 import { serve } from "@hono/node-server";
 import {
@@ -11,6 +12,7 @@ import {
   enrollmentIgnored,
   type TokenVerifier,
 } from "../src/auth.js";
+import { AgentAskRuns } from "../src/agentask.js";
 import { AgentLoginRuns } from "../src/agentauth.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import { resolveRoots } from "../src/browse.js";
@@ -380,6 +382,24 @@ const agentLogins = new AgentLoginRuns({
   onWarning: (detail: string) => console.error(`agent login: ${detail}`),
 });
 
+/**
+ * Where a plugin's one-shot model request runs.
+ *
+ * Constructed beside `agentLogins` and not inside the registry, for its reason
+ * doubled: this is not part of a session's lifecycle, and it must not be part of
+ * the registry's *anything* — see `agentask.ts`'s header for why a bare `Session`
+ * rather than a hidden `ManagedSession` is what makes the whole thing safe.
+ *
+ * ⚠ **The `cwd` is an empty directory this daemon owns**, created beside the
+ * plugin root rather than borrowed from a session. `session/new` requires one and
+ * whatever it gets is where the agent may look, so handing it somebody's working
+ * copy would give a plugin holding only the `model` scope an agent reading a tree
+ * that scope says nothing about.
+ */
+const askRoot = expandHome(process.env["REEMOAT_ASK_ROOT"] ?? join(homedir(), ".reemoat", "ask"));
+mkdirSync(askRoot, { recursive: true, mode: 0o700 });
+const agentAsks = new AgentAskRuns({ runtime, cwd: askRoot });
+
 const registry = new SessionRegistry(
   stores.events,
   stores.sessions,
@@ -477,6 +497,7 @@ if (process.env["REEMOAT_PLUGINS"] !== "0") {
         git: registry.sessionRuntime.git(),
         maxChangedFiles: positiveInt(process.env["REEMOAT_CHANGES_MAX_FILES"]),
         maxDiffBytes: positiveInt(process.env["REEMOAT_DIFF_MAX_BYTES"]),
+        ask: agentAsks,
       },
       onWarning: (detail: string) => console.error(`plugins: ${detail}`),
     });
@@ -787,6 +808,15 @@ async function shutdown(signal: string): Promise<void> {
   // this daemon is gone. Stopped before the sessions because it is cheap and
   // unconditional, and because it is not on the 20s session budget.
   await agentLogins.shutdown();
+  /*
+   * ⚠ **Before the plugin host, and that ordering is the whole of this line.** A
+   * model ask is started *by* a plugin, so draining the host first would leave
+   * the host gone and the agent it asked for still being spawned — and nothing
+   * downstream would ever collect it, because `agentask.ts` is the only thing
+   * that holds these. Same reason `agentLogins` goes before the sessions: it is
+   * cheap, unconditional, and not on the 20s session budget.
+   */
+  await agentAsks.shutdown();
   // Before the sessions, because a plugin's hooks are driven by session events
   // and stopping the sessions first would spend the shutdown budget delivering
   // exit notices to children that are about to be killed anyway.

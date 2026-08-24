@@ -1229,6 +1229,34 @@ export const SETTINGS_HEADING = "text-2xs font-semibold tracking-wider text-mute
 export const SETTINGS_SECTION = "mt-8 border-t border-edge pt-5";
 
 /**
+ * A tab in a strip of them.
+ *
+ * ⚠ **The same pill the machine bar in the rail draws, and it is one function so
+ * it stays that way.** That component argues the palette decision at length and
+ * it is not repeated here, only the conclusion: a selected tab is `bg-raised`,
+ * because `raised` means *state* in this app and `bg-fg` means the affirmative
+ * action inside a decision — a near-black pill for "you are looking at this" was
+ * the loudest object on a page whose whole palette sits within 1.22:1. And an
+ * unselected tab keeps `raised/50` rather than nothing, or a strip of two reads
+ * as one tab and one label, with the only cue that the strip is a strip existing
+ * where you already are.
+ *
+ * A function rather than two constants because the pair *is* the rule: the two
+ * states are only meaningful against each other, and two exported strings is an
+ * invitation to use one of them somewhere the other never appears.
+ *
+ * `min-h-8` is 32px and deliberately below the 44px floor, which the rail's own
+ * pills already are: this is navigation between two views of the same pop-up, not
+ * a control that answers anything. `webcheck`'s 44px sweep covers the three cards
+ * where a mis-tap *decides* something, and this is not one of them.
+ */
+export function tabPill(selected: boolean): string {
+  return `tap flex min-h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs whitespace-nowrap ${
+    selected ? "bg-raised font-medium text-fg" : "bg-raised/50 text-muted hover:bg-raised hover:text-fg"
+  }`;
+}
+
+/**
  * One act inside a settings row's kebab.
  *
  * Promoted out of `UsersSection` when `MachinesSection` grew a kebab of its own,

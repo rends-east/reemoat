@@ -644,6 +644,26 @@ function readZipMembers(central: Buffer): ZipMember[] {
     const externalAttributes = central.readUInt32LE(at + 38);
     let localOffset = central.readUInt32LE(at + 42);
 
+    /*
+     * ⚠ **A record that does not fit inside its own directory is refused, not
+     * clamped**, and the clamp it replaces was a way to be shown one manifest and
+     * sent another. `central` holds exactly the bytes of the central directory, so
+     * `subarray` silently pins an over-declared `nameLength` at the end of the
+     * buffer: this read `plugin.json` off a record claiming a longer name, while
+     * `pluginArchive.ts` slices the same field out of the *whole file* and ran on
+     * into the trailing EOCD record, getting `plugin.json` plus four bytes of
+     * junk — a name it then correctly declined to treat as a manifest. So the
+     * browser described an archive without this member and the daemon installed
+     * one with it. The entry-count check on the other side does not catch it,
+     * because the record was counted either way.
+     *
+     * Refusing is also the right answer on this side alone: the clamp let one
+     * malformed record silently swallow every entry after it.
+     */
+    if (at + 46 + nameLength + extraLength + commentLength > central.length) {
+      throw new ArchiveError("unreadable", "that zip has a directory entry that runs past the directory");
+    }
+
     const nameBytes = central.subarray(at + 46, at + 46 + nameLength);
     const extra = central.subarray(at + 46 + nameLength, at + 46 + nameLength + extraLength);
     at += 46 + nameLength + extraLength + commentLength;

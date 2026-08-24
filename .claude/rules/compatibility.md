@@ -55,6 +55,36 @@ fleet switched off until the last machine is touched by hand. `relaycheck` asser
 the negotiation in both directions, including a daemon that predates the header
 entirely.
 
+**The mirror is swept, field for field, and until recently nothing swept it.**
+`webcheck` compared the four plugin *unions* — a union member is a value that
+turns up in a `switch` — and compared no **interface** at all. A field added to
+`SessionSnapshot` on the daemon and not copied into `wire.ts` compiles on both
+sides, ships, and is `undefined` at runtime on the screen that reads it. The sweep
+is over every interface declared in both, currently 44, and asserts **`daemon ⊆
+client`, never equality**: a field added after the first release is *optional* on
+this side on purpose, because an older daemon does not send it. What is refused is
+the client knowing *less* than the daemon says. ⚠ Its first run reported two
+drifts and both were the sweep's own bugs — a prefix match (`Me` against
+`MemoryEventStore`) and `extends` it did not follow. A checker that cries wolf is
+turned off in a week, so it anchors the name and resolves inheritance, and the
+count has a floor under it: finding nothing to compare must not read as finding no
+drift. Two more, both from the same argument: an `extends` naming something the
+reader cannot find is a **refusal**, never a silent shortfall — an interface that
+reads as smaller than it is makes the sweep compare fewer fields and report no
+drift about the half it could not read. And the anchor has a **negative control**:
+a name that is only a prefix of real declarations must match nothing, beside an
+assertion that the real one still reads. Without it, "the anchor works" is a
+belief — unanchored, `Session` returns `SessionResumeState`'s fields and every
+other line here passes anyway. ⚠ **And two defences under one assertion is either
+redundancy or two *properties* sharing a name — only knocking them out one at a
+time says which.** Here it was the second: the depth counter holds a nested object
+and the paren counter holds a parameter list, and neither covers the other. Each
+is driven on a fixture written in the shape where it is the only thing holding,
+because a reader correct only for the input it has been shown is not correct. The
+parameter case was a real hole found this way — no mirrored file uses that shape
+today, so nothing was wrong, which is exactly why it was worth finding before
+somebody adds one.
+
 **2. An unknown value fails toward "keep working".** The client is allowed to be
 behind the wire — `wire.ts` is a hand mirror and says so — so every narrowing in
 it degrades rather than throws. The one that was wrong was `endedWithDaemon`,

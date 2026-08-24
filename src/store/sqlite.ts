@@ -399,6 +399,7 @@ function migrate(db: DatabaseSync): void {
   // nullable column an older daemon never selects is invisible to it.
   if (!hasSession("ultracode")) db.exec("ALTER TABLE sessions ADD COLUMN ultracode INTEGER");
 
+
   // The relay fields on `identity`. NULL means "this daemon enrolled with a
   // control plane that offered no relay", which is both the honest value for
   // every identity that predates these columns and the value a control plane

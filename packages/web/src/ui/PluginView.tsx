@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { seedForm } from "../plugins";
 import type { PluginBlock, PluginField, PluginOpen, PluginRow, PluginView as PluginViewShape } from "../wire";
-import { Button, DangerButton, Dot, Empty, FIELD, Spinner } from "./bits";
+import { Button, DangerButton, Dot, Dropdown, Empty, FIELD, Spinner } from "./bits";
 import { Trash2 } from "lucide-react";
 
 /**
@@ -395,29 +395,63 @@ function Field({
     );
   }
 
+  if (field.kind === "select") {
+    /*
+     * ⚠ **`Dropdown`, never a bare `<select>`.** This was one, wearing `FIELD` —
+     * and a native select keeps the platform's own chrome unless *every* one of
+     * `appearance`, the border, the radius and the arrow is overridden, so what
+     * shipped was a heavy system-drawn outline sitting in a form of `edge-strong`
+     * boxes, opening a menu in the operating system's colours rather than this
+     * app's. The screenshot that ended it read as a stylesheet that had failed to
+     * load.
+     *
+     * `Dropdown` is the one popover picker here: it takes Escape through
+     * `overlay.ts` rather than owning the key itself, keeps the whole listbox ARIA
+     * set, draws group headings and per-row descriptions, and gets 44px rows at
+     * every pointer. A plugin's options are unbounded up to
+     * `PLUGIN_VIEW_LIMITS.options`, which is exactly the case its own docblock
+     * says a dropdown is for.
+     *
+     * ⚠ **A value the plugin did not offer is drawn as itself rather than as
+     * nothing.** `Dropdown`'s trigger is a node this caller supplies, so a
+     * `value` outside `options` — an old stored setting, a list that changed under
+     * somebody — shows as the raw string instead of silently reading as the first
+     * option. A native select drops it, which is the same fail-open rule
+     * `plugins.ts` keeps everywhere else, in the direction that lies.
+     */
+    const chosen = field.options.find((option) => option.value === value) ?? null;
+    return (
+      <label className="flex flex-col gap-1">
+        <span className="text-sm">{field.label}</span>
+        <Dropdown
+          items={field.options.map((option) => ({ value: option.value, label: option.label || option.value }))}
+          value={value}
+          onChange={onChange}
+          heading={field.label || undefined}
+          trigger={
+            <span className={`min-w-0 truncate ${chosen === null && value.length === 0 ? "text-muted" : ""}`}>
+              {chosen?.label || chosen?.value || value || field.placeholder || "Choose"}
+            </span>
+          }
+        />
+        {help}
+      </label>
+    );
+  }
+
   return (
     <label className="flex flex-col gap-1">
       <span className="text-sm">{field.label}</span>
-      {field.kind === "select" ? (
-        <select className={FIELD} value={value} onChange={(event) => onChange(event.target.value)}>
-          {field.options.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label || option.value}
-            </option>
-          ))}
-        </select>
-      ) : (
-        <input
-          // An unknown kind arrives here as `text` — `plugins.ts` has already made
-          // that substitution, so a field a newer plugin invented is still readable
-          // and still round-trips rather than vanishing.
-          type={field.kind === "password" ? "password" : field.kind === "number" ? "number" : "text"}
-          className={FIELD}
-          value={value}
-          placeholder={field.placeholder ?? undefined}
-          onChange={(event) => onChange(event.target.value)}
-        />
-      )}
+      <input
+        // An unknown kind arrives here as `text` — `plugins.ts` has already made
+        // that substitution, so a field a newer plugin invented is still readable
+        // and still round-trips rather than vanishing.
+        type={field.kind === "password" ? "password" : field.kind === "number" ? "number" : "text"}
+        className={FIELD}
+        value={value}
+        placeholder={field.placeholder ?? undefined}
+        onChange={(event) => onChange(event.target.value)}
+      />
       {help}
     </label>
   );

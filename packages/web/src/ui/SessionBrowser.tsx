@@ -1,15 +1,4 @@
-import {
-  Bell,
-  Check,
-  ChevronRight,
-  Folder as FolderIcon,
-  Layers,
-  ListFilter,
-  Pin,
-  Plus,
-  Puzzle,
-  Search,
-} from "lucide-react";
+import { Bell, Check, ChevronRight, Folder as FolderIcon, Layers, ListFilter, Pin, Plus, Search } from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { MachineId, SessionKey } from "../ids";
 import { machineQuotaNotice, mayAddMachine } from "../quota";
@@ -56,7 +45,6 @@ import {
   type FolderId,
   type MachineTab,
 } from "./groups";
-import { pluginPath, screenPlugins } from "../plugins";
 import { Mark } from "./Mark";
 import { HelpButton, ProfileMenu } from "./ProfileMenu";
 import { RenameField, SessionMenu } from "./SessionMenu";
@@ -1299,15 +1287,6 @@ function SidebarFoot({ state, machine }: { state: AppState; machine: MachineId |
    * plus the bordered New session button is what separates the footer, which is
    * the rule this list already follows between every other pair of things.
    */
-  /*
-   * Only the selected machine's, and only the ones that draw a screen and are
-   * usable. A plugin that is switched off or has failed is not offered rather than
-   * offered-and-broken: this is a launcher, and a door onto a sentence saying the
-   * plugin is not running is worse than no door. Its row on the machine's settings
-   * screen is where that sentence belongs, and it is drawn there.
-   */
-  const launchable = machine === null ? [] : screenPlugins(state.pluginsByMachine.get(machine) ?? []);
-
   return (
     <div className="pb-safe shrink-0 px-3 pt-3">
       {/*
@@ -1352,37 +1331,21 @@ function SidebarFoot({ state, machine }: { state: AppState; machine: MachineId |
         New session
       </Button>
       {/*
-       * Plugin screens for the machine whose tab is selected.
+       * ⚠ **The launcher is inside the account menu now, and it is still not in
+       * the list.** It used to be one bordered button per plugin, stacked directly
+       * under New session — which put an unbounded, machine-dependent column
+       * between the one control somebody presses all day and the account row, and
+       * grew the footer by a row for every plugin installed.
        *
-       * **In the footer, and never in the list above it.** The rail is the
-       * sessions — that is the question this whole screen is shaped around, and a
+       * The rule it was written for is untouched: the rail is the sessions, and a
        * plugin able to add rows to the list would open a hole in `waitingFloor`,
        * which is computed by subtraction precisely so that a new section cannot.
-       * Down here it takes part in no ordering, no filter and no count; it is a
-       * door beside the two doors that were already here.
-       *
-       * Nothing is drawn for a machine with no plugins, and a daemon too old to
-       * have the route reads as exactly that — `fetchPlugins` leaves the list
-       * empty rather than reporting anything. So this row costs nothing to
-       * everybody who has never installed one.
+       * A menu row takes part in no ordering, no filter and no count either — it
+       * is one door further in than it was, in a menu that is already where the
+       * other doors out of the rail live.
        */}
-      {launchable.length > 0 && (
-        <div className="mt-2 flex flex-col gap-1">
-          {launchable.map((plugin) => (
-            <Button
-              key={plugin.id}
-              size="sm"
-              className="w-full justify-start"
-              onClick={() => machine !== null && navigate(pluginPath(machine, plugin.id))}
-            >
-              <Icon as={Puzzle} size={16} />
-              {plugin.contributes.screen?.title ?? plugin.name}
-            </Button>
-          ))}
-        </div>
-      )}
       <div className="mt-2 flex items-center gap-1">
-        <ProfileMenu state={state} className="min-w-0 flex-1" />
+        <ProfileMenu state={state} machine={machine} className="min-w-0 flex-1" />
         <HelpButton />
       </div>
     </div>

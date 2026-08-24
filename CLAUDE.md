@@ -57,7 +57,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 704 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 720 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -82,11 +82,13 @@ pnpm daemoncheck                     # the daemon's HTTP surface and durable sta
                                      #   builds itself, every member there is a refusal for, and
                                      #   the second half of each — that nothing at all was created.
                                      #   Plus plugins: every manifest refusal, the scope gate swept over
-                                     #   the whole method table, the six routes under both axes, and the
+                                     #   the whole method table, the seven routes under both axes, and the
                                      #   lifecycle a real `fork` cannot be made to walk — a start that
                                      #   never completes, an answer that never comes, an exhausted
                                      #   restart budget — plus what an update keeps and what a failed
-                                     #   one puts back
+                                     #   one puts back, and the two surfaces a plugin draws on: every
+                                     #   block and every field kind on each, always in pairs, and the
+                                     #   same bytes answered to both over HTTP
 pnpm relaycheck                      # framing, flow control, authorization, tunnel supersede,
                                      #   tunnel presence as a row and the relay's own health route,
                                      #   live-row revocation, the control plane's routes,
@@ -126,7 +128,11 @@ pnpm webcheck                        # packages/web: the cursor, rotation, repla
                                      #   never a permission, never a subagent, never one call.
                                      #   And the import flow: that an old daemon is known by the
                                      #   shape of its refusal rather than by its version, and that
-                                     #   the export skill asks for what the extractor accepts.
+                                     #   the export skill asks for what the extractor accepts. And
+                                     #   where a plugin's settings are — their own screen behind a gear,
+                                     #   narrowed to three controls, drawn with this app's own picker
+                                     #   rather than the platform's — read off the files that place
+                                     #   them, since nothing typed can hold a placement
                                      #   And the newest: that a transcript missing its beginning
                                      #   *says so* — `transcriptNotice` as a total partition over
                                      #   720 states, its pair with `loadStop`, and the one string
@@ -279,7 +285,8 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `web-shell.md` | `packages/web/src/ui/AppShell.tsx`, `SessionBrowser.tsx`, `groups.ts`, `overlay.ts`, `settings/`, `packages/web/src/store.ts` | The one question this screen is shaped around, and the rules that keep it answerable · who owns Escape · what a folder is · what a client may not draw optimistically |
 | `web-transcript.md` | `packages/web/src/ui/tail.ts`, `EventList.tsx`, `DiffView.tsx`, `AskCard.tsx`, `packages/web/src/diff.ts` | What a conversation may leave out and what it must say instead · what folds into a run and what may never · how a diff is drawn, and what refuses to draw one |
 | `web-composer.md` | `packages/web/src/ui/Composer.tsx`, `CommandMenu.tsx`, `AgentConfigBar.tsx`, `packages/web/src/keys.ts` | Which key sends · what a `/` opens · why a control never leaves the strip · what a chip may claim before the daemon has answered |
-| `plugins.md` | `src/plugins/`, `plugins/`, `packages/web/src/plugins.ts`, `PluginView.tsx` | What a plugin may add and where it may appear · the two axes of authorization, and which applies inside a hook · what an update keeps and what a failed one puts back · why `src/` now holds two `fetch` calls |
+| `plugins.md` | `src/plugins/`, `plugins/`, `packages/web/src/wire.ts` | What a plugin may add and where it may appear · the two axes of authorization, and which applies inside a hook · what an update keeps and what a failed one puts back · why `src/` now holds three `fetch` calls |
+| `plugin-ui.md` | `packages/web/src/plugins.ts`, `catalogue.ts`, `install.ts`, `ui/plugins/`, `PluginView.tsx` | What the browser draws for a plugin and what it refuses to draw · where a plugin is installed from and what somebody agreed to · the one client that fails *closed* · what a draft of a fleet is |
 | `deployment.md` | `deploy/`, `.github/workflows/` | Two deployments and three services · what a restart costs and what decides one · every rule about writing a value into an env file |
 | `compatibility.md` | `src/version.ts`, `src/relay/protocol.ts`, `packages/control-plane/src/store.ts`, `schema.sql`, `packages/web/src/wire.ts` | What ships with what, and why the web client riding the control plane's image decides the rest · negotiated against announced · which way an unknown value must fail · how to make a breaking change without a flag day · what is still one |
 

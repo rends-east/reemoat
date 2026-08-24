@@ -1,10 +1,11 @@
 import { useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
 import { parseGateScreen, type GateScreen } from "./gate";
+import { parseMarketRoute, type MarketRoute } from "./market";
 import { machineId, sessionId, type MachineId, type SessionRef } from "./ids";
-import { navMove } from "./nav";
 import { parseSettingsRoute, type SettingsRoute } from "./settings";
 import { isOverlayPath } from "./ui/overlay";
+import { navMove, originFor } from "./nav";
 
 /**
  * Four screens, so four lines of routing.
@@ -66,6 +67,23 @@ export type Route =
    * installed.
    */
   | { name: "plugin"; machineId: MachineId; pluginId: string }
+  /**
+   * `/plugins`, `/plugins/installed`, `/plugins/p/:id` — the plugin market.
+   *
+   * ⚠ **A different screen from `plugin` above, sharing a word and nothing
+   * else.** That one is a plugin *drawing something* on one machine, opened from
+   * the rail several times a day. This is where plugins are found and put on
+   * machines, opened from the profile menu when somebody wants one. Distinct
+   * first segments, so nothing has to disambiguate them.
+   *
+   * A pop-up, and a route, for the same three reasons `/settings` is: it deep
+   * links, it survives the reload a phone performs on its own, and the phone's
+   * Back button closes it because closing it is popping a history entry.
+   *
+   * Every rule about the segments lives in `market.ts` rather than here, for the
+   * reason `settings.ts` gives: `webcheck` cannot import this file at all.
+   */
+  | ({ name: "plugins" } & MarketRoute)
   /**
    * `/register`, `/confirm`, `/forgot`, `/reset`, `/verify`.
    *
@@ -139,6 +157,9 @@ function parse(pathname: string): Route {
     // that knows a segment may not decode stays the one place.
     return { name: "settings", ...parseSettingsRoute(parts.slice(1), decodeSegment) };
   }
+  if (parts[0] === "plugins") {
+    return { name: "plugins", ...parseMarketRoute(parts.slice(1), decodeSegment) };
+  }
   if (parts[0] === "p" && parts[1] !== undefined && parts[2] !== undefined) {
     return {
       name: "plugin",
@@ -176,6 +197,23 @@ interface Location {
   route: Route;
   /** The path the overlay is drawn over. `/` on a cold deep link. */
   under: string;
+  /**
+   * The *other overlay* this one was opened from, or `null`.
+   *
+   * ⚠ **Beside `under` rather than instead of it, because they answer different
+   * questions and both are needed at once.** `under` is what the ✕ closes onto and
+   * is deliberately carried forward when one overlay opens another, so a pop-up
+   * always closes back onto a screen. That flattening is what left the ◀ with
+   * nothing: `/settings/machines/:id/plugins` links to `/plugins/p/:id`, and with
+   * only `under` recorded the way *up* fell through to `marketUp`, which answers
+   * "the market list" on the reasoning that an entry is only ever reached from
+   * there — true until the settings sheet started linking here.
+   *
+   * So the ✕ still leaves the stack and the ◀ walks back through it. `null`
+   * whenever the previous screen was not itself an overlay, which is the ordinary
+   * case and the one `marketUp` already answers correctly.
+   */
+  origin: string | null;
 }
 
 const listeners = new Set<() => void>();
@@ -185,8 +223,21 @@ function readUnder(): string {
   return typeof state?.under === "string" && state.under.length > 0 ? state.under : "/";
 }
 
+/**
+ * The overlay this entry was opened from, as recorded.
+ *
+ * Absent on every entry written before this field existed, and on a cold deep
+ * link — both mean the same thing here and both answer `null`, which is exactly
+ * the state that leaves `marketUp` in charge. So an old history entry degrades to
+ * the previous behaviour rather than to a broken one.
+ */
+function readOrigin(): string | null {
+  const state = window.history.state as { origin?: unknown } | null;
+  return typeof state?.origin === "string" && state.origin.length > 0 ? state.origin : null;
+}
+
 function read(): Location {
-  return { route: parse(window.location.pathname), under: readUnder() };
+  return { route: parse(window.location.pathname), under: readUnder(), origin: readOrigin() };
 }
 
 let current: Location = read();
@@ -288,10 +339,16 @@ function underFor(target: string): string {
   return isOverlayPath(here) ? readUnder() : here;
 }
 
+/*
+ * `originFor` and `overlayKind` live in `nav.ts` — pure, and therefore assertable.
+ * See their docblocks: the decision was here for one round, and a mutation run
+ * showed it was the one part of this work no driver could reach.
+ */
 export function navigate(path: string, replace = false): void {
   const under = underFor(path);
-  if (replace) window.history.replaceState({ under }, "", path);
-  else window.history.pushState({ under }, "", path);
+  const origin = originFor(window.location.pathname, path, readOrigin());
+  if (replace) window.history.replaceState({ under, origin }, "", path);
+  else window.history.pushState({ under, origin }, "", path);
   announce();
 }
 
@@ -332,4 +389,14 @@ export function useRoute(): Route {
  */
 export function useUnder(): string {
   return useSyncExternalStore(subscribe, () => current.under);
+}
+
+/**
+ * The other overlay this one was opened from, or `null`. See {@link Location.origin}.
+ *
+ * Read by the way *up* rather than by the way out: the ✕ is `useUnder`'s and is
+ * unchanged.
+ */
+export function useOrigin(): string | null {
+  return useSyncExternalStore(subscribe, () => current.origin);
 }

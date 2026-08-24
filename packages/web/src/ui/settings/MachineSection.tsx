@@ -169,7 +169,7 @@ export function MachineSection({
           answers `403 insufficient_scope` to a read-only grant. */}
       <section className={SETTINGS_SECTION}>
         <h2 className={SETTINGS_HEADING}>Plugins</h2>
-        <MachinePluginsSection state={state} machineId={machineId} plugin={null} />
+        <MachinePluginsSection state={state} machineId={machineId} />
       </section>
 
       {/*

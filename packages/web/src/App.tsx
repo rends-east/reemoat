@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useSyncExternalStore, type ReactNode } from "react";
 import { isSheet, upFrom } from "./nav";
-import { navigate, parsePath, useRoute, useUnder, type Route } from "./router";
+import { navigate, parsePath, useOrigin, useRoute, useUnder, type Route } from "./router";
 import { setTelegramBack } from "./telegram";
 import { store } from "./store";
 import { AppShell, NothingSelected } from "./ui/AppShell";
@@ -43,6 +43,11 @@ const Settings = lazy(async () => ({ default: (await import("./ui/settings/Setti
  * one. Nothing on the sign-in or session path imports it.
  */
 const PluginScreen = lazy(async () => ({ default: (await import("./ui/PluginScreen")).PluginScreen }));
+/*
+ * The market. Lazy for `Settings`' reason and one of its own: it pulls in the
+ * catalogue reader and the machine picker, and most sessions never open it.
+ */
+const PluginsSheet = lazy(async () => ({ default: (await import("./ui/plugins/PluginsSheet")).PluginsSheet }));
 
 /**
  * Three phases, and — new here — two routes at once.
@@ -60,6 +65,9 @@ export function App(): ReactNode {
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const route = useRoute();
   const under = useUnder();
+  // The other pop-up this one was opened from, for the way *up*. The ✕ is
+  // `under`'s and is unchanged. See `Location.origin` in `router.ts`.
+  const origin = useOrigin();
   /*
    * Telegram's own control, kept in step with the screen.
    *
@@ -81,7 +89,7 @@ export function App(): ReactNode {
    * Caught in a browser rather than by `typecheck`, which cannot see it. Every
    * hook here belongs above line one of the branching.
    */
-  const up = upFrom(route, under);
+  const up = upFrom(route, under, origin);
   useEffect(() => {
     setTelegramBack(up === null ? null : () => navigate(up, true));
     // Deliberately no teardown. There is one back button and one page; hiding it
@@ -160,6 +168,18 @@ export function App(): ReactNode {
       )}
       {route.name === "new" && (
         <NewSession state={state} machineId={route.machineId} cwd={route.cwd} />
+      )}
+      {route.name === "plugins" && (
+        <Suspense fallback={<Waiting />}>
+          {/*
+           * Not keyed: the sheet stays put while the tab and the entry change
+           * under it, which is what makes the section slide read as one pop-up
+           * moving rather than as a pop-up closing and another opening. What each
+           * screen *inside* it owes instead is its own key — `MarketEntry` keys on
+           * the plugin id, for the state that would otherwise be carried across.
+           */}
+          <PluginsSheet state={state} route={route} />
+        </Suspense>
       )}
       {route.name === "plugin" && (
         <Suspense fallback={<Waiting />}>

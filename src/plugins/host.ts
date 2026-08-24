@@ -8,6 +8,17 @@ import type { ManagedSession, SessionRegistry } from "../registry.js";
 import { probeExists } from "../stall.js";
 import { PluginApi, PluginApiError, type PluginApiOptions } from "./api.js";
 import { parseManifest } from "./manifest.js";
+import { PluginOrigins } from "./origin.js";
+import {
+  consentGap,
+  fetchArchive,
+  isSourceRefusal,
+  REAL_ARCHIVE_FETCHER,
+  sourceLabel,
+  type ArchiveFetcher,
+  type PluginConsent,
+  type PluginSource,
+} from "./source.js";
 import {
   clampView,
   noteClamp,
@@ -16,6 +27,7 @@ import {
   type PluginResult,
   type PluginState,
   type PluginSummary,
+  type PluginSurface,
   PLUGIN_VIEW_LIMITS,
 } from "./protocol.js";
 import {
@@ -44,10 +56,15 @@ import type { InstalledPlugin, PluginDataStore, PluginRecordStore } from "./stor
  * Three things this deliberately does **not** do, each of which reads as an
  * omission without a sentence:
  *
- *   - **It never reaches the network to find a plugin.** `src/` holds two `fetch`
- *     calls and both are named — `enroll.ts`, and `net.fetch` made on a plugin's
- *     own behalf. A registry to poll would be a third, and would make a
- *     control-plane outage able to stop an install on somebody's own machine.
+ *   - **It discovers nothing, and it polls nothing.** `src/` holds three `fetch`
+ *     calls now and all three are named — `enroll.ts`, `net.fetch` made on a
+ *     plugin's own behalf, and {@link fetchArchive} in `source.ts`, reached only
+ *     by {@link PluginHost.installFromSource}. What Q7.104 refused was a
+ *     *registry to poll*, which would make somebody else's outage able to stop an
+ *     install on your own machine; the catalogue this daemon installs *from* lives
+ *     entirely in the browser's world, and what arrives here is a repository and a
+ *     commit that a person read the permissions of. `source.ts`'s header is the
+ *     argument, and `.claude/rules/plugins.md` carries the count.
  *   - **It never updates a plugin by itself.** Updating is an act, exactly as
  *     updating the daemon is; nothing here is a step toward fleet rollout (Q7.42).
  *   - **It keeps no pid and reaps no orphans.** `runner.ts` exits when its IPC
@@ -142,7 +159,7 @@ export interface PluginHostOptions {
   records: PluginRecordStore;
   data: PluginDataStore;
   registry: SessionRegistry;
-  api: Omit<PluginApiOptions, "registry" | "data" | "onWarning">;
+  api: Omit<PluginApiOptions, "registry" | "data" | "onWarning" | "origins">;
   onWarning?: (detail: string) => void;
   /** The one seam a sandbox would be written at, and what drivers substitute. */
   runtime?: PluginRuntime;
@@ -156,6 +173,26 @@ export interface PluginHostOptions {
   now?: () => number;
   /** How a restart backoff is waited out. See {@link PluginScheduler}. */
   scheduler?: PluginScheduler;
+  /**
+   * How the archive is fetched by {@link PluginHost.installFromSource}.
+   *
+   * The third seam in this file, and here for the reason the other two are:
+   * `daemoncheck` has no network, and every refusal on that path — a 404, a
+   * redirect, a body larger than a plugin may be, a commit whose manifest asks
+   * for more than was consented to — has to be reachable without one.
+   */
+  fetchArchive?: ArchiveFetcher;
+  /**
+   * Where a plugin's own writes are stamped, so its own echo is not sent back.
+   *
+   * A seam for the same reason `runtime` and `scheduler` are: producing a claim
+   * needs `ManagedSession.prompt` to answer `accepted`, which needs a live agent
+   * — and the section of `daemoncheck` that drives hooks deliberately has none,
+   * because it is driving the *announcement* rather than the agent. Handed one it
+   * can write to, that driver reaches the suppression end to end. Production
+   * passes nothing and gets its own.
+   */
+  origins?: PluginOrigins;
   /**
    * The two deadlines, overridable.
    *
@@ -190,6 +227,13 @@ export class PluginHost {
   private root: string;
   private readonly live = new Map<string, LivePlugin>();
   private readonly api: PluginApi;
+  /**
+   * Who caused what, so that {@link PluginHost.fan} can leave one plugin out.
+   *
+   * See `origin.ts`: this holds the *turn* claims only. A session's origin is an
+   * argument to `SessionRegistry.create` and is spent by the announcement.
+   */
+  private readonly origins: PluginOrigins;
   private readonly watching = new Map<string, () => void>();
   private unwatch: (() => void) | null = null;
   /**
@@ -218,11 +262,14 @@ export class PluginHost {
 
   private constructor(readonly options: PluginHostOptions) {
     this.root = options.root;
+    // Before the API is built, because the API is what writes into it.
+    this.origins = options.origins ?? new PluginOrigins();
     this.api = new PluginApi({
       ...options.api,
       registry: options.registry,
       data: options.data,
       onWarning: options.onWarning,
+      origins: this.origins,
     });
   }
 
@@ -237,8 +284,10 @@ export class PluginHost {
      * Watched before anything is started, so a plugin coming up during the boot
      * pass cannot miss the sessions that pass is resuming.
      */
-    host.unwatch = options.registry.watchSessions((managed, arrival) => host.observe(managed, arrival));
-    for (const managed of options.registry.list()) host.observe(managed, "restored");
+    host.unwatch = options.registry.watchSessions((managed, arrival, origin) => host.observe(managed, arrival, origin));
+    // `null`: the boot pass is not an act anybody performed, and `restored` fans
+    // no `session.created` anyway.
+    for (const managed of options.registry.list()) host.observe(managed, "restored", null);
     for (const plugin of host.live.values()) {
       /*
        * ⚠ **Seeded, for `install`'s reason and in `install`'s words.** The boot
@@ -286,8 +335,8 @@ export class PluginHost {
     }
   }
 
-  callApi(manifest: PluginManifest, method: string, args: unknown): Promise<unknown> {
-    return this.api.call(manifest, method, args);
+  callApi(manifest: PluginManifest, method: string, args: unknown, signal?: AbortSignal): Promise<unknown> {
+    return this.api.call(manifest, method, args, signal);
   }
 
   pluginRuntime(): PluginRuntime {
@@ -341,7 +390,26 @@ export class PluginHost {
    *      the refusal carries what the child said. An update that breaks a plugin
    *      must not also uninstall it.
    */
-  async install(request: { body: ReadableStream<Uint8Array>; name: string }): Promise<InstallOutcome> {
+  async install(request: {
+    body: ReadableStream<Uint8Array>;
+    name: string;
+    /** Where the bytes came from, when they were fetched rather than uploaded. */
+    source?: PluginSource;
+    /**
+     * What the person installing was shown, when anybody was shown anything.
+     *
+     * `undefined` on the upload path, where the browser read the archive itself
+     * and `consentBroken` checks the answer afterwards. Set on the source path,
+     * where nothing local ever opened the archive — see the check below.
+     */
+    consent?: PluginConsent;
+  }): Promise<InstallOutcome> {
+    // See {@link shuttingDown}: refused before the body is read, and the body is
+    // cancelled on the way out like every other refusal this route makes.
+    if (this.shuttingDown) {
+      await cancel(request.body);
+      return refuse("shutting_down", "the daemon is shutting down");
+    }
     if (this.installing) {
       await cancel(request.body);
       return { kind: "busy" };
@@ -382,6 +450,33 @@ export class PluginHost {
 
       if ((await probeExists(join(root, "server.js"))) !== true) {
         return refuse("entry_missing", "that plugin has no server.js beside its plugin.json");
+      }
+
+      /*
+       * ⚠ **Before anything is moved and before anything is started, which is the
+       * whole of what makes it consent rather than a notification.**
+       *
+       * On the upload path the browser opened the archive itself and
+       * `consentBroken` compares the answer afterwards — a check the person is
+       * shown *after* a plugin has already run once, and `PluginsPanel` says so
+       * out loud. That is tolerable there because the reader they are relying on
+       * read the very bytes that were sent.
+       *
+       * Here nothing local ever opened the archive: the browser read a
+       * `plugin.json` from `raw.githubusercontent.com` at this commit and this
+       * daemon fetched a tarball of the same commit, and while those are the same
+       * object by construction, "by construction" is not a check. So this one
+       * refuses rather than reports, and it refuses early enough that the plugin
+       * has not been started.
+       *
+       * See {@link consentGap} for why it compares three fields and not the
+       * manifest — the short version is that `parseManifest` normalises, so a
+       * field-by-field check would fire on healthy plugins and teach everybody to
+       * click through it.
+       */
+      if (request.consent !== undefined) {
+        const gap = consentGap(request.consent, manifest);
+        if (gap !== null) return refuse("plugin_consent_broken", gap);
       }
 
       existing = this.live.get(manifest.id) ?? null;
@@ -440,7 +535,17 @@ export class PluginHost {
         enabled: true,
         installedAt: existing?.record.installedAt ?? now,
         updatedAt: now,
-        source: request.name.length > 0 ? request.name : null,
+        /*
+         * Where it came from, written and never read for a decision — the
+         * filename on the upload path, and the pinned commit on the source path,
+         * which is the one somebody would actually want to look up later.
+         */
+        source:
+          request.source !== undefined
+            ? sourceLabel(request.source)
+            : request.name.length > 0
+              ? request.name
+              : null,
       };
 
       const plugin = new LivePlugin(record, this);
@@ -638,6 +743,49 @@ export class PluginHost {
   }
 
   /**
+   * Install a plugin this daemon fetches for itself, from a pinned commit.
+   *
+   * **A thin front on {@link install} and deliberately nothing more.** The
+   * staging directory, the unpacker, the manifest root rule, the `rename`
+   * publish and the whole rollback are the same code — a second implementation
+   * of that sequence is how one of them comes to be missing the step that puts
+   * the old tree back, which is a defect this file has already had once and
+   * records at length. What is new here is exactly two things: where the bytes
+   * come from, and the consent check {@link install} performs on their behalf.
+   *
+   * The `installing` mutex is asked **twice on purpose**. Once here, before a
+   * fetch, so a machine already installing something refuses in a millisecond
+   * instead of downloading two megabytes to be told; and once inside `install`,
+   * which is the authoritative one. The gap between them is a race that costs a
+   * wasted download and nothing else — the second check is what actually keeps
+   * installs serialised.
+   */
+  async installFromSource(source: PluginSource, consent: PluginConsent | null): Promise<InstallOutcome> {
+    // Refused before the fetch as well as before the install, for the reason the
+    // `installing` check below is asked twice. See {@link shuttingDown}.
+    if (this.shuttingDown) return refuse("shutting_down", "the daemon is shutting down");
+    if (this.installing) return { kind: "busy" };
+
+    const fetched = await fetchArchive(source, this.options.fetchArchive ?? REAL_ARCHIVE_FETCHER);
+    if (isSourceRefusal(fetched)) return refuse(fetched.code, fetched.message);
+    try {
+      return await this.install({
+        body: fetched.body,
+        // The name is a label on the row and this path has a better one, so it is
+        // left empty rather than invented — `sourceLabel` is what gets written.
+        name: "",
+        source,
+        ...(consent === null ? {} : { consent }),
+      });
+    } finally {
+      // The deadline, released on every path. `install`'s own `finally` cancels
+      // the body; this is the timer that would otherwise hold the process's event
+      // loop open for the rest of its window after a fast install.
+      fetched.done();
+    }
+  }
+
+  /**
    * Uninstall, whether or not this build can read what it is uninstalling.
    *
    * ⚠ **The fall-through to the store is the whole of this, and it closes a row
@@ -676,6 +824,7 @@ export class PluginHost {
      * and holding a `DELETE` open behind a 2 MiB upload is a worse answer than
      * telling them what the machine is doing.
      */
+    if (this.shuttingDown) return "busy";
     if (this.installing) return "busy";
     this.installing = true;
     try {
@@ -757,6 +906,7 @@ export class PluginHost {
     // See {@link installing}: an update stops and restarts the plugin, so a switch
     // thrown across one lands on whichever `LivePlugin` happens to be current.
     // Claimed for the same reason `remove` claims it.
+    if (this.shuttingDown) return "busy";
     if (this.installing) return "busy";
     this.installing = true;
     try {
@@ -818,7 +968,7 @@ export class PluginHost {
    * plugin between an agent and its transcript. Deliveries are queued and drained
    * on their own.
    */
-  private observe(managed: ManagedSession, arrival: "created" | "restored"): void {
+  private observe(managed: ManagedSession, arrival: "created" | "restored", origin: string | null): void {
     if (this.stopped || this.watching.has(managed.id)) return;
     let ended = false;
     /**
@@ -852,14 +1002,31 @@ export class PluginHost {
       guarded(() => {
         const event = stored.event;
         if (event.type === "turn_end") {
-          this.fan("turn.ended", () => ({ session: managed.snapshot(), stopReason: event.stopReason }));
+          /*
+           * ⚠ **Taken here, before the fan, and whether or not anybody is
+           * subscribed.** The claim names *this* turn: a plugin whose prompt
+           * started it does not get the echo, and nothing later may inherit the
+           * claim. Reading it inside the lazy payload builder would mean it was
+           * spent only when somebody happened to be listening, which is how a
+           * stale claim comes to suppress somebody else's turn an hour later.
+           */
+          const started = this.origins.takeTurn(managed.id);
+          this.fan("turn.ended", () => ({ session: managed.snapshot(), stopReason: event.stopReason }), started);
         } else if (event.type === "permission_request") {
-          this.fan("permission.requested", () => ({
-            session: managed.snapshot(),
-            permissionId: event.permissionId,
-            title: event.title,
-            options: event.options,
-          }));
+          /*
+           * Unattributed on purpose. Nothing a plugin may call produces one of
+           * these — an agent asks — so there is no write of its own to echo.
+           */
+          this.fan(
+            "permission.requested",
+            () => ({
+              session: managed.snapshot(),
+              permissionId: event.permissionId,
+              title: event.title,
+              options: event.options,
+            }),
+            null,
+          );
         } else if (event.type === "permission_resolved") {
           /*
            * `outcome` and `by` both cross, and neither is redundant. `outcome:
@@ -870,14 +1037,27 @@ export class PluginHost {
            * sweeping a cancelled turn, which is the difference a plugin measuring
            * "how often do I approve this" is actually asking about.
            */
-          this.fan("permission.resolved", () => ({
-            session: managed.snapshot(),
-            permissionId: event.permissionId,
-            title: event.title,
-            outcome: event.outcome,
-            optionId: event.optionId,
-            by: event.by,
-          }));
+          /*
+           * ⚠ **Deliberately not attributed, though `sessions.answerPermission`
+           * does cause one.** The loop it makes ends by itself: a second answer to
+           * the same question is refused as `already_answered` and nothing is
+           * fanned for it. What suppression would cost is the one confirmation a
+           * plugin has that its answer landed — and `by` cannot stand in for it,
+           * because a plugin's answer is written as `"client"`, the same as a
+           * person's.
+           */
+          this.fan(
+            "permission.resolved",
+            () => ({
+              session: managed.snapshot(),
+              permissionId: event.permissionId,
+              title: event.title,
+              outcome: event.outcome,
+              optionId: event.optionId,
+              by: event.by,
+            }),
+            null,
+          );
         }
       }),
     );
@@ -905,7 +1085,29 @@ export class PluginHost {
         }
         if (ended) return;
         ended = true;
-        this.fan("session.ended", () => ({ session: snapshot, exit: snapshot.exit }));
+        /*
+         * ⚠ **A claim on a session that is over names nothing.** A turn the agent
+         * died inside never produces a `turn_end`, so nothing would spend it —
+         * and it would then suppress the first turn of a session somebody
+         * resumes, which is the blind spot this whole design exists to avoid.
+         */
+        this.origins.forget(snapshot.id);
+        /*
+         * Unattributed. `sessions.stop`'s loop ends by itself — `ended` latches
+         * until the session is resumed, and stopping a terminal session fans
+         * nothing — and a session ending is the last thing a plugin should be
+         * made to miss.
+         *
+         * ⚠ **`sessions.create` is the case this does not close.** A create whose
+         * `start()` throws is an exit, so the plugin that asked is told
+         * `session.ended` about the session it just made; a handler answering that
+         * by creating another loops. `MAX_LIVE_SESSIONS` does not bound it —
+         * `liveSessionCount` skips terminal sessions — so what is left is
+         * `SESSION_CREATE_BURST` throttling it, and a worktree left behind each
+         * time round, since `create` deliberately leaves one on a failed start.
+         * Bounding that needs a per-plugin create budget, which this is not.
+         */
+        this.fan("session.ended", () => ({ session: snapshot, exit: snapshot.exit }), null);
       }),
     );
     this.watching.set(managed.id, () => {
@@ -913,7 +1115,15 @@ export class PluginHost {
       unsubWatch();
     });
     if (arrival === "created") {
-      this.fan("session.created", () => ({ session: managed.snapshot() }));
+      /*
+       * ⚠ **The origin came with the announcement rather than from a ledger**,
+       * because this fan runs *inside* `SessionRegistry.create`: the plugin that
+       * asked is still parked on its own `await` and could not have stamped
+       * anything. Without this, a `session.created` handler calling
+       * `ctx.sessions.create` makes sessions until `MAX_LIVE_SESSIONS`, each one a
+       * worktree and an agent process.
+       */
+      this.fan("session.created", () => ({ session: managed.snapshot() }), origin);
     }
   }
 
@@ -924,13 +1134,45 @@ export class PluginHost {
    * because `snapshot()` copies arrays and the ordinary case is that nobody
    * subscribed at all. With no subscriber it is never built.
    */
-  private fan(hook: PluginHook, payload: () => Record<string, unknown>): void {
+  private fan(hook: PluginHook, payload: () => Record<string, unknown>, origin: string | null): void {
     let built: Record<string, unknown> | null = null;
     for (const plugin of this.live.values()) {
+      /*
+       * ⚠ **The one plugin not told is the one that caused it.**
+       *
+       * Compared against the id rather than against the object, which is what
+       * makes this survive an update: `install` replaces the `LivePlugin` while
+       * the id stays the same, so a claim made by the incumbent is still honoured
+       * against the successor — the same plugin, by the only name this subsystem
+       * has for one.
+       */
+      if (origin !== null && plugin.record.id === origin) continue;
       if (!plugin.wants(hook)) continue;
       built ??= payload();
       plugin.deliver(hook, { hook, ...built });
     }
+  }
+
+  /**
+   * Whether this host has been shut down, as a refusal every mutator owes.
+   *
+   * ⚠ **`stopped` was written by {@link shutdown} and read by nothing but
+   * `observe` and shutdown's own latch, so shutdown was not a barrier.** An
+   * install accepted a moment earlier and still streaming its archive walked
+   * straight through the drain below, renamed its tree, wrote its row and called
+   * `ensureStarted` — forking a child *after* the drain, held by nothing, and
+   * unreachable from a `shutdown` that has already latched itself idempotent.
+   *
+   * The route's own guard cannot cover that window: `registry.isShuttingDown` is
+   * set inside `registry.shutdown()`, and `scripts/daemon.ts` runs this method
+   * *first* — so it is false for the whole of it.
+   *
+   * `AgentAskRuns` reaches the same conclusion one file over and states it in
+   * `admit`; this is that rule, applied to the subsystem that spawns the longer
+   * lived process.
+   */
+  private get shuttingDown(): boolean {
+    return this.stopped;
   }
 
   async shutdown(): Promise<void> {
@@ -940,6 +1182,16 @@ export class PluginHost {
     this.unwatch = null;
     for (const stop of this.watching.values()) stop();
     this.watching.clear();
+    /*
+     * ⚠ **An install in flight is waited out rather than raced.** `installing` is
+     * held for the whole of an install, an update, a remove and a switch, so
+     * spinning on it is the same barrier those four already agree on — and
+     * draining `live` while one is between its `rename` and its `ensureStarted`
+     * is exactly how a child outlives this call. The mutators refuse the moment
+     * `stopped` is set, so nothing new can be admitted while this waits and the
+     * loop is bounded by the one act that was already running.
+     */
+    while (this.installing) await new Promise((resolve) => setTimeout(resolve, 10));
     await Promise.all([...this.live.values()].map((plugin) => plugin.stop()));
   }
 }
@@ -1036,6 +1288,26 @@ class LivePlugin {
    * compares against it before touching anything this object shares.
    */
   private generation = 0;
+  /**
+   * What tells this launch's outstanding **host** calls that nobody is waiting.
+   *
+   * ⚠ **`settlePending` answers the calls going the other way, and there was no
+   * equivalent for these.** A child that is stopped, disabled, updated or removed
+   * has its inbound invocations settled and its timers disarmed — but a call *it*
+   * made outward, which is the direction where a method spawns an agent, ran on
+   * with nothing left to hand the answer to. `model.complete` allows two minutes
+   * against the ten seconds an invocation gets, so the measured shape is a plugin
+   * timed out at 10 s, stopped at the third of those, its row and tree deleted by
+   * `remove` — and an agent subprocess still holding one of the two slots this
+   * machine allows, for another 110 seconds.
+   *
+   * One per launch, replaced in {@link doStart} and aborted in {@link doStop}, so
+   * a call carries the signal of the child that made it and a superseded
+   * generation's abort cannot reach its successor's work. Captured at the call
+   * site rather than re-read after an await, which is this class's standing rule
+   * about `this.process`.
+   */
+  private hostCallsAbort = new AbortController();
   /**
    * The newest launch a stop has been **asked for**, which is not the same fact as
    * a stop having finished.
@@ -1151,6 +1423,8 @@ class LivePlugin {
      * and the guard past the fork can see it. See {@link stopGeneration}.
      */
     const generation = ++this.generation;
+    // A launch of its own gets a signal of its own; see {@link hostCallsAbort}.
+    this.hostCallsAbort = new AbortController();
     /*
      * ⚠ **A stop already under way is waited out rather than raced.** `doStop`
      * nulls `process` and writes "stopped" on the row in its first three lines and
@@ -1410,8 +1684,14 @@ class LivePlugin {
       const release = (): void => {
         this.hostCalls = Math.max(0, this.hostCalls - 1);
       };
+      /*
+       * Read here rather than inside the `.then`, so what travels is the signal of
+       * the launch that was current when the child asked — the same discipline the
+       * captured `target` above keeps, and for the same reason.
+       */
+      const gone = this.hostCallsAbort.signal;
       void this.host
-        .callApi(this.record.manifest, message.method, message.args)
+        .callApi(this.record.manifest, message.method, message.args, gone)
         .then((value) => {
           release();
           if (generation !== this.generation) return;
@@ -1579,7 +1859,7 @@ class LivePlugin {
       throw new PluginApiError("plugin_request_too_large", `a plugin is sent at most ${MAX_PLUGIN_MESSAGE_BYTES} bytes in one message`);
     }
     if (!answer.message.ok) throw new PluginApiError("plugin_failed", clip(answer.message.error, MAX_FAILURE_CHARS));
-    return this.shape(kind, answer.message.value);
+    return this.shape(kind, name, answer.message.value);
   }
 
   /**
@@ -1589,7 +1869,23 @@ class LivePlugin {
    * somebody's real board — and the clamp is reported as a notice rather than
    * hidden, because a list silently cut is a list that shows a wrong number.
    */
-  private shape(kind: PluginInvokeKind, value: unknown): PluginResult {
+  private shape(kind: PluginInvokeKind, name: string, value: unknown): PluginResult {
+    /*
+     * ⚠ **Which surface, taken from the name this invocation already carried.**
+     * A `view` is invoked by its id — `server.ts` refuses any id but `screen` and
+     * `settings` — so the surface was on the wire the whole time and neither side
+     * read it.
+     *
+     * ⚠ **An `action` is `screen`, and that is a limit worth stating rather than
+     * hiding.** An action id says which action, never which pane it was pressed
+     * on: the same submit reaches here from a form on a screen and from a form on
+     * a settings pane. So the *browser* narrows what a settings pane draws — it
+     * is the side that knows for certain — and this clamp is what produces the
+     * author-facing notice on the read. Guessing the surface from the presence of
+     * a `form` context was considered and is worse than not knowing: a screen's
+     * form would then be told it may not draw a list.
+     */
+    const surface: PluginSurface = kind === "view" && name === "settings" ? "settings" : "screen";
     if (kind === "action") {
       const result = (value ?? null) as { kind?: unknown; text?: unknown; tone?: unknown; view?: unknown } | null;
       if (result === null) return { kind: "toast", text: "Done", tone: "default" };
@@ -1600,10 +1896,10 @@ class LivePlugin {
           tone: result.tone === "danger" ? "danger" : "default",
         };
       }
-      const clamped = clampView(result.kind === "view" ? result.view : result);
-      return { kind: "view", view: noteClamp(clamped) };
+      const clamped = clampView(result.kind === "view" ? result.view : result, surface);
+      return { kind: "view", view: noteClamp(clamped, surface) };
     }
-    return { kind: "view", view: noteClamp(clampView(value)) };
+    return { kind: "view", view: noteClamp(clampView(value, surface), surface) };
   }
 
   /** Every session this daemon already knows about, for a plugin that has just arrived. */
@@ -1749,6 +2045,13 @@ class LivePlugin {
    */
   private async doStop(generation: number): Promise<void> {
     this.settlePending(generation, "this plugin was stopped");
+    /*
+     * The other direction, and the reason it is here rather than left to a
+     * deadline: `settlePending` above answers what was asked *of* this child, and
+     * this withdraws what this child asked *of the daemon* — the calls that spawn
+     * things. See {@link hostCallsAbort}.
+     */
+    this.hostCallsAbort.abort(new Error(`plugin ${this.record.id} was stopped`));
     const child = this.process;
     this.process = null;
     this.state = "stopped";

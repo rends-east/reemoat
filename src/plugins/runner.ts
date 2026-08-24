@@ -29,7 +29,8 @@ import {
   type HostMessage,
   type PluginInvokeKind,
 } from "./runtime.js";
-import { fitView, noteClamp, type PluginManifest } from "./protocol.js";
+import { pluginContext } from "./context.js";
+import { fitView, noteClamp, type PluginManifest, type PluginSurface } from "./protocol.js";
 
 /** What a plugin's module may export. Every one is optional; missing means "not offered". */
 interface PluginModule {
@@ -79,65 +80,9 @@ function call(method: string, args: unknown): Promise<unknown> {
   });
 }
 
-/**
- * The plugin's whole view of this machine.
- *
- * Shaped as plain namespaced functions rather than a class, because it is
- * documented in `docs/PLUGINS.md` and read by people writing twenty lines of
- * JavaScript. Every one of these is refused by the host unless the manifest
- * declared the matching scope — including inside a hook, where there is no
- * caller at all and the manifest is the only authority there is.
- */
+/** The plugin's whole view of this machine — see `context.ts`, which owns it. */
 function context(): Record<string, unknown> {
-  return {
-    plugin: { id: manifest?.id ?? null, version: manifest?.version ?? null },
-    log: (message: unknown) => call("log", { message: String(message) }),
-    sessions: {
-      list: () => call("sessions.list", {}),
-      get: (id: unknown) => call("sessions.get", { id }),
-      events: (id: unknown, options: unknown) => call("sessions.events", { id, ...(options as object) }),
-      changes: (id: unknown) => call("sessions.changes", { id }),
-      diff: (id: unknown, path: unknown) => call("sessions.diff", { id, path }),
-      workspace: (id: unknown) => call("sessions.workspace", { id }),
-      create: (options: unknown) => call("sessions.create", options),
-      prompt: (id: unknown, text: unknown) => call("sessions.prompt", { id, text }),
-      cancel: (id: unknown) => call("sessions.cancel", { id }),
-      stop: (id: unknown) => call("sessions.stop", { id }),
-      setMeta: (id: unknown, meta: unknown) => call("sessions.setMeta", { id, ...(meta as object) }),
-      answerPermission: (id: unknown, permissionId: unknown, optionId: unknown) =>
-        call("sessions.answerPermission", { id, permissionId, optionId }),
-      // The other half of `answerPermission`. Spread like `setMeta` because the
-      // host reads `decline`/`cancel`/`content` off the same object the call
-      // carries, rather than a nested one.
-      answerElicitation: (id: unknown, elicitationId: unknown, body: unknown) =>
-        call("sessions.answerElicitation", { id, elicitationId, ...(body as object) }),
-    },
-    agents: {
-      list: () => call("agents.list", {}),
-    },
-    files: {
-      // `read` and no `list`: the host's table deliberately has no `files.list`,
-      // and offering one here bought a plugin author an `unknown_method` at
-      // runtime instead of an error they could read.
-      read: (sessionId: unknown, path: unknown) => call("files.read", { sessionId, path }),
-    },
-    store: {
-      get: (key: unknown) => call("store.get", { key }),
-      set: (key: unknown, value: unknown) => call("store.set", { key, value }),
-      delete: (key: unknown) => call("store.delete", { key }),
-      keys: (prefix: unknown) => call("store.keys", { prefix }),
-      // `keys` and then a `get` each is what an author writes when this is not
-      // here, and it is a round trip per key: the reference plugin's board did
-      // exactly that, at 2002 messages for the 1000 keys a plugin may hold. This
-      // is one query, answered as `{entries, more}` — `more` means the page hit
-      // the host's byte budget, and the next one starts after the last key it
-      // handed back.
-      entries: (prefix: unknown, after: unknown) => call("store.entries", { prefix, after }),
-    },
-    net: {
-      fetch: (url: unknown, init: unknown) => call("net.fetch", { url, init }),
-    },
-  };
+  return pluginContext(call, { id: manifest?.id ?? null, version: manifest?.version ?? null });
 }
 
 /**
@@ -209,12 +154,12 @@ const VIEW_BUDGET = MAX_PLUGIN_MESSAGE_BYTES - 1024;
  * `null` is an action that only changed state, and everything else is a view —
  * which is exactly how `shape` discriminates on the other side.
  */
-function fitted(value: unknown): unknown {
+function fitted(value: unknown, surface: PluginSurface): unknown {
   if (value === null || value === undefined) return value;
   const one = value as { kind?: unknown; view?: unknown };
   if (one.kind === "toast") return value;
-  if (one.kind === "view") return { kind: "view", view: noteClamp(fitView(one.view, VIEW_BUDGET)) };
-  return noteClamp(fitView(value, VIEW_BUDGET));
+  if (one.kind === "view") return { kind: "view", view: noteClamp(fitView(one.view, VIEW_BUDGET, surface), surface) };
+  return noteClamp(fitView(value, VIEW_BUDGET, surface), surface);
 }
 
 process.on("message", (raw: unknown) => {
@@ -254,7 +199,21 @@ process.on("message", (raw: unknown) => {
     const { id } = message;
     void (async () => {
       try {
-        const value = fitted(await dispatch(message.kind, message.name, message.input));
+        /*
+         * ⚠ **The surface, from the name this invocation already carries.** A
+         * `view` is invoked by its id, and `settings` is one of exactly two the
+         * host will ask for — so the narrower settings vocabulary applies here,
+         * in the child, at the same moment the size clamp does.
+         *
+         * An **action** is `screen`, and that is not an oversight: an action id
+         * says which action, never which pane it was pressed on. The same submit
+         * can come from a form on a screen and from a form on a settings pane, so
+         * this side cannot know. The client narrows what it draws, which is the
+         * side that does know — this half is what produces the *notice*, and a
+         * notice about a surface nobody can identify would be a guess.
+         */
+        const surface: PluginSurface = message.kind === "view" && message.name === "settings" ? "settings" : "screen";
+        const value = fitted(await dispatch(message.kind, message.name, message.input), surface);
         // Exactly once, and the fallback is still an answer: a result too large
         // to send must not become an invocation that never returns. Still here
         // after `fitted`, because a view is not the only thing a plugin may

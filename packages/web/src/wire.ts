@@ -1826,10 +1826,10 @@ export interface CreatedUser {
  * shapes fails open**. `plugins.ts` is where that is done and asserted.
  * ------------------------------------------------------------------ */
 
-export type PluginScope = "sessions.read" | "sessions.write" | "files.read" | "store" | "net";
+export type PluginScope = "sessions.read" | "sessions.write" | "files.read" | "store" | "net" | "model";
 
 /**
- * One sentence per scope, for the list somebody reads before installing.
+ * One line per scope, for the list somebody reads before installing.
  *
  * Copied rather than fetched. It is the *client's* job to explain what a
  * capability means to the person looking at it, and a daemon that could choose
@@ -1853,20 +1853,50 @@ export type PluginScope = "sessions.read" | "sessions.write" | "files.read" | "s
  * keeps over every other shape here.
  */
 export const PLUGIN_SCOPE_TEXT: Record<PluginScope, string> = {
-  "sessions.read": "Read your sessions, their transcripts and what they changed",
   /*
-   * ⚠ **"answer the questions agents ask" is the load-bearing half.** The scope
-   * also grants `sessions.answerPermission` and `sessions.answerElicitation`, so a
-   * plugin holding it and the `permission.requested` hook can approve every
-   * permission an agent raises on this machine — on a product whose own docs
-   * describe that prompt as the thing standing between an agent and arbitrary
-   * shell. The sentence somebody reads before installing named none of that.
+   * ⚠ **One line each, and the length is the decision rather than the wording.**
+   * These were sentences — *"Start, prompt, stop and rename sessions, and answer
+   * the questions agents ask"* — and six of them stacked is the wall of text that
+   * pushed the install control off a phone and got read by nobody, which is the
+   * one failure a consent screen cannot survive: an unread disclosure discloses
+   * nothing. `webcheck` holds them to a line, because a table of sentences is one
+   * well-meant edit away from being a wall again.
+   *
+   * ⚠ **Lower-case fragments, because they are read as the tail of "It may".**
+   * The heading is the verb; each row completes it. Capitalised they read as six
+   * separate claims and take a line each to restate the subject.
+   *
+   * ⚠ **Two of the six carry a consequence rather than a mechanism, and those
+   * halves survive the shortening or the shortening was not worth having.**
+   * `sessions.write` also grants `sessions.answerPermission` and
+   * `sessions.answerElicitation` — so a plugin holding it plus the
+   * `permission.requested` hook approves every permission an agent raises on this
+   * machine, on a product whose own docs call that prompt the thing standing
+   * between an agent and arbitrary shell. And `model` spends the operator's
+   * **quota**, on an account they signed an agent into for their own work, from a
+   * hook that can fire on every turn of every session. "ask a model a question"
+   * describes the mechanism perfectly and hides the only part worth reading.
+   *
+   * "your agents" rather than a vendor: which agents exist is a fact about the
+   * machine, and naming Claude here would be wrong on a host that has only codex.
    */
-  "sessions.write": "Start, prompt, stop and rename sessions, and answer the questions agents ask",
-  "files.read": "Read files inside a session's workspace",
-  store: "Keep its own data on this machine",
-  net: "Reach the hosts it lists, through this daemon",
+  "sessions.read": "read your sessions and transcripts",
+  "sessions.write": "control sessions, and answer agents' questions",
+  "files.read": "read files in a session's workspace",
+  store: "keep its own data here",
+  net: "reach the hosts it lists",
+  model: "ask your agents, at your cost",
 };
+
+/**
+ * How long one of those lines may be.
+ *
+ * ⚠ **A number in the mirror rather than a rule in a review**, for the reason the
+ * table above gives: the shortening is the whole change, and nothing else in this
+ * build would notice it being undone one entry at a time. `webcheck` reads this,
+ * so the ceiling and the strings it bounds move together or not at all.
+ */
+export const PLUGIN_SCOPE_TEXT_MAX = 56;
 
 export type PluginHook =
   | "session.created"
@@ -1937,6 +1967,41 @@ export interface PluginRow {
 }
 
 export type PluginFieldKind = "text" | "password" | "number" | "toggle" | "select";
+
+/**
+ * Which of a plugin's two screens is being drawn. Mirrors `PluginSurface`.
+ *
+ * ⚠ **The browser is the only side that knows this for an action's answer**, and
+ * that is why the narrowing lives here as well as in the daemon. A `view` is
+ * invoked by its id, so the daemon knows which surface it is answering for — but
+ * a *form submit* reaches it as an action id, which says which action and never
+ * which pane it was pressed on. The component drawing the pane knows; nothing
+ * upstream of it does.
+ */
+export type PluginSurface = "screen" | "settings";
+
+/**
+ * What a settings pane draws. Mirrors `PLUGIN_SETTINGS_BLOCK_TYPES`.
+ *
+ * A settings pane is a form plus the words around it. `text` and `notice` are
+ * not settings — they are the sentence above a control and the warning beside
+ * it — and a form with no way to say anything about itself is a worse pane, not
+ * a stricter one. `list` and `columns` are a **screen**, which a plugin already
+ * has at `/p/:machineId/:pluginId`.
+ */
+export const PLUGIN_SETTINGS_BLOCK_TYPES: readonly PluginBlock["type"][] = ["text", "notice", "form"];
+
+/**
+ * The three controls a setting may be. Mirrors `PLUGIN_SETTINGS_FIELD_KINDS`.
+ *
+ * A box you type in, a switch, a dropdown. `password` and `number` are spellings
+ * of the first rather than a fourth and a fifth kind: `PluginField.value` is a
+ * string on the wire whatever the kind, so `number` only ever bought a keyboard,
+ * and `password` masked a value the daemon keeps in a plaintext SQLite column —
+ * an assurance this system does not provide, offered on the screen where a false
+ * one costs most.
+ */
+export const PLUGIN_SETTINGS_FIELD_KINDS: readonly PluginFieldKind[] = ["text", "toggle", "select"];
 
 export interface PluginFieldOption {
   value: string;

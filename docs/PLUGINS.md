@@ -44,7 +44,36 @@ pnpm client plugin install board.tgz
 ```
 
 Installing an id that is already there **updates** it. There is no separate
-update verb, because the manifest is what says which of the two this is.
+update verb, because the manifest is what says which of the two this is. An update
+keeps everything the plugin stored, and **inherits the switch**: a plugin somebody
+had switched off is still switched off afterwards, because re-enabling it on their
+behalf is not this daemon's decision to make.
+
+## Being installed from the market
+
+Where the server offers a plugin catalogue, the same archive can be installed
+without anybody downloading it: the app sends the machine a repository and a
+commit, and the daemon fetches the tarball itself.
+
+Two things follow for you as an author.
+
+**The pin is a commit, and only a full 40-character one.** A tag is refused —
+`git tag -f` moves a tag, and what is being installed runs on somebody's machine as
+them, with no sandbox. So an unmodified GitHub tarball of a commit is what gets
+unpacked, `<repo>-<sha>/` wrapper and all, which is exactly the "one top-level
+folder" shape the manifest root rule already accepts.
+
+**Your `plugin.json` is read twice, and it has to say the same thing both times.**
+Before anything is sent, the app reads that file at the pinned commit and shows a
+person what your plugin asks for. The machine then parses the manifest out of the
+archive and compares three fields against what was shown — `scopes`, `net` and
+`contributes.hooks` — and refuses the install outright if the archive asks for more.
+In practice this only bites if the file in the repository and the file in the
+archive differ at the same commit, which cannot happen; it exists so that nobody has
+to trust that it cannot.
+
+Nothing about writing a plugin changes. There is no manifest field for this, no
+registration step, and no way for a plugin to install itself or to update itself.
 
 ## `plugin.json`
 
@@ -150,6 +179,23 @@ An action pressed from a session's menu can only produce a toast: there is no
 plugin screen under it to redraw, and opening one would be a plugin choosing where
 somebody goes, which no control in this app does.
 
+> ⚠ **All three of `session`, `row` and `form` are independently `null`, and an
+> absent one is not a default.** Declaring an action puts a verb on this daemon's
+> HTTP surface — `POST /plugins/:pluginId/actions/:actionId` — and the daemon
+> passes whichever context the caller sent, which may be none of them. A body of
+> `{}` reaches your handler with `event.form === null`.
+>
+> This bites hardest on a settings form, because the shape of an absent toggle and
+> the shape of a toggle somebody switched **off** are the same shape once you stop
+> looking. Measured on a real daemon: a plugin whose `save` read its checkbox as
+> `event.form?.on === "true"` had that setting silently switched back **on** by an
+> empty POST, undoing what the person had just turned off. A string field read
+> through `typeof … === "string"` was unaffected; the toggle was not.
+>
+> So branch on the context you need before you write anything: `if (event.form ===
+> null) return;` is the whole of it. Treating a missing context as "use the
+> defaults" writes your defaults over somebody's configuration.
+
 ### What `hook` gets
 
 ```js
@@ -189,11 +235,33 @@ Every one of these is refused unless the manifest declared the matching scope,
 | `store` | `ctx.store.get(key)` · `.set(key, value)` · `.delete(key)` · `.keys(prefix)` · `.entries(prefix, after)` |
 | `net` | `ctx.net.fetch(url, init)` — https only, only the hosts in `net` |
 | `sessions.read` | `ctx.agents.list()` — which agents this machine has and which are signed in. Ask before `sessions.create` |
+| `model` | `ctx.model.complete({agent, prompt, model})` · `ctx.model.list({agent})` — one question to an agent, and which models it offers |
 | always | `ctx.log(message)` · `ctx.plugin` |
 
 There is no `files.list`, deliberately: `sessions.changes` is git's own list of
 what a session touched, already bounded and already containment-checked, and it is
 a better answer than a directory walk for everything a plugin has wanted so far.
+
+### A key nobody set reads as `null`
+
+`ctx.store.get(key)` answers **`null`** for a key you have never written — never
+`undefined`. Check for it as `null`, or with `??`, and not with `!== undefined`.
+
+This is the one place the type cannot help you: the value is `unknown`, because it
+is whatever you stored. A plugin that wrote
+
+```js
+const done = await ctx.store.get(`t:${session.id}`);
+if (done !== undefined) return;              // wrong: null !== undefined
+```
+
+took the "already done" branch for **every** session, for weeks. Nothing said so:
+a hook that returns early writes no key, logs nothing and leaves no history, so it
+is indistinguishable from a hook that was never called at all. The plugin looked
+dead while every part of the daemon was working.
+
+A stored `null` and a key nobody set are the same answer. If you need to tell them
+apart, store a wrapper — `{value: null}` — rather than the bare value.
 
 ### The store is what survives an update
 
@@ -237,8 +305,16 @@ showing the wrong number of cards.
 
 The daemon makes the request, against the hosts your manifest named, so there is
 one place a plugin's outbound traffic can be seen. https only, no redirects
-followed (a redirect is a second host chosen by the first), 1 MiB of response, 10
-seconds, 30 requests a minute.
+followed (a redirect is a second host chosen by the first), 64 KiB of response,
+10 seconds, 30 requests a minute.
+
+**64 KiB, and it is the same fact `entries` is paged for**: what comes back is
+handed to you inside one 256 KiB message, re-escaped as a JSON string with the
+whole `headers` object beside it, and a body that is all `"` doubles on the way —
+so 1 MiB, which this used to say, is four times what could ever be delivered. A
+response past the bound is refused with `response_too_large` rather than
+truncated, and it is refused *while it is still arriving*, so ask your service
+for a page rather than for everything.
 
 ```js
 const answer = await ctx.net.fetch("https://api.example.com/cards", {
@@ -317,13 +393,149 @@ dropping off LTE for one tick is not news.
 is typing into, and re-reading it under them would either discard what they typed
 or keep it over a value you have since changed.
 
-## A settings pane is a view
+**A settings pane also draws less than your screen does** — three block types and
+three field kinds. The table is one section down, and it is the commonest surprise
+in this API.
+
+## Asking an agent one question
+
+`model` is the one scope that spends the operator's **money** rather than the
+machine's access, and the sentence somebody reads before granting it says so. Use
+it sparingly and never on a timer.
+
+```js
+const { text } = await ctx.model.complete({
+  agent: "claude",
+  prompt: "Name this conversation in under six words.",
+  model: await ctx.store.get("model"),   // optional; see below
+});
+```
+
+**One question, one answer, nothing left behind.** The session it runs in is
+unaddressable: it is not in anybody's list, it has no transcript, and it is
+disposed when the answer arrives. Bounds: 8 KiB of prompt, 16 KiB back, 120 s,
+6 requests a minute per plugin, and 2 at a time for the whole machine.
+
+> ⚠ **Do not `await` this inside a hook, a view or an action.** Those are
+> *invocations*, and an invocation has **10 seconds** to answer against this
+> call's **120**. So awaiting it means your invocation is timed out long before
+> the model replies — and three consecutive timeouts stop your plugin, with
+> "stopped answering after 3 requests" on its row. The two numbers are printed
+> together here because they are eleven pages apart in the bounds table, which is
+> how this was easy to get wrong.
+>
+> Start it and let the hook return. The turn is meant to outlive the invocation
+> that began it, and when your plugin is stopped, disabled, updated or removed the
+> daemon withdraws the call for you: an ask still running is ended and the agent it
+> started is disposed, and the code you get is `model_cancelled` rather than
+> `model_timeout` so the two are never confused for one another.
+>
+> ```js
+> // In a hook: start it, write the answer where your screen will find it, return.
+> void ctx.model
+>   .complete({ agent: "claude", prompt: "Name this in under six words." })
+>   .then(({ text }) => ctx.store.set(`title:${event.session.id}`, text))
+>   .catch((error) => ctx.log(`naming failed: ${error.message}`));
+> ```
+>
+> That shape needs `"scopes": ["model", "store"]` — `ctx.store.set` is its own
+> scope, and `ctx.log` needs none.
+
+**Every refusal carries a code**, because this is fire-and-forget — no invocation
+is waiting to fail and there is no screen to open on it. `model_agent_unknown`,
+`model_agent_unavailable`, `model_agent_signed_out`, `model_busy`,
+`model_rate_limited`, `model_timeout`, `model_cancelled`, `model_too_large`,
+`model_unknown`, `model_not_selectable`, `model_unavailable`,
+`model_prompt_too_large`, `model_prompt_empty`, `model_failed`. Show them; you are
+the only place they can appear.
+
+### Choosing a model
+
+```js
+const { models } = await ctx.model.list({ agent: "claude" });
+// [{ id: "opus", name: "Opus 5", description: "…", group: null }, …]
+```
+
+**This daemon has no list of models of its own and could not have one.** Which
+models exist is a fact about the agent's CLI on that disk, published over ACP, and
+it changes when somebody updates it. So `list` **starts the agent** to find out —
+no prompt is sent and no quota is spent, but it is a subprocess and a handshake.
+It is cached for ten minutes and it costs one of your six requests a minute. Call
+it when you draw a picker, not on every hook.
+
+An agent that offers no choice of model answers with an **empty list**, and that
+is an answer rather than an error — kimi is one. Draw "this agent does not offer
+one" rather than an error where a dropdown was.
+
+⚠ **A model you did not choose has three spellings and they all mean the same
+thing.** Left out, `null`, and `""` — a field omitted, a `ctx.store.get` for a key
+nobody has written, and a form submitting an untouched control — all mean *use the
+agent's own default*. None of them is an error, and there is no fourth spelling to
+learn. (Whitespace-only is the same as empty.)
+
+⚠ **A model is validated against the agent when it is used, not when you listed
+it.** Your cached list may be up to ten minutes old and a CLI update can retire a
+model in between, so `model_unknown` is a real outcome for a value that was valid
+when you drew the dropdown. Its message names what the agent offers now.
+
+⚠ **The choice does not survive anything.** It applies to the one throwaway
+session this call makes and nothing else — it is not a preference stored on the
+machine, and a session a person starts in the app is unaffected.
+
+## A settings pane is a view, and a narrower one than your screen
 
 There is no separate settings schema. `settings` returns a view; a form's `action`
 names one of your actions; that action writes to `ctx.store`. One vocabulary.
 
-A secret is your own decision to make: return `kind: "password"` and whatever you
-want shown for a value that is already set — the empty string is the usual answer.
+**But not all of it.** A settings pane is a form plus the words around it, and the
+host draws exactly this much of what you return:
+
+| | on your `screen` | on your `settings` |
+|---|---|---|
+| blocks | `text` `notice` `list` `columns` `form` | `text` `notice` `form` |
+| field `kind` | `text` `password` `number` `toggle` `select` | `text` `toggle` `select` |
+
+A **setting is one of three controls**: a box you type in, a switch, a dropdown.
+`text` and `notice` stay because neither is a setting — they are the sentence
+above a control and the warning beside it, and a form with no way to say anything
+about itself is a worse pane rather than a stricter one.
+
+**If you have no `screen`, `notice` is your whole diagnostic channel — use it.** A
+hook's failure has nobody waiting on it: nothing asked, so nothing is owed an
+error. `notice` with `tone: "danger"` on your settings pane is where a person finds
+out, and the host keeps the tone. Do not put that record in a `list`; see below.
+
+**A `list` or a `columns` on a settings pane is dropped, and the pane says so** —
+naming the type, and naming the three it does draw. If you have rows, you have a
+**screen**: that is what `contributes.screen` is for, and it is one tap from the
+same page.
+
+One consequence to plan around rather than discover: `open` lives on a row, and
+rows live only in `list` and `columns`, so **a settings pane can link to nothing**.
+A name that used to take somebody to a session becomes prose. If those links are
+the point, that is a screen.
+
+**`password` and `number` are drawn as a plain text box on a settings pane, and
+that is reported as a substitution.** Neither was a fourth kind of setting:
+
+- `value` is a string on the wire whatever the `kind`, so `number` never
+  round-tripped as a number — you parsed a string either way, and all the kind
+  ever bought was a numeric keyboard.
+- `password` masked a value the daemon keeps in `plugin_data`, which is a column
+  in a plaintext SQLite file that everything running as your uid can read,
+  including the plugin next to yours. The mask was an assurance this system does
+  not provide, on the one screen where a false one costs most.
+
+So **do not put a secret in a settings pane and expect it to be hidden.** Nothing
+here can hide it. If you need a credential, the honest shapes are the machine's
+own environment — which you read yourself, as the process you are — or a value the
+person pastes knowing it is stored in the clear.
+
+Both narrowings are applied twice, on purpose: the daemon clamps the pane it
+answers a read with, which is what produces the notice you see, and the browser
+clamps what it draws — including the view an **action** answers with, which the
+daemon cannot classify (an action id says which action, never which pane pressed
+it).
 
 ## Updating one
 
@@ -408,6 +620,6 @@ answer `503` rather than reporting an empty list, because "there are none" and
 | Refresh | 2 s floor, 5 min cap, paused while the tab is in the background |
 | Answering | 10 s per call, 256 KiB per message (the harder of the two bounds, and what a view is cut to), 8 calls in flight to your plugin, 16 host calls in flight from it |
 | Starting | 10 s, then 3 restarts per daemon life with backoff; three timeouts in a row stops it |
-| `net.fetch` | https only, 10 s, 1 MiB, 30 requests a minute, no redirects |
+| `net.fetch` | https only, 10 s, **64 KiB** of response, 30 requests a minute, no redirects. A quarter of one message, because the body is re-escaped into it beside the whole `headers` object |
 | Files | 64 KiB per read |
 | Hooks | 256 queued per plugin, drop-oldest, with the drops reported |

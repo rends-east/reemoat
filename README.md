@@ -73,10 +73,10 @@ Three pieces, and you can run all of them yourself.
 |---|---|
 | `CLAUDE.md` | The rules as they stand — what you need in order to *change* the code |
 | `.claude/rules/` | The same, per area, loaded when you open a file it covers |
-| `docs/API.md` | The HTTP surface of both services — 102 routes, what each is for, and the conventions every one of them answers in |
+| `docs/API.md` | The HTTP surface of both services — 103 routes, what each is for, and the conventions every one of them answers in |
 | `docs/PLUGINS.md` | Writing a plugin: the manifest, the host API, the drawing vocabulary, and what a plugin is trusted with |
 | `docs/RELEASING.md` | Where the version is written down, when it moves, and what a tag does that a push does not |
-| `docs/DECISIONS.md` | **Why** any of it is that way. 704 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
+| `docs/DECISIONS.md` | **Why** any of it is that way. 720 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
 | `deploy/README.md` | The deployment surface in full |
 | `deploy/RELAYS.md` | Running more than one relay, and the order of operations |
 | `CHANGELOG.md` | What changed in each release, and what a 0.x minor is allowed to break |

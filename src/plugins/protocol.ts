@@ -44,8 +44,29 @@
  * fields declares `2` and gets `plugin_api_too_new` from an older daemon rather
  * than silently losing its navigation. Which of the two a plugin is is the
  * author's decision, and the number is how they say it.
+ *
+ * **v3 added the `model` scope, and the ceiling moved again for a sharper reason
+ * than v2's.** A new *scope* is not like a new field: `parseManifest` refuses an
+ * unknown one outright, so without a bump a plugin declaring `model` is told
+ * `manifest_invalid: unknown scope "model"` by every daemon that has not been
+ * updated — which says *the plugin is wrong*, and sends its author looking for a
+ * mistake in somebody else's code. Declaring `3` gets `plugin_api_too_new` and
+ * names the machine instead. ⚠ **That only works because `api` is negotiated
+ * before `scopes` are read** (`manifest.ts`: api at the top, scopes below it); the
+ * two are ordered, and reversing them would make this bump buy nothing.
+ *
+ * **v4 added `model.list` and the optional `model` on `model.complete`, and the
+ * ceiling moved for v2's reason rather than v3's.** A new *method* is not refused
+ * at install the way an unknown scope is — `SCOPE_OF` decides at call time — so a
+ * plugin declaring `3` and calling `ctx.model.list` gets `unknown_method` from an
+ * older daemon, at the moment somebody presses something, with nothing on screen
+ * saying which of the two is out of date. Declaring `4` moves that to install and
+ * names the machine. A plugin that only wants to *pass* a model needs no bump at
+ * all: the field is optional and an older daemon ignores it, which means the
+ * naming quietly runs on the agent's default — worth knowing, and not worth
+ * refusing an install over.
  */
-export const PLUGIN_API_VERSION = 2;
+export const PLUGIN_API_VERSION = 4;
 
 /** The oldest `api` an install still accepts. See {@link PLUGIN_API_VERSION}. */
 export const PLUGIN_API_MIN_VERSION = 1;
@@ -84,7 +105,7 @@ export function negotiatePluginApi(declared: number): PluginApiVerdict {
  * catches the mistake rather than the attacker. `SECURITY.md` says so in those
  * words, and this comment exists so nobody restores the stronger claim.
  */
-export type PluginScope = "sessions.read" | "sessions.write" | "files.read" | "store" | "net";
+export type PluginScope = "sessions.read" | "sessions.write" | "files.read" | "store" | "net" | "model";
 
 export const PLUGIN_SCOPES: readonly PluginScope[] = [
   "sessions.read",
@@ -92,6 +113,26 @@ export const PLUGIN_SCOPES: readonly PluginScope[] = [
   "files.read",
   "store",
   "net",
+  /*
+   * ⚠ **The one scope that spends the operator's money, and the only one whose
+   * sentence has to say so.**
+   *
+   * `model` lets a plugin put one short prompt through an agent this machine is
+   * already signed in to, and take the text back. It is *not* `net` — nothing
+   * outbound is chosen by the plugin — and it is not `sessions.write`: no session
+   * is created that anybody can see, prompt or find.
+   *
+   * The alternative it replaced was worse in the way that matters here. A plugin
+   * wanting a model could hold `net` and its own API key, and then the consent
+   * screen said "reaches api.anthropic.com" while the person supplied a second
+   * credential by hand. Reading the machine's *own* agent credential instead was
+   * considered and refused: there is no scope for it and there could not be one —
+   * "read the credentials your agents are signed in with" is a line nobody would
+   * agree to, so the capability would have existed only in a form this system can
+   * hide. Which is the one thing `SECURITY.md` says the scope table exists to
+   * prevent.
+   */
+  "model",
 ];
 
 /*
@@ -265,6 +306,85 @@ export interface PluginField {
  * a plugin screen is consistent with the rest of the app and legible on a phone
  * without its author thinking about either.
  */
+/**
+ * The block types this daemon draws, as a value.
+ *
+ * ⚠ **A constant rather than a comment, because it is now printed to a person.**
+ * When a view carries a `type` nobody here knows, the notice names it *and* names
+ * these — and a list typed out a second time in a sentence is a list that drifts
+ * away from the union it is describing. `webcheck` already compares the union's
+ * members across the mirror; this is the same discipline one layer in.
+ */
+/** How much of an invented block `type` is repeated back to a person. */
+const UNKNOWN_BLOCK_NAME_MAX = 40;
+
+/** How many distinct invented types the notice names before it stops. */
+const UNKNOWN_BLOCKS_NAMED = 3;
+
+export const PLUGIN_BLOCK_TYPES = ["text", "notice", "list", "columns", "form"] as const;
+
+/**
+ * Which of a plugin's two screens is being drawn.
+ *
+ * ⚠ **Not a decoration on a log line: the two surfaces draw different
+ * vocabularies, and this is what decides which.** A plugin's *screen* is a thing
+ * somebody looks at, so it gets all five blocks and every field kind. A
+ * **settings pane** is a thing somebody fills in, and it is bounded to three
+ * controls and nothing else — see {@link PLUGIN_SETTINGS_BLOCK_TYPES}.
+ *
+ * The value is the `viewId` the route already parses (`server.ts` refuses any
+ * third one) and the `name` the child is already invoked with, so nothing new
+ * travels: what was missing was that neither side used it.
+ */
+export type PluginSurface = "screen" | "settings";
+
+/**
+ * What a settings pane may draw.
+ *
+ * ⚠ **A settings pane is a form, plus the words around it — never a screen that
+ * happens to be reached from settings.** It could draw all five blocks, so a
+ * plugin could put a list of rows with their own action buttons, or a two-column
+ * board, on the pane whose whole job is *"what do I want this thing to do"*. The
+ * vocabulary was unbounded and the screen was the only thing bounding it.
+ *
+ * `text` and `notice` stay because neither is a setting: they are the sentence
+ * above a control and the warning beside it — *"you are not signed in yet"* — and
+ * a form with no way to say anything about itself is a worse pane, not a
+ * stricter one.
+ *
+ * `list` and `columns` go, and a plugin that needs rows has a **screen** for
+ * them, reached at `/p/:machineId/:pluginId`. That is the same split this
+ * subsystem already makes everywhere else: configuration is a form, and looking
+ * at things is a screen.
+ */
+export const PLUGIN_SETTINGS_BLOCK_TYPES = ["text", "notice", "form"] as const;
+
+/**
+ * The three controls a setting may be, and there is no fourth.
+ *
+ * A box you type in, a switch, and a dropdown. Everything a plugin wants to
+ * configure is one of those three, and the two that were dropped were not a
+ * fourth and a fifth kind of setting — they were *spellings of the first*:
+ *
+ *   - **`number`** never round-tripped as a number. {@link PluginField.value} is
+ *     `string | null` on the wire by design ("one narrowing, not five"), so the
+ *     plugin parsed a string either way and all the kind ever bought was a
+ *     numeric keyboard on a phone.
+ *   - **`password`** masked a value that is kept in `plugin_data`, which is a
+ *     column in a plaintext SQLite file that everything running as this uid can
+ *     read — including the plugin next to it. So the mask was an assurance this
+ *     system does not provide, on the one screen in the product where a false
+ *     assurance is most expensive. `SECURITY.md` says a plugin's blast radius is
+ *     *named* rather than fenced; a password box says the opposite in one glyph.
+ *
+ * A field arriving with either kind on a settings pane is drawn as a text box and
+ * **reported as a substitution**, so its author finds out rather than shipping a
+ * pane that looks masked and is not. On a plugin's own *screen* both still draw,
+ * because that surface is not this decision's subject and narrowing it would be a
+ * breaking change bought for nothing.
+ */
+export const PLUGIN_SETTINGS_FIELD_KINDS = ["text", "toggle", "select"] as const;
+
 export type PluginBlock =
   | { type: "text"; text: string; tone: "default" | "muted" }
   | { type: "notice"; text: string; tone: "default" | "danger" }
@@ -341,11 +461,57 @@ export const PLUGIN_VIEW_LIMITS = {
   short: 200,
 } as const;
 
-/** What a clamp did, so a caller can say so rather than hide it. */
+/**
+ * What a clamp did, so a caller can say so rather than hide it.
+ *
+ * ⚠ **Two facts and not one, because they send an author to two different
+ * places.** "Too large" means look at the bounds; "not a shape this daemon
+ * knows" means look at the protocol. One flag with one sentence about size told
+ * the second author to go and count things.
+ */
 export interface ClampedView {
   view: PluginView;
-  /** True when anything at all was cut. Drawn as a line, never swallowed. */
+  /** True when anything at all was cut for being too large. Drawn as a line, never swallowed. */
   clamped: boolean;
+  /**
+   * The block `type` values this build does not draw, in the order they arrived.
+   *
+   * ⚠ **Names rather than a count, and this is the difference between a notice
+   * and a diagnosis.** Saying *something was not in a shape this machine
+   * recognises* is true and leaves an author with the whole protocol to search.
+   * Saying *it does not draw blocks of type "actions"* ends the search.
+   *
+   * Measured: an author invented `{type: "actions"}` in an evening without reading
+   * the five that exist. It rendered as nothing, said nothing about itself, and
+   * the only way the cause was found was by running this very function over the
+   * payload by hand — which the author could do because they happen to have this
+   * repository, and which nobody writing a plugin can.
+   *
+   * Bounded and deduplicated: the value comes from a plugin and a hostile or
+   * broken one can send a great many distinct ones. What a person needs is the
+   * first few.
+   */
+  unknownBlocks: readonly string[];
+  /**
+   * True when a value this daemon does not recognise was **substituted**, or an
+   * identifier a control needs was missing and became `""`.
+   *
+   * ⚠ **This exists because fail-open protected the client and guaranteed the
+   * plugin author would never find out.** `plugins.ts`'s rule — an unknown field
+   * kind becomes a text input and still round-trips, nothing throws — is right
+   * and stays. What it did *not* do is say so, and a substitution is far worse
+   * than a truncation for exactly that reason: a cut list is visibly short,
+   * while a form whose fields all lost their `key` renders perfectly, submits
+   * nothing, and looks like it works.
+   *
+   * Measured on a real plugin: a settings pane shipped to the market with every
+   * field sending `id` where `clampField` reads `key`, and a form sending
+   * `submit` where the identifier belongs. Three fields collapsed onto one empty
+   * key, the submit called an action named `""`, and it survived two releases —
+   * because the only thing that could have caught it was the plugin's own driver,
+   * which asserted the author's misunderstanding rather than the protocol.
+   */
+  substituted: boolean;
 }
 
 function clip(value: unknown, max: number): string {
@@ -361,8 +527,25 @@ function clip(value: unknown, max: number): string {
  * unrecognised is dropped rather than thrown on — the same posture the web
  * client's own narrowing takes at the other end, and for the same reason.
  */
-export function clampView(raw: unknown): ClampedView {
+export function clampView(raw: unknown, surface: PluginSurface = "screen"): ClampedView {
+  /*
+   * ⚠ **Defaulted to `screen`, and that default is the safe direction.** Every
+   * caller that has not been told which surface it is on gets the *wider*
+   * vocabulary — so a missed call site draws a settings pane as though it were a
+   * screen, which is exactly today's behaviour, rather than silently deleting
+   * controls off somebody's pane. The narrowing is opt-in at the two places that
+   * know: the route in `server.ts` and the invoke in `runner.ts`, both of which
+   * already carry the name.
+   */
+  const drawable: readonly string[] = surface === "settings" ? PLUGIN_SETTINGS_BLOCK_TYPES : PLUGIN_BLOCK_TYPES;
   let clamped = false;
+  /**
+   * Block types this build does not draw. Bounded and deduplicated — see
+   * {@link ClampedView.unknownBlocks}.
+   */
+  const unknownBlocks: string[] = [];
+  /** See {@link ClampedView.substituted}. Raised where a value was replaced. */
+  let substituted = false;
   const source = (raw ?? {}) as { title?: unknown; blocks?: unknown; refreshMs?: unknown };
   const rawBlocks = Array.isArray(source.blocks) ? source.blocks : [];
   if (rawBlocks.length > PLUGIN_VIEW_LIMITS.blocks) clamped = true;
@@ -370,7 +553,14 @@ export function clampView(raw: unknown): ClampedView {
   const blocks: PluginBlock[] = [];
   for (const entry of rawBlocks.slice(0, PLUGIN_VIEW_LIMITS.blocks)) {
     const block = entry as { type?: unknown };
-    switch (block.type) {
+    /*
+     * ⚠ **The surface decides the vocabulary *before* the switch, rather than
+     * each arm asking.** A block this surface does not draw falls into `default:`
+     * — the same arm, the same notice, the same naming — so there is one way for
+     * a block to be missing rather than two, and adding a block type cannot leave
+     * a settings pane quietly accepting it.
+     */
+    switch (drawable.includes(String(block.type)) ? String(block.type) : null) {
       case "text":
       case "notice": {
         const one = entry as { text?: unknown; tone?: unknown };
@@ -407,26 +597,85 @@ export function clampView(raw: unknown): ClampedView {
         const one = entry as { fields?: unknown; submit?: unknown; action?: unknown };
         const raw = Array.isArray(one.fields) ? one.fields : [];
         if (raw.length > PLUGIN_VIEW_LIMITS.fields) clamped = true;
-        const fields = raw.slice(0, PLUGIN_VIEW_LIMITS.fields).map((field) => clampField(field, () => (clamped = true)));
+        const fields = raw
+          .slice(0, PLUGIN_VIEW_LIMITS.fields)
+          .map((field) => clampField(field, () => (clamped = true), () => (substituted = true), surface));
+        const action = clip(one.action, PLUGIN_VIEW_LIMITS.short);
+        /*
+         * ⚠ **A form with no `action` cannot submit anywhere, and used to say
+         * nothing about it.** `clip(undefined)` is `""`, so the button called an
+         * action named `""` and the plugin's `if (event.action === …)` never
+         * matched. It rendered perfectly. `submit` is the *label* on that button
+         * and is a different field — sending one where the other belongs is the
+         * exact mistake this caught in the wild.
+         */
+        if (action.length === 0) substituted = true;
         blocks.push({
           type: "form",
           fields,
           submit: clip(one.submit, PLUGIN_VIEW_LIMITS.short),
-          action: clip(one.action, PLUGIN_VIEW_LIMITS.short),
+          action,
         });
         break;
       }
       default:
-        // Something this daemon does not draw. Dropped rather than forwarded: the
-        // client would drop it too, and forwarding spends bytes on a phone to
-        // deliver nothing.
-        clamped = true;
+        /*
+         * Something this surface does not draw. Dropped rather than forwarded: the
+         * client would drop it too, and forwarding spends bytes on a phone to
+         * deliver nothing.
+         *
+         * ⚠ **Two different facts arrive here and the notice tells them apart.**
+         * On a screen this is a `type` nobody has ever heard of. On a settings
+         * pane it is more often a `list` or a `columns` — real blocks, which this
+         * daemon draws perfectly one surface over — so the sentence has to say
+         * *a settings pane does not draw this* rather than *this machine does
+         * not*, or an author goes looking for a typo in a block type that is
+         * spelled correctly. {@link noteClamp} takes the surface for that one
+         * reason.
+         *
+         * ⚠ **`substituted`, not `clamped`, and the difference is the whole reason
+         * these are two flags.** Nothing here was too large — no ceiling was
+         * reached, no row was cut, no string was clipped. A `type` this build has
+         * never heard of is a *shape* problem, and the two notices send an author
+         * to two different places: one says "look at the bounds", the other says
+         * "look at the list of block types". Reported as a size clamp, an author
+         * goes and counts elements.
+         *
+         * Measured on a real plugin the day this was found: a screen returned a
+         * `list` and an `{type: "actions"}` block that does not exist. The list had
+         * one row, nothing exceeded anything, and the screen said *"some of what
+         * this plugin returned was too large to show"* — while the invented block
+         * rendered as nothing and complained about nothing. The author had made up
+         * a block type in an evening without reading the five, and was told about
+         * bytes.
+         *
+         * ⚠ **The check that covered this line asserted `.clamped === true`**, so
+         * it pinned the wrong channel — written when there was one flag and never
+         * revisited when there were two. That is the same failure as the code, in
+         * the one place that could have caught it.
+         */
+        substituted = true;
+        {
+          /*
+           * ⚠ **Clipped short and capped at three, because this string is a
+           * plugin's and it is about to be read by a person.** `short` is 200,
+           * which is a sentence rather than a type name, and a broken plugin can
+           * send a different invented type in every one of its 24 blocks. Three
+           * names answer "which one did I make up"; twenty-four is the same wall
+           * of text the notice replaced.
+           */
+          const name = clip((block as { type?: unknown }).type, UNKNOWN_BLOCK_NAME_MAX);
+          const shown = name.length === 0 ? "(no type)" : name;
+          if (unknownBlocks.length < UNKNOWN_BLOCKS_NAMED && !unknownBlocks.includes(shown)) {
+            unknownBlocks.push(shown);
+          }
+        }
         break;
     }
   }
 
   const title = source.title === null || source.title === undefined ? null : clip(source.title, PLUGIN_VIEW_LIMITS.short);
-  return { view: { title, refreshMs: clampRefresh(source.refreshMs), blocks }, clamped };
+  return { view: { title, refreshMs: clampRefresh(source.refreshMs), blocks }, clamped, substituted, unknownBlocks };
 }
 
 /**
@@ -442,16 +691,82 @@ export function clampView(raw: unknown): ClampedView {
  * told about. Applying it twice is a no-op: the host's own pass finds nothing left
  * to clamp and adds nothing.
  */
-export function noteClamp(clamped: ClampedView): PluginView {
-  if (!clamped.clamped) return clamped.view;
+export function noteClamp(clamped: ClampedView, surface: PluginSurface = "screen"): PluginView {
+  if (!clamped.clamped && !clamped.substituted) return clamped.view;
+  /*
+   * One notice per fact, because they are two different things to do about it —
+   * and both, where both happened. The size line is about bounds; the shape line
+   * is about the protocol, and it is the one whose absence let a broken form ship
+   * twice.
+   */
+  const notices: PluginBlock[] = [];
+  if (clamped.clamped) {
+    notices.push({ type: "notice", text: "Some of what this plugin returned was too large to show.", tone: "default" });
+  }
+  if (clamped.substituted) {
+    notices.push({
+      type: "notice",
+      /*
+       * Written to be true for a person and useful to an author, because both
+       * read it: the author only ever sees it by opening their own plugin. So it
+       * names the consequence ("will not work") rather than the mechanism, and
+       * does not pretend to know which control.
+       *
+       * ⚠ **Where the shape problem is a block type, it is *named*, and the five
+       * that exist are named beside it.** That turns a notice into a diagnosis,
+       * and the difference is not cosmetic: an author has no copy of this
+       * protocol, so without the names the only way left to find the cause is to
+       * obtain this repository and run this function over the payload by hand.
+       * That is exactly what happened, and it worked only because the author of
+       * the plugin in question happened to have it.
+       *
+       * Still one notice rather than two: a form with a bad field *and* an
+       * invented block is one answer to "why does this screen not work", and
+       * splitting it would put the same person in front of two lines about one
+       * mistake.
+       */
+      text: substitutedText(surface, clamped.unknownBlocks),
+      tone: "default",
+    });
+  }
   return {
     title: clamped.view.title,
     refreshMs: clamped.view.refreshMs,
-    blocks: [
-      ...clamped.view.blocks,
-      { type: "notice", text: "Some of what this plugin returned was too large to show.", tone: "default" },
-    ],
+    blocks: [...clamped.view.blocks, ...notices],
   };
+}
+
+/**
+ * The shape notice, worded for the surface it is about.
+ *
+ * ⚠ **"This machine does not draw" is false on a settings pane** — the commonest
+ * thing to land here is a `list`, which this machine draws perfectly well one
+ * surface over. Told that, an author goes looking for a typo in a block type they
+ * spelled correctly, which is the same wrong-diagnosis failure the named-types
+ * branch exists to end.
+ *
+ * Both branches name the vocabulary that *does* apply, because an author has no
+ * copy of this protocol and the alternative is obtaining this repository and
+ * running `clampView` over the payload by hand. That is not a hypothetical: it is
+ * how the last one was found.
+ */
+function substitutedText(surface: PluginSurface, unknownBlocks: readonly string[]): string {
+  const draws = surface === "settings" ? PLUGIN_SETTINGS_BLOCK_TYPES : PLUGIN_BLOCK_TYPES;
+  const who = surface === "settings" ? "A settings pane" : "This machine";
+  if (unknownBlocks.length === 0) {
+    /*
+     * No block was refused, so what was substituted was inside one — a field with
+     * no `key`, a form with no `action`, or a `kind` this surface does not draw.
+     * The settings wording names the three controls, because on that surface the
+     * commonest cause is `password` or `number`, and "not in a shape this machine
+     * recognises" is exactly wrong about a kind the machine recognises and
+     * declines.
+     */
+    return surface === "settings"
+      ? `Part of what this plugin sent is not something a settings pane draws, so some controls here will not work. A setting is one of: ${PLUGIN_SETTINGS_FIELD_KINDS.join(", ")}.`
+      : "Part of what this plugin sent is not in a shape this machine recognises, so some controls here will not work.";
+  }
+  return `${who} does not draw blocks of type ${unknownBlocks.map((one) => JSON.stringify(one)).join(", ")}, so that part is missing. It draws: ${draws.join(", ")}.`;
 }
 
 /** The rows of every block that has any, as one number. */
@@ -513,8 +828,8 @@ function wireBytes(view: PluginView): number {
  * Both bounds still hold afterwards, and neither is now a claim the other
  * quietly overrules.
  */
-export function fitView(raw: unknown, budget: number): ClampedView {
-  const first = clampView(raw);
+export function fitView(raw: unknown, budget: number, surface: PluginSurface = "screen"): ClampedView {
+  const first = clampView(raw, surface);
   if (wireBytes(first.view) <= budget) return first;
 
   let cap = rowsIn(first.view);
@@ -526,7 +841,13 @@ export function fitView(raw: unknown, budget: number): ClampedView {
   }
   // `clamped` unconditionally: reaching here means something was dropped, and at
   // `cap === 0` it means every row was — which the notice must still say.
-  return { view: cut, clamped: true };
+  // `substituted` is carried through from the first pass rather than invented:
+  // cutting rows for size replaces nothing, and claiming it did would send an
+  // author looking for a shape problem this pass did not create.
+  // Carried through: cutting rows for size neither creates nor resolves a block
+  // type nobody here knows, and losing the names would make the second pass a
+  // worse diagnosis than the first.
+  return { view: cut, clamped: true, substituted: first.substituted, unknownBlocks: first.unknownBlocks };
 }
 
 /**
@@ -600,7 +921,7 @@ function clampRows(raw: unknown, cut: () => void): PluginRow[] {
   });
 }
 
-function clampField(raw: unknown, cut: () => void): PluginField {
+function clampField(raw: unknown, cut: () => void, swap: () => void, surface: PluginSurface = "screen"): PluginField {
   const field = (raw ?? {}) as {
     key?: unknown;
     label?: unknown;
@@ -612,10 +933,39 @@ function clampField(raw: unknown, cut: () => void): PluginField {
   };
   const options = Array.isArray(field.options) ? field.options : [];
   if (options.length > PLUGIN_VIEW_LIMITS.options) cut();
-  const kinds: readonly PluginFieldKind[] = ["text", "password", "number", "toggle", "select"];
-  const kind = kinds.find((one) => one === field.kind) ?? "text";
+  /*
+   * ⚠ **A settings pane knows three kinds and a screen knows five**, and the two
+   * dropped ones are spellings of `text` rather than capabilities — see
+   * {@link PLUGIN_SETTINGS_FIELD_KINDS} for why `number` never round-tripped as a
+   * number and why `password` masked a value kept in plaintext.
+   */
+  const kinds: readonly string[] =
+    surface === "settings" ? PLUGIN_SETTINGS_FIELD_KINDS : ["text", "password", "number", "toggle", "select"];
+  /*
+   * ⚠ **Absence is a default; a *value* this surface does not draw is a
+   * substitution.** Omitting `kind` means "an ordinary text field" and is a
+   * perfectly good thing for a plugin to do, so it says nothing. Sending
+   * `"string"` or `"boolean"` — both real, both from a plugin that shipped — is
+   * a field that will not behave as its author wrote it, and that has to be said.
+   *
+   * ⚠ **`password` on a settings pane takes this path too, and it must.** It is
+   * the one substitution here that *looks* like it worked: the field draws, it
+   * round-trips, and the only thing missing is the masking its author asked for.
+   * Silently downgrading it is how a pane ships believing it hides something.
+   */
+  const known = (kinds as readonly PluginFieldKind[]).find((one) => one === field.kind);
+  if (known === undefined && field.kind !== undefined && field.kind !== null) swap();
+  const kind = known ?? "text";
+  const key = clip(field.key, PLUGIN_VIEW_LIMITS.short);
+  /*
+   * ⚠ **A field with no `key` cannot round-trip and never could.** The form
+   * submits `{[key]: value}`, so every keyless field collapses onto one entry
+   * named `""` — which is what happens when a plugin sends `id` instead, and is
+   * indistinguishable on screen from a form that works.
+   */
+  if (key.length === 0) swap();
   return {
-    key: clip(field.key, PLUGIN_VIEW_LIMITS.short),
+    key,
     label: clip(field.label, PLUGIN_VIEW_LIMITS.short),
     kind,
     value: field.value === null || field.value === undefined ? null : clip(field.value, PLUGIN_VIEW_LIMITS.text),

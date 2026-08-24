@@ -741,11 +741,6 @@ process.stdout.write("\nlisting sessions, and the cut that reorders\n");
   check("a limit above the count truncates nothing", roomy.body.truncated, false);
   check("and still returns every row", roomy.body.sessions.length, 3);
 
-  /*
-   * Zero is a limit, not a missing one — `limitParam === undefined` is the only
-   * thing that means unbounded, so a client asking for nothing gets nothing and
-   * is told the list is not whole.
-   */
   const none = await get("/sessions?limit=0", "u_alice");
   check("zero returns nothing rather than everything", none.body.sessions.length, 0);
   check("and is still honest about the total", [none.body.total, none.body.truncated], [3, true]);
@@ -1858,6 +1853,7 @@ process.stdout.write("\nthe database, across a restart\n");
   // row written before v5, and `String(null)` would name a session "null".
   check("a session written without them reads back unnamed", plain?.title, null);
   check("and unpinned", plain?.pinned, false);
+
   check("the file is stamped with the version it now matches", Number(second.db.prepare("PRAGMA user_version").get()?.["user_version"]), SCHEMA_VERSION);
 
   /*
@@ -11772,6 +11768,25 @@ process.stdout.write("\nwhere a plugin's data actually lives\n");
      */
     for (const key of ["a%b", "axb", "a_b", "ab"]) refusal(() => store.set("one", key, JSON.stringify(key)));
 
+    /*
+     * ⚠ **Mixed case, because `LIKE` folds ASCII and this column does not** — and
+     * because the comment in `store/sqlite.ts` that records this defect also
+     * records why the assertion above did not catch it: the fake filters with
+     * `startsWith`, which is case sensitive, so **the parity line at the bottom of
+     * this block passed only while every fixture key was lower case**. That is a
+     * gap described in prose and left open, which is the one shape of gap this
+     * file exists to close.
+     *
+     * These are the three keys the defect was measured with, in the order it
+     * answered them: against this exact DDL `LIKE 'card:%'` gave
+     * `['CARD:3', 'Card:2', 'card:1']` where the plugin had named one namespace
+     * and `card:1` was the only key in it. A third plugin id so that nothing above
+     * moves — `everyKey` and `unprefixed` are asserted as literals.
+     */
+    for (const key of ["CARD:3", "Card:2", "card:1"]) {
+      refusal(() => store.set("three", key, JSON.stringify(key)));
+    }
+
     const bounds = [
       // The shared bound, met from the far side: a value one byte past the cap,
       // an empty key, a key holding a control character.
@@ -11801,6 +11816,11 @@ process.stdout.write("\nwhere a plugin's data actually lives\n");
     const answer = {
       sameKey,
       percentPrefix: store.keys("one", "a%"),
+      // The half-open binary range against the same prefix, read both ways: a
+      // regression to `LIKE` takes all three on SQLite and one on the fake, so it
+      // fails the literal below *and* the parity line.
+      casedPrefix: store.keys("three", "card:"),
+      casedEntries: store.entries("three", "card:", "", 1_000_000).entries.map((one) => one.key),
       underscorePrefix: store.keys("one", "a_"),
       everyKey: store.keys("one", "a"),
       bounds,
@@ -11825,8 +11845,45 @@ process.stdout.write("\nwhere a plugin's data actually lives\n");
   const stores = openStores({ path: join(tmp("plugin-data-"), "d.db"), instanceId: "i_plugin_data" });
   const real = script(stores.pluginData);
 
+  /*
+   * ⚠ **What a key nobody set reads as, pinned on both implementations at once.**
+   *
+   * `PluginDataStore.get` is typed `unknown`, so the type promises nothing and a
+   * plugin author has to guess. One guessed `undefined`, wrote `held !== undefined`
+   * as an idempotency check, and every session took the "already done" branch —
+   * for weeks, silently, because a hook that returns early leaves no key, no log
+   * and no history to distinguish it from a hook that was never called. The whole
+   * plugin looked dead while every part of the daemon was working.
+   *
+   * The two implementations already agreed — SQLite answers `null`, and
+   * `memoryPluginData` answers `null` — and **nothing said so**. Two stores behind
+   * one interface, agreeing by coincidence, is the pair this file exists to stop
+   * drifting, and it was the one pair with no assertion on it.
+   *
+   * ⚠ **A stored `null` is indistinguishable from a key nobody set**, which is
+   * asserted rather than left to be discovered: a plugin that needs the difference
+   * has to store a wrapper, and this is the line that tells its author so before
+   * they find out from a bug.
+   */
+  {
+    const fake = memoryPluginData();
+    for (const [name, store] of [["sqlite", stores.pluginData], ["the driver's own", memoryPluginData()]] as const) {
+      check(`a key nobody set reads as null on ${name}, never undefined`, store.get("p", "no_such_key"), null);
+    }
+    fake.set("p", "held", JSON.stringify(null));
+    stores.pluginData.set("p", "held", JSON.stringify(null));
+    check("a stored null is the same answer as a missing key, on both", [fake.get("p", "held"), stores.pluginData.get("p", "held")], [null, null]);
+    // And the value that is *not* null round-trips, so the two lines above are not
+    // green about a store that answers null to everything.
+    fake.set("p", "real", JSON.stringify({ a: 1 }));
+    stores.pluginData.set("p", "real", JSON.stringify({ a: 1 }));
+    check("while an ordinary value comes back as itself", [fake.get("p", "real"), stores.pluginData.get("p", "real")], [{ a: 1 }, { a: 1 }]);
+  }
+
   check("one plugin's key and another's of the same name", real["sameKey"], ["ok", "ok", "first", "second"]);
   check("a prefix holding a % names one key rather than every key", real["percentPrefix"], ["a%b"]);
+  check("a prefix is case sensitive, because the column is", real["casedPrefix"], ["card:1"]);
+  check("and the paged read agrees with the listing about that", real["casedEntries"], ["card:1"]);
   check("and one holding an _ likewise", real["underscorePrefix"], ["a_b"]);
   check("while a prefix holding neither takes them all", real["everyKey"], ["a%b", "a_b", "ab", "axb"]);
   check("the bounds are the shared ones", real["bounds"], ["value_too_large", "bad_request", "bad_request"]);
@@ -11962,15 +12019,100 @@ process.stdout.write("\na plugin row this build cannot read\n");
 
 process.stdout.write("\nwhat a plugin returns, and what is forwarded\n");
 {
-  const { clampView, fitView, noteClamp, PLUGIN_VIEW_LIMITS } = await import("../src/plugins/protocol.js");
+  const { clampView, fitView, noteClamp, PLUGIN_BLOCK_TYPES, PLUGIN_SETTINGS_BLOCK_TYPES, PLUGIN_VIEW_LIMITS } =
+    await import("../src/plugins/protocol.js");
   const { MAX_PLUGIN_MESSAGE_BYTES } = await import("../src/plugins/runtime.js");
 
+  /*
+   * The whole record, field for field, rather than a spot check — which is why
+   * adding `unknownBlocks` failed here first. That is the assertion working: a new
+   * field on this type is a new thing every caller of `clampView` now receives,
+   * and it should not arrive without one line somewhere saying what it is on the
+   * quietest possible input.
+   */
   check("nothing at all is an empty view rather than a throw", clampView(null), {
     view: { title: null, refreshMs: null, blocks: [] },
     clamped: false,
+    substituted: false,
+    unknownBlocks: [],
   });
   check("a block this daemon does not draw is dropped", clampView({ blocks: [{ type: "canvas" }] }).view.blocks, []);
-  check("and dropping one is reported", clampView({ blocks: [{ type: "canvas" }] }).clamped, true);
+  /*
+   * ⚠ **Reported as a *shape* problem, never as a size one — and this assertion
+   * used to pin the wrong one of the two.**
+   *
+   * It read `.clamped === true`, which was written when there was a single flag
+   * and never revisited when it became two. So the one check covering this line
+   * asserted the same misunderstanding the code had, and the pair passed together
+   * for a release.
+   *
+   * What it cost, measured: a real plugin returned a one-row list and a block type
+   * its author had invented. Nothing exceeded any ceiling — and the screen said
+   * *"some of what this plugin returned was too large to show"*, which sends
+   * somebody to count rows and measure bytes when the answer is a list of five
+   * type names. The invented block itself rendered as nothing and said nothing.
+   *
+   * Both halves are asserted, because "it is reported" is what the old line said
+   * and is exactly what stayed true while being useless.
+   */
+  const invented = clampView({ blocks: [{ type: "canvas" }] });
+  check("and dropping one is reported as a shape it does not know", invented.substituted, true);
+  check("and never as something that was too large", invented.clamped, false);
+  const drawn = noteClamp(invented).blocks.filter((block) => block.type === "notice");
+  check(
+    "so the notice a person reads names the protocol rather than the bounds",
+    drawn.map((block) => (block as { text: string }).text.includes("too large")),
+    [false],
+  );
+  /*
+   * ⚠ **And it names the type, and the five that exist.** A notice that says only
+   * *not a shape this machine recognises* is true and leaves an author with the
+   * whole protocol to search — and an author has no copy of it, so the only way
+   * left to find the cause is to obtain this repository and run `clampView` over
+   * the payload by hand. That is what actually happened.
+   */
+  check(
+    "and it names the type nobody here knows",
+    drawn.map((block) => (block as { text: string }).text.includes('"canvas"')),
+    [true],
+  );
+  check(
+    "and the ones it does",
+    PLUGIN_BLOCK_TYPES.every((type) => (drawn[0] as { text: string }).text.includes(type)),
+    true,
+  );
+  /*
+   * The name comes from the plugin and is repeated to a person, so it is bounded
+   * on both axes: clipped for length, deduplicated, and capped in number. A
+   * broken plugin can invent a different type in every one of its blocks, and
+   * twenty-four names is the wall of text the notice replaced.
+   */
+  const many = clampView({
+    blocks: [
+      { type: "a".repeat(400) },
+      { type: "b" },
+      { type: "b" },
+      { type: "c" },
+      { type: "d" },
+      { type: "" },
+    ],
+  });
+  check("a long invented type is clipped before it is repeated back", (many.unknownBlocks[0] ?? "").length <= 40, true);
+  check("repeats of one type are named once", many.unknownBlocks.includes("b"), true);
+  check("and the list stops rather than growing with the plugin", many.unknownBlocks.length <= 3, true);
+  check("every one of those blocks was still dropped", many.view.blocks, []);
+  /*
+   * A block with no `type` at all is the same shape problem and must not become an
+   * empty pair of quotes in a sentence somebody reads.
+   */
+  const nameless = clampView({ blocks: [{ notype: true }] });
+  check("a block with no type says so rather than naming nothing", nameless.unknownBlocks, ["(no type)"]);
+  /*
+   * The other direction, so the two are pinned as opposites rather than one at a
+   * time: a list past its ceiling is a size clamp and says nothing about shape.
+   */
+  const overRows = clampView({ blocks: [{ type: "list", rows: new Array(PLUGIN_VIEW_LIMITS.rows + 1).fill({ id: "r" }) }] });
+  check("a list past its ceiling is the other flag", [overRows.clamped, overRows.substituted], [true, false]);
 
   const rows = Array.from({ length: PLUGIN_VIEW_LIMITS.rows + 10 }, (_, index) => ({ id: String(index), title: "x" }));
   const big = clampView({ blocks: [{ type: "list", rows, empty: "" }] });
@@ -12093,6 +12235,115 @@ process.stdout.write("\nwhat a plugin returns, and what is forwarded\n");
 
   check("a view that is already fine is not reported as clamped", clampView({ title: "T", blocks: [] }).clamped, false);
 
+  /*
+   * ⚠ **A substitution is a clamp, and used to be the one kind nobody was told
+   * about.** `plugins.ts`'s fail-open rule is right and stays — an unknown field
+   * kind becomes a text input and still round-trips, nothing throws. What it did
+   * not do is *say so*, and that is worse for a substitution than for a
+   * truncation: a cut list is visibly short, while a form whose fields all lost
+   * their `key` renders perfectly, submits nothing, and looks like it works.
+   *
+   * Every case below is one a real plugin shipped to the market with, and it
+   * survived two releases: fields sending `id` where `clampField` reads `key`,
+   * `submit` sent where the action identifier belongs, and `kind: "string"` /
+   * `"boolean"` — neither of which is in the enum. The plugin's own driver was
+   * green throughout, because it asserted the author's misunderstanding
+   * (`form.submit === "save"`) rather than the protocol.
+   */
+  const shipped = clampView({
+    blocks: [
+      {
+        type: "form",
+        submit: "save",
+        fields: [
+          { id: "apiKey", kind: "string", label: "Anthropic API key", value: "" },
+          { id: "rename", kind: "boolean", label: "Rename new sessions", value: "true" },
+        ],
+      },
+    ],
+  });
+  check(
+    "a form that shipped broken is reported as substituted rather than silently drawn",
+    [shipped.substituted, shipped.clamped],
+    [true, false],
+  );
+  /*
+   * The two halves of the flag are independent facts and are asserted apart,
+   * because they send an author to two different places: "too large" means look
+   * at the bounds, "not a shape this daemon knows" means look at the protocol.
+   */
+  const keyless = clampView({ blocks: [{ type: "form", action: "save", fields: [{ label: "A" }] }] });
+  check("a field with no key cannot round-trip, and says so", keyless.substituted, true);
+  const actionless = clampView({ blocks: [{ type: "form", submit: "Save", fields: [{ key: "a", label: "A" }] }] });
+  check("a form with no action submits nowhere, and says so", actionless.substituted, true);
+  const unknownKind = clampView({
+    blocks: [{ type: "form", action: "save", fields: [{ key: "a", label: "A", kind: "string" }] }],
+  });
+  check("a kind this daemon does not know is a substitution", unknownKind.substituted, true);
+  /*
+   * ⚠ **Absence is a default, not a substitution.** Omitting `kind` means "an
+   * ordinary text field" and is a perfectly good thing for a plugin to do — if
+   * that raised the flag, every well-formed plugin in the world would draw a
+   * notice saying it was broken, and the notice would stop meaning anything.
+   */
+  const plain = clampView({
+    blocks: [{ type: "form", action: "save", fields: [{ key: "a", label: "A" }] }],
+  });
+  check("but omitting kind entirely is a default rather than a substitution", plain.substituted, false);
+  /*
+   * ⚠ **And `null` spelled out is the same default, which the line above does not
+   * cover.** The guard is `kind !== undefined && kind !== null` — two spellings of
+   * absence — and only one of them was driven. Delete the `!== null` half and this
+   * file stays green while **every plugin that serialises a missing field as
+   * `null`** starts drawing "not in a shape this machine recognises" on a form
+   * that is perfectly fine.
+   *
+   * It is not the unlikely spelling, either. This crosses as JSON, which has no
+   * `undefined` at all: an author writing `kind: config.kind ?? null`, or reading
+   * a row out of a database, sends `null` and cannot send anything else. The half
+   * that was covered is the one that only arises from leaving the key out.
+   *
+   * Found by the author of a plugin who had just been bitten by the mirror of it —
+   * `store.get` answering `null` where they expected `undefined` — and then again
+   * by their own driver, where a parameter with a default value made passing
+   * `undefined` impossible and silently ran the `null` case twice. Three of one
+   * shape in a day: the spelling of absence is not a detail.
+   */
+  const nulled = clampView({
+    blocks: [{ type: "form", action: "save", fields: [{ key: "a", label: "A", kind: null }] }],
+  });
+  check("and neither is null spelled out", nulled.substituted, false);
+  /*
+   * The other half of the pair: not raising the flag is only right if the field
+   * came out as a text input. A `clampField` that dropped the field entirely would
+   * pass the two lines above and lose the control off the form.
+   */
+  const kindOf = (view: typeof plain.view): unknown => {
+    const block = view.blocks[0];
+    return block !== undefined && block.type === "form" ? block.fields[0]?.kind : "<not a form>";
+  };
+  check("both spellings still give an ordinary text field", [kindOf(plain.view), kindOf(nulled.view)], ["text", "text"]);
+
+  /*
+   * And the notice itself: two facts, two lines, both where both happened —
+   * `noteClamp` is the half a person actually reads, and the half the author
+   * sees by opening their own plugin.
+   */
+  const noticed = noteClamp(shipped);
+  const lines = noticed.blocks.filter((one) => one.type === "notice").length;
+  check("the substitution is said out loud rather than swallowed", lines, 1);
+  check(
+    "and it names the consequence rather than the size",
+    noticed.blocks.some((one) => one.type === "notice" && one.text.includes("will not work")),
+    true,
+  );
+  const both = noteClamp({ view: shipped.view, clamped: true, substituted: true, unknownBlocks: [] });
+  check(
+    "both facts get their own line, because they have different remedies",
+    both.blocks.filter((one) => one.type === "notice").length,
+    2,
+  );
+
   /* ---------------------------------------------------------------- *
    * What v2 added.
    * ---------------------------------------------------------------- */
@@ -12157,6 +12408,159 @@ process.stdout.write("\nwhat a plugin returns, and what is forwarded\n");
     tonedRows?.type === "list" ? tonedRows.rows.map((row) => row.tone) : null,
     ["danger", null, null],
   );
+
+  /* ---------------------------------------------------------------- *
+   * A settings pane draws less than a screen does.
+   *
+   * ⚠ **Two vocabularies over one protocol, and the whole risk is that the
+   * narrow one silently becomes the wide one again.** A settings pane is a form
+   * plus the words around it — three block types, three field kinds — while a
+   * plugin's own screen keeps all five of each. Nothing in the type system
+   * expresses "narrower", so every assertion below is paired with its negative
+   * control on the other surface: dropping a `list` is only correct if a screen
+   * still draws one, and downgrading `password` is only correct if a screen
+   * still masks one.
+   * ---------------------------------------------------------------- */
+  {
+    const listBlock = { type: "list", empty: "nothing", rows: [{ id: "a", title: "A" }] };
+    const onScreen = clampView({ blocks: [listBlock] }, "screen");
+    const onSettings = clampView({ blocks: [listBlock] }, "settings");
+    check("a screen draws a list", onScreen.view.blocks.map((one) => one.type), ["list"]);
+    check("a settings pane does not", onSettings.view.blocks, []);
+    /*
+     * ⚠ **`substituted`, never `clamped`.** Nothing here was too large — the two
+     * flags send an author to two different places, and reported as a size clamp
+     * this one sends them to go and count rows in a list that was the wrong shape
+     * for the surface rather than too long.
+     */
+    check(
+      "and says so as a shape problem rather than a size one",
+      [onSettings.substituted, onSettings.clamped, [...onSettings.unknownBlocks]],
+      [true, false, ["list"]],
+    );
+    check("while the screen reports neither", [onScreen.substituted, onScreen.clamped], [false, false]);
+    /*
+     * ⚠ **The notice must not say "this machine does not draw a list".** It does
+     * draw one, one surface over — told that, an author goes looking for a typo in
+     * a block type they spelled correctly, which is the wrong-diagnosis failure
+     * the naming branch exists to end. And it names what a settings pane *does*
+     * draw, because the author has no copy of this protocol.
+     */
+    const settingsNotice = noteClamp(onSettings, "settings").blocks.filter((one) => one.type === "notice");
+    const settingsText = settingsNotice[0]?.type === "notice" ? settingsNotice[0].text : "";
+    check("the notice is about the surface, not about the machine", settingsText.startsWith("A settings pane"), true);
+    check("and names the three block types a pane draws", /text, notice, form/.test(settingsText), true);
+    check("and does not offer the two it just refused", /list|columns/.test(settingsText.split(" It draws")[1] ?? ""), false);
+    check("and never says anything was too large", /too large/.test(settingsText), false);
+    /*
+     * ⚠ **A danger notice keeps its tone on a settings pane, and that is
+     * load-bearing rather than cosmetic.** Found by the first plugin this
+     * narrowing hit: it has no screen — a screen for one function is a page nobody
+     * visits — and its pane carried the only record of *refusals*. A hook's
+     * failure has nobody waiting on it, so nothing is owed an error and there is
+     * no session left to warn through; `notice` is the entire diagnostic channel
+     * for a plugin shaped like that. Drawn in the ordinary ink it is a diagnostic
+     * nobody reads, so the tone is asserted and not merely the block.
+     */
+    const danger = clampView(
+      { blocks: [{ type: "notice", text: "could not rename", tone: "danger" }] },
+      "settings",
+    ).view.blocks[0];
+    check(
+      "a settings pane keeps a danger notice, and its tone",
+      danger?.type === "notice" ? [danger.tone, danger.text] : null,
+      ["danger", "could not rename"],
+    );
+
+    /*
+     * The field kinds. `password` and `number` are spellings of a text box rather
+     * than a fourth and fifth kind of setting — see `PLUGIN_SETTINGS_FIELD_KINDS`
+     * — so on a settings pane they become `text` **and are reported**, which is
+     * the half that matters: a masked box that silently stops being masked is the
+     * one substitution here that looks like it worked.
+     */
+    const form = (kind: unknown): unknown => ({
+      blocks: [{ type: "form", action: "save", submit: "Save", fields: [{ key: "k", label: "L", kind }] }],
+    });
+    const kindOn = (surface: "screen" | "settings", kind: unknown): string | null => {
+      const block = clampView(form(kind), surface).view.blocks[0];
+      return block?.type === "form" ? (block.fields[0]?.kind ?? null) : null;
+    };
+    check(
+      "a screen keeps all five field kinds",
+      ["text", "password", "number", "toggle", "select"].map((kind) => kindOn("screen", kind)),
+      ["text", "password", "number", "toggle", "select"],
+    );
+    check(
+      "a settings pane keeps three and spells the other two as a text box",
+      ["text", "password", "number", "toggle", "select"].map((kind) => kindOn("settings", kind)),
+      ["text", "text", "text", "toggle", "select"],
+    );
+    check(
+      "and reports the two it changed, so an author finds out",
+      ["text", "password", "number", "toggle", "select"].map((kind) => clampView(form(kind), "settings").substituted),
+      [false, true, true, false, false],
+    );
+    check(
+      "while the screen reports none of them",
+      ["text", "password", "number", "toggle", "select"].map((kind) => clampView(form(kind), "screen").substituted),
+      [false, false, false, false, false],
+    );
+    /*
+     * ⚠ **Absence is still a default on both surfaces.** Omitting `kind` means an
+     * ordinary text box and is a perfectly good thing for a plugin to do — if it
+     * raised the flag, every well-written plugin would draw the notice and it
+     * would stop meaning anything. Both spellings of absence, because JSON has no
+     * `undefined` and `null` is the likelier one on the wire.
+     */
+    check(
+      "a field with no kind is a default rather than a substitution",
+      [
+        clampView({ blocks: [{ type: "form", action: "s", fields: [{ key: "k" }] }] }, "settings").substituted,
+        clampView(form(null), "settings").substituted,
+      ],
+      [false, false],
+    );
+    /*
+     * The notice for a substitution *inside* a block, where no block was refused:
+     * on a settings pane the commonest cause is a kind the machine recognises and
+     * declines, so "not in a shape this machine recognises" is exactly wrong and
+     * the three kinds are named instead.
+     */
+    const inner = noteClamp(clampView(form("password"), "settings"), "settings").blocks.filter(
+      (one) => one.type === "notice",
+    );
+    const innerText = inner[0]?.type === "notice" ? inner[0].text : "";
+    check("a refused field kind names the three that are not", /text, toggle, select/.test(innerText), true);
+
+    /*
+     * ⚠ **The default is the wide surface**, and that direction is the safe one:
+     * a call site nobody has told about surfaces draws a settings pane as though
+     * it were a screen — today's behaviour — rather than silently deleting
+     * controls off somebody's pane.
+     */
+    check(
+      "an untold caller gets the screen's vocabulary",
+      clampView({ blocks: [listBlock] }).view.blocks.map((one) => one.type),
+      ["list"],
+    );
+    check(
+      "and `fitView` carries the surface through the size pass",
+      fitView({ blocks: [listBlock] }, 64_000, "settings").view.blocks,
+      [],
+    );
+    /*
+     * A settings type that is not a screen type is a value `PluginView` has no arm
+     * for: it would render as nothing and say nothing about itself. Asserted as a
+     * subset rather than as two lists, so adding a block type to the wide set
+     * cannot quietly fail to be considered for the narrow one.
+     */
+    check(
+      "what a pane draws is a subset of what a screen draws",
+      PLUGIN_SETTINGS_BLOCK_TYPES.filter((one) => !PLUGIN_BLOCK_TYPES.some((two) => two === one)),
+      [],
+    );
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -12793,7 +13197,8 @@ process.stdout.write("\ninstalling a plugin, and updating one\n");
 
 process.stdout.write("\nwhat a plugin is allowed to ask the daemon for\n");
 {
-  const { PluginApi, PluginApiError } = await import("../src/plugins/api.js");
+  const { MAX_PLUGIN_FETCH_BYTES, PluginApi, PluginApiError } = await import("../src/plugins/api.js");
+  const { MAX_PLUGIN_MESSAGE_BYTES } = await import("../src/plugins/runtime.js");
   const { parseManifest } = await import("../src/plugins/manifest.js");
   const { PLUGIN_SCOPES } = await import("../src/plugins/protocol.js");
   const { SessionRegistry } = await import("../src/registry.js");
@@ -12882,6 +13287,22 @@ process.stdout.write("\nwhat a plugin is allowed to ask the daemon for\n");
     ["store.keys", {}],
     ["store.entries", {}],
     ["net.fetch", { url: "https://api.example.com/" }],
+    /*
+     * The one method that spends the operator's quota rather than the machine's
+     * access. In this sweep for the same reason as every other: the plugin
+     * declaring nothing must be refused *before* anything is asked of an agent —
+     * the scope gate runs ahead of the availability check, so this is refused on
+     * a daemon that has no asker wired at all.
+     */
+    ["model.complete", { agent: "claude", prompt: "hi" }],
+    /*
+     * And its sibling, which spends no quota and still spawns an agent — so it
+     * sits behind the same scope and is refused on the same terms. In this sweep
+     * for the same reason as every other: the gate runs ahead of the availability
+     * check, so a plugin declaring nothing is refused on a daemon with no asker
+     * wired at all.
+     */
+    ["model.list", { agent: "claude" }],
   ];
   const denied: string[] = [];
   for (const [method, args] of METHODS) {
@@ -12890,13 +13311,13 @@ process.stdout.write("\nwhat a plugin is allowed to ask the daemon for\n");
   check("every method needs a scope, and a plugin with none reaches nothing", denied, []);
   report(
     "and every scope in the union is the gate for at least one of them",
-    PLUGIN_SCOPES.length === 5,
+    PLUGIN_SCOPES.length === 6,
     `${METHODS.length} methods behind ${PLUGIN_SCOPES.length} scopes`,
   );
   /*
    * ⚠ **The number is written here and has to be moved by hand, which is the
-   * whole of what this line is worth.** `SCOPE_OF` holds twenty-two entries —
-   * twenty-one scoped methods plus `log`, which needs none and is driven on its
+   * whole of what this line is worth.** `SCOPE_OF` holds twenty-three entries —
+   * twenty-two scoped methods plus `log`, which needs none and is driven on its
    * own below — and the table above is a hand-written mirror of it. The sweep
    * claims "every method", and that claim is only as good as somebody having
    * added a row here; nothing on this side can derive the list, because `SCOPE_OF`
@@ -12904,10 +13325,71 @@ process.stdout.write("\nwhat a plugin is allowed to ask the daemon for\n");
    * gate importable by anything else that wanted to reason about it. **Measured
    * while writing this**: `store.entries` had been added to `SCOPE_OF` and never
    * here, so the assertion above was true of twenty of the twenty-one and said
-   * "every method" about a table missing one. A twenty-second scoped method needs
-   * a row and this count moved in the same edit.
+   * "every method" about a table missing one. A further scoped method needs
+   * a row and this count moved in the same edit — which `model.complete` duly
+   * did, failing all three of these lines until it was written down here — and
+   * `model.list` after it.
    */
-  check("and the sweep is the whole of that table", METHODS.length, 21);
+  check("and the sweep is the whole of that table", METHODS.length, 23);
+
+  /*
+   * ⚠ **Every method a plugin may call is one it can *reach*, and this assertion
+   * exists because one was not.**
+   *
+   * `model.complete` had an entry in `SCOPE_OF`, an arm in the dispatcher, a row
+   * in the table above, a sentence on the consent screen and a version bump — and
+   * no line in the object the child process is handed. `ctx.model` was
+   * `undefined`, so a plugin calling it got a `TypeError` before a byte crossed
+   * the IPC channel. Eight drivers were green: every one of them tested the host's
+   * half, and the two halves meet at `api.ts` and part at `context.ts`.
+   *
+   * That is the sixth bug of the same shape in one day — *the only check of a
+   * place contained the same misunderstanding as the code* — and the first in this
+   * direction. The table above says what a plugin is *allowed* to call; this says
+   * what a plugin can *say*, and the gap between the two was invisible.
+   *
+   * Two properties, and the second is the one a smoke test would miss: the
+   * function is there, **and** it asks for the method it is named for. A branch
+   * calling the wrong string is reachable, well-typed, and answers
+   * `unknown_method` at runtime.
+   */
+  {
+    const { pluginContext } = await import("../src/plugins/context.js");
+    const asked: string[] = [];
+    const ctx = pluginContext(
+      (method) => {
+        asked.push(method);
+        return Promise.resolve(null);
+      },
+      { id: "p", version: "1.0.0" },
+    ) as Record<string, unknown>;
+
+    const unreachable: string[] = [];
+    const misnamed: string[] = [];
+    for (const [method] of METHODS) {
+      const [group, name] = method.split(".");
+      const holder = group === undefined ? undefined : ctx[group];
+      const fn = holder !== null && typeof holder === "object" ? (holder as Record<string, unknown>)[name ?? ""] : undefined;
+      if (typeof fn !== "function") {
+        unreachable.push(method);
+        continue;
+      }
+      const before = asked.length;
+      // Three empty objects: every builder either ignores its arguments or spreads
+      // them, so this reaches the `call` without depending on any one signature.
+      void (fn as (...args: unknown[]) => unknown)({}, {}, {});
+      if (asked[before] !== method) misnamed.push(`${method} asked for ${asked[before] ?? "nothing"}`);
+    }
+    check("every method a plugin may call is one it can reach", unreachable, []);
+    check("and each one asks the host for the method it is named for", misnamed, []);
+    /*
+     * `log` is not in the table above because it needs no scope — and it is the
+     * one method whose absence would leave a plugin unable to say anything about
+     * itself, so it is asserted separately rather than left out with its scope.
+     */
+    check("and logging is reachable too, though it is behind no scope", typeof ctx["log"], "function");
+    check("nothing was asked for that the table does not hold", asked.length, METHODS.length);
+  }
 
   check("a method that does not exist", await codeOf(manifestWith(["store"]), "sessions.destroy"), "unknown_method");
   // The one method with no scope at all, because it is how a plugin says anything
@@ -13056,6 +13538,101 @@ process.stdout.write("\nwhat a plugin is allowed to ask the daemon for\n");
     // Charged per chunk rather than once the body is whole, which is the whole
     // point: a bound that reads everything first is not a bound.
     report("refused while it was still arriving", pulls > 0 && pulls < 64, `${pulls} chunks read`);
+
+    /*
+     * ⚠ **Refused before a byte of it is read — which the `/a` case above cannot
+     * show.** Its body was the two-character string `"x"`, so a header gate that
+     * read the whole thing first and refused it afterwards would have passed that
+     * assertion unchanged. A body that counts its own pulls is what separates the
+     * two, and the assertion is zero.
+     *
+     * ⚠ **`highWaterMark: 0`, or this fails against its own fixture.** A
+     * `ReadableStream` built with no strategy gets a `CountQueuingStrategy` of one
+     * and calls `pull` once at construction — before any reader exists, whatever
+     * this daemon does, and `body.cancel()` does not undo it. Measured: one pull
+     * with the default, none at zero. At zero the only thing that can move this
+     * counter is somebody reading.
+     */
+    let declaredPulls = 0;
+    answers = () =>
+      new Response(
+        new ReadableStream<Uint8Array>(
+          {
+            pull(controller) {
+              declaredPulls += 1;
+              controller.enqueue(new Uint8Array(1024));
+            },
+          },
+          { highWaterMark: 0 },
+        ),
+        { status: 200, headers: { "content-length": String(MAX_PLUGIN_FETCH_BYTES + 1) } },
+      );
+    check(
+      "one byte past the bound, honestly declared",
+      await codeOf(fresh, "net.fetch", { url: "https://late.example.com/c" }),
+      "response_too_large",
+    );
+    report("and its body was never pulled at all", declaredPulls === 0, `${declaredPulls} chunks read`);
+
+    /*
+     * ⚠ **The bound against the channel it has to cross, which nothing checked.**
+     * `MAX_PLUGIN_FETCH_BYTES` was `1024 * 1024` while one IPC message carries
+     * `MAX_PLUGIN_MESSAGE_BYTES`, so every answer past roughly 250 KiB was
+     * fetched in full, charged to the plugin's thirty a minute, read into this
+     * daemon's heap — and then refused by `ForkedPlugin.send`, which was the only
+     * place the two numbers ever met. So the largest answer the API will hand
+     * back is built here and measured inside the `{"t":"answer",…}` envelope
+     * `LivePlugin.onChildMessage` actually sends.
+     *
+     * A body that is all `"` because that is a body's worst *realistic* escape:
+     * `JSON.stringify` doubles it, and a JSON payload — the thing `net.fetch`
+     * exists to go and fetch — is already a third quotes. Measured at this bound:
+     * 131,182 bytes of the 262,144 the channel takes, against 262,254 for the
+     * half-channel bound this would otherwise have inherited from `store.entries`.
+     */
+    answers = () =>
+      new Response('"'.repeat(MAX_PLUGIN_FETCH_BYTES), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    const largest = (await api.call(fresh, "net.fetch", { url: "https://late.example.com/d" })) as {
+      body: string;
+    };
+    check("a body of exactly the bound is answered rather than refused", largest.body.length, MAX_PLUGIN_FETCH_BYTES);
+    const wire = Buffer.byteLength(JSON.stringify({ t: "answer", id: 1, ok: true, value: largest }), "utf8");
+    report(
+      "and the largest answer it will hand back still crosses the channel it is delivered on",
+      wire <= MAX_PLUGIN_MESSAGE_BYTES,
+      `${wire} of ${MAX_PLUGIN_MESSAGE_BYTES} bytes`,
+    );
+
+    // The other side of that boundary, undeclared, so `readBounded` is the only
+    // thing that can catch it. `new Response(string)` sets no `content-length` —
+    // measured — which is what makes this the chunked path rather than the header
+    // one, with a body one byte over instead of an endless stream.
+    answers = () => new Response("a".repeat(MAX_PLUGIN_FETCH_BYTES + 1), { status: 200 });
+    check(
+      "and one byte more than that is refused",
+      await codeOf(fresh, "net.fetch", { url: "https://late.example.com/e" }),
+      "response_too_large",
+    );
+
+    /*
+     * ⚠ **Inside the read bound and still undeliverable**, which is the case the
+     * assembled-answer check at the end of `fetch` exists for. Every C0 control
+     * byte is a six-character `\u00XX` escape, so a body at exactly the read bound
+     * serialises to 393,326 against a 262,144-byte channel. Refused here with the
+     * code the docs publish, rather than assembled, charged and then dropped by
+     * `ForkedPlugin.send` naming a limit the plugin was never given.
+     */
+    answers = () =>
+      new Response(String.fromCharCode(1).repeat(MAX_PLUGIN_FETCH_BYTES), { status: 200 });
+    check(
+      "a body inside the bound that could not be delivered is refused here, not at the channel",
+      await codeOf(fresh, "net.fetch", { url: "https://late.example.com/f" }),
+      "response_too_large",
+    );
+
     answers = () => new Response("hi", { status: 200 });
   }
 
@@ -13138,7 +13715,452 @@ process.stdout.write("\nwhat a plugin is allowed to ask the daemon for\n");
     ["store.keys", "store"],
     ["store.entries", "store"],
     ["net.fetch", "net"],
+    ["model.complete", "model"],
+    // Not `sessions.read`, which is where a method called "list" would land by
+    // reflex — reading an agent's model list spawns that agent, so it belongs
+    // with the one that spends, not with the ones that only look.
+    ["model.list", "model"],
   ]);
+}
+
+process.stdout.write("\nasking an agent one question, and every way that is refused\n");
+{
+  const { AgentAskRuns, AgentAskError, MAX_ASK_PROMPT_BYTES, MAX_CONCURRENT_ASKS } = await import(
+    "../src/agentask.js"
+  );
+
+  /**
+   * A runtime that answers `availability()` and nothing else.
+   *
+   * ⚠ **Every case below is refused *before* `launch` is reached**, which is the
+   * property that makes this fake honest rather than convenient: `launch` throws,
+   * so any assertion that accidentally got past the gate would fail loudly rather
+   * than pass on a stub. The refusals that need a real ACP session — the deadline,
+   * the output ceiling, the text collection — are not here and are named at the
+   * foot of this section rather than left to look covered.
+   */
+  const runtimeWith = (agents: { id: string; available: boolean; loggedIn: boolean | null; hint?: string }[]): never =>
+    ({
+      availability: () =>
+        Promise.resolve(
+          agents.map((one) => ({
+            id: one.id,
+            displayName: one.id,
+            available: one.available,
+            hint: one.hint ?? null,
+            loggedIn: one.loggedIn,
+          })),
+        ),
+      launch: () => {
+        throw new Error("this driver refuses before anything is launched");
+      },
+    }) as never;
+
+  const codeOfAsk = async (runs: InstanceType<typeof AgentAskRuns>, agent: string, prompt = "hi"): Promise<string> => {
+    try {
+      await runs.ask(agent as never, prompt);
+      return "none";
+    } catch (error) {
+      return error instanceof AgentAskError ? error.code : `unexpected: ${String(error)}`;
+    }
+  };
+
+  const claudeOnly = runtimeWith([{ id: "claude", available: true, loggedIn: true }]);
+  const runs = new AgentAskRuns({ runtime: claudeOnly, cwd: tmp("ask-") });
+
+  check("an agent this machine does not have", await codeOfAsk(runs, "kimi"), "model_agent_unknown");
+  check(
+    "a prompt larger than a prompt may be",
+    await codeOfAsk(runs, "claude", "x".repeat(MAX_ASK_PROMPT_BYTES + 1)),
+    "model_prompt_too_large",
+  );
+  check("and nothing to ask at all", await codeOfAsk(runs, "claude", "   "), "model_prompt_empty");
+
+  /*
+   * ⚠ **`loggedIn` is three-valued, and `null` must be attempted rather than
+   * refused.** Q7.99 records this exact mistake one subsystem over: `null` means
+   * *this agent has no non-interactive way to answer*, which is permanently true
+   * of kimi — so reading it as "not signed in" refuses an agent that works, and
+   * on this path there is no screen on which anybody could discover otherwise.
+   *
+   * The assertion is that `null` gets **past** the gate: it reaches `launch`,
+   * which this fake throws from, so `model_failed` here is the proof that the
+   * check did not short-circuit. `false` is refused before that.
+   */
+  const mixed = new AgentAskRuns({
+    runtime: runtimeWith([
+      { id: "claude", available: true, loggedIn: false },
+      { id: "kimi", available: true, loggedIn: null },
+      { id: "codex", available: false, loggedIn: null, hint: "install codex first" },
+    ]),
+    cwd: tmp("ask-"),
+  });
+  check("an agent that is installed and signed out", await codeOfAsk(mixed, "claude"), "model_agent_signed_out");
+  check(
+    "an agent that cannot say whether it is signed in is tried, not refused",
+    await codeOfAsk(mixed, "kimi"),
+    "model_failed",
+  );
+  check("an agent that is not installed carries the runtime's own hint", await codeOfAsk(mixed, "codex"), "model_agent_unavailable");
+  check(
+    "and the hint is what it says rather than a sentence this file invented",
+    await mixed.ask("codex" as never, "hi").catch((error: unknown) => (error as Error).message),
+    "install codex first",
+  );
+
+  /*
+   * ⚠ **The daemon-wide cap, and it counts starts as well as running turns.** A
+   * cap that only counted `live` would let N calls all get past the check while
+   * every one of them was still inside `Session.start` — which is a subprocess
+   * spawn and an ACP handshake, i.e. the expensive part. `inFlight` is the sum,
+   * and `starting` is why.
+   */
+  const slow = new AgentAskRuns({
+    runtime: {
+      availability: () => Promise.resolve([{ id: "claude", displayName: "claude", available: true, hint: null, loggedIn: true }]),
+      // `Session.start` asks for this *before* it launches, so a fake without it
+      // throws there and never reaches the park — which is how the first version
+      // of this case measured `model_failed` and an empty `starting`.
+      describe: () => ({ displayName: "claude", authHint: "" }),
+      clientFileIo: false,
+      // Never resolves, so every accepted ask stays in `starting`.
+      launch: () => new Promise(() => {}),
+    } as never,
+    cwd: tmp("ask-"),
+  });
+  const parked = Array.from({ length: MAX_CONCURRENT_ASKS }, () => slow.ask("claude" as never, "hi").catch(() => "parked"));
+  // Let each of them get past the availability await and into `starting`.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  check("one more than the machine will run at once", await codeOfAsk(slow, "claude"), "model_busy");
+  check("and the cap counted the ones still starting", slow.inFlight, MAX_CONCURRENT_ASKS);
+
+  /*
+   * ⚠ **Shutdown waits for what was still being born.** An ask accepted moments
+   * before SIGTERM is inside `Session.start` when the drain runs; without
+   * awaiting `starting` it would spawn *after* the drain and outlive
+   * `process.exit(0)` with nothing holding it. `AgentLoginRuns` records the same
+   * measurement. Driven here by leaving two parked starts and asserting that a
+   * shutdown does not race past them — and that the door is shut afterwards.
+   */
+  const closing = slow.shutdown();
+  check("an ask arriving during shutdown is refused rather than started", await codeOfAsk(slow, "claude"), "model_unavailable");
+  void parked;
+  void closing;
+
+  /*
+   * ⚠ **Not covered here, and said rather than left looking covered:** the wall
+   * clock, the output ceiling and the text collection all need a real ACP
+   * handshake, so they are exercised by `pnpm harness` against a live agent
+   * rather than by this driver. What this section does cover is every refusal
+   * that happens before a process is spawned — which is every refusal a plugin
+   * author can actually provoke by getting the call wrong.
+   */
+}
+
+process.stdout.write("\nwhich model a one-shot ask runs on\n");
+{
+  /* ---------------------------------------------------------------- *
+   * ⚠ **This daemon has no list of models and could not have one.** There is no
+   * field called `model` anywhere in `src/`: selection travels over ACP's
+   * `session/set_config_option`, where "model" is one value of the option's
+   * `category`, and what exists is whatever the agent's CLI decided this week. So
+   * the only honest answer to *which models are there* is to start the agent and
+   * read what it publishes — and the only way to drive that offline is a real
+   * `Session` over pipes with a fake agent on the far end, which is what this is.
+   *
+   * The three things a refusal-only fake could never reach: that the list really
+   * comes off `session/new`, that a chosen model really reaches
+   * `session/set_config_option`, and that a *stale* choice is refused against the
+   * agent standing in front of us rather than against the cache somebody read.
+   * ---------------------------------------------------------------- */
+  const acp = await import("@agentclientprotocol/sdk");
+  const { LocalRuntime } = await import("../src/runtime/local.js");
+  const { PassThrough } = await import("node:stream");
+  const { AgentAskRuns, AgentAskError, MODELS_TTL_MS } = await import("../src/agentask.js");
+
+  /** Every `session/set_config_option` the daemon sent, as it sent it. */
+  const configured: { configId: string; value: unknown }[] = [];
+  /** How many `session/new` calls this fake has answered. Feeds the cache case. */
+  let opened = 0;
+  /** What the agent claims its models are. Rewritten mid-section, on purpose. */
+  let models = [
+    { value: "opus", name: "Opus 5", description: "the big one" },
+    { value: "haiku", name: "Haiku 4.5", description: null },
+  ];
+
+  /*
+   * ⚠ **A fresh pair of pipes per launch, not one pair shared.** Every case here
+   * starts and disposes a session, and `dispose` ends the agent's stdin — so a
+   * single pair works exactly once and every case after the first dies with "ACP
+   * connection closed". That is an artefact of both ends being in this process,
+   * and it is the reason the peer is built inside `launch` rather than around it.
+   */
+  /*
+   * ⚠ **A turn that never answers, opt-in, so every assertion below keeps the fake
+   * it already had.** The cancellation case needs an agent that has started and is
+   * still talking — a `session/prompt` that resolves at once can only ever be
+   * raced by a deadline, never by a caller walking away.
+   */
+  let hangPrompt = false;
+  const speak = (): { toAgent: PassThrough; toClient: PassThrough } => {
+    const toAgent = new PassThrough();
+    const toClient = new PassThrough();
+    const send = (message: unknown): boolean => toClient.write(`${JSON.stringify(message)}\n`);
+    let buffer = "";
+    toAgent.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      for (let nl = buffer.indexOf("\n"); nl >= 0; nl = buffer.indexOf("\n")) {
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (line.trim().length === 0) continue;
+        const message = JSON.parse(line) as Record<string, any>;
+        const id = message["id"];
+        switch (message["method"]) {
+          case acp.methods.agent.initialize:
+            send({
+              jsonrpc: "2.0",
+              id,
+              result: { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: {}, authMethods: [] },
+            });
+            break;
+          case acp.methods.agent.session.new:
+            opened += 1;
+            /*
+             * ⚠ **Two options, and the model one is *not* first.** Found by
+             * `category`, never by id or position — the standing rule about every
+             * agent control in this fleet, and the one a reflex `options[0]` would
+             * break silently on the agent that happens to order them the other way.
+             */
+            send({
+              jsonrpc: "2.0",
+              id,
+              result: {
+                sessionId: "s_models",
+                configOptions: [
+                  {
+                    id: "effort",
+                    name: "Effort",
+                    category: "thought_level",
+                    type: "select",
+                    currentValue: "default",
+                    options: [{ value: "default", name: "Default" }],
+                  },
+                  {
+                    id: "model-picker",
+                    name: "Model",
+                    category: "model",
+                    type: "select",
+                    currentValue: "opus",
+                    options: models,
+                  },
+                ],
+              },
+            });
+            break;
+          case acp.methods.agent.session.setConfigOption:
+            configured.push({ configId: message["params"]?.configId, value: message["params"]?.value });
+            // ACP defines the response's `configOptions` as the complete list, so
+            // this answers with the whole thing rather than a delta.
+            send({
+              jsonrpc: "2.0",
+              id,
+              result: {
+                configOptions: [
+                  {
+                    id: "model-picker",
+                    name: "Model",
+                    category: "model",
+                    type: "select",
+                    currentValue: message["params"]?.value,
+                    options: models,
+                  },
+                ],
+              },
+            });
+            break;
+          case acp.methods.agent.session.prompt:
+            // Deliberately unanswered where the case under test is a caller that
+            // leaves mid-turn; see {@link hangPrompt}.
+            if (hangPrompt) break;
+            send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+            break;
+          default:
+            if (id !== undefined) send({ jsonrpc: "2.0", id, result: {} });
+        }
+      }
+    });
+    return { toAgent, toClient };
+  };
+
+  // A runtime that is the local one in every respect except where the agent is —
+  // subclassing rather than hand-rolling, so a new required member is a type
+  // error here rather than a silently untested path.
+  class ModelPipes extends LocalRuntime {
+    override describe(agent: AgentId): AgentLaunchConfig {
+      return stubAgentConfig(agent);
+    }
+    override availability(): Promise<any> {
+      return Promise.resolve([{ id: "claude", displayName: "claude", available: true, hint: null, loggedIn: true }]);
+    }
+    override async launch(): Promise<any> {
+      const { toAgent, toClient } = speak();
+      return {
+        stdin: toAgent,
+        stdout: toClient,
+        stderr: new PassThrough(),
+        handle: null,
+        onceStartError: () => () => {},
+        onceExit: () => () => {},
+        hasExited: false,
+        waitForExit: async () => true,
+        endStdin: () => toAgent.end(),
+        kill: async () => {},
+      };
+    }
+  }
+
+  const runs = new AgentAskRuns({ runtime: new ModelPipes() as never, cwd: process.cwd() });
+
+  const listed = await runs.models("claude" as never);
+  check(
+    "the models are the ones the agent published, not a list this daemon holds",
+    listed.map((one) => [one.id, one.name, one.description]),
+    [
+      ["opus", "Opus 5", "the big one"],
+      ["haiku", "Haiku 4.5", null],
+    ],
+  );
+  check("and it cost one agent to find out", opened, 1);
+
+  /*
+   * ⚠ **Cached, because the answer costs a subprocess and an ACP handshake.** A
+   * settings pane opened twice must not spawn twice. The negative control is the
+   * whole assertion: without it, "the list is right" passes on a build that spawns
+   * every time.
+   */
+  const again = await runs.models("claude" as never);
+  check("asking again spawns nothing", opened, 1);
+  check("and answers the same thing", again.length, listed.length);
+  report("the cache is a ceiling on staleness rather than for ever", MODELS_TTL_MS > 0, `${MODELS_TTL_MS}ms`);
+
+  /*
+   * ⚠ **A chosen model reaches `session/set_config_option`, with the option's own
+   * id.** `model-picker` is deliberately not `model`: a build that sent the
+   * *category* as the id would look right in every log and be refused by every
+   * real agent.
+   */
+  await runs.ask("claude" as never, "hi", "haiku");
+  check("a chosen model is sent as the option the agent named", configured, [{ configId: "model-picker", value: "haiku" }]);
+
+  /*
+   * ⚠ **Three spellings of "not chosen", and all three mean the agent's own
+   * default.** Absent, `null` and `""` arrive from shapes nobody controls — a
+   * field left out of a JSON body, a `ctx.store.get` for a key nobody wrote, and a
+   * form submitting an untouched control. Picking one as *the* spelling makes the
+   * other two an error a plugin author discovers in production, which is exactly
+   * what the store contract cost somebody a day of. Swept rather than sampled.
+   */
+  configured.length = 0;
+  const spellings: [string, string | undefined][] = [
+    ["left out", undefined],
+    ["empty", ""],
+    ["whitespace", "   "],
+  ];
+  /*
+   * ⚠ **Both halves, because "set nothing" alone passes on a build that
+   * *threw*.** An implementation reading `""` as a chosen model refuses it as
+   * unknown — which also configures nothing, so an assertion about `configured`
+   * would be green while every plugin storing an untouched setting was broken.
+   * The refusals are collected rather than allowed to reject, so the difference is
+   * a named failure rather than a driver that dies here.
+   */
+  const refused: string[] = [];
+  for (const [name, model] of spellings) {
+    await runs.ask("claude" as never, "hi", model).catch((error: unknown) => refused.push(`${name}: ${String(error)}`));
+  }
+  check("no model chosen, in any of its spellings, is refused", refused, []);
+  check("and none of them sets anything", configured, []);
+
+  const codeOfAsk = async (model: string): Promise<string> => {
+    try {
+      await runs.ask("claude" as never, "hi", model);
+      return "none";
+    } catch (error) {
+      return error instanceof AgentAskError ? error.code : `unexpected: ${String(error)}`;
+    }
+  };
+  const messageOf = async (model: string): Promise<string> =>
+    await runs.ask("claude" as never, "hi", model).then(
+      () => "none",
+      (error: unknown) => (error as Error).message,
+    );
+
+  check("a model this agent does not offer", await codeOfAsk("gpt-9"), "model_unknown");
+  /*
+   * ⚠ **The refusal names what is really there.** "Unknown model" and a full stop
+   * sends somebody to guess — and a plugin author has no copy of the agent's list,
+   * so guessing is all that is left.
+   */
+  report("and says what it does offer", (await messageOf("gpt-9")).includes("opus"), await messageOf("gpt-9"));
+  check("and nothing was sent for the one it refused", configured, []);
+
+  /*
+   * ⚠ **Validated against the agent in front of us, never against the cache.**
+   * The list somebody chose from may be up to `MODELS_TTL_MS` old and a CLI update
+   * can retire a model in between — so a choice that was valid when the dropdown
+   * was drawn has to be refused *by name* rather than sent. Driven by retiring a
+   * model behind the cache's back: `models()` still answers the old pair, and the
+   * ask still refuses.
+   */
+  models = [{ value: "opus", name: "Opus 5", description: "the big one" }];
+  const stale = await runs.models("claude" as never);
+  check("the cache still believes the retired model exists", stale.map((one) => one.id), ["opus", "haiku"]);
+  check("but using it is refused against what the agent says now", await codeOfAsk("haiku"), "model_unknown");
+
+  /*
+   * ⚠ **A caller that walks away ends the turn, rather than the turn outliving it
+   * by nearly two minutes.** `ASK_TIMEOUT_MS` is 120 s and the only caller this
+   * has is a plugin invocation with `PLUGIN_INVOKE_TIMEOUT_MS` — 10 s — to answer
+   * in, three of those stopping the plugin altogether. So the measured shape was a
+   * plugin timed out, then stopped, then removed with its row and tree deleted,
+   * and an agent subprocess still holding one of the two slots this machine allows
+   * for another 110 seconds. `LivePlugin.hostCallsAbort` is what now says so, and
+   * this is the far end of that signal.
+   *
+   * ⚠ **Its own `AgentAskRuns`, with a driver-only half-second deadline.** Reusing
+   * the section's `runs` would leave a build with the signal reverted hanging out
+   * the full two minutes before failing; here it fails in half a second, and as
+   * `model_timeout` rather than `model_cancelled`, which is the difference the
+   * assertion is about. `timeoutMs` is documented as existing for exactly this.
+   */
+  const leaving = new AgentAskRuns({ runtime: new ModelPipes() as never, cwd: process.cwd(), timeoutMs: 500 });
+  hangPrompt = true;
+  const walkAway = new AbortController();
+  const asked = leaving.ask("claude" as never, "hi", undefined, walkAway.signal);
+  // Long enough for the handshake, `session/new` and the prompt to be in flight —
+  // the window this is about is the one *after* the agent has started.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  walkAway.abort(new Error("plugin board was stopped"));
+  check(
+    "a caller that has gone ends the turn rather than waiting the deadline out",
+    await asked.then(
+      () => "none",
+      (error: unknown) => (error instanceof AgentAskError ? error.code : `unexpected: ${String(error)}`),
+    ),
+    "model_cancelled",
+  );
+  /*
+   * ⚠ **And the agent it started is disposed rather than merely unwaited-for.**
+   * The refusal travelling is half the fix; `ask`'s `finally` letting go of the
+   * subprocess is the half that gives the slot back, and `inFlight` counts
+   * `reserved`, `starting` and `live` together — so this is also the assertion
+   * that the abort did not corrupt that accounting.
+   */
+  check("and the agent it started is let go of", leaving.inFlight, 0);
+  hangPrompt = false;
+  await leaving.shutdown();
+
+  await runs.shutdown();
 }
 
 process.stdout.write("\na plugin that will not start, or will not answer\n");
@@ -13529,6 +14551,36 @@ process.stdout.write("\nhooks reaching a plugin\n");
     ],
   );
 
+  /*
+   * ⚠ **The echo of a plugin's own write is not sent back to it**, which is what
+   * keeps `ctx.sessions.create` inside a `session.created` handler from making
+   * sessions until `MAX_LIVE_SESSIONS` — each one a worktree and an agent
+   * process. `src/agentask.ts`'s header records the same recursion against a
+   * session nobody can address; this is the one a plugin is handed on purpose.
+   *
+   * Driven through `registry.create`'s own `origin` rather than through the API,
+   * because that argument *is* the mechanism: the announcement happens inside
+   * `create`, so there is no moment afterwards at which anything could stamp it.
+   */
+  const before = plugin.seen().length;
+  await registry
+    .create({ agent: "kimi", cwd: tmp("hooks-own-"), origin: "watcher" })
+    .then(() => null, () => null);
+  await settle(() => plugin.seen().length);
+  const echoed = plugin.seen().slice(before).map((one) => one.hook);
+  check("a plugin is not told about the session it asked for itself", echoed.includes("session.created"), false);
+  /*
+   * ⚠ **And `session.ended` still arrives, which is a named non-goal rather than
+   * an oversight.** A create whose `start()` throws is an exit, so the plugin
+   * that asked is told its own session ended — and a handler answering *that* by
+   * creating another still loops. `MAX_LIVE_SESSIONS` does not bound it, because
+   * `liveSessionCount` skips terminal sessions; what is left is
+   * `SESSION_CREATE_BURST` and a worktree left behind each time round. Closing it
+   * needs a per-plugin create budget. Asserted so the gap is written down as
+   * behaviour rather than left to be rediscovered.
+   */
+  check("but it is still told that session ended, which the loop above does not close", echoed, ["session.ended"]);
+
   /* ---------------------------------------------------------------- *
    * The three hooks derived from the log.
    *
@@ -13707,7 +14759,22 @@ process.stdout.write("\nthe plugin routes\n");
                 t: "done",
                 id: message.id,
                 ok: true,
-                value: { title: message.name, blocks: [{ type: "text", text: message.name, tone: "default" }] },
+                /*
+                 * ⚠ **A `list` beside the text, and it is here to be *refused* on
+                 * one of the two surfaces.** The clamp's own section drives
+                 * `clampView` directly; this is the other half — that the surface
+                 * actually reaches it from the route, which is a wiring question
+                 * no pure-function assertion can answer. It was on the wire the
+                 * whole time (`viewId` is the invoke's `name`) and neither side
+                 * read it.
+                 */
+                value: {
+                  title: message.name,
+                  blocks: [
+                    { type: "text", text: message.name, tone: "default" },
+                    { type: "list", empty: "nothing", rows: [{ id: "a", title: "A" }] },
+                  ],
+                },
               }),
             );
           }
@@ -13804,6 +14871,20 @@ process.stdout.write("\nthe plugin routes\n");
   const sweep: [string, RequestInit][] = [
     ["/plugins", {}],
     ["/plugins", { method: "POST", body: "an archive nobody will look at" }],
+    /*
+     * ⚠ **The list is the assertion, which is why a seventh route has to be
+     * added here by hand.** Every one of these goes through `withPlugins`, and a
+     * route written outside it on a daemon with `REEMOAT_PLUGINS=0` would not
+     * answer `503` — it would throw, or worse, act. `installFromSource` is the
+     * one that would act: it opens a socket to GitHub.
+     */
+    [
+      "/plugins/source",
+      {
+        method: "POST",
+        body: JSON.stringify({ source: { kind: "github", repo: "o/r", commit: "a".repeat(40) } }),
+      },
+    ],
     ["/plugins/p", { method: "DELETE" }],
     ["/plugins/p/state", { method: "POST", body: JSON.stringify({ enabled: true }) }],
     ["/plugins/p/views/screen", {}],
@@ -13815,7 +14896,7 @@ process.stdout.write("\nthe plugin routes\n");
     swept.push([answer.status, codeOf(answer.body)]);
   }
   check(
-    "and so does every one of the six",
+    "and so does every one of the seven",
     swept,
     sweep.map(() => [503, "plugins_unavailable"]),
   );
@@ -13826,10 +14907,24 @@ process.stdout.write("\nthe plugin routes\n");
     401,
   );
 
+  const blocksOf = (body: Record<string, unknown>): string[] => {
+    const shown = (body["result"] as { view?: { blocks?: { type?: string }[] } } | undefined)?.view?.blocks ?? [];
+    return shown.map((one) => one.type ?? "?");
+  };
   const view = await call(pluginApp, "/plugins/p/views/screen");
   check("a screen", [view.status, ((view.body["result"] as { view?: { title?: string } })?.view?.title ?? null)], [200, "screen"]);
   const settings = await call(pluginApp, "/plugins/p/views/settings");
   check("and a settings pane", ((settings.body["result"] as { view?: { title?: string } })?.view?.title ?? null), "settings");
+  /*
+   * ⚠ **The surface reaches the clamp, over HTTP, on the route that knows it.**
+   * Both answers are the same bytes from the same plugin; the only difference is
+   * the last segment of the URL. A screen keeps the list, a settings pane drops it
+   * and says so — and asserting the *pair* is what makes this a wiring check
+   * rather than a second copy of the clamp's own assertions: either one alone
+   * passes for a build that clamps both surfaces the same way.
+   */
+  check("a screen keeps a list", blocksOf(view.body), ["text", "list"]);
+  check("and a settings pane drops it, with a line saying so", blocksOf(settings.body), ["text", "notice"]);
 
   const noView = await call(pluginApp, "/plugins/p/views/board");
   check("a view that is not one of the two", [noView.status, codeOf(noView.body)], [404, "view_not_found"]);
@@ -13981,7 +15076,18 @@ process.stdout.write("\ninstalling a plugin over HTTP, and what each refusal is 
    */
   const rigFor = async (
     name: string,
-    options: { starts: boolean; refusesToWrite?: boolean } = { starts: true },
+    options: {
+      starts: boolean;
+      refusesToWrite?: boolean;
+      /**
+       * What `POST /plugins/source` gets back instead of reaching GitHub.
+       *
+       * The seam exists so this driver can hold every refusal on that path — a
+       * 404, a redirect, a body over the bound — with no network. See
+       * `PluginHostOptions.fetchArchive`.
+       */
+      fetchArchive?: (url: string, signal: AbortSignal) => Promise<Response>;
+    } = { starts: true },
   ): Promise<{
     host: Awaited<ReturnType<typeof PluginHost.open>>;
     app: ReturnType<typeof createApp>["app"];
@@ -14014,6 +15120,7 @@ process.stdout.write("\ninstalling a plugin over HTTP, and what each refusal is 
       api: { git: hostGit },
       runtime: childThat(options.starts),
       timeouts: { start: 500, invoke: 500 },
+      ...(options.fetchArchive === undefined ? {} : { fetchArchive: options.fetchArchive }),
     });
     const { app } = createApp({
       registry,
@@ -14235,6 +15342,239 @@ process.stdout.write("\ninstalling a plugin over HTTP, and what each refusal is 
     false,
   );
   await unwritable.close();
+
+  /* ── installing from a commit, rather than from a file ─────────────────── */
+
+  const SHA = "a".repeat(40);
+  const REPO_NAME = "rends-east/reemoat-board";
+
+  /** What the far end said, scripted. The daemon never reaches a network here. */
+  const sourceRig = async (
+    name: string,
+    answer: (url: string) => Response | Promise<Response>,
+  ): Promise<Awaited<ReturnType<typeof rigFor>> & { urls: string[] }> => {
+    const urls: string[] = [];
+    const rig = await rigFor(name, {
+      starts: true,
+      fetchArchive: async (url) => {
+        urls.push(url);
+        return await answer(url);
+      },
+    });
+    return { ...rig, urls };
+  };
+
+  const postSource = async (
+    app: ReturnType<typeof createApp>["app"],
+    body: unknown,
+    scopes: Scope[] = ["session:read", "session:write", "machine:admin"],
+  ): Promise<{ status: number; body: Record<string, unknown> }> => {
+    const response = await app.request("/plugins/source", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${tokenWith("http", scopes)}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    const text = await response.text();
+    return { status: response.status, body: text.length === 0 ? {} : (JSON.parse(text) as Record<string, unknown>) };
+  };
+
+  const tarball = (patch: Record<string, unknown> = {}): Response =>
+    new Response(new Uint8Array(archiveOf(patch)), { status: 200 });
+
+  /*
+   * ⚠ **The address is built by the daemon and asserted here, because that is the
+   * whole of the fence.** Nothing on the wire names a host: a caller who could
+   * would have a daemon that fetches arbitrary addresses as its owner. `codeload`
+   * directly rather than `github.com/<repo>/archive/<sha>.tar.gz`, which answers
+   * `302` — and this path refuses redirects, so building the redirecting spelling
+   * would make every install fail.
+   */
+  const fromSource = await sourceRig("source", () => tarball());
+  const arrived = await postSource(fromSource.app, {
+    source: { kind: "github", repo: REPO_NAME, commit: SHA },
+    consent: { scopes: [], net: [], hooks: [] },
+  });
+  check("a plugin arrives from a commit", [arrived.status, arrived.body["replaced"]], [201, null]);
+  check("and the daemon built the address itself", fromSource.urls, [
+    `https://codeload.github.com/${REPO_NAME}/tar.gz/${SHA}`,
+  ]);
+  /*
+   * The row records where it came from, and on this path that is the pin rather
+   * than a filename somebody's browser happened to choose. Written and never read
+   * for a decision — the same standing this column already had.
+   */
+  check("and the row records the commit it came from", fromSource.rows.get("board")?.source, `github:${REPO_NAME}@${SHA}`);
+
+  const again = await postSource(fromSource.app, {
+    source: { kind: "github", repo: REPO_NAME, commit: SHA },
+    consent: { scopes: [], net: [], hooks: [] },
+  });
+  check("and the same id again is an update, exactly as an upload would be", [again.status, again.body["replaced"]], [200, "1.0.0"]);
+  await fromSource.close();
+
+  /*
+   * ⚠ **The normalisation case, and it is the one worth a named test.**
+   * `parseManifest` synthesises an absent `contributes` into
+   * `{screen: null, settings: false, actions: [], hooks: []}` and turns an absent
+   * `description` into `null`. A consent check comparing the manifest field for
+   * field would therefore fire on a plugin that simply did not write a
+   * `contributes` block — which is most of them — and an alarm that cries wolf is
+   * an alarm people learn to click through. `consentGap` compares three fields
+   * that survive normalisation as plain string arrays, and this asserts that the
+   * plainest possible manifest installs without one.
+   */
+  const plainest = await sourceRig("plain", () => tarball({ contributes: undefined, description: undefined }));
+  const plain = await postSource(plainest.app, {
+    source: { kind: "github", repo: REPO_NAME, commit: SHA },
+    consent: { scopes: [], net: [], hooks: [] },
+  });
+  check("a manifest that writes no contributes at all is not a consent breach", plain.status, 201);
+  await plainest.close();
+
+  /*
+   * ⚠ **Refused, and refused *before the plugin ran*.** On the upload path the
+   * browser opened the archive itself and `consentBroken` reports afterwards —
+   * tolerable, because the reader there read the very bytes that were sent. Here
+   * nothing local ever opened the archive, so this one has to be a refusal rather
+   * than a notification, and it has to land before `ensureStarted`. The second
+   * assertion is the half that matters: not merely a 409, but nothing installed.
+   */
+  const sneaky = await sourceRig("sneaky", () =>
+    tarball({ scopes: ["store", "sessions.read"], contributes: { hooks: ["permission.requested"] } }),
+  );
+  const overreached = await postSource(sneaky.app, {
+    source: { kind: "github", repo: REPO_NAME, commit: SHA },
+    consent: { scopes: [], net: [], hooks: [] },
+  });
+  check(
+    "a commit asking for more than was shown",
+    [overreached.status, errorOf(overreached.body).code],
+    [409, "plugin_consent_broken"],
+  );
+  check("and nothing was installed", [sneaky.host.list(), sneaky.rows.has("board")], [[], false]);
+
+  /*
+   * A caller that sends no consent at all is not a client bug: `pnpm client` has
+   * no screen to have shown anybody, and `install` skips the check for it. What
+   * that costs is stated rather than hidden — the archive is still validated, and
+   * the scopes still land on the row where somebody can read them.
+   */
+  const unasked = await postSource(sneaky.app, { source: { kind: "github", repo: REPO_NAME, commit: SHA } });
+  check("a caller that consented to nothing at all is not held to nothing", unasked.status, 201);
+  await sneaky.close();
+
+  /*
+   * ⚠ **The bound holds with no `content-length`, which is the only way it is
+   * ever exercised in the fleet.** Measured: codeload sends none — the tarball is
+   * generated as it is sent. So a guard reading that header would bound precisely
+   * nothing on the one URL this path fetches, and the real bound is
+   * `unpackArchive` charging each chunk against `PLUGIN_LIMITS.maxBytes` as it
+   * reads. This drives exactly that shape: a streamed body, no header, over the
+   * ceiling.
+   */
+  const flood = await sourceRig("flood", () => {
+    const chunk = new Uint8Array(1024 * 1024);
+    let sent = 0;
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (sent >= PLUGIN_LIMITS.maxBytes + chunk.byteLength) {
+            controller.close();
+            return;
+          }
+          sent += chunk.byteLength;
+          controller.enqueue(chunk);
+        },
+      }),
+      { status: 200 },
+    );
+  });
+  const flooded = await postSource(flood.app, { source: { kind: "github", repo: REPO_NAME, commit: SHA } });
+  check(
+    "an archive over the ceiling, arriving with no content-length",
+    [flooded.status, errorOf(flooded.body).code],
+    [413, "plugin_too_large"],
+  );
+  await flood.close();
+
+  /*
+   * What the far end said, as codes a person can act on. `404` keeps its own,
+   * because "that commit is not there, or the repository is private" is the one
+   * refusal here somebody can do something about; everything else is `502`,
+   * because nothing was wrong with the request and this daemon is not the thing
+   * that is unwell.
+   */
+  const farEnd: [string, () => Response | Promise<Response>, number, string][] = [
+    ["a commit that is not there", () => new Response("no", { status: 404 }), 502, "plugin_source_not_found"],
+    ["a forge having a bad day", () => new Response("no", { status: 500 }), 502, "plugin_source_unavailable"],
+    [
+      // What `redirect: "error"` produces, which is a throw rather than a status.
+      // The `github.com/<repo>/archive` spelling is the one that redirects, and it
+      // is built nowhere — this is the guard that says so.
+      "a redirect, which this path refuses to follow",
+      () => Promise.reject(new Error("unexpected redirect")),
+      502,
+      "plugin_source_unavailable",
+    ],
+  ];
+  for (const [label, answer, status, code] of farEnd) {
+    const rig = await sourceRig(`far-${code}-${status}-${label.length}`, answer);
+    const said = await postSource(rig.app, { source: { kind: "github", repo: REPO_NAME, commit: SHA } });
+    check(label, [said.status, errorOf(said.body).code], [status, code]);
+    await rig.close();
+  }
+
+  /*
+   * ⚠ **A tag and a short sha are refused, and that is a security decision.** A
+   * tag moves under `git tag -f`, so a plugin pinned "at v1.2.0" is a plugin whose
+   * code can change under an identifier that did not — and what is being pinned is
+   * code that runs as this machine's owner with no sandbox. Both are well-formed
+   * enough to look like an oversight when refused, which is why the message names
+   * them.
+   */
+  const bad = await sourceRig("bad", () => tarball());
+  const shapes: [string, unknown][] = [
+    ["no source at all", {}],
+    ["a forge this daemon does not install from", { source: { kind: "gitlab", repo: REPO_NAME, commit: SHA } }],
+    ["a repo that is not owner/name", { source: { kind: "github", repo: "board", commit: SHA } }],
+    ["a repo reaching for a third path segment", { source: { kind: "github", repo: "a/b/c", commit: SHA } }],
+    ["a tag where a commit belongs", { source: { kind: "github", repo: REPO_NAME, commit: "v1.2.0" } }],
+    ["a short sha", { source: { kind: "github", repo: REPO_NAME, commit: SHA.slice(0, 7) } }],
+  ];
+  const refusals: [number, string][] = [];
+  for (const [, body] of shapes) {
+    const said = await postSource(bad.app, body);
+    refusals.push([said.status, errorOf(said.body).code]);
+  }
+  check(
+    `every malformed source, refused before a socket is opened (${shapes.map(([label]) => label).join("; ")})`,
+    refusals,
+    shapes.map(() => [400, "plugin_source_invalid"]),
+  );
+  check("and none of them reached the far end", bad.urls, []);
+
+  /*
+   * ⚠ **Both axes, on the newest route.** A route's scope is the caller's;
+   * `manifest.scopes` is the plugin's, and neither implies the other. Installing
+   * is `machine:admin` — a grant that can drive sessions all day may not put code
+   * on the machine — and this is the route where getting that wrong would let a
+   * `session:write` grant fetch and run somebody else's code as the owner.
+   */
+  const asWriter = await postSource(
+    bad.app,
+    { source: { kind: "github", repo: REPO_NAME, commit: SHA } },
+    ["session:read", "session:write"],
+  );
+  check(
+    "a session:write grant may not install from a commit",
+    [asWriter.status, errorOf(asWriter.body).code],
+    [403, "insufficient_scope"],
+  );
+  check("and it reached the far end no more than the malformed ones did", bad.urls, []);
+  await bad.close();
 }
 
 process.stdout.write("\nwhat a plugin's own refusal becomes over HTTP\n");

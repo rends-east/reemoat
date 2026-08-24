@@ -3,27 +3,31 @@ import { daemonReadable } from "../../machine";
 import type { MachineId } from "../../ids";
 import type { AppState } from "../../store";
 import { Empty, reachText } from "../bits";
-import { PluginList, PluginSettings } from "./PluginsPanel";
+import { PluginList } from "./PluginsPanel";
 
 /**
  * Plugins, inside the machine they run on.
  *
- * The sibling of `MachineAgentsSection`, and deliberately shaped identically:
- * two depths, the same unreachable branch, the same argument for why neither is a
- * fleet-wide screen. What is installed lives on one host's disk and what it has
- * stored lives in one daemon's database, so a list that spanned machines would
- * open with a dropdown asking which one — a screen asking a question its own copy
- * answers.
+ * ⚠ **One depth now, and the second one left on purpose.** This was the sibling
+ * of `MachineAgentsSection` down to the shape: a list, and one leaf holding that
+ * plugin's own settings. The leaf is gone. What it drew is a plugin's
+ * configuration, which is a thing *about the plugin* rather than about this host,
+ * and it sat four taps into a sheet behind a kebab where nobody found it — the
+ * question this screen was asked, in those words, was *"where in settings is the
+ * normal plugin setting?"*.
+ *
+ * What stays is what is genuinely per-machine and cannot be anywhere else: which
+ * plugins this daemon has, whether each is switched on, what a failed one said,
+ * and handing this host an archive from a file. Every row links to the plugin's
+ * own page, which is where its settings now are.
+ *
+ * The argument that put settings here — that a fleet-wide screen would open with
+ * a dropdown asking which machine — was answered rather than reversed: the
+ * plugin's page **is** fleet-wide and already knows which machines it is on, so
+ * where it asks, it asks with the answer already narrowed to those, and does not
+ * ask at all where there is only one.
  */
-export function MachinePluginsSection({
-  state,
-  machineId,
-  plugin,
-}: {
-  state: AppState;
-  machineId: MachineId;
-  plugin: string | null;
-}): ReactNode {
+export function MachinePluginsSection({ state, machineId }: { state: AppState; machineId: MachineId }): ReactNode {
   const machine = state.machines.find((candidate) => candidate.id === machineId) ?? null;
 
   if (machine === null) {
@@ -41,8 +45,7 @@ export function MachinePluginsSection({
      */
     return (
       <Empty>
-        {machine.name} is not reachable right now — {reachText(machine.reach, machine.offlineReason)}
-        {plugin === null ? "." : `, so nothing about ${plugin} can be read or changed.`}
+        {machine.name} is not reachable right now — {reachText(machine.reach, machine.offlineReason)}.
       </Empty>
     );
   }
@@ -54,26 +57,15 @@ export function MachinePluginsSection({
         is shared with your other machines.
       </p>
       <div className="mt-3">
-        {plugin === null ? (
-          /*
-           * Keyed for `PluginSettings`' reason, and for a sharper one: `usePlugins`
-           * has no late-write gate, so without a remount machine A's in-flight
-           * listing lands under B's `machineId` and every row on screen is A's
-           * while `PluginRow` resolves its daemon from B. Remove then sends A's
-           * plugin id to B — and since the same plugin on both your machines is the
-           * ordinary case, that hits a real target and takes its `plugin_data`
-           * with it.
-           */
-          <PluginList key={machineId} machineId={machineId} />
-        ) : (
-          /*
-           * Keyed on both, so switching plugin or machine remounts rather than
-           * carrying the previous one's form state — the same reason `AgentDetail`
-           * is keyed, and it matters more here because the state is somebody's
-           * half-typed API token.
-           */
-          <PluginSettings key={`${machineId}:${plugin}`} machineId={machineId} pluginId={plugin} />
-        )}
+        {/*
+         * Keyed on the machine: `usePlugins` has no late-write gate, so without a
+         * remount machine A's in-flight listing lands under B's `machineId` and
+         * every row on screen is A's while `PluginRow` resolves its daemon from B.
+         * Remove then sends A's plugin id to B — and since the same plugin on both
+         * your machines is the ordinary case, that hits a real target and takes
+         * its `plugin_data` with it.
+         */}
+        <PluginList key={machineId} machineId={machineId} />
       </div>
     </div>
   );

@@ -6280,6 +6280,113 @@ process.stdout.write("\nthe web client, and what may be cached\n");
       connect.includes("https://r2.example"),
       connect.includes("wss://r2.example"),
     ], [true, true]);
+
+    /*
+     * An instance with no catalogue names neither market host, which is exactly
+     * what such an instance can reach — `connectOrigins`' posture one value over.
+     * Asserted rather than assumed, because the alternative to "absent" here is a
+     * policy that quietly widens for every deployment in the fleet, market or no.
+     */
+    const img = /img-src ([^;]+)/.exec(csp)?.[1] ?? "";
+    check(
+      "an instance with no catalogue names neither market host, in either directive",
+      [connect.includes("raw.githubusercontent.com"), img.includes("raw.githubusercontent.com")],
+      [false, false],
+    );
+  }
+
+  /*
+   * ⚠ **The market needs three sources across *two* directives, and the pair is
+   * the assertion.**
+   *
+   * A plugin's `plugin.json` is read with `fetch` and its icon is drawn with
+   * `<img src>`, and CSP treats those as different questions. Listing
+   * `raw.githubusercontent.com` in `connect-src` alone is the failure mode that
+   * reads as working: every permission list on the market screen renders
+   * correctly, and every icon is silently blank — with the reason only in a
+   * console, on a phone, where nobody has one open. So this checks all three
+   * sources in the directive each belongs to, and it checks the icon host is in
+   * *both*.
+   *
+   * A separate app rather than a field on the one above, because the assertion
+   * immediately preceding this one is that an instance without a catalogue names
+   * none of them.
+   */
+  {
+    const withMarket = createControlPlaneApp({
+      db,
+      issuer: ISSUER,
+      tokenTtlSeconds: 300,
+      relayUrl,
+      relay: registry,
+      webRoot,
+      pluginCatalogueUrl: "https://plugins.example",
+    });
+    const csp = (await Promise.resolve(withMarket.request("/"))).headers.get("content-security-policy") ?? "";
+    const connect = /connect-src ([^;]+)/.exec(csp)?.[1] ?? "";
+    const img = /img-src ([^;]+)/.exec(csp)?.[1] ?? "";
+    check(
+      "a catalogue is reachable, and so is the host its manifests and icons come from",
+      [
+        connect.includes("https://plugins.example"),
+        connect.includes("https://raw.githubusercontent.com"),
+        img.includes("https://raw.githubusercontent.com"),
+      ],
+      [true, true, true],
+    );
+    /*
+     * The origin, never the path somebody configured — CSP matches origins, and a
+     * source with a path in it is one browsers treat differently from what the
+     * writer meant.
+     */
+    const deep = createControlPlaneApp({
+      db,
+      issuer: ISSUER,
+      tokenTtlSeconds: 300,
+      relayUrl,
+      relay: registry,
+      webRoot,
+      pluginCatalogueUrl: "https://plugins.example/api/v2/",
+    });
+    const deepCsp = (await Promise.resolve(deep.request("/"))).headers.get("content-security-policy") ?? "";
+    check(
+      "and it is listed as an origin rather than as the path it was configured with",
+      /connect-src ([^;]+)/.exec(deepCsp)?.[1]?.includes("https://plugins.example/api") ?? true,
+      false,
+    );
+    /*
+     * A value `fetch` could never use reaches the same policy an absent one does.
+     * `main.ts` warns about it; the app's own answer must not be a throw at
+     * construction, because a driver may build an app with anything.
+     */
+    const nonsense = createControlPlaneApp({
+      db,
+      issuer: ISSUER,
+      tokenTtlSeconds: 300,
+      relayUrl,
+      relay: registry,
+      webRoot,
+      pluginCatalogueUrl: "not a url",
+    });
+    const nonsenseCsp = (await Promise.resolve(nonsense.request("/"))).headers.get("content-security-policy") ?? "";
+    check(
+      "an unparseable catalogue widens nothing",
+      (/img-src ([^;]+)/.exec(nonsenseCsp)?.[1] ?? "").includes("raw.githubusercontent.com"),
+      false,
+    );
+
+    /*
+     * What the client is told, and why publishing the address is safe: it is the
+     * same value the document's own `connect-src` already carries, read once at
+     * construction, so a client cannot be handed a catalogue the page may not
+     * reach.
+     */
+    const instance = (await Promise.resolve(withMarket.request("/v1/instance"))) as Response;
+    const told = (await instance.json()) as { plugins?: { catalogue?: unknown } };
+    check("and /v1/instance says where it is", told.plugins?.catalogue, "https://plugins.example");
+    const without = (await Promise.resolve(app.request("/v1/instance"))) as Response;
+    const silent = (await without.json()) as { plugins?: { catalogue?: unknown } };
+    check("while an instance with none says so rather than omitting the field", silent.plugins?.catalogue, null);
   }
 
   interface WebResponse {

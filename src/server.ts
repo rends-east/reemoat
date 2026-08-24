@@ -31,6 +31,7 @@ import {
 import { PluginApiError } from "./plugins/api.js";
 import type { LivePlugin, PluginHost } from "./plugins/host.js";
 import { PLUGIN_API_VERSION, type PluginResult } from "./plugins/protocol.js";
+import { isSourceRefusal, readConsent, readSource } from "./plugins/source.js";
 import { listDirs, makeDir, PathError, resolveCwd } from "./browse.js";
 import { DESCRIBE_TIMEOUT_MS, probeExists, probeFile, probeRealpath } from "./stall.js";
 import {
@@ -2570,7 +2571,7 @@ export function createApp(options: ServerOptions): AppBundle {
   /* ---------------------------------------------------------------- *
    * Plugins
    *
-   * Six routes, and the scope on each is written here rather than derived
+   * Seven routes, and the scope on each is written here rather than derived
    * from the manifest — a table mapping method and path to a scope is one
    * edit away from describing routes that have moved, which is the argument
    * `requireScope` already makes above.
@@ -2714,6 +2715,57 @@ export function createApp(options: ServerOptions): AppBundle {
       if (body === null) return jsonError(c, 400, "bad_request", "expected a request body");
 
       const outcome = await host.install({ body, name: named.name });
+      if (outcome.kind === "ok") {
+        return c.json({ plugin: outcome.summary, replaced: outcome.replaced }, outcome.replaced === null ? 201 : 200);
+      }
+      if (outcome.kind === "busy") {
+        return jsonError(c, 409, "plugin_busy", "this machine is already installing a plugin");
+      }
+      return jsonError(c, pluginInstallStatus(outcome.code), outcome.code, outcome.message);
+    }),
+  );
+
+  /**
+   * Install a plugin this daemon fetches for itself, from a commit somebody named.
+   *
+   * **The same act as `POST /plugins`, arriving by a different door**, which is
+   * why it answers in the same shapes down to `replaced` and the 201/200 split:
+   * a client that can read one answer can read the other, and `PluginHost.install`
+   * is literally the same function underneath.
+   *
+   * ⚠ **Not a streaming route, and it must not become one.** The body is a small
+   * JSON object, so it belongs under the ordinary bound like every other route
+   * here — `isStreamingRoute` exempts `POST /plugins` because the archive arrives
+   * *in* the request, and here the archive arrives on a socket this daemon opened.
+   * The obligation that exemption creates — cancel the body on every refusal —
+   * therefore does not apply, and adding this path to it would take on a duty
+   * nothing here owes.
+   *
+   * ⚠ **The address is built by `source.ts` from `repo` and `commit` alone.**
+   * Nothing here accepts a URL, and that is the fence: a caller who could name the
+   * host would have a daemon that fetches arbitrary addresses as its owner.
+   */
+  app.post(
+    "/plugins/source",
+    admin,
+    withPlugins(async (c, host) => {
+      if (registry.isShuttingDown) return jsonError(c, 503, "shutting_down", "the daemon is shutting down");
+
+      const body = await requireJson(c);
+      if (body instanceof Response) return body;
+
+      const source = readSource(body["source"] ?? body);
+      if (isSourceRefusal(source)) return jsonError(c, 400, source.code, source.message);
+
+      /*
+       * `null` when the caller sent none, and that is a real state rather than a
+       * client bug: `pnpm client` has no consent screen to have shown anybody, and
+       * `PluginHost.install` skips the check for exactly that caller. What the web
+       * client sends is what it drew, and the daemon refuses anything beyond it.
+       */
+      const consent = readConsent(body["consent"]);
+
+      const outcome = await host.installFromSource(source, consent);
       if (outcome.kind === "ok") {
         return c.json({ plugin: outcome.summary, replaced: outcome.replaced }, outcome.replaced === null ? 201 : 200);
       }
@@ -3748,16 +3800,34 @@ function pluginErrorStatus(code: string): 403 | 413 | 502 | 503 | 504 {
  * about the archive or the manifest, all of which are things the person who built
  * it can fix.
  */
-function pluginInstallStatus(code: string): 400 | 409 | 413 | 503 {
+function pluginInstallStatus(code: string): 400 | 409 | 413 | 502 | 503 {
   switch (code) {
     case "plugin_too_large":
     case "plugin_unpacked_too_large":
     case "plugin_too_many_entries":
       return 413;
     case "plugin_start_failed":
+    /*
+     * A conflict for `plugin_start_failed`'s own reason: nothing was changed.
+     * The commit asks for authority nobody granted, so this daemon refused it
+     * before the plugin ran — whatever was installed before is still installed
+     * and still running, and the remedy is a person looking at what changed.
+     */
+    case "plugin_consent_broken":
       return 409;
     case "plugin_write_failed":
       return 503;
+    /*
+     * ⚠ **`502`, because nothing about the request was wrong.** GitHub was
+     * unreachable, or answered something other than a tarball. A `400` here would
+     * send somebody hunting for a typo in a commit that is perfectly good, and a
+     * `503` would claim this daemon is the thing that is unwell. `404` from the
+     * far end keeps its own code, because "that commit is not there, or the
+     * repository is private" is the one refusal on this path a person can act on.
+     */
+    case "plugin_source_unavailable":
+    case "plugin_source_not_found":
+      return 502;
     default:
       return 400;
   }

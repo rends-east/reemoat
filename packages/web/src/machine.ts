@@ -1112,6 +1112,19 @@ export function slowRoute(method: string | undefined, path: string): boolean {
   return (
     (verb === "POST" && path === "/sessions") ||
     /*
+     * ⚠ **Installing from a commit, because the daemon downloads before it
+     * answers.** `source.ts` gives itself 30s to fetch the archive and then
+     * unpacks and starts the plugin, so the ordinary 15s budget guarantees the
+     * client aborts first on every install that is not instant. That abort is a
+     * *transport* failure, so it drops the route memo and draws a perfectly
+     * healthy machine as unreachable — over an install that is very likely still
+     * succeeding on the far side.
+     *
+     * `POST /plugins` needs no entry here: it goes through `upload`, which has its
+     * own `uploadDeadlines` keyed on the byte count.
+     */
+    (verb === "POST" && path === "/plugins/source") ||
+    /*
      * A prompt, because sending one to a session the daemon interrupted resumes
      * it first — the whole point of "you just go on talking after a deploy".
      *

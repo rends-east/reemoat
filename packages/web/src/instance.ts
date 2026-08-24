@@ -37,6 +37,21 @@ export interface InstanceConfig {
    * than none: it looks like the offer was made.
    */
   source: { url: string; version: string | null } | null;
+  /**
+   * Where this instance's plugin catalogue lives, or `null` for one with none.
+   *
+   * The address rather than a boolean, because the client has to `fetch` it and
+   * has no other way to learn it. Safe to publish for the reason it is safe to
+   * read: the document's own `connect-src` already names this exact origin —
+   * both come from one variable the control plane reads once at startup — so a
+   * client can never be handed a catalogue the page is not permitted to reach.
+   *
+   * `null` on an instance with no market, on a control plane that predates the
+   * field, and on a value that could not be read. All three are the same state
+   * here and are drawn the same way: the Market tab says there is nothing to
+   * browse, and installing a plugin from a file is untouched.
+   */
+  catalogue: string | null;
 }
 
 /**
@@ -119,7 +134,39 @@ export function parseInstanceConfig(body: unknown): InstanceConfig | null {
       ? { url, version: typeof version === "string" && version.length > 0 ? version : null }
       : null;
 
-  return { registration: enabled ? "open" : "off", email: configured, source };
+  /*
+   * Read with the same leniency `source` gets, and for the same reason: a control
+   * plane that predates the field still has a readable config and must still draw
+   * a sign-in screen. `isAbsoluteHttpUrl` rather than a bare string check, because
+   * this value is handed to `new URL` and then to `fetch` — a scheme-less value
+   * would resolve **relative to this origin**, and the SPA fallback answers such a
+   * path with `index.html`, so the market would parse the app's own HTML as a
+   * catalogue and report it as malformed. An unreadable address is no catalogue,
+   * which is a state this client already draws.
+   */
+  const catalogue = read(read(body, "plugins"), "catalogue");
+  return {
+    registration: enabled ? "open" : "off",
+    email: configured,
+    source,
+    catalogue: typeof catalogue === "string" && isAbsoluteHttpUrl(catalogue) ? catalogue : null,
+  };
+}
+
+/**
+ * Where to ask for the list of official plugins, or `null`.
+ *
+ * ⚠ **Fails closed on an unknown config, which is the opposite of `mailUsable`
+ * beside it, and the reconciling sentence is this file's standing one:** fail
+ * closed where the cost is a missing screen, fail open where the cost is a
+ * locked-out person. Nobody is locked out of anything by a market that is not on
+ * offer for one render — every plugin already installed still works, and
+ * importing a file still installs one. Guessing an address, meanwhile, produces a
+ * request the page's own CSP refuses before it leaves, which is a failure with no
+ * symptom anybody can see.
+ */
+export function catalogueUrl(config: InstanceConfig | null): string | null {
+  return config?.catalogue ?? null;
 }
 
 /**

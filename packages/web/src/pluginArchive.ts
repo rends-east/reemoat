@@ -140,10 +140,25 @@ async function peekTarGz(blob: Blob): Promise<ArchivePeek> {
       // Walk every whole header (and its body) currently held, and keep the rest.
       for (;;) {
         if (held.byteLength < TAR_BLOCK) break;
+        /*
+         * ⚠ **The end of a tar is an all-zero block, never an empty name**, and
+         * this is `archive.ts:879` transcribed rather than paraphrased. Reading it
+         * as "the name field came back empty" made a member named with three
+         * spaces terminate this walk while the daemon carried on past it — one
+         * header that meant *stop* to the screen somebody consents from and
+         * *another member* to the thing installing. Everything after it was
+         * described to nobody. `tarString` losing its `.trim()` is the other half.
+         */
+        if (held.subarray(0, TAR_BLOCK).every((byte) => byte === 0)) return finish(best);
         const stem = tarString(held.subarray(0, 100));
-        // Two zero blocks end a tar; one is enough to know there is no more.
-        if (stem.length === 0) return finish(best);
         const size = tarOctal(held.subarray(124, 136));
+        // Base-256, which this reader will not guess at. See {@link tarOctal}.
+        if (size === null) {
+          return {
+            kind: "unreadable",
+            reason: "that archive uses a binary size field this screen cannot follow",
+          };
+        }
         const typeflag = String.fromCharCode(held[156] ?? 0);
         const padded = TAR_BLOCK + Math.ceil(size / TAR_BLOCK) * TAR_BLOCK;
         if (held.byteLength < padded) break;
@@ -280,6 +295,22 @@ async function peekZip(blob: Blob): Promise<ArchivePeek> {
     const nameLen = view.getUint16(at + 28, true);
     const extraLen = view.getUint16(at + 30, true);
     const commentLen = view.getUint16(at + 32, true);
+    /*
+     * ⚠ **Refused rather than read past the directory**, the other half of
+     * `archive.ts`'s refusal for the same record. `bytes` is the whole file here,
+     * not just the central directory, so an over-declared `nameLen` ran on into
+     * the trailing EOCD record and produced `plugin.json` plus four bytes of
+     * junk — a name this reader then declined, while the daemon's own read of the
+     * same field is bounded by its directory-sized buffer and got `plugin.json`.
+     * One manifest on the screen, a different one installed. The count check below
+     * cannot see it: the record is counted on both sides.
+     */
+    if (at + 46 + nameLen + extraLen + commentLen > cdEnd) {
+      return {
+        kind: "unreadable",
+        reason: "that zip has a directory entry that runs past the directory",
+      };
+    }
     const raw = utf8(bytes.subarray(at + 46, at + 46 + nameLen));
     const name = canonical(raw) ?? raw;
     if (isManifestPath(raw)) {
@@ -370,9 +401,30 @@ function finish(best: { body: Uint8Array; rival: boolean } | null): ArchivePeek 
  * manifest with no scopes.
  */
 function read(body: Uint8Array): ArchivePeek {
+  return readManifestText(utf8(body));
+}
+
+/**
+ * The same reader, for a `plugin.json` that did not come out of an archive.
+ *
+ * ⚠ **Exported so the market's consent screen uses this reader and no other.**
+ * There the manifest arrives as text from `raw.githubusercontent.com` at the
+ * commit the catalogue pinned, and the disclosure drawn from it is the one
+ * somebody agrees to. A second reader would be a second set of rules about what
+ * an absent `scopes` means and a second wording for "this cannot be read" — on
+ * the two screens in this app where those sentences matter most, and where they
+ * must agree.
+ *
+ * The archive walkers reach it through {@link read}, which is the same function
+ * with the bytes decoded. Everything the docblock above says about leniency
+ * applies unchanged: this fails open into empty values and never invents one.
+ */
+export function readManifestText(json: string): ArchivePeek {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(utf8(body));
+    // Named `json` rather than `text`, because `text()` is this module's own
+    // narrowing helper and a parameter of that name shadows it three lines down.
+    parsed = JSON.parse(json);
   } catch {
     return { kind: "unreadable", reason: "that plugin.json is not valid JSON" };
   }
@@ -469,12 +521,46 @@ function depthOf(name: string): number {
   return name.replace(/\/+$/, "").split("/").length - 1;
 }
 
+/**
+ * A NUL-terminated tar field, as text.
+ *
+ * ⚠ **No `.trim()`, and its absence is the whole of this function.** `archive.ts`
+ * does not trim, and a name of three spaces is therefore a *member* to the daemon
+ * and was the *empty string* here — which the walk below read as the terminating
+ * zero block. So the browser stopped at that member and the daemon walked past it,
+ * and every member after it was invisible on the screen somebody consents from
+ * while being perfectly visible to the thing doing the installing. Trimming is
+ * also what made the size field's base-256 spelling look like ordinary text; see
+ * {@link tarOctal}.
+ *
+ * The only reader either side has to agree with is the other one, so this is a
+ * transcription of `archive.ts`'s `tarString` rather than a tidier version of it.
+ */
 function tarString(bytes: Uint8Array): string {
   const end = bytes.indexOf(0);
-  return utf8(end < 0 ? bytes : bytes.subarray(0, end)).trim();
+  return utf8(end < 0 ? bytes : bytes.subarray(0, end));
 }
 
-function tarOctal(bytes: Uint8Array): number {
+/**
+ * A tar numeric field, or `null` for one this reader will not guess at.
+ *
+ * ⚠ **`null` for GNU base-256, because guessing produced a different archive.**
+ * When bit 7 of the first byte is set the field is not octal text at all — it is
+ * a big-endian integer, which `archive.ts`'s `tarNumber` decodes and this stripped
+ * to nothing and read as zero. A size of zero advances the walk by one block
+ * instead of past the member, so the next "header" it read was 512 bytes of
+ * somebody's *file body* — where a synthetic root `plugin.json` and a zero block
+ * are cheap to plant. The screen then showed that manifest and the daemon
+ * installed the real one further down.
+ *
+ * Refusing rather than decoding is the same answer this file already gives to the
+ * `x`, `L`, `K` and `g` headers a few lines up, for the same reason: a second
+ * implementation of a decoder is a second thing that has to stay in step, and the
+ * cost of refusing is the named "Install without reading it" press rather than a
+ * wrong description of what somebody is about to run.
+ */
+function tarOctal(bytes: Uint8Array): number | null {
+  if (((bytes[0] ?? 0) & 0x80) !== 0) return null;
   const parsed = Number.parseInt(tarString(bytes).replace(/[^0-7]/g, ""), 8);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
 }

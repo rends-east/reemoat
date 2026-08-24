@@ -1,6 +1,17 @@
 import { ApiError } from "./http";
 import type { MachineId } from "./ids";
-import type { PluginBlock, PluginField, PluginOpen, PluginRow, PluginRowAction, PluginSummary, PluginView } from "./wire";
+import { PLUGIN_SETTINGS_BLOCK_TYPES, PLUGIN_SETTINGS_FIELD_KINDS } from "./wire";
+import type {
+  PluginBlock,
+  PluginField,
+  PluginFieldKind,
+  PluginOpen,
+  PluginRow,
+  PluginRowAction,
+  PluginSummary,
+  PluginSurface,
+  PluginView,
+} from "./wire";
 
 /**
  * What a plugin is allowed to make this client draw, and what happens when it
@@ -85,10 +96,25 @@ function row(raw: unknown): PluginRow {
   };
 }
 
-function field(raw: unknown): PluginField {
+function field(raw: unknown, surface: PluginSurface): PluginField {
   const source = (raw ?? {}) as Record<string, unknown>;
   const options = Array.isArray(source["options"]) ? source["options"] : [];
-  const kind = FIELD_KINDS.find((one) => one === source["kind"]) ?? "text";
+  /*
+   * ⚠ **Three kinds on a settings pane, five on a screen**, and the narrowing is
+   * here as well as in the daemon because this is the side that knows. The daemon
+   * clamps the *view* it answers with, which is enough for a read — but a form's
+   * submit can answer with a redrawn pane, and it reaches the daemon as an action
+   * id that says nothing about which pane it came from. This component is drawing
+   * one, so it decides.
+   *
+   * Fail-open either way: an unsupported kind is a text box that still
+   * round-trips, never a dropped control. `password` narrowing to a visible box
+   * is the one that looks like a regression and is not — the value is kept in a
+   * plaintext column on the daemon, so the mask was an assurance nothing here can
+   * keep.
+   */
+  const kinds: readonly PluginFieldKind[] = surface === "settings" ? PLUGIN_SETTINGS_FIELD_KINDS : FIELD_KINDS;
+  const kind = kinds.find((one) => one === source["kind"]) ?? "text";
   return {
     key: text(source["key"]),
     label: text(source["label"]),
@@ -106,10 +132,23 @@ function field(raw: unknown): PluginField {
   };
 }
 
-/** One block, or `null` when this client cannot draw it. */
-export function readBlock(raw: unknown): PluginBlock | null {
+/** One block, or `null` when this surface does not draw it. */
+export function readBlock(raw: unknown, surface: PluginSurface = "screen"): PluginBlock | null {
   const source = (raw ?? {}) as Record<string, unknown>;
   const rows = (value: unknown): PluginRow[] => (Array.isArray(value) ? value.map(row) : []);
+  /*
+   * ⚠ **A block this *surface* does not draw takes the same exit as a block this
+   * *client* does not know**, which is `null` and a shorter screen. One exit
+   * rather than two: a settings pane refusing a `list` and an old tab refusing a
+   * block from a newer daemon are the same event as far as this function's caller
+   * is concerned, and giving them separate paths is how one of them grows a
+   * placeholder row the other does not have.
+   *
+   * ⚠ **Defaulted to `screen`, the wider set.** A call site that has not been
+   * told which surface it is on keeps today's behaviour rather than silently
+   * deleting somebody's controls.
+   */
+  if (surface === "settings" && !PLUGIN_SETTINGS_BLOCK_TYPES.some((one) => one === source["type"])) return null;
   switch (source["type"]) {
     case "text":
       return { type: "text", text: text(source["text"]), tone: source["tone"] === "muted" ? "muted" : "default" };
@@ -131,7 +170,7 @@ export function readBlock(raw: unknown): PluginBlock | null {
       const fields = Array.isArray(source["fields"]) ? source["fields"] : [];
       return {
         type: "form",
-        fields: fields.map(field),
+        fields: fields.map((one) => field(one, surface)),
         submit: text(source["submit"]) || "Save",
         action: text(source["action"]),
       };
@@ -145,7 +184,7 @@ export function readBlock(raw: unknown): PluginBlock | null {
   }
 }
 
-export function readView(raw: unknown): PluginView {
+export function readView(raw: unknown, surface: PluginSurface = "screen"): PluginView {
   const source = (raw ?? {}) as Record<string, unknown>;
   const blocks = Array.isArray(source["blocks"]) ? source["blocks"] : [];
   const refresh = source["refreshMs"];
@@ -159,7 +198,7 @@ export function readView(raw: unknown): PluginView {
      * A floor on the side that owns the timer is the only one that binds.
      */
     refreshMs: typeof refresh === "number" && Number.isFinite(refresh) && refresh > 0 ? Math.max(MIN_REFRESH_MS, refresh) : null,
-    blocks: blocks.map(readBlock).filter((block): block is PluginBlock => block !== null),
+    blocks: blocks.map((one) => readBlock(one, surface)).filter((block): block is PluginBlock => block !== null),
   };
 }
 
@@ -252,6 +291,34 @@ export function consentBroken(
   return `That plugin asked for more than this screen showed: ${parts.join("; ")}. Remove it unless you know why.`;
 }
 
+/**
+ * A broken consent, as something that can be thrown without losing its words.
+ *
+ * ⚠ **The one sentence on this whole screen that must never be replaced, and it
+ * was being replaced.** {@link consentBroken} is raised on the fan-out paths by
+ * throwing — which is right, because a thrown act lands the row on `failed` and
+ * leaves the box unticked, and a ticked box for a plugin this screen has just
+ * refused to trust is the one lie the consent step exists to prevent. But a plain
+ * `Error` is not an `ApiError`, so {@link pluginFailure} answered **"That did not
+ * work. Try again."** — deleting the naming of which scope was gained and
+ * inviting the person to install it a second time. The single-machine path in
+ * `PluginsPanel` does `toast("error", broken)` and shows it verbatim, so the same
+ * check was disclosed in one flow and discarded in the other.
+ *
+ * A class with a static guard rather than a bare `instanceof`, for
+ * `ApiError.isApiError`'s reason one module over.
+ */
+export class ConsentBrokenError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConsentBrokenError";
+  }
+
+  static isConsentBroken(error: unknown): error is ConsentBrokenError {
+    return error instanceof ConsentBrokenError;
+  }
+}
+
 /** Which scope a `403 insufficient_scope` said it wanted, or `null` if it did not say. */
 function requiredScope(detail: unknown): string | null {
   if (detail === null || typeof detail !== "object") return null;
@@ -260,6 +327,13 @@ function requiredScope(detail: unknown): string | null {
 }
 
 export function pluginFailure(error: unknown): string {
+  /*
+   * ⚠ **Before the `ApiError` gate, because this one is ours rather than a
+   * daemon's.** See {@link ConsentBrokenError}: it carries the only sentence here
+   * that names what a plugin gained, and the generic arm below would replace it
+   * with an invitation to try the install again.
+   */
+  if (ConsentBrokenError.isConsentBroken(error)) return error.message;
   if (!(error instanceof ApiError)) return "That did not work. Try again.";
 
   /*
@@ -313,6 +387,33 @@ export function pluginFailure(error: unknown): string {
       return "That plugin needs a newer daemon than this machine is running.";
     case "plugin_start_failed":
       return `That plugin would not start, so nothing was changed. ${error.message}`;
+    /*
+     * ⚠ **The one refusal on the market path that is about *authority* rather
+     * than about machinery, so it says what to do about it.** The daemon parsed
+     * the manifest at the pinned commit and found it asking for more than the
+     * disclosure screen showed — and refused before starting the plugin, so
+     * nothing ran. The daemon's own sentence names which scope, host or hook was
+     * gained, which is the only useful thing to say, so it is carried through
+     * rather than replaced.
+     */
+    case "plugin_consent_broken":
+      return `That commit asks for more than this screen showed you, so nothing was installed. ${error.message}`;
+    /*
+     * A daemon too old to fetch a plugin for itself, recognised by the shape of
+     * its refusal exactly as a daemon with no plugins at all is: `POST
+     * /plugins/source` is a route it has never registered, so Hono answers a bare
+     * 404 and `parseBody` makes it `http_404`. The 404 arm at the top of this
+     * function catches that first and says "update it" — this arm is the
+     * *catalogue's* 404, which is a different fact with a different remedy.
+     */
+    case "plugin_source_not_found":
+      return "That plugin's code is not where the catalogue says it is. It may have been withdrawn.";
+    case "plugin_source_unavailable":
+      return "This machine could not fetch that plugin from GitHub. Try again in a moment.";
+    case "plugin_source_invalid":
+      // The daemon names which of the two fields, and whether it was a tag where a
+      // commit belongs — which is the one somebody can act on.
+      return error.message;
     case "plugin_timeout":
       return "That plugin did not answer in time.";
     case "plugin_unavailable":
@@ -324,8 +425,9 @@ export function pluginFailure(error: unknown): string {
     case "plugin_scope_denied":
       return "That plugin asked for something it did not declare, and was refused.";
     /*
-     * ⚠ **Read off `required`, because three of these six routes want
-     * `machine:admin` rather than `session:write`.** Install, remove and the
+     * ⚠ **Read off `required`, because four of these seven routes want
+     * `machine:admin` rather than `session:write`.** Both installs — the upload
+     * and the one from a commit — remove and the
      * state switch are the admin ones, so a grant that really does hold
      * `session:write` was being told it was read-only — a sentence naming the
      * wrong permission is worse than one naming none, since the remedy it points
@@ -393,6 +495,28 @@ export interface PluginActionOffer {
  * is worse than no row. Declaration order is kept: it is the order the plugin's
  * author wrote, and the menu has nothing better to sort by.
  */
+/**
+ * Whether this plugin offers settings anywhere in the fleet.
+ *
+ * ⚠ **Anywhere, not everywhere, and that is deliberate.** The gear opens a screen
+ * that picks a machine, so it is right whenever *one* install has a pane — and a
+ * fleet mid-update, with 0.3.2 on one host and 0.2.0 on another, is the ordinary
+ * case rather than the edge one. Requiring all of them would hide the control on
+ * exactly the fleet where somebody most wants to look at what changed.
+ *
+ * ⚠ **`enabled` is not consulted.** A plugin somebody switched off is the
+ * commonest reason to open its settings — to fix whatever made them switch it off
+ * — and a control that disappears when a thing stops working is a control they go
+ * looking for. The pane itself reports whatever the daemon says about a stopped
+ * plugin.
+ *
+ * Takes a flat list rather than the store's map, so this stays a pure decision
+ * `webcheck` can sweep. The caller flattens.
+ */
+export function offersSettings(plugins: readonly PluginSummary[], pluginId: string): boolean {
+  return plugins.some((one) => one.id === pluginId && one.contributes.settings);
+}
+
 export function sessionActions(plugins: readonly PluginSummary[]): PluginActionOffer[] {
   const offers: PluginActionOffer[] = [];
   for (const plugin of plugins) {

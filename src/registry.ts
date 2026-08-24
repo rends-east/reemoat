@@ -36,6 +36,7 @@ import { LocalRuntime } from "./runtime/local.js";
 import { probeExists } from "./stall.js";
 import type { SessionRuntime } from "./runtime/types.js";
 import {
+  isAuthRequiredMessage,
   ResumeUnsupportedError,
   Session,
   SessionForgottenError,
@@ -380,9 +381,10 @@ export function describeResumeFailure(error: unknown): {
   if (error instanceof ResumeUnsupportedError) return { code: "resume_unsupported", status: 409, message };
   if (error instanceof AgentUnavailableError) return { code: "agent_unavailable", status: 503, message };
   if (error instanceof StartTimeoutError) return { code: "agent_start_timeout", status: 504, message };
-  // Matched on the message because that is all the agent gives us: `Session.resume`
-  // rewraps the ACP error with its own `authHint` rather than a typed class.
-  if (/authentication required/i.test(message)) {
+  // The predicate lives in `session.ts`, which is where the message is written —
+  // see `isAuthRequiredMessage` for why it is a string match at all, and why
+  // there is one copy of that concession rather than one per caller.
+  if (isAuthRequiredMessage(message)) {
     return { code: "agent_auth_required", status: 502, message };
   }
   return { code: "agent_launch_failed", status: 502, message };
@@ -1255,13 +1257,6 @@ export interface ManagedSessionInit {
 export interface ManagedSessionOptions {
   sessionStore?: SessionStore | null;
   restore?: ManagedSessionInit;
-  /**
-   * The verified subject that created this session.
-   *
-   * Sits here rather than in `restore` because it is immutable identity, like
-   * `id` and `agent`, not state recovered from a previous life — the restore
-   * path and the create path both supply it the same way.
-   */
   /** Where this session's agent runs. Defaults to a child of this daemon. */
   runtime?: SessionRuntime;
   /**
@@ -4058,6 +4053,25 @@ export interface CreateSessionOptions {
   /** Client-supplied branch name. Validated by git before use. */
   branch?: string | null;
   /**
+   * Who asked for this session, when it was not a person.
+   *
+   * ⚠ **An argument to *this act*, carried to the observers and kept nowhere.**
+   * It is not stored on the session, not on the snapshot, not persisted and not
+   * on the wire: a session a plugin opened is not that plugin's for ever, and a
+   * field that outlived the announcement would become exactly that.
+   *
+   * Here rather than in `src/plugins/` because the announcement it is for happens
+   * **inside** this function — `announce(managed, "created")` runs before `create`
+   * resolves, so there is no moment after the `await` at which the caller could
+   * stamp it. This file knows nothing about plugins and this string is opaque to
+   * it; `PluginHost` is what reads it.
+   *
+   * ⚠ **Never from a request body.** `POST /sessions` builds these options field
+   * by field and does not spread the body — a client able to name its own origin
+   * could switch off another plugin's hooks.
+   */
+  origin?: string | null;
+  /**
    * Where this session's worktree goes, overriding the daemon-wide policy.
    *
    * The daemon-wide `workspacePolicy.worktreeRoot` is the answer in production;
@@ -4141,7 +4155,18 @@ export interface AutoResumeReport {
  * where an observer is already subscribed and where it is ordered against
  * everything else the session said.
  */
-export type SessionObserver = (managed: ManagedSession, arrival: "created" | "restored") => void;
+export type SessionObserver = (
+  managed: ManagedSession,
+  arrival: "created" | "restored",
+  /**
+   * Who asked for it, when it was not a person — {@link CreateSessionOptions.origin}
+   * verbatim, and `null` for every restored session and every session a client
+   * created. Opaque here: this file does not know what the string names, and the
+   * one observer that does is the plugin host, which uses it to avoid handing a
+   * plugin the echo of its own write.
+   */
+  origin: string | null,
+) => void;
 
 export class SessionRegistry {
   private readonly sessions = new Map<string, ManagedSession>();
@@ -4238,10 +4263,10 @@ export class SessionRegistry {
     };
   }
 
-  private announce(managed: ManagedSession, arrival: "created" | "restored"): void {
+  private announce(managed: ManagedSession, arrival: "created" | "restored", origin: string | null): void {
     for (const observer of this.observers) {
       try {
-        observer(managed, arrival);
+        observer(managed, arrival, origin);
       } catch (error) {
         this.onWarning?.(`session observer threw: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -4435,7 +4460,11 @@ export class SessionRegistry {
     // After the workspace is recorded and before the agent is launched, so an
     // observer subscribing to this session's log is attached before the first
     // thing the agent says — the same ordering `recordWorkspace` is placed for.
-    this.announce(managed, "created");
+    //
+    // The origin travels with the announcement and is kept nowhere. This is the
+    // ordering that forces that: this line runs before `create` resolves, so a
+    // caller holding the returned session is already too late to stamp it.
+    this.announce(managed, "created", options.origin ?? null);
 
     // If this throws, the worktree is deliberately left in place. Tearing it down
     // on an error path is how you eventually delete a directory you did not
@@ -4482,7 +4511,10 @@ export class SessionRegistry {
       // Announced for every restored row, terminal ones included: an observer
       // rebuilding its own index after a restart needs the sessions that ended
       // while the daemon was down as much as the ones that did not.
-      this.announce(managed, "restored");
+      //
+      // `null`, and not because the origin was lost: a restart is not an act
+      // anybody performed, so there is nobody whose echo this would be.
+      this.announce(managed, "restored", null);
       if (row.exit !== null) continue;
 
       // The runtime owns the fence, because only it knows what makes a recorded

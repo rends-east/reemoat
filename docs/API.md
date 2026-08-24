@@ -43,7 +43,7 @@ below the auth gate.
 
 ---
 
-## The daemon — 43 routes
+## The daemon — 44 routes
 
 Runs on your machine, reachable through the relay. `pnpm client` drives all of it.
 
@@ -115,17 +115,26 @@ inside a hook where there is no caller at all. Neither implies the other. See
 |---|---|
 | `GET /plugins` | What is installed, what each may reach, and the plugin API this daemon speaks |
 | `POST /plugins` | Install **or update** — one verb, because the manifest says which. The archive is the body and `?name=` is the filename it arrived as, sanitized like an upload's and recorded as the row's `source`; it is the sole cause of `400 invalid_name`, and omitting it is one. Streams its body past the 1 MiB bound and cancels it on every refusal; `409 plugin_start_failed` means the tree is unchanged and the old version is still running |
+| `POST /plugins/source` | The same act, for a plugin this daemon fetches itself: `{source: {kind: "github", repo, commit}, consent?}`. The address is **built here** from `repo` and `commit` and is never taken from the caller, the commit must be a full 40-character sha (a tag moves; the pin has to be content-addressed), and redirects are refused. `consent` is what the installer was shown — `{scopes, net, hooks}` — and a manifest exceeding it is `409 plugin_consent_broken`, refused *before the plugin is started*. Answers exactly as `POST /plugins` does, `replaced` included |
 | `DELETE /plugins/:pluginId` | Uninstall, and drop everything it kept. An update keeps that; this does not |
 | `POST /plugins/:pluginId/state` | `{enabled}`. The state a caller wants rather than the transition, so a lost answer is safe to send again |
 | `GET /plugins/:pluginId/views/:viewId` | `screen` or `settings`. A **read** by contract — `isReplayable` lets the transport repeat it |
 | `POST /plugins/:pluginId/actions/:actionId` | Press something. Refused unless the manifest declared that action |
 
-All six answer `503 plugins_unavailable` where the daemon was built without a plugin
-host or started with `REEMOAT_PLUGINS=0`, and the three that mutate — install, remove
-and the state switch — answer `409 plugin_busy` while another one is in flight, since
-one mutation at a time is a property of the whole daemon rather than of a plugin. A
-first install answers `201` and an update answers `200`; `replaced` on the body is
+All seven answer `503 plugins_unavailable` where the daemon was built without a plugin
+host or started with `REEMOAT_PLUGINS=0`, and the four that mutate — both installs,
+remove and the state switch — answer `409 plugin_busy` while another one is in flight,
+since one mutation at a time is a property of the whole daemon rather than of a plugin.
+A first install answers `201` and an update answers `200`; `replaced` on the body is
 which of the two it was.
+
+`POST /plugins/source` is the **only** route on this daemon that reaches the network on
+its own behalf, and it does so to one hardcoded host. Its refusals from the far end are
+`502 plugin_source_not_found` (that repository and commit are not there, or it is
+private) and `502 plugin_source_unavailable` (anything else, including a redirect) —
+`502` rather than `400` because nothing about the request was wrong, and rather than
+`503` because this daemon is not the thing that is unwell. A malformed `repo` or
+`commit` is `400 plugin_source_invalid` and never opens a socket.
 
 Both of the last two answer through one plugin, so both carry its failures:
 `503 plugin_unavailable` (not running), `504 plugin_timeout` (did not answer inside the

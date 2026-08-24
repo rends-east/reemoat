@@ -1,14 +1,25 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Puzzle, Trash2, Upload } from "lucide-react";
-import { consentBroken, pluginFailure, pluginPath, pluginStateText, readView } from "../../plugins";
+import { useRef, useState, useEffect, type ReactNode } from "react";
+import { ChevronRight, MoreHorizontal, Upload } from "lucide-react";
+import { consentBroken, pluginFailure, pluginPath, pluginStateText } from "../../plugins";
 import { peekPluginArchive, type ArchivePeek, type ManifestPreview } from "../../pluginArchive";
+import { PluginConsent } from "../PluginConsent";
 import type { MachineId } from "../../ids";
+import { marketEntryPath } from "../../market";
 import { navigate } from "../../router";
-import { pluginSettingsPath, settingsPath } from "../../settings";
 import { store } from "../../store";
-import { PLUGIN_SCOPE_TEXT, type PluginSummary, type PluginView as PluginViewShape } from "../../wire";
-import { Button, DangerButton, Empty, LINK, SETTINGS_HEADING, SETTINGS_SECTION, Spinner } from "../bits";
-import { PluginView } from "../PluginView";
+import type { PluginSummary } from "../../wire";
+import {
+  Button,
+  DangerButton,
+  Empty,
+  Icon,
+  IconButton,
+  Menu,
+  RowAction,
+  SETTINGS_HEADING,
+  SETTINGS_SECTION,
+  Spinner,
+} from "../bits";
 import { toast } from "../Toast";
 
 /**
@@ -110,209 +121,142 @@ function PluginRow({
   const daemon = store.daemonFor(machineId);
 
   return (
-    <li className="border-b border-edge py-3 last:border-b-0">
-      <div className="flex min-w-0 items-start gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
-            <span className="text-sm font-medium">{plugin.name}</span>
-            <span className="text-xs text-muted">{plugin.version}</span>
-            <span className="text-xs text-muted">· {pluginStateText(plugin)}</span>
-          </div>
-          {plugin.description !== null && <p className="mt-0.5 text-xs text-muted">{plugin.description}</p>}
-          {/*
-           * The scopes, as sentences, on every row rather than behind a disclosure.
-           * This is the list somebody consented to, and a capability nobody re-reads
-           * is a capability nobody withdraws.
-           */}
-          {plugin.scopes.length > 0 && (
-            <ul className="mt-1.5 flex flex-col gap-0.5">
-              {plugin.scopes.map((scope) => (
-                <li key={scope} className="text-xs text-muted">
-                  {/* An unknown scope falls through to its own identifier — legible,
-                      and never a guess about what a newer daemon means by it. */}
-                  {PLUGIN_SCOPE_TEXT[scope] ?? scope}
-                </li>
-              ))}
-            </ul>
+    <li className="border-b border-edge last:border-b-0">
+      <div className="flex min-w-0 items-center gap-1">
+        {/*
+         * ⚠ **The row is a link to the plugin, and the wall of text it used to be
+         * is on the page it links to.** It drew the plugin's description and then
+         * every scope as a sentence — *"Read your sessions, their transcripts and
+         * what they changed"*, four of those — on the argument that a capability
+         * nobody re-reads is a capability nobody withdraws. What that produced was
+         * a machine screen where three installed plugins filled a phone twice
+         * over with prose that is identical on every machine, and the *settings*
+         * of the plugin were a kebab entry underneath it that nobody found.
+         *
+         * The scopes are one tap away, in the permissions fold on the plugin's own
+         * page, which is also where its settings now are. What stays on this row
+         * is what is true of *this host* and cannot be read anywhere else: the
+         * version installed here, whether it is running, and what it said if it
+         * failed.
+         */}
+        <button
+          type="button"
+          onClick={() => navigate(marketEntryPath(plugin.id))}
+          className="tap press flex min-h-14 min-w-0 flex-1 items-center gap-3 rounded-lg px-1 py-2.5 text-left hover:bg-raised"
+        >
+          <span className="min-w-0 flex-1">
+            <span className="flex min-w-0 items-baseline gap-x-2">
+              <span className="truncate text-sm font-medium">{plugin.name}</span>
+              <span className="shrink-0 text-xs text-muted">{plugin.version}</span>
+            </span>
+            <span className="block truncate text-2xs text-muted">{pluginStateText(plugin)}</span>
+          </span>
+          <Icon as={ChevronRight} size={16} className="shrink-0 text-faint" />
+        </button>
+        <Menu
+          align="right"
+          panelClassName="w-56"
+          trigger={(open, toggle) => (
+            <IconButton
+              icon={MoreHorizontal}
+              label={`Actions for ${plugin.name}`}
+              size="sm"
+              active={open}
+              disabled={busy}
+              onClick={toggle}
+            />
           )}
-          {plugin.net.length > 0 && (
-            <p className="mt-0.5 text-xs text-muted">Reaches {plugin.net.join(", ")}</p>
+        >
+          {(close) => (
+            <>
+              {/* Disabled rather than absent while the plugin is switched off: the
+                  row above says why, and a control that vanishes is one somebody
+                  goes looking for. `focusableRows` skips a disabled button, so it
+                  is not a stop on the way to one either. */}
+              {plugin.contributes.screen !== null && plugin.enabled && (
+                <RowAction
+                  label="Open"
+                  onClick={() => {
+                    close();
+                    navigate(pluginPath(machineId, plugin.id));
+                  }}
+                />
+              )}
+              {/*
+               * ⚠ **No `Settings` row here any more, and that is the point of the
+               * link above rather than an omission.** A plugin's settings are on
+               * the plugin's page, drawn for the machines it is actually on. Two
+               * doors to one pane is how the one nobody uses drifts.
+               */}
+              <RowAction
+                label={plugin.enabled ? "Switch off" : "Switch on"}
+                onClick={() => {
+                  close();
+                  if (daemon === undefined) return;
+                  run(
+                    daemon.setPluginEnabled(plugin.id, !plugin.enabled),
+                    plugin.enabled ? "Switched off" : "Switched on",
+                  );
+                }}
+              />
+              <RowAction
+                label="Remove"
+                danger
+                onClick={() => {
+                  close();
+                  setConfirming(true);
+                }}
+              />
+            </>
           )}
-          {plugin.failure !== null && (
-            <p className="mt-1.5 max-h-56 overflow-auto text-xs whitespace-pre-wrap wrap-anywhere text-fg">{plugin.failure}</p>
-          )}
-        </div>
+        </Menu>
       </div>
+
+      {plugin.failure !== null && (
+        <p className="mb-2 max-h-56 overflow-auto px-1 text-xs whitespace-pre-wrap wrap-anywhere text-fg">
+          {plugin.failure}
+        </p>
+      )}
 
       {/*
-       * ⚠ **`sm` with the coarse-pointer floor on the *resting* controls.**
-       * `BUTTON_SIZE` licenses `sm` for "a confirmation that has replaced the
-       * controls on a settings row, so it is the only thing on that row and has
-       * nothing adjacent to mis-hit" — which describes the confirming pair below
-       * and not these. Up to four of these sit adjacent at `gap-2`, and the last
-       * one removes the plugin and everything it stored. `AgentsPanel` spells the
-       * same escape at its own `sm` button; the confirming pair keeps bare `sm`,
-       * which is the shape the docblock actually blesses.
+       * **The confirmation still leaves the menu and lands on the row.** A menu
+       * held open to hold a two-step confirm would be a second dismissable layer
+       * over the sheet, for one tap — `UsersSection` settled that, and the
+       * confirming pair below is its shape, down to Cancel being last and filled.
        */}
-      <div className="mt-2 flex flex-wrap items-center gap-2">
-        {plugin.contributes.screen !== null && (
+      {confirming ? (
+        /*
+         * Two-step, and the confirming row ends with Cancel — the settings-row
+         * rule, kept for its measured reason: both groups lay out in the same box,
+         * so a second tap aimed at a button that looked inert lands on the undo.
+         * This one earns it more than most, because uninstalling takes the
+         * plugin's data with it and nothing brings that back.
+         */
+        <div className="mb-2 flex flex-wrap items-center gap-2 px-1">
+          <span className="text-xs text-muted">Remove it and everything it kept?</span>
           <Button
+            tone="destructive"
             size="sm"
             className="[@media(pointer:coarse)]:min-h-11"
-            disabled={!plugin.enabled}
-            onClick={() => navigate(pluginPath(machineId, plugin.id))}
-          >
-            Open
-          </Button>
-        )}
-        {plugin.contributes.settings && (
-          <Button
-            size="sm"
-            className="[@media(pointer:coarse)]:min-h-11"
-            onClick={() => navigate(pluginSettingsPath(machineId, plugin.id))}
-          >
-            Settings
-          </Button>
-        )}
-        <Button
-          size="sm"
-          className="[@media(pointer:coarse)]:min-h-11"
-          disabled={busy || daemon === undefined}
-          onClick={() => {
-            if (daemon === undefined) return;
-            run(daemon.setPluginEnabled(plugin.id, !plugin.enabled), plugin.enabled ? "Switched off" : "Switched on");
-          }}
-        >
-          {plugin.enabled ? "Switch off" : "Switch on"}
-        </Button>
-        {/*
-         * Two-step, and the confirming row ends with Cancel — the settings-row rule,
-         * kept for its measured reason: both groups lay out in the same box, so a
-         * second tap aimed at a button that looked inert lands on the undo. This one
-         * earns it more than most, because uninstalling takes the plugin's data with
-         * it and nothing brings that back.
-         */}
-        {confirming ? (
-          <>
-            <span className="text-xs text-muted">Remove it and everything it kept?</span>
-            <Button
-              tone="destructive"
-              size="sm"
-              className="[@media(pointer:coarse)]:min-h-11"
-              disabled={busy || daemon === undefined}
-              onClick={() => {
-                setConfirming(false);
-                if (daemon !== undefined) run(daemon.removePlugin(plugin.id), "Removed");
-              }}
-            >
-              Remove
-            </Button>
-            <Button tone="primary" size="sm" className="[@media(pointer:coarse)]:min-h-11" onClick={() => setConfirming(false)}>
-              Cancel
-            </Button>
-          </>
-        ) : (
-          <DangerButton
-            icon={Trash2}
-            size="sm"
-            className="[@media(pointer:coarse)]:min-h-11"
-            disabled={busy}
-            onClick={() => setConfirming(true)}
+            disabled={busy || daemon === undefined}
+            onClick={() => {
+              setConfirming(false);
+              if (daemon !== undefined) run(daemon.removePlugin(plugin.id), "Removed");
+            }}
           >
             Remove
-          </DangerButton>
-        )}
-      </div>
+          </Button>
+          <Button
+            tone="primary"
+            size="sm"
+            className="[@media(pointer:coarse)]:min-h-11"
+            onClick={() => setConfirming(false)}
+          >
+            Cancel
+          </Button>
+        </div>
+      ) : null}
     </li>
-  );
-}
-
-/**
- * What a plugin says about itself, drawn before anything is sent.
- *
- * ⚠ **This is the consent step, and it is the whole reason the manifest is read
- * in the browser.** `SECURITY.md` says a plugin's blast radius is "named before
- * somebody consents to it"; it was not. The old flow POSTed the file straight
- * from the picker, and the daemon unpacked it, wrote the row and *started the
- * plugin* before a single scope reached a person — who then read the scopes on
- * the row of something already running. This screen is the sentence that claim
- * needs to be true.
- *
- * `hooks` is drawn beside the scopes rather than under "contributes", because it
- * is disclosure rather than decoration: a plugin that declares only hooks asks for
- * no scopes at all and still gets sent every session's title, agent, workspace and
- * every permission an agent raises. Listing it under contributions would put the
- * most surprising thing on the screen in the least surprising place.
- */
-function ManifestConsent({ manifest }: { manifest: ManifestPreview }): ReactNode {
-  const rows: { title: string; items: string[] }[] = [
-    {
-      title: "It may",
-      // Read through `Record<string, string>` deliberately: the table is exhaustive
-      // over `PluginScope` so that adding a scope is a compile error, but what
-      // arrives here is whatever a manifest wrote. A scope this client has not
-      // heard of falls through to its raw identifier — an undisclosed capability
-      // is the one thing this screen exists to prevent.
-      items: manifest.scopes.map((scope) => (PLUGIN_SCOPE_TEXT as Record<string, string>)[scope] ?? scope),
-    },
-    {
-      title: "It is told when",
-      items: manifest.hooks.map(
-        (hook) =>
-          ({
-            "session.created": "a session starts",
-            "turn.ended": "an agent finishes a turn",
-            "session.ended": "a session ends",
-            "permission.requested": "an agent asks for permission",
-            "permission.resolved": "a permission is answered",
-            // A hook this client has not heard of falls through to its identifier
-            // rather than being dropped: an undisclosed hook is the one thing this
-            // screen exists to prevent.
-          })[hook] ?? hook,
-      ),
-    },
-    { title: "It reaches", items: manifest.net },
-    {
-      title: "It adds",
-      items: [
-        ...(manifest.screen === null ? [] : [`a screen called ${manifest.screen}`]),
-        ...(manifest.settings ? ["a settings pane"] : []),
-        ...manifest.actions.map((action) =>
-          action.on === "session" ? `"${action.title}" on a session's menu` : `"${action.title}" on its own screen`,
-        ),
-      ],
-    },
-  ];
-
-  return (
-    <div className="mt-3 rounded-lg border border-edge p-3">
-      <p className="text-sm text-fg">
-        {manifest.name || manifest.id || "This plugin"}{" "}
-        <span className="text-muted">{manifest.version}</span>
-      </p>
-      {manifest.description !== null && <p className="mt-0.5 text-xs text-muted">{manifest.description}</p>}
-      {rows
-        .filter((row) => row.items.length > 0)
-        .map((row) => (
-          <div key={row.title} className="mt-2.5">
-            <p className="text-xs text-muted">{row.title}</p>
-            <ul className="mt-1 space-y-0.5">
-              {row.items.map((item, index) => (
-                <li key={`${row.title}-${index}`} className="text-xs text-fg">
-                  · {item}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ))}
-      {manifest.scopes.length === 0 && manifest.hooks.length === 0 && (
-        <p className="mt-2.5 text-xs text-muted">It asks for nothing and is told nothing.</p>
-      )}
-      <p className="mt-3 text-xs text-muted">
-        Whatever it declares, a plugin runs on this machine as you, with your files — the same as an agent does. What is
-        listed here is what it said it needs, not a fence around what it can do.
-      </p>
-    </div>
   );
 }
 
@@ -419,7 +363,7 @@ function InstallPlugin({ machineId, onInstalled }: { machineId: MachineId; onIns
         }}
       />
 
-      {phase.kind === "confirming" && phase.peek.kind === "ok" && <ManifestConsent manifest={phase.peek.manifest} />}
+      {phase.kind === "confirming" && phase.peek.kind === "ok" && <PluginConsent manifest={phase.peek.manifest} />}
       {phase.kind === "confirming" && phase.peek.kind === "unreadable" && (
         <div className="mt-3 rounded-lg border border-edge p-3">
           <p className="text-sm text-fg">This file cannot be read here</p>
@@ -484,117 +428,6 @@ function InstallPlugin({ machineId, onInstalled }: { machineId: MachineId; onIns
         )}
       </div>
       {phase.kind === "failed" && <p className="mt-2 max-h-56 overflow-auto text-xs whitespace-pre-wrap wrap-anywhere text-fg">{phase.message}</p>}
-    </div>
-  );
-}
-
-/**
- * One plugin's own settings, drawn by the same renderer its screen uses.
- *
- * There is no second vocabulary for settings: a settings pane *is* a view, and a
- * plugin that wants a form returns one. That is what stops this subsystem growing
- * a config schema beside the drawing schema, which would be two ways to describe a
- * text field.
- */
-export function PluginSettings({ machineId, pluginId }: { machineId: MachineId; pluginId: string }): ReactNode {
-  /*
-   * **No refresh timer here, deliberately, and the reason is the form.** A
-   * settings pane is a thing somebody is typing into, and re-reading it under
-   * them would either discard what they typed or keep it over a value the plugin
-   * has since changed. `refreshMs` is honoured on the plugin's *screen*, which is
-   * a thing you look at; a form is a thing you fill in.
-   */
-  const [view, setView] = useState<PluginViewShape | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  /*
-   * ⚠ **What re-seeds the form after a save, and why it is a counter here rather
-   * than a key on the form itself.**
-   *
-   * `Form` seeds its state once per mount, so a plugin that normalises a value on
-   * save drew the un-normalised one until reload. Its own docblock claimed it was
-   * "keyed on what the plugin sent" and there was no key anywhere — but adding a
-   * content-derived one inside `PluginView` would have been worse than the bug:
-   * `PluginView` also draws the plugin's **screen**, which `PluginScreen` re-reads
-   * on `refreshMs` (floor 2s), so any poll that changed a field would have wiped
-   * what somebody was typing.
-   *
-   * The distinction the two callers already make is the answer. This pane has no
-   * timer, deliberately, so `view` changes only when the person here acted — and
-   * that is exactly the moment a re-seed is wanted. The screen passes nothing and
-   * keeps today's behaviour.
-   */
-  const [saves, setSaves] = useState(0);
-
-  useEffect(() => {
-    let live = true;
-    const daemon = store.daemonFor(machineId);
-    if (daemon === undefined) {
-      setError("That machine is not reachable right now.");
-      return;
-    }
-    setError(null);
-    void daemon
-      .pluginView(pluginId, "settings")
-      .then((answer) => {
-        if (!live) return;
-        setView(answer.result.kind === "view" ? readView(answer.result.view) : { title: null, refreshMs: null, blocks: [] });
-      })
-      .catch((cause: unknown) => {
-        if (live) setError(pluginFailure(cause));
-      });
-    return () => {
-      live = false;
-    };
-  }, [machineId, pluginId]);
-
-  const act = (actionId: string, context: { row?: string; form?: Record<string, string> }): void => {
-    const daemon = store.daemonFor(machineId);
-    if (daemon === undefined) return;
-    setBusy(true);
-    void daemon
-      .pluginAction(pluginId, actionId, context)
-      .then((answer) => {
-        if (answer.result.kind === "view") {
-          setView(readView(answer.result.view));
-          setSaves((held) => held + 1);
-          return;
-        }
-        toast(answer.result.tone === "danger" ? "error" : "ok", answer.result.text);
-      })
-      .catch((cause: unknown) => toast("error", pluginFailure(cause)))
-      .finally(() => setBusy(false));
-  };
-
-  if (error !== null) return <Empty>{error}</Empty>;
-  if (view === null) {
-    return (
-      <div className="flex justify-center py-6">
-        <Spinner />
-      </div>
-    );
-  }
-  return (
-    <div>
-      <p className="mb-4 text-xs text-muted">
-        <Puzzle size={12} className="mr-1 inline align-[-1px]" />
-        Drawn by <code className="text-muted/80">{pluginId}</code> on this machine.{" "}
-        {/*
-          `replace`, like the chevron to the same destination in `Settings.tsx`, and
-          for the reason stated there: this moves *shallower* inside the sheet, and
-          pushing an entry to go up means Android's Back walks the sheet backwards
-          instead of popping out of it. Alternating this link with the pane it came
-          from grew the stack without bound.
-        */}
-        <button
-          type="button"
-          className={`${LINK} tap`}
-          onClick={() => navigate(settingsPath("machines", machineId), true)}
-        >
-          All plugins
-        </button>
-      </p>
-      <PluginView key={saves} view={view} busy={busy} onAction={act} />
     </div>
   );
 }
