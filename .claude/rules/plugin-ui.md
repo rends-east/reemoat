@@ -5,6 +5,7 @@ paths:
   - packages/web/src/market.ts
   - packages/web/src/nav.ts
   - packages/web/src/install.ts
+  - packages/web/src/pane.ts
   - packages/web/src/pluginArchive.ts
   - packages/web/src/ui/PluginView.tsx
   - packages/web/src/ui/PluginScreen.tsx
@@ -72,17 +73,63 @@ downstream of that.
   machine. Its **screen** is at `/p/:machineId/:pluginId`: a board is opened
   several times a day, and four taps into a settings sheet is not where that goes.
   Q3.447, Q3.459.
-- **And they are a screen of their own behind a gear, not a section on the plugin's
-  page.** `/plugins/p/:id/settings`, one push deep, ◀ back to the plugin. The two
-  answer questions asked at different rates: the entry page is *what this plugin
+- **And they are a screen of their own, one push deep, ◀ back to the plugin.** The
+  two answer questions asked at different rates: the entry page is *what this plugin
   is* and is read once, its settings are what somebody comes back for — as a
   section, the thing read a hundred times sat under a permissions fold, above an
-  install control, on a page that also carries a version history. The gear is drawn
-  only where `offersSettings` says a machine reports a pane: **anywhere, not
-  everywhere** (a fleet mid-update is ordinary), and **`enabled` is not consulted**
-  (switched-off is the commonest reason to open it). The head names the screen with
-  the word *settings* where the entry head puts a version — a version there would
-  be the wrong fact, since the machines may be on different ones. Q3.462.
+  install control, on a page that also carries a version history. The head names the
+  screen with the word *settings* where the entry head puts a version — a version
+  there would be the wrong fact, since the machines may be on different ones. Q3.462.
+- **The way in is the bulk bar's Settings, and the scope rides the URL.** ⚠ **The
+  gear is gone.** It was the only route in and it asked no question about *which*
+  machines: the screen it opened picked one from a dropdown over
+  `installs.filter(contributes.settings)` — a set that is not the set the plugin is
+  on — and where that came to one it drew no control at all, so the commonest state
+  named no machine anywhere. `/plugins/p/:id/settings/:m1/:m2…`, one segment per
+  machine and **never a comma-joined list**: `encodeURIComponent` does not escape a
+  comma, so `a,b` and one id holding a comma are the same string, and the failure is
+  silent and writes to the wrong hosts. **Empty is the entry page and never "all
+  machines"** — writing a form into a host nobody selected is what the shape exists
+  to prevent, and a wildcard is how it would arrive. The parser dedupes and drops
+  empty segments (the fan-out is over this list) and does **not** sort, since the
+  builder joins in the order given. The pane then **states** the scope rather than
+  asking for it, always and at every count, on a `sticky` line — a long form scrolls
+  it off and the question is asked while typing. Q7.108.
+- **Settings are enabled only where *every* selected machine can take them, and the
+  asymmetry with the other three is the decision.** Install, Update and Remove are
+  fan-outs: a machine the act cannot reach falls out and says so on its own row.
+  Settings is a **navigation** — one screen, nothing to skip — so a selection of
+  seven opening a screen about a subset is the "selected and never heard about
+  again" failure in different clothes. ⚠ **`settingsBlockFor` is not
+  `skipReasonFor`**: installing is `machine:admin`, reading a pane is `session:read`,
+  so a grant that may configure may not install. And **`not_installed` sits below
+  `no_scope` and `unreachable`**, because `fetchPlugins` swallows every failure into
+  an empty list — "that machine does not have this plugin" about an unread host is a
+  claim this client cannot make.
+- **One form is written to several machines only where they agree about its shape.**
+  `pane.ts`, its own module because everything in `plugins.ts` fails *open* and this
+  refuses to draw. Same shape and same values → seed it; same shape, different values
+  → **blank, with a red line naming the keys that differed**, because a blanked
+  toggle is *off* rather than empty and a checkbox has no third state; different
+  shape → **draw no form at all** and group the machines, each group a link to its
+  own scope, since submitting one machine's keys to another writes fields it does
+  not have and omits ones it does, silently both ways. Values are compared **after
+  `seedForm` normalisation**, or an identical fleet reports as mixed. The signature
+  is the action id and the sorted `(key, kind)` pairs — labels, order and `options`
+  excluded, the last a named hole rather than a covered one. Every machine handed in
+  is a target or is named; nothing a machine *said* is dropped, and identical blocks
+  collapse so a danger notice on one host is the only attributed line on screen.
+- **A field's `help` sits outside its `<label>`.** A `<label>` activates its first
+  labelable descendant from anywhere inside it, and both a `Dropdown` trigger and an
+  `<input>` are labelable — so with the help paragraph inside, every word of a
+  three-line explanation opened the picker. Reported as the field being "clickable
+  much lower than it actually is", which is what it was.
+- **The plugin's name is drawn at every width, and only the chevron is withdrawn.**
+  `marketUpWithinNav` gates the ◀ at `sm`+ because the rail already draws that row —
+  and it rode the whole head row for one release, which took the identity off the
+  desktop entirely: the sheet says "Plugins", the rail says "Market", and the pane
+  opened on a description with nothing naming what it described. The rail makes the
+  way *back* redundant; it says nothing about *which plugin*.
 - **A plugin's `select` is `Dropdown`, never a native `<select>`.** One shipped
   wearing `FIELD`, and a native select ignores nearly all of it without
   `appearance: none` — so a settings pane had a system-drawn outline among
@@ -114,16 +161,49 @@ downstream of that.
 - **"All machines" is a snapshot, never a standing policy** (Q7.42), and it needs
   no sentence saying so: ticking it fills the list below with ticked boxes, so the
   snapshot is on screen before anything is sent.
-- **The boxes are a *draft*; one button at the foot applies all of it.** Live
-  checkboxes could not express *moving* a plugin. `draftAct` names the act and is
-  pure, so `webcheck` sweeps every cell; **disabled until the draft differs**, and
-  **only a removal is confirmed**. The list is **collapsed** (a fleet is unbounded)
-  and `installedSummary` is the closed row. All four `skipReasonFor` states disable
-  a row, `unreachable` included — an unticked box on a machine nobody can read
-  would be a claim. An update is the `Reinstall` arm rather than a control of its
-  own, since a ticked box ticked again is nothing. And because an install never
-  switches a plugin on and an update **inherits** the switch, that has to be said
-  somewhere, or *"I updated it and it does not work"* arrives instead. Q3.458.
+- **The rows are a table and the boxes are a selection, and one press acts.** The
+  draft could express *moving* a plugin in a single press and could express nothing
+  else: no per-row install, no way to find a host by name, and — a fleet being
+  unbounded — a collapsed disclosure, so the list somebody came to read and the
+  failures written into it were behind the same fold. A fixed-height scroller now,
+  with a search box and a filter above it and a bar of four below. ⚠ **Only a
+  removal is confirmed**, on the row and in the bar, both ending with Cancel: an
+  install is undone by pressing the other icon and a removal takes `plugin_data`
+  with it. ⚠ **`rowActs` and `bulkEnabled` are pure and swept**, `draftAct`'s own
+  reason — and the bar's counts are derived from `rowActs`, so **the bar cannot
+  offer an act the rows do not**. All four `skipReasonFor` states offer nothing, and
+  so does a row with a request out, which is also what stops a second bulk press
+  double-sending. ⚠ **A hidden row is still selected** — narrowing the filter does
+  not unselect — and `selectionLine` says so, or one press reaches machines that are
+  not on screen. ⚠ **Row icons are `size="lg"` and never `sm`**: an `sm` is 24px of
+  ink reaching 44 through `after:-inset-2.5`, so two adjacent ones overlap by 18px
+  and the later element wins the hit test — which on this row is the destructive
+  one. ⚠ **The row is a `<div>` with a `<label htmlFor>`**, never a `<label>` around
+  it, which may hold no `<button>`. ⚠ **Epochs are per machine**: two rows acting a
+  second apart are two acts, and an act-wide counter discards the first's answer for
+  a machine the second never touched. ⚠ **The scroller carries no
+  `overscroll-contain`** — Chrome ends the chain at a box that has it and nothing to
+  scroll — and the box around it is a **definite height, 3.5 rows at every fleet
+  size**: under a `max-h` it was the size of its contents, so one machine and a
+  no-results sentence were different heights and the bar below moved every time
+  somebody typed a letter. The half row is the only thing that says the list
+  scrolls. ⚠ **The search, the select-all and the filter are inside that box**, above
+  the scroller and `shrink-0`: they are about the rows, and drawn outside the border
+  they read as a separate control that happens to sit nearby. ⚠ **A row draws no removal
+  at all** — `drawnActs` narrows what `rowActs` reports, and the two are separate
+  because the *bar* reads the wider answer to decide whether its own Remove may
+  move. A bin on the row put an unrecoverable act 44px from a checkbox, and the
+  question guarding it had to replace the row to fit. So there is one question on
+  this screen and it is the bar's, and everything a row draws is undone by pressing
+  something else on the same row. ⚠ **The one line that changes is *inside*
+  the table**, which has a definite height — so nothing it holds can move the bar.
+  Reserving space for it below was tried and was not enough: `text-2xs` has an 18px
+  line box against a 16px reserve, so the strip still stepped 2px on every tick, and
+  reserving the *right* number fixes one instance and leaves the next caller to find
+  it again. The blocker wins over the count, since the count is visible in the ticked
+  boxes while *why a control will not move* is visible nowhere else. An install never switches a plugin on and an update **inherits** the
+  switch, which `installedSubline` now says on the row itself: it lived in
+  `outcomeText`, which this screen never rendered. Q3.458.
 - **Market icons are `<img src>`, never markup.** An SVG loaded as an image runs no
   script; the same bytes in the DOM do. `icon: null` is *common*, so the fallback is
   the ordinary case.
@@ -215,12 +295,10 @@ downstream of that.
   asserts **linkage** here rather than presence, because presence is satisfied by a
   controller nothing listens to.
 - **An import carries its archive's version or it cannot update anything.**
-  Without `available`, `behind` is empty, the draft matches what is installed and
-  `draftAct` answers `{reinstall, ready: false}` — a disabled button carrying a word
-  for an act it will not perform, on the screen whose purpose is putting a build
-  onto a fleet. The only remaining route to an update was untick → Remove →
-  re-tick, and Remove takes `plugin_data` with it: the destructive path as the only
-  path.
+  Without `available`, `isBehind` is false on every row, so no row draws Update and
+  the bar's Update is dead — leaving Remove as the only route to a newer copy on the
+  screen whose purpose is putting a build onto a fleet, and Remove takes
+  `plugin_data` with it: the destructive path as the only path.
 - **`isSheet` and `isOverlayPath` must hold the same set.** One question from two
   directions: a route in one and not the other is a pop-up that either forgets what
   it was drawn over or records one while being a screen.

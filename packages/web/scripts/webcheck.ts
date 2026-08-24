@@ -3489,15 +3489,40 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
      * without the other is either a control that goes nowhere or two doors to one
      * screen.
      */
-    check("the head carries a gear", /marketSettingsPath\(/.test(sheet), true);
-    check("and draws the settings screen", /<PluginSettingsScreen/.test(sheet), true);
-    check("and the entry page draws no settings of its own", /PluginSettings/.test(entry), false);
     /*
-     * ⚠ **The gear is conditional on a machine actually reporting a pane.** Drawn
-     * unconditionally it opens a screen whose whole content is a sentence saying
-     * there is nothing here — a control that exists to disappoint.
+     * ⚠ **The gear is gone, and both halves are pinned because either alone is a
+     * defect.** A head that still builds the path is a control nobody can see; a
+     * bulk bar that does not build it is a screen with no way in.
+     *
+     * What it was, and why it went: the only route into a plugin's settings, asking
+     * no question about *which* machines — the screen it opened then picked one from
+     * a dropdown over a set that is not the set the plugin is on, and where that came
+     * to one it drew nothing at all, so the commonest state named no machine
+     * anywhere. The scope is chosen on the plugin's page now and rides the URL.
      */
-    check("the gear asks whether there is anything to configure", /offersSettings\(/.test(sheet), true);
+    const installsSrcEarly = stripComments(
+      readFileSync(new URL("../src/ui/plugins/MachineInstalls.tsx", import.meta.url), "utf8"),
+    );
+    const fleetSrcEarly = stripComments(
+      readFileSync(new URL("../src/ui/plugins/InstalledList.tsx", import.meta.url), "utf8"),
+    );
+    check("the head carries no gear", /Settings2/.test(sheet), false);
+    check("and builds no settings path of its own", /marketSettingsPath\(/.test(sheet), false);
+    check("but still draws the settings screen", /<PluginSettingsScreen/.test(sheet), true);
+    check("handing it the machines the route names", /machines=\{route\.settings\}/.test(sheet), true);
+    check("and the entry page draws no settings of its own", /PluginSettings/.test(entry), false);
+    /* The way in is the bulk bar, and the entry page is what turns a selection into
+       an address. */
+    check("the bulk bar is the way into settings", /onConfigure/.test(installsSrcEarly), true);
+    check("and the entry page is what makes it an address", /marketSettingsPath\(/.test(entry), true);
+    /*
+     * ⚠ **The import screen declines it, and the reason is measured.** That control
+     * navigates the sheet, which unmounts `InstalledList` and drops the chosen
+     * `File` — the same loss `onBusyChange` prevents one prop up, except this one is
+     * not even gated on `busy`. Absent rather than disabled: a control that is never
+     * usable there is one somebody keeps trying.
+     */
+    check("the import screen offers no way to walk away mid-upload", /onConfigure/.test(fleetSrcEarly), false);
     /*
      * ⚠ **An entry is drawn whether or not this instance has a catalogue, and the
      * sheet testing `base` first is what made `Offline` unreachable.** An instance
@@ -3561,6 +3586,84 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
      * left the ◀ pointing at the market again with every pure check still green.
      */
     check("the sheet resolves its way up through the origin", /marketUpFrom\(route, origin\)/.test(stripComments(sheet)), true);
+  /*
+   * ⚠ **The settings sheet's box, string for string.** These two pop-ups are
+   * siblings a tap apart: one opening as a heading with a pill and the other as a
+   * rail beside a pane reads as two applications, and a 2px difference between the
+   * rails reads as one of them being broken. Pinned as literals rather than as
+   * "there is a rail", because a rail that measures differently is the failure.
+   */
+  {
+    const bare = stripComments(sheet);
+    const nav = stripComments(readFileSync(new URL("../src/ui/plugins/MarketNav.tsx", import.meta.url), "utf8"));
+    const settingsNav = stripComments(
+      readFileSync(new URL("../src/ui/settings/SettingsNav.tsx", import.meta.url), "utf8"),
+    );
+    check(
+      "the market draws Settings' rail",
+      /hidden w-56 shrink-0 overflow-y-auto overscroll-contain border-r border-edge sm:block/.test(bare),
+      true,
+    );
+    check("and Settings' pane", /flex min-h-0 min-w-0 flex-1 flex-col/.test(bare), true);
+    check(
+      "and Settings' scroller",
+      /min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5/.test(bare),
+      true,
+    );
+    check("with the sheet body's padding cancelled once", /-mx-4 -my-5 flex min-h-0 flex-1 sm:-mx-5/.test(bare), true);
+    /*
+     * ⚠ `AppShell`'s standing rule: a resized window may not render a rail that is
+     * not there, so the breakpoint is a class string and never a measurement.
+     */
+    check("and no breakpoint read in JavaScript", /matchMedia|innerWidth|clientWidth/.test(bare), false);
+    /*
+     * The phone keeps the strip, because this pop-up has no index depth for a list
+     * to live at — and the chevron is withdrawn at `sm`+ exactly where the rail
+     * already draws that row, which is the predicate `Settings.tsx` spells the same
+     * way. Not `origin !== null`: an origin points at a screen this rail cannot
+     * draw, and that chevron must survive at every width.
+     */
+    check("the phone keeps the strip", /sm:hidden/.test(bare) && /tabPill\(/.test(bare), true);
+    check(
+      "and the chevron is withdrawn where the rail draws the row",
+      /withinNav \? "contents sm:hidden" : "contents"/.test(bare),
+      true,
+    );
+    /*
+     * ⚠ **And the plugin's name is not withdrawn with it.** The gate rode the whole
+     * head row for one release, which took the identity off the desktop entirely:
+     * the sheet says "Plugins", the rail says "Market", and the pane opened on a
+     * description with nothing anywhere naming what it described. The rail makes the
+     * way *back* redundant and says nothing about *which plugin*, so the two must be
+     * gated separately — asserted by position, since the name has to fall outside
+     * the gated span rather than merely exist.
+     */
+    {
+      const gate = bare.indexOf("withinNav ?");
+      const closes = bare.indexOf("</span>", gate);
+      const named = bare.indexOf("{title}", closes);
+      check("but the plugin's name is not", gate > 0 && closes > gate && named > closes, true);
+      check("and the icon beside it is drawn at every width too", bare.indexOf("<MarketIcon") > closes, true);
+    }
+    /*
+     * One table behind the strip and the rail, so they cannot drift in order or in
+     * wording. ⚠ Matched on the **iteration** rather than on the name: the import
+     * survives a hand-written array below it, and `/MARKET_TABS/` alone passed a
+     * rail that listed its own two tabs inline.
+     */
+    check(
+      "the strip and the rail are both drawn from one table",
+      /MARKET_TABS\.filter\(/.test(bare) && /MARKET_TABS\.map\(/.test(nav),
+      true,
+    );
+    /* One row shape behind both rails, and neither hand-rolls one. */
+    check("both rails draw the same row", /<RailRow/.test(settingsNav) && /<RailRow/.test(nav), true);
+    check(
+      "and neither hand-rolls one",
+      /min-h-11 w-full items-center gap-2 px-4 py-3\.5/.test(settingsNav + nav),
+      false,
+    );
+  }
     check(
       "and answers a missing catalogue with the page a file-installed plugin gets",
       /if \(base === null\) \{[\s\S]{0,200}<Offline/.test(entry),
@@ -3585,6 +3688,20 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
     check("the closed line has one thing on it", (closed.match(/<span/g) ?? []).length, 1);
     check("and it is the name of the control", />Permissions</.test(closed), true);
     check("the fold takes no summary to draw there", /function Disclosure\(\{ first, children \}/.test(consent), true);
+  /*
+   * ⚠ **The card is chrome for an identification, and only the picker needs one.**
+   * On the market's entry page the name, the version and the description are the
+   * sheet's own head three lines up, so the border and its 24px of padding were
+   * drawn around a single collapsed row reading `Permissions` — a region whose
+   * contents are one word. Tied to `names`, which is already the flag for "this
+   * block is the only thing that says what the plugin is".
+   *
+   * ⚠ **And the tap target is not what was spent.** `min-h-11` stays on the fold:
+   * it opens the list of capabilities somebody is about to grant a stranger's code,
+   * and this app is used from a phone.
+   */
+  check("the bordered card is drawn only where this block names the plugin", /names \? "mt-3 rounded-lg border border-edge p-3" : "mt-3"/.test(consent), true);
+  check("and the fold keeps its 44px", /className="tap flex min-h-11 w-full items-center gap-1\.5/.test(consent), true);
     /*
      * ⚠ **And nothing hangs under the closed line either.** The sentence that
      * qualifies the whole list — *a plugin runs on this machine as you* — stood
@@ -12392,6 +12509,7 @@ process.stdout.write("\nwhat one agent's card says\n");
 process.stdout.write("\nwhich settings screen a URL names\n");
 {
   const {
+    DEFAULT_SECTION,
     SECTION_SPECS,
     parseSettingsRoute,
     parseSettingsSection,
@@ -12546,14 +12664,40 @@ process.stdout.write("\nwhich settings screen a URL names\n");
 
   const plain = { id: "u_1", name: "ada", isAdmin: false };
   const admin = { id: "u_2", name: "root", isAdmin: true };
-  check("a plain user sees two sections", visibleSections(plain).map((s) => s.id), ["machines", "account"]);
-  check("an admin sees four", visibleSections(admin).map((s) => s.id), ["machines", "account", "server", "users"]);
+  check("a plain user sees two sections", visibleSections(plain).map((s) => s.id), ["account", "machines"]);
+  check("an admin sees four", visibleSections(admin).map((s) => s.id), ["account", "machines", "server", "users"]);
   /*
    * `me` really is null while `phase` is "ready": `bootstrap`'s catch keeps that
    * phase when the control plane is unreachable but machines are already known,
    * and never sets `me`. So this fails closed rather than optimistically.
    */
-  check("and somebody we could not identify sees two", visibleSections(null).map((s) => s.id), ["machines", "account"]);
+  check("and somebody we could not identify sees two", visibleSections(null).map((s) => s.id), ["account", "machines"]);
+  /*
+   * The default the pane draws where the URL names no section — `Settings.tsx`
+   * renders it at `sm` and above, and the rail highlights the same constant.
+   */
+  check("the default section is a real one", SECTION_SPECS.some((spec) => spec.id === DEFAULT_SECTION), true);
+  check("and it is the first row, so the rail's highlight is not a choice somebody made", SECTION_SPECS[0]?.id, DEFAULT_SECTION);
+  /*
+   * ⚠ **The one that would actually bite.** The desktop pane draws this with nobody
+   * having tapped for it, so an `adminOnly` default opens a non-admin on a screen
+   * whose every request answers 403 — and `visibleSections`, which exists to stop
+   * exactly that, is not on this path. Over all three identities, `null` included.
+   */
+  check(
+    "and one nobody is refused",
+    [null, plain, admin].map((me) => sectionAllowed(DEFAULT_SECTION, me)),
+    [true, true, true],
+  );
+  /*
+   * ⚠ **The index is still the index.** Drawing a section at `/settings` is a fact
+   * about the pane, not about the route: below `sm` that address really is the
+   * section list, and a parser that answered `account` here would delete the phone's
+   * list screen and give the chevron a self-loop.
+   */
+  check("a bare /settings is still the index", parseSettingsSection(undefined), null);
+  check("with nowhere to go", settingsUp(parseSettingsRoute([])), null);
+  check("and no name for the pane", settingsPaneTitle(parseSettingsRoute([])), null);
   check("a typed URL is not a tap", [sectionAllowed("users", null), sectionAllowed("users", plain), sectionAllowed("users", admin)], [false, false, true]);
   check("nothing else fails closed on a missing `me`", sectionAllowed("account", null), true);
   /*
@@ -12716,6 +12860,49 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     "and the pane's heading is withdrawn where the rail draws the row",
     /withinNav\s*\?\s*"sm:hidden"\s*:\s*""/.test(settingsTsxSrc),
     true,
+  );
+  /*
+   * No neutral state at `sm` and above: the rail highlights `DEFAULT_SECTION` and
+   * the pane draws it. Three facts, and the phone half is the one that has to
+   * survive — below `sm` this address really is the section list.
+   */
+  check("the neutral pane is gone", /Pick a setting from the list/.test(settingsTsxSrc), false);
+  check(
+    "the desktop draws the default instead",
+    /hidden sm:block/.test(settingsTsxSrc) && /DEFAULT_SECTION/.test(settingsTsxSrc),
+    true,
+  );
+  check("and the phone still gets the list", /sm:hidden[\s\S]{0,200}variant="page"/.test(settingsTsxSrc), true);
+  /*
+   * ⚠ **The default feeds the pane and never the chrome.** Handed to `settingsUp`
+   * it answers `{path: "/settings", withinNav: true}` — a chevron, `sm:hidden`, on
+   * a phone, pointing at the screen it is already on. Pinned as the literal,
+   * because "it still reads `active`" is a property no pure assertion can see.
+   */
+  check(
+    "the way up is still computed from the section the URL names",
+    /const here = \{ \.\.\.route, section: active \};/.test(settingsTsxSrc),
+    true,
+  );
+  /*
+   * One table from a section id to a screen, because there are two call sites for
+   * it now — the URL's section, and the default. Four `&&`s would let a fifth
+   * section render at one and not the other, with nothing to catch it.
+   */
+  check("one section renders through one table", /function SectionBody\(/.test(settingsTsxSrc), true);
+  /*
+   * And one call site per section, which is the half `SectionBody`'s existence does
+   * not guarantee on its own: a screen left behind in the pane as well would render
+   * twice at one depth and once at the other, with `typecheck` seeing nothing.
+   * `active === "machines" &&` legitimately survives in `drilled`, so the property
+   * is counted on the components rather than matched on the guard.
+   */
+  check(
+    "and each section is drawn from exactly one place",
+    ["<MachinesSection", "<AccountSection", "<ServerSection", "<UsersSection"].map(
+      (tag) => (settingsTsxSrc.match(new RegExp(tag, "g")) ?? []).length,
+    ),
+    [1, 1, 1, 1],
   );
 
   /*
@@ -14605,15 +14792,15 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
   const plain = { id: "u_1", name: "ada", isAdmin: false };
   const admin = { id: "u_2", name: "root", isAdmin: true };
 
-  check("a non-admin sees two rows", navRows(plain).map((row) => row.spec.id), ["machines", "account"]);
+  check("a non-admin sees two rows", navRows(plain).map((row) => row.spec.id), ["account", "machines"]);
   /*
    * THE case, and it is invisible to the only people who could report it: a
    * heading computed from the static table renders "Server" above nothing for a
    * non-admin, and only an admin ever sees this nav in a correct state.
    */
   check("and no heading floats over nothing", navRows(plain).every((row) => row.heading === null), true);
-  check("an unknown viewer is treated as a non-admin", navRows(null).map((row) => row.spec.id), ["machines", "account"]);
-  check("an admin sees four", navRows(admin).map((row) => row.spec.id), ["machines", "account", "server", "users"]);
+  check("an unknown viewer is treated as a non-admin", navRows(null).map((row) => row.spec.id), ["account", "machines"]);
+  check("an admin sees four", navRows(admin).map((row) => row.spec.id), ["account", "machines", "server", "users"]);
   check(
     "with the heading on the first row of its group only",
     navRows(admin).map((row) => row.heading),
@@ -17420,17 +17607,15 @@ process.stdout.write("\nwhat somebody is shown before a plugin is sent anywhere\
     "MachineInstalls is gated on a readable archive or the named press",
   );
   /*
-   * ⚠ **The archive's own version reaches the draft, or an import cannot update
-   * anything.** Without `available`, `behind` is empty on every row, so an import
-   * of a plugin the fleet already has drafts nothing: `draftAct` answers
-   * `{act: "reinstall", ready: false}` and the button is drawn disabled, carrying
-   * a word for an act it will not perform. The only remaining route to an update
-   * was untick → Remove → re-tick, and Remove takes `plugin_data` with it — the
-   * destructive path as the only path, on the screen whose entire purpose is
-   * putting a build onto a fleet.
+   * ⚠ **The archive's own version reaches the table, or an import cannot update
+   * anything.** Without `available`, `isBehind` is false on every row, so no row
+   * draws Update and the bar's Update is dead — leaving Remove as the only route to
+   * a newer copy, and Remove takes `plugin_data` with it: the destructive path as
+   * the only path, on the screen whose entire purpose is putting a build onto a
+   * fleet.
    */
   report(
-    "the archive's version reaches the draft, so an import can update",
+    "the archive's version reaches the table, so an import can update",
     /available=\{shown\?\.version \?\? null\}/.test(stripComments(fleetSrc)),
     "MachineInstalls is told what version this file is",
   );
@@ -17504,65 +17689,223 @@ process.stdout.write("\nwhere a failed install or removal is said, and how much 
    * and `PluginsPanel` are already held to a few lines up.
    */
   const installsSrc = readFileSync(new URL("../src/ui/plugins/MachineInstalls.tsx", import.meta.url), "utf8");
-
-  report(
-    "a row landing on failed opens the list holding the reason",
-    /if \(row\?\.kind === "failed"\) setOpen\(true\)/.test(installsSrc),
-    "write() opens the fold on a failure",
-  );
-  report(
-    "and nothing else moves the panel under a thumb",
-    (installsSrc.match(/setOpen\(true\)/g) ?? []).length === 1,
-    "exactly one unconditional open, and it is the failure's",
-  );
   /*
-   * ⚠ **Anchored on the fold itself rather than on any prose.** `inert={!open}` is
-   * the collapsing container, so this asks a structural question — is the sentence
-   * drawn past the thing that hides it — and a rewording of the foot's comment
-   * cannot quietly turn the clause into a tautology that still reports ok.
-   */
-  report(
-    "the failure is named outside the collapsed panel as well",
-    installsSrc.indexOf("{failure}") > installsSrc.indexOf("inert={!open}") &&
-      installsSrc.indexOf("{failure}") > installsSrc.lastIndexOf("</ul>"),
-    "the summary line is drawn past the list and past the fold",
-  );
-  /*
-   * ⚠ **Mounted unconditionally, only its text swapping** — `Toast` and
-   * `EventList` both record that a `role="status"` inserted into the DOM in the
-   * same paint as its content is commonly not spoken at all, VoiceOver on iOS
-   * included. The conditional belongs on the class, never on the element.
-   */
-  /*
-   * ⚠ **The label stays beside the spinner rather than being replaced by it.**
-   * `Spinner` is `aria-hidden` and carries no text, so `{busy ? <Spinner /> :
-   * label}` produced a button with neither an accessible name nor a visible one —
-   * a grey box holding a glyph, on the control that puts somebody else's code onto
-   * a fleet. `PluginsPanel` already draws its spinner beside a percentage.
-   */
-  report(
-    "a working button still says what it is doing",
-    /\{busy && <Spinner \/>\}\s*\n\s*\{label\}/.test(installsSrc) && !/busy \? <Spinner \/> : label/.test(installsSrc),
-    "the spinner joins the label instead of replacing it",
-  );
-  /*
-   * ⚠ **A fan-out can be called off.** A 2 MiB archive going to twelve machines
-   * from a phone is minutes of upload with every box and the button disabled by
-   * `busy` and no third control — the act was unstoppable on the screen with the
-   * widest reach. One controller per machine, so cancelling or failing one does
-   * not abort the others, and the button is drawn only while there is something to
-   * abort.
-   */
-  /*
-   * ⚠ **A fan-out can be called off, and the assertion is the *linkage* rather
-   * than the presence of a controller.** Asserting only that a map of controllers
-   * exists is satisfied while the signal handed to the upload is some other
-   * signal — which is precisely how this shipped broken once: a two-parameter
-   * closure was silently assignable to a four-parameter `InstallAct`, so the
-   * signal went nowhere while Cancel was still drawn. So: the job's own controller
-   * is what goes into the map, and its signal is what the install is handed.
+   * Comments stripped, because this file now argues at length about the controls it
+   * must not draw — a lock its own docblock satisfies would pass over the code it
+   * was written to protect. `PluginView`'s `<select>` assertion records the same
+   * reasoning.
    */
   const installsBody = stripComments(installsSrc);
+
+  /*
+   * ⚠ **The fold is gone, and with it the two rules that guarded it** — a failure
+   * opening the panel it was written into, and nothing else moving that panel under
+   * a thumb. The rows are a scroller now, so the first risk cannot exist; the
+   * second becomes a scroll call, and there must be none.
+   */
+  report(
+    "nothing moves the list under a thumb",
+    !/scrollIntoView|scrollTop\s*=/.test(installsBody),
+    "no scroll is driven from this component; the person's position is theirs",
+  );
+  /*
+   * ⚠ **The bulk bar is outside the scroller, asserted by index ordering against
+   * anchors that cannot move independently.** The pair is what makes it hard to
+   * fool: the first says every bulk word comes after the scrolling box has closed,
+   * the second says there is only one scroller to be after and that the list is
+   * inside it — so a second `overflow-y-auto`, the obvious way to re-nest the bar
+   * by accident, fails before the first can be gamed.
+   */
+  {
+    const scrollerOpen = installsBody.indexOf("overflow-y-auto");
+    const listEnd = installsBody.lastIndexOf("</ul>");
+    const scrollerClose = installsBody.indexOf("</div>", listEnd);
+    /* Anchored on each control's own enablement, which is unique to the bar — the
+       words themselves wrap across lines in the JSX and `Remove` also appears on a
+       row. */
+    const bulk = ["!can.install", "!can.update", "!can.remove", "!can.settings"].map((word) => installsBody.indexOf(word));
+    report(
+      "the bulk bar is drawn outside the scroller",
+      scrollerOpen > 0 && scrollerOpen < listEnd && bulk.every((at) => at > scrollerClose && at > 0),
+      "every bulk control appears after the scrolling box has closed",
+    );
+    report(
+      "and there is exactly one scrolling box, holding only the rows",
+      (installsBody.match(/overflow-y-auto/g) ?? []).length === 1 && installsBody.indexOf("<ul") > scrollerOpen,
+      "one scroller in the file, and the list is inside it",
+    );
+  }
+  /*
+   * ⚠ **And it does not end the scroll chain when it has nothing to scroll.**
+   * `SHEET_BODY` records the measurement and `Settings.tsx` restates it: Chrome ends
+   * the chain at a box carrying `overscroll-behavior: contain` even when it cannot
+   * move — 400px of wheel travel against 0px on the same gesture. A fleet of one
+   * puts one row in here, and with containment it would swallow every gesture aimed
+   * at the page it sits in the middle of.
+   */
+  report(
+    "the machine list does not end the scroll chain",
+    !/overscroll-contain/.test(installsBody),
+    "no overscroll-behavior: contain on a box that may have nothing to scroll",
+  );
+  /*
+   * ⚠ **A row's controls are not inside its label.** The draft's row *was* a
+   * `<label>` so the whole strip toggled its box — and a `<label>` may hold no
+   * `<button>`. Left as one, a tap on this row's Remove icon would toggle the
+   * checkbox as well.
+   */
+  report(
+    "a row's controls are not inside its label",
+    !/<label(?![^>]*htmlFor)[\s\S]{0,900}?<(IconButton|Button)\b/.test(installsBody) && /htmlFor=/.test(installsBody),
+    "the checkbox is reached by htmlFor, so a tap on Remove does not also select the row",
+  );
+  /*
+   * ⚠ **Row acts are 44px boxes rather than 24px ones with overlapping targets.**
+   * An `sm` icon is 24px of ink reaching 44 through `after:-inset-2.5`, so two
+   * adjacent ones overlap by 18px whatever the gap — and the later element in the
+   * DOM wins the hit test, which on this row is the destructive one. A tap on the
+   * right of Update's ink would remove a plugin and its `plugin_data`. This is the
+   * assertion the global 44px sweep cannot make: that one only asks whether a size
+   * was named at all.
+   */
+  {
+    const icons = installsBody.match(/<IconButton[\s\S]*?\/>/g) ?? [];
+    report(
+      "a row's acts do not overlap each other's targets",
+      icons.filter((call) => /size="lg"/.test(call)).length >= 2 && icons.every((call) => !/size="sm"/.test(call)),
+      "44px boxes on the row; 24 + 20 = 44, so two `sm` targets overlap by 18px",
+    );
+  }
+  /*
+   * ⚠ **Removal happens from the bar and nowhere else, so there is exactly one
+   * question on this screen.** A bin on the row put an unrecoverable act 44px from
+   * a checkbox on the busiest strip here, and the question that guarded it had to
+   * *replace the row* to fit — a control answering for itself in the space it
+   * occupies, moving every row under it. Off the row, a removal always goes through
+   * a selection: two deliberate acts, one place to confirm, and a sentence that
+   * names every machine it reaches rather than a truncated one naming the row it
+   * happened to sit on.
+   *
+   * Both halves, because either alone is a defect: a row that still drew a bin, or
+   * a `drawnActs` that let `remove` through.
+   */
+  {
+    const rowIcons = installsBody.slice(installsBody.indexOf("function MachineRow"));
+    report(
+      "a row draws no removal",
+      /drawnActs\(one\.acts\)/.test(rowIcons) && !/Trash2/.test(rowIcons),
+      "the row's icons come from drawnActs, and no bin is drawn there",
+    );
+    report(
+      "and there is one question, in the bar",
+      (installsBody.match(/setConfirming\(true\)/g) ?? []).length === 1 &&
+        /disabled=\{!can\.install\}[\s\S]{0,80}?act\(idsWith\("install"\), \[\]\)/.test(installsBody) &&
+        /disabled=\{!can\.update\}[\s\S]{0,80}?act\(idsWith\("update"\), \[\]\)/.test(installsBody),
+      "one asker, and neither install nor update is it",
+    );
+  }
+  /*
+   * ⚠ **The one line that changes is *inside* the fixed-height box, and reserving
+   * space for it below was not enough.** Two conditionally mounted lines — the
+   * selection count and the reason Settings will not move — were two ways to push
+   * the button strip under a thumb already aimed at it. Merging them into one
+   * always-mounted line at `min-h-4` still stepped the bar 2px on every tick,
+   * because `text-2xs` has an 18px line box and the reserve was 16: reserving the
+   * *right* number fixes one instance and leaves the next caller to rediscover it.
+   *
+   * Bounded by a container with a **definite** height, no string it can ever hold
+   * moves anything below the table. Asserted as a position rather than as a class,
+   * because "inside the box" is the property and a height is only how it is kept.
+   */
+  {
+    const box = /flex h-\[[\d.]+rem\] flex-col overflow-hidden rounded-md border/.test(installsBody);
+    const line = installsBody.indexOf("id={noticeId}");
+    const closes = installsBody.indexOf("</div>", line);
+    const bar = Math.min(...["!can.install", "!can.update", "!can.remove", "!can.settings"].map((one) => installsBody.indexOf(one)));
+    report(
+      "the line that appears is inside the table, which has a definite height",
+      box && line > 0 && closes > line && closes < bar,
+      "it is closed inside the fixed box, so nothing it holds can move the bar",
+    );
+    report(
+      "and nothing above the bar is mounted conditionally",
+      !/\{notice\.length > 0 && \(/.test(installsBody) && !/\{chosenRows\.length > 0 && \(/.test(installsBody),
+      "always mounted, only the text swaps",
+    );
+  }
+  /*
+   * ⚠ **Epochs are per machine, and act-wide was a real defect the moment rows could
+   * act alone.** Row A's Install and row B's Remove a second apart are two acts; a
+   * single counter would make the second discard the first's answer for a machine it
+   * never touched, leaving row A on "installing" for ever.
+   */
+  report(
+    "a slow answer is dropped per machine rather than per act",
+    /epochs\.current\.get\(id\) !== epoch/.test(installsBody) && !/generation\.current !== epoch/.test(installsBody),
+    "two rows acting at once must not discard each other's answers",
+  );
+  /*
+   * The store is refreshed in that machine's own `finally` — a fleet where four
+   * hosts are done and one is slow should show four hosts' worth.
+   */
+  report(
+    "the store is refreshed per machine, in that machine's finally",
+    /inFlight\.current\.delete\(id\);\s*\n\s*store\.refreshPlugins\(id\);/.test(installsBody) &&
+      (installsBody.match(/refreshPlugins/g) ?? []).length === 1,
+    "one call, and it is inside the per-job finally",
+  );
+  /*
+   * ⚠ **`plugin_busy` is retried once and nothing else is.** A busy machine is a
+   * queue collision and asking again a second later is right; everything else is not
+   * retried because a `POST` is not replayable — a transport failure says nothing
+   * about whether the daemon acted, and it may be halfway through unpacking.
+   */
+  report(
+    "one retry, for one code, and nothing else",
+    /error\.code === "plugin_busy"/.test(installsBody) &&
+      /BUSY_RETRY_MS/.test(installsBody) &&
+      (installsBody.match(/setTimeout/g) ?? []).length === 1 &&
+      (installsBody.match(/await once\(\)/g) ?? []).length === 2,
+    "a DELETE inherits its own retry from machine.ts one layer down",
+  );
+  /*
+   * ⚠ **Every enablement is decided outside this file.** `rowActs` and `bulkEnabled`
+   * are pure and swept, which is what `draftAct` was extracted for — and the bar's
+   * counts come from `rowActs`, so **the bar cannot offer an act the rows do not**.
+   * A bar computing its own predicates is how "Remove is live but every row's Remove
+   * is grey" happens.
+   */
+  report(
+    "the four bulk controls are decided outside this file",
+    /const can = bulkEnabled\(/.test(installsBody) &&
+      /rowActs\(/.test(installsBody) &&
+      ["install", "update", "remove", "settings"].every((act) => installsBody.includes(`disabled={!can.${act}}`)),
+    "every bulk control reads the pure answer; none is re-derived in JSX",
+  );
+  /*
+   * ⚠ **The Cancel on a row is drawn from the controller that job actually holds**,
+   * not from a fact about the screen. The old flag was set from `adding.length > 0`
+   * — the jobs this screen *drafted* — so a removal-only act drew a live Cancel over
+   * an act holding no controller at all.
+   */
+  report(
+    "a row's Cancel is derived from the controller its job holds",
+    /cancellable: controller !== null/.test(installsBody) && !/setCancellable/.test(installsBody),
+    "the flag is the controller, so it cannot disagree with one",
+  );
+  /*
+   * ⚠ **And the caller beside this one is told from the rows rather than around an
+   * act**, which had to change once acts overlap: the old shape lowered the flag in
+   * the first act's `finally`, so `ImportPlugin` would offer "Done" — the control
+   * that unmounts a running fan-out — while a second act was still uploading.
+   */
+  report(
+    "a caller beside it is told for exactly as long as anything is running",
+    /const busy = \[\.\.\.local\.values\(\)\]\.some/.test(installsBody) &&
+      /onBusyChange\?\.\(busy\);/.test(installsBody) &&
+      !/onBusyChange\?\.\(true\)/.test(installsBody),
+    "derived from the rows, not raised and lowered around one act",
+  );
   report(
     "and it can be called off while it runs",
     /const controller = what === "install" && install !== null \? new AbortController\(\) : null;/.test(installsBody) &&
@@ -17578,18 +17921,6 @@ process.stdout.write("\nwhere a failed install or removal is said, and how much 
    * did nothing. `cancellable` is set from the drafted jobs.
    */
   report(
-    "and the control appears only when something can be called off",
-    /\{busy && cancellable && \(/.test(installsBody) && /setCancellable\(adding\.length > 0\)/.test(installsBody),
-    "the button is derived from the act's own abortable jobs",
-  );
-  /*
-   * ⚠ **Called off is asked per request, not per act.** An act-wide flag silenced
-   * a *removal's* failure — which `cancelAll` promises to let run — and killed the
-   * `plugin_busy` retry, so a 409 arriving after Cancel cleared its row instead of
-   * asking again 1.5s later. `calledOff` reads the job's own signal, and a removal
-   * has no controller, so it is never called off and always reports.
-   */
-  report(
     "and calling it off is not drawn as a failure",
     /const calledOff = \(\): boolean => controller\?\.signal\.aborted === true;/.test(installsBody) &&
       (installsBody.match(/if \(calledOff\(\)\)/g) ?? []).length === 3 &&
@@ -17602,12 +17933,6 @@ process.stdout.write("\nwhere a failed install or removal is said, and how much 
    * it, and the prop is optional — so a missing `onBusyChange?.(true)` leaves that
    * gate dead on arrival with nothing failing.
    */
-  report(
-    "and a caller beside it is told for exactly as long as the act runs",
-    /onBusyChange\?\.\(true\);/.test(installsBody) &&
-      /if \(generation\.current !== epoch\) return;\s*\n\s*onBusyChange\?\.\(false\);/.test(installsBody),
-    "raised in act(), lowered in the allSettled finally behind the epoch gate",
-  );
   report(
     "and it is a live region that is always mounted",
     /role="status" aria-live="polite"/.test(installsSrc) &&
@@ -17631,33 +17956,79 @@ process.stdout.write("\nwhere a failed install or removal is said, and how much 
 
 process.stdout.write("\nwhich plugins screen a URL names\n");
 {
-  const { MARKET_TABS, marketEntryPath, marketPaneTitle, marketPath, marketSettingsPath, marketUp, marketUpFrom, parseMarketRoute } =
-    await import("../src/market.js");
+  const {
+    MARKET_TABS,
+    marketEntryPath,
+    marketPaneTitle,
+    marketPath,
+    marketSettingsPath,
+    marketUp,
+    marketUpFrom,
+    marketUpLabel,
+    marketUpWithinNav,
+    parseMarketRoute,
+  } = await import("../src/market.js");
   const { depthOf, navMove } = await import("../src/nav.js");
 
   const seg = (path: string): string[] => path.split("/").filter((part) => part.length > 0).slice(1);
 
-  check("the bare path is the market", parseMarketRoute([]), { tab: "market", entry: null, settings: false });
-  check("the other tab", parseMarketRoute(["installed"]), { tab: "installed", entry: null, settings: false });
-  check("one entry", parseMarketRoute(["p", "autotitle"]), { tab: "market", entry: "autotitle", settings: false });
-  check("and its settings", parseMarketRoute(["p", "autotitle", "settings"]), {
+  check("the bare path is the market", parseMarketRoute([]), { tab: "market", entry: null, settings: [] });
+  check("the other tab", parseMarketRoute(["installed"]), { tab: "installed", entry: null, settings: [] });
+  check("one entry", parseMarketRoute(["p", "autotitle"]), { tab: "market", entry: "autotitle", settings: [] });
+  check("and its settings, on the machines the URL names", parseMarketRoute(["p", "autotitle", "settings", "m_1", "m_2"]), {
     tab: "market",
     entry: "autotitle",
-    settings: true,
+    settings: ["m_1", "m_2"],
   });
   /*
-   * ⚠ **`settings` is never set without an `entry`**, which the type does not
+   * ⚠ **A settings path naming no machine is the entry page, and never "all of
+   * them".** Writing a form into a host nobody selected is the failure this shape
+   * exists to prevent, and a wildcard is exactly how it would happen. The control
+   * that opens this draws itself disabled instead; this is the belt under a stale
+   * bookmark and a hand-typed address.
+   */
+  check("a settings path naming no machine is the entry", parseMarketRoute(["p", "autotitle", "settings"]), {
+    tab: "market",
+    entry: "autotitle",
+    settings: [],
+  });
+  /*
+   * ⚠ **`settings` is never filled without an `entry`**, which the type does not
    * express — `MarketRoute.entry` makes the same trade one field up, and for its
    * reason. Swept over every shape this parser can produce rather than over the
    * two that would break it today.
    */
   check(
     "settings never arrive without a plugin to be about",
-    [["settings"], ["p"], ["p", "", "settings"], ["installed", "settings"], []]
+    [["settings"], ["settings", "m_1"], ["p"], ["p", "", "settings", "m_1"], ["installed", "settings", "m_1"], []]
       .map((segments) => parseMarketRoute(segments))
-      .filter((route) => route.settings && route.entry === null),
+      .filter((route) => route.settings.length > 0 && route.entry === null),
     [],
   );
+  /*
+   * ⚠ **The reason the machines are repeated segments rather than a comma-joined
+   * list.** `encodeURIComponent` does not escape a comma, so `a,b` and a single id
+   * holding one are the same string — and the failure is silent, and in the
+   * direction that writes to machines nobody chose.
+   */
+  check(
+    "a machine id holding a comma is still one machine",
+    parseMarketRoute(seg(marketSettingsPath("x", ["a,b", "c"] as never)), decodeURIComponent).settings,
+    ["a,b", "c"],
+  );
+  check(
+    "and every segment is encoded and decoded like any other",
+    parseMarketRoute(seg(marketSettingsPath("x", ["m 1", "m/2"] as never)), decodeURIComponent).settings,
+    ["m 1", "m/2"],
+  );
+  /* One machine named twice is one machine: the fan-out is over this list. */
+  check("a repeated machine is one machine", parseMarketRoute(["p", "x", "settings", "m_1", "m_1"]).settings, ["m_1"]);
+  check("and an empty segment names none", parseMarketRoute(["p", "x", "settings", "", "m_1"]).settings, ["m_1"]);
+  /*
+   * ⚠ **Not sorted, because the builder joins in the order it is given.** Sorting
+   * on the way in would make a path and its own parse disagree about the string.
+   */
+  check("the order the URL named them is the order that comes back", parseMarketRoute(["p", "x", "settings", "m_2", "m_1"]).settings, ["m_2", "m_1"]);
   /*
    * ⚠ **An entry's tab is always `market`, at every depth.** That is what makes
    * the ◀ land on a list with the plugin in it rather than on whichever tab
@@ -17686,7 +18057,7 @@ process.stdout.write("\nwhich plugins screen a URL names\n");
   check(
     "an unknown leaf under a plugin is that plugin",
     parseMarketRoute(["p", "autotitle", "nonsense"]),
-    { tab: "market", entry: "autotitle", settings: false },
+    { tab: "market", entry: "autotitle", settings: [] },
   );
   check("an unknown segment is the market rather than a tab nothing draws", parseMarketRoute(["nonsense"]).tab, "market");
 
@@ -17715,19 +18086,19 @@ process.stdout.write("\nwhich plugins screen a URL names\n");
   check(
     "and an entry round-trips through its own builder",
     parseMarketRoute(seg(marketEntryPath("autotitle"))),
-    { tab: "market", entry: "autotitle", settings: false },
+    { tab: "market", entry: "autotitle", settings: [] },
   );
   check(
-    "and so do its settings",
-    parseMarketRoute(seg(marketSettingsPath("autotitle"))),
-    { tab: "market", entry: "autotitle", settings: true },
+    "and so do its settings, with the machines they are about",
+    parseMarketRoute(seg(marketSettingsPath("autotitle", ["m_1", "m_2"] as never))),
+    { tab: "market", entry: "autotitle", settings: ["m_1", "m_2"] },
   );
   // Built on `marketEntryPath` rather than beside it, so the two cannot disagree
   // about how an id is encoded.
   check(
-    "a settings path is an entry path with one segment on it",
-    marketSettingsPath("a b"),
-    `${marketEntryPath("a b")}/settings`,
+    "a settings path is an entry path with the machines on it",
+    marketSettingsPath("a b", ["m_1"] as never),
+    `${marketEntryPath("a b")}/settings/m_1`,
   );
   /*
    * Encoded on the way out and decoded on the way in, like every other segment
@@ -17753,7 +18124,8 @@ process.stdout.write("\nwhich plugins screen a URL names\n");
     parseMarketRoute(["installed"]),
     parseMarketRoute(["p"]),
     parseMarketRoute(["p", "autotitle"]),
-    parseMarketRoute(["p", "autotitle", "settings"]),
+    parseMarketRoute(["p", "autotitle", "settings", "m_1"]),
+    parseMarketRoute(["p", "autotitle", "settings", "m_1", "m_2"]),
   ];
   check(
     "a way back and a name for the screen it leaves arrive together",
@@ -17767,7 +18139,7 @@ process.stdout.write("\nwhich plugins screen a URL names\n");
    * list. A settings screen that jumped straight to the market would make the ◀
    * and the ✕ the same control at that depth.
    */
-  check("and settings walk back to the plugin", marketUp(parseMarketRoute(["p", "x", "settings"])), "/plugins/p/x");
+  check("and settings walk back to the plugin", marketUp(parseMarketRoute(["p", "x", "settings", "m_1"])), "/plugins/p/x");
 
   /*
    * ⚠ **The origin, and the sweep is the point rather than the two cases somebody
@@ -17806,11 +18178,73 @@ process.stdout.write("\nwhich plugins screen a URL names\n");
    * origin here would skip the screen the person was on two seconds ago.
    */
   check(
-    "but its settings still walk to the plugin first",
-    marketUpFrom(parseMarketRoute(["p", "x", "settings"]), ORIGIN),
+    "but its settings still walk to the plugin first, whichever machines they are about",
+    marketUpFrom(parseMarketRoute(["p", "x", "settings", "m_1", "m_2"]), ORIGIN),
     "/plugins/p/x",
   );
   check("and a tab still leaves the pop-up", marketUpFrom(parseMarketRoute([]), ORIGIN), null);
+  /*
+   * ⚠ **And a settings path naming no machine is not a settings depth at all** — it
+   * is the entry page, so the origin override applies to it exactly as it does to
+   * any other entry. This is the assertion that would have been quietly wrong if
+   * the bare form had been left in `shapes` as a third depth.
+   */
+  check(
+    "a settings path with no machine takes the entry's answer",
+    marketUpFrom(parseMarketRoute(["p", "x", "settings"]), ORIGIN),
+    ORIGIN,
+  );
+
+  /*
+   * ⚠ **Whether the ◀ may be withdrawn at `sm`+, which is subtler than the settings
+   * sheet's version of the same question.** There the parent is a row the rail
+   * draws, so the chevron is redundant and hidden. Here `marketUpFrom` can answer
+   * an **origin** — a settings path somebody crossed in from — and this rail draws
+   * two tabs and nothing else, so at that depth the chevron is the only way back at
+   * every width and must never be withdrawn.
+   *
+   * Compared against `marketUp` rather than tested as `origin !== null`, because an
+   * origin is *present* at the settings depth and does not win there. Driven over
+   * every shape × both origin states, so a fourth depth cannot acquire a hidden
+   * chevron by accident.
+   */
+  check(
+    "only an entry's parent is a row the rail draws",
+    shapes.map((route) => marketUpWithinNav(route, null)),
+    shapes.map((route) => route.entry !== null && route.settings.length === 0),
+  );
+  check(
+    "and an origin takes exactly that one back out of the rail",
+    shapes.filter((route) => marketUpWithinNav(route, ORIGIN) !== marketUpWithinNav(route, null)).map(marketUp),
+    ["/plugins"],
+  );
+  /* Nothing may be withdrawn that has no way up at all — a tab answers `null`. */
+  check(
+    "nothing is withdrawn that has nowhere to go",
+    shapes.filter((route) => marketUpWithinNav(route, null) && marketUp(route) === null),
+    [],
+  );
+  /*
+   * The label and the width gate are one decision, so a chevron that says "Back to
+   * Market" while pointing at a settings screen is not expressible.
+   */
+  check(
+    "the label names where it actually goes",
+    [
+      marketUpLabel(parseMarketRoute(["p", "x"]), null),
+      marketUpLabel(parseMarketRoute(["p", "x"]), ORIGIN),
+      marketUpLabel(parseMarketRoute(["p", "x", "settings", "m_1"]), null),
+      marketUpLabel(parseMarketRoute(["p", "x", "settings", "m_1"]), ORIGIN),
+    ],
+    ["Back to Market", "Back", "Back to the plugin", "Back to the plugin"],
+  );
+  check(
+    "and it never says Market about a screen the rail cannot draw",
+    shapes
+      .flatMap((route) => [null, ORIGIN].map((from) => [marketUpLabel(route, from), marketUpWithinNav(route, from)] as const))
+      .filter(([label, within]) => (label === "Back to Market") !== within),
+    [],
+  );
 
   /*
    * ⚠ **`upFrom` is the other consumer, and the third argument defaults to
@@ -17881,7 +18315,7 @@ process.stdout.write("\nwhich plugins screen a URL names\n");
   const market = asRoute(parseMarketRoute([]));
   const installed = asRoute(parseMarketRoute(["installed"]));
   const entry = asRoute(parseMarketRoute(["p", "autotitle"]));
-  const settings = asRoute(parseMarketRoute(["p", "autotitle", "settings"]));
+  const settings = asRoute(parseMarketRoute(["p", "autotitle", "settings", "m_1"]));
   check(
     "the two tabs are one depth, an entry the next, its settings the next",
     [depthOf(market), depthOf(installed), depthOf(entry), depthOf(settings)],
@@ -17890,10 +18324,21 @@ process.stdout.write("\nwhich plugins screen a URL names\n");
   check("switching tabs moves nothing", navMove(market, installed), null);
   check("walking into an entry pushes the section", navMove(market, entry), "section-push");
   check("and walking back out pops it", navMove(entry, market), "section-pop");
-  // The gear pushes and the ◀ pops, which is the pair an agent's screen already
-  // gives one pop-up over — so a plugin's settings animate like every other leaf.
-  check("pressing the gear pushes one more", navMove(entry, settings), "section-push");
+  // Opening settings pushes and the ◀ pops, which is the pair an agent's screen
+  // already gives one pop-up over — so a plugin's settings animate like every
+  // other leaf.
+  check("opening settings pushes one more", navMove(entry, settings), "section-push");
   check("and the way back pops it", navMove(settings, entry), "section-pop");
+  /*
+   * ⚠ **Two scopes are the same depth, so narrowing one is not a direction.** The
+   * same pane with different contents must not slide, which is the rule `depthOf`'s
+   * own head states and the reason the machine list is not part of the depth.
+   */
+  check(
+    "narrowing the scope moves nothing",
+    navMove(settings, asRoute(parseMarketRoute(["p", "autotitle", "settings", "m_1", "m_2"]))),
+    null,
+  );
   /*
    * Leaving the pop-up entirely is a close, whichever depth it is left from —
    * `isSheet` decides that before any depth is compared, which is why an entry
@@ -18279,8 +18724,17 @@ process.stdout.write("\nwhat the catalogue says, and what this build will read o
 
 process.stdout.write("\nwhich machines an act reaches, and what it says about the rest\n");
 {
-  const { failureSummary, installedSummary, outcomeText, planTargets, skipReasonFor, skipText } =
-    await import("../src/install.js");
+  const {
+    failureSummary,
+    installedSummary,
+    outcomeText,
+    planTargets,
+    settingsBlockFor,
+    settingsBlockText,
+    settingsNotice,
+    skipReasonFor,
+    skipText,
+  } = await import("../src/install.js");
 
   const machine = (id: string, patch: Record<string, unknown> = {}): never =>
     ({
@@ -18451,160 +18905,464 @@ process.stdout.write("\nwhich machines an act reaches, and what it says about th
     false,
   );
   check("and no fleet at all", installedSummary(0, []), "no machines");
+  /* ------------------------------------------------ configuring one ----- */
+  /*
+   * ⚠ **A different predicate from `skipReasonFor`, and the scope is why.**
+   * Installing is an act on the *machine* and takes `machine:admin`; a settings pane
+   * is read behind `session:read` and written behind `session:write`. So a grant
+   * that drives every session on somebody's host all day may not put code on it and
+   * *may* configure what is already there — and reusing the install predicate would
+   * grey out the one control that grant is entitled to.
+   */
+  {
+    const pane = { version: "1.0.0", contributes: { settings: true } };
+    const noPane = { version: "0.2.1", contributes: { settings: false } };
+    const named = (id: string): never => (fleet.find((one) => (one as { id: string }).id === id) ?? fleet[0]) as never;
+
+    check("a reachable machine with a pane is configurable", settingsBlockFor(named("ok"), pane), null);
+    /*
+     * ⚠ **The two predicates disagree on the shared machine, and that disagreement
+     * is the reason both exist.** This is what stops somebody folding them into one.
+     */
+    check(
+      "a session grant may configure what it may not install",
+      [skipReasonFor(named("shared")), settingsBlockFor(named("shared"), pane)],
+      ["not_admin", null],
+    );
+    /*
+     * ⚠ **`not_installed` and `no_pane` sit BELOW `no_scope` and `unreachable`, and
+     * the obvious order is a bug.** `store.fetchPlugins` swallows every failure into
+     * an empty list, so a 403 and a daemon nobody can reach both arrive here as
+     * `null` — and answering "that machine does not have this plugin" about either
+     * is a claim this client cannot make. `skipReasonFor`'s own argument about
+     * `unreachable`, one field over.
+     */
+    check(
+      "a machine nobody can read is not reported as not having it",
+      settingsBlockFor(named("asleep"), null),
+      "unreachable",
+    );
+    check(
+      "and neither is one whose sessions are not yours to read",
+      settingsBlockFor(machine("blind", { scopes: [] }), null),
+      "no_scope",
+    );
+    /* Ordered by remedy, so a machine in two states names the one to fix first. */
+    check(
+      "a banned owner outranks the limit, and both outrank everything else",
+      [
+        settingsBlockFor(machine("both", { ownerDisabled: true, overLimit: true }), pane),
+        settingsBlockFor(named("over"), pane),
+      ],
+      ["owner_disabled", "over_limit"],
+    );
+    check("a machine that really does not have it says so", settingsBlockFor(named("ok"), null), "not_installed");
+    check("and one on a version with no pane says which version", settingsBlockFor(named("ok"), noPane), "no_pane");
+    /*
+     * ⚠ **`enabled` is not consulted**, `offersSettings`' standing rule: a plugin
+     * somebody switched off is the commonest reason to open its settings.
+     */
+    check(
+      "and a switched-off plugin is still configurable",
+      settingsBlockFor(named("ok"), { ...pane, contributes: { settings: true } }),
+      null,
+    );
+
+    const blocks = ["owner_disabled", "over_limit", "no_scope", "unreachable", "not_installed", "no_pane"] as const;
+    check(
+      "every reason has a sentence, and each names the machine",
+      blocks.filter((one) => {
+        const said = settingsBlockText(one, "server", "0.2.1");
+        return said.length === 0 || !said.includes("server");
+      }),
+      [],
+    );
+    check("and no two of them read the same", new Set(blocks.map((one) => settingsBlockText(one, "server", "0.2.1"))).size, blocks.length);
+    check("the version is named where there is one", settingsBlockText("no_pane", "server", "0.2.1"), "server has no settings pane for 0.2.1");
+    check("and left out where there is not", settingsBlockText("no_pane", "server", null), "server has no settings pane");
+
+    /*
+     * ⚠ **The empty string rather than `null`**, so one value feeds the visible line
+     * and the `aria-describedby` pointing at it — `EventList`'s rule about a notice
+     * that reads empty in exactly the state it was added for.
+     */
+    check("nothing blocking is nothing said", settingsNotice([]), "");
+    check(
+      "one blocker is said in full",
+      settingsNotice([{ name: "server", block: "no_pane", version: "0.2.1" }]),
+      "server has no settings pane for 0.2.1.",
+    );
+    check(
+      "and several name the first and count the rest",
+      settingsNotice([
+        { name: "server", block: "no_pane", version: "0.2.1" },
+        { name: "nuc", block: "unreachable", version: null },
+        { name: "mini", block: "not_installed", version: null },
+      ]),
+      "server has no settings pane for 0.2.1, and 2 more.",
+    );
+  }
+
 }
 
-process.stdout.write("\nwhat the one button at the foot of the install screen says\n");
+process.stdout.write("\nwhat the machine table's controls can do\n");
 {
-  const { draftAct, draftLabel, removalQuestion } = await import("../src/install.js");
+  const {
+    bulkEnabled,
+    drawnActs,
+    installedSubline,
+    isBehind,
+    noRowsText,
+    removalQuestion,
+    rowActLabel,
+    rowActs,
+    rowShown,
+    selectionLine,
+    shownRows,
+  } = await import("../src/install.js");
 
+  /* ------------------------------------------------ one row's icons ------ */
   /*
-   * ⚠ **The screen this covers stages a draft and applies it with one press**, so
-   * the button is the only place the act is named — and naming it wrongly is a
-   * person pressing a control that does something other than what it says. The
-   * decision lives in `install.ts` rather than in the JSX for exactly this: it can
-   * be swept.
+   * ⚠ **The 32-cell sweep rather than the handful somebody thought of**, which is
+   * what `draftAct` was extracted from this component for and for the same reason:
+   * left inline these are ternaries nothing checks, in the one place on this screen
+   * where being wrong means pressing a control that does something other than what
+   * it says.
    */
-  const sizes = [0, 1, 2];
-  const acts = new Set<string>();
-  const wrongReady: string[] = [];
-  const unnamed: string[] = [];
-  let total = 0;
-  let ready = 0;
-  for (const adding of sizes) {
-    for (const updating of sizes) {
-      for (const removing of sizes) {
-        for (const canInstall of [true, false]) {
-          for (const anywhere of [true, false]) {
-            const answer = draftAct({ adding, updating, removing, canInstall, anywhere });
-            const cell = `${adding}+${updating}/${removing}${canInstall ? "" : " file"}${anywhere ? " somewhere" : ""}`;
-            total += 1;
-            acts.add(answer.act);
-            if (answer.ready) ready += 1;
-            /*
-             * ⚠ **`ready` is exactly "something is drafted", and this is the
-             * assertion the person's own rule turns into**: until a change has been
-             * made the button does not move. Recomputed here from the counts rather
-             * than read off the answer, with `canInstall` folded in the same way —
-             * a screen holding no archive can draft no install however many boxes
-             * are ticked.
-             */
-            const drafted = (canInstall ? adding + updating : 0) + removing > 0;
-            if (answer.ready !== drafted) wrongReady.push(cell);
-            // Every cell names something, and it is one of the four. A fifth arm,
-            // or a label that fell through to the empty string, is a button whose
-            // words nobody chose.
-            if (draftLabel(answer.act).length === 0) unnamed.push(cell);
+  const rowCells: { row: { installed: boolean; behind: boolean; blocked: boolean; busy: boolean }; canInstall: boolean }[] = [];
+  for (const installed of [false, true]) {
+    for (const behind of [false, true]) {
+      for (const blocked of [false, true]) {
+        for (const busy of [false, true]) {
+          for (const canInstall of [false, true]) rowCells.push({ row: { installed, behind, blocked, busy }, canInstall });
+        }
+      }
+    }
+  }
+  const answers = rowCells.map((cell) => ({ ...cell, acts: rowActs(cell.row, cell.canInstall) }));
+  check("all three acts are reachable", [...new Set(answers.flatMap((one) => one.acts))].sort(), ["install", "remove", "update"]);
+  /*
+   * ⚠ **Install and remove are never both offered**, which is what makes a row's
+   * trailing group readable at a glance rather than a state somebody has to parse.
+   */
+  check(
+    "a row never offers to install and to remove at once",
+    answers.filter((one) => one.acts.includes("install") && one.acts.includes("remove")),
+    [],
+  );
+  /*
+   * ⚠ **An update never appears without a remove**: an update is an install onto a
+   * machine that already has it, so a row offering Update alone would be claiming an
+   * install state it does not hold.
+   */
+  check(
+    "and never offers an update it has nothing to update",
+    answers.filter((one) => one.acts.includes("update") && !one.acts.includes("remove")),
+    [],
+  );
+  /*
+   * ⚠ **Remove is always last, and it is not cosmetic.** The row's confirming pair
+   * replaces the trailing group, so the last child before the tap and Cancel after
+   * it occupy the same pixels — Q3.218's measured property, reaching a row of icons.
+   */
+  check(
+    "and remove is always the last of them",
+    answers.filter((one) => one.acts.includes("remove") && one.acts[one.acts.length - 1] !== "remove"),
+    [],
+  );
+  /*
+   * ⚠ **All four `skipReasonFor` states offer nothing, `unreachable` included.**
+   * Under the draft that was a rule about a claim — an unticked box on a machine
+   * nobody can read. Under live acts it is stronger: Install there fires a request
+   * that cannot land, and Remove claims there is something to remove.
+   */
+  check("a blocked row offers nothing", answers.filter((one) => one.row.blocked && one.acts.length > 0), []);
+  /*
+   * ⚠ **And a busy row offers nothing, which is also what stops a second bulk press
+   * double-sending**: the bar's counts are derived from this, so a machine with a
+   * request out is in none of them.
+   */
+  check("nor does one with a request out", answers.filter((one) => one.row.busy && one.acts.length > 0), []);
+  check(
+    "and a screen holding no archive offers neither install nor update",
+    answers.filter((one) => !one.canInstall && (one.acts.includes("install") || one.acts.includes("update"))),
+    [],
+  );
+  /* The accessible name is the label, and seven rows saying "Remove" is seven
+     controls a screen reader cannot tell apart. */
+  /*
+   * ⚠ **What a row *draws* is narrower than what it can report**, and the two are
+   * separate on purpose: the bar reads `rowActs` to decide whether its own Remove
+   * may move, so a row that could not report a removable machine would take the
+   * bar's Remove down with it. The property is not the filter — it is that
+   * everything a row draws is undone by pressing something else on the same row.
+   */
+  check(
+    "a row draws nothing that cannot be undone from the row",
+    answers.filter((one) => drawnActs(one.acts).includes("remove")),
+    [],
+  );
+  check(
+    "and it draws everything else it can do",
+    answers.filter((one) => drawnActs(one.acts).length !== one.acts.filter((act) => act !== "remove").length),
+    [],
+  );
+  check(
+    "so an installed, current machine offers the row nothing at all",
+    drawnActs(rowActs({ installed: true, behind: false, blocked: false, busy: false }, true)),
+    [],
+  );
+  check(
+    "each act names the machine it is about",
+    (["install", "update", "remove"] as const).map((act) => rowActLabel(act, "laptop")),
+    ["Install on laptop", "Update on laptop", "Remove from laptop"],
+  );
+
+  /* ------------------------------------------------ the bulk bar --------- */
+  /*
+   * ⚠ **The sweep is 2048 cells and its output is collected rather than printed.**
+   * `draftAct`'s own block records why: a sweep whose output nobody reads is a sweep
+   * whose failure nobody sees.
+   */
+  const sizes = [0, 1, 2, 3];
+  const bulkCells: { counts: Parameters<typeof bulkEnabled>[0]; answer: ReturnType<typeof bulkEnabled> }[] = [];
+  for (const selected of sizes) {
+    for (const installable of sizes) {
+      for (const updatable of sizes) {
+        for (const removable of sizes) {
+          for (const configurable of sizes) {
+            for (const canInstall of [false, true]) {
+              const counts = { selected, installable, updatable, removable, configurable, canInstall };
+              bulkCells.push({ counts, answer: bulkEnabled(counts) });
+            }
           }
         }
       }
     }
   }
-  // Collected rather than checked in the loop: 144 cells is 144 lines of `ok`,
-  // and a sweep whose output nobody reads is a sweep whose failure nobody sees.
-  check("every combination of the draft decides something", total, sizes.length ** 3 * 4);
-  check("the button moves exactly when something has been drafted", wrongReady, []);
-  check("and it carries a word in every one of them", unnamed, []);
-  check("all four acts are reachable", [...acts].sort().join(","), "install,reconfigure,reinstall,remove");
-  check("some cells are ready and some are not", ready > 0 && ready < total, true);
-
-  /*
-   * ⚠ **Both directions at once is its own word.** It is the act the staged draft
-   * exists for — moving a plugin from one machine to another in one press — and
-   * calling it "Install" would name the reversible half of something whose other
-   * half takes `plugin_data` with it.
-   */
+  check("the sweep is the whole space", bulkCells.length, 4 * 4 * 4 * 4 * 4 * 2);
   check(
-    "adding and removing in one press is a reconfigure",
-    draftAct({ adding: 1, updating: 0, removing: 1, canInstall: true, anywhere: true }).act,
-    "reconfigure",
+    "all four controls are reachable in both directions",
+    (["install", "update", "remove", "settings"] as const).flatMap((act) => [
+      bulkCells.some((one) => one.answer[act]),
+      bulkCells.some((one) => !one.answer[act]),
+    ]),
+    [true, true, true, true, true, true, true, true],
   );
   check(
-    "and so is an update alongside a removal",
-    draftAct({ adding: 0, updating: 1, removing: 1, canInstall: true, anywhere: true }).act,
-    "reconfigure",
+    "nothing is offered over an empty selection",
+    bulkCells.filter((one) => one.counts.selected === 0 && Object.values(one.answer).some(Boolean)),
+    [],
   );
   check(
-    "taking it off and nothing else is a remove",
-    draftAct({ adding: 0, updating: 0, removing: 2, canInstall: true, anywhere: true }).act,
-    "remove",
-  );
-  check(
-    "a machine that has never had it is an install",
-    draftAct({ adding: 1, updating: 0, removing: 0, canInstall: true, anywhere: false }).act,
-    "install",
+    "a screen holding no archive never offers install or update",
+    bulkCells.filter((one) => !one.counts.canInstall && (one.answer.install || one.answer.update)),
+    [],
   );
   /*
-   * ⚠ **The update gesture, and the whole reason there is no second button.** A
-   * ticked box ticked again is nothing, so "0.2.1 is installed and 0.3.0 exists"
-   * had nowhere to be acted on and grew a strip of its own in the middle of the
-   * screen. It is this arm now.
+   * ⚠ **Install, update and remove are "any"; settings is "every", and the asymmetry
+   * is the decision.** The first three are fan-outs — a machine the act cannot reach
+   * falls out and says so on its own row, which is `planTargets`' partition — while
+   * settings is a **navigation**: there is one screen and nothing to skip, so a
+   * selection of seven opening a screen about a subset would be the "selected and
+   * never heard about again" failure in different clothes.
    */
   check(
-    "an unchanged set with something behind is a reinstall",
-    draftAct({ adding: 0, updating: 2, removing: 0, canInstall: true, anywhere: true }).act,
-    "reinstall",
+    "settings moves only where every selected machine can take it",
+    bulkCells.filter(
+      (one) => one.answer.settings !== (one.counts.selected > 0 && Math.min(one.counts.configurable, one.counts.selected) === one.counts.selected),
+    ),
+    [],
   );
+  /*
+   * ⚠ **And the other three are the opposite rule**, asserted rather than left to
+   * read the same as the one above.
+   */
   check(
-    "and it is ready, because there is something to do",
-    draftAct({ adding: 0, updating: 2, removing: 0, canInstall: true, anywhere: true }).ready,
+    "while remove moves where any of them can",
+    bulkCells.filter((one) => one.answer.remove !== Math.min(one.counts.removable, one.counts.selected) > 0),
+    [],
+  );
+  /*
+   * ⚠ **Independence: holding three counts fixed and moving the fourth never changes
+   * the other three answers.** The strongest available form of "these four controls
+   * do not leak into each other", and a property the single button could not have
+   * had.
+   */
+  {
+    const leaked: string[] = [];
+    for (const one of bulkCells) {
+      for (const [field, act] of [
+        ["installable", "install"],
+        ["updatable", "update"],
+        ["removable", "remove"],
+        ["configurable", "settings"],
+      ] as const) {
+        for (const value of sizes) {
+          const moved = bulkEnabled({ ...one.counts, [field]: value });
+          for (const other of ["install", "update", "remove", "settings"] as const) {
+            if (other !== act && moved[other] !== one.answer[other]) leaked.push(`${field}->${other}`);
+          }
+        }
+      }
+    }
+    check("no count moves a control it is not about", [...new Set(leaked)], []);
+  }
+  /*
+   * ⚠ **`configurable` is clamped rather than trusted.** The caller derives both
+   * from one walk so agreeing is expected — but a count larger than the selection
+   * would enable Settings over a selection holding a machine that cannot take it,
+   * which is the one state this control exists to refuse.
+   */
+  check(
+    "a configurable count larger than the selection is not believed",
+    bulkEnabled({ selected: 2, installable: 0, updatable: 0, removable: 0, configurable: 9, canInstall: true }).settings,
     true,
   );
-
-  /*
-   * With nothing drafted the button still carries a word — a control with no
-   * label is one nobody can tell is disabled *for now* rather than broken — and
-   * what it carries is what it is for.
-   */
   check(
-    "nothing drafted, nothing installed",
-    draftLabel(draftAct({ adding: 0, updating: 0, removing: 0, canInstall: true, anywhere: false }).act),
-    "Install",
-  );
-  check(
-    "nothing drafted, already somewhere",
-    draftLabel(draftAct({ adding: 0, updating: 0, removing: 0, canInstall: true, anywhere: true }).act),
-    "Reinstall",
-  );
-  /*
-   * ⚠ **A plugin that arrived as a file can only ever be removed**, because there
-   * is no `{repo, commit}` to hand a second daemon. Ticked boxes are forced to
-   * nothing rather than trusted: the caller derives them from the same flag, so
-   * agreeing is expected — and this is the one place where offering an install
-   * with nothing to send can be made unreachable rather than merely unlikely.
-   */
-  check(
-    "a plugin with no source offers only removal",
-    draftLabel(draftAct({ adding: 3, updating: 3, removing: 0, canInstall: false, anywhere: true }).act),
-    "Remove",
-  );
-  check(
-    "and it is not ready, because those ticks cannot be sent",
-    draftAct({ adding: 3, updating: 3, removing: 0, canInstall: false, anywhere: true }).ready,
+    "and one smaller than it refuses",
+    bulkEnabled({ selected: 2, installable: 0, updatable: 0, removable: 0, configurable: 1, canInstall: true }).settings,
     false,
   );
+  /*
+   * ⚠ **Settings does not consult `canInstall`.** A plugin that arrived as a file is
+   * exactly the one whose settings somebody wants, and that screen can never
+   * install anything.
+   */
   check(
-    "but a removal on it still is",
-    draftAct({ adding: 3, updating: 0, removing: 1, canInstall: false, anywhere: true }).ready,
+    "settings works on a screen that cannot install",
+    bulkEnabled({ selected: 2, installable: 0, updatable: 0, removable: 2, configurable: 2, canInstall: false }).settings,
     true,
   );
 
+  /* ------------------------------------------------ search and filter ---- */
+  const fleet = [
+    { id: "m_1", name: "laptop", installed: true },
+    { id: "m_2", name: "mini", installed: false },
+    { id: "m_3", name: "server", installed: true },
+  ];
+  const needles = ["", "  ", "LAP", "lap", "m_2", "zzz"];
+  const filters = ["all", "installed", "absent"] as const;
   /*
-   * The question the foot asks in place of the button, and only ever about the
-   * removals: the install half of a reconfigure is undone by unticking and
-   * pressing again, and spending somebody's attention on that is how the prompt
-   * in front of the irreversible half stops being read.
+   * ⚠ **A subsequence, which is `waitingFloor`'s posture**: order preserved, no
+   * duplicates, and nothing invented. A list whose order depends on the filter is a
+   * list that reorders under a thumb.
    */
   check(
-    "one machine is named",
-    removalQuestion(["laptop"]),
-    "Remove it from laptop and everything it kept there?",
+    "what is shown is always a subsequence of the fleet",
+    needles.flatMap((needle) =>
+      filters.filter((filter) => {
+        const shown = shownRows(fleet, needle, filter);
+        const indexes = shown.map((one) => fleet.indexOf(one));
+        return (
+          new Set(shown).size !== shown.length ||
+          indexes.some((at, i) => at < 0 || (i > 0 && at <= (indexes[i - 1] ?? -1)))
+        );
+      }),
+    ),
+    [],
   );
+  check("no search and no filter is the whole fleet", shownRows(fleet, "", "all"), fleet);
+  check("and a blank needle is no search", shownRows(fleet, "   ", "all"), fleet);
+  check("the needle is case-folded", shownRows(fleet, "LAP", "all").map((one) => one.name), ["laptop"]);
+  /*
+   * ⚠ **The id is matched as well as the name**, because the id is drawn on the row
+   * exactly where `ambiguousNames` says the name cannot tell two hosts apart — a
+   * needle that could not reach it would be unable to separate the one pair search
+   * is most needed for.
+   */
+  check("and the id is searchable too", shownRows(fleet, "m_2", "all").map((one) => one.name), ["mini"]);
+  /*
+   * ⚠ **The two halves of the filter partition the whole**, for every needle: a
+   * machine in neither is one nothing on this screen can reach.
+   */
   check(
-    "and several are counted",
-    removalQuestion(["laptop", "mini", "desktop"]),
-    "Remove it from 3 machines and everything it kept on them?",
+    "installed and not-installed partition what the needle left",
+    needles.filter((needle) => {
+      const all = shownRows(fleet, needle, "all");
+      const on = shownRows(fleet, needle, "installed");
+      const off = shownRows(fleet, needle, "absent");
+      return on.length + off.length !== all.length || [...on, ...off].some((one) => !all.includes(one));
+    }),
+    [],
   );
-  check("the question always names the data, not just the plugin", /everything it kept/.test(removalQuestion(["a"])), true);
+  check("and one row agrees with the list it is in", rowShown(fleet[0] as never, "lap", "installed"), true);
+
+  /*
+   * ⚠ **The line that closes the hazard the filter opens.** Select four machines,
+   * narrow the filter so two disappear, and the bar still acts on four — which has
+   * to be the behaviour, since hiding a row is not unselecting it, but which has to
+   * be *said* or one press removes a plugin from machines that are not on screen.
+   */
+  check("nothing selected says so", selectionLine(0, 0), "nothing selected");
+  check("one is singular", selectionLine(1, 0), "1 machine selected");
+  check("several are counted", selectionLine(3, 0), "3 machines selected");
+  check("and what the filter is hiding is named", selectionLine(4, 2), "4 selected, 2 of them not shown");
+  check(
+    "the hidden clause appears exactly when something is hidden",
+    [0, 1, 2, 3].flatMap((selected) =>
+      [0, 1, 2, 3].filter((hidden) => selectionLine(selected, hidden).includes("not shown") !== (selected > 0 && hidden > 0)),
+    ),
+    [],
+  );
+
+  /*
+   * ⚠ **Total over every combination**, because an empty box where a list should be
+   * is the one state with nothing else on screen to explain it. And ⚠ **no
+   * `JSON.stringify`**: `MarketList` quotes a needle through a serialiser one screen
+   * over, which shows somebody their own input escaped for anything holding a quote.
+   */
+  check(
+    "there is always a sentence where the list is empty",
+    [0, 3].flatMap((total) => needles.flatMap((needle) => filters.filter((f) => noRowsText(total, needle, f).length === 0))),
+    [],
+  );
+  check("a needle that matched nothing is quoted back", noRowsText(3, "zzz", "all"), "No machine here is called “zzz”.");
+  check("with real quotation marks rather than a serialiser", noRowsText(3, 'a"b', "all").includes('\\"'), false);
+  check("an empty Installed filter says where it is not", noRowsText(3, "", "installed"), "It is not on any of your machines.");
+  check("and an empty Not-installed filter says it is everywhere", noRowsText(3, "", "absent"), "It is on every machine you have.");
+  check("no machines at all is its own sentence", noRowsText(0, "", "all"), "You have no machines yet, so there is nowhere to put a plugin.");
+
+  /* ------------------------------------------------ the row's subline ---- */
+  /*
+   * ⚠ **The third argument kept its slot and changed meaning** — `ticked` became
+   * `enabled` when the draft went — so the sentence below appears nowhere in the old
+   * body on purpose: these fail against it rather than passing by accident.
+   *
+   * ⚠ **Switched off outranks both comparisons.** An install never switches a plugin
+   * on and an update *inherits* the switch, so without this line "I updated it and
+   * it does not work" is what arrives instead.
+   */
+  check("a switched-off machine says so", installedSubline("0.4.0", "0.4.0", false), "0.4.0 · switched off");
+  check("even with nothing on offer", installedSubline("0.4.0", null, false), "0.4.0 · switched off");
+  check("and being off outranks being behind", installedSubline("0.3.3", "0.4.0", false), "0.3.3 · switched off");
+  check("and outranks being ahead", installedSubline("0.4.0", "0.3.3", false), "0.4.0 · switched off");
+  check("a machine behind the offer says what is available", installedSubline("0.3.3", "0.4.0", true), "0.3.3 · 0.4.0 available");
+  check(
+    "a machine ahead of it says so rather than falling through",
+    installedSubline("0.4.0", "0.3.3", true),
+    "0.4.0 · newer than the 0.3.3 offered here",
+  );
+  check("an equal one is just the version", installedSubline("0.4.0", "0.4.0", true), "0.4.0");
+  check("with nothing on offer it is the bare version", installedSubline("0.4.0", null, true), "0.4.0");
+  check(
+    "the comparison is numeric in both directions",
+    [installedSubline("0.10.0", "0.9.0", true), installedSubline("0.9.0", "0.10.0", true)],
+    ["0.10.0 · newer than the 0.9.0 offered here", "0.9.0 · 0.10.0 available"],
+  );
+  /* One rule for "behind", shared by the subline and the Update icon beside it. */
+  check("behind is numeric and null is never behind", [isBehind("0.9.0", "0.10.0"), isBehind("0.10.0", "0.9.0"), isBehind("1.0.0", null)], [true, false, false]);
+
+  /* ------------------------------------------------ the question --------- */
+  check("one machine is named", removalQuestion(["laptop"]), "Remove it from laptop and everything it kept there?");
+  check("several are counted", removalQuestion(["a", "b", "c"]), "Remove it from 3 machines and everything it kept on them?");
+  check("and none is still a sentence", removalQuestion([]), "Remove it from 0 machines and everything it kept on them?");
+  /*
+   * ⚠ **The row's question and a one-machine bulk selection are the same string**,
+   * which is what stops the two confirmations drifting into two different promises
+   * about the same act.
+   */
+  check("the row and the bar ask the same thing about one machine", removalQuestion(["laptop"]), removalQuestion(["laptop"]));
 }
 
 process.stdout.write("\nthe one mirror whose other half is in a different repository\n");
@@ -18921,6 +19679,19 @@ process.stdout.write("\nwhich routes are pop-ups, asked from both directions\n")
     [{ name: "plugins", tab: "market", entry: null }, "/plugins", true],
     [{ name: "plugins", tab: "installed", entry: null }, "/plugins/installed", true],
     [{ name: "plugins", tab: "market", entry: "autotitle" }, "/plugins/p/autotitle", true],
+    /*
+     * ⚠ **And the deepest one, because it is the longest path this app builds.** A
+     * scoped settings screen carries one segment per machine, so `/plugins/p/x/
+     * settings/m_1/m_2` is six segments where every other overlay is at most three
+     * — and `isOverlayPath` compares the *first* segment, which is the property
+     * that keeps that true. A `startsWith` creeping in here would still pass every
+     * case above it.
+     */
+    [
+      { name: "plugins", tab: "market", entry: "autotitle", settings: ["m_1", "m_2"] },
+      "/plugins/p/autotitle/settings/m_1/m_2",
+      true,
+    ],
   ];
   check(
     "every route agrees with its own path about being a pop-up",
@@ -18931,6 +19702,196 @@ process.stdout.write("\nwhich routes are pop-ups, asked from both directions\n")
   // screen — the same rule `/settingsomething` already had.
   check("a path that merely starts with the same letters is not one", isOverlayPath("/pinned"), false);
   check("nor is a plugin id at the root", isOverlayPath("/board"), false);
+}
+
+process.stdout.write("\nwhat several machines' settings panes add up to\n");
+{
+  const { paneAgreement, blankForm } = await import("../src/pane.js");
+  const { seedForm } = await import("../src/plugins.js");
+  const { scopeSummary } = await import("../src/install.js");
+
+  const field = (key: string, kind: string, value: string | null): unknown => ({
+    key,
+    label: key,
+    kind,
+    value,
+    options: [],
+    placeholder: null,
+    help: null,
+  });
+  const form = (action: string, fields: unknown[]): unknown => ({ type: "form", fields, submit: "Save", action });
+  const view = (...blocks: unknown[]): unknown => ({ title: null, refreshMs: null, blocks });
+  const say = (type: string, text: string, tone: string): unknown => ({ type, text, tone });
+  const read = (id: string, v: unknown): never => ({ machineId: id, view: v }) as never;
+
+  const HOST = (v: string | null): unknown => form("save", [field("host", "text", v), field("loud", "toggle", "true")]);
+
+  /*
+   * ⚠ **One rule with two spellings, pinned equal.** A blank form is exactly what
+   * `seedForm` produces for a plugin that sent no values at all, including the
+   * toggle's `"false"` — every field is a string on the wire, so there is one
+   * narrowing here and not five.
+   */
+  const fields = [field("host", "text", "a"), field("loud", "toggle", "true"), field("mode", "select", "x")] as never;
+  check(
+    "blank is seedForm over a plugin that sent nothing",
+    blankForm(fields),
+    seedForm((fields as never as { value: unknown }[]).map((one) => ({ ...one, value: null })) as never),
+  );
+  check("a toggle is off and everything else is empty", blankForm(fields), { host: "", loud: "false", mode: "" });
+
+  /*
+   * ⚠ **Compared after `seedForm` normalisation, never as raw `value`.** `null` on
+   * one machine and `""` on another are the same on screen and the same on submit,
+   * so a fleet that is identical must not be reported as differing — the red
+   * warning that follows would be a lie about somebody's configuration.
+   */
+  check(
+    "an absent value and an empty one agree",
+    paneAgreement([read("m_1", view(form("save", [field("host", "text", null)]))), read("m_2", view(form("save", [field("host", "text", "")])))]).form.kind,
+    "agreed",
+  );
+  check(
+    "two machines that agree seed the form from what they hold",
+    paneAgreement([read("m_1", view(HOST("a"))), read("m_2", view(HOST("a")))]).form,
+    { kind: "agreed", block: HOST("a"), values: { host: "a", loud: "true" } },
+  );
+  {
+    const answer = paneAgreement([read("m_1", view(HOST("a"))), read("m_2", view(HOST("b")))]);
+    check("two that differ open blank", answer.form.kind, "mixed");
+    check("with nothing filled in", answer.form.kind === "mixed" ? answer.form.values : null, { host: "", loud: "false" });
+    /*
+     * ⚠ **And only the keys that actually disagreed are named.** A blanked toggle is
+     * not empty, it is *off*, and a checkbox has no third state — so without this the
+     * warning says "they were different" while a switch nobody looked at is about to
+     * be written off across a fleet.
+     */
+    check("naming only what disagreed", answer.form.kind === "mixed" ? answer.form.differing : null, ["host"]);
+    check("and both machines are still written to", answer.targets, ["m_1", "m_2"]);
+  }
+
+  /*
+   * ⚠ **A different form is a third answer and refuses to draw one.** Submitting
+   * one machine's keys to another writes fields that machine does not have and omits
+   * ones it does — the first stores garbage inside a hook nobody is waiting on, the
+   * second leaves or clears a value depending entirely on how the author wrote the
+   * handler. Both are silent, so the screen says so instead.
+   */
+  const divergent = [
+    ["a different action id", paneAgreement([read("m_1", view(form("save", [field("host", "text", "a")]))), read("m_2", view(form("apply", [field("host", "text", "a")])))])],
+    ["a different key set", paneAgreement([read("m_1", view(form("save", [field("host", "text", "a")]))), read("m_2", view(form("save", [field("port", "text", "a")])))])],
+    ["a key whose kind differs", paneAgreement([read("m_1", view(form("save", [field("host", "text", "a")]))), read("m_2", view(form("save", [field("host", "select", "a")])))])],
+  ] as const;
+  check("every shape of disagreement is divergent", divergent.map(([, answer]) => answer.form.kind), ["divergent", "divergent", "divergent"]);
+  check("and nothing is written to on that arm", divergent.map(([, answer]) => answer.targets), [[], [], []]);
+  check(
+    "with every machine in exactly one group, and named as excluded",
+    divergent.map(([, answer]) => [
+      answer.form.kind === "divergent" ? answer.form.groups.flatMap((one) => one.machines).sort() : null,
+      answer.excluded.map((one) => one.machineId).sort(),
+    ]),
+    [
+      [["m_1", "m_2"], ["m_1", "m_2"]],
+      [["m_1", "m_2"], ["m_1", "m_2"]],
+      [["m_1", "m_2"], ["m_1", "m_2"]],
+    ],
+  );
+  /*
+   * And the three things that are deliberately NOT divergent, because each would
+   * refuse a whole fleet over something that changes no write.
+   */
+  check(
+    "a reworded label is not",
+    paneAgreement([
+      read("m_1", view(form("save", [field("host", "text", "a")]))),
+      read("m_2", view(form("save", [{ ...(field("host", "text", "a") as object), label: "Hostname" }]))),
+    ]).form.kind,
+    "agreed",
+  );
+  check(
+    "nor a different field order",
+    paneAgreement([
+      read("m_1", view(form("save", [field("a", "text", "1"), field("b", "text", "2")]))),
+      read("m_2", view(form("save", [field("b", "text", "2"), field("a", "text", "1")]))),
+    ]).form.kind,
+    "agreed",
+  );
+  check(
+    "nor a select whose options are local facts",
+    paneAgreement([
+      read("m_1", view(form("save", [{ ...(field("m", "select", "x") as object), options: [{ value: "x", label: "X" }] }]))),
+      read("m_2", view(form("save", [{ ...(field("m", "select", "x") as object), options: [{ value: "x", label: "X" }, { value: "y", label: "Y" }] }]))),
+    ]).form.kind,
+    "agreed",
+  );
+  /*
+   * ⚠ **A machine with no form at all is excluded rather than divergent**, which is
+   * `offersSettings`' *anywhere, not everywhere* rule holding end to end: a fleet
+   * mid-update is the ordinary case, and refusing the screen over a host that has
+   * nothing to say would be the wrong half of it.
+   */
+  {
+    const answer = paneAgreement([read("m_1", view(HOST("a"))), read("m_2", view(say("text", "hello", "muted")))]);
+    check("a machine offering no form is excluded, not divergent", answer.form.kind, "agreed");
+    check("and is named", answer.excluded, [{ machineId: "m_2", reason: "no_form" }]);
+    check("and is not written to", answer.targets, ["m_1"]);
+  }
+  {
+    const answer = paneAgreement([read("m_1", view(HOST("a"))), read("m_2", null)]);
+    check("an unreadable machine takes no part and is named", answer.excluded, [{ machineId: "m_2", reason: "unreadable" }]);
+    check("and is never a target", answer.targets, ["m_1"]);
+  }
+
+  /*
+   * ⚠ **The partition, and it is the one that would actually bite.** Every machine
+   * handed in is a target or is named, exactly once. One that fell out of both is a
+   * machine somebody selected and never heard about again — `planTargets`' own
+   * thesis, at the other end of the same screen.
+   */
+  {
+    const bodies = [null, view(HOST("a")), view(HOST("b")), view(form("apply", [field("host", "text", "a")])), view(say("notice", "x", "danger"))];
+    const stranded: string[] = [];
+    for (let a = 0; a < bodies.length; a += 1) {
+      for (let b = 0; b < bodies.length; b += 1) {
+        for (let c = 0; c < bodies.length; c += 1) {
+          const answer = paneAgreement([read("m_1", bodies[a]), read("m_2", bodies[b]), read("m_3", bodies[c])]);
+          const seen = [...answer.targets, ...answer.excluded.map((one) => one.machineId)].sort();
+          if (JSON.stringify(seen) !== JSON.stringify(["m_1", "m_2", "m_3"])) stranded.push(`${a}${b}${c}`);
+        }
+      }
+    }
+    check("every machine handed in is a target or is named, exactly once", stranded, []);
+  }
+
+  /*
+   * ⚠ **Nothing a machine said is dropped** — `notice` is the whole diagnostic
+   * channel for a plugin with no screen — **and an identical block collapses**, so
+   * a danger notice on one host is the only attributed line on the screen rather
+   * than one wall among five.
+   */
+  {
+    const same = say("text", "the same sentence", "muted");
+    const only = say("notice", "this host is signed out", "danger");
+    const answer = paneAgreement([read("m_1", view(same)), read("m_2", view(same, only)), read("m_3", view(same))]);
+    check("an identical block is drawn once", answer.said.length, 2);
+    check("unattributed where every machine sent it", answer.said[0]?.machines, ["m_1", "m_2", "m_3"]);
+    check("and named where only one did", answer.said[1], { block: only, machines: ["m_2"] });
+    check("with its tone intact", (answer.said[1]?.block as { tone?: string } | undefined)?.tone, "danger");
+    check("and an unreadable machine says nothing", paneAgreement([read("m_1", null)]).said, []);
+  }
+
+  /* The sentence above the form. */
+  check("one machine is named", scopeSummary(["laptop"]), "laptop");
+  check("three are named", scopeSummary(["a", "b", "c"]), "a, b, c");
+  check("four are counted", scopeSummary(["a", "b", "c", "d"]), "4 machines");
+  check("and none is said out loud", scopeSummary([]), "no machines");
+  /*
+   * ⚠ **It never says "all".** This is a scope somebody chose rather than a fact
+   * about the fleet, and "all" is the word most likely to be read as a standing
+   * policy — Q7.42's hazard, on the line whose whole job is to say what the choice
+   * was.
+   */
+  check("and it never says all", [1, 2, 3, 4, 9].map((n) => scopeSummary(Array.from({ length: n }, (_, i) => `m${i}`)).includes("all")), [false, false, false, false, false]);
 }
 
 process.stdout.write(failures === 0 ? "\nall green\n\n" : `\n${failures} FAILED\n\n`);

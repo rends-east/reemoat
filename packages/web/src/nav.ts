@@ -80,13 +80,17 @@ export function depthOf(route: Route): number {
      * answers `null` for equal depths, which is right: the same pane with
      * different contents is not a direction.
      *
-     * The settings leaf is a depth rather than a section on the entry, so pressing
-     * the gear pushes and the ◀ pops — the same pair the settings sheet gives an
-     * agent. `parseMarketRoute` never sets `settings` without an `entry`, so the
-     * order of these two tests decides nothing.
+     * The settings leaf is a depth rather than a section on the entry, so opening it
+     * pushes and the ◀ pops — the same pair the settings sheet gives an agent.
+     * `parseMarketRoute` never fills `settings` without an `entry`, so the order of
+     * these two tests decides nothing.
+     *
+     * ⚠ **Two settings routes over different machines are the same depth**, so
+     * `navMove` between them is `null` — the same pane with different contents is
+     * not a direction, which is the rule this function's own head states.
      */
     case "plugins":
-      if (route.settings) return 3;
+      if (route.settings.length > 0) return 3;
       return route.entry !== null ? 2 : 1;
   }
 }

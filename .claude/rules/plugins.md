@@ -345,12 +345,12 @@ comparing, with a loud skip where this side is absent. Q4.105.
 | `packages/web/src/ui/PluginView.tsx` | The five blocks, drawn with `bits.tsx` |
 | `packages/web/src/ui/PluginScreen.tsx` | The route-backed sheet at `/p/:machineId/:pluginId` |
 | `packages/web/src/ui/settings/PluginsPanel.tsx` | What this machine has and the file import. Each row is a **link to the plugin's page**; the acts left on it are behind **one kebab**. No settings pane and no scope prose — both moved, and `webcheck` reads the file to keep them gone |
-| `packages/web/src/ui/plugins/PluginSettings.tsx` | One plugin's settings, as its own screen behind the gear at `/plugins/p/:id/settings`. Asks which machine only where it is on more than one, and narrows what it draws to the settings vocabulary — including an action's answer, which the daemon cannot classify |
+| `packages/web/src/ui/plugins/PluginSettings.tsx` | One plugin's settings, on the machines the URL names — reached from the bulk bar on the plugin's page. It **states** the scope on a sticky line rather than asking for it, and narrows what it draws to the settings vocabulary, an action's answer included |
 | `src/plugins/source.ts` | Installing from a commit: the `{repo, commit}` validator, the address this daemon builds itself, `consentGap`, and the third `fetch`. All but the fetch is pure, so `daemoncheck` reaches every refusal with no network |
 | `packages/web/src/catalogue.ts` | What the catalogue says, read: the hand mirror, the fail-*closed* posture, `compareVersions` (numeric — `0.10.0` beats `0.9.0`), the sentence each failed read draws |
 | `packages/web/src/market.ts` | Which plugins screen a URL names. Pure, its own module for `settings.ts`'s reason |
-| `packages/web/src/install.ts` | Which machines an act reaches: `planTargets` as a partition, `skipReasonFor` ordered by *remedy*, `outcomeText`, and the summary |
-| `packages/web/src/ui/plugins/` | The pop-up: two tabs, the market, one entry in full, the machine multi-select, and the per-machine results. The fan-out is `act` in `MachineInstalls.tsx`, inline rather than a hook — concurrent across machines, serial within one, `plugin_busy` retried once and nothing else retried |
+| `packages/web/src/install.ts` | Which machines an act reaches and what each control may do: `planTargets` as a partition, `skipReasonFor` by *remedy* and `settingsBlockFor` beside it on a **different scope**, `rowActs`/`bulkEnabled` swept, and every sentence the table draws |
+| `packages/web/src/ui/plugins/` | The pop-up: a rail of two tabs, the market, one entry in full, and the machine table. The fan-out is `act` in `MachineInstalls.tsx`, inline rather than a hook — concurrent across machines, serial within one, `plugin_busy` retried once and nothing else |
 | `packages/web/src/ui/PluginConsent.tsx` | The disclosure, in **one** copy, drawn by both ways in |
 
 ## Bounds

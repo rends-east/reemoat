@@ -80,8 +80,25 @@ export interface SectionSpec {
  * the fourth, Server settings, arrived with SMTP and is the only admin-only one
  * besides Users — and the split is by *what you came here to do* rather than by
  * which service answers.
+ *
+ * **Account leads, and it leads because it is the one the pane opens on.** There
+ * is no neutral state at `sm` and above any more — the rail highlights
+ * {@link DEFAULT_SECTION} and the pane draws it — so the first row and the default
+ * are the same screen, and a rail whose highlighted row were not the first would
+ * read as a selection somebody made. Machines was first while the pane opened on
+ * nothing, where the order was only a reading order.
  */
 export const SECTION_SPECS: readonly SectionSpec[] = [
+  {
+    id: "account",
+    title: "Account",
+    // Sign out is on that screen and is not what anybody came for, and this
+    // string truncates in the nav — so it names the four things you go looking
+    // for. Email and keys are new there and are the reason it changed.
+    blurb: "Your password, your email, your keys and your devices.",
+    adminOnly: false,
+    group: null,
+  },
   {
     id: "machines",
     // The Agents section used to sit above this one and open with a machine
@@ -92,16 +109,6 @@ export const SECTION_SPECS: readonly SectionSpec[] = [
     // promising it on an instance that hands out none is the same false claim
     // the intro on that screen had to stop making.
     blurb: "Your machines, their agents, and which are reachable.",
-    adminOnly: false,
-    group: null,
-  },
-  {
-    id: "account",
-    title: "Account",
-    // Sign out is on that screen and is not what anybody came for, and this
-    // string truncates in the nav — so it names the four things you go looking
-    // for. Email and keys are new there and are the reason it changed.
-    blurb: "Your password, your email, your keys and your devices.",
     adminOnly: false,
     group: null,
   },
@@ -122,6 +129,33 @@ export const SECTION_SPECS: readonly SectionSpec[] = [
     group: "server",
   },
 ];
+
+/**
+ * The section the pane draws at `/settings`, where there is no neutral state.
+ *
+ * ⚠ **A constant that is *drawn*, never a section the URL is parsed into.** The
+ * index is a real screen below `sm` — it is the section list, and tapping a row
+ * drills into it — so {@link parseSettingsSection} still answers `null` for a bare
+ * `/settings`, and {@link settingsUp} and {@link settingsPaneTitle} stay `null`
+ * with it. What changed is only what the *pane* renders at that route, which is a
+ * class string away in `Settings.tsx` and no business of this parser's. Answered
+ * here rather than there so `webcheck` can reach it.
+ *
+ * ⚠ **It may never be an `adminOnly` section.** The desktop pane draws this with
+ * nobody having tapped for it, so an admin-only default would open a non-admin on
+ * a screen whose every request answers 403 — the exact failure
+ * {@link visibleSections} exists to prevent, arriving by the one door that does not
+ * go through it. Asserted over every identity, `null` included, which is a state
+ * this app really reaches (`bootstrap`'s catch keeps `phase: "ready"` and never
+ * sets `me`).
+ *
+ * A constant rather than `visibleSections(me)[0]?.id`: which section leads the rail
+ * is a draw-order decision and which one the pane falls back to is a product one,
+ * and deriving the second from the first means a future reorder silently moves the
+ * default. The `??` that derivation would need also puts the literal back, behind a
+ * fallback arm no driver can reach.
+ */
+export const DEFAULT_SECTION: SettingsSection = "account";
 
 export const GROUP_TITLES: Record<SettingsGroup, string> = { server: "Server" };
 

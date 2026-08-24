@@ -150,9 +150,11 @@ function InstalledRow({ state, row, entry }: { state: AppState; row: Row; entry:
 /**
  * Which machines have it, in the words the market screen uses for the same fact.
  *
- * `installedSummary` rather than a second phrasing: this row and the closed
- * machine list on the plugin's own page answer the same question, and two
- * sentences for one fact is how they come to disagree about a fleet of one.
+ * `installedSummary` rather than a second phrasing: this row is now the **only**
+ * caller — the plugin's own page dropped its summary line when the machine table
+ * started answering the same question row by row — and it is kept shared because
+ * this list and that table are one tap apart. Two sentences for one fact is how
+ * they come to disagree about a fleet of one.
  */
 function whereText(state: AppState, row: Row): string {
   return installedSummary(
@@ -299,20 +301,29 @@ function ImportPlugin({ state }: { state: AppState }): ReactNode {
            */}
           {/*
            * \u26a0 **`available` is the *archive's* own version, and omitting it made
-           * the one act this screen exists for impossible.** Without it `behind`
-           * is empty, so an import of a plugin every machine already has drafts
-           * nothing: `draftAct` answers `{act: "reinstall", ready: false}` and the
-           * button is drawn disabled, reading a word for an act it will not
-           * perform. The only route to an update was untick \u2192 Remove \u2192 re-tick,
-           * and Remove takes `plugin_data` with it \u2014 the destructive path as the
-           * only path. With it, a machine holding an older copy is an update
-           * target and says so on its own row.
+           * the one act this screen exists for impossible.** Without it `isBehind`
+           * is false on every row, so no row draws Update at all and the bar's
+           * Update is dead \u2014 leaving Remove as the only route to a newer copy, and
+           * Remove takes `plugin_data` with it: the destructive path as the only
+           * path, on the screen whose entire purpose is putting a build onto a
+           * fleet. With it, a machine holding an older copy is an update target
+           * and says so on its own row.
            *
-           * An archive at the *same* version still drafts nothing, and that is
+           * An archive at the *same* version still offers no Update, and that is
            * deliberate: `PluginsPanel` sends unconditionally per machine, which is
            * where iterating on one build belongs (see the same-version rollback
            * path in `host.ts`). This screen is for putting a known version onto a
            * fleet.
+           */}
+          {/*
+           * ⚠ **No `onConfigure`, so this screen draws no Settings button — and the
+           * reason is measured rather than tidy.** That control navigates the sheet
+           * to the plugin's settings, which unmounts this component and takes the
+           * chosen `File` with it. It is the same loss `onBusyChange` exists to
+           * prevent one prop up — "Done" reading as *finish* while being the control
+           * that abandons the act — except this one is not even gated on `busy`.
+           * Absent rather than disabled: a control that is never usable here is one
+           * somebody keeps trying.
            */}
           <MachineInstalls
             pluginId={shown?.id ?? ""}

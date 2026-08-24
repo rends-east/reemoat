@@ -1,10 +1,12 @@
 import type { ReactNode } from "react";
 import {
+  DEFAULT_SECTION,
   sectionAllowed,
   settingsPaneTitle,
   settingsUp,
   settingsUpLabel,
   type SettingsRoute,
+  type SettingsSection,
 } from "../../settings";
 import type { AppState } from "../../store";
 import { ChevronLeft } from "lucide-react";
@@ -67,6 +69,14 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
    * site, which is why the two now read from one value.
    */
   const here = { ...route, section: active };
+  /*
+   * ⚠ **What the pane draws, which is not what the chrome computes.** `here`, `up`,
+   * `paneTitle` and `upLabel` all keep reading `active` — the section the *URL*
+   * names — and only the body below reads this. Fed to `settingsUp`, the default
+   * answers `{path: "/settings", withinNav: true}`: a chevron, `sm:hidden`, on a
+   * phone, pointing at the screen it is already on. The two must not be merged.
+   */
+  const shown = active ?? DEFAULT_SECTION;
   const up = settingsUp(here);
   const paneTitle = settingsPaneTitle(here);
   const upLabel = settingsUpLabel(here);
@@ -85,7 +95,7 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
          * the same list → detail the rest of the app uses, in the same direction.
          */}
         <div className="hidden w-56 shrink-0 overflow-y-auto overscroll-contain border-r border-edge sm:block">
-          <SettingsNav state={state} active={active} variant="rail" />
+          <SettingsNav state={state} active={shown} variant="rail" />
         </div>
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {/*
@@ -153,7 +163,23 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
               <div className="-mx-4 -my-4 sm:hidden">
                 <SettingsNav state={state} active={null} variant="page" />
               </div>
-              <p className="hidden text-sm text-muted sm:block">Pick a setting from the list.</p>
+              {/*
+               * ⚠ **No neutral state at `sm` and above.** "Pick a setting from the
+               * list." was a pane whose only content was an instruction to use the
+               * rail beside it — half of a 672px sheet spent saying nothing, on the
+               * depth this pop-up opens at. The rail highlights `DEFAULT_SECTION`
+               * and this draws it, both from the one constant, so they cannot point
+               * at different rows.
+               *
+               * ⚠ `hidden sm:block` rather than a width read in JavaScript, which is
+               * `AppShell`'s standing rule. The phone arm above keeps its `-mx-4
+               * -my-4` cancelling the scroller's padding; at `sm` that child is
+               * `display: none`, so its negative margins take nothing with them and
+               * this one sits in the scroller's ordinary padding.
+               */}
+              <div className="hidden sm:block">
+                <SectionBody state={state} section={DEFAULT_SECTION} />
+              </div>
             </>
           ) : drilled && route.machineId !== null ? (
             /* The machine's own screen, and one level in, its agents. Both parse
@@ -167,24 +193,38 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
               <MachineAgentsSection state={state} machineId={route.machineId} agent={route.agent} />
             )
           ) : (
-            <>
-              {active === "machines" && <MachinesSection state={state} />}
-              {/*
-                `config` for the same reason `UsersSection` takes it: what this
-                instance can do is not on `Me`, and the Email block promises a
-                password reset that an instance with no SMTP can never perform.
-                Passed rather than read from the store so the section stays a
-                function of its arguments, which is what lets `webcheck` reason
-                about it at all.
-              */}
-              {active === "account" && <AccountSection me={state.me} config={state.config} />}
-              {active === "server" && <ServerSection />}
-              {active === "users" && <UsersSection me={state.me} config={state.config} />}
-            </>
+            <SectionBody state={state} section={active} />
           )}
           </div>
         </div>
       </div>
     </Sheet>
   );
+}
+
+/**
+ * One section, and the whole of the mapping from a section id to a screen.
+ *
+ * ⚠ **A `switch` over the union rather than four `&&`s in the pane, because there
+ * are two call sites now** — the section a URL names, and `DEFAULT_SECTION` where
+ * it names none. A fifth member of `SettingsSection` has to be a compile error here
+ * rather than a pane that silently renders nothing at one of the two.
+ *
+ * `config` is passed to two of them for the reason `UsersSection` states: what this
+ * instance can do is not on `Me`, and the Email block promises a password reset an
+ * instance with no SMTP can never perform. Passed rather than read from the store,
+ * so a section stays a function of its arguments — which is what lets `webcheck`
+ * reason about it at all.
+ */
+function SectionBody({ state, section }: { state: AppState; section: SettingsSection }): ReactNode {
+  switch (section) {
+    case "machines":
+      return <MachinesSection state={state} />;
+    case "account":
+      return <AccountSection me={state.me} config={state.config} />;
+    case "server":
+      return <ServerSection />;
+    case "users":
+      return <UsersSection me={state.me} config={state.config} />;
+  }
 }

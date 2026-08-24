@@ -7,7 +7,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { Check, ChevronDown, X } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, X } from "lucide-react";
 import { listNavKey, nextOptionIndex } from "../keys";
 import { displayCwd, shortPath } from "../paths";
 import type { OfflineReason, Reach } from "../machine";
@@ -143,6 +143,22 @@ export const COLUMN = "mx-auto w-full max-w-3xl";
  * the token: this box has no fill of its own to identify it, so its boundary is
  * the control, and a boundary that identifies a control is held at 3:1.
  */
+/**
+ * A search box, glyph-inset and complete.
+ *
+ * ⚠ **A whole string rather than `` `${FIELD} pl-8` ``, and that is the trap
+ * {@link FIELD} documents.** Tailwind emits every utility at equal specificity, so
+ * `px-3` and `pl-8` race by stylesheet order and the loser is whichever the build
+ * happens to emit second. The caller draws the magnifier as an absolutely
+ * positioned `pointer-events-none` span in a `relative` wrapper.
+ *
+ * `bg-surface` because a control is drawn in the colour of what it sits on, and
+ * everything using this sits on a sheet. The rail's own search box is the same
+ * shape at `bg-ink` and is deliberately not this constant.
+ */
+export const SEARCH_FIELD =
+  "min-h-9 w-full rounded-md border border-edge-strong bg-surface py-2 pr-2.5 pl-8 text-sm outline-none [@media(pointer:coarse)]:min-h-11";
+
 export const FIELD =
   "min-h-9 rounded-md border border-edge-strong bg-surface px-3 text-sm leading-5 outline-none [@media(pointer:coarse)]:min-h-11";
 
@@ -848,15 +864,35 @@ export type ButtonTone = "primary" | "plain" | "destructive" | "ghost";
  * enough. It is never reached directly: {@link DangerButton} is the only door, and
  * it requires a glyph.
  */
+/**
+ * ⚠ **Disabled dims the ink and keeps the box, and only on the outlined tones.**
+ *
+ * `disabled:opacity-40` used to ride the base string for all four, and on an
+ * outlined button that is not a dimming — it is a *deletion*. `--color-edge-strong`
+ * is held at ≥3:1 precisely because a control drawn in the colour of what it sits
+ * on has its border as its **only** identification, and 40% of that is ~1.2:1: the
+ * hairline `index.css` forbids for exactly this job. So a disabled `plain` button
+ * had no boundary at all, and the moment one became live it read as having *grown*
+ * — reported in those words, off a strip of four where three are inert most of the
+ * time. Nothing about the box ever changed: `min-h-11 px-3` in both states, and
+ * `opacity` cannot move layout.
+ *
+ * `primary` and `ghost` keep the opacity, because neither has a boundary to lose —
+ * one is a fill and the other is bare text.
+ *
+ * The `disabled:` variants are emitted after their unvariant counterparts in the
+ * same layer, which is what lets `disabled:border-edge` beat `border-edge-strong`
+ * — the same ordering `hover:bg-raised` already relies on one property over.
+ */
 const BUTTON_TONE: Record<ButtonTone, string> = {
-  primary: "bg-fg text-ink hover:bg-fg/85",
+  primary: "bg-fg text-ink hover:bg-fg/85 disabled:opacity-40",
   // Hover moves the *fill*, not the border. See `--color-edge-strong` in
   // `index.css`: the gap between the two line weights is now large enough that
   // swapping them on hover is a louder change than the press itself.
-  plain: "border border-edge-strong bg-surface text-fg hover:bg-raised",
+  plain: "border border-edge-strong bg-surface text-fg hover:bg-raised disabled:border-edge disabled:bg-surface disabled:text-faint",
   destructive:
-    "border border-danger/45 bg-surface text-danger font-medium hover:bg-danger/10",
-  ghost: "text-muted hover:bg-raised hover:text-fg",
+    "border border-danger/45 bg-surface text-danger font-medium hover:bg-danger/10 disabled:border-edge disabled:bg-surface disabled:text-faint",
+  ghost: "text-muted hover:bg-raised hover:text-fg disabled:opacity-40",
 };
 
 /**
@@ -914,7 +950,7 @@ export function Button({
       disabled={disabled}
       title={title}
       aria-label={ariaLabel}
-      className={`tap press inline-flex items-center justify-center gap-1.5 rounded-md font-medium disabled:opacity-40 ${BUTTON_SIZE[size]} ${BUTTON_TONE[tone]} ${className}`}
+      className={`tap press inline-flex items-center justify-center gap-1.5 rounded-md font-medium ${BUTTON_SIZE[size]} ${BUTTON_TONE[tone]} ${className}`}
     >
       {children}
     </button>
@@ -1254,6 +1290,51 @@ export function tabPill(selected: boolean): string {
   return `tap flex min-h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs whitespace-nowrap ${
     selected ? "bg-raised font-medium text-fg" : "bg-raised/50 text-muted hover:bg-raised hover:text-fg"
   }`;
+}
+
+/**
+ * One row in a pop-up's left rail — a settings section, a market tab.
+ *
+ * ⚠ **The row is shared and the list is not, and the split is where the drift
+ * actually is.** What two rails must agree on is height, padding, the active wash
+ * and the chevron: they sit one tap apart inside sheets that look the same, so a
+ * 2px difference reads as two apps. What they must *not* share is which rows
+ * exist — for settings that is `navRows(me)`, a function precisely because
+ * computing it in JSX draws a **Server** heading over nothing for a non-admin, and
+ * a generalised list component would hand that obligation back to the caller.
+ *
+ * `blurb` is optional because a market tab is a word: a second line of prose under
+ * "Market" would be a caption for a noun.
+ *
+ * `bg-raised` for the active row is `raised`'s one meaning — state, the tab you are
+ * on, the toggle that is on — and never `bg-fg`, which is the affirmative action
+ * inside a decision and would make a navigation row the loudest thing on screen.
+ */
+export function RailRow({
+  title,
+  blurb,
+  active,
+  onClick,
+}: {
+  title: string;
+  blurb?: string;
+  active: boolean;
+  onClick: () => void;
+}): ReactNode {
+  return (
+    <button
+      onClick={onClick}
+      className={`tap press flex min-h-11 w-full items-center gap-2 px-4 py-3.5 text-left hover:bg-raised ${
+        active ? "bg-raised" : ""
+      }`}
+    >
+      <span className="min-w-0 flex-1">
+        <span className="block text-sm font-medium">{title}</span>
+        {blurb !== undefined && <span className="block truncate text-xs text-muted">{blurb}</span>}
+      </span>
+      <Icon as={ChevronRight} size={14} className="shrink-0 text-faint" />
+    </button>
+  );
 }
 
 /**
@@ -1644,7 +1725,7 @@ export function Dropdown<T extends string>({
         // being made to cover both. In CSS and not in JavaScript, because
         // `AppShell` is explicit that this app holds no breakpoint state — a
         // media query cannot disagree with the window it is in.
-        className="tap press inline-flex min-h-8 w-full items-center gap-1.5 rounded-md border border-edge-strong bg-surface px-2.5 text-xs text-fg hover:bg-raised disabled:opacity-40 [@media(pointer:coarse)]:min-h-11"
+        className="tap press inline-flex min-h-8 w-full items-center gap-1.5 rounded-md border border-edge-strong bg-surface px-2.5 text-xs text-fg hover:bg-raised disabled:border-edge disabled:text-faint [@media(pointer:coarse)]:min-h-11"
       >
         {trigger}
         {busy ? <Spinner /> : <Icon as={ChevronDown} size={12} className="ml-auto text-faint" />}

@@ -1,251 +1,391 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { MachineId } from "../../ids";
+import { scopeSummary } from "../../install";
 import type { MachineState } from "../../machine";
+import { marketSettingsPath } from "../../market";
+import { paneAgreement, type PaneAgreement, type PaneReading } from "../../pane";
 import { pluginFailure, readView } from "../../plugins";
+import { navigate } from "../../router";
 import { store, type AppState } from "../../store";
-import { ambiguousNames, type PluginSummary, type PluginView as PluginViewShape } from "../../wire";
-import { Dropdown, Empty, Spinner } from "../bits";
-import { PluginView } from "../PluginView";
-import { toast } from "../Toast";
+import { ambiguousNames } from "../../wire";
+import { Empty, LINK, Spinner } from "../bits";
+import { PluginBlockView } from "../PluginView";
 
 /**
- * A plugin's own settings, as a screen of its own.
+ * A plugin's settings, on the machines somebody selected.
  *
- * ⚠ **It used to be a leaf of the settings sheet and nobody found it.** The path
- * was Settings → Machines → *a* machine → Plugins → a kebab → Settings, six taps
- * behind a control that looks like a row's overflow menu, on a screen that draws
- * one machine at a time. The question that ended it was asked in those words:
- * *"where in settings is the normal plugin setting?"*
+ * ⚠ **It used to be a leaf of the settings sheet and nobody found it** — Settings →
+ * Machines → *a* machine → Plugins → a kebab → Settings, six taps behind a control
+ * that looks like a row's overflow menu. ⚠ **And then it was a section on the
+ * plugin's page, which was still wrong**: that page is what a plugin *is* and is
+ * read once, while its settings are what somebody comes back for. A screen of its
+ * own, one push deep, is what both of those arrived at and it has not moved.
  *
- * ⚠ **And then it was a section on the plugin's page, which was still wrong.**
- * That page is what a plugin *is* — what it does, what it may do, where it is,
- * what it was before this version — and it is read once. Its settings are what
- * somebody comes back for, every time, and they sat below a fold of permissions
- * and above an install control: a form buried in a brochure. So the gear in the
- * head opens them as their own screen, one push deep, with the ◀ back to the
- * plugin.
- *
- * ⚠ **Which machine is asked here rather than assumed, and only where there is
- * something to ask.** Q3.447's argument — that a fleet-wide plugin screen would
- * open with a dropdown, which is a screen asking a question its own copy answers
- * — is why this lived inside a machine at all. It is answered rather than
- * reversed: this screen already knows which machines the plugin is on, so the
- * choice is over *those* and not over the fleet, and where it is on one machine
- * there is no choice and no control. The dropdown appears exactly when a person
- * genuinely has two answers, which is the case that argument never covered.
+ * ⚠ **What moved is the scope, and it is no longer a question this screen asks.**
+ * It drew a machine picker over the installs that report a pane — a set that is not
+ * the set the plugin is on — and where that came to one it drew nothing at all, so
+ * the commonest state named no machine anywhere on screen. The machines are chosen
+ * on the plugin's page now and carried in the URL, so this screen **states** the
+ * scope instead of asking for it. A picker here would be a second scope control
+ * able to disagree with the address.
  *
  * ⚠ **Per machine because the data is.** `plugin_data` is a table in one daemon's
- * SQLite, so there is no such thing as this plugin's settings across a fleet —
- * two machines running the same plugin are two configurations, and a control
- * implying otherwise would be the one lie this screen can tell.
+ * SQLite, so two machines running the same plugin are two configurations — and
+ * writing one form to several is only honest where they agree about its shape,
+ * which is `paneAgreement`'s whole job.
  */
 export function PluginSettingsScreen({
   state,
   pluginId,
+  machines,
   onIdentified,
 }: {
   state: AppState;
   pluginId: string;
+  /** The scope, straight off the route. Never component state. */
+  machines: readonly MachineId[];
   /**
    * What this plugin turned out to be called, handed to the sheet's head.
    *
-   * ⚠ **From the machines rather than from the catalogue**, unlike the entry page
-   * one level up. This screen makes no catalogue request — it has no use for one —
-   * and a plugin that arrived as a file is not in the catalogue at all while being
-   * exactly as configurable. The installed rows carry the name the daemon parsed
-   * out of the manifest, which is the name of the code actually running.
+   * ⚠ **From the machines rather than from the catalogue.** This screen makes no
+   * catalogue request — it has no use for one — and a plugin that arrived as a file
+   * is not in the catalogue at all while being exactly as configurable.
    */
-  onIdentified: (identity: { id: string; name: string; version: string }) => void;
+  onIdentified: (identity: { id: string; name: string; version: string; icon: string | null }) => void;
 }): ReactNode {
-  /**
-   * The machine being configured, once somebody has chosen one.
-   *
-   * `null` means "whichever the list starts with", rather than being seeded from
-   * the installs — which change on every plugin poll, so a seeded value would need
-   * re-seeding, and a re-seed lands under somebody's fingers.
+  /*
+   * ⚠ **The URL is the scope and the fleet is the truth, and they can disagree.** A
+   * machine named in the path may have been revoked in another tab between the
+   * press and this render, and a cold deep link was never pressed at all. Walked
+   * from `state.machines` rather than from the path, so the order is the order the
+   * fleet is drawn in everywhere else and a name in a URL cannot put a host on this
+   * screen that is not in the person's list.
    */
-  const [picked, setPicked] = useState<MachineId | null>(null);
+  const named = new Set(machines);
+  const here = state.machines.filter((one) => named.has(one.id));
+  const gone = machines.filter((id) => !state.machines.some((one) => one.id === id));
 
-  const installs = installsOf(state, pluginId);
-  const offering = installs.filter((one) => one.plugin.contributes.settings);
-  const name = installs[0]?.plugin.name ?? pluginId;
-  const version = [...new Set(offering.map((one) => one.plugin.version))].join(", ");
+  const rows = here.map((machine) => state.pluginsByMachine.get(machine.id)?.find((one) => one.id === pluginId) ?? null);
+  const name = rows.find((one) => one !== null)?.name ?? pluginId;
+  const version = [...new Set(rows.flatMap((one) => (one === null ? [] : [one.version])))].join(", ");
 
   useEffect(() => {
-    onIdentified({ id: pluginId, name, version });
+    // This screen reads no catalogue, so it has no icon to offer.
+    onIdentified({ id: pluginId, name, version, icon: null });
   }, [onIdentified, pluginId, name, version]);
 
-  if (installs.length === 0) {
-    // Reachable: the gear is drawn from this same list, but a machine can be
-    // revoked or go quiet between the press and the render — and a deep link is
-    // not pressed at all.
-    return <Empty>This plugin is not on any of your machines, so there is nothing to configure.</Empty>;
+  if (here.length === 0) {
+    return <Empty>None of those machines is in your list any more, so there is nothing to configure.</Empty>;
   }
-  const chosen = offering.find((one) => one.machine.id === picked) ?? offering[0];
-  if (chosen === undefined) return <Empty>{name} has no settings of its own.</Empty>;
-  const ambiguous = ambiguousNames(state.machines);
-
   return (
-    <div>
-      {offering.length > 1 && (
-        <div className="mb-3 flex min-h-11 items-center gap-2 text-xs text-muted">
-          <span className="shrink-0">On</span>
-          {/*
-           * ⚠ **The app's own picker, never a bare `<select>`.** A native select
-           * keeps the platform's own chrome unless every one of `appearance`, the
-           * border, the radius and the arrow is overridden — which is why the one
-           * that shipped here drew a heavy system outline in the middle of a form
-           * of `edge-strong` boxes, and opened a menu nothing in this palette can
-           * reach. `Dropdown` is the one popover picker in this app: it takes
-           * Escape through `overlay.ts`, keeps the whole listbox ARIA set, and
-           * looks like everything around it because it is what everything around
-           * it uses.
-           */}
-          <Dropdown
-            items={offering.map((one) => ({
-              value: one.machine.id,
-              // The id only where the name does not tell two hosts apart — a
-              // property of the list, asked once rather than per row.
-              label: ambiguous.has(one.machine.name.toLowerCase())
-                ? `${one.machine.name} (${one.machine.id})`
-                : one.machine.name,
-              description: one.plugin.version,
-            }))}
-            value={chosen.machine.id}
-            onChange={setPicked}
-            heading="Machine"
-            trigger={<span className="min-w-0 truncate">{chosen.machine.name}</span>}
-            className="min-w-0 flex-1"
-          />
-        </div>
-      )}
-      {/*
-       * Keyed on the pair, so switching machine remounts rather than carrying the
-       * previous one's form state across — the same reason `AgentDetail` is keyed,
-       * and it matters more here because the state is somebody's half-typed
-       * configuration for a *different* host.
-       */}
-      <PluginPane key={`${chosen.machine.id}:${pluginId}`} machineId={chosen.machine.id} pluginId={pluginId} />
-    </div>
+    <Pane
+      key={here.map((one) => one.id).join(" ")}
+      state={state}
+      pluginId={pluginId}
+      here={here}
+      gone={gone}
+      name={name}
+    />
   );
 }
 
-/**
- * Every machine this plugin is installed on, with the row that machine reports.
- *
- * ⚠ **Walked from `state.machines` rather than from `pluginsByMachine`**, so the
- * order is the order the fleet is drawn in everywhere else, and so a plugin row
- * left behind for a machine that has since been revoked cannot put a host on this
- * screen that is not in the person's list.
- */
-function installsOf(state: AppState, pluginId: string): { machine: MachineState; plugin: PluginSummary }[] {
-  return state.machines.flatMap((machine) => {
-    const found = state.pluginsByMachine.get(machine.id)?.find((one) => one.id === pluginId);
-    return found === undefined ? [] : [{ machine, plugin: found }];
-  });
-}
+/** What happened to one machine's save. */
+type SaveOutcome = { kind: "saving" } | { kind: "saved" } | { kind: "failed"; message: string };
 
-/**
- * One machine's pane, drawn by the same renderer the plugin's screen uses.
- *
- * There is no second vocabulary for settings: a settings pane *is* a view, and a
- * plugin that wants a form returns one. That is what stops this subsystem growing
- * a config schema beside the drawing schema, which would be two ways to describe a
- * text field.
- *
- * ⚠ **What it may contain is narrower than a screen, and that narrowing is
- * applied here as well as in the daemon.** `readView(…, "settings")` keeps `text`,
- * `notice` and `form`, and inside a form keeps the three kinds a setting may be —
- * a box, a switch, a dropdown. The daemon clamps the same set when it answers the
- * *read*, which is what produces the notice its author sees; this side is what
- * makes it hold for an **action's** answer as well, because a form submit reaches
- * the daemon as an action id that says nothing about which pane it was pressed
- * on. The component drawing the pane is the only thing that knows for certain.
- */
-function PluginPane({ machineId, pluginId }: { machineId: MachineId; pluginId: string }): ReactNode {
-  /*
-   * **No refresh timer here, deliberately, and the reason is the form.** A
-   * settings pane is a thing somebody is typing into, and re-reading it under
-   * them would either discard what they typed or keep it over a value the plugin
-   * has since changed. `refreshMs` is honoured on the plugin's *screen*, which is
-   * a thing you look at; a form is a thing you fill in.
-   */
-  const [view, setView] = useState<PluginViewShape | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  /*
-   * ⚠ **What re-seeds the form after a save, and why it is a counter here rather
-   * than a key on the form itself.**
+function Pane({
+  state,
+  pluginId,
+  here,
+  gone,
+  name,
+}: {
+  state: AppState;
+  pluginId: string;
+  here: readonly MachineState[];
+  gone: readonly MachineId[];
+  name: string;
+}): ReactNode {
+  /**
+   * Every selected machine's pane, or `null` while none has been read.
    *
-   * `Form` seeds its state once per mount, so a plugin that normalises a value on
-   * save drew the un-normalised one until reload. Its own docblock claimed it was
-   * "keyed on what the plugin sent" and there was no key anywhere — but adding a
-   * content-derived one inside `PluginView` would have been worse than the bug:
-   * `PluginView` also draws the plugin's **screen**, which `PluginScreen` re-reads
-   * on `refreshMs` (floor 2s), so any poll that changed a field would have wiped
-   * what somebody was typing.
-   *
-   * The distinction the two callers already make is the answer. This pane has no
-   * timer, deliberately, so `view` changes only when the person here acted — and
-   * that is exactly the moment a re-seed is wanted. The screen passes nothing and
-   * keeps today's behaviour.
+   * ⚠ **No refresh timer, deliberately, and the reason is the form.** A settings
+   * pane is a thing somebody is typing into, and re-reading it under them would
+   * either discard what they typed or keep it over a value the plugin has since
+   * changed. `refreshMs` is honoured on the plugin's *screen*, which is a thing you
+   * look at; a form is a thing you fill in. The only re-read is the one a save
+   * causes.
    */
+  const [readings, setReadings] = useState<PaneReading[] | null>(null);
+  const [outcomes, setOutcomes] = useState<ReadonlyMap<MachineId, SaveOutcome>>(new Map());
   const [saves, setSaves] = useState(0);
+  /**
+   * Which round the answers landing now belong to.
+   *
+   * Two saves in a row are ordinary, and a slow first answer must not overwrite
+   * what the second has since written. `MachineInstalls`' `generation` and
+   * `PluginScreen`'s `liveRoute` keep the same gate.
+   */
+  const round = useRef(0);
 
-  useEffect(() => {
-    let live = true;
-    const daemon = store.daemonFor(machineId);
-    if (daemon === undefined) {
-      setError("That machine is not reachable right now.");
-      return;
-    }
-    setError(null);
-    void daemon
-      .pluginView(pluginId, "settings")
-      .then((answer) => {
-        if (!live) return;
-        setView(
-          answer.result.kind === "view"
-            ? readView(answer.result.view, "settings")
-            : { title: null, refreshMs: null, blocks: [] },
-        );
-      })
-      .catch((cause: unknown) => {
-        if (live) setError(pluginFailure(cause));
-      });
-    return () => {
-      live = false;
-    };
-  }, [machineId, pluginId]);
-
-  const act = (actionId: string, context: { row?: string; form?: Record<string, string> }): void => {
-    const daemon = store.daemonFor(machineId);
-    if (daemon === undefined) return;
-    setBusy(true);
-    void daemon
-      .pluginAction(pluginId, actionId, context)
-      .then((answer) => {
-        if (answer.result.kind === "view") {
-          // Narrowed to the settings vocabulary here too: this answer is being
-          // drawn *into this pane*, and the daemon could not know that — an action
-          // id says which action, never which surface pressed it.
-          setView(readView(answer.result.view, "settings"));
-          setSaves((held) => held + 1);
-          return;
+  const readAll = (epoch: number, ids: readonly MachineId[]): void => {
+    void Promise.all(
+      ids.map(async (id): Promise<PaneReading> => {
+        const daemon = store.daemonFor(id);
+        if (daemon === undefined) return { machineId: id, view: null };
+        try {
+          const answer = await daemon.pluginView(pluginId, "settings");
+          return { machineId: id, view: answer.result.kind === "view" ? readView(answer.result.view, "settings") : null };
+        } catch {
+          /*
+           * ⚠ **A machine that could not be read takes no part and is never written
+           * to.** Writing a setting whose current value was never seen is the same
+           * class of failure as writing to a machine nobody selected — `install.ts`'s
+           * `unreachable` arm makes the argument: a value drawn for a host nobody
+           * can read would be a claim.
+           */
+          return { machineId: id, view: null };
         }
-        toast(answer.result.tone === "danger" ? "error" : "ok", answer.result.text);
-      })
-      .catch((cause: unknown) => toast("error", pluginFailure(cause)))
-      .finally(() => setBusy(false));
+      }),
+    ).then((all) => {
+      if (round.current === epoch) setReadings(all);
+    });
   };
 
-  if (error !== null) return <Empty>{error}</Empty>;
-  if (view === null) {
+  const ids = here.map((one) => one.id);
+  useEffect(() => {
+    const epoch = (round.current += 1);
+    setReadings(null);
+    readAll(epoch, ids);
+    // The scope is the component's key, so this runs once per scope; `ids` is
+    // derived from it and `readAll` closes over nothing that outlives the round.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pluginId]);
+
+  if (readings === null) {
     return (
       <div className="flex justify-center py-6">
         <Spinner />
       </div>
     );
   }
-  return <PluginView key={saves} view={view} busy={busy} onAction={act} />;
+
+  const agreement = paneAgreement(readings);
+  const ambiguous = ambiguousNames(state.machines);
+  const nameOf = (id: MachineId): string => {
+    const machine = here.find((one) => one.id === id);
+    if (machine === undefined) return id;
+    return ambiguous.has(machine.name.toLowerCase()) ? `${machine.name} (${machine.id})` : machine.name;
+  };
+
+  const save = (actionId: string, context: { row?: string; form?: Record<string, string> }): void => {
+    const epoch = (round.current += 1);
+    setOutcomes(new Map(agreement.targets.map((id) => [id, { kind: "saving" } as SaveOutcome])));
+    void Promise.all(
+      agreement.targets.map(async (id): Promise<readonly [MachineId, SaveOutcome]> => {
+        const daemon = store.daemonFor(id);
+        if (daemon === undefined) {
+          return [id, { kind: "failed", message: "That machine is not in your list any more." }];
+        }
+        try {
+          /*
+           * ⚠ **Nothing is retried.** `MachineInstalls` retries `plugin_busy` and
+           * only that, because installs are serialised for a whole daemon; an action
+           * is not and has no such refusal. Everything else is not retried because a
+           * `POST` is not replayable — a transport failure says nothing about
+           * whether the plugin's handler ran, and a settings write run twice is a
+           * write nobody asked for.
+           */
+          await daemon.pluginAction(pluginId, actionId, context);
+          return [id, { kind: "saved" }];
+        } catch (cause: unknown) {
+          return [id, { kind: "failed", message: pluginFailure(cause) }];
+        }
+      }),
+    ).then((all) => {
+      if (round.current !== epoch) return;
+      setOutcomes(new Map(all));
+      /*
+       * ⚠ **Re-read every target and run the agreement again**, rather than using
+       * each action's answer where it returned a view. An action's answer is one
+       * machine's redraw and may legitimately differ from a fresh read; only a fresh
+       * read can honestly answer *are they in agreement now?* That is what closes
+       * the mixed loop, and it is a stronger confirmation than any toast: after a
+       * save that reached everything the warning goes and the form comes back
+       * seeded, and if two machines failed it is still there, which is correct.
+       */
+      readAll(epoch, agreement.targets);
+      setSaves((held) => held + 1);
+    });
+  };
+
+  const saving = [...outcomes.values()].some((one) => one.kind === "saving");
+  const scope = here.map((one) => (ambiguous.has(one.name.toLowerCase()) ? `${one.name} (${one.id})` : one.name));
+
+  return (
+    <div>
+      {/*
+       * ⚠ **Always drawn, at every count, and it does not scroll away.** The picker
+       * this replaces appeared only where more than one machine offered a pane, so
+       * the commonest state — one — named no machine anywhere. `sticky` because a
+       * long form scrolls the line off while the question it answers, *which
+       * machines is this going to*, is asked while typing.
+       *
+       * ⚠ `bg-surface` explicitly, `AppShell`'s rule that every surface paints its
+       * own ground: a transparent sticky bar has the form legible straight through
+       * it. `z-10` sits under `LAYER.menu`'s `z-40`, so a `select` field's dropdown
+       * panel paints over this bar rather than under it.
+       */}
+      <div className="sticky top-0 z-10 -mx-4 -mt-4 mb-4 border-b border-edge bg-surface px-4 py-2 text-xs sm:-mx-5 sm:px-5">
+        <span className="text-muted">Writing to </span>
+        <span className="text-fg" title={scope.join(", ")}>
+          {scopeSummary(scope)}
+        </span>
+      </div>
+
+      <Excluded agreement={agreement} gone={gone} nameOf={nameOf} />
+
+      {agreement.form.kind === "divergent" ? (
+        <div className="text-sm">
+          <p className="text-fg">
+            These machines are on versions whose settings are not the same form, so they cannot be set together.
+          </p>
+          {/*
+           * ⚠ **Grouped rather than merely refused, and that is what the scope being
+           * an address buys.** Each group is a link to its own settings screen, so
+           * "these hosts disagree" is two taps from a coherent set rather than a
+           * dead end.
+           */}
+          <ul className="mt-2 flex flex-col gap-1">
+            {agreement.form.groups.map((group) => (
+              <li key={group.machines.join(",")}>
+                <button
+                  type="button"
+                  className={`tap min-h-11 text-left text-xs ${LINK}`}
+                  onClick={() => navigate(marketSettingsPath(pluginId, group.machines), true)}
+                >
+                  {group.machines.map(nameOf).join(", ")}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : agreement.form.kind === "none" ? (
+        <Empty>{name} has no settings on those machines.</Empty>
+      ) : (
+        <>
+          {agreement.form.kind === "mixed" && (
+            /*
+             * ⚠ **The client's own line, drawn outside the block renderer and never
+             * as a synthesized `notice`.** `notice` is the *plugin's* diagnostic
+             * channel — for a plugin with no screen it is the only one it has — so a
+             * sentence this app wrote, drawn in that box, would be indistinguishable
+             * from the plugin's own words.
+             */
+            <p className="mb-4 rounded-md border border-edge-strong px-3 py-2 text-sm text-fg">
+              These machines had different settings for {agreement.form.differing.join(", ")}, so nothing is filled in.
+              Set them again and save to make them the same everywhere.
+            </p>
+          )}
+          {/*
+           * ⚠ **Seeded blank by handing the fields down with no values**, which needs
+           * no prop and no second component: `Form` seeds once per mount from
+           * `seedForm`, and `seedForm` maps a missing value to the empty string — or
+           * `"false"` for a toggle, since every field is a string on the wire.
+           *
+           * Keyed on the round *and* the agreement, so a save that flips `mixed` to
+           * `agreed` re-seeds the form with what the machines now hold.
+           */}
+          <PluginBlockView
+            key={`${saves}:${agreement.form.kind}`}
+            block={
+              agreement.form.kind === "mixed"
+                ? { ...agreement.form.block, fields: agreement.form.block.fields.map((one) => ({ ...one, value: null })) }
+                : agreement.form.block
+            }
+            busy={saving}
+            onAction={save}
+          />
+        </>
+      )}
+
+      {/* Whatever else the machines said, deduplicated and attributed. Nothing is
+          dropped: a plugin with no screen of its own has no other channel for a
+          failure nobody is waiting on. */}
+      {agreement.said.map((one, index) => (
+        <div key={index} className="mt-4">
+          {one.machines.length < here.length && (
+            <p className="mb-1 text-2xs text-muted">{one.machines.map(nameOf).join(", ")}</p>
+          )}
+          <PluginBlockView block={one.block} busy={saving} onAction={save} />
+        </div>
+      ))}
+
+      <Outcomes outcomes={outcomes} nameOf={nameOf} />
+    </div>
+  );
+}
+
+/**
+ * The machines this screen will not write to, and why.
+ *
+ * ⚠ **Named rather than dropped.** A machine somebody selected and never heard
+ * about again is the failure `planTargets`' partition exists to prevent, at the
+ * other end of the same screen.
+ */
+function Excluded({
+  agreement,
+  gone,
+  nameOf,
+}: {
+  agreement: PaneAgreement;
+  gone: readonly MachineId[];
+  nameOf: (id: MachineId) => string;
+}): ReactNode {
+  const said = [
+    ...gone.map((id) => `${nameOf(id)} is not in your list any more`),
+    ...agreement.excluded.flatMap((one) => {
+      if (one.reason === "unreadable") return [`${nameOf(one.machineId)} could not be read`];
+      if (one.reason === "no_form") return [`${nameOf(one.machineId)} has no settings pane`];
+      return [];
+    }),
+  ];
+  if (said.length === 0) return null;
+  return <p className="mb-4 text-2xs text-muted">Not included: {said.join(", ")}.</p>;
+}
+
+/**
+ * What the save did, per machine.
+ *
+ * ⚠ **On screen rather than in a toast, on every path.** Over a fan-out a toast
+ * lies in both directions: "Saved" while two of five failed, or one error toast for
+ * three different failures. `MachineInstalls` takes the same posture, and this
+ * stands until the next act rather than expiring.
+ */
+function Outcomes({
+  outcomes,
+  nameOf,
+}: {
+  outcomes: ReadonlyMap<MachineId, SaveOutcome>;
+  nameOf: (id: MachineId) => string;
+}): ReactNode {
+  const failed = [...outcomes.entries()].flatMap(([id, one]) =>
+    one.kind === "failed" ? [{ id, message: one.message }] : [],
+  );
+  const saved = [...outcomes.values()].filter((one) => one.kind === "saved").length;
+  const line = failed.length > 0 || saved === 0 ? "" : `Saved on ${saved === 1 ? "1 machine" : `${saved} machines`}.`;
+  return (
+    <div className="mt-4">
+      {/* Always mounted, the ternary on the className rather than on the mount —
+          `EventList` and `Toast` both record that a live region inserted in the same
+          paint as its content is commonly not spoken at all, VoiceOver included. */}
+      <p role="status" aria-live="polite" className={line.length === 0 ? "" : "text-xs text-muted"}>
+        {line}
+      </p>
+      {failed.map((one) => (
+        <p key={one.id} className="mt-1 text-2xs wrap-anywhere text-fg">
+          {nameOf(one.id)}: {one.message}
+        </p>
+      ))}
+    </div>
+  );
 }

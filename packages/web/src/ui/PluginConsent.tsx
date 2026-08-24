@@ -98,7 +98,27 @@ export function PluginConsent({
   const asksNothing = manifest.scopes.length === 0 && manifest.hooks.length === 0;
 
   return (
-    <div className="mt-3 rounded-lg border border-edge p-3">
+    /*
+     * ⚠ **The card is drawn only where this block is the identification.**
+     *
+     * The file picker has no other copy of the name — an archive was chosen off a
+     * filesystem and nothing on screen says what it is until this reads it — so
+     * there the border and the padding are what make one object out of a name, a
+     * version, a description and a fold, and they stay.
+     *
+     * The market's entry page already opened with all three, and there the card was
+     * 24px of padding and a line around a single 44px row reading `Permissions`,
+     * sitting between the plugin's own description and the machines it goes on. A
+     * box drawn around one collapsed control reads as a region with something in
+     * it; what is in it is one word. Bare, it is a disclosure in the flow of the
+     * page — which is what it is, and what `Earlier versions` two sections down
+     * already looks like.
+     *
+     * ⚠ **The fold keeps `min-h-11`.** What was spent here is the chrome, never the
+     * target: this is the control that opens a list of capabilities somebody is
+     * about to grant a stranger's code, on a phone.
+     */
+    <div className={names ? "mt-3 rounded-lg border border-edge p-3" : "mt-3"}>
       {names && (
         <>
           <p className="text-sm text-fg">

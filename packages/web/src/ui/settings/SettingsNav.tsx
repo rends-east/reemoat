@@ -1,9 +1,8 @@
-import { ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
 import { navigate } from "../../router";
-import { GROUP_TITLES, navRows, settingsPath, type SectionSpec, type SettingsSection } from "../../settings";
+import { GROUP_TITLES, navRows, settingsPath, type SettingsSection } from "../../settings";
 import type { AppState } from "../../store";
-import { Icon, SETTINGS_HEADING } from "../bits";
+import { RailRow, SETTINGS_HEADING } from "../bits";
 
 /**
  * The list of settings sections, and nothing else.
@@ -59,26 +58,18 @@ export function SettingsNav({
               {GROUP_TITLES[heading]}
             </div>
           )}
-          <SectionRow spec={spec} active={variant === "rail" && spec.id === active} />
+          {/* The row is `bits.tsx`'s, shared with the market's rail: two rails one
+              tap apart inside sheets that look the same must not measure
+              differently. What is *not* shared is this list, which is `navRows`
+              for the reason above. */}
+          <RailRow
+            title={spec.title}
+            blurb={spec.blurb}
+            active={variant === "rail" && spec.id === active}
+            onClick={() => navigate(settingsPath(spec.id))}
+          />
         </div>
       ))}
     </div>
-  );
-}
-
-function SectionRow({ spec, active }: { spec: SectionSpec; active: boolean }): ReactNode {
-  return (
-    <button
-      onClick={() => navigate(settingsPath(spec.id))}
-      className={`tap press flex min-h-11 w-full items-center gap-2 px-4 py-3.5 text-left hover:bg-raised ${
-        active ? "bg-raised" : ""
-      }`}
-    >
-      <span className="min-w-0 flex-1">
-        <span className="block text-sm font-medium">{spec.title}</span>
-        <span className="block truncate text-xs text-muted">{spec.blurb}</span>
-      </span>
-      <Icon as={ChevronRight} size={14} className="shrink-0 text-faint" />
-    </button>
   );
 }

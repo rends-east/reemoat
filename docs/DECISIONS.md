@@ -58,18 +58,18 @@ bug in the file.
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 113 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 71 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 210 | `####` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 215 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 44 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 106 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 64 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 112 | `###` |
-| | | **720** | |
+| | | **725** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 720 rather than the 404
+dividers. So the count is over **both** depths, and it says 725 rather than the 404
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -10049,18 +10049,21 @@ default. Ticking it now fills the list below with ticked boxes, so the snapshot 
 on screen before anything is sent, and the sentence was explaining something the
 screen shows.
 
-**What checks it.** `draftAct` in `packages/web/src/install.ts` is pure and
-DOM-free, so `webcheck` sweeps the whole space — three sizes in each of three
-directions against both flags — rather than the four cases somebody thought of,
-and asserts the two properties that matter: that the button moves *exactly* when
-something has been drafted, and that every cell names one of the four acts. Left
-as a nested ternary in the JSX it was the one decision on that screen with nothing
-checking it, in the place where being wrong means pressing a control that does
-something other than what it says. Injecting two drifts — collapsing `reconfigure`
-into `install`, and letting a file-import screen draft an install it holds no
-archive for — fails six assertions; `typecheck` sees neither.
+**What checked it.** A pure, DOM-free decision in `packages/web/src/install.ts`,
+so `webcheck` swept the whole space — three sizes in each of three directions
+against both flags — rather than the four cases somebody thought of, and asserted
+the two properties that mattered: that the button moved *exactly* when something
+had been drafted, and that every cell named one of the four acts. Left as a nested
+ternary in the JSX it was the one decision on that screen with nothing checking it.
 
-**Status.** Decided
+**Status.** **Reversed by Q3.465**, which is where the machine table lives now.
+The draft is gone and with it the one act it could express that a live control
+cannot — *moving* a plugin in a single press. What survives is the method rather
+than the answer: `rowActs` and `bulkEnabled` are the pure, swept decisions that
+replaced it, extracted for exactly the reason given above, and **only a removal is
+confirmed** is still the rule. The reversal's own cost is recorded there: the code
+was the smaller half, and the assertions that were the argument for it being right
+went with it.
 
 
 #### Q3.459 — A plugin's settings were inside its machine. Why did nobody find them, and where are they now?
@@ -10264,6 +10267,9 @@ carries a version history. A form buried in a brochure.
 **Why a gear rather than a row or a tab.** A gear top-right is the one control
 every operating system has trained everybody to look for, and the head already had
 an empty right-hand slot on that depth — the tab strip only exists at the tabs.
+*(**The gear is gone as of Q3.468**, and the screen is not: what it could not do
+was say* which *machines, and it opened onto a picker over a set that is not the
+set the plugin is on. Everything below about the two rates still holds.)*
 A row in the body would have been a fourth thing competing with the install
 control for the same attention; a third tab would have forced the head back into
 pills, and the heading-plus-one-link shape is what makes two tabs readable at all.
@@ -10289,7 +10295,9 @@ under a bar you reached by pressing a gear says the same thing twice.
 `marketPaneTitle` over the new shape, which is what keeps that cost bounded rather
 than a place to forget.
 
-**Status.** Decided
+**Status.** **Current in its argument, superseded in its mechanism by Q3.468.**
+The settings screen is still a screen of its own, one push deep, with the ◀ back
+to the plugin, and still for the reason above. Only the way in moved.
 
 #### Q3.463 — A plugin returned a `select`. Why did the screenshot look like the stylesheet had failed to load?
 
@@ -10409,6 +10417,298 @@ cache's back. The absence sweep asserts **both** halves, that nothing was set *a
 that nothing was refused, because "set nothing" alone is green on a build that
 throws. Five drifts were injected: finding the option by position, treating `""` as
 a choice, skipping validation, dropping the cache, and each fails only its own.
+
+**Status.** Decided
+
+#### Q3.465 — The plugin page's boxes were a draft. What made them a selection?
+
+**Decision.** A table. A fixed-height scroller with a select-all, a search box and
+a filter above it; per-row Install, Update and Remove that happen when pressed; and
+a bar of four below that acts on whatever is ticked. The boxes select rather than
+draft, and **only a removal is confirmed** — on the row and in the bar.
+
+**What the draft could do that this cannot, stated first.** *Move* a plugin from
+one host to another in a single press. Q3.458 was built for that case and the
+argument was sound: untick, wait, tick, wait is two irreversible steps with no
+state in between that anybody chose. That is the price, and it is paid knowingly.
+
+**What it could not do, which is everything else.** Put a plugin on one machine
+without composing a fleet-wide act. Find a host by name in a fleet. See only the
+machines that have it. And — a fleet being unbounded — it answered *size* with a
+collapsed disclosure, so the list somebody came to read was behind a fold, and so
+were the per-machine failures written into it. Q7.111 records the other end of the
+same complaint: a fleet of one paid three controls and a two-step model to put a
+plugin on the only host there is.
+
+**What "only a removal is confirmed" now costs, and why it is unchanged.** Under
+the draft, the confirmation guarded one act and sat on one button. There are two
+questions now — a row's and the bar's — and both **end with Cancel**, because both
+groups lay out in the same box, so the last child occupies the same pixels and a
+second tap aimed at a control that has just gone inert lands on the undo. Q3.218's
+measured property, reaching a row of icons.
+
+**Six things that read as arbitrary without the measurement.**
+
+  - **Row icons are `size="lg"`, never `sm`.** An `sm` is 24px of ink reaching 44
+    through `after:-inset-2.5`, so two adjacent ones overlap their targets by 18px
+    whatever the gap — and the later element in the DOM wins the hit test, which on
+    this row is the destructive one. A tap on the right of Update's ink would remove
+    a plugin and its `plugin_data`. `chip`'s own docblock warns about this shape.
+  - **The row is a `<div>` with a `<label htmlFor>`.** It *was* a `<label>` wrapping
+    the checkbox so the strip toggled it — and a `<label>` may hold no `<button>`.
+    Left as one, a tap on Remove would also select the row.
+  - **Epochs are per machine.** Act-wide is right while a draft is applied
+    wholesale; two rows pressed a second apart are two acts, and one counter makes
+    the second discard the first's answer for a machine it never touched, leaving
+    that row on "installing" for ever.
+  - **The scroller carries no `overscroll-contain`** and takes a `max-h` rather than
+    a height. Chrome ends the scroll chain at a box carrying containment **even when
+    it has nothing to scroll** — measured at 400px of wheel travel against 0px — and
+    a fleet of one puts one row in a box that then cannot move.
+  - **A hidden row is still a selected row.** Narrowing the filter does not
+    unselect, because hiding is not choosing; `selectionLine` says so, or one press
+    reaches machines that are not on screen.
+  - **`cancellable` is written from the controller the job holds**, inside the job
+    body. Set from `adding.length > 0` it is a fact about the jobs the *screen*
+    drafted, and a removal-only act then draws a live Cancel over an act holding no
+    controller. That defect was reintroduced by this very rewrite and caught by its
+    own assertion.
+
+**And one fact moved onto the row.** An install never switches a plugin on and an
+update **inherits** the switch. That lived in `outcomeText` — which this screen
+never rendered, since it wrote `null` on success and let the store answer — so
+*"I updated it and it does not work"* had nothing preventing it. `installedSubline`
+says it now, and says it above both version comparisons, because the Update icon
+beside the line already carries "behind" while "switched off" has no other
+representation on the row.
+
+**What checks it.** `rowActs` over 32 cells and `bulkEnabled` over 2048, both pure
+and DOM-free — the method Q3.458 established, kept while its answer was reversed —
+plus an **independence** property the single button could not have had: holding
+three counts fixed and moving the fourth never changes the other three answers. The
+placements are read off the file, because nothing typed can hold one: the bulk bar
+after the scroller has closed, exactly one scroller with the list inside it, no
+`overscroll-contain`, no `sm` icon on a row, two questions and neither on an
+install. Eight drifts were injected and each fails at least one.
+
+**Status.** Decided
+
+#### Q3.466 — Two pop-ups, one tap apart, that did not look alike
+
+**Decision.** `/plugins` draws Settings' rail at `sm` and above — Market and
+Installed as rows, the content beside them — sharing `RailRow` with `SettingsNav`
+so the two cannot measure differently.
+
+**The argument it reverses.** `PluginsSheet` held that Settings earns its 224px
+column by having four sections with sub-depths under two of them, while two tabs in
+a column would be a rail with more chrome than content. That is true about the
+*content* and misses what the column is: the shape somebody arrives already knowing
+how to use. These two are siblings a tap apart in the same profile menu, drawn in
+the same sheet — one opening as a heading with a pill beside it and the other as a
+rail beside a pane reads as two applications.
+
+**What the phone keeps, and why it is not an inconsistency.** The strip, `sm:hidden`.
+Settings has an index depth — `/settings` draws the section list and a row drills in
+— and the market has none: a tab *is* the content, so `parseMarketRoute` answers
+`market` for a bare `/plugins` and there is no address for a list to live at.
+Inventing one would move that parser's pinned answers, `depthOf`'s arms and
+`marketUp`'s parenthood, to buy a phone screen whose entire content is two words.
+Both the strip and the rail iterate `MARKET_TABS`, so they cannot drift.
+
+**The ◀ needed a new pure answer, and it is subtler than the sheet's.**
+`settingsUp.withinNav` hides the chevron at `sm`+ when the parent is a row the rail
+draws. Here `marketUpFrom` can answer an **origin** — a settings path somebody
+crossed in from — which this rail cannot draw, so that chevron is the only way back
+at every width. `marketUpWithinNav` is a sibling function rather than a widened
+return type, which is the split Q3.432 already made once for `settingsUpLabel`.
+
+**One thing measured and written down rather than claimed.** Deriving it from
+`marketUpFrom !== marketUp` and writing `origin !== null` give identical answers on
+every shape this parser can produce, so injecting the proxy fails nothing. The
+comparison is kept because it asks the question actually being asked — *did the
+override fire* — and would carry a fourth depth that consulted the origin; the
+docblock says that instead of implying a distinction no driver can see.
+
+**Status.** Decided
+
+#### Q3.467 — Settings opened on a pane whose only content was "use the list"
+
+**Decision.** No neutral state at `sm` and above. `DEFAULT_SECTION` is what the
+pane draws at `/settings` and what the rail highlights, from one constant — and
+`SECTION_SPECS` puts Account first, so the highlighted row and the default are the
+same screen.
+
+**What was there.** *"Pick a setting from the list."* beside a rail with nothing
+selected: half of a 672px sheet spent instructing somebody to use the control next
+to it, on the depth this pop-up opens at.
+
+**Why the order swap is load-bearing rather than cosmetic.** A rail whose
+highlighted row is not the first reads as a selection somebody made. Machines led
+while the pane opened on nothing, where the order was only a reading order.
+
+**Three things it deliberately does not do.** It does not move the parser:
+`/settings` still answers `section: null`, because below `sm` that address really
+*is* the section list and the phone keeps list → detail. It never reaches the
+chrome — fed to `settingsUp` the default answers `{path: "/settings", withinNav:
+true}`, a chevron on a phone pointing at the screen it is already on, so the call
+site is pinned as a literal. And it **may never be an `adminOnly` section**, which
+is asserted rather than commented: the pane draws it with nobody having tapped for
+it, so an admin-only default opens a non-admin on a screen whose every request
+answers 403 — the failure `visibleSections` exists to prevent, arriving by the one
+door that does not go through it.
+
+**One behaviour changed with it.** A non-admin who types `/settings/users` used to
+land on the empty pane at `sm`+ and now lands on Account. That is the same fall-up
+posture and strictly better than a pane that says nothing.
+
+**Status.** Decided
+
+#### Q3.468 — A plugin's settings asked which machine. Why do they now state it?
+
+**Decision.** Settings is the fourth act in the machine table's bulk bar, it writes
+to the machines that are **ticked**, and the scope rides the URL —
+`/plugins/p/:id/settings/:m1/:m2…`, one segment per machine. The screen states that
+scope on a sticky line instead of asking for it, and the gear is gone.
+
+**What the gear could not do.** It was the only route in and it asked no question
+about *which* machines. The screen it opened picked one from a `Dropdown` over
+`installs.filter(contributes.settings)` — a set that is not the set the plugin is on
+— and where that came to one it drew no control at all, so the commonest state named
+no machine anywhere on the screen. That is Q7.108, and this closes it by deleting
+the control rather than varying it: with the scope chosen upstream, a picker here
+would be a second scope control able to disagree with the address.
+
+**Why the path and not `history.state`.** The standing rule is that a
+`history.state` field must degrade to the previous behaviour when absent — and there
+is no previous behaviour, so it degrades to "no machines", i.e. a screen that cannot
+draw, for every shared link, bookmark and reload. Second, `under` and `origin` are
+facts about *how you got here* while the machine set is a fact about *what this
+screen is*: in `history.state` two navigations to one path would be two different
+screens, which breaks `parsePath` — exported precisely so `App` can draw an open
+pop-up's background from a string.
+
+**Repeated segments, never a comma-joined list.** `encodeURIComponent` does not
+escape a comma, so `a,b` and a single id holding one are the same string — and the
+failure is silent and in the direction that writes to hosts nobody chose. The
+parser dedupes and drops empty segments, because the fan-out is over this list, and
+does **not** sort, since the builder joins in the order given. **Empty is the entry
+page and never "all machines"**: writing a form into a host nobody selected is what
+the shape exists to prevent, and a wildcard is how it would arrive.
+
+**Settings is "every" where the other three are "any", and the asymmetry is the
+decision.** Install, Update and Remove are fan-outs: a machine the act cannot reach
+falls out and says so on its own row, which is `planTargets`' partition. Settings is
+a **navigation** — one screen, nothing to skip — so a selection of seven opening a
+screen about a subset is the "selected and never heard about again" failure in
+different clothes. ⚠ Its predicate is **not** `skipReasonFor`: installing is an act
+on the machine and takes `machine:admin`, while a pane is read behind `session:read`
+and written behind `session:write`, so a grant that may configure may not install.
+And `not_installed` sits **below** `no_scope` and `unreachable`, because
+`fetchPlugins` swallows every failure into an empty list — *"that machine does not
+have this plugin"* about an unread host is a claim this client cannot make.
+
+**Writing one form to several machines is only honest where they agree.** `pane.ts`
+decides that, and it is its own module because everything in `plugins.ts` fails
+**open** while this refuses to draw — two opposite postures in one file is how the
+next reader applies the wrong one. Same shape and same values: seed it. Same shape,
+different values: **blank, with a red line naming the keys that differed**, because
+a blanked toggle is *off* rather than empty and a checkbox has no third state.
+Different shape: **draw no form at all**, and group the machines, each group a link
+to its own scope — submitting one machine's keys to another writes fields it does
+not have and omits ones it does, silently in both directions. That remedy exists
+only because the scope is an address.
+
+**Two judgements inside that, named rather than buried.** Values are compared after
+`seedForm` normalisation, so `null` and `""` agree — comparing the wire values would
+report `mixed` for an identical fleet, and the red warning would be a lie about
+somebody's configuration. And `options` are excluded from the form signature, which
+is a **named hole rather than a covered one**: a `select` whose options differ per
+machine is usually a plugin describing local facts, but a value chosen where it
+exists and saved where it does not reaches a daemon whose plugin may not recognise
+it.
+
+**Nothing a machine said is dropped, and identical blocks collapse.** `notice` is
+the entire diagnostic channel for a plugin with no screen (Q3.460), so drawing the
+first machine's and hiding four others' is exactly what that rule forbids. The
+collapse is what makes a real diagnostic *visible*: a danger notice on one host
+becomes the only attributed line on the screen. And the red warning is drawn
+**outside** the block renderer, never as a synthesized `notice`, or a sentence this
+app wrote would be indistinguishable from the plugin's own words.
+
+**What checks it.** The agreement's partition over 125 fleet shapes — every machine
+handed in is a target or is named, exactly once — plus the four not-divergent cases
+that would each refuse a whole fleet over something that changes no write. Four
+drifts injected: raw-value comparison, merging divergent forms, drawing only the
+first machine's notices, and folding `options` into the signature.
+
+**Status.** Decided
+
+#### Q3.469 — Nothing on this screen may move, and an inert control may not vanish
+
+**Decision.** Three fixes off one screenshot pass, and they are one rule seen from
+three sides: **removal leaves the row entirely**, **the line above the button strip
+reserves its own height**, and **a disabled outlined button keeps its border**.
+
+**The row's bin, and why moving it is not merely tidier.** It put an unrecoverable
+act 44px from a checkbox on the busiest strip here — and the question guarding it
+had to *replace the row* to fit, because a pair of buttons plus the sentence on a
+second line grew the row by ~40px and moved every row under it, the table, and the
+bar beneath. A control that answers for itself inside the space it occupies is
+already a compromise; one that does so while the layout jumps is the wrong thing
+under a thumb at the moment it matters most. Off the row, a removal always goes
+through a selection: two deliberate acts, one place to confirm, and a sentence
+naming every machine it reaches rather than a truncated one naming the row it
+happened to sit on.
+
+**`rowActs` still reports `remove` and `drawnActs` is what narrows it**, which is
+the part that reads as redundant and is not: the *bar* reads `rowActs` to decide
+whether its own Remove may move, so a row that could not report a removable machine
+would take the bar's Remove down with it. What is asserted is not the filter — it
+is that everything a row draws is undone by pressing something else on the same
+row.
+
+**Two conditionally mounted lines were two ways to move the bar.** The selection
+count arrived on the first tick of a box; the reason Settings will not move arrived
+on the tick that made the selection unconfigurable. Both sat above the strip and
+both pushed it. One line now, always mounted at a reserved `min-h-4`, truncating so
+a long blocker cannot wrap into a second — and the **blocker wins where there is
+one**, because the count is already visible in the ticked boxes three lines up
+while *why a control will not move* is visible nowhere else.
+
+**And the disabled button, which is the one with reach beyond this screen.**
+`disabled:opacity-40` rode `Button`'s base string for all four tones. On an
+outlined tone that is not a dimming, it is a **deletion**: `--color-edge-strong` is
+held at ≥3:1 precisely because a control drawn in the colour of what it sits on has
+its border as its only identification, and 40% of that is ~1.2:1 — the hairline
+`index.css` forbids for exactly this job. So a disabled `plain` button had no
+boundary, and the moment one became live it read as having *grown*. Reported in
+those words, off a strip of four where three are inert most of the time.
+
+**Nothing about the box ever changed**, and that is worth stating because the report
+was about size: `min-h-11 px-3` in both states, and `opacity` cannot move layout.
+What changed was the only thing that said a control was there.
+
+`primary` and `ghost` keep the opacity — a fill and bare text have no boundary to
+lose — so the change is scoped to the two tones that draw one, plus `Dropdown`'s
+trigger, which is an outlined control with the same token. It reaches every
+disabled outlined button in the app, ~91 call sites, and it is strictly the right
+direction at all of them.
+
+**What checks it.** `drawnActs` swept over the same 32 row cells `rowActs` is, with
+the reversibility property rather than the filter; the row read off disk for the
+absence of a bin and for drawing through `drawnActs`; one asker in the file, and
+neither install nor update is it; and the reserved height pinned as a literal with
+both old conditional mounts asserted gone. Injected: `drawnActs` passing everything
+through fails three, the row drawing every act fails one, and the line losing its
+reserve fails one.
+
+**A residual, and it is about this repository rather than this screen.** The rule
+about a disabled control keeping its border belongs in `web-shell.md`'s palette
+bullet, which scopes `bits.tsx` and would deliver it to whoever edits that file.
+It does not fit: that file is at 31,998 of `docscheck`'s 32,000, and the clause is
+~200. The argument lives in `BUTTON_TONE`'s own docblock instead, which is where
+somebody changing it is standing — but the file wanting a split is now costing
+rules their home, which is the signal `plugins.md` and `plugin-ui.md` acted on.
 
 **Status.** Decided
 
@@ -18252,7 +18552,11 @@ pane, so this is the state the entry path selects for rather than an edge.
 static `On laptop` line at one, the `Dropdown` at several. Sticky, because a long
 pane scrolls the line off and the question is asked while typing.
 
-**Status.** Not built — deferred at the 2026-08-24 design review
+**Status.** **Built, and more strongly than this asked** — see Q3.468. The line is
+always drawn, at every count, and it is sticky for exactly the reason given here.
+The *control* it proposed varying was deleted rather than varied: the scope is
+chosen on the plugin's page and carried in the URL, so a picker on this screen
+would be a second scope control able to disagree with the address.
 
 ### Q7.109 — The consent card's own strings are the one place a stranger's text is not wrapped
 

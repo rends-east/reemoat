@@ -128,7 +128,7 @@ function MarketRow({ entry, state }: { entry: CatalogueEntry; state: AppState })
       onClick={() => navigate(marketEntryPath(entry.id))}
       className="tap press flex w-full min-h-14 items-center gap-3 rounded-lg border border-edge bg-surface px-3 py-2.5 text-left hover:border-edge-strong"
     >
-      <MarketIcon entry={entry} />
+      <MarketIcon icon={entry.source.icon} />
       <span className="min-w-0 flex-1">
         <span className="flex min-w-0 items-center gap-1.5">
           <span className="min-w-0 truncate text-sm font-medium">{entry.name}</span>
@@ -158,26 +158,34 @@ function MarketRow({ entry, state }: { entry: CatalogueEntry; state: AppState })
  * than as an absence. `onError` covers the other half: a commit whose icon has
  * been deleted since publish, which no amount of validation at publish can catch.
  */
-function MarketIcon({ entry }: { entry: CatalogueEntry }): ReactNode {
+export function MarketIcon({ icon, size = 32 }: { icon: string | null; size?: number }): ReactNode {
   const [broken, setBroken] = useState(false);
-  if (entry.source.icon === null || broken) {
+  /*
+   * ⚠ **The box is a style so the two callers cannot drift**, and `size` is a
+   * number rather than a class because it is also the `<img>`'s own attribute — an
+   * intrinsic size is what stops the row reflowing when the bytes land.
+   */
+  const box = { width: size, height: size };
+  if (icon === null || broken) {
     return (
       <span
         aria-hidden="true"
-        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-raised text-muted"
+        style={box}
+        className="inline-flex shrink-0 items-center justify-center rounded-md bg-raised text-muted"
       >
-        <Icon as={Puzzle} size={16} />
+        <Icon as={Puzzle} size={Math.round(size / 2)} />
       </span>
     );
   }
   return (
     <img
-      src={entry.source.icon}
+      src={icon}
       alt=""
-      width={32}
-      height={32}
+      width={size}
+      height={size}
+      style={box}
       onError={() => setBroken(true)}
-      className="h-8 w-8 shrink-0 rounded-md"
+      className="shrink-0 rounded-md"
     />
   );
 }

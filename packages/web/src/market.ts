@@ -1,4 +1,5 @@
 import type { CatalogueEntry } from "./catalogue";
+import { machineId, type MachineId } from "./ids";
 
 /**
  * Which plugins screen a URL names.
@@ -13,10 +14,10 @@ import type { CatalogueEntry } from "./catalogue";
  *
  * Four addresses:
  *
- *   /plugins                    the market
- *   /plugins/installed          what is on your machines
- *   /plugins/p/:id              one plugin in the market, in full
- *   /plugins/p/:id/settings     that plugin's own settings, on its own screen
+ *   /plugins                      the market
+ *   /plugins/installed            what is on your machines
+ *   /plugins/p/:id                one plugin in the market, in full
+ *   /plugins/p/:id/settings/:m…   that plugin's settings, on those machines
  *
  * **`/p/:machineId/:pluginId` is a different screen and stays where it is.** That
  * one is a plugin *drawing something* on a machine — a board somebody opens
@@ -45,20 +46,32 @@ export interface MarketRoute {
    */
   entry: string | null;
   /**
-   * Whether the entry's **settings** screen is the one on show.
+   * The machines whose settings are on show, in the order the URL named them.
+   * **Empty means this is not the settings screen.**
    *
-   * ⚠ **A screen of its own rather than a section on the entry page**, and the
-   * gear in the head is what opens it. The entry page is what a plugin *is* —
-   * what it does, what it may do, where it is — and is read once; its settings
-   * are what somebody came back for. As a section they sat below a fold of
-   * permissions and above an install control, on a page that also carries a
-   * version history, which is a form buried in a brochure.
+   * ⚠ **A screen of its own rather than a section on the entry page.** The entry
+   * page is what a plugin *is* — what it does, what it may do, where it is — and
+   * is read once; its settings are what somebody came back for. As a section they
+   * sat below a fold of permissions and above an install control, on a page that
+   * also carries a version history, which is a form buried in a brochure.
    *
-   * Never set without an `entry`, enforced by {@link parseMarketRoute} rather
-   * than by the type — `MarketRoute.entry`'s own note gives the reason, and it is
-   * the same one.
+   * ⚠ **A list rather than a flag, and the list is the point.** Settings are an
+   * act on *the machines somebody selected* on the plugin's page, so the screen
+   * has to carry which — and the URL is the only place that survives a reload,
+   * Back, Forward and being shared. `plugin_data` is a table in one daemon's
+   * SQLite; a screen that could not say which daemons it was about would be the
+   * one lie this subsystem refuses.
+   *
+   * ⚠ **Empty is the entry page, and never "all machines".** Writing a form into
+   * a host nobody selected is the failure this shape exists to prevent, and "all"
+   * is the guess that produces it. The absence of a machine is the absence of the
+   * screen.
+   *
+   * Never non-empty without an `entry`, enforced by {@link parseMarketRoute}
+   * rather than by the type — `MarketRoute.entry`'s own note gives the reason, and
+   * it is the same one.
    */
-  settings: boolean;
+  settings: readonly MachineId[];
 }
 
 /**
@@ -80,21 +93,42 @@ export function parseMarketRoute(
   segments: readonly (string | undefined)[],
   decode: (part: string) => string = (part) => part,
 ): MarketRoute {
-  if (segments[0] === "installed") return { tab: "installed", entry: null, settings: false };
+  if (segments[0] === "installed") return { tab: "installed", entry: null, settings: [] };
   if (segments[0] === "p") {
     const wanted = segments[1];
     // An entry always belongs to the market, so the tab behind it is `market` at
     // every depth. That is what makes the ◀ land on a list with the plugin in it.
-    if (wanted === undefined) return { tab: "market", entry: null, settings: false };
+    if (wanted === undefined) return { tab: "market", entry: null, settings: [] };
     /*
      * Anything after the id that is not the literal `settings` drops to the
      * plugin's own page — the "fall up to the nearest real screen" posture this
      * function already takes twice, and the one `parseSettingsRoute` takes for the
      * segment after a machine.
      */
-    return { tab: "market", entry: decode(wanted), settings: segments[2] === "settings" };
+    if (segments[2] !== "settings") return { tab: "market", entry: decode(wanted), settings: [] };
+    /*
+     * ⚠ **Deduplicated, and empty segments dropped, because the fan-out is over
+     * this list.** `…/settings/m_1/m_1` would send the same form to one daemon
+     * twice — harmless for an idempotent plugin and a double write for any other —
+     * and the line whose whole job is to say which machines would name one of them
+     * twice. `//` names nothing.
+     *
+     * ⚠ **Not sorted.** {@link marketSettingsPath} joins in the order it is given,
+     * so sorting here would make a path and its own parse disagree about the
+     * string, which is the one thing a round trip must not do.
+     *
+     * ⚠ **And not bounded.** A ceiling that silently dropped machines would be the
+     * inverse of the failure this shape prevents — it would skip a host somebody
+     * *did* select, and skipping is exactly as quiet as writing. A fleet of two
+     * hundred is a four-kilobyte path, under every limit in the way.
+     */
+    const named = segments
+      .slice(3)
+      .filter((one): one is string => one !== undefined && one.length > 0)
+      .map((one) => machineId(decode(one)));
+    return { tab: "market", entry: decode(wanted), settings: [...new Set(named)] };
   }
-  return { tab: "market", entry: null, settings: false };
+  return { tab: "market", entry: null, settings: [] };
 }
 
 /**
@@ -120,14 +154,27 @@ export function marketEntryPath(entry: string): string {
 }
 
 /**
- * The path for one plugin's settings.
+ * The path for one plugin's settings, on a given set of machines.
+ *
+ * ⚠ **The machines are required rather than a widening positional.**
+ * `settingsPath`'s idiom does not apply here: an entry with no machines is not a
+ * settings screen at all, so a signature able to omit them would be a signature
+ * able to express a URL that falls up to a different page. The one caller that
+ * could produce an empty list draws its control disabled instead, and
+ * {@link parseMarketRoute}'s fall-up is the belt under a stale bookmark.
+ *
+ * ⚠ **Each id is its own segment, and that is not a formatting choice.**
+ * `encodeURIComponent` does **not** escape a comma, so a comma-joined list and a
+ * single id holding one are the same string — and the failure is silent and in the
+ * direction that writes to machines nobody chose.
  *
  * Built on {@link marketEntryPath} rather than beside it, so the two cannot
  * disagree about how an id is encoded — a plugin id is a URL segment and may hold
  * anything a manifest wrote.
  */
-export function marketSettingsPath(entry: string): string {
-  return `${marketEntryPath(entry)}/settings`;
+export function marketSettingsPath(entry: string, machines: readonly MachineId[]): string {
+  const base = `${marketEntryPath(entry)}/settings`;
+  return machines.length === 0 ? base : `${base}/${machines.map((one) => encodeURIComponent(one)).join("/")}`;
 }
 
 /**
@@ -142,7 +189,7 @@ export function marketUp(route: MarketRoute): string | null {
   if (route.entry === null) return null;
   // Settings walk to the plugin, and the plugin walks to the list — one level at a
   // time, which is what stops the ◀ and the ✕ becoming the same control.
-  return route.settings ? marketEntryPath(route.entry) : marketPath("market");
+  return route.settings.length > 0 ? marketEntryPath(route.entry) : marketPath("market");
 }
 
 /**
@@ -167,8 +214,59 @@ export function marketUp(route: MarketRoute): string | null {
  * body, so a rule left in there is a rule `webcheck` cannot reach.
  */
 export function marketUpFrom(route: MarketRoute, origin: string | null): string | null {
-  if (route.entry !== null && !route.settings && origin !== null) return origin;
+  if (route.entry !== null && route.settings.length === 0 && origin !== null) return origin;
   return marketUp(route);
+}
+
+/**
+ * Whether the screen this ◀ points at is a row the rail already draws.
+ *
+ * `settingsUp`'s second field, as a function of its own — because {@link
+ * marketUpFrom} answers a **string** whose values are pinned, and widening its
+ * return type would move every one of them. Q3.432 made exactly this split once
+ * already, for `settingsUpLabel`, and for the identical reason.
+ *
+ * ⚠ **It is subtler than `settingsUp`'s field, and the first line is why.**
+ * `marketUpFrom` can answer an **origin** — a settings-sheet path somebody crossed
+ * in from — and the rail draws this pop-up's own two tabs and nothing else. So a
+ * chevron leaving here is the only way back **at every width** and must never be
+ * withdrawn.
+ *
+ * ⚠ **The first line and a plain `origin !== null` agree on every shape this
+ * parser can produce today, and that is said out loud rather than left to be
+ * discovered.** They can only differ at a depth where the origin is *offered* and
+ * does not win, and the settings depth — the one that fits that description — is
+ * already excluded by the second line. So no driver can tell the two spellings
+ * apart, and injecting the proxy fails nothing. The comparison is kept anyway
+ * because it derives from the question actually being asked — *did the override
+ * fire* — rather than from a condition that currently implies it: a fourth depth
+ * that consulted the origin would be carried by this and silently mishandled by
+ * the proxy. That is a reason to prefer it, not a property to claim, which is why
+ * the sweep beside it runs over every shape × both origin states rather than over
+ * this arm.
+ */
+export function marketUpWithinNav(route: MarketRoute, origin: string | null): boolean {
+  if (marketUpFrom(route, origin) !== marketUp(route)) return false;
+  // A tab has no parent inside the pop-up at all — `marketUp` is `null` exactly
+  // when `entry` is — and settings walk to their own plugin, which is a depth
+  // rather than a rail row.
+  return route.entry !== null && route.settings.length === 0;
+}
+
+/**
+ * What the ◀ says it goes to. `settingsUpLabel`'s counterpart.
+ *
+ * ⚠ **Named for where it actually goes.** With an origin the chevron leaves this
+ * pop-up, so "Back to Market" would name a list the person has never opened —
+ * which is precisely the complaint the origin work exists to answer, and saying it
+ * in the accessible name is the worst version of it.
+ *
+ * Derived from the same comparison {@link marketUpWithinNav} makes, so a label and
+ * a width gate that disagree are not expressible.
+ */
+export function marketUpLabel(route: MarketRoute, origin: string | null): string {
+  if (route.settings.length > 0) return "Back to the plugin";
+  return marketUpWithinNav(route, origin) ? "Back to Market" : "Back";
 }
 
 /**

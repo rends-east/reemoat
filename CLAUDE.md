@@ -57,7 +57,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 720 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 725 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -129,10 +129,15 @@ pnpm webcheck                        # packages/web: the cursor, rotation, repla
                                      #   And the import flow: that an old daemon is known by the
                                      #   shape of its refusal rather than by its version, and that
                                      #   the export skill asks for what the extractor accepts. And
-                                     #   where a plugin's settings are — their own screen behind a gear,
+                                     #   where a plugin's settings are — their own screen, scoped to
+                                     #   the machines somebody ticked and carrying them in the URL,
                                      #   narrowed to three controls, drawn with this app's own picker
                                      #   rather than the platform's — read off the files that place
-                                     #   them, since nothing typed can hold a placement
+                                     #   them, since nothing typed can hold a placement. Plus the
+                                     #   machine table those machines are ticked on: what one row may
+                                     #   offer and what the bar may, both swept; that the bar sits
+                                     #   outside the scroller and the scroller ends no scroll chain;
+                                     #   and what N settings panes add up to when they disagree
                                      #   And the newest: that a transcript missing its beginning
                                      #   *says so* — `transcriptNotice` as a total partition over
                                      #   720 states, its pair with `loadStop`, and the one string

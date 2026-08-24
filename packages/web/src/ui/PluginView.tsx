@@ -48,13 +48,23 @@ export function PluginView({
         // rather than patching it — so position is the only honest identity, and
         // inventing one from the contents would reorder text under somebody's
         // cursor the first time two blocks matched.
-        <Block key={index} block={block} busy={busy} onAction={onAction} onOpen={onOpen} />
+        <PluginBlockView key={index} block={block} busy={busy} onAction={onAction} onOpen={onOpen} />
       ))}
     </div>
   );
 }
 
-function Block({
+/**
+ * One block, drawn.
+ *
+ * ⚠ **Exported for the settings pane, which draws blocks that came from *different
+ * machines* and cannot hand this component a single `PluginView`.** It needs the
+ * same `notice` — the same box, the same danger ink, the same `text-sm` — because
+ * a settings pane is a plugin's whole diagnostic channel when it has no screen of
+ * its own, and a second copy of that markup is how the danger arm gets lost in one
+ * of them. Q3.460.
+ */
+export function PluginBlockView({
   block,
   busy,
   onAction,
@@ -421,6 +431,15 @@ function Field({
      */
     const chosen = field.options.find((option) => option.value === value) ?? null;
     return (
+      /*
+       * ⚠ **`help` sits outside the `<label>`, and that is a hit-target fix rather
+       * than markup tidying.** A `<label>` activates its first labelable descendant
+       * from anywhere inside it, and `Dropdown`'s trigger is a `<button>` — so with
+       * the help paragraph inside, every word of it opened the picker. Reported as
+       * the field being "clickable much lower than it actually is", which is exactly
+       * what it was: the label's box ran to the bottom of a three-line explanation.
+       */
+      <div className="flex flex-col gap-1">
       <label className="flex flex-col gap-1">
         <span className="text-sm">{field.label}</span>
         <Dropdown
@@ -434,12 +453,16 @@ function Field({
             </span>
           }
         />
-        {help}
       </label>
+      {help}
+      </div>
     );
   }
 
   return (
+    /* Same split as the `select` arm above, for its reason: inside the label, the
+       help text focuses the input from wherever it is clicked. */
+    <div className="flex flex-col gap-1">
     <label className="flex flex-col gap-1">
       <span className="text-sm">{field.label}</span>
       <input
@@ -452,7 +475,8 @@ function Field({
         placeholder={field.placeholder ?? undefined}
         onChange={(event) => onChange(event.target.value)}
       />
-      {help}
     </label>
+    {help}
+    </div>
   );
 }

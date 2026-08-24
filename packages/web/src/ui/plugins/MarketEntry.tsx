@@ -10,6 +10,8 @@ import {
 import type { TargetOutcome } from "../../install";
 import { readManifestText, type ManifestPreview } from "../../pluginArchive";
 import { consentBroken, ConsentBrokenError } from "../../plugins";
+import { marketSettingsPath } from "../../market";
+import { navigate } from "../../router";
 import type { AppState } from "../../store";
 import { Empty, LINK, SETTINGS_HEADING, SETTINGS_SECTION, Spinner } from "../bits";
 import { PluginConsent } from "../PluginConsent";
@@ -60,7 +62,7 @@ export function MarketEntry({
    * copy underneath it. Carries the id so the head can refuse a name that belongs
    * to the plugin somebody just navigated away from.
    */
-  onIdentified: (identity: { id: string; name: string; version: string }) => void;
+  onIdentified: (identity: { id: string; name: string; version: string; icon: string | null }) => void;
 }): ReactNode {
   const read = useCatalogue(base, CATALOGUE_PATHS.get(entryId), readOne);
 
@@ -112,7 +114,7 @@ function Entry({
   state: AppState;
   base: string;
   entry: CatalogueEntry;
-  onIdentified: (identity: { id: string; name: string; version: string }) => void;
+  onIdentified: (identity: { id: string; name: string; version: string; icon: string | null }) => void;
 }): ReactNode {
   const consent = usePinnedManifest(entry);
 
@@ -120,8 +122,8 @@ function Entry({
   // fields rather than on `entry` so that a catalogue re-read returning an equal
   // object does not set state on every poll.
   useEffect(() => {
-    onIdentified({ id: entry.id, name: entry.name, version: entry.version });
-  }, [onIdentified, entry.id, entry.name, entry.version]);
+    onIdentified({ id: entry.id, name: entry.name, version: entry.version, icon: entry.source.icon });
+  }, [onIdentified, entry.id, entry.name, entry.version, entry.source.icon]);
 
   /*
    * What the disclosure block draws, and therefore what somebody agreed to.
@@ -246,13 +248,24 @@ function Entry({
 
       <section className={SETTINGS_SECTION}>
         {/*
-         * ⚠ **Named for the act rather than for the state.** The boxes under this
-         * heading are a draft of where the plugin should be and the button at the
-         * foot applies it, so the section is *Install* — the thing that will
-         * happen — rather than "where it is installed", which described a list
-         * that no longer only describes.
+         * ⚠ **Named for the acts under it rather than for the state**, which is the
+         * rule the old heading already followed — it read *Install* rather than
+         * "where it is installed" because the control below it was an act. It names
+         * both now because the section holds both: the way onto a machine, and the
+         * way into what the plugin does once it is there.
+         *
+         * ⚠ **"Settings" here is the *plugin's* settings pane**, not this app's
+         * settings screen — `SETTINGS_HEADING` and `SETTINGS_SECTION` are the
+         * chrome idiom and are unrelated to the word.
          */}
-        <MachineInstalls pluginId={entry.id} state={state} install={install} available={entry.version} heading="Install" />
+        <MachineInstalls
+          pluginId={entry.id}
+          state={state}
+          install={install}
+          available={entry.version}
+          heading="Settings and installation"
+          onConfigure={(machines) => navigate(marketSettingsPath(entry.id, machines))}
+        />
       </section>
 
       <Versions base={base} entry={entry} />
@@ -369,7 +382,7 @@ function Offline({
   state: AppState;
   pluginId: string;
   notice: string | null;
-  onIdentified: (identity: { id: string; name: string; version: string }) => void;
+  onIdentified: (identity: { id: string; name: string; version: string; icon: string | null }) => void;
 }): ReactNode {
   const on = [...state.pluginsByMachine.values()].flatMap((plugins) => plugins.filter((one) => one.id === pluginId));
   const first = on[0] ?? null;
@@ -377,7 +390,8 @@ function Offline({
   const version = [...new Set(on.map((one) => one.version))].join(", ");
 
   useEffect(() => {
-    onIdentified({ id: pluginId, name, version });
+    // No catalogue entry, so no icon — the glyph is the ordinary case here.
+    onIdentified({ id: pluginId, name, version, icon: null });
   }, [onIdentified, pluginId, name, version]);
 
   if (first === null) {
@@ -395,7 +409,17 @@ function Offline({
       </p>
 
       <section className={SETTINGS_SECTION}>
-        <MachineInstalls pluginId={pluginId} state={state} install={null} heading="Where it is" />
+        {/* ⚠ **Settings still work here**, and that is why `settingsBlockFor`
+            consults nothing about installing: a plugin that arrived as a file is
+            exactly the one whose settings somebody wants, and this screen makes no
+            catalogue request to draw them. */}
+        <MachineInstalls
+          pluginId={pluginId}
+          state={state}
+          install={null}
+          heading="Where it is"
+          onConfigure={(machines) => navigate(marketSettingsPath(pluginId, machines))}
+        />
       </section>
     </div>
   );
