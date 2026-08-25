@@ -12,7 +12,7 @@ import { navigate } from "../../router";
 import type { AppState } from "../../store";
 import type { PluginSummary } from "../../wire";
 import { Badge, Button, DangerButton, Empty, Icon, SETTINGS_HEADING, SETTINGS_SECTION } from "../bits";
-import { PluginConsent } from "../PluginConsent";
+import { PLUGIN_ARCHIVE_ACCEPT, PluginArchiveNote, PluginConsent, PluginUnreadable } from "../PluginConsent";
 import { MachineInstalls } from "./MachineInstalls";
 import { useCatalogue } from "./MarketList";
 
@@ -62,14 +62,6 @@ export function InstalledList({ state, base }: { state: AppState; base: string |
       </section>
     </div>
   );
-}
-
-/** One plugin, and everywhere it is. */
-interface InstalledRow {
-  id: string;
-  name: string;
-  /** Every machine holding it, with the copy that machine has. */
-  on: { machine: MachineState; plugin: PluginSummary }[];
 }
 
 /**
@@ -246,16 +238,11 @@ function ImportPlugin({ state }: { state: AppState }): ReactNode {
 
   return (
     <div className="mt-2">
-      <p className="text-xs text-muted">
-        A <code className="text-muted/80">.tar.gz</code> or <code className="text-muted/80">.zip</code> holding{" "}
-        <code className="text-muted/80">plugin.json</code> and <code className="text-muted/80">server.js</code>.
-        Installing the same id again updates it and keeps what it has stored.
-      </p>
-      <p className="mt-1 text-xs text-muted">Nothing is sent until you have read what it asks for.</p>
+      <PluginArchiveNote />
       <input
         ref={input}
         type="file"
-        accept=".tgz,.gz,.zip,application/gzip,application/zip"
+        accept={PLUGIN_ARCHIVE_ACCEPT}
         className="hidden"
         onChange={(event) => {
           const chosen = event.target.files?.[0];
@@ -270,24 +257,23 @@ function ImportPlugin({ state }: { state: AppState }): ReactNode {
       />
 
       {phase.kind === "confirming" && phase.peek.kind === "ok" && <PluginConsent manifest={phase.peek.manifest} />}
+      {/* `Each machine`, because one press here reaches every ticked host and each
+          of them parses the archive itself. The machine picker in Settings passes
+          the other word, and the two sentences are otherwise one string. */}
       {phase.kind === "confirming" && phase.peek.kind === "unreadable" && (
-        <div className="mt-3 rounded-lg border border-edge p-3">
-          <p className="text-sm text-fg">This file cannot be read here</p>
-          <p className="mt-1 text-xs text-muted">
-            {phase.peek.reason}. Nothing has been sent. Each machine will still check it properly — but until it does,
-            nobody can tell you what this plugin asks for.
-          </p>
+        <PluginUnreadable reason={phase.peek.reason} checker="Each machine">
           {/*
            * The separate, named press. `DangerButton` and its own words, never the
-           * ordinary Install below — see {@link unread}. It reaches a whole fleet
-           * from here rather than one machine, so it says so.
+           * ordinary Install below — see {@link unread}. Inside the card rather
+           * than in the row below, because from here it reaches a whole fleet: the
+           * sentence it is buying past should be the thing directly above it.
            */}
           {!unread && (
             <DangerButton icon={Upload} onClick={() => setUnread(true)}>
               Install without reading it
             </DangerButton>
           )}
-        </div>
+        </PluginUnreadable>
       )}
 
       {phase.kind === "confirming" && (phase.peek.kind === "ok" || unread) && (

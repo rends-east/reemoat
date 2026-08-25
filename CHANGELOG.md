@@ -54,7 +54,7 @@ it — so a citation here would be the one kind nothing checks.
   nothing on disk changes. That holds for a reinstall of the version already
   installed, and for a plugin that is switched off: the build is started long
   enough to prove it runs and stopped again before the row is written, so an
-  update nobody could have noticed was broken is refused rather than committed. Six new daemon routes under `/plugins`.
+  update nobody could have noticed was broken is refused rather than committed. Seven new daemon routes under `/plugins`.
 - **Plugins on the machine's settings screen**, beside its agents, with each
   plugin's scopes written out as sentences on its row. A plugin that draws a
   screen gets a launcher in the rail's footer and a route of its own at
@@ -71,9 +71,20 @@ it — so a citation here would be the one kind nothing checks.
   closing an asymmetry: a plugin could learn a question was asked and not how it
   ended, could answer a permission but not a form, and could start a session
   without being able to ask which agents this machine has.
-- Plugin API **2**. The floor stays at 1, so a plugin written for 1 runs
-  untouched; one that needs the new fields declares 2 and is refused by an older
-  daemon with a sentence rather than losing its navigation quietly.
+- **A plugin market**, read by the browser and never by the daemon. The catalogue
+  is its own service on its own host, named by `REEMOAT_CP_PLUGIN_CATALOGUE_URL`
+  and reported to the client as `plugins.catalogue` on `GET /v1/instance`; an
+  instance that sets none has no market and says so. Installing from it is
+  `POST /plugins/source`, which hands the daemon a repository and a **commit**
+  rather than an archive, so what arrives is what the catalogue pinned. The daemon
+  still discovers nothing and polls nothing.
+- Plugin API **4**, in three rungs that all land here. The floor stays at 1, so a
+  plugin written for 1 runs untouched; one that needs more declares the rung it
+  needs and is refused by an older daemon with a sentence rather than losing its
+  navigation quietly. **v2** added `open`, `refreshMs` and `tone`; **v3** added the
+  `model` scope; **v4** added `model.list` and the optional `model` on
+  `model.complete`. Declaring `2` and using the `model` scope is refused, so the
+  rung to declare is the highest one whose features a plugin actually uses.
 
 ### Fixed
 

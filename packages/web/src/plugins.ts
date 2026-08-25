@@ -245,14 +245,6 @@ export function seedForm(fields: readonly PluginField[]): Record<string, string>
 }
 
 /**
- * A refusal from a plugin route, as a sentence.
- *
- * The shape `importFailure` established one screen over, and for its reasons: the
- * codes are a closed set this client knows, the sentence names the *remedy* rather
- * than restating the failure, and anything unrecognised falls through to the
- * message the daemon sent rather than to "something went wrong".
- */
-/**
  * What the machine says it installed, against what somebody was shown — and the
  * words for the difference, or `null` when there is none.
  *
@@ -326,6 +318,14 @@ function requiredScope(detail: unknown): string | null {
   return typeof named === "string" && named.length > 0 ? named : null;
 }
 
+/**
+ * A refusal from a plugin route, as a sentence.
+ *
+ * The shape `importFailure` established one screen over, and for its reasons: the
+ * codes are a closed set this client knows, the sentence names the *remedy* rather
+ * than restating the failure, and anything unrecognised falls through to the
+ * message the daemon sent rather than to "something went wrong".
+ */
 export function pluginFailure(error: unknown): string {
   /*
    * ⚠ **Before the `ApiError` gate, because this one is ours rather than a
@@ -486,6 +486,48 @@ export interface PluginActionOffer {
 }
 
 /**
+ * Whether this plugin offers settings anywhere in the fleet.
+ *
+ * ⚠ **Nothing draws a control from this any more, and it is kept for its two
+ * rules rather than for its answer.** It gated the **gear**, which is gone
+ * (Q3.468): the gear was the only route in and it asked no question about *which*
+ * machines — the screen it opened picked one from a dropdown over
+ * `installs.filter(contributes.settings)`, a set that is not the set the plugin is
+ * on, and where that came to one it drew no control at all. The route now is the
+ * machine table's **bulk bar**, over the machines somebody ticked, and the scope
+ * rides the URL rather than a picker. So the live gate is `bulkEnabled`'s
+ * `settings` arm over `settingsBlockFor` in `install.ts`, per machine and per
+ * *reason*.
+ *
+ * ⚠ **Which means its headline rule is the opposite of the shipped one, and that
+ * is the trap this docblock exists to disarm.** *Anywhere* was right for a control
+ * that opened a screen picking one machine out of a set. Settings is a
+ * **navigation** now — one screen, nothing to skip — so it is enabled only where
+ * *every* selected machine can take it, or a selection of seven opens a screen
+ * about a subset. Wiring this predicate back into that control would re-open
+ * Q7.108 exactly as it was written.
+ *
+ * ⚠ **`enabled` is not consulted**, and *that* half survives the move intact —
+ * `settingsBlockFor` does not consult it either. A plugin somebody switched off is
+ * the commonest reason to open its settings, to fix whatever made them switch it
+ * off, and a control that disappears when a thing stops working is a control they
+ * go looking for. The pane itself reports whatever the daemon says about a stopped
+ * plugin.
+ *
+ * ⚠ **And *anywhere, not everywhere* is still live one module over**, which is why
+ * this is not simply deleted: `pane.ts` cites it by name for the machine whose
+ * version has no `settings` at all — excluded rather than `divergent`, because a
+ * fleet mid-update is the ordinary case and calling it a disagreement would refuse
+ * the whole screen over a host with nothing to say.
+ *
+ * Takes a flat list rather than the store's map, so this stays a pure decision
+ * `webcheck` can sweep. The caller flattens — when there is one.
+ */
+export function offersSettings(plugins: readonly PluginSummary[], pluginId: string): boolean {
+  return plugins.some((one) => one.id === pluginId && one.contributes.settings);
+}
+
+/**
  * Which plugin actions belong on a session's menu.
  *
  * Flattened here rather than in the menu, so the two rules are in one place and
@@ -495,28 +537,6 @@ export interface PluginActionOffer {
  * is worse than no row. Declaration order is kept: it is the order the plugin's
  * author wrote, and the menu has nothing better to sort by.
  */
-/**
- * Whether this plugin offers settings anywhere in the fleet.
- *
- * ⚠ **Anywhere, not everywhere, and that is deliberate.** The gear opens a screen
- * that picks a machine, so it is right whenever *one* install has a pane — and a
- * fleet mid-update, with 0.3.2 on one host and 0.2.0 on another, is the ordinary
- * case rather than the edge one. Requiring all of them would hide the control on
- * exactly the fleet where somebody most wants to look at what changed.
- *
- * ⚠ **`enabled` is not consulted.** A plugin somebody switched off is the
- * commonest reason to open its settings — to fix whatever made them switch it off
- * — and a control that disappears when a thing stops working is a control they go
- * looking for. The pane itself reports whatever the daemon says about a stopped
- * plugin.
- *
- * Takes a flat list rather than the store's map, so this stays a pure decision
- * `webcheck` can sweep. The caller flattens.
- */
-export function offersSettings(plugins: readonly PluginSummary[], pluginId: string): boolean {
-  return plugins.some((one) => one.id === pluginId && one.contributes.settings);
-}
-
 export function sessionActions(plugins: readonly PluginSummary[]): PluginActionOffer[] {
   const offers: PluginActionOffer[] = [];
   for (const plugin of plugins) {
@@ -532,11 +552,15 @@ export function sessionActions(plugins: readonly PluginSummary[]): PluginActionO
 /**
  * `/p/:machineId/:pluginId`, and the reason it is not under `/settings`.
  *
- * A plugin's *settings* live inside its machine, beside that machine's agents,
- * because they are configuration of one daemon. A plugin's **screen** is not
- * configuration — it is a thing somebody opens to look at, several times a day,
- * from a phone — and four taps into a settings sheet is not where that belongs.
- * Short, because it is typed and shared.
+ * ⚠ **A plugin's *settings* are not inside one machine either any more** —
+ * Q3.468 moved them out to a screen of their own, scoped to the machines somebody
+ * ticked on the machine table and carrying that scope in the URL
+ * (`marketSettingsPath`). What survives is the distinction this path exists for,
+ * and it was never about *which* screen settings sat on: settings are
+ * configuration, answered once and then left alone. A plugin's **screen** is not —
+ * it is a thing somebody opens to look at, several times a day, from a phone — and
+ * however few taps the settings route now costs, that is not where a thing you
+ * open daily belongs. Short, because it is typed and shared.
  */
 export function pluginPath(machineId: MachineId, pluginId: string): string {
   return `/p/${encodeURIComponent(machineId)}/${encodeURIComponent(pluginId)}`;

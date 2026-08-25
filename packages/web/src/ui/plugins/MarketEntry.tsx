@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
   CATALOGUE_PATHS,
+  CATALOGUE_TIMEOUT_MS,
   catalogueNotice,
   previewOf,
   readOne,
@@ -338,7 +339,15 @@ function usePinnedManifest(entry: CatalogueEntry): { kind: "reading" } | ReturnT
   useEffect(() => {
     let live = true;
     setState({ kind: "reading" });
-    void fetch(entry.source.manifestRaw, { signal: AbortSignal.timeout(15_000) })
+    /*
+     * The catalogue's own budget, and not a second literal spelling it. This read
+     * is `catalogue.ts`'s in everything but the host it goes to — the same fifteen
+     * seconds, on the address that module derived — and its docblock already claims
+     * the number is shared, which it was not: this was the one bare timeout in the
+     * plugin client, so the claim was true of every request except the one made
+     * from the other side of the module boundary.
+     */
+    void fetch(entry.source.manifestRaw, { signal: AbortSignal.timeout(CATALOGUE_TIMEOUT_MS) })
       .then(async (response) => {
         if (!response.ok) throw new Error(`GitHub answered ${response.status}`);
         return await response.text();

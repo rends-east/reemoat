@@ -2614,12 +2614,14 @@ export function createApp(options: ServerOptions): AppBundle {
     };
 
   /**
-   * The other refusal four of these routes share.
+   * The other refusal three of these routes share.
    *
-   * Written out four times, with the sentence retyped each time. It is one
+   * It was written out four times, with the sentence retyped each time. It is one
    * answer — "no such plugin on this machine" — and a client reads the code, so
-   * four independently-typed copies of the message are four chances for one of
-   * them to say something slightly different about the same state.
+   * independently-typed copies of the message are that many chances for one of
+   * them to say something slightly different about the same state. The fourth
+   * copy is gone rather than collapsed: `DELETE /plugins/:pluginId` stopped
+   * refusing an unknown id at all, for the replay reason stated there.
    */
   const pluginNotFound = (c: Context<AppEnv>): Response =>
     jsonError(c, 404, "plugin_not_found", "no such plugin on this machine");
@@ -2780,9 +2782,28 @@ export function createApp(options: ServerOptions): AppBundle {
    * `remove` rather than a `withPlugin` lookup, and the difference is load-bearing:
    * it also removes a plugin whose tree is on disk and unreadable, which never
    * reached `live` and which a `find` would answer 404 for while leaving the
-   * directory and the row behind. The 404 here means "nothing of that id anywhere",
-   * which is a wider claim than the wrapper's and the only one that makes an
-   * uninstall able to finish.
+   * directory and the row behind. "Nothing of that id anywhere" is a wider claim
+   * than the wrapper's, and the only one that makes an uninstall able to finish.
+   *
+   * ⚠ **An id with nothing under it is `200 {removed: false}` and never a 404,
+   * because this is a `DELETE` and the transport replays those.** `isReplayable`
+   * in `packages/web/src/machine.ts` whitelists `GET` and `DELETE` on a stated
+   * property this route is inside: "the daemon's are idempotent — stopping an
+   * already-stopped session or removing an already-removed workspace answers the
+   * same way twice". The failure a 404 makes is a removal that *worked* and whose
+   * answer was lost on the wire — the replay lands after the row, the data and the
+   * tree are already gone, and `pluginFailure` renders `plugin_not_found` as "That
+   * plugin is not installed on this machine any more.", which is true, is exactly
+   * what the caller asked for, and reads as the act having failed. `MachineInstalls`
+   * says the same thing from the other end: a remove "inherits its retry from
+   * `machine.ts` one layer down". `removed` is what tells the two sends apart, and
+   * the client already typed this answer `{removed: boolean}` for it.
+   *
+   * The cost is that a mistyped id is no longer refused, and `pnpm client plugin
+   * remove` prints "removed" over one. That is the trade a replayable verb makes:
+   * a wrong id costs a person one confusing line, and a 404 costs whoever hit a
+   * dropped LTE packet an uninstall that looks like it failed on every machine in
+   * a fan-out.
    */
   app.delete(
     "/plugins/:pluginId",
@@ -2790,11 +2811,11 @@ export function createApp(options: ServerOptions): AppBundle {
     withPlugins(async (c, host) => {
       const removed = await host.remove(c.req.param("pluginId") ?? "");
       // The same 409 `POST /plugins` answers, for the same fact: one mutation at a
-      // time for the whole daemon. Asked before the 404, because "there is no such
-      // plugin" is not what this machine knows right now.
+      // time for the whole daemon. It is the one refusal left here, and it is a
+      // refusal rather than a `false` because nothing was removed *and* the answer
+      // would be different a moment later — which is not what `removed: false` says.
       if (removed === "busy") return jsonError(c, 409, "plugin_busy", "this machine is already installing a plugin");
-      if (!removed) return pluginNotFound(c);
-      return c.json({ removed: true });
+      return c.json({ removed });
     }),
   );
 
@@ -2843,6 +2864,30 @@ export function createApp(options: ServerOptions): AppBundle {
       if (viewId !== "screen" && viewId !== "settings") {
         return jsonError(c, 404, "view_not_found", "a plugin draws a screen and a settings pane, and no other view");
       }
+      /*
+       * ⚠ **And it has to be one *this* plugin declared.** The pair above is the
+       * vocabulary; `contributes` is which of the two this plugin said it draws,
+       * and they are different questions. The action route just below makes this
+       * exact argument against the same field, and it applies here unchanged: a
+       * view id is a string somebody put in a URL.
+       *
+       * Without it, `settings` on a plugin declaring `settings: false` reaches the
+       * child, `runner.ts` finds no such export and throws "this plugin exports no
+       * settings", `PluginApiError` makes that `plugin_failed`, and
+       * {@link pluginErrorStatus} defaults it to a `502` — whose own stated reason
+       * is "something downstream of this daemon answered badly". Nothing answered
+       * badly: the manifest already says that view is not there, so this is a 404
+       * about the request rather than a 502 about the plugin. The web client
+       * narrows both surfaces already (`screenPlugins`, `settingsBlockFor`'s
+       * `no_pane`), so what arrives here is `pnpm client plugin view` or a
+       * hand-typed `/p/:machineId/:pluginId` — exactly the traffic that must not be
+       * told a working plugin is broken. `view_not_found` carries a second sentence
+       * rather than a second code, because the code is the client's contract and
+       * these are two ways of naming a view that is not there.
+       */
+      const contributes = plugin.record.manifest.contributes;
+      const declares = viewId === "settings" ? contributes.settings : contributes.screen !== null;
+      if (!declares) return jsonError(c, 404, "view_not_found", "this plugin declares no such view");
       return pluginAnswer(c, () => plugin.invoke("view", viewId, { view: viewId }));
     }),
   );

@@ -341,10 +341,13 @@ handshake), no fleet rollout, no access log on the control plane, and
 no `@file` mentions, and **nothing says a background task is still running** — the
 spawn is on the wire (`run_in_background`) and its *end* is on no wire at all, so
 counting the starts would buy a row nothing could honestly take down (Q7.113).
-**Plugins have no market** — a registry would be a second
-control-plane request and a way for code to arrive on a machine nobody named it on
-(Q7.104) — and no plugin draws in the transcript or adds a slash command, both
-with their seams written down rather than half-built (Q7.105). **CD stops half-way on purpose**: nothing deploys on a push,
+**The daemon still has no registry** — it discovers nothing and polls
+nothing — but there *is* a market, and the half of Q7.104 that survived is which
+process reads it: a catalogue on its own host, read **by the browser**, with
+`POST /plugins/source` handing the daemon a repository and a pinned commit. A
+machine still installs only what somebody named it on. And no plugin draws in the
+transcript or adds a slash command, both with their seams written down rather than
+half-built (Q7.105). **CD stops half-way on purpose**: nothing deploys on a push,
 and the one automated path is a manual `workflow_dispatch` that deploys the
 *control plane* only, refuses a commit whose `check` run is not green, and calls
 `deploy/ci-deploy.sh` rather than reimplementing it. **The daemon is still

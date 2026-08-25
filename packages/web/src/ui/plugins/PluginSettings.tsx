@@ -122,8 +122,12 @@ function Pane({
    * Which round the answers landing now belong to.
    *
    * Two saves in a row are ordinary, and a slow first answer must not overwrite
-   * what the second has since written. `MachineInstalls`' `generation` and
-   * `PluginScreen`'s `liveRoute` keep the same gate.
+   * what the second has since written. `MachineInstalls`' `epochs` and
+   * `PluginScreen`'s `liveRoute` keep the same gate — but that one keys **per
+   * machine**, because two rows pressed a second apart are two acts and an
+   * act-wide counter would discard the first's answer for a machine the second
+   * never touched. One counter is right here: a save on this screen is one act
+   * across every machine in scope, sent from one press.
    */
   const round = useRef(0);
 

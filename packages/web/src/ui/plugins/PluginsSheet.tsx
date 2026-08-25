@@ -51,7 +51,16 @@ import { PluginSettingsScreen } from "./PluginSettings";
  * Three depths: a tab, one plugin, and that plugin's settings. The head carries
  * the way up at the deeper two — withdrawn at `sm`+ exactly where the rail already
  * draws that row, which is `marketUpWithinNav` and not a class string reasoning
- * about the origin — and the **gear** at the middle one.
+ * about the origin — and it carries nothing else.
+ *
+ * ⚠ **There is no gear, and this head is not the way into a plugin's settings.**
+ * It was: one control, in here, asking no question about *which* machines — so the
+ * screen it opened had to pick one from a dropdown over a set that is not the set
+ * the plugin is on, and where that came to one it drew no control at all, leaving
+ * the commonest state naming no machine anywhere. The scope is chosen on the
+ * plugin's own page now, on the table of machines, and rides the URL as one
+ * segment per machine. What this head still draws for that depth is the trailing
+ * word *settings*, below, in the slot an entry puts its version in.
  */
 export function PluginsSheet({ state, route }: { state: AppState; route: MarketRoute }): ReactNode {
   const base = catalogueUrl(state.config);
@@ -187,10 +196,10 @@ export function PluginsSheet({ state, route }: { state: AppState; route: MarketR
               anything.
               ⚠ **On the settings screen the trailing word names the screen rather
               than the version.** That screen has no heading of its own — a
-              section called Settings under a bar you reached by pressing a gear
-              says the same thing twice — so this is the only place it is named,
-              and a version there would be the wrong fact: settings are per
-              machine and the machines may be on different versions. */}
+              section called Settings, one push below the plugin's own page, says
+              the same thing twice — so this is the only place it is named, and a
+              version there would be the wrong fact: settings are per machine and
+              the machines may be on different versions. */}
           {title !== null && (
             <h2 className="min-w-0 truncate text-sm font-medium">
               {title}

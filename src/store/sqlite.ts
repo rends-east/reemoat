@@ -1155,6 +1155,35 @@ export class SqliteSessionStore implements SessionStore {
       // the upload store's own reconciliation at open.
       this.db.exec("DELETE FROM uploads WHERE session_id NOT IN (SELECT id FROM sessions)");
       /*
+       * ⚠ **And the same for what a plugin put here, which is the one child
+       * table in this file that had no sweep.** Same shape as the two above — no
+       * FOREIGN KEY, `PRAGMA foreign_keys = OFF` — and the same reachable cause,
+       * except that here the two deletes are written in another file: `host.ts`
+       * runs `records.remove(id)` and then `data.dropPlugin(id)` as two implicit
+       * transactions with no BEGIN around them, in `doRemove` and again in the
+       * install rollback. A throw from either, or a SIGKILL between them, or a
+       * backup taken between them, strands up to `MAX_PLUGIN_KEYS` rows and
+       * `MAX_PLUGIN_DATA_BYTES` per id.
+       *
+       * **Stranded here means stranded for ever**, which is what makes this
+       * worse than the upload case: afterwards `installed()` is false on both
+       * halves — no row, and the tree below the plugin root is gone — so `DELETE
+       * /plugins/:id` answers 404 and nothing can reach `dropPlugin` again. And
+       * they do not stay invisible: `plugin_data` is keyed on the id and never
+       * on the version, deliberately so that an update keeps it, so the next
+       * install of that id silently inherits somebody else's rows against its
+       * own quota.
+       *
+       * **The subquery reads the table rather than `records.list()`**, and that
+       * is `PluginRecordStore.has`'s distinction rather than a shortcut: a row
+       * whose `manifest_json` this build cannot validate is reported through
+       * `onDegraded` and omitted from `list`, and destroying its data would make
+       * a daemon downgrade a data loss. A row is a row here. Nothing races it
+       * either — `prune()` runs inside `openStores`, before `PluginHost` exists,
+       * so no plugin is running and no half-written install is in flight.
+       */
+      this.db.exec("DELETE FROM plugin_data WHERE plugin_id NOT IN (SELECT id FROM plugins)");
+      /*
        * A pasted credential, when there is nothing left here at all.
        *
        * `agent_credentials` had no retention path: the only delete was
@@ -1806,10 +1835,13 @@ export class SqlitePluginRecordStore implements PluginRecordStore {
 /**
  * What plugins have put here.
  *
- * The quota is read and applied in one synchronous stretch — count, sum, existing
- * length, `checkPluginWrite`, insert — which is safe for the reason everything
- * else in this file is: `node:sqlite` is synchronous, so there is no `await`
- * between the read and the write for a second caller to interleave into.
+ * The quota is read and applied in one synchronous stretch — the running pair,
+ * the replaced row's length, `checkPluginWrite`, insert — which is safe for the
+ * reason everything else in this file is: `node:sqlite` is synchronous, so there
+ * is no `await` between the read and the write for a second caller to interleave
+ * into. That is also what makes the running pair legitimate rather than a cache
+ * that can be wrong: nothing can write between the adjustment and the statement
+ * it describes.
  *
  * `checkPluginWrite` lives in `src/plugins/store.ts` rather than here, so that
  * `daemoncheck`'s in-memory implementation refuses exactly what this one refuses.
@@ -1817,20 +1849,69 @@ export class SqlitePluginRecordStore implements PluginRecordStore {
  */
 export class SqlitePluginDataStore implements PluginDataStore {
   private readonly getStmt: StatementSync;
+  private readonly sizeStmt: StatementSync;
   private readonly setStmt: StatementSync;
   private readonly deleteStmt: StatementSync;
   private readonly keysStmt: StatementSync;
   private readonly entriesStmt: StatementSync;
   private readonly dropStmt: StatementSync;
   private readonly usageStmt: StatementSync;
+  /**
+   * `(keys, bytes)` per plugin, carried forward instead of recomputed.
+   *
+   * ⚠ **`set` used to run the `COUNT(*), SUM(...)` below on every single write,
+   * and that made filling a store quadratic.** The primary key is
+   * `(plugin_id, key)` and does not cover `value`, so the sum is a full walk of
+   * the plugin's rows *plus* a table fetch of every value — up to the 1 MiB
+   * `MAX_PLUGIN_DATA_BYTES` allows, per write, synchronously, on the event loop
+   * that also owns every session and the tunnel. Measured on Node 26 against
+   * `schema.sql` itself, filling one store with ~1 KiB values one write at a
+   * time: **250 keys 3.3 ms → 0.6 ms, 500 keys 11.7 ms → 1.2 ms, 1000 keys
+   * 42.9 ms → 2.3 ms.** The ratio is the small part of that — the shape is the
+   * point: doubling the row count roughly quadrupled the old time and roughly
+   * doubled the new one, which is what "quadratic" reads like from outside.
+   * 1000 is `MAX_PLUGIN_KEYS`, so it is the ceiling rather than an unfair case.
+   *
+   * Seeded once per plugin from the same query and then moved by
+   * `size - (existing ?? 0)`, which is the delta `checkPluginWrite` is already
+   * handed. Every mutation in this class adjusts it — `set`, `delete` and
+   * `dropPlugin` — so the invariant is "it agrees with the table", not "it agrees
+   * with the last seed". `dropPlugin` **forgets** the entry rather than zeroing
+   * it, so the next touch reseeds from the table: the one shape that is still
+   * right if a row survived the drop, which `prune`'s orphan sweep exists because
+   * it can.
+   */
+  private readonly usage = new Map<string, { keys: number; bytes: number }>();
 
   constructor(db: DatabaseSync) {
     this.getStmt = db.prepare("SELECT value FROM plugin_data WHERE plugin_id = ? AND key = ?");
+    // What the replaced row costs, without paying to carry it back. `set` used
+    // to read the whole value through `getStmt` and measure it with
+    // `Buffer.byteLength` — up to `MAX_PLUGIN_VALUE_BYTES` of TEXT off the table
+    // to learn one integer. The `LENGTH(CAST(... AS BLOB))` is the same
+    // expression `usageStmt` sums, so the credit-back cannot disagree with the
+    // seed the way a JS-side count and a SQL-side sum could.
+    this.sizeStmt = db.prepare(
+      "SELECT LENGTH(CAST(value AS BLOB)) AS bytes FROM plugin_data WHERE plugin_id = ? AND key = ?",
+    );
     this.setStmt = db.prepare(
       "INSERT INTO plugin_data (plugin_id, key, value, updated_at) VALUES (?, ?, ?, ?) " +
         "ON CONFLICT(plugin_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
     );
-    this.deleteStmt = db.prepare("DELETE FROM plugin_data WHERE plugin_id = ? AND key = ?");
+    /*
+     * `RETURNING` so the credit back to `usage` costs no second statement, and
+     * safe here for a reason that is about this `WHERE` rather than about
+     * `RETURNING`: it names the whole primary key, so at most one row can match
+     * and `get()`'s single step is the whole statement. Measured on Node 26 —
+     * the row is gone afterwards, a missing key answers `undefined` and deletes
+     * nothing, and the statement resets clean for the next call. ⚠ **Widening
+     * that `WHERE` would break this**, because `get()` stops at the first row;
+     * `dropStmt` below is many rows and deliberately does not do this.
+     */
+    this.deleteStmt = db.prepare(
+      "DELETE FROM plugin_data WHERE plugin_id = ? AND key = ? " +
+        "RETURNING LENGTH(CAST(value AS BLOB)) AS bytes",
+    );
     /*
      * ⚠ **A binary range rather than `LIKE`, because `LIKE` is not case
      * sensitive and this column is.** SQLite folds ASCII in `LIKE` by default
@@ -1877,18 +1958,38 @@ export class SqlitePluginDataStore implements PluginDataStore {
   }
 
   set(pluginId: string, key: string, value: string): void {
-    const usage = this.usageStmt.get(pluginId);
-    const existing = this.getStmt.get(pluginId, key);
-    checkPluginWrite(key, value, {
-      keys: Number(usage?.["n"] ?? 0),
-      bytes: Number(usage?.["bytes"] ?? 0),
-      existing: existing === undefined ? null : Buffer.byteLength(String(existing["value"]), "utf8"),
-    });
+    const usage = this.usageOf(pluginId);
+    const existing = this.sizeOf(pluginId, key);
+    // Throws before anything is written, and before `usage` is moved — so a
+    // refusal leaves the pair describing the table exactly as it did.
+    checkPluginWrite(key, value, { keys: usage.keys, bytes: usage.bytes, existing });
     this.setStmt.run(pluginId, key, value, Date.now());
+    // The same arithmetic `checkPluginWrite` just did, applied rather than
+    // predicted: it charges `Buffer.byteLength(value)` against the credited-back
+    // `existing`, and the row now holds those exact bytes.
+    usage.bytes += Buffer.byteLength(value, "utf8") - (existing ?? 0);
+    if (existing === null) usage.keys += 1;
   }
 
   delete(pluginId: string, key: string): void {
-    this.deleteStmt.run(pluginId, key);
+    /*
+     * ⚠ **Seeded before the statement runs, and the order is the whole of it.**
+     * A first touch that is a `delete` — a restarted plugin clearing a key it
+     * wrote in a previous daemon life — would otherwise seed `usage` from a
+     * table the delete had *already* changed, and then subtract the same row a
+     * second time. Measured against `schema.sql` with sixteen 64 KiB values,
+     * i.e. `MAX_PLUGIN_DATA_BYTES` exactly: a fresh store deleting one of them
+     * and then writing back accepted **two** 64 KiB values rather than one, and
+     * left 1,114,112 bytes under a 1,048,576-byte ceiling. A quota that a
+     * restart widens is not a quota.
+     */
+    const usage = this.usageOf(pluginId);
+    const row = this.deleteStmt.get(pluginId, key);
+    // `undefined` means there was no such row, and then nothing moved — deleting
+    // a key a plugin never wrote must not credit it a key it never spent.
+    if (row === undefined) return;
+    usage.keys -= 1;
+    usage.bytes -= Number(row["bytes"] ?? 0);
   }
 
   keys(pluginId: string, prefix: string): string[] {
@@ -1948,6 +2049,35 @@ export class SqlitePluginDataStore implements PluginDataStore {
 
   dropPlugin(pluginId: string): void {
     this.dropStmt.run(pluginId);
+    // Forgotten rather than zeroed, so the next write reseeds from the table.
+    // Zeroing asserts the drop emptied it; forgetting asks. The difference is
+    // only ever visible when a row outlives the drop — which `prune`'s orphan
+    // sweep is there because it can, `host.ts` writing the row and the data as
+    // two transactions with no BEGIN around them.
+    this.usage.delete(pluginId);
+  }
+
+  /**
+   * The running `(keys, bytes)` for one plugin, seeded from the table on first
+   * touch and moved by every mutation after that.
+   *
+   * Returned by reference on purpose: the callers adjust the object they were
+   * handed, so there is no second write-back to forget.
+   */
+  private usageOf(pluginId: string): { keys: number; bytes: number } {
+    let held = this.usage.get(pluginId);
+    if (held === undefined) {
+      const row = this.usageStmt.get(pluginId);
+      held = { keys: Number(row?.["n"] ?? 0), bytes: Number(row?.["bytes"] ?? 0) };
+      this.usage.set(pluginId, held);
+    }
+    return held;
+  }
+
+  /** What one key's value costs on disk today, or `null` when there is no row. */
+  private sizeOf(pluginId: string, key: string): number | null {
+    const row = this.sizeStmt.get(pluginId, key);
+    return row === undefined ? null : Number(row["bytes"] ?? 0);
   }
 }
 
@@ -1981,9 +2111,44 @@ function range(prefix: string): [string, string | null] {
     // 0x10FFFF is the top of the range and cannot be raised; drop it and carry,
     // which is the same reason `zzz` carries to `{`.
     if (at >= 0x10ffff) continue;
-    return [prefix, points.slice(0, i).join("") + String.fromCodePoint(at + 1)];
+    return [prefix, points.slice(0, i).join("") + String.fromCodePoint(successor(at))];
   }
   return [prefix, null];
+}
+
+/**
+ * One code point on, in the values that survive the trip to the column.
+ *
+ * ⚠ **`at + 1` was the whole of this and it over-returned at exactly one code
+ * point.** A JS string holds UTF-16 code units and this column holds UTF-8, and
+ * the two do not agree about the surrogate block: `node:sqlite` binds a *lone*
+ * surrogate as U+FFFD rather than as its own three bytes. So the successor of a
+ * prefix ending U+D7FF — computed as U+D800, a lone high surrogate — reached
+ * SQLite as U+FFFD, and the upper bound jumped over the whole of E000–FFFC
+ * instead of stopping one code point along.
+ *
+ * Measured against this file's own DDL, `SELECT hex(?)`: U+D7FF binds `ED9FBF`,
+ * U+E000 binds `EE8080`, and U+D800 binds `EFBFBD` — U+FFFD's bytes exactly.
+ * With the five keys `\uD7FFa`, `\uD7FFb`, `\uE000private`, `\uF8FFapple`
+ * and `\uFFFCobj` under one plugin id, `keys(id, "\uD7FF")` answered all five
+ * where `startsWith` answers two. That is the same defect the LIKE-to-binary-range
+ * rewrite above exists to close — a prefix handing back keys its caller did not
+ * ask for — surviving at the one code point that borders the surrogates.
+ *
+ * The second arm is the prefix's own last code point being a lone surrogate,
+ * which `[...prefix]` yields as a single element and which a plugin can send:
+ * `"\ud800"` survives `JSON.parse` intact and nothing on the way here rejects
+ * it. It is **mapped rather than skipped** — skipping it and carrying would
+ * widen the bound to the next code point up, and the honest answer is narrower
+ * than that: the bind already turned it into U+FFFD, so U+FFFD is what the
+ * comparison is against and U+FFFE is what comes after it. Measured the same
+ * way: writing the key `"\uD800zz"` and reading it back yields `"\uFFFDzz"`,
+ * and with `at + 1` the two bounds both bound as `EFBFBD`, so an empty range
+ * answered nothing at all for a key that is sitting right there.
+ */
+function successor(at: number): number {
+  if (at >= 0xd800 && at <= 0xdfff) return 0xfffe;
+  return at === 0xd7ff ? 0xe000 : at + 1;
 }
 
 /**

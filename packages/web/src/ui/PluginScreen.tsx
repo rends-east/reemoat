@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { pluginDestination, pluginFailure, pluginPath, readView } from "../plugins";
 import { refOf, sessionId, type MachineId } from "../ids";
 import { navigate, sessionPath } from "../router";
@@ -156,7 +156,23 @@ export function PluginScreen({ machineId, pluginId }: { machineId: MachineId; pl
     setBusy(false);
   }, [machineId, pluginId]);
 
-  const act = (actionId: string, context: { row?: string; form?: Record<string, string> }): void => {
+  /*
+   * ⚠ **Hoisted into a `useCallback`, and this is the half of `PluginView`'s
+   * memoising that lives here.** Every `Row` and every block down there is
+   * memoised on a comparator that compares these two by identity, because a
+   * function is not comparable any other way — so redeclared per render they make
+   * every comparison answer `false`, and the memos become a cost with no return
+   * on the one screen that redraws itself on a timer.
+   *
+   * ⚠ **`[machineId, pluginId]` is genuinely the whole of it**, which is what
+   * makes the callback stable across a poll: `round` moving is what a refresh
+   * *is*, and it is not in here. The rest of the body reads `store` and `toast`
+   * (modules), `liveRoute` (a ref, whose identity never changes) and `setBusy` (a
+   * setter React guarantees stable). The two that are left are the route, and the
+   * route only moves when the sheet moves to another plugin — which is the one
+   * moment every row *should* redraw.
+   */
+  const act = useCallback((actionId: string, context: { row?: string; form?: Record<string, string> }): void => {
     const daemon = store.daemonFor(machineId);
     if (daemon === undefined) {
       toast("error", "That machine is not reachable right now.");
@@ -203,7 +219,7 @@ export function PluginScreen({ machineId, pluginId }: { machineId: MachineId; pl
         // switch strands.
         if (liveRoute.current === issuedFor) setBusy(false);
       });
-  };
+  }, [machineId, pluginId]);
 
   /**
    * A row tapped.
@@ -214,15 +230,20 @@ export function PluginScreen({ machineId, pluginId }: { machineId: MachineId; pl
    * because the sheet has to close: the session is *behind* it, and pushing a
    * route over the pop-up would leave the board on top of the thing it opened.
    */
-  const go = (where: PluginOpen): void => {
-    const target = pluginDestination(where);
-    if (target === null) return;
-    if (target.kind === "screen") {
-      navigate(pluginPath(machineId, pluginId), true);
-      return;
-    }
-    navigate(sessionPath(refOf(machineId, sessionId(target.sessionId))));
-  };
+  const go = useCallback(
+    (where: PluginOpen): void => {
+      const target = pluginDestination(where);
+      if (target === null) return;
+      if (target.kind === "screen") {
+        navigate(pluginPath(machineId, pluginId), true);
+        return;
+      }
+      navigate(sessionPath(refOf(machineId, sessionId(target.sessionId))));
+    },
+    // Same two, and for {@link act}'s reason. Everything else this reads is a
+    // module-level function.
+    [machineId, pluginId],
+  );
 
   return (
     <Sheet title={view?.title ?? pluginId}>

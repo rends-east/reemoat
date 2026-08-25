@@ -1648,8 +1648,19 @@ async function main(): Promise<void> {
 
       if (action === "remove") {
         if (!id) fail("plugin remove requires a plugin id");
-        await api(`/plugins/${encodeURIComponent(id)}`, { method: "DELETE" });
-        out(`removed  ${id}  (and everything it kept)`);
+        /*
+         * ⚠ **The answer is read and not merely awaited, because this route stopped
+         * refusing.** `DELETE /plugins/:id` is on `isReplayable`'s whitelist, so a
+         * lost answer is re-sent — and the 404 it used to give the second time
+         * reported a removal that had *worked* as a failure. It answers
+         * `200 {removed}` either way now, `removed` being the only thing telling the
+         * two apart, which means a mistyped id no longer throws out here. Printing
+         * "removed" over it would be this command lying about the one thing it does.
+         */
+        const { removed } = await api<{ removed: boolean }>(`/plugins/${encodeURIComponent(id)}`, {
+          method: "DELETE",
+        });
+        out(removed ? `removed  ${id}  (and everything it kept)` : `not installed  ${id}  (nothing to remove)`);
         return;
       }
 

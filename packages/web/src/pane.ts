@@ -41,8 +41,19 @@ export interface PaneReading {
   view: PluginView | null;
 }
 
-/** Why a selected machine is named on screen and written to by nothing. */
-export type PaneExclusion = "unreadable" | "no_form" | "divergent" | "gone";
+/**
+ * Why a selected machine is named on screen and written to by nothing.
+ *
+ * ⚠ **Three reasons, and a machine that left the fleet is deliberately not one of
+ * them.** {@link paneAgreement} is handed readings, so every member here is
+ * something a *reading* can show; a revoked machine has no reading to show it
+ * with, and the screen derives that list from the route instead — the ids in the
+ * path that `state.machines` no longer holds. A fourth member here would have had
+ * no producer, which leaves the next reader two equally wrong moves: handle a case
+ * that cannot occur, or route the real list through this union and derive the same
+ * fact a second time, in the one place that cannot see it.
+ */
+export type PaneExclusion = "unreadable" | "no_form" | "divergent";
 
 export type PaneForm =
   /** Every readable machine sent the same form *and* the same values. */

@@ -168,6 +168,13 @@ process.on("message", (raw: unknown) => {
   try {
     message = JSON.parse(raw) as HostMessage;
   } catch {
+    // `runtime.ts` drops an unparseable frame from the child for the same reason
+    // and this is that reason read from the other end: a frame this process
+    // cannot parse is not one it can answer, and every deadline in this
+    // subsystem is the host's. A lost `invoke` ends at the invoke deadline, a
+    // lost `answer` ends there too — `call` above keeps none of its own — and a
+    // lost `init` at the start deadline, each with a sentence naming the plugin.
+    // Exiting instead would spend one of three restarts on a bad message.
     return;
   }
 

@@ -358,13 +358,6 @@ export class DaemonClient {
    * which is stronger than the upload path's after-the-fact `consentBroken`, and
    * has to be, because nothing in this browser ever opened the archive.
    *
-   * Answers `PluginInstalled`, exactly as {@link installPlugin} does, down to
-   * `replaced`. It is the same act on the same host reached by a different door,
-   * and a caller that can read one answer can read the other.
-   */
-  /**
-   * Install from a pinned commit, on this machine.
-   *
    * ⚠ **`signal` is not optional decoration: without it this route was the one
    * install in the client that could not be called off.** `request` already
    * composes a caller's signal with its own deadline (`withTimeout(timeout,
@@ -374,6 +367,10 @@ export class DaemonClient {
    * `InstallAct`. The daemon unpacks and starts the plugin either way, so an
    * un-abortable fan-out is a plugin arriving on machines after somebody pressed
    * Cancel.
+   *
+   * Answers `PluginInstalled`, exactly as {@link installPlugin} does, down to
+   * `replaced`. It is the same act on the same host reached by a different door,
+   * and a caller that can read one answer can read the other.
    */
   installPluginFromSource(
     source: { kind: "github"; repo: string; commit: string },

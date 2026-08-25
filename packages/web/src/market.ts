@@ -145,9 +145,11 @@ export function marketPath(tab: MarketTab = "market"): string {
 /**
  * The path for one catalogue entry.
  *
- * A separate builder for {@link pluginSettingsPath}'s reason: the two leaves are
+ * A separate builder for {@link marketSettingsPath}'s reason: the two leaves are
  * mutually exclusive, and a signature able to take both would be a signature able
- * to express a URL nothing parses.
+ * to express a URL nothing parses. (It named `pluginSettingsPath` until that one
+ * was deleted with the leaf it built — `webcheck` asserts `settings.ts` builds no
+ * path to a plugin at all now.)
  */
 export function marketEntryPath(entry: string): string {
   return `/plugins/p/${encodeURIComponent(entry)}`;

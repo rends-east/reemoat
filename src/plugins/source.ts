@@ -148,8 +148,16 @@ export function isSourceRefusal(value: object): value is SourceRefusal {
   return "code" in value && "message" in value;
 }
 
-/** Where the archive for this source lives. Built here, never taken from a caller. */
-export function archiveUrlFor(source: PluginSource): string {
+/**
+ * Where the archive for this source lives. Built here, never taken from a caller.
+ *
+ * File-local, and that is the honest standing rather than an oversight: the one
+ * caller is {@link fetchArchive} below. Exported, it reads as an address other
+ * modules may build — which is the opposite of what {@link PluginSource}'s own
+ * docblock is about, where the whole point is that exactly one place decides what
+ * URL this daemon fetches.
+ */
+function archiveUrlFor(source: PluginSource): string {
   return `https://${ARCHIVE_HOST}/${source.repo}/tar.gz/${source.commit}`;
 }
 

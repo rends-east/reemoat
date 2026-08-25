@@ -145,6 +145,30 @@ const PLUGIN_ASK_BURST = 6;
 const PLUGIN_ASK_WINDOW_MS = 60_000;
 
 /**
+ * One metered door: what it counts, how much of it there is, and what it says
+ * when there is none left.
+ *
+ * ⚠ **The map is a field of the budget rather than of the class, and that is the
+ * whole reason this type exists.** {@link PluginApi.spend} carried a docblock
+ * saying it was "shared by both model methods rather than copied, because two
+ * windows keyed on the same map with two different sets of arithmetic is how one
+ * of them comes to be counting a different thing" — while `net.fetch` held a
+ * third window and a second, hand-written copy of that arithmetic two hundred
+ * lines above it. Three windows and two implementations is that sentence going
+ * unheeded in the same file it was written in. Handing the map to the arithmetic
+ * is what makes a fourth window unable to bring a third copy with it.
+ */
+interface PluginBudget {
+  /** `pluginId -> the timestamps still inside the window`. Bounded by the window itself. */
+  readonly windows: Map<string, number[]>;
+  readonly burst: number;
+  readonly windowMs: number;
+  /** Code and sentence, as every refusal here carries: one for a program, one for a person. */
+  readonly code: string;
+  readonly refusal: string;
+}
+
+/**
  * A refusal a plugin can read.
  *
  * Carries a code as well as a sentence for the reason every refusal in this
@@ -242,16 +266,28 @@ export interface PluginApiOptions {
 /**
  * The dispatcher, and the one place a plugin's authority is decided.
  *
- * A class rather than a closure because it holds the per-plugin fetch window,
- * which has to survive between calls and must not be shared between plugins — one
+ * A class rather than a closure because it holds the per-plugin windows, which
+ * have to survive between calls and must not be shared between plugins — one
  * plugin's polling loop spending another's budget is a bug whose symptom appears
  * in the wrong place entirely.
  */
 export class PluginApi {
-  /** `pluginId -> timestamps of recent fetches`. Bounded by the window itself. */
-  private readonly fetches = new Map<string, number[]>();
-  /** The same, for model asks. Separate map because they are separate budgets. */
-  private readonly asks = new Map<string, number[]>();
+  /** What a plugin may ask of somebody else's server. */
+  private readonly fetchBudget: PluginBudget = {
+    windows: new Map(),
+    burst: PLUGIN_FETCH_BURST,
+    windowMs: PLUGIN_FETCH_WINDOW_MS,
+    code: "fetch_rate_limited",
+    refusal: `a plugin may make ${PLUGIN_FETCH_BURST} requests a minute`,
+  };
+  /** And what it may ask of a model. A separate budget, never a separate copy of the arithmetic. */
+  private readonly askBudget: PluginBudget = {
+    windows: new Map(),
+    burst: PLUGIN_ASK_BURST,
+    windowMs: PLUGIN_ASK_WINDOW_MS,
+    code: "model_rate_limited",
+    refusal: `a plugin may make ${PLUGIN_ASK_BURST} model requests a minute`,
+  };
 
   constructor(private readonly options: PluginApiOptions) {}
 
@@ -611,14 +647,15 @@ export class PluginApi {
       throw new PluginApiError("host_not_allowed", `${url.hostname} is not in this plugin's net list`);
     }
 
-    const now = Date.now();
-    const seen = (this.fetches.get(manifest.id) ?? []).filter((at) => now - at < PLUGIN_FETCH_WINDOW_MS);
-    if (seen.length >= PLUGIN_FETCH_BURST) {
-      this.fetches.set(manifest.id, seen);
-      throw new PluginApiError("fetch_rate_limited", `a plugin may make ${PLUGIN_FETCH_BURST} requests a minute`);
-    }
-    seen.push(now);
-    this.fetches.set(manifest.id, seen);
+    /*
+     * Spent before the request goes out, on the same arithmetic the two model
+     * methods spend theirs on. This was that arithmetic written a second time,
+     * inline, above a docblock whose only subject is why it must not be — and
+     * the copy is what made the id leak two bugs rather than one: neither
+     * implementation ever dropped a plugin from its map, so fixing it in the
+     * shared one would have left this one growing. See {@link spend}.
+     */
+    this.spend(this.fetchBudget, manifest.id);
 
     const init = (input["init"] ?? {}) as Record<string, unknown>;
     const headers: Record<string, string> = {};
@@ -759,9 +796,11 @@ export class PluginApi {
      * plugin's loop cannot spend another's budget — a bug whose symptom would
      * otherwise appear in the wrong place entirely. Spent *before* the call, and
      * the timestamp is recorded whatever the outcome: a refusal that cost an
-     * agent spawn has cost the machine the same either way.
+     * agent spawn has cost the machine the same either way. A different budget
+     * from `net.fetch`'s and the same arithmetic, which is now literal rather
+     * than a resemblance.
      */
-    this.spend(manifest);
+    this.spend(this.askBudget, manifest.id);
 
     try {
       return await ask.ask(agent, prompt, model, signal);
@@ -810,7 +849,7 @@ export class PluginApi {
       // machine" — which reads as *not installed*.
       throw new PluginApiError("model_agent_unknown", `${JSON.stringify(agent)} is not an agent this daemon knows`);
     }
-    this.spend(manifest);
+    this.spend(this.askBudget, manifest.id);
     try {
       return { models: await ask.models(agent, signal) };
     } catch (error) {
@@ -822,27 +861,44 @@ export class PluginApi {
   }
 
   /**
-   * One unit of this plugin's model budget, spent before the call rather than
+   * One unit of one of this plugin's budgets, spent before the call rather than
    * after it.
    *
    * ⚠ **Before, and the timestamp is recorded whatever the outcome**: a refusal
-   * that cost an agent spawn has cost the machine the same as a success. Shared
-   * by both model methods rather than copied, because two windows keyed on the
-   * same map with two different sets of arithmetic is how one of them comes to be
-   * counting a different thing.
+   * that cost an agent spawn has cost the machine the same as a success. Every
+   * window on this API goes through here — `net.fetch`'s as well as the two model
+   * methods' — because two windows keyed on the same shape with two different
+   * sets of arithmetic is how one of them comes to be counting a different thing,
+   * and that sentence stood here for a while with a second implementation of it
+   * inline in {@link fetch}.
+   *
+   * ⚠ **The sweep is over every plugin in the map and not only the one asking,
+   * because nothing else will ever come back for the others.** A window empties
+   * by *time passing*, and time passes for a plugin that has been uninstalled
+   * exactly as it does for one that is idle — but no call is ever made on its
+   * behalf again, so its entry sat here for the life of the daemon and one
+   * install / use / remove lap per id grew the map without bound. Swept from the
+   * call site rather than cleared from `PluginHost.remove`: this map has no other
+   * reader, and a second call site is a second thing to forget when a plugin
+   * leaves by some route nobody has written yet. What it costs is a walk of the
+   * ids that have spent something recently, once per call that is about to buy a
+   * request on somebody else's server or a node subprocess.
    */
-  private spend(manifest: PluginManifest): void {
+  private spend(budget: PluginBudget, pluginId: string): void {
     const now = Date.now();
-    const seen = (this.asks.get(manifest.id) ?? []).filter((at) => now - at < PLUGIN_ASK_WINDOW_MS);
-    if (seen.length >= PLUGIN_ASK_BURST) {
-      this.asks.set(manifest.id, seen);
-      throw new PluginApiError(
-        "model_rate_limited",
-        `a plugin may make ${PLUGIN_ASK_BURST} model requests a minute`,
-      );
+    for (const [id, at] of budget.windows) {
+      const kept = at.filter((one) => now - one < budget.windowMs);
+      // An entry whose window has emptied carries no information, and this is the
+      // only place that would ever notice.
+      if (kept.length === 0) budget.windows.delete(id);
+      else budget.windows.set(id, kept);
     }
+
+    // Already aged by the sweep above, so a refusal needs no write of its own.
+    const seen = budget.windows.get(pluginId) ?? [];
+    if (seen.length >= budget.burst) throw new PluginApiError(budget.code, budget.refusal);
     seen.push(now);
-    this.asks.set(manifest.id, seen);
+    budget.windows.set(pluginId, seen);
   }
 
   private session(input: Record<string, unknown>): ManagedSession {

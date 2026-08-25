@@ -167,9 +167,11 @@ downstream of that.
   unbounded — a collapsed disclosure, so the list somebody came to read and the
   failures written into it were behind the same fold. A fixed-height scroller now,
   with a search box and a filter above it and a bar of four below. ⚠ **Only a
-  removal is confirmed**, on the row and in the bar, both ending with Cancel: an
-  install is undone by pressing the other icon and a removal takes `plugin_data`
-  with it. ⚠ **`rowActs` and `bulkEnabled` are pure and swept**, `draftAct`'s own
+  removal is confirmed, and only in the bar**, ending with Cancel: an install is
+  undone by pressing the other icon and a removal takes `plugin_data` with it. The
+  row's bin and the row's question went together — see the `drawnActs` bullet
+  below, which is the same decision stated where it is enforced. ⚠ **`rowActs` and
+  `bulkEnabled` are pure and swept**, `draftAct`'s own
   reason — and the bar's counts are derived from `rowActs`, so **the bar cannot
   offer an act the rows do not**. All four `skipReasonFor` states offer nothing, and
   so does a row with a request out, which is also what stops a second bulk press

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { memo, useState, type ReactNode } from "react";
 import { seedForm } from "../plugins";
 import type { PluginBlock, PluginField, PluginOpen, PluginRow, PluginView as PluginViewShape } from "../wire";
 import { Button, DangerButton, Dot, Dropdown, Empty, FIELD, Spinner } from "./bits";
@@ -64,7 +64,7 @@ export function PluginView({
  * its own, and a second copy of that markup is how the danger arm gets lost in one
  * of them. Q3.460.
  */
-export function PluginBlockView({
+export const PluginBlockView = memo(function PluginBlockView({
   block,
   busy,
   onAction,
@@ -146,9 +146,31 @@ export function PluginBlockView({
     case "form":
       return <Form block={block} busy={busy} onAction={onAction} />;
   }
-}
+}, sameBlockProps);
 
-function Row({
+/**
+ * One row of a plugin's list or column, drawn.
+ *
+ * Memoised on {@link sameRowProps}, for the reason `EventList`'s `TailRow` states
+ * one file over: `readView` hands back a fresh object graph on every read, so
+ * `React.memo`'s own shallow compare — which asks whether `row` is the *same
+ * object* — answers "no" for every row on every tick, and memoising with it would
+ * achieve exactly nothing while adding a comparison. The comparator is what makes
+ * it work.
+ *
+ * ⚠ **What it is worth is set by what a plugin may send.** `PLUGIN_VIEW_LIMITS`
+ * allows 8 columns of 200 rows, and `PLUGIN_REFRESH_MIN_MS` is 2s — so a board
+ * plugin at the ceiling re-rendered 1600 of these every two seconds on a phone,
+ * for a poll that usually changed nothing. `PluginBlockView` above is memoised for
+ * the same reason and takes most of that: where a whole column is unchanged, its
+ * rows are never reached at all. This one is what saves the other 199 in the
+ * column that *did* change.
+ *
+ * The `useState` below survives it — `memo` declines to re-render and does not
+ * unmount — so a confirmation somebody has opened stays open while the board
+ * refreshes underneath it.
+ */
+const Row = memo(function Row({
   row,
   busy,
   onAction,
@@ -317,7 +339,7 @@ function Row({
       )}
     </li>
   );
-}
+}, sameRowProps);
 
 function Form({
   block,
@@ -478,5 +500,158 @@ function Field({
     </label>
     {help}
     </div>
+  );
+}
+
+/* ── what a memo above compares ───────────────────────────────────────────── */
+
+/**
+ * Whether two rows would draw the same thing.
+ *
+ * ⚠ **Field by field, and it must stay total.** A field added to `PluginRow` and
+ * not to this is a row that silently stops redrawing — the one way a memo fails
+ * that leaves the screen *wrong* rather than slow, and nothing in this file would
+ * notice. That is why it is the same shape as `sameNode` in `tail.ts` rather than
+ * a deep-equality helper: the list is meant to be read beside the type.
+ *
+ * Exported so a driver can reach it, for `sameNode`'s reason — a comparator that
+ * wrongly answers `true` shows a stale row and nothing anywhere would say so.
+ */
+export function samePluginRow(a: PluginRow, b: PluginRow): boolean {
+  if (a === b) return true;
+  return (
+    a.id === b.id &&
+    a.title === b.title &&
+    a.subtitle === b.subtitle &&
+    a.badge === b.badge &&
+    a.tone === b.tone &&
+    sameOpen(a.open, b.open) &&
+    a.actions.length === b.actions.length &&
+    a.actions.every((action, index) => {
+      const other = b.actions[index];
+      return (
+        other !== undefined &&
+        action.id === other.id &&
+        action.label === other.label &&
+        action.tone === other.tone &&
+        action.confirm === other.confirm
+      );
+    })
+  );
+}
+
+/**
+ * Whether two blocks would draw the same thing.
+ *
+ * ⚠ **Total over the five, and `type` is compared first** — the switch above has
+ * an arm for each, so a block that changed shape must never compare equal to the
+ * one it replaced. Exported with {@link samePluginRow} and for its reason.
+ *
+ * A `form`'s `value`s are compared even though {@link Form} reads them only once
+ * per mount: what is being answered here is whether the *block* changed, and
+ * deciding that from a subset of it is how the next field added to `PluginField`
+ * becomes invisible.
+ */
+export function samePluginBlock(a: PluginBlock, b: PluginBlock): boolean {
+  if (a === b) return true;
+  if (a.type !== b.type) return false;
+  switch (a.type) {
+    case "text": {
+      const other = b as Extract<PluginBlock, { type: "text" }>;
+      return a.text === other.text && a.tone === other.tone;
+    }
+    case "notice": {
+      const other = b as Extract<PluginBlock, { type: "notice" }>;
+      return a.text === other.text && a.tone === other.tone;
+    }
+    case "list": {
+      const other = b as Extract<PluginBlock, { type: "list" }>;
+      return a.empty === other.empty && sameRows(a.rows, other.rows);
+    }
+    case "columns": {
+      const other = b as Extract<PluginBlock, { type: "columns" }>;
+      return (
+        a.columns.length === other.columns.length &&
+        a.columns.every((column, index) => {
+          const twin = other.columns[index];
+          return twin !== undefined && column.title === twin.title && sameRows(column.rows, twin.rows);
+        })
+      );
+    }
+    case "form": {
+      const other = b as Extract<PluginBlock, { type: "form" }>;
+      return (
+        a.action === other.action &&
+        a.submit === other.submit &&
+        a.fields.length === other.fields.length &&
+        a.fields.every((field, index) => {
+          const twin = other.fields[index];
+          return twin !== undefined && sameField(field, twin);
+        })
+      );
+    }
+  }
+}
+
+/** Where a row goes, which is one of two shapes or nothing at all. */
+function sameOpen(a: PluginOpen | null, b: PluginOpen | null): boolean {
+  if (a === null || b === null) return a === b;
+  if ("session" in a) return "session" in b && a.session === b.session;
+  // `{ screen: true }` carries no second value, so having the key is the whole of
+  // it — and a row whose destination changed from a session to the screen is
+  // caught by the arm above rather than here.
+  return !("session" in b);
+}
+
+function sameRows(a: readonly PluginRow[], b: readonly PluginRow[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  return a.every((row, index) => {
+    const other = b[index];
+    return other !== undefined && samePluginRow(row, other);
+  });
+}
+
+function sameField(a: PluginField, b: PluginField): boolean {
+  return (
+    a.key === b.key &&
+    a.label === b.label &&
+    a.kind === b.kind &&
+    a.value === b.value &&
+    a.placeholder === b.placeholder &&
+    a.help === b.help &&
+    a.options.length === b.options.length &&
+    a.options.every((option, index) => {
+      const other = b.options[index];
+      return other !== undefined && option.value === other.value && option.label === other.label;
+    })
+  );
+}
+
+/**
+ * The props of one row, compared.
+ *
+ * `onAction` and `onOpen` by identity, which is why `PluginScreen` hoists both
+ * into `useCallback`: a caller that rebuilds either per render makes this answer
+ * `false` every time, and then the whole file's memoising is a cost with no
+ * return. That is the failure a comparator cannot see about itself, so it is
+ * written down at both ends — here, and at the `useCallback` that prevents it.
+ */
+function sameRowProps(
+  a: { row: PluginRow; busy: boolean; onAction: unknown; onOpen?: unknown },
+  b: { row: PluginRow; busy: boolean; onAction: unknown; onOpen?: unknown },
+): boolean {
+  return (
+    a.busy === b.busy && a.onAction === b.onAction && a.onOpen === b.onOpen && samePluginRow(a.row, b.row)
+  );
+}
+
+/** The props of one block, compared. Same rule about the two callbacks. */
+function sameBlockProps(
+  a: { block: PluginBlock; busy: boolean; onAction: unknown; onOpen?: unknown },
+  b: { block: PluginBlock; busy: boolean; onAction: unknown; onOpen?: unknown },
+): boolean {
+  return (
+    a.busy === b.busy && a.onAction === b.onAction && a.onOpen === b.onOpen && samePluginBlock(a.block, b.block)
   );
 }

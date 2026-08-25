@@ -41,6 +41,26 @@ export type ManifestOutcome =
   | { ok: true; manifest: PluginManifest }
   | { ok: false; code: ManifestRefusalCode; message: string };
 
+/*
+ * ⚠ **Every bound below is exported for `daemoncheck` and for nothing else —
+ * there is no caller.** Nothing outside this file compares a manifest against
+ * these. What there was instead was a driver spelling them out again,
+ * `"x".repeat(201)` and the string `"name must be 1–64"`, so each number was
+ * written down three times — in the comparison, in the refusal sentence, and in
+ * the fixture — and moving it moved one of the three. A driver that copies a
+ * bound is a driver that goes on asserting the old one, which is why `envNameFor`
+ * is pure: `relaycheck` loops over `SETTING_KEYS` instead of listing them.
+ *
+ * ⚠ **The driver interpolates them now, and that closes the wide gap by opening a
+ * narrow one.** Both sides of a derived fixture move together, so a bound that
+ * changes value is **invisible** to every case built on it — which is the whole
+ * point, and is also why derivation alone is not the assertion. The one failure it
+ * cannot see is a comparison that drifts off its own constant by one, so
+ * `daemoncheck` sweeps all six at *exactly* their ceiling as well: every existing
+ * case is one character past a bound, and a validator refusing one character early
+ * passes every one of them silently.
+ */
+
 /**
  * How many contributions one plugin may declare.
  *
@@ -49,9 +69,32 @@ export type ManifestOutcome =
  * already more than that menu has ever held, and a plugin able to declare forty
  * would be a plugin able to make the menu unusable for everything else on it.
  */
-const MAX_ACTIONS = 8;
+export const MAX_ACTIONS = 8;
 /** How many hosts `net.fetch` may be pointed at. A plugin talks to a service, not to the web. */
-const MAX_NET_HOSTS = 8;
+export const MAX_NET_HOSTS = 8;
+
+/** How long the name shown wherever this plugin is listed may be. */
+export const MAX_NAME_CHARS = 64;
+
+/** How long the sentence under that name may be. A line on a row, not a README. */
+export const MAX_DESCRIPTION_CHARS = 200;
+
+/**
+ * How long each of the two titles may be — and they are two constants at one
+ * value on purpose.
+ *
+ * ⚠ **A screen title and an action title are different subjects that agree on
+ * 40 by coincidence of what fits.** One is drawn once, at the head of a plugin's
+ * own page; the other is a row in a session's kebab menu, beside Resume and Stop
+ * and beside whatever a second installed plugin called its own — which is the
+ * width that is actually under pressure, and `plugin-ui.md` records a single
+ * string wrapping that 208px panel to two lines and moving Stop by however long
+ * an author's title was. Written as the literal `40` in both places, tightening
+ * the menu row is one edit that silently leaves the page alone, and nothing
+ * anywhere says the two were ever one decision.
+ */
+export const MAX_SCREEN_TITLE_CHARS = 40;
+export const MAX_ACTION_TITLE_CHARS = 40;
 
 const ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const VERSION = /^\d+\.\d+\.\d+$/;
@@ -115,8 +158,8 @@ export function parseManifest(text: string): ManifestOutcome {
   }
 
   const name = source["name"];
-  if (typeof name !== "string" || name.trim().length === 0 || name.length > 64) {
-    return invalid("name must be 1–64 characters");
+  if (typeof name !== "string" || name.trim().length === 0 || name.length > MAX_NAME_CHARS) {
+    return invalid(`name must be 1–${MAX_NAME_CHARS} characters`);
   }
 
   const version = source["version"];
@@ -145,8 +188,12 @@ export function parseManifest(text: string): ManifestOutcome {
   }
 
   const description = source["description"];
-  if (description !== undefined && description !== null && (typeof description !== "string" || description.length > 200)) {
-    return invalid("description must be a string of at most 200 characters");
+  if (
+    description !== undefined &&
+    description !== null &&
+    (typeof description !== "string" || description.length > MAX_DESCRIPTION_CHARS)
+  ) {
+    return invalid(`description must be a string of at most ${MAX_DESCRIPTION_CHARS} characters`);
   }
 
   const scopes = readScopes(source["scopes"]);
@@ -238,8 +285,8 @@ function readContributions(raw: unknown): PluginContributions | string {
   if (rawScreen !== undefined && rawScreen !== null) {
     if (typeof rawScreen !== "object" || Array.isArray(rawScreen)) return "contributes.screen must be an object";
     const title = (rawScreen as Record<string, unknown>)["title"];
-    if (typeof title !== "string" || title.trim().length === 0 || title.length > 40) {
-      return "contributes.screen.title must be 1–40 characters";
+    if (typeof title !== "string" || title.trim().length === 0 || title.length > MAX_SCREEN_TITLE_CHARS) {
+      return `contributes.screen.title must be 1–${MAX_SCREEN_TITLE_CHARS} characters`;
     }
     screen = { title: title.trim() };
   }
@@ -271,8 +318,8 @@ function readActions(raw: unknown): PluginAction[] | string {
     }
     if (out.some((one) => one.id === id)) return `action ${JSON.stringify(id)} is declared twice`;
     const title = action["title"];
-    if (typeof title !== "string" || title.trim().length === 0 || title.length > 40) {
-      return `action ${JSON.stringify(id)} needs a title of 1–40 characters`;
+    if (typeof title !== "string" || title.trim().length === 0 || title.length > MAX_ACTION_TITLE_CHARS) {
+      return `action ${JSON.stringify(id)} needs a title of 1–${MAX_ACTION_TITLE_CHARS} characters`;
     }
     const on = action["on"];
     if (on !== "session" && on !== "screen") {

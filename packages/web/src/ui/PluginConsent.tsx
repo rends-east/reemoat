@@ -167,6 +167,100 @@ export function PluginConsent({
 }
 
 /**
+ * What both pickers accept, spelled once.
+ *
+ * ⚠ **The two `<input type="file">` elements stay at their call sites and this
+ * string does not.** What a picker *does* with the file it is handed is the one
+ * thing genuinely different between them — one screen reads the archive and moves
+ * to a confirming phase, the other clears a flag first — while the list of
+ * extensions is a fact about the daemon's reader and is the same on both. The
+ * halves that must not drift are the words and this string; the handler is not
+ * one of them.
+ */
+export const PLUGIN_ARCHIVE_ACCEPT = ".tgz,.gz,.zip,application/gzip,application/zip";
+
+/**
+ * What a plugin archive is, above the control that takes one.
+ *
+ * ⚠ **One copy, for {@link PluginConsent}'s reason one function up.** Two screens
+ * ask for the same file and said the same two sentences, typed out twice — and by
+ * the time this was lifted the copies had already drifted in their line wrapping,
+ * which is how a paragraph starts diverging in what it *says*. There is nothing
+ * per-screen in either sentence: both are about what the daemon's reader takes and
+ * about the consent step below.
+ */
+export function PluginArchiveNote(): ReactNode {
+  return (
+    <>
+      <p className="text-xs text-muted">
+        A <code className="text-muted/80">.tar.gz</code> or <code className="text-muted/80">.zip</code> holding{" "}
+        <code className="text-muted/80">plugin.json</code> and <code className="text-muted/80">server.js</code>.
+        Installing the same id again updates it and keeps what it has stored.
+      </p>
+      <p className="mt-1 text-xs text-muted">Nothing is sent until you have read what it asks for.</p>
+    </>
+  );
+}
+
+/**
+ * An archive this browser could not describe, and what that costs.
+ *
+ * ⚠ **This is the same consent sentence as {@link PluginConsent} in its failed
+ * state, so it obeys the same rule and for the same reason: one copy.** It was two
+ * — the file picker in Settings and the fleet-wide import — and the header above
+ * argues that a second copy of a consent sentence is one rewording away from the
+ * two paths disclosing the same capability differently. That is not a prediction
+ * any more: the copies had already come apart on the one word that matters here,
+ * and only one of them was right about which machines were being spoken for.
+ *
+ * ⚠ **Not a refusal.** The daemon is what decides whether an archive is a plugin,
+ * and it accepts shapes this reader may not — so refusing here would make the
+ * browser a second, stricter gate that turns away plugins the machine would have
+ * taken. What it may not do is pretend: the whole point of this screen is that
+ * somebody knows what they are agreeing to, so when it cannot say, it says that,
+ * and the way through is a separate press that names what is being given up.
+ */
+export function PluginUnreadable({
+  reason,
+  checker,
+  children,
+}: {
+  /** What the reader could not do, in its own words. */
+  reason: string;
+  /**
+   * Who will still check it properly.
+   *
+   * ⚠ **The one word that legitimately differs between the two ways in, which is
+   * why it is a prop rather than a shared literal.** The picker in a machine's
+   * settings sends to that one host; the import screen sends the same bytes to
+   * every ticked machine, each of which parses the archive itself. A union rather
+   * than a `string`, so a third spelling of the same fact is a compile error.
+   */
+  checker: "This machine" | "Each machine";
+  /**
+   * The named press, where the screen that draws it puts it inside this card.
+   *
+   * ⚠ **Optional because the two screens place it differently and both placements
+   * are deliberate.** The fleet-wide import puts it in here, beside the sentence
+   * it is buying past, because from there one press reaches every ticked machine.
+   * The machine's own picker keeps it in the button row below, where it sits
+   * beside the "Choose another file" that is the safe way out of the same state.
+   */
+  children?: ReactNode;
+}): ReactNode {
+  return (
+    <div className="mt-3 rounded-lg border border-edge p-3">
+      <p className="text-sm text-fg">This file cannot be read here</p>
+      <p className="mt-1 text-xs text-muted">
+        {reason}. Nothing has been sent. {checker} will still check it properly — but until it does, nobody can tell you
+        what this plugin asks for.
+      </p>
+      {children}
+    </div>
+  );
+}
+
+/**
  * The permissions, folded.
  *
  * ⚠ **The closed line says "Permissions" and nothing else, and the permissions

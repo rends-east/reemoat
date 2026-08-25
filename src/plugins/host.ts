@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import { ArchiveError, PLUGIN_LIMITS, unpackArchive } from "../archive.js";
@@ -92,6 +92,52 @@ const MAX_CONSECUTIVE_TIMEOUTS = 3;
 const MAX_HOOK_QUEUE = 256;
 /** How much of a failure is kept on the row. */
 const MAX_FAILURE_CHARS = 500;
+
+/**
+ * How long {@link PluginHost.shutdown} waits for a mutation in flight before it
+ * goes ahead anyway.
+ *
+ * A few seconds because what it is buying is the ordinary case — an install
+ * between its `rename` and its `ensureStarted`, which is milliseconds — and what
+ * it is refusing to pay for is the pathological one, an archive arriving a byte at
+ * a time. Well under `scripts/daemon.ts`'s 25 s hard exit on purpose: everything
+ * after this method in that function still needs its own budget, and the two acts
+ * this delays are the two that write things down.
+ */
+const SHUTDOWN_MUTATION_WAIT_MS = 3_000;
+
+/**
+ * A staging directory {@link PluginHost.install} left behind, by the only name it
+ * ever gives one.
+ *
+ * Exact rather than a prefix test, and this is `archive.ts`'s own constant with
+ * one word changed — `randomBytes(8).toString("hex")` is sixteen hex characters
+ * and nothing else here is. A plugin id cannot collide with it at any price:
+ * `manifest.ts`'s `ID` is `/^[a-z0-9][a-z0-9-]{0,31}$/`, so no id this daemon will
+ * make a directory of can begin with a dot.
+ */
+const STAGING_NAME = /^\.reemoat-plugin-[0-9a-f]{16}$/;
+/**
+ * The incumbent tree, moved out of the way and never moved back.
+ *
+ * Matched as a **suffix** because the name is `<version>.replaced-<8 hex>` and the
+ * version half is somebody's. It is still unambiguous: `manifest.ts`'s `VERSION`
+ * is `/^\d+\.\d+\.\d+$/`, so no directory this daemon publishes can end this way,
+ * and the only writer of the name is the one `rename` in `install`.
+ */
+const REPLACED_NAME = /\.replaced-[0-9a-f]{8}$/;
+/**
+ * How long one of those may sit before it is litter rather than an install.
+ *
+ * `archive.ts`'s number, for `archive.ts`'s reason and with one narrowing it does
+ * not have: this sweep runs inside {@link PluginHost.open}, before a single
+ * `install` on this daemon can have started, so the only writer it could race is
+ * a *second* daemon pointed at the same `REEMOAT_PLUGIN_ROOT`. Generous on
+ * purpose all the same — the cost of waiting too long is a directory nobody looks
+ * at until the next boot an hour later, and the cost of not waiting long enough is
+ * deleting a live install's staging out from under it.
+ */
+const STALE_STAGING_MS = 60 * 60 * 1000;
 
 /**
  * How one invocation ended, as the things that are not each other.
@@ -237,7 +283,7 @@ export class PluginHost {
   private readonly watching = new Map<string, () => void>();
   private unwatch: (() => void) | null = null;
   /**
-   * One install at a time, for the whole daemon.
+   * One mutation at a time, for the whole daemon.
    *
    * Q7.97's argument for `POST /fs/import`, unchanged: this is a route with **no
    * accounting that outlives the request**. An installed plugin is charged against
@@ -246,19 +292,28 @@ export class PluginHost {
    * has to be on arrival, and a person installs a plugin about as often as they
    * install anything.
    *
-   * ⚠ **Read by every mutation now, not only by `install`.** It guarded installs
-   * against each other and left `remove` and `setEnabled` free to run straight
-   * through one: measured, a `DELETE` landing while a `POST /plugins` for the same
-   * id was still reading its body dropped the row and every `plugin_data` key,
-   * and the install then re-created the row and left the plugin installed and
-   * running with its data gone for good — the operator holding a "Removed" toast
-   * for a plugin that is still there, and a `201 Installed` for what was an
-   * update, because `existing` had been captured before the removal. Both routes
-   * are `machine:admin`, so two tabs is the whole of the setup, and the window is
-   * however long an archive takes over the relay.
+   * ⚠ **Held by every mutation, not only by `install`, and the name says so
+   * now.** It was `installing`, and it guarded installs against each other while
+   * leaving `remove` and `setEnabled` free to run straight through one: measured,
+   * a `DELETE` landing while a `POST /plugins` for the same id was still reading
+   * its body dropped the row and every `plugin_data` key, and the install then
+   * re-created the row and left the plugin installed and running with its data
+   * gone for good — the operator holding a "Removed" toast for a plugin that is
+   * still there, and a `201 Installed` for what was an update, because `existing`
+   * had been captured before the removal. Both routes are `machine:admin`, so two
+   * tabs is the whole of the setup, and the window is however long an archive
+   * takes over the relay. The old name is what made `this.installing` inside
+   * `setEnabled` twenty lines of comment away from being readable at all.
    */
-  private installing = false;
-  private stopped = false;
+  private mutating = false;
+  /**
+   * The shutdown, once one has been asked for. See {@link shutdown}.
+   *
+   * A promise rather than a flag because the two facts a caller needs are "has one
+   * been asked for" and "is it finished", and a boolean only ever carried the
+   * first. {@link shuttingDown} is the first; awaiting this is the second.
+   */
+  private stopped: Promise<void> | null = null;
 
   private constructor(readonly options: PluginHostOptions) {
     this.root = options.root;
@@ -277,6 +332,9 @@ export class PluginHost {
     const host = new PluginHost(options);
     await mkdir(options.root, { mode: 0o700, recursive: true });
     host.root = resolved(options.root);
+    // Before a single record is read, so nothing below is deciding anything about
+    // a tree that was already garbage. See {@link sweepStaleStaging}.
+    await host.sweepStaleStaging();
     for (const record of options.records.list()) {
       host.live.set(record.id, new LivePlugin(record, host));
     }
@@ -410,11 +468,11 @@ export class PluginHost {
       await cancel(request.body);
       return refuse("shutting_down", "the daemon is shutting down");
     }
-    if (this.installing) {
+    if (this.mutating) {
       await cancel(request.body);
       return { kind: "busy" };
     }
-    this.installing = true;
+    this.mutating = true;
     const staging = join(this.root, `.reemoat-plugin-${randomBytes(8).toString("hex")}`);
     let published: string | null = null;
     /** The tree that was there, moved out of the way until the new one is proven. */
@@ -432,6 +490,20 @@ export class PluginHost {
     let existing: LivePlugin | null = null;
     /** Whether the row was written, so the catch knows whether it owes one back. */
     let wrote = false;
+    /**
+     * Whether a row for this id existed before this install wrote one.
+     *
+     * ⚠ **Hoisted for the catch, and asked of the record store rather than of
+     * `live`.** The rollback uses it to tell a *first* install from an update, and
+     * it used `existing` — which comes from `this.live`, which `open()` fills only
+     * from the rows `records.list()` could turn back into records. A row this build
+     * cannot validate is skipped, so `existing` reads `null` over a plugin that is
+     * very much installed, and the rollback then deleted its data as though there
+     * had never been any. `installed()` — what `remove` consults before it destroys
+     * anything — asks `records.has` first, and this is the destructive path, so it
+     * gets the same authority rather than the weaker one.
+     */
+    let hadRow = false;
     try {
       await mkdir(staging, { mode: 0o700, recursive: true });
       const unpacked = await unpackArchive({ staging, body: request.body, limits: PLUGIN_LIMITS });
@@ -595,6 +667,8 @@ export class PluginHost {
         record.enabled = false;
       }
 
+      // Before the write that makes the question unanswerable. See its declaration.
+      hadRow = this.options.records.has(manifest.id);
       this.options.records.put(record);
       wrote = true;
       if (replaced !== null && replaced !== record.version) {
@@ -706,23 +780,80 @@ export class PluginHost {
            * install that failed is not an update; before it there was no data of
            * this id to keep. Deliberately not added to the `existing !== null`
            * arm, where the plugin really is being updated.
+           *
+           * ⚠ **And "first" is `hadRow` rather than `existing === null`.** See
+           * where it is captured, above `records.put`: the two disagree exactly
+           * when a row exists that this build cannot read back — a plugin
+           * declaring a newer `api` after a daemon downgrade, which is the state
+           * `remove`'s own docblock names as reachable. On that path `existing`
+           * reads `null` over a plugin that is installed, this arm ran, and an
+           * install that **failed** destroyed the incumbent's data. `installed()`
+           * asks `records.has` before it destroys anything; so does this now.
            */
-          this.options.data.dropPlugin(planted.record.id);
+          if (!hadRow) this.options.data.dropPlugin(planted.record.id);
         }
       }
       if (published !== null) await this.discard(published);
-      if (aside !== null && target !== null) {
-        await rename(aside, target).catch(() => {
-          // Nothing further to try: the tree is still under the plugin root under
-          // its `.replaced-` name, which `discard` will not touch and a person can
-          // see. Losing it silently is the outcome this whole path exists to avoid.
-          this.warn(`plugin ${aside} could not be put back at ${target}`);
-        });
-      }
+      /*
+       * ⚠ **A rollback that could not roll back used to be a `warn` and nothing
+       * else, and the two statements after it then made the machine lie.** The
+       * row was restored, naming `<id>/<version>`; the tree was still sitting at
+       * `<version>.replaced-…`; and `ensureStarted` forked a child against an
+       * entry point that is not there — so `GET /plugins` showed a plugin
+       * `running` for as long as the fork took, then `failed` with `Cannot find
+       * module`, a sentence about Node's resolver rather than about what this
+       * daemon did. Nothing anywhere named the tree that was left, and the person
+       * reading the row had no way to reach the one that would have said so.
+       *
+       * Captured as a pair rather than as a flag because the sentence below needs
+       * both paths, and `aside`/`target` are the hoisted `let`s the rest of this
+       * catch is still narrowing. Where there is no `existing` to tell, the tree is
+       * removed with the id directory two arms down — and where there is neither,
+       * it is what {@link sweepStaleStaging} collects at the next boot.
+       */
+      const putBack = aside !== null && target !== null ? { from: aside, to: target } : null;
+      /** `null` once the incumbent's tree is back where its row says it is. */
+      const unrestored =
+        putBack === null
+          ? null
+          : await rename(putBack.from, putBack.to).then(
+              () => null,
+              () => putBack,
+            );
       if (existing !== null) {
         this.live.set(existing.record.id, existing);
-        existing.resetBudget();
-        void existing.ensureStarted("supervised");
+        if (unrestored !== null) {
+          /*
+           * ⚠ **The row is kept and made honest rather than dropped, and it is
+           * not started.** Both halves are the choice.
+           *
+           * *Kept*, because the row is the only thing on this machine that can
+           * say any of this. Removing it would leave a plugin whose files are
+           * demonstrably still under the root with nothing in `GET /plugins`
+           * naming it — the state {@link installed}'s second half exists to mop up
+           * — and the whole of what somebody would be told is one `onWarning` line
+           * in a log they are not reading. `remove` still works either way, so
+           * keeping it costs nothing and buys the sentence.
+           *
+           * *Failed rather than started*, because `entryFor` resolves
+           * `<id>/<version>/server.js` and that is exactly the path the `rename`
+           * just failed to produce. `fail()` is what this file already uses to
+           * say "this plugin is not runnable, and here is why"; the sentence names
+           * both paths, so the tree is findable from the row rather than only from
+           * a shell. `drain` holds a `failed` plugin rather than restarting it,
+           * and `setEnabled(true)` is still the way to ask for another attempt
+           * once somebody has moved the directory back by hand.
+           *
+           * The budget is deliberately **not** returned here, unlike the arm
+           * below: there is nothing to spend it on.
+           */
+          existing.markFailed(
+            `this plugin's files could not be put back at ${unrestored.to} after a failed update, and are at ${unrestored.from}`,
+          );
+        } else {
+          existing.resetBudget();
+          void existing.ensureStarted("supervised");
+        }
       } else if (planted !== null) {
         // Nothing was here before this call, so nothing is what it leaves —
         // symmetric with the `plugin_start_failed` path's own `else`, down to
@@ -733,7 +864,7 @@ export class PluginHost {
       if (error instanceof ArchiveError) return refuse(archiveCode(error), error.message);
       return refuse("plugin_write_failed", error instanceof Error ? error.message : String(error));
     } finally {
-      this.installing = false;
+      this.mutating = false;
       // Both on every path, and the body first. A refusal that stops reading parks
       // the sender against the relay's window, and the valve after that closes the
       // whole tunnel for this machine rather than this one request.
@@ -753,18 +884,20 @@ export class PluginHost {
    * records at length. What is new here is exactly two things: where the bytes
    * come from, and the consent check {@link install} performs on their behalf.
    *
-   * The `installing` mutex is asked **twice on purpose**. Once here, before a
+   * The {@link mutating} mutex is asked **twice on purpose**, which is also why
+   * neither of these two goes through {@link exclusive}. Once here, before a
    * fetch, so a machine already installing something refuses in a millisecond
    * instead of downloading two megabytes to be told; and once inside `install`,
-   * which is the authoritative one. The gap between them is a race that costs a
-   * wasted download and nothing else — the second check is what actually keeps
-   * installs serialised.
+   * which is the authoritative one and is where the claim is actually made. The
+   * gap between them is a race that costs a wasted download and nothing else — the
+   * second check is what keeps installs serialised. A helper that checks and
+   * claims in one act cannot express a check that deliberately claims nothing.
    */
   async installFromSource(source: PluginSource, consent: PluginConsent | null): Promise<InstallOutcome> {
     // Refused before the fetch as well as before the install, for the reason the
-    // `installing` check below is asked twice. See {@link shuttingDown}.
+    // {@link mutating} check below is asked twice. See {@link shuttingDown}.
     if (this.shuttingDown) return refuse("shutting_down", "the daemon is shutting down");
-    if (this.installing) return { kind: "busy" };
+    if (this.mutating) return { kind: "busy" };
 
     const fetched = await fetchArchive(source, this.options.fetchArchive ?? REAL_ARCHIVE_FETCHER);
     if (isSourceRefusal(fetched)) return refuse(fetched.code, fetched.message);
@@ -812,25 +945,43 @@ export class PluginHost {
    */
   async remove(id: string): Promise<boolean | "busy"> {
     /*
-     * See {@link installing}. **Claimed rather than merely read**, and the
-     * difference is the whole fix: reading it would still leave a `remove` that
-     * started first free to finish *underneath* an install that started second —
-     * this method's first act drops the plugin from `live`, so that install
-     * captures `existing` as `null`, lands a fresh row and tree, and then this
-     * method resumes past its await and deletes both. Holding it for the length of
-     * the removal is what makes the two orderings the same one.
-     *
-     * Refused rather than queued: the caller is a person who can press it again,
-     * and holding a `DELETE` open behind a 2 MiB upload is a worse answer than
-     * telling them what the machine is doing.
+     * Held rather than merely read, and for this route the difference is the whole
+     * fix: reading it would still leave a `remove` that started first free to
+     * finish *underneath* an install that started second — this method's first act
+     * drops the plugin from `live`, so that install captures `existing` as `null`,
+     * lands a fresh row and tree, and then this method resumes past its await and
+     * deletes both. Holding it for the length of the removal is what makes the two
+     * orderings the same one. See {@link exclusive}.
      */
+    return this.exclusive(() => this.doRemove(id));
+  }
+
+  /**
+   * Run one mutation, or say the machine is busy with another.
+   *
+   * ⚠ **The two checks and the `try`/`finally` were written out twice, verbatim,
+   * and a claim that exists in two copies is a claim one of them will be missing.**
+   * That is not hypothetical for this particular one: {@link mutating} had exactly
+   * one copy when it was called `installing`, `remove` and `setEnabled` had none,
+   * and the measured cost is on that field's own docblock. What is left out of the
+   * helper deliberately is {@link install} and {@link installFromSource}, whose
+   * two-stage check is a *check that claims nothing* — see the second's docblock.
+   *
+   * Refused rather than queued: the caller is a person who can press it again, and
+   * holding a `DELETE` open behind a 2 MiB upload is a worse answer than telling
+   * them what the machine is doing. `"busy"` covers a shutdown as well as a rival
+   * mutation, because at the moment a machine is going away "try again" is exactly
+   * as true as it is for the other one — see {@link shuttingDown} for why the
+   * refusal is owed at all.
+   */
+  private async exclusive<T>(fn: () => Promise<T>): Promise<T | "busy"> {
     if (this.shuttingDown) return "busy";
-    if (this.installing) return "busy";
-    this.installing = true;
+    if (this.mutating) return "busy";
+    this.mutating = true;
     try {
-      return await this.doRemove(id);
+      return await fn();
     } finally {
-      this.installing = false;
+      this.mutating = false;
     }
   }
 
@@ -868,7 +1019,21 @@ export class PluginHost {
     // finished, and a board whose cards outlive the board is litter nothing will
     // ever collect.
     this.options.data.dropPlugin(id);
-    await this.discard(join(this.root, id));
+    /*
+     * ⚠ **The one caller that may not carry on past a failed `rm`.** The row and
+     * the data are gone by this line, so answering `true` over a tree that is
+     * still there is not a small inaccuracy: `installed()`'s directory half then
+     * reads it as installed for ever, and every later `DELETE /plugins/:id`
+     * answers `removed: true` while removing nothing — and `<root>/<id>` matches
+     * neither staging pattern, so no sweep will collect it. Thrown rather than
+     * answered `false`, because `false` is this method's word for *there was
+     * nothing here*, which is the opposite of what happened. The caller gets the
+     * 500 it used to get before {@link discard} stopped throwing; what changed is
+     * that the rollback paths no longer get one.
+     */
+    if (!(await this.discard(join(this.root, id)))) {
+      throw new Error(`${id} was removed from this daemon's records, but its files at ${join(this.root, id)} could not be`);
+    }
     return true;
   }
 
@@ -903,17 +1068,10 @@ export class PluginHost {
   }
 
   async setEnabled(id: string, enabled: boolean): Promise<PluginSummary | null | "busy"> {
-    // See {@link installing}: an update stops and restarts the plugin, so a switch
-    // thrown across one lands on whichever `LivePlugin` happens to be current.
-    // Claimed for the same reason `remove` claims it.
-    if (this.shuttingDown) return "busy";
-    if (this.installing) return "busy";
-    this.installing = true;
-    try {
-      return await this.doSetEnabled(id, enabled);
-    } finally {
-      this.installing = false;
-    }
+    // Held for this route's own reason: an update stops and restarts the plugin,
+    // so a switch thrown across one lands on whichever `LivePlugin` happens to be
+    // current. See {@link exclusive}.
+    return this.exclusive(() => this.doSetEnabled(id, enabled));
   }
 
   private async doSetEnabled(id: string, enabled: boolean): Promise<PluginSummary | null> {
@@ -933,6 +1091,104 @@ export class PluginHost {
   }
 
   /**
+   * Directories a previous install did not live to clean up, removed at boot.
+   *
+   * ⚠ **`install`'s `finally` is exactly what an OOM and a `SIGKILL` do not
+   * reach**, and this file took `importArchive`'s staging pattern without taking
+   * the sweeper that answers it — `archive.ts` states the argument at its own
+   * `sweepStaleStaging` and had it first, for the same reason. Every daemon
+   * killed mid-install left a `.reemoat-plugin-…` holding up to
+   * `PLUGIN_LIMITS.maxBytes` of `archive.bin` plus up to eight megabytes of
+   * unpacked tree, and **nothing on this side collected it**: {@link open} builds
+   * `live` from the record store rather than by walking the root, {@link list}
+   * never sees it, and {@link installed} probes `join(root, id)` for an id
+   * `manifest.ts` will not let begin with a dot. A `<version>.replaced-…` has the
+   * same standing, and now has a second producer as well as a crash — see the
+   * failed-rollback arm of {@link install}, which leaves one deliberately rather
+   * than lying about where the tree is.
+   *
+   * **On the way in rather than on a timer, and that is available here where it
+   * was not there.** `importArchive` stages inside the *target*, an arbitrary
+   * folder this daemon learns about only when somebody names it, so there is no
+   * set of places a timer could walk and the next import is the one moment the
+   * path is known again. The plugin root is a directory this daemon owns and
+   * created; boot is both a moment it knows the path and the one moment nothing
+   * is running and no install is in flight.
+   *
+   * Three narrowings, `archive.ts`'s three, because this removes without a record
+   * telling it to: the name must be exactly what this file generates, `lstat`
+   * must say directory — so a symlink wearing the name is neither followed nor
+   * removed — and it must be old enough that no live install could own it.
+   * Failure is silent throughout; litter must never be the reason a machine comes
+   * up without its plugins.
+   */
+  private async sweepStaleStaging(): Promise<void> {
+    const cutoff = Date.now() - STALE_STAGING_MS;
+    /**
+     * One candidate, weighed and removed.
+     *
+     * `lstat` rather than {@link probeExists}, which is what `discard` asks: the
+     * question here is not "is something there" but "is this a *directory* rather
+     * than a link wearing its name", and only `lstat` answers the second without
+     * following it first. `containedIn` resolves both sides, so a name reached
+     * through a link out of the root is refused by that line even when this one
+     * is walked into.
+     */
+    const collect = async (full: string): Promise<void> => {
+      try {
+        const info = await lstat(full);
+        if (!info.isDirectory()) return;
+        if (info.mtimeMs > cutoff) return;
+        if (!containedIn(full, this.root)) return;
+        await rm(full, { recursive: true, force: true });
+        this.warn(`removed ${full}, left behind by an install that did not finish`);
+      } catch {
+        // Removed by something else between the listing and the removal, or never
+        // ours to touch. Neither is worth failing an open over.
+      }
+    };
+
+    let top: string[];
+    try {
+      top = await readdir(this.root);
+    } catch {
+      // Unreadable, or gone between the `mkdir` above and here. Everything the
+      // caller does next is about to fail on the same directory and say so.
+      return;
+    }
+    for (const name of top) {
+      if (STAGING_NAME.test(name)) {
+        await collect(join(this.root, name));
+        continue;
+      }
+      /*
+       * ⚠ **The other one is two levels down, which is why this descends at
+       * all.** Staging is `<root>/.reemoat-plugin-…`, but the tree a rollback
+       * moves aside is `<root>/<id>/<version>.replaced-…` — so a sweep of the root
+       * alone collects the larger of the two and leaves the one that holds a whole
+       * working plugin. One level, and only into something `lstat` calls a
+       * directory: a plugin's own files are below that, and none of this daemon's
+       * names are written there.
+       */
+      const directory = join(this.root, name);
+      let versions: string[];
+      try {
+        const info = await lstat(directory);
+        if (!info.isDirectory()) continue;
+        versions = await readdir(directory);
+      } catch {
+        // Gone, or not something this daemon can list. `installed` is what decides
+        // whether anything under this root is a plugin; this only removes.
+        continue;
+      }
+      for (const version of versions) {
+        if (!REPLACED_NAME.test(version)) continue;
+        await collect(join(directory, version));
+      }
+    }
+  }
+
+  /**
    * A directory under the plugin root, removed.
    *
    * Guarded by `containedIn` against that root, and refused outright when the path
@@ -941,18 +1197,59 @@ export class PluginHost {
    * not "it is not there": it is "the filesystem did not answer", and a remover
    * that treats those as the same runs against a path it knows nothing about.
    */
-  private async discard(path: string): Promise<void> {
+  /**
+   * Remove a tree this daemon put there, and say whether it is gone.
+   *
+   * ⚠ **The answer is load-bearing for exactly one of the eight callers.** The
+   * rollback callers want warn-and-carry-on; `doRemove` may not, because it has
+   * already dropped the row and the data by the time it gets here, and answering
+   * `removed: true` over a tree still on disk is a claim the next call disproves:
+   * `installed()` reads that directory and says the plugin is installed for ever,
+   * while every `DELETE` answers `true` and removes nothing. The leftover is at
+   * `<root>/<id>`, which matches neither {@link STAGING_NAME} nor
+   * {@link REPLACED_NAME}, so no sweep collects it either.
+   */
+  private async discard(path: string): Promise<boolean> {
     if (!containedIn(path, this.root)) {
       this.warn(`refused to remove ${path}, which is not under the plugin root`);
-      return;
+      return false;
     }
     const there = await probeExists(path);
     if (there === null) {
       this.warn(`the filesystem holding ${path} did not answer; nothing was removed`);
-      return;
+      return false;
     }
-    if (!there) return;
-    await rm(path, { recursive: true, force: true });
+    if (!there) return true;
+    try {
+      await rm(path, { recursive: true, force: true });
+      return true;
+    } catch (error) {
+      /*
+       * ⚠ **Reported rather than thrown, because four of this method's eight
+       * callers are inside the `install` rollback and a throw there abandons the
+       * rest of it.** `force: true` already swallows ENOENT, so what is left is
+       * EPERM, EBUSY and EIO: a file somebody else has open, a mount going away
+       * underneath, a disk answering badly.
+       *
+       * ⚠ **Measured, because the first version of this comment named the wrong
+       * casualty.** It said the row restoration was what a throw here skipped. It
+       * is not — `records.put(existing.record)` runs thirty lines *above*
+       * `discard(published)`, and with a bare `rm` the row was still there. What a
+       * throw actually skipped is everything *after*: the `rename(aside, target)`
+       * that puts the incumbent's tree back, the `live.set(existing…)` that makes
+       * it reachable again, and the `refuse(...)` that tells the caller which
+       * failure it was. So the row named a version whose tree had been moved aside
+       * and never moved back, and the caller got the filesystem's error instead of
+       * the install's.
+       *
+       * This is what the two refusals above already do — a path outside the root
+       * and a filesystem that will not answer are both warned and returned from.
+       * The third was the odd one out and the only one reachable *during* a
+       * rollback.
+       */
+      this.warn(`could not remove ${path}: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
   }
 
   /**
@@ -969,7 +1266,7 @@ export class PluginHost {
    * on their own.
    */
   private observe(managed: ManagedSession, arrival: "created" | "restored", origin: string | null): void {
-    if (this.stopped || this.watching.has(managed.id)) return;
+    if (this.shuttingDown || this.watching.has(managed.id)) return;
     let ended = false;
     /**
      * A throw in either subscriber, reported and the subscription kept.
@@ -1172,26 +1469,86 @@ export class PluginHost {
    * lived process.
    */
   private get shuttingDown(): boolean {
-    return this.stopped;
+    return this.stopped !== null;
   }
 
-  async shutdown(): Promise<void> {
-    if (this.stopped) return;
-    this.stopped = true;
+  /**
+   * Every plugin on this machine, down — and the caller told once they are.
+   *
+   * ⚠ **`this.x ??= this.doX()`, this codebase's idiom, and the deviation it
+   * replaces was behavioural rather than cosmetic.** This was an early-return
+   * latch (`if (this.stopped) return; this.stopped = true;`), so a second
+   * `await host.shutdown()` resolved *immediately* while the first was still
+   * inside `plugin.stop()` on live children — a caller that awaited it had no
+   * guarantee any child was down, which is the one guarantee this method exists to
+   * make. `LivePlugin.stop` writes twelve lines about the same trap one class
+   * down, and `runtime.ts` spells the idiom `this.stopping ??= this.doStop()`.
+   *
+   * ⚠ **The claim and `doShutdown`'s synchronous prefix are one job, which is what
+   * makes {@link shuttingDown} a barrier despite `??=` assigning last.** `??=`
+   * evaluates the right-hand side before it writes, so between the call and the
+   * assignment `this.stopped` is still `null` — and nothing observes it there,
+   * because everything `doShutdown` does before its first `await` is
+   * synchronous and this runtime is one thread. A mutator can only ask after that
+   * `await`, by which point the field is written.
+   */
+  shutdown(): Promise<void> {
+    return (this.stopped ??= this.doShutdown());
+  }
+
+  private async doShutdown(): Promise<void> {
     this.unwatch?.();
     this.unwatch = null;
     for (const stop of this.watching.values()) stop();
     this.watching.clear();
     /*
-     * ⚠ **An install in flight is waited out rather than raced.** `installing` is
-     * held for the whole of an install, an update, a remove and a switch, so
-     * spinning on it is the same barrier those four already agree on — and
-     * draining `live` while one is between its `rename` and its `ensureStarted`
+     * ⚠ **A mutation in flight is waited out rather than raced, but only so far.**
+     * {@link mutating} is held for the whole of an install, an update, a remove and
+     * a switch, so waiting on it is the same barrier those four already agree on —
+     * and draining `live` while one is between its `rename` and its `ensureStarted`
      * is exactly how a child outlives this call. The mutators refuse the moment
-     * `stopped` is set, so nothing new can be admitted while this waits and the
-     * loop is bounded by the one act that was already running.
+     * {@link shuttingDown} is true, so nothing new can be admitted while this
+     * waits.
+     *
+     * ⚠ **What it may not do is wait forever, and the old loop had no bound at
+     * all.** The act it is waiting on has no deadline of its own: `install` holds
+     * the mutex across `unpackArchive`, whose `for await (const chunk of
+     * request.body)` charges **bytes** and never charges **time**, so a client
+     * trickling a two-megabyte archive one byte at a time holds this open for as
+     * long as it likes. `scripts/daemon.ts` runs this method *before*
+     * `registry.shutdown()` and `stores.close()`, under one 25 s hard exit — so an
+     * unbounded wait here does not merely delay a shutdown, it spends somebody
+     * else's budget and the process leaves with no session exit records written and
+     * no WAL checkpoint.
+     *
+     * ⚠ **What the bound gives back is a narrow version of the thing the drain
+     * exists to prevent, and it is the smaller of the two by a distance.** An
+     * install that outlasts the deadline and then completes forks a child after
+     * `live` has been drained, which no `stop()` here will reach — exactly what
+     * {@link shuttingDown} describes. But that child is not `detached` and there is
+     * no reaper: `runner.ts` exits when its IPC channel closes, and
+     * `scripts/daemon.ts`'s `process.exit(0)` two lines later closes it. So the
+     * escaped child dies with this process either way, while the sessions whose
+     * exit records were never written stay wrong on disk until somebody reads a
+     * transcript that ends in the middle. One stalled upload must not be able to
+     * buy the second to avoid the first.
      */
-    while (this.installing) await new Promise((resolve) => setTimeout(resolve, 10));
+    const deadline = Date.now() + SHUTDOWN_MUTATION_WAIT_MS;
+    // `Date.now` rather than {@link PluginHostOptions.now}, whose docblock says it
+    // decides `installedAt`/`updatedAt` and nothing else — a driver holding that
+    // clock still would otherwise turn this bound back into the unbounded loop.
+    while (this.mutating && Date.now() < deadline) {
+      await new Promise<void>((resolve) => {
+        // Unref'd like every other backstop timer here. A process whose last work
+        // is waiting out a mutation must not be held open by the waiting itself.
+        setTimeout(resolve, 10).unref?.();
+      });
+    }
+    if (this.mutating) {
+      this.warn(
+        `a change to this machine's plugins was still running after ${SHUTDOWN_MUTATION_WAIT_MS}ms; shutting down without waiting for it`,
+      );
+    }
     await Promise.all([...this.live.values()].map((plugin) => plugin.stop()));
   }
 }
@@ -1372,6 +1729,20 @@ class LivePlugin {
     this.failure = null;
   }
 
+  /**
+   * This plugin is not runnable, and its row is to say so.
+   *
+   * ⚠ **The one caller is {@link PluginHost.install}'s failed-rollback arm**, and
+   * it is the one failure the *host* knows about that the plugin cannot: its files
+   * are not where its row says they are, so no launch could report this as
+   * anything but a missing module. Everything else that reaches {@link fail}
+   * — a start that did not, a child that died, a plugin that stopped answering —
+   * is inside this class, which is why `fail` is private and this is one line.
+   */
+  markFailed(detail: string): void {
+    this.fail(detail);
+  }
+
   summary(): PluginSummary {
     const { manifest } = this.record;
     return {
@@ -1424,7 +1795,18 @@ class LivePlugin {
      */
     const generation = ++this.generation;
     // A launch of its own gets a signal of its own; see {@link hostCallsAbort}.
-    this.hostCallsAbort = new AbortController();
+    const hostCalls = new AbortController();
+    /*
+     * ⚠ **Held as a local as well as on `this`, because the field is reassigned by
+     * the next launch and `onExit` fires arbitrarily late.** A crash that has
+     * already been followed by a restart finds `this.hostCallsAbort` pointing at
+     * its *successor's* controller — aborting that would cancel the live child's
+     * work, and reading it to abort "the crashed one" is not possible at all once
+     * the field has moved. The closure below owns the controller of the launch it
+     * belongs to, which is the same rule every other callback here follows about
+     * `this.process`.
+     */
+    this.hostCallsAbort = hostCalls;
     /*
      * ⚠ **A stop already under way is waited out rather than raced.** `doStop`
      * nulls `process` and writes "stopped" on the row in its first three lines and
@@ -1520,6 +1902,22 @@ class LivePlugin {
            * precisely the ones nobody is ever going to answer.
            */
           this.settlePending(generation, `the plugin process ${detail}`);
+          /*
+           * ⚠ **And the calls going the *other* way, which only `doStop` withdrew.**
+           * {@link hostCallsAbort}'s docblock names the exposure — an agent
+           * subprocess holding one of this machine's two `model.complete` slots for
+           * 110 seconds after the plugin that asked for it is gone — and answers it
+           * for the deliberate paths. A **crash** reaches none of them: the child
+           * dies, `settlePending` tells the inbound side, and the outbound call ran
+           * on. Worse, `scheduleRestart` two lines down replaces the field within
+           * two seconds, after which the crashed generation's controller is
+           * unreachable from every field on this object and no later `stop()`,
+           * `setEnabled(false)`, `remove()` or `shutdown()` can ever abort it.
+           *
+           * Above the generation gate for `settlePending`'s reason: a superseded
+           * child's outbound calls are exactly the ones whose answers nobody wants.
+           */
+          hostCalls.abort(new Error(`the plugin process ${detail}`));
           if (generation !== this.generation) {
             /*
              * ⚠ **A child this plugin has already moved on from — and every line

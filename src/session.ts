@@ -10,7 +10,7 @@ import {
 import { MAX_PARENT_ID_CHARS, toolCallLineage } from "./acp/subagents.js";
 import { sessionMetaFor } from "./acp/agents.js";
 import type { AgentId } from "./acp/agents.js";
-import { clip, jsonSize } from "./events.js";
+import { clip, jsonBytes } from "./events.js";
 import type {
   AgentCommand,
   AgentCommands,
@@ -1866,7 +1866,7 @@ export class Session {
      * silently shortened. `invalidParams`, matching every other refusal on this
      * path and on the elicitation one.
      */
-    const weight = jsonSize(title) + jsonSize(options);
+    const weight = jsonBytes(title) + jsonBytes(options);
     if (weight > MAX_PERMISSION_SNAPSHOT_BYTES) {
       throw acp.RequestError.invalidParams(
         `a permission's title and options come to at most ${MAX_PERMISSION_SNAPSHOT_BYTES} bytes, ` +
@@ -2483,7 +2483,7 @@ export function toElicitationForm(schema: acp.ElicitationSchema | null | undefin
   // The backstop the per-item caps cannot be: they bound one string, this bounds
   // a thousand of them. Measured after projecting, so it counts what would
   // actually be carried rather than what arrived.
-  if (jsonSize(form) > MAX_ELICITATION_FORM_BYTES) {
+  if (jsonBytes(form) > MAX_ELICITATION_FORM_BYTES) {
     throw new ElicitationRefusedError(
       `this form is larger than the ${MAX_ELICITATION_FORM_BYTES} bytes this client will carry`,
     );

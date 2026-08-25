@@ -10,7 +10,6 @@ import {
   installedSubline,
   isBehind,
   noRowsText,
-  outcomeText,
   removalQuestion,
   rowActLabel,
   rowActs,
@@ -48,8 +47,15 @@ import { Badge, Button, DangerButton, Empty, Icon, IconButton, Menu, menuRow, SE
  * So: a fixed-height scroller with a search box and a filter above it, per-row acts
  * that happen when pressed, and a bar of four below that acts on whatever is
  * ticked. `plugin_data` still does not come back, so **only a removal is
- * confirmed** — on the row and in the bar, both ending with Cancel, which is
- * Q3.218's measured property rather than an ordering preference.
+ * confirmed** — in the bar, ending with Cancel, which is Q3.218's measured
+ * property rather than an ordering preference.
+ *
+ * ⚠ **In the bar and nowhere else: the row's bin went with the row's question**
+ * (Q3.469). A confirming pair has to replace what it guards, and a row 44px from
+ * its own checkbox has nothing it can replace itself with. `drawnActs` is where
+ * that is enforced, and it is a *narrowing* of `rowActs` rather than a second
+ * predicate, because the bar still needs the wider answer to know whether its own
+ * Remove may light up.
  *
  * ⚠ **Every enablement and every word is decided in `install.ts`.** `rowActs` and
  * `bulkEnabled` are pure and swept, which is what `draftAct` was extracted for and
@@ -67,6 +73,16 @@ import { Badge, Button, DangerButton, Empty, Icon, IconButton, Menu, menuRow, SE
 
 /** How long to wait before the one retry a busy machine gets. */
 const BUSY_RETRY_MS = 1_500;
+
+/**
+ * How many machines a bulk act may be sending to at once.
+ *
+ * See {@link MachineInstalls}'s `act` for the arithmetic this number comes out of:
+ * a bulk install is one 2 MiB upload per machine out of one phone, and above about
+ * four of them at once each one starves past its own `uploadDeadlines` wall clock
+ * and the whole fleet reports "upload timed out" rather than finishing slowly.
+ */
+const MAX_MACHINES_AT_ONCE = 4;
 
 /**
  * What to do on one machine. Returns what happened, so the row can say it.
@@ -292,118 +308,190 @@ export function MachineInstalls({
       ...removing.map((id) => ({ id, what: "remove" as const })),
     ];
 
-    void Promise.allSettled(
-      jobs.map(async ({ id, what }) => {
-        const daemon = store.daemonFor(id);
-        if (daemon === undefined) {
-          // The list moved under the act — a machine revoked in another tab. Said
-          // on its own row rather than thrown, because every other machine in this
-          // act is still going.
-          write(id, { kind: "failed", message: "That machine is not in your list any more." }, mine.get(id) ?? 0);
+    /*
+     * ⚠ **Every row is marked and every controller minted here, before a single
+     * byte goes out** — because the pool below starts only some of these and the
+     * rest wait their turn. Left inside the job, a fleet of fifty would paint eight
+     * working rows and forty-two that still read "not installed", and Cancel on a
+     * machine whose turn had not come would have no controller to abort. Held
+     * together up here, a queued job is cancellable from the paint of the press:
+     * `sendWithProgress` refuses an already-aborted signal before it opens the
+     * request, and `upload` does not retry what the caller called off.
+     *
+     * Nothing is lost by the move. The old shape marked every row in this same tick
+     * anyway — an `async` body runs synchronously to its first `await` — so this is
+     * where the rows were being painted from already, said once instead of once per
+     * job.
+     */
+    const queued: {
+      id: MachineId;
+      what: "install" | "remove";
+      daemon: DaemonClient;
+      controller: AbortController | null;
+    }[] = [];
+    for (const { id, what } of jobs) {
+      const daemon = store.daemonFor(id);
+      if (daemon === undefined) {
+        // The list moved under the act — a machine revoked in another tab. Said
+        // on its own row rather than thrown, because every other machine in this
+        // act is still going.
+        write(id, { kind: "failed", message: "That machine is not in your list any more." }, mine.get(id) ?? 0);
+        continue;
+      }
+      /*
+       * ⚠ **One controller per job, and `null` for a removal.** It is what makes
+       * "this request was called off" a question each job answers about itself
+       * rather than about the act — a removal has no controller, is never
+       * aborted, and therefore still reports its own failures, which is exactly
+       * what `cancelAll` promises. Held across the retry rather than per attempt:
+       * a failed attempt leaves it unaborted, so it is still the right handle,
+       * and a fresh one per attempt would leave a `plugin_busy` retry
+       * uncancellable for the 1.5s it sleeps.
+       */
+      const controller = what === "install" && install !== null ? new AbortController() : null;
+      if (controller !== null) inFlight.current.set(id, controller);
+      /*
+       * ⚠ **`cancellable` is *literally* the controller this job holds.** It was
+       * set from `adding.length > 0` — a fact about the jobs the screen drafted —
+       * and a removal-only act therefore drew a live Cancel over an act holding no
+       * controller at all.
+       */
+      write(
+        id,
+        { kind: "working", label: what === "install" ? "installing" : "removing", cancellable: controller !== null },
+        mine.get(id) ?? 0,
+      );
+      queued.push({ id, what, daemon, controller });
+    }
+
+    /**
+     * One machine's job, start to finish.
+     *
+     * ⚠ **Total: it settles rather than rejecting**, which is what lets the workers
+     * below `await` it in a loop. A rejection here would end the worker that drew
+     * it and quietly shrink the pool for the rest of the act.
+     */
+    const run = async ({ id, what, daemon, controller }: (typeof queued)[number]): Promise<void> => {
+      /** Whether *this* request was the one called off. */
+      const calledOff = (): boolean => controller?.signal.aborted === true;
+      const once = async (): Promise<void> => {
+        if (what === "remove") {
+          await daemon.removePlugin(pluginId);
           return;
         }
-        /*
-         * ⚠ **One controller per job, and `null` for a removal.** It is what makes
-         * "this request was called off" a question each job answers about itself
-         * rather than about the act — a removal has no controller, is never
-         * aborted, and therefore still reports its own failures, which is exactly
-         * what `cancelAll` promises. Held across the retry rather than per attempt:
-         * a failed attempt leaves it unaborted, so it is still the right handle,
-         * and a fresh one per attempt would leave a `plugin_busy` retry
-         * uncancellable for the 1.5s it sleeps.
-         */
-        const controller = what === "install" && install !== null ? new AbortController() : null;
-        if (controller !== null) inFlight.current.set(id, controller);
-        /*
-         * ⚠ **The row is marked working here rather than before the fan-out, so
-         * `cancellable` is *literally* the controller this job holds.** It was set
-         * from `adding.length > 0` — a fact about the jobs the screen drafted — and
-         * a removal-only act therefore drew a live Cancel over an act holding no
-         * controller at all. This runs before the first `await`, so the row still
-         * changes in the same paint as the press.
-         */
-        write(
+        if (install === null || controller === null) return;
+        await install(
+          daemon,
           id,
-          { kind: "working", label: what === "install" ? "installing" : "removing", cancellable: controller !== null },
-          mine.get(id) ?? 0,
+          (fraction) =>
+            write(id, { kind: "working", label: `${Math.round(fraction * 100)}%`, cancellable: true }, mine.get(id) ?? 0),
+          controller.signal,
         );
-        /** Whether *this* request was the one called off. */
-        const calledOff = (): boolean => controller?.signal.aborted === true;
-        const once = async (): Promise<void> => {
-          if (what === "remove") {
-            await daemon.removePlugin(pluginId);
-            return;
-          }
-          if (install === null || controller === null) return;
-          await install(
-            daemon,
-            id,
-            (fraction) =>
-              write(id, { kind: "working", label: `${Math.round(fraction * 100)}%`, cancellable: true }, mine.get(id) ?? 0),
-            controller.signal,
-          );
-        };
-        try {
-          await once();
-          // Cleared rather than set to a success state: the store is about to
-          // carry the answer, and a row that kept a local "installed" would be a
-          // second copy of the truth that nothing invalidates.
+      };
+      try {
+        await once();
+        // Cleared rather than set to a success state: the store is about to
+        // carry the answer, and a row that kept a local "installed" would be a
+        // second copy of the truth that nothing invalidates.
+        write(id, null, mine.get(id) ?? 0);
+      } catch (error) {
+        /*
+         * ⚠ **`plugin_busy` is retried once and nothing else is.** A busy
+         * machine is a queue collision — installs are serialised for a whole
+         * daemon — and asking again a second later is exactly right. Everything
+         * else is not retried, because `POST` is not replayable: a transport
+         * failure says nothing about whether the daemon acted, and it may be
+         * halfway through unpacking. A *remove* is a `DELETE` and inherits its
+         * retry from `machine.ts` one layer down.
+         */
+        /*
+         * ⚠ **A cancelled upload is not a failure, and must not be reported as
+         * one.** `pluginFailure` has no arm for an abort, so it falls through to
+         * "That did not work. Try again." — a failure sentence, on a row, for an
+         * act the person took deliberately. The row is cleared instead, so it
+         * falls back to what the store says: whatever was there before. Checked
+         * before the retry, or a cancelled `plugin_busy` would wait 1.5s and
+         * then send again, which is the opposite of cancelling.
+         */
+        if (calledOff()) {
           write(id, null, mine.get(id) ?? 0);
-        } catch (error) {
-          /*
-           * ⚠ **`plugin_busy` is retried once and nothing else is.** A busy
-           * machine is a queue collision — installs are serialised for a whole
-           * daemon — and asking again a second later is exactly right. Everything
-           * else is not retried, because `POST` is not replayable: a transport
-           * failure says nothing about whether the daemon acted, and it may be
-           * halfway through unpacking. A *remove* is a `DELETE` and inherits its
-           * retry from `machine.ts` one layer down.
-           */
-          /*
-           * ⚠ **A cancelled upload is not a failure, and must not be reported as
-           * one.** `pluginFailure` has no arm for an abort, so it falls through to
-           * "That did not work. Try again." — a failure sentence, on a row, for an
-           * act the person took deliberately. The row is cleared instead, so it
-           * falls back to what the store says: whatever was there before. Checked
-           * before the retry, or a cancelled `plugin_busy` would wait 1.5s and
-           * then send again, which is the opposite of cancelling.
-           */
+          return;
+        }
+        if (ApiError.isApiError(error) && error.code === "plugin_busy") {
+          await new Promise((resolve) => setTimeout(resolve, BUSY_RETRY_MS));
           if (calledOff()) {
             write(id, null, mine.get(id) ?? 0);
             return;
           }
-          if (ApiError.isApiError(error) && error.code === "plugin_busy") {
-            await new Promise((resolve) => setTimeout(resolve, BUSY_RETRY_MS));
+          try {
+            await once();
+            write(id, null, mine.get(id) ?? 0);
+            return;
+          } catch (second) {
             if (calledOff()) {
               write(id, null, mine.get(id) ?? 0);
               return;
             }
-            try {
-              await once();
-              write(id, null, mine.get(id) ?? 0);
-              return;
-            } catch (second) {
-              if (calledOff()) {
-                write(id, null, mine.get(id) ?? 0);
-                return;
-              }
-              write(id, { kind: "failed", message: pluginFailure(second) }, mine.get(id) ?? 0);
-              return;
-            }
+            write(id, { kind: "failed", message: pluginFailure(second) }, mine.get(id) ?? 0);
+            return;
           }
-          write(id, { kind: "failed", message: pluginFailure(error) }, mine.get(id) ?? 0);
-        } finally {
-          /*
-           * Per machine, and after that machine's own answer rather than after the
-           * whole act: the launcher in the account menu and a session's menu read
-           * `pluginsByMachine`, and a fleet where four hosts are done and one is
-           * slow should show four hosts' worth.
-           */
-          inFlight.current.delete(id);
-          store.refreshPlugins(id);
         }
-      }),
-    );
+        write(id, { kind: "failed", message: pluginFailure(error) }, mine.get(id) ?? 0);
+      } finally {
+        /*
+         * Per machine, and after that machine's own answer rather than after the
+         * whole act: the launcher in the account menu and a session's menu read
+         * `pluginsByMachine`, and a fleet where four hosts are done and one is
+         * slow should show four hosts' worth.
+         */
+        inFlight.current.delete(id);
+        store.refreshPlugins(id);
+      }
+    };
+
+    /*
+     * ⚠ **A pool, because one `Promise.allSettled` over the whole list is an
+     * unbounded fan-out and this is the widest one in the client.** Every job is an
+     * upload of the same archive — `PLUGIN_LIMITS.maxBytes` is 2 MiB and
+     * `MAX_MACHINES_PER_USER` is 50 — so ticking a whole fleet started 100 MiB of
+     * simultaneous `XMLHttpRequest` out of one phone. `src/plugins/runtime.ts`
+     * bounds exactly this shape on the daemon's own side and says what the bound is
+     * for: "what it stops is the unbounded fan-out, not concurrency". This is that
+     * sentence's other half.
+     *
+     * ⚠ **And unbounded here does not merely mean slow, it means every row fails.**
+     * The uploads share one uplink, so fifty of them each get a fiftieth of it —
+     * while each still runs against its own wall clock. `uploadDeadlines` gives a
+     * 2 MiB archive `20_000 + 2097152/50 ≈ 62s`, and 2 MiB at a fiftieth of a
+     * 250 KiB/s uplink is about 419s: past the cap on all fifty, with none of them
+     * finished. `sendWithProgress` aborts each one — "upload timed out" — and since
+     * a `POST` is not replayable nothing retries, so `pluginFailure` draws fifty
+     * failed rows. The *stall* budget never fires, because the bytes really are
+     * trickling; the wall clock is what kills it.
+     *
+     * Four leaves that arithmetic with room — ≈34s against 62s — on a link a phone
+     * plausibly has. It is arithmetic against those two constants rather than a
+     * measurement of a real fleet, which is the honest description of it, and it is
+     * why the number is small rather than the 16 the daemon's own bound uses.
+     *
+     * ⚠ **The bound is on how many *start*, and on nothing else.** Progress stays
+     * per row, each job keeps its own epoch, its own controller and its own
+     * `write` — `plugin-ui.md`'s "epochs are per machine" is untouched, because
+     * scheduling is the only thing this adds.
+     */
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        // `next` is claimed and advanced with no `await` between the two, which is
+        // the whole of the mutual exclusion: one thread, one turn of the loop, so
+        // two workers cannot draw the same job.
+        const job = queued[next];
+        next += 1;
+        if (job === undefined) return;
+        await run(job);
+      }
+    };
+    void Promise.allSettled(Array.from({ length: Math.min(MAX_MACHINES_AT_ONCE, queued.length) }, () => worker()));
   };
 
   if (state.machines.length === 0) {
@@ -670,6 +758,12 @@ export function MachineInstalls({
          * it explains — `AccountSection`'s consequence-before-the-button rule — and
          * is what that control's `aria-describedby` points at.
          *
+         * ⚠ **Empty rather than "nothing selected"**: that named the *absence* of a
+         * state, on a strip whose four controls are already visibly inert, and it
+         * is the commonest state — a permanent line saying nothing. What the line
+         * is for survives, because a row the filter is hiding is still selected and
+         * one press reaches it.
+         *
          * ⚠ **Not a live region**, unlike the failure below: this changes on every
          * tick of a checkbox, and announcing that would be chatter beside a region
          * meant to speak a failure.
@@ -694,20 +788,6 @@ export function MachineInstalls({
       <p role="status" aria-live="polite" className={failure.length === 0 ? "" : "mt-3 text-xs wrap-anywhere text-fg"}>
         {failure}
       </p>
-      {/*
-       * ⚠ **Always mounted at a reserved height, and only its text swaps.** Gated on
-       * the selection it moved the bar under a thumb the moment somebody ticked a
-       * box — the same defect the row's question had, one element down. `min-h-4` is
-       * the `text-2xs` line box, so the empty state costs the space it will need
-       * rather than none.
-       *
-       * ⚠ **Empty rather than "nothing selected"**: that named the absence of a
-       * state, on a strip whose four controls are already visibly inert, and it is
-       * the commonest state — a permanent line saying nothing. What the line is
-       * *for* survives, because a row the filter is hiding is still selected and one
-       * press reaches it.
-       */}
-
       {/*
        * ⚠ **The bar, outside the scroller and always on screen.** Order puts the
        * destructive control in the middle, so a stray tap at either end of the strip
@@ -837,8 +917,10 @@ function MachineRow({
           </label>
           {/*
            * ⚠ **A reserved slot two `lg` boxes wide**, so a row going
-           * `[install]` → `[spinner]` → `[update][remove]` does not mount sideways
-           * into the name beside it.
+           * `[install]` → `[spinner][cancel]` → `[update]` does not mount sideways
+           * into the name beside it. Two and not one even though `drawnActs` leaves
+           * a settled row at most one icon: the *working* state draws the spinner
+           * and the cancel beside it, and that pair is what sets the width.
            */}
           <span className="flex w-[5.5rem] shrink-0 items-center justify-end gap-1">
             {one.busy ? (
@@ -891,6 +973,3 @@ function sublineFor(row: RowState, canInstall: boolean, available: string | null
       return row.message;
   }
 }
-
-/** The row's outcome as this app words it elsewhere. Kept for a driver to reach. */
-export { outcomeText };

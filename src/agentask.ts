@@ -245,9 +245,10 @@ export class AgentAskRuns {
    * rests on.
    *
    * Incremented inside `admit` with no `await` between the test and the
-   * increment, and handed over to `starting` in the same tick by the caller. It
-   * double-counts for no turns of the loop at all, which is why the handover is
-   * in a `finally` with nothing awaited inside the `try`.
+   * increment, and handed over to `starting` in the same tick by {@link claim},
+   * which is `admit`'s only caller and the only place that hand-over is written
+   * down. It double-counts for no turns of the loop at all, which is why the
+   * handover is in a `finally` with nothing awaited inside the `try`.
    */
   private reserved = 0;
 
@@ -311,31 +312,7 @@ export class AgentAskRuns {
      */
     stopIfGone(signal);
 
-    await this.admit(agent);
-
-    // The slot `admit` reserved, handed to `starting` without an `await` in
-    // between — the two count the same run and must never both be absent.
-    let started: Promise<Session>;
-    try {
-      started = this.start(agent);
-      this.starting.add(started);
-    } finally {
-      this.reserved -= 1;
-    }
-    let session: Session;
-    try {
-      session = await started;
-    } finally {
-      this.starting.delete(started);
-    }
-
-    /*
-     * ⚠ **Registered before the first `await` that can park**, or a shutdown
-     * landing between the start resolving and this line drains an empty set and
-     * leaves the process behind. `starting` covers the window before; this covers
-     * the window after, and the two must not have a gap between them.
-     */
-    this.live.add(session);
+    const session = await this.claim(agent);
     try {
       /*
        * ⚠ **Asked again here, because `Session.start` is the long part and nothing
@@ -348,14 +325,7 @@ export class AgentAskRuns {
       if (chosen.length > 0) await this.choose(session, agent, chosen);
       return { text: await this.collect(session, prompt, signal), agent };
     } finally {
-      this.live.delete(session);
-      // Disposed on every path, including the deadline. `dispose()` is memoised,
-      // so a second call from `shutdown` racing this one settles rather than
-      // killing a child twice.
-      await session.dispose().catch(() => {
-        // Nothing left to release, or the child died with the turn. Either way
-        // there is no second way to say it from here and nobody waiting to hear.
-      });
+      await this.release(session);
     }
   }
 
@@ -368,6 +338,13 @@ export class AgentAskRuns {
    * agent process — a second copy of this preamble is how one of them comes to be
    * missing the cap, and the symptom of that is a machine with an unbounded
    * number of node subprocesses on it.
+   *
+   * ⚠ **It has exactly one caller, and that is a correction rather than a
+   * detail.** The lifting stopped at the test: the {@link reserved} increment
+   * this leaves behind was handed to {@link starting} by ten lines transcribed
+   * into both entry points, so the cap was one function while the bookkeeping
+   * that makes its number true was two hand-kept copies — the very shape the
+   * paragraph above refuses. {@link claim} is where both halves live now.
    */
   private async admit(agent: AgentId): Promise<void> {
     if (this.stopped) {
@@ -422,6 +399,68 @@ export class AgentAskRuns {
   }
 
   /**
+   * A slot, a spawned agent, and a session nobody but the caller can reach — or
+   * a refusal that has cost the machine nothing.
+   *
+   * ⚠ **{@link admit} counts, and this is what makes its number mean anything.**
+   * The cap is not the test: it is the test plus the `reserved` → `starting` →
+   * `live` chain below, which has no `await` at either join and no path on which
+   * a run is counted in neither set. That chain was **copied** into both entry
+   * points, one screen under a docblock that exists to refuse exactly that for
+   * the test above — so the shared half was the half the compiler could not get
+   * wrong anyway, and the transcribed half was the accounting. A third caller
+   * would have transcribed it a third time.
+   *
+   * ⚠ **The handover is in a `finally` with nothing awaited inside the `try`**,
+   * so `reserved` and `starting` double-count for no turns of the loop and go
+   * absent together for none either. A `start` that rejects before this returns
+   * leaves both empty and `live` untouched, which is why a caller only owes
+   * {@link release} for a session this actually handed back.
+   *
+   * ⚠ **`live` is joined before this returns**, so a `shutdown` landing in the
+   * microtask between the two finds the session rather than an empty set and a
+   * process nobody holds. `starting` covers the window before the start
+   * resolves; `live` covers the window after; the two must not have a gap
+   * between them, and here they cannot.
+   */
+  private async claim(agent: AgentId): Promise<Session> {
+    await this.admit(agent);
+
+    // The slot `admit` reserved, handed to `starting` without an `await` in
+    // between — the two count the same run and must never both be absent.
+    let started: Promise<Session>;
+    try {
+      started = this.start(agent);
+      this.starting.add(started);
+    } finally {
+      this.reserved -= 1;
+    }
+    let session: Session;
+    try {
+      session = await started;
+    } finally {
+      this.starting.delete(started);
+    }
+    this.live.add(session);
+    return session;
+  }
+
+  /**
+   * The other half of {@link claim}, owed on every path out of the `try` that
+   * follows it — the deadline and the abandonment included.
+   *
+   * `dispose()` is memoised, so a second call from {@link shutdown} racing this
+   * one settles rather than killing a child twice.
+   */
+  private async release(session: Session): Promise<void> {
+    this.live.delete(session);
+    await session.dispose().catch(() => {
+      // Nothing left to release, or the child died with the turn. Either way
+      // there is no second way to say it from here and nobody waiting to hear.
+    });
+  }
+
+  /**
    * Which models this agent says it can be asked to use.
    *
    * ⚠ **This daemon has no model list of its own and could not have one.** There
@@ -468,27 +507,7 @@ export class AgentAskRuns {
      */
     stopIfGone(signal);
 
-    await this.admit(agent);
-    // The reserved slot handed to `starting`, as `ask` does and for its reason.
-    let started: Promise<Session>;
-    try {
-      started = this.start(agent);
-      this.starting.add(started);
-    } finally {
-      this.reserved -= 1;
-    }
-    let session: Session;
-    try {
-      session = await started;
-    } finally {
-      this.starting.delete(started);
-    }
-    /*
-     * ⚠ **Registered before the first `await` that can park**, exactly as `ask`
-     * does and for its reason: a shutdown landing between the start resolving and
-     * this line drains an empty set and leaves the process behind.
-     */
-    this.live.add(session);
+    const session = await this.claim(agent);
     try {
       const option = modelOptionOf(session);
       /*
@@ -508,11 +527,7 @@ export class AgentAskRuns {
       this.models_.set(agent, { at: Date.now(), choices });
       return choices;
     } finally {
-      this.live.delete(session);
-      await session.dispose().catch(() => {
-        // Nothing left to release, or the child died first. Either way there is no
-        // second way to say it from here and nobody waiting to hear.
-      });
+      await this.release(session);
     }
   }
 

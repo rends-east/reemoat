@@ -568,8 +568,18 @@ export function isNewer(catalogue: string, installed: string): boolean {
  * The same fifteen seconds every other request in this client gets. A catalogue
  * that is slow is a tab that says so; there is nothing here worth a longer
  * budget, because nothing here is on a path anybody is blocked on.
+ *
+ * ⚠ **Exported, because the sentence above claims a budget this module does not
+ * hold alone.** A market entry makes a second read the person is waiting on —
+ * `usePinnedManifest`, straight to `raw.githubusercontent.com` rather than
+ * through {@link fetchCatalogue}, since that is the one address answering CORS
+ * `*` — and while this was module-private that screen spelled a bare `15_000`
+ * instead. Two literals cannot keep "the same fifteen seconds" true — the next
+ * person to change the wait changes one of them — and `ROTATE_RETRY_MS` is named
+ * one module over for the weaker half of the same reason: so a reader does not
+ * have to prove that bare `15_000`s were meant to be one number.
  */
-const CATALOGUE_TIMEOUT_MS = 15_000;
+export const CATALOGUE_TIMEOUT_MS = 15_000;
 
 /**
  * Where each of the three reads lives, given the base this instance published.
@@ -583,20 +593,6 @@ export function catalogueEndpoint(base: string, path: string): string {
   return new URL(path.replace(/^\//, ""), base.endsWith("/") ? base : `${base}/`).toString();
 }
 
-/**
- * Ask the catalogue something.
- *
- * ⚠ **No credential, ever.** The catalogue has no authentication and is not
- * going to grow any: it answers `GET` and `OPTIONS` and nothing else, and
- * publishing is a CLI inside its own container. Sending this app's credential to
- * a third origin would be the one thing `cp.ts`'s whole "only to this origin"
- * rule exists to prevent.
- *
- * No cache of our own either. The service sends `cache-control: max-age=60` with
- * an `ETag`, so the browser revalidates by itself and a second visit to the
- * screen is a `304` — which is a cache this client does not have to invalidate,
- * and therefore cannot get wrong.
- */
 /**
  * Ask the catalogue something, and read the answer.
  *

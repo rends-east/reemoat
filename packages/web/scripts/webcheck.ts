@@ -17458,7 +17458,7 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
 
 process.stdout.write("\nwhat somebody is shown before a plugin is sent anywhere\n");
 {
-  const { peekPluginArchive } = await import("../src/pluginArchive.js");
+  const { peekPluginArchive, MAX_PEEK_BYTES } = await import("../src/pluginArchive.js");
   const { consentBroken } = await import("../src/plugins.js");
   const { gzipSync, deflateRawSync, crc32 } = await import("node:zlib");
 
@@ -17832,6 +17832,306 @@ process.stdout.write("\nwhat somebody is shown before a plugin is sent anywhere\
     zipOverrunning({ "wrap/plugin.json": MANIFEST, "wrap/server.js": "export {}", "plugin.json": EVIL }),
   );
   check("a zip directory entry that runs past the directory is refused", overrun.kind, "unreadable");
+
+  /*
+   * 9. The size field the daemon reads as octal and this reader tidied.
+   *
+   * ⚠ **The first eight cases each pin one reader against a literal, and a literal
+   * keeps agreeing with a rule that has moved.** This one runs the same bytes
+   * through *both* real readers and compares, which is the only shape that can see
+   * a divergence nobody thought to hand-write a case for — and it is how this one
+   * was found, after five had been.
+   *
+   * The field is `0x0000003000`. `tarNumber` hands the whole thing to `parseInt`,
+   * which stops at the `x` and reads 0; this reader stripped every non-octal byte
+   * first and read 0o3000 = 1536. Zero advances the walk one block and 1536
+   * advances it four, so from that member on the two are reading headers at
+   * different offsets — the screen described `benign` while the daemon installed
+   * `evil` with six scopes and a `permission.requested` hook. Neither reader checks
+   * the header checksum, so the field costs nothing to plant.
+   */
+  {
+    const { unpackArchive, PLUGIN_LIMITS } = await import("../../../src/archive.js");
+    const { mkdtempSync, readdirSync, readFileSync, existsSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+
+    /*
+     * ⚠ **The ceiling this reader stops at is the daemon's own, restated by hand,
+     * and until now nothing held the two together.** `MAX_PEEK_BYTES`'s own docblock
+     * calls it "the daemon's own unpacked ceiling (`PLUGIN_LIMITS.maxUnpackedBytes`)
+     * rather than something smaller", because a plugin the daemon would accept must
+     * be one this screen can describe — and the copy is there for `wire.ts`'s reason,
+     * that `packages/web` may not import from `src/`. This block already holds both
+     * files open, so the claim costs one line to check.
+     *
+     * The direction that goes wrong is silent and it is a *raise* over there: this
+     * reader then becomes exactly the second, stricter gate that paragraph forbids,
+     * and the symptom on the phone is an archive the machine takes happily arriving
+     * as "unreadable" — which reads as a broken download rather than as a stale
+     * constant. Lowering `maxUnpackedBytes` is the harmless direction and fails here
+     * too, on purpose: one number, asserted, beats two that agree today.
+     */
+    check("the consent screen's ceiling is the daemon's own", MAX_PEEK_BYTES, PLUGIN_LIMITS.maxUnpackedBytes);
+
+    /** `findManifestRoot`'s rule, restated: the tree, or one directory inside it. */
+    const daemonInstalls = async (bytes: Buffer): Promise<string> => {
+      const staging = mkdtempSync(join(tmpdir(), "peek-parity-"));
+      try {
+        const out = await unpackArchive({
+          staging,
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new Uint8Array(bytes));
+              controller.close();
+            },
+          }),
+          limits: PLUGIN_LIMITS,
+        });
+        if (out.kind !== "ok") return "refused";
+        let at: string | null = existsSync(join(out.tree, "plugin.json")) ? out.tree : null;
+        if (at === null) {
+          const top = readdirSync(out.tree, { withFileTypes: true });
+          const only = top.length === 1 && top[0]?.isDirectory() === true ? top[0].name : null;
+          at = only !== null && existsSync(join(out.tree, only, "plugin.json")) ? join(out.tree, only) : null;
+        }
+        if (at === null) return "refused";
+        const read = JSON.parse(readFileSync(join(at, "plugin.json"), "utf8")) as { id?: unknown };
+        return String(read.id ?? "?");
+      } catch {
+        // A refusal spelled as a throw is still a refusal, and this comparison only
+        // cares which manifest the daemon would name.
+        return "refused";
+      } finally {
+        rmSync(staging, { recursive: true, force: true });
+      }
+    };
+
+    /*
+     * One member whose size the two readers disagree about, and a body holding two
+     * manifests — the daemon's at offset 0, because it reads the size as 0 and
+     * takes the next block as a header, and this reader's at 1536, because it read
+     * 0o3000. Both are real, checksummed tar members; the only crafted byte is the
+     * size field. Measured before the fix: the screen said `board` with no scopes
+     * while the daemon installed `evil` with four and a `permission.requested`
+     * hook.
+     */
+    const head = (name: string, size: number, sizeField?: Buffer): Buffer => {
+      const h = Buffer.alloc(512);
+      h.write(name, 0, "utf8");
+      h.write("000644 \0", 100);
+      h.write("000000 \0", 108);
+      h.write("000000 \0", 116);
+      h.write(size.toString(8).padStart(11, "0") + " ", 124);
+      if (sizeField !== undefined) sizeField.copy(h, 124, 0, 12);
+      h.write("00000000000 ", 136);
+      h.write("        ", 148);
+      h.write("0", 156);
+      h.write("ustar\0", 257);
+      h.write("00", 263);
+      let sum = 0;
+      for (const byte of h) sum += byte;
+      h.write(sum.toString(8).padStart(6, "0") + "\0 ", 148);
+      return h;
+    };
+    const one = (name: string, body: string): Buffer => {
+      const data = Buffer.from(body, "utf8");
+      return Buffer.concat([head(name, data.length), data, Buffer.alloc((512 - (data.length % 512)) % 512)]);
+    };
+    // Exactly 1536, so what this reader lands on is the member after it.
+    const forDaemon = Buffer.concat([one("plugin.json", EVIL), Buffer.alloc(512)]);
+    const inner = Buffer.concat([forDaemon, one("plugin.json", MANIFEST), one("server.js", "export {}"), Buffer.alloc(1024)]);
+    const tidied = Buffer.alloc(12);
+    tidied.write("0x0000003000", 0, "latin1");
+    const crafted = gzipSync(
+      Buffer.concat([head("pad.bin", inner.length, tidied), inner, Buffer.alloc((512 - (inner.length % 512)) % 512), Buffer.alloc(1024)]),
+    );
+
+    /*
+     * ⚠ **Three shapes that exist because the tar walk is a cursor over one reused
+     * buffer now**, and not one of the fixtures above is big enough to notice.
+     * `peekTarGz` held a single `Uint8Array` reallocated on every chunk and re-cut on
+     * every member consumed; it grows by doubling and compacts in place, and the
+     * archives that can tell those two apart are the ones where the buffer is reused
+     * *under* the walk. Every archive in this comparison fitted in the first
+     * allocation, so the whole rewrite was covered by a differential that never left
+     * it.
+     *
+     * Counted against the reader in this tree, with both branches instrumented: the
+     * four hundred members compact 24 times and grow the buffer once, the straddled
+     * manifest grows it 8 times and compacts once, and the large one grows 9 and
+     * compacts once. A shape that exercises neither branch pins nothing here, which
+     * is the whole of what was wrong with the five rows this list started as.
+     *
+     * The same four hundred members go through as a **zip** as well, which walks a
+     * directory rather than a cursor and so exercises none of the above: it is here
+     * because a member count is the one thing both readers hold an opinion about,
+     * and the forged-count case above (4) only ever drove a count of three.
+     *
+     * All four sit inside the daemon's own limits on purpose — 500 entries, 2 MiB
+     * on the wire, 8 MiB unpacked — because a fixture past any of them makes the
+     * right-hand side "refused" and turns this into a comparison about limits rather
+     * than about the walk.
+     */
+    const crowded: Record<string, string> = { "plugin.json": MANIFEST };
+    for (let i = 0; i < 398; i += 1) crowded[`f${i}.txt`] = `file ${i}\n`;
+    /*
+     * The filler is *another manifest*, repeated, rather than a megabyte of one
+     * letter: what a stale read of the buffer would find has to be something a
+     * reader could believe, or this fixture only ever proves that garbage is not
+     * JSON. `EVIL` is the same decoy the spelling cases above plant.
+     */
+    const decoy = EVIL.repeat(Math.ceil(1_500_000 / EVIL.length));
+    const straddling = tarOf({
+      "wrap/a.bin": decoy,
+      "wrap/plugin.json": MANIFEST,
+      "wrap/b.bin": decoy,
+      "wrap/server.js": "export {}",
+    });
+
+    const cases: [string, Buffer][] = [
+      ["a size field the two spelled differently", crafted],
+      ["four hundred members", tarOf(crowded)],
+      ["a manifest with a megabyte and a half either side of it", straddling],
+      ["one large enough to be reallocated several times", tarOf({ "plugin.json": MANIFEST, "bundle.js": "x".repeat(3_000_000), "assets.bin": "y".repeat(2_500_000) })],
+      ["four hundred members in a zip", zipOf(crowded)],
+      ["the plainest archive there is", tarOf({ "plugin.json": MANIFEST, "server.js": "export {}" })],
+      ["one folded into a directory", tarOf({ "board/plugin.json": MANIFEST, "board/server.js": "export {}" })],
+      ["noise beside a real one", tarOf({ "__MACOSX/plugin.json": EVIL, "real/plugin.json": MANIFEST, "real/server.js": "export {}" })],
+      ["a zip", zipOf({ "plugin.json": MANIFEST, "server.js": "export {}" })],
+    ];
+
+    const disagreed: string[] = [];
+    for (const [name, bytes] of cases) {
+      const screen = await peek(bytes);
+      const said = screen.kind === "ok" ? screen.manifest.id : "refused";
+      const installed = await daemonInstalls(bytes);
+      /*
+       * Leniency in exactly one direction: this reader may say it cannot describe
+       * an archive the daemon would take — that costs the named "Install without
+       * reading it" press. It may never describe a *different* manifest, which is
+       * the whole of what the consent screen is for.
+       */
+      if (said !== "refused" && said !== installed) disagreed.push(`${name}: screen said ${said}, daemon installs ${installed}`);
+    }
+    check("what the screen describes is what the daemon would install", disagreed, []);
+
+    /*
+     * ⚠ **The half of that the differential cannot see, and the reason is its own
+     * leniency rule.** `said !== "refused"` is what lets this reader admit it cannot
+     * describe an archive the daemon would take — and a manifest that was read
+     * correctly and then *overwritten* comes back as exactly that, a refusal, so the
+     * comparison above waves it through while the screen has stopped being able to
+     * say what anybody is installing.
+     *
+     * The buffer below the cursor is compacted in place (`copyWithin`) as later
+     * members arrive, so the body kept for the winning candidate has to be a `slice`
+     * and may never be a `subarray` — a view onto bytes a later chunk overwrites is
+     * a manifest that changes after it was read. Measured against this fixture with
+     * that one call changed back: `unreadable: that plugin.json is not valid JSON`,
+     * because the compaction that runs while `wrap/b.bin` is walked copies live
+     * bytes over the region the view still points at. It does not come back as
+     * `evil` and could not — the view is exactly the winning manifest's length and
+     * the decoy is longer — which is why this is a literal check rather than another
+     * row in `cases`.
+     */
+    const straddled = await peek(straddling);
+    check(
+      "a manifest read early survives the buffer being reused under it",
+      straddled.kind === "ok" ? [straddled.manifest.id, straddled.manifest.scopes] : `unreadable: ${straddled.reason}`,
+      ["board", ["sessions.read", "store"]],
+    );
+
+    /*
+     * 10. The zip64 saturated fields — and this one is inside the block rather than
+     *     beside the eight literals above because the load-bearing half of it is
+     *     what the *daemon* answers, which needs the harness.
+     *
+     * ⚠ **0xffffffff in a central-directory record is not a size and not an offset.**
+     * It means "the real one is in the zip64 extra field", `readZipMembers` goes and
+     * gets it through `readZip64Extra`, and this reader does not — so the machine
+     * locates and unpacks a member this screen would slice with a length of four
+     * gigabytes, or from an offset four gigabytes into an 8 MiB file.
+     *
+     * Both already answered "unreadable" before there was an arm for it, and that is
+     * the whole argument for adding one rather than leaving it. Measured against a
+     * copy of this reader with the arm taken out, on these exact two fixtures: a
+     * saturated *offset* gives "that zip's entry does not point at a file", and a
+     * saturated *compressed size* gives "Trailing junk found after the end of the
+     * compressed stream" — a raw zlib string reaching a consent screen through
+     * `describe(error)`, about an archive the daemon installs perfectly. The safety
+     * was an accident of what the wrong read happened to decode to, which is exactly
+     * what was **not** true of the size field case 9 is about: there the wrong read
+     * produced a perfectly good manifest at the wrong offset.
+     *
+     * So each is asserted with the daemon's own answer beside it: this reader
+     * refuses in the one sentence it chose, and the machine takes the archive. That
+     * pair is what a *deliberate* leniency looks like, and it is the only shape that
+     * would notice this becoming a refusal on both sides — a plugin nobody can
+     * install rather than one nobody can preview.
+     */
+    const zip64Of = (saturate: "compressed" | "offset"): Buffer => {
+      const raw = Buffer.from(MANIFEST, "utf8");
+      const packed = deflateRawSync(raw);
+      const named = Buffer.from("plugin.json", "utf8");
+      const local = Buffer.alloc(30);
+      local.writeUInt32LE(0x04034b50, 0);
+      // 45 is the version zip64 needs, and it is what an archiver writes here.
+      local.writeUInt16LE(45, 4);
+      local.writeUInt16LE(8, 8);
+      local.writeUInt32LE(crc32(raw), 14);
+      local.writeUInt32LE(packed.length, 18);
+      local.writeUInt32LE(raw.length, 22);
+      local.writeUInt16LE(named.length, 26);
+      /*
+       * The extra carries only the fields the record saturated, in the order the
+       * format fixes — original size, compressed size, offset — which is why
+       * `readZip64Extra` reads it positionally off the same three booleans. One
+       * saturated field is one 8-byte body.
+       */
+      const extra = Buffer.alloc(12);
+      extra.writeUInt16LE(0x0001, 0);
+      extra.writeUInt16LE(8, 2);
+      extra.writeBigUInt64LE(BigInt(saturate === "compressed" ? packed.length : 0), 4);
+      const entry = Buffer.alloc(46);
+      entry.writeUInt32LE(0x02014b50, 0);
+      entry.writeUInt16LE(45, 6);
+      entry.writeUInt16LE(8, 10);
+      entry.writeUInt32LE(crc32(raw), 16);
+      entry.writeUInt32LE(saturate === "compressed" ? 0xffffffff : packed.length, 20);
+      // Uncompressed stays honest in both: it is positional input to the extra and
+      // nothing else here reads it, so saturating it would only move the goalposts.
+      entry.writeUInt32LE(raw.length, 24);
+      entry.writeUInt16LE(named.length, 28);
+      entry.writeUInt16LE(extra.length, 30);
+      entry.writeUInt32LE(saturate === "offset" ? 0xffffffff : 0, 42);
+      const locals = Buffer.concat([local, named, packed]);
+      const directory = Buffer.concat([entry, named, extra]);
+      const end = Buffer.alloc(22);
+      end.writeUInt32LE(0x06054b50, 0);
+      end.writeUInt16LE(1, 8);
+      end.writeUInt16LE(1, 10);
+      end.writeUInt32LE(directory.length, 12);
+      end.writeUInt32LE(locals.length, 16);
+      return Buffer.concat([locals, directory, end]);
+    };
+
+    const wideSize = await peek(zip64Of("compressed"));
+    check(
+      "a zip64 compressed size is refused rather than followed",
+      wideSize.kind === "unreadable" ? wideSize.reason : `ok: ${wideSize.manifest.id}`,
+      "that zip uses zip64 fields this screen cannot follow",
+    );
+    check("and it is an archive the daemon installs, which is why refusing is the whole answer", await daemonInstalls(zip64Of("compressed")), "board");
+
+    const wideOffset = await peek(zip64Of("offset"));
+    check(
+      "a zip64 local offset is refused in the same sentence",
+      wideOffset.kind === "unreadable" ? wideOffset.reason : `ok: ${wideOffset.manifest.id}`,
+      "that zip uses zip64 fields this screen cannot follow",
+    );
+    check("and the daemon installs that one too", await daemonInstalls(zip64Of("offset")), "board");
+  }
 
   /*
    * ...and the half that does not depend on this reader having been right.
@@ -19811,21 +20111,37 @@ process.stdout.write("\nthe one mirror whose other half is in a different reposi
 {
   const { offersSettings } = await import("../src/plugins.js");
   /*
-   * ⚠ **Whether the gear is drawn, as a pure decision.** Two rules, and both are
-   * the kind that reads as a bug when found without the argument.
+   * ⚠ **A superseded gate, asserted because it is still exported.** This answered
+   * whether the **gear** was drawn on a plugin's row, and there is no gear:
+   * `plugin-ui.md` records it going, and the way in is the machine table's bulk bar
+   * with the scope on the URL. The live gate is `settingsBlockFor` under
+   * `bulkEnabled`'s `settings` arm, and it is asserted in its own section above.
    *
-   * *Anywhere, not everywhere*: the screen it opens picks a machine, so one
-   * install with a pane is enough — and a fleet mid-update, one host on the new
-   * version and one on the old, is the ordinary case. Requiring all of them hides
-   * the control on exactly the fleet where somebody most wants to look.
+   * ⚠ **The rule below is now the *inverse* of the shipped one, which is exactly
+   * why these six stay rather than going with the control they gated.** This
+   * answers *anywhere* — one install with a pane is enough, a fleet mid-update
+   * being the ordinary case — while `install.ts` answers *every*:
+   * `selected > 0 && at(counts.configurable) === selected`. Q3.468 is the argument,
+   * and it is not a tidy-up: Settings is a **navigation** rather than a fan-out, so
+   * one screen about a subset of what somebody ticked is the "selected and never
+   * heard about again" failure in different clothes. A reader who finds an exported
+   * function with no caller and wires it back in re-opens Q7.108, and these are what
+   * would say so.
    *
-   * *`enabled` is not consulted*: a plugin somebody switched off is the commonest
-   * reason to open its settings, and a control that vanishes when a thing stops
-   * working is one they go looking for.
+   * *`enabled` is not consulted* is the half that survived the reversal intact:
+   * a plugin somebody switched off is the commonest reason to open its settings,
+   * and `settingsBlockFor` independently declines to consult it — asserted there,
+   * against the function that is actually called.
+   *
+   * ⚠ **Deleting it is three edits and one of them is not in this file**: the
+   * function and its docblock in `plugins.ts`, this block, and nothing in
+   * `docs/DECISIONS.md` — `docscheck` greps whole file text, so the prose citations
+   * in `pane.ts` and `install.ts` keep both `Q` references resolving. Scrubbing
+   * those two comments as well is what would fail its symbol pass.
    */
   const row = (id: string, settings: boolean, enabled = true): never =>
     ({ id, enabled, contributes: { screen: null, settings, actions: [], hooks: [] } }) as never;
-  check("no rows, no gear", offersSettings([], "autotitle"), false);
+  check("no rows, no pane", offersSettings([], "autotitle"), false);
   check("a plugin that declares none", offersSettings([row("autotitle", false)], "autotitle"), false);
   check("one that does", offersSettings([row("autotitle", true)], "autotitle"), true);
   check("another plugin's pane is not this one's", offersSettings([row("board", true)], "autotitle"), false);

@@ -164,12 +164,27 @@ export function outcomeText(outcome: TargetOutcome): string {
 }
 
 /**
- * The three things one machine's row can do.
+ * The three things one machine can be *reported* as able to do — of which a row
+ * draws two.
  *
- * Drawn in this order, remove last — which is not cosmetic: the row's confirming
- * pair replaces the trailing group, so the last child before the tap and Cancel
- * after it occupy the same pixels. Q3.218's measured safety property, reaching a
- * row of icons.
+ * ⚠ **`remove` is in this union and not on the row, and the two facts are not in
+ * tension.** {@link rowActs} answers the wider question, because the bulk bar's
+ * counts are derived from it and the bar's Remove is the only removal on this
+ * screen; {@link drawnActs} narrows it to what a row may put under a thumb. A row
+ * that could not *report* a removable machine would take the bar's Remove down
+ * with it, which is why the two are separate functions rather than one predicate
+ * with a flag.
+ *
+ * ⚠ **So a row's trailing group holds at most one icon, and it is always
+ * reversible by pressing something else on the same row.** Install and update are
+ * mutually exclusive — an update is an install onto a machine that already has it
+ * — so there is no ordering rule left to state here. There was one: the row used
+ * to end with a bin, and Q3.218's measured safety property (the confirming pair
+ * replaces the trailing group in place and ends with Cancel, so a second tap lands
+ * on the undo) governed where that bin sat. Both went together in Q3.469 — a bin
+ * 44px from a checkbox, guarded by a question that had to *replace the row* to fit
+ * — and the measurement did not go with them: it governs the **bar** now, and is
+ * written at the bar in `MachineInstalls`.
  */
 export type RowAct = "install" | "update" | "remove";
 
@@ -505,6 +520,22 @@ export function removalQuestion(names: readonly string[]): string {
 }
 
 /**
+ * How many machines are named before a list becomes a count.
+ *
+ * Three is where the line stops being readable at a phone's width and starts being
+ * a paragraph; past it the count is the more useful of the two.
+ *
+ * ⚠ **One symbol because three summaries share the judgement, and a bare `3` in
+ * each is three places to change it.** `installedSummary`, `scopeSummary` and
+ * `failureSummary` draw different sentences about different lists in the same
+ * strip, and the two later docblocks already cite the first one's rule *in prose*
+ * — so the rule was written once and the number three times, which is the
+ * arrangement where they come to disagree about when somebody stops being told
+ * which machines and starts being told how many.
+ */
+export const NAMES_BEFORE_COUNT = 3;
+
+/**
  * What the collapsed row says about where a plugin is.
  *
  * ⚠ **This replaced a summary drawn *after* an act, and the difference is the
@@ -523,19 +554,17 @@ export function installedSummary(total: number, names: readonly string[]): strin
   if (total === 0) return "no machines";
   if (names.length === 0) return "not installed anywhere";
   if (names.length === total) return total === 1 ? "installed" : `on all ${total} machines`;
-  // Three is where the line stops being readable at a phone's width and starts
-  // being a paragraph; past it the count is the more useful of the two.
-  if (names.length <= 3) return `on ${names.join(", ")}`;
+  if (names.length <= NAMES_BEFORE_COUNT) return `on ${names.join(", ")}`;
   return `on ${names.length} of ${total} machines`;
 }
 
 /**
  * Which machines a settings form is about to be written to, as the line above it.
  *
- * {@link installedSummary}'s rule and its reason: one name answers "which", three
- * is where the line stops being readable at a phone's width and starts being a
- * paragraph, and past that the count is the more useful of the two. The full list
- * rides a `title`, so nothing is unreachable.
+ * {@link installedSummary}'s rule and its reason, and {@link NAMES_BEFORE_COUNT}
+ * rather than a second `3`: one name answers "which", and past the threshold the
+ * count is the more useful of the two. The full list rides a `title`, so nothing
+ * is unreachable.
  *
  * ⚠ **It never says "all machines", and that is the difference from
  * {@link installedSummary}.** That one reports a *fact* — where the plugin is —
@@ -545,7 +574,7 @@ export function installedSummary(total: number, names: readonly string[]): strin
  */
 export function scopeSummary(names: readonly string[]): string {
   if (names.length === 0) return "no machines";
-  if (names.length <= 3) return names.join(", ");
+  if (names.length <= NAMES_BEFORE_COUNT) return names.join(", ");
   return `${names.length} machines`;
 }
 
@@ -619,9 +648,9 @@ export function installedSubline(version: string, available: string | null, enab
  * this line is not entitled to make. The reason is the row's own, and the row is
  * open by the time this is read.
  *
- * One name, up to three names, then a count: `installedSummary`'s rule and its
- * reason — three is where the line stops being readable at a phone's width and
- * starts being a paragraph.
+ * One name, then names up to {@link NAMES_BEFORE_COUNT}, then a count:
+ * {@link installedSummary}'s rule and its reason, sharing the threshold rather
+ * than a third copy of it.
  *
  * ⚠ **The empty string rather than `null`, so one string feeds both the visible
  * line and the live region beside it.** `EventList` records what the other
@@ -632,6 +661,6 @@ export function installedSubline(version: string, available: string | null, enab
 export function failureSummary(names: readonly string[]): string {
   if (names.length === 0) return "";
   if (names.length === 1) return `Failed on ${names[0]} — the row says why.`;
-  if (names.length <= 3) return `Failed on ${names.join(", ")} — each row says why.`;
+  if (names.length <= NAMES_BEFORE_COUNT) return `Failed on ${names.join(", ")} — each row says why.`;
   return `Failed on ${names.length} machines — each row says why.`;
 }

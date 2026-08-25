@@ -409,11 +409,11 @@ const TONE_TEXT: Record<StatusTone, string> = {
  *   slightly dim dot. See the keyframe in `index.css` for why it also glows
  *   rather than only fading.
  *
- *   {@link WorkingDot} draws the same dot at the foot of a transcript, and that
- *   is one decision rather than two: the same keyframe, the same colour and the
- *   same eight pixels saying the same sentence one screen deeper — the argument
- *   `SessionView`'s header already makes for reusing `StatusDot` rather than
- *   inventing a second vocabulary for the same fact.
+ *   It used to be one decision in two places: `WorkingDot` drew the same dot at
+ *   the foot of a transcript, off the same keyframe and the same eight pixels.
+ *   That is gone — the transcript's working row is `WorkingMark` in `ui/Mark.tsx`
+ *   with a keyframe of its own — so `animate-blink` has exactly one user, which is
+ *   what the driver asserts and why a stray second one would be worth catching.
  * * **bright, with a halo** — it is waiting for *you*. Deliberately the loudest
  *   thing a row can carry, and the ring is what makes it distinguishable from
  *   the pulsing state at a glance rather than only by colour, which is what a

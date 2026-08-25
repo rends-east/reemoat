@@ -292,6 +292,12 @@ export interface PluginField {
   help: string | null;
 }
 
+/** How much of an invented block `type` is repeated back to a person. */
+const UNKNOWN_BLOCK_NAME_MAX = 40;
+
+/** How many distinct invented types the notice names before it stops. */
+const UNKNOWN_BLOCKS_NAMED = 3;
+
 /**
  * The whole drawing vocabulary, and it is five members.
  *
@@ -305,9 +311,6 @@ export interface PluginField {
  * Small on purpose. Five blocks render with primitives `bits.tsx` already has, so
  * a plugin screen is consistent with the rest of the app and legible on a phone
  * without its author thinking about either.
- */
-/**
- * The block types this daemon draws, as a value.
  *
  * ⚠ **A constant rather than a comment, because it is now printed to a person.**
  * When a view carries a `type` nobody here knows, the notice names it *and* names
@@ -315,12 +318,6 @@ export interface PluginField {
  * away from the union it is describing. `webcheck` already compares the union's
  * members across the mirror; this is the same discipline one layer in.
  */
-/** How much of an invented block `type` is repeated back to a person. */
-const UNKNOWN_BLOCK_NAME_MAX = 40;
-
-/** How many distinct invented types the notice names before it stops. */
-const UNKNOWN_BLOCKS_NAMED = 3;
-
 export const PLUGIN_BLOCK_TYPES = ["text", "notice", "list", "columns", "form"] as const;
 
 /**
@@ -358,6 +355,27 @@ export type PluginSurface = "screen" | "settings";
  * at things is a screen.
  */
 export const PLUGIN_SETTINGS_BLOCK_TYPES = ["text", "notice", "form"] as const;
+
+/**
+ * The five controls a plugin's own screen may draw, as a value.
+ *
+ * ⚠ **This list existed already, typed out a second time as an array literal
+ * inside {@link clampField} and widened to `readonly string[]` by the ternary it
+ * sat in.** Widened, nothing held it against {@link PluginFieldKind}: `"toggel"`
+ * type-checked, and so did a kind the union had dropped. That is the drift
+ * {@link PLUGIN_BLOCK_TYPES} is a constant to prevent, one field over, and this
+ * file made the argument there and then did the opposite here.
+ *
+ * ⚠ **The annotation catches a member that is not in the union and does not
+ * catch a union member that is not in the list**, which is worth stating because
+ * it is the half somebody will assume. Measured with a sixth arm added to
+ * {@link PluginFieldKind}: `tsc` says nothing, and the new kind is silently
+ * downgraded to a text box on the surface that is supposed to draw all of them.
+ * {@link PLUGIN_SCOPES} and {@link PLUGIN_HOOKS} are the same shape with the same
+ * exposure; what would close all three is one exhaustive table each, and none of
+ * them has one.
+ */
+export const PLUGIN_FIELD_KINDS: readonly PluginFieldKind[] = ["text", "password", "number", "toggle", "select"];
 
 /**
  * The three controls a setting may be, and there is no fourth.
@@ -779,6 +797,11 @@ function rowsIn(view: PluginView): number {
   return most;
 }
 
+/** The same view carrying only its first `keep` blocks. */
+function withBlockCap(view: PluginView, keep: number): PluginView {
+  return { title: view.title, refreshMs: view.refreshMs, blocks: view.blocks.slice(0, keep) };
+}
+
 /** The same view with no list or column longer than `cap`. */
 function withRowCap(view: PluginView, cap: number): PluginView {
   return {
@@ -819,35 +842,64 @@ function wireBytes(view: PluginView): number {
  * because the only control that deletes a card belongs to a session that by then
  * no longer exists.
  *
- * **Rows are the only unbounded dimension**, which is why they are the lever.
- * Blocks, text, fields and columns are each bounded by a count that is small
- * enough to be irrelevant against 256 KiB; the number of rows a plugin has is
- * whatever its data grew to. So the cap is halved until the message fits, which
- * is at most eight measurements and terminates at zero rows.
+ * **Rows are the unbounded dimension**, which is why they are the first lever.
+ * The number of rows a plugin has is whatever its data grew to, so the cap is
+ * halved until the message fits, which is at most eight measurements and
+ * terminates at zero rows.
  *
- * Both bounds still hold afterwards, and neither is now a claim the other
- * quietly overrules.
+ * ⚠ **Rows were the *only* lever, and "the rest is bounded small enough to be
+ * irrelevant against 256 KiB" was arithmetic nobody had done.** They are each
+ * bounded, but they multiply: `PLUGIN_VIEW_LIMITS` allows 24 blocks × 40 fields ×
+ * 40 options × a 200-character label, and `text` is 4,000 on top. Measured against
+ * this module, one form block at exactly those published caps and *no rows at all*
+ * comes to 534,576 bytes against a 261,120-byte budget — and `rowsIn` is 0 for a
+ * form, so the loop below never executed and the oversized view was returned as
+ * though it had been cut. The child then refused to post it, which is precisely
+ * the "refused for not fitting" this function exists to end, reached by the one
+ * shape its own reasoning had excluded.
+ *
+ * So the reduction is **total**: rows first because they lose the least meaning,
+ * then whole blocks from the end, and a view of nothing but its title as the
+ * floor — which always fits, because `clampView` has already bounded the title.
+ * The post-condition is the point: what this returns is inside `budget`, or there
+ * was no `budget` a title could fit inside.
+ *
+ * `clamped` reports what actually happened rather than the fact that this branch
+ * was reached: a view that needed no cutting is not described as cut, which was
+ * the other half of the same defect — a form-only view got a "this was shortened"
+ * line over a complete view, sending its author to count rows nothing had touched.
+ *
+ * `substituted` and `unknownBlocks` are carried through from the first pass rather
+ * than invented: cutting for size neither creates nor resolves a block type nobody
+ * here knows, and losing the names would make the second pass a worse diagnosis
+ * than the first.
  */
 export function fitView(raw: unknown, budget: number, surface: PluginSurface = "screen"): ClampedView {
   const first = clampView(raw, surface);
+  const carried = { substituted: first.substituted, unknownBlocks: first.unknownBlocks };
   if (wireBytes(first.view) <= budget) return first;
 
-  let cap = rowsIn(first.view);
   let cut = first.view;
+  let cap = rowsIn(first.view);
   while (cap > 0) {
     cap = Math.floor(cap / 2);
     cut = withRowCap(first.view, cap);
-    if (wireBytes(cut) <= budget) break;
+    if (wireBytes(cut) <= budget) return { view: cut, clamped: true, ...carried };
   }
-  // `clamped` unconditionally: reaching here means something was dropped, and at
-  // `cap === 0` it means every row was — which the notice must still say.
-  // `substituted` is carried through from the first pass rather than invented:
-  // cutting rows for size replaces nothing, and claiming it did would send an
-  // author looking for a shape problem this pass did not create.
-  // Carried through: cutting rows for size neither creates nor resolves a block
-  // type nobody here knows, and losing the names would make the second pass a
-  // worse diagnosis than the first.
-  return { view: cut, clamped: true, substituted: first.substituted, unknownBlocks: first.unknownBlocks };
+
+  // Rows are gone (or there were none) and it still does not fit, so the bulk is
+  // in blocks that hold no rows. Dropped from the end rather than shrunk in place:
+  // a half-clipped label reads as the plugin's own text and sends an author
+  // looking for a bug in their data, while a missing block is what the clamp line
+  // above it already says happened.
+  for (let keep = cut.blocks.length - 1; keep >= 0; keep -= 1) {
+    const fewer = withBlockCap(cut, keep);
+    if (wireBytes(fewer) <= budget) return { view: fewer, clamped: true, ...carried };
+  }
+
+  // Nothing left to drop. `clampView` bounds the title, so this fits any budget
+  // worth calling one — and it is still a view rather than a refusal.
+  return { view: { title: cut.title, refreshMs: cut.refreshMs, blocks: [] }, clamped: true, ...carried };
 }
 
 /**
@@ -939,8 +991,7 @@ function clampField(raw: unknown, cut: () => void, swap: () => void, surface: Pl
    * {@link PLUGIN_SETTINGS_FIELD_KINDS} for why `number` never round-tripped as a
    * number and why `password` masked a value kept in plaintext.
    */
-  const kinds: readonly string[] =
-    surface === "settings" ? PLUGIN_SETTINGS_FIELD_KINDS : ["text", "password", "number", "toggle", "select"];
+  const kinds: readonly PluginFieldKind[] = surface === "settings" ? PLUGIN_SETTINGS_FIELD_KINDS : PLUGIN_FIELD_KINDS;
   /*
    * ⚠ **Absence is a default; a *value* this surface does not draw is a
    * substitution.** Omitting `kind` means "an ordinary text field" and is a
@@ -953,7 +1004,7 @@ function clampField(raw: unknown, cut: () => void, swap: () => void, surface: Pl
    * round-trips, and the only thing missing is the masking its author asked for.
    * Silently downgrading it is how a pane ships believing it hides something.
    */
-  const known = (kinds as readonly PluginFieldKind[]).find((one) => one === field.kind);
+  const known = kinds.find((one) => one === field.kind);
   if (known === undefined && field.kind !== undefined && field.kind !== null) swap();
   const kind = known ?? "text";
   const key = clip(field.key, PLUGIN_VIEW_LIMITS.short);

@@ -2,7 +2,7 @@ import { useRef, useState, useEffect, type ReactNode } from "react";
 import { ChevronRight, MoreHorizontal, Upload } from "lucide-react";
 import { consentBroken, pluginFailure, pluginPath, pluginStateText } from "../../plugins";
 import { peekPluginArchive, type ArchivePeek, type ManifestPreview } from "../../pluginArchive";
-import { PluginConsent } from "../PluginConsent";
+import { PLUGIN_ARCHIVE_ACCEPT, PluginArchiveNote, PluginConsent, PluginUnreadable } from "../PluginConsent";
 import type { MachineId } from "../../ids";
 import { marketEntryPath } from "../../market";
 import { navigate } from "../../router";
@@ -23,13 +23,20 @@ import {
 import { toast } from "../Toast";
 
 /**
- * What is installed on one machine, and what each of them may reach.
+ * What is installed on one machine, and handing that machine a file.
  *
- * Two depths, like `AgentsPanel` beside it: no plugin named is the list, one named
- * is that plugin's own settings. And for the same reason those live inside a
- * machine at all — a plugin's code is on one host's disk and its data is in one
- * daemon's database, so a fleet-wide screen would open with a machine dropdown,
- * which is a screen asking a question its own copy answers.
+ * ⚠ **One depth, and the leaf that used to sit under it is gone.** This was
+ * `AgentsPanel`'s shape beside it — a list, and one screen per named plugin
+ * holding that plugin's own settings — on the argument that a plugin's code is on
+ * one host's disk and its data in one daemon's database, so a fleet-wide screen
+ * would have to open by asking which machine. That argument was **answered rather
+ * than reversed**: the plugin's own page already knows which machines it is on, so
+ * it asks over *those* and does not ask where there is one. What was here was six
+ * taps behind a kebab and nobody found it.
+ *
+ * So every row below is a link to the plugin's page, and what stays is only what
+ * cannot be anywhere else: which plugins this daemon has, whether each is switched
+ * on, what a failed one said, and the picker at the foot.
  */
 
 function usePlugins(machineId: MachineId): {
@@ -340,18 +347,11 @@ function InstallPlugin({ machineId, onInstalled }: { machineId: MachineId; onIns
 
   return (
     <div className="mt-2">
-      <p className="text-xs text-muted">
-        A <code className="text-muted/80">.tar.gz</code> or <code className="text-muted/80">.zip</code> holding{" "}
-        <code className="text-muted/80">plugin.json</code> and <code className="text-muted/80">server.js</code>. Installing
-        the same id again updates it and keeps what it has stored.
-      </p>
-      <p className="mt-1 text-xs text-muted">
-        Nothing is sent until you have read what it asks for.
-      </p>
+      <PluginArchiveNote />
       <input
         ref={input}
         type="file"
-        accept=".tgz,.gz,.zip,application/gzip,application/zip"
+        accept={PLUGIN_ARCHIVE_ACCEPT}
         className="hidden"
         onChange={(event) => {
           const file = event.target.files?.[0];
@@ -364,23 +364,10 @@ function InstallPlugin({ machineId, onInstalled }: { machineId: MachineId; onIns
       />
 
       {phase.kind === "confirming" && phase.peek.kind === "ok" && <PluginConsent manifest={phase.peek.manifest} />}
+      {/* `This machine`, because this picker reaches exactly the one host this
+          settings pane is about. The fleet-wide import passes the other word. */}
       {phase.kind === "confirming" && phase.peek.kind === "unreadable" && (
-        <div className="mt-3 rounded-lg border border-edge p-3">
-          <p className="text-sm text-fg">This file cannot be read here</p>
-          {/*
-            * ⚠ **Not a refusal.** The daemon is what decides whether an archive is a
-            * plugin, and it accepts shapes this reader may not — so refusing here
-            * would make the browser a second, stricter gate that turns away plugins
-            * the machine would have taken. What it may not do is pretend: the whole
-            * point of this screen is that somebody knows what they are agreeing to,
-            * so when it cannot say, it says that, and the way through is a separate
-            * press that names what is being given up.
-            */}
-          <p className="mt-1 text-xs text-muted">
-            {phase.peek.reason}. Nothing has been sent. This machine will still check it properly — but until it does,
-            nobody can tell you what this plugin asks for.
-          </p>
-        </div>
+        <PluginUnreadable reason={phase.peek.reason} checker="This machine" />
       )}
 
       <div className="mt-3 flex items-center gap-2">
@@ -393,7 +380,13 @@ function InstallPlugin({ machineId, onInstalled }: { machineId: MachineId; onIns
             // it". Returning here left the safe way out inert and the unsafe one
             // working, which is the opposite of what this screen is for.
             if (phase.kind === "confirming" && phase.peek.kind === "ok") {
-              send(phase.file, phase.peek.kind === "ok" ? phase.peek.manifest : null);
+              // The manifest, never `null`: the `if` above has already narrowed the
+              // peek to `ok`, so the second test this line used to carry could only
+              // ever answer the same way — and reading as though there were a
+              // no-manifest path through *this* press is the thing that matters,
+              // because the one that really exists is the `DangerButton` below and
+              // it is the whole point of the two being different controls.
+              send(phase.file, phase.peek.manifest);
               return;
             }
             input.current?.click();

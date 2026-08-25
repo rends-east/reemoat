@@ -4,7 +4,7 @@ import { CATALOGUE_PATHS, catalogueNotice, fetchCatalogue, readCatalogue, type C
 import { navigate } from "../../router";
 import { groupCatalogue, marketEntryPath } from "../../market";
 import type { AppState } from "../../store";
-import { Badge, Empty, Icon, SETTINGS_HEADING, Spinner } from "../bits";
+import { Badge, Empty, Icon, SEARCH_FIELD, SETTINGS_HEADING, Spinner } from "../bits";
 
 /**
  * The official plugins, as a list.
@@ -63,7 +63,11 @@ function Found({ entries, state }: { entries: readonly CatalogueEntry[]; state: 
           onChange={(event) => setQuery(event.target.value)}
           aria-label="Search plugins"
           placeholder="Search plugins"
-          className="min-h-9 w-full rounded-md border border-edge-strong bg-surface py-2 pr-2.5 pl-8 text-sm outline-none [@media(pointer:coarse)]:min-h-11"
+          /* The shared string, not a copy of it. This box and `MachineInstalls`'s
+             are one tap apart on adjacent screens, and the copy that was here was
+             already byte-identical — so it was not a variant, it was a second
+             chance to be wrong the next time `FIELD`'s padding rule is applied. */
+          className={SEARCH_FIELD}
         />
       </div>
 
