@@ -1,4 +1,4 @@
-import { MoreVertical, Pencil, Pin, PinOff, Play, Square } from "lucide-react";
+import { MoreVertical, Pencil, Pin, PinOff, Play, Puzzle, Square } from "lucide-react";
 import { useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { errorText } from "../http";
 import { keyOf, type SessionRef } from "../ids";
@@ -7,6 +7,7 @@ import { isResumable, isTerminal } from "../wire";
 import { Icon, IconButton, MENU_PANEL } from "./bits";
 import { useDismissible } from "./overlay";
 import { toast } from "./Toast";
+import { pluginFailure, sessionActions } from "../plugins";
 
 /**
  * Ask the daemon to put an agent back on this session.
@@ -118,6 +119,41 @@ export function SessionMenu({
       .finally(() => setBusy(false));
   };
 
+  /**
+   * What plugins on this machine offer for a session.
+   *
+   * Read from the store's copy rather than fetched here: this menu is mounted on
+   * every row of the list, and a fetch per row would be a request per session per
+   * poll for a list that changes only when somebody installs something.
+   */
+  const offers = sessionActions(state.pluginsByMachine.get(sessionRef.machineId) ?? []);
+
+  const press = (pluginId: string, actionId: string): void => {
+    const daemon = store.daemonFor(sessionRef.machineId);
+    if (daemon === undefined) {
+      toast("error", "that machine is not reachable");
+      return;
+    }
+    setBusy(true);
+    void daemon
+      .pluginAction(pluginId, actionId, { session: sessionRef.sessionId })
+      .then((answer) => {
+        /*
+         * A toast either way, and **never a navigation**. A plugin returning a view
+         * from a session's menu has nowhere to draw it — there is no plugin screen
+         * under this press — and opening one would be a plugin choosing where
+         * somebody goes, which no control in this app does. The plugin's own screen
+         * is a tap away in the rail, and it will be redrawn when they get there.
+         */
+        toast(
+          answer.result.kind === "toast" && answer.result.tone === "danger" ? "error" : "ok",
+          answer.result.kind === "toast" ? answer.result.text : "Done",
+        );
+      })
+      .catch((cause: unknown) => toast("error", pluginFailure(cause)))
+      .finally(() => setBusy(false));
+  };
+
   if (session === undefined) return null;
 
   return (
@@ -155,6 +191,38 @@ export function SessionMenu({
             }}
           />
 
+          {/*
+           * Plugins, in their own band between what this app does to a session
+           * and what it does to the agent running one.
+           *
+           * ⚠ **They used to sit last, under Stop, and the rule was "never above
+           * Stop" — the rows a person reaches for without reading must not move
+           * because a plugin was installed.** The property that rule was
+           * protecting is *Stop's position*, and putting plugins last was the
+           * wrong way to protect it: Stop stopped being the last row the moment
+           * anything was installed, so the red row with no way back sat in the
+           * middle of a list of somebody else's words. Above the separator, Stop
+           * is the last row of this menu at every install — which is a stronger
+           * version of the same property than the old ordering ever had.
+           *
+           * The plugin's name is drawn beside the action's title — two plugins may
+           * both offer "Move on", and a menu row that does not say whose it is is a
+           * row somebody presses twice to find out.
+           */}
+          {offers.length > 0 && <div className="my-1 border-t border-edge/60" />}
+          {offers.map((offer) => (
+            <MenuItem
+              key={`${offer.plugin.id}:${offer.actionId}`}
+              icon={Puzzle}
+              label={offer.title}
+              note={offer.plugin.name}
+              onClick={() => {
+                setOpen(false);
+                press(offer.plugin.id, offer.actionId);
+              }}
+            />
+          ))}
+
           {(canResume || !isTerminal(session.status)) && <div className="my-1 border-t border-edge/60" />}
 
           {canResume && (
@@ -168,7 +236,8 @@ export function SessionMenu({
             />
           )}
           {/* Last, separated, and the only red thing in the menu. Stopping an
-              agent mid-turn is the one action here with no way back. */}
+              agent mid-turn is the one action here with no way back — and it is
+              last whatever is installed, which is what the band above buys. */}
           {!isTerminal(session.status) && (
             <MenuItem
               icon={Square}
@@ -189,11 +258,28 @@ export function SessionMenu({
 function MenuItem({
   icon,
   label,
+  note,
   onClick,
   tone = "plain",
 }: {
   icon: ComponentType<{ size?: number | string; className?: string }>;
   label: string;
+  /**
+   * Whose row this is, where the row is not this app's own.
+   *
+   * ⚠ **A second element rather than more of `label`, because the two truncate
+   * differently and that is the whole point.** It was one string —
+   * `"Rename this session · Auto title"` — in a 208px panel, and a menu row that
+   * cannot fit its own text wrapped to a second line, which made one row twice
+   * the height of every other row in the menu and moved Stop down by however
+   * long a plugin author's title happened to be.
+   *
+   * Split, the *action* keeps the space it needs and the plugin's name gives way
+   * first: what somebody is looking for is the verb, and the name is there to
+   * tell two plugins apart when both offer one. Nothing wraps, at any title
+   * length, because both halves truncate rather than reflow.
+   */
+  note?: string;
   onClick: () => void;
   tone?: "plain" | "danger";
 }): ReactNode {
@@ -201,6 +287,10 @@ function MenuItem({
     <button
       role="menuitem"
       onClick={onClick}
+      // The whole label, for a pointer that can hover. A phone gets the truncation
+      // and nothing else, which is why the split above is the real fix rather than
+      // this.
+      title={note === undefined ? label : `${label} · ${note}`}
       // `min-h-11` — 44px, and deliberately the same number `Dropdown`'s option
       // rows use rather than a second menu-row height living in this file. This
       // menu was 37px, which is under the platform minimum on the one popover in
@@ -209,8 +299,14 @@ function MenuItem({
         tone === "danger" ? "text-danger hover:bg-danger/15" : "text-fg"
       }`}
     >
-      <Icon as={icon} size={13} />
-      {label}
+      <Icon as={icon} size={13} className="shrink-0" />
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {note !== undefined && (
+        // `max-w-[45%]` so a long plugin name can never crowd out the verb, and
+        // `shrink-0` so it is that fraction rather than whatever is left after the
+        // verb has taken what it wants.
+        <span className="min-w-0 max-w-[45%] shrink-0 truncate text-2xs text-muted">{note}</span>
+      )}
     </button>
   );
 }

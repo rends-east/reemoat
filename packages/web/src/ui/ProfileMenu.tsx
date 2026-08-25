@@ -1,12 +1,15 @@
-import { CircleQuestionMark, LogOut, Settings as SettingsIcon } from "lucide-react";
+import { CircleQuestionMark, LogOut, Puzzle, Settings as SettingsIcon } from "lucide-react";
 import type { ReactNode } from "react";
+import type { MachineId } from "../ids";
+import { marketPath } from "../market";
+import { pluginPath, screenPlugins } from "../plugins";
 import { navigate } from "../router";
 import { settingsPath } from "../settings";
 import { store, type AppState } from "../store";
-import { Icon, MENU_HEADING, MENU_ROW, Menu } from "./bits";
+import { Icon, MENU_HEADING, Menu, menuRow } from "./bits";
 
 /**
- * Who you are signed in as, and the two things you can do about it.
+ * Who you are signed in as, and the three things you can do about it.
  *
  * The sidebar has never carried identity before. `SettingsNav` deleted a "Signed
  * in as…" footer with two arguments — it was the only thing in that column that
@@ -22,20 +25,52 @@ import { Icon, MENU_HEADING, MENU_ROW, Menu } from "./bits";
  * no help surface beyond the `?` beside this row, and `index.css` explicitly
  * refuses a theme switcher. Said out loud because the next reader will have the
  * same reference open.
+ *
+ * **Plugins is the third row, and it is here rather than inside Settings for a
+ * reason the paragraph above does not cover.** The rule that paragraph is really
+ * about is that this menu takes no row which is not *a place to go* — and the
+ * plugin market is one, at the same rank as Settings: it is where a plugin is
+ * acquired and where you decide which of your machines has it. What it is not is
+ * configuration, which is why it did not become a fifth `SECTION_SPEC`. A
+ * plugin's own settings, its switch and its screen all stay inside the machine it
+ * runs on, where `.claude/rules/plugins.md` argues they belong, and every row in
+ * the market links through to them.
+ *
+ * Growing this menu is still a thing to resist. The test a fourth row has to pass
+ * is the one these three pass: it is a destination, it is reached from nowhere
+ * else, and it is about *you* rather than about what is on screen.
  */
 export function ProfileMenu({
   state,
+  machine,
   placement = "up",
   align = "left",
   className = "",
 }: {
   state: AppState;
+  /** Whose plugin screens to offer. `null` before any machine is selected. */
+  machine?: MachineId | null;
   placement?: "up" | "down";
   align?: "left" | "right";
   className?: string;
 }): ReactNode {
   const me = state.me;
   const name = me?.name ?? null;
+  /*
+   * ⚠ **Only the selected machine's, and only the ones that draw a screen and
+   * are usable.** A plugin that is switched off or has failed is not offered
+   * rather than offered-and-broken: this is a launcher, and a door onto a
+   * sentence saying the plugin is not running is worse than no door. That
+   * sentence belongs on the plugin's row inside its machine, and is drawn there.
+   *
+   * Nothing is drawn for a machine with no plugins, and a daemon too old to have
+   * the route reads as exactly that — `fetchPlugins` leaves the list empty rather
+   * than reporting anything. So this costs nothing to everybody who has never
+   * installed one.
+   */
+  const launchable = machine === undefined || machine === null
+    ? []
+    : screenPlugins(state.pluginsByMachine.get(machine) ?? []);
 
   return (
     <Menu
@@ -102,11 +137,54 @@ export function ProfileMenu({
                 close();
                 navigate(settingsPath());
               }}
-              className={`${MENU_ROW} items-center text-fg hover:bg-raised`}
+              className={`${menuRow("center")} text-fg hover:bg-raised`}
             >
               <Icon as={SettingsIcon} size={14} className="text-muted" />
               Settings
             </button>
+          )}
+          {me !== null && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                close();
+                navigate(marketPath());
+              }}
+              className={`${menuRow("center")} text-fg hover:bg-raised`}
+            >
+              <Icon as={Puzzle} size={14} className="text-muted" />
+              Plugins
+            </button>
+          )}
+          {/*
+           * The plugin screens this machine offers, under the row that manages
+           * them — a heading rather than a separator, because these are not more
+           * account actions: they are somebody else's screens, and the word above
+           * them is what says so. `MENU_HEADING` is the same type the name at the
+           * top of this menu uses, so the menu grows one idiom rather than two.
+           */}
+          {launchable.length > 0 && machine != null && (
+            <>
+              <p className={MENU_HEADING}>screens</p>
+              {launchable.map((plugin) => (
+                <button
+                  key={plugin.id}
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    close();
+                    navigate(pluginPath(machine, plugin.id));
+                  }}
+                  className={`${menuRow("center")} text-fg hover:bg-raised`}
+                >
+                  <Icon as={Puzzle} size={14} className="text-muted" />
+                  {/* The title the plugin chose, falling back to its name — the
+                      same pair the launcher drew before it moved here. */}
+                  <span className="min-w-0 truncate">{plugin.contributes.screen?.title ?? plugin.name}</span>
+                </button>
+              ))}
+            </>
           )}
           {/*
            * Last, separated, and drawn in the state it is most needed in.
@@ -127,7 +205,7 @@ export function ProfileMenu({
               close();
               void store.signOut();
             }}
-            className={`${MENU_ROW} mt-1 items-center border-t border-edge pt-3 text-danger hover:bg-danger/10`}
+            className={`${menuRow("center")} mt-1 border-t border-edge pt-3 text-danger hover:bg-danger/10`}
           >
             <Icon as={LogOut} size={14} />
             Sign out

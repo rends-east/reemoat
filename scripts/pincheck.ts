@@ -381,5 +381,53 @@ check(
 process.stdout.write("  note  app.ts's VERSION literal is checked by relaycheck, against the response rather than the file\n");
 
 
+process.stdout.write("\nthe plugin API, and the one plugin in this repository\n");
+
+/*
+ * **There is no second copy of the plugin API version to pin, and that is the
+ * point of this section rather than a gap in it.**
+ *
+ * `packages/web/src/wire.ts` mirrors the plugin *shapes* by hand, as it mirrors
+ * the session event union, but it deliberately holds **no** `PLUGIN_API_VERSION`
+ * of its own: the client reads the number off `GET /plugins`, so there is nothing
+ * to drift. Adding a constant there in order to have something to compare would
+ * be manufacturing the second copy this whole file exists to argue against.
+ *
+ * What *can* go quietly wrong is the reference plugin. `plugins/board` is what
+ * `docs/PLUGINS.md` walks through and what somebody trying this feature installs
+ * first, and it declares an `api` like any other plugin — so the day
+ * `PLUGIN_API_MIN_VERSION` is raised past it, the documented first step stops
+ * working, on a machine that is running exactly what the tree says it should.
+ */
+const protocolTs = read("src/plugins/protocol.ts");
+const apiVersion = capture(protocolTs, /^export const PLUGIN_API_VERSION = (\d+);$/m);
+const apiMin = capture(protocolTs, /^export const PLUGIN_API_MIN_VERSION = (\d+);$/m);
+check("the plugin API version is readable at all", apiVersion !== null, true);
+check("and so is the floor under it", apiMin !== null, true);
+check(
+  "the floor is not above the ceiling",
+  apiMin !== null && apiVersion !== null && Number(apiMin) <= Number(apiVersion),
+  true,
+);
+
+const boardManifest = JSON.parse(read("plugins/board/plugin.json")) as { api?: number; id?: string; version?: string };
+check("the reference plugin declares an API version", typeof boardManifest.api === "number", true);
+check(
+  "and this daemon would still install it",
+  apiMin !== null &&
+    apiVersion !== null &&
+    typeof boardManifest.api === "number" &&
+    boardManifest.api >= Number(apiMin) &&
+    boardManifest.api <= Number(apiVersion),
+  true,
+);
+
+/*
+ * The id in the manifest is also the directory `docs/PLUGINS.md` tells somebody to
+ * `tar -C`, so the two have to agree or the documented command builds an archive
+ * the daemon then unpacks under a different name.
+ */
+check("the reference plugin's id is the directory it lives in", boardManifest.id, "board");
+
 process.stdout.write(failures === 0 ? "\nall green\n\n" : `\n${failures} FAILED\n\n`);
 process.exit(failures === 0 ? 0 : 1);

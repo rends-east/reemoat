@@ -2,11 +2,14 @@
 import { execFileSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
+  lutimesSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   utimesSync,
@@ -46,6 +49,9 @@ import {
   settleFolderName,
 } from "../src/archive.js";
 import { SignedTokenVerifier, type Scope } from "../src/auth.js";
+import type { PluginManifest } from "../src/plugins/protocol.js";
+import type { PluginRuntime } from "../src/plugins/runtime.js";
+import { checkPluginWrite, type PluginDataStore, type PluginRecordStore } from "../src/plugins/store.js";
 import { forgetStalled, isStalled, listDirs, makeDir, PathError, probeExists, resolveCwd } from "../src/browse.js";
 import { isRemoteType, mountFor, parseBsdMounts, parseLinuxMounts, readMounts } from "../src/mounts.js";
 import { CORS_ALLOW_METHODS } from "../src/cors.js";
@@ -200,6 +206,80 @@ function memoryUploadIndex(): UploadIndex {
     remove: (sessionId, uploadId) => void rows.delete(key(sessionId, uploadId)),
     removeSession: (sessionId) => {
       for (const [id, row] of rows) if (row.sessionId === sessionId) rows.delete(id);
+    },
+  };
+}
+
+/**
+ * A `PluginDataStore` with no database behind it.
+ *
+ * `memoryUploadIndex`'s shape one subject over, and at module scope rather than
+ * inside the section that first needed it because there are two callers now: the
+ * scope gate is driven against this, and `SqlitePluginDataStore` is driven
+ * against **both**. That pairing is the whole reason `checkPluginWrite` lives in
+ * `src/plugins/store.ts` instead of beside the SQL — a quota that holds only
+ * where there is a file is a quota nothing drives — and `entries` makes the same
+ * claim about paging, which is why the byte accounting below is the real one
+ * rather than a row count.
+ *
+ * ⚠ **Keyed on the pair, because the real one is.** This ignored `pluginId`
+ * entirely and held one flat map, so it was structurally incapable of showing a
+ * cross-plugin leak — the one property `PluginApi` namespacing every store call
+ * on `manifest.id` exists to provide. `dropPlugin` cleared everything for the
+ * same reason, which would have made "uninstalling one leaves the other's" pass
+ * against a store that dropped both.
+ */
+function memoryPluginData(): PluginDataStore {
+  const data = new Map<string, string>();
+  /** `pluginId` and `key` are two fields, never one string somebody could forge. */
+  const at = (id: string, key: string): string => `${id}\u0000${key}`;
+  const keysOf = (id: string, prefix: string): string[] =>
+    [...data.keys()]
+      .filter((held) => held.startsWith(`${id}\u0000`))
+      .map((held) => held.slice(id.length + 1))
+      .filter((key) => key.startsWith(prefix));
+  const sizeOf = (id: string, key: string): number | null => {
+    const held = data.get(at(id, key));
+    return held === undefined ? null : Buffer.byteLength(held, "utf8");
+  };
+  return {
+    get: (id, key) => (data.has(at(id, key)) ? JSON.parse(data.get(at(id, key)) as string) : null),
+    set: (id, key, value) => {
+      /*
+       * The shared bound, charged here rather than assumed. A fake that skipped
+       * it would make every quota assertion in this file a claim about SQLite
+       * alone, which is exactly the arrangement `checkPluginWrite` was extracted
+       * to end — and the refusals are what a plugin author actually meets.
+       */
+      const held = keysOf(id, "");
+      checkPluginWrite(key, value, {
+        keys: held.length,
+        bytes: held.reduce((total, one) => total + (sizeOf(id, one) ?? 0), 0),
+        existing: sizeOf(id, key),
+      });
+      data.set(at(id, key), value);
+    },
+    delete: (id, key) => void data.delete(at(id, key)),
+    // Sorted, because `keysStmt` is `ORDER BY key` and a driver comparing the two
+    // answers would otherwise be comparing SQLite's collation against a Map's
+    // insertion order.
+    keys: (id, prefix) => keysOf(id, prefix).sort(),
+    entries: (id, prefix, after, maxBytes) => {
+      const out: { key: string; value: unknown }[] = [];
+      let bytes = 0;
+      for (const key of keysOf(id, prefix).sort()) {
+        if (key <= after) continue;
+        const text = data.get(at(id, key)) as string;
+        // Charged as the bytes the answer carries, the way SQLite's does, so the
+        // two implementations cut a page at the same place.
+        bytes += Buffer.byteLength(text, "utf8") + Buffer.byteLength(JSON.stringify(key), "utf8");
+        if (out.length > 0 && bytes > maxBytes) return { entries: out, more: true };
+        out.push({ key, value: JSON.parse(text) });
+      }
+      return { entries: out, more: false };
+    },
+    dropPlugin: (id) => {
+      for (const held of [...data.keys()]) if (held.startsWith(`${id}\u0000`)) data.delete(held);
     },
   };
 }
@@ -664,11 +744,6 @@ process.stdout.write("\nlisting sessions, and the cut that reorders\n");
   check("a limit above the count truncates nothing", roomy.body.truncated, false);
   check("and still returns every row", roomy.body.sessions.length, 3);
 
-  /*
-   * Zero is a limit, not a missing one — `limitParam === undefined` is the only
-   * thing that means unbounded, so a client asking for nothing gets nothing and
-   * is told the list is not whole.
-   */
   const none = await get("/sessions?limit=0", "u_alice");
   check("zero returns nothing rather than everything", none.body.sessions.length, 0);
   check("and is still honest about the total", [none.body.total, none.body.truncated], [3, true]);
@@ -1781,6 +1856,7 @@ process.stdout.write("\nthe database, across a restart\n");
   // row written before v5, and `String(null)` would name a session "null".
   check("a session written without them reads back unnamed", plain?.title, null);
   check("and unpinned", plain?.pinned, false);
+
   check("the file is stamped with the version it now matches", Number(second.db.prepare("PRAGMA user_version").get()?.["user_version"]), SCHEMA_VERSION);
 
   /*
@@ -6120,14 +6196,54 @@ process.stdout.write("\nwhat a form is allowed to be\n");
     { value: "ok", label: "ok", description: null },
   ]);
 
-  check("prose is clipped rather than refused", (() => {
+  /*
+   * ⚠ **This asserted the opposite until 0.3.0: "prose is clipped rather than
+   * refused", at 512 / 100 / 300 characters for `message`, a title and a
+   * description.**
+   *
+   * What made those wrong is *where the question lives*. With several questions on
+   * one form the adapter puts each question in its field's `description` and leaves
+   * `message` as a preamble — so 300 was a cap on the sentence somebody is being
+   * asked to answer, and an option's `description` is the sentence explaining what
+   * one answer means. Measured against this machine's own log, one real option
+   * description was **318** characters and was being cut on screen. A question read
+   * half is a question answered wrongly, which is precisely the harm "structure is
+   * refused" exists to prevent, one field along.
+   *
+   * So the split runs between *structure* and *prose* rather than between refusing
+   * and clipping, and the byte backstop below is what bounds prose now — one
+   * whole-object number instead of three per-string ones.
+   */
+  check("prose arrives whole rather than clipped", (() => {
     const long = toElicitationForm({
       type: "object",
-      properties: { a: { type: "string", description: "x".repeat(5_000) } },
+      properties: {
+        a: {
+          type: "string",
+          title: "T".repeat(400),
+          description: "x".repeat(5_000),
+          oneOf: [{ const: "v", title: "L".repeat(400), description: "d".repeat(1_000) }],
+        },
+      },
     } as never);
-    const description = long.fields[0]?.description ?? "";
-    return description.length < 5_000 && description.startsWith("x");
+    const field = long.fields[0];
+    return (
+      field?.description === "x".repeat(5_000) &&
+      field?.title === "T".repeat(400) &&
+      field?.options?.[0]?.label === "L".repeat(400) &&
+      field?.options?.[0]?.description === "d".repeat(1_000)
+    );
   })(), true);
+  // An empty string and `null` are one absence to every reader, and `askTitle` in
+  // the web client falls through to its next source on `null` — so the half of
+  // `clipOrNull` that survived its budget is the half that had to.
+  check("but an empty string is still an absence", (() => {
+    const blank = toElicitationForm({
+      type: "object",
+      properties: { a: { type: "string", title: "", description: "" } },
+    } as never);
+    return [blank.fields[0]?.title, blank.fields[0]?.description];
+  })(), [null, null]);
 
   check("an empty form is a form, not an error", toElicitationForm({ type: "object", properties: {} } as never), {
     fields: [],
@@ -6269,6 +6385,23 @@ process.stdout.write("\nwhat a form is allowed to be\n");
   check(
     "and a form that is only large in total is refused by the byte backstop",
     refusalFrom({ type: "object", properties: heavy })?.includes("bytes"),
+    true,
+  );
+  /*
+   * ⚠ **The case the per-string caps used to catch, and the backstop is now the
+   * only thing that catches it.** With `MAX_ELICITATION_DESCRIPTION_CHARS` gone,
+   * one field can carry an arbitrarily long sentence — which is the point — so the
+   * assertion that matters is that *one* enormous string still meets the same 32
+   * KiB number a thousand small ones do. Without this, "prose arrives whole" above
+   * would be the only statement about prose in the file and the form would be
+   * unbounded in the direction nobody drives.
+   */
+  check(
+    "and one enormous string meets the same backstop the thousand small ones do",
+    refusalFrom({
+      type: "object",
+      properties: { a: { type: "string", description: "q".repeat(40_000) } },
+    })?.includes("bytes"),
     true,
   );
 }
@@ -8790,13 +8923,28 @@ process.stdout.write("\nanswering a permission the agent is waiting on\n");
                   { optionId: "o_never", name: "Never", kind: "reject_always" },
                 ];
             /*
-             * The two shapes an agent can send that nothing used to bound, and
+             * The three shapes an agent can send that nothing used to bound, and
              * they are here rather than in a pure case because the whole defect
              * was that the *route from the wire to the snapshot* had no cap on
              * it. Asserting `clip` would have passed all along.
+             *
+             * `wordy` is the pair `shouting` used to be half of. The two 200-char
+             * clips are gone — a clipped `name` broke `askedQuestion`'s identity
+             * match against `rawInput`, which is how a kimi question fell back to
+             * buttons — so a long-but-reasonable option name has to arrive whole,
+             * and only the *pair's* byte weight refuses.
              */
+            if (text.includes("wordy")) {
+              offer = [
+                { optionId: "o_yes", name: `Yes, and ${"scope ".repeat(60)}`.trim(), kind: "allow_once" },
+                { optionId: "o_no", name: "No", kind: "reject_once" },
+              ];
+            }
             if (text.includes("shouting")) {
               offer = [{ optionId: "o_yes", name: "Y".repeat(4_000), kind: "allow_once" }];
+            }
+            if (text.includes("in Chinese")) {
+              offer = [{ optionId: "o_yes", name: "好", kind: "allow_once" }];
             }
             if (text.includes("swarming")) {
               offer = Array.from({ length: 200 }, (_, i) => ({
@@ -8815,7 +8963,13 @@ process.stdout.write("\nanswering a permission the agent is waiting on\n");
                 sessionId,
                 toolCall: {
                   toolCallId: `tc_${mine}_${askId}`,
-                  title: text.includes("shouting") ? "T".repeat(50_000) : "Terminal",
+                  title: text.includes("shouting")
+                    ? "T".repeat(50_000)
+                    : text.includes("in Chinese")
+                      ? "運".repeat(8_000)
+                      : text.includes("wordy")
+                        ? `Run ${"a long deliberate title ".repeat(20)}`.trim()
+                        : "Terminal",
                   rawInput: { command: "rm -rf /" },
                   content: [{ type: "content", content: { type: "text", text: "Requesting approval to run it" } }],
                 },
@@ -9142,23 +9296,71 @@ process.stdout.write("\nanswering a permission the agent is waiting on\n");
      *
      * Driven through the wire rather than asserted against `clip`, because what
      * was missing was a call site and every pure function involved was correct.
+     *
+     * ⚠ **This block used to assert a *clip* at 200 characters, and now asserts a
+     * refusal at 8 KiB over the pair.** Two things forced the change. A clipped
+     * `option.name` is a model-written *answer* whenever kimi asks a question down
+     * this channel, and `askedQuestion` recovers the question by matching that name
+     * against the same string in `rawInput` **by identity** — `rawInput` is bounded
+     * by bytes and never by characters, so past 200 the two disagreed and the whole
+     * question silently fell back to a row of buttons. And a person must never be
+     * shown a shortened version of what an agent asked. What the snapshot needed
+     * was never a per-string cap; it was one number over the thing that rides it.
      */
     const shouted = await permRegistry.create({ agent: "kimi", cwd: workdir });
     shouted.prompt("run it, shouting");
     await quiesce();
-    const parked = shouted.snapshot().pendingPermissions[0];
-    check("an agent shouting a 50 KB title is still asked", shouted.status, "blocked");
-    report(
-      "but the snapshot carries a clipped one",
-      (parked?.title.length ?? 0) <= 256,
-      `${parked?.title.length ?? -1} chars from 50000`,
-    );
-    report(
-      "and a 4 KB option name likewise",
-      (parked?.options[0]?.name.length ?? 0) <= 256,
-      `${parked?.options[0]?.name.length ?? -1} chars from 4000`,
-    );
+    check("a 50 KB title is refused rather than parked", shouted.snapshot().pendingPermissions.length, 0);
+    // The same property the swarming case below asserts, and for the same reason:
+    // the agent is told, the turn carries on, and nobody is left blocked on a card
+    // this daemon declined to carry.
+    check("so the session is not left blocked on it either", shouted.status === "blocked", false);
     await permRegistry.stop(shouted.id);
+
+    /*
+     * The other side of the same number, and it is the side that matters daily: a
+     * title and an option name far longer than anything measured — 480 and 350
+     * characters against a live-log maximum of 14 and 31 — arrive **whole**. Both
+     * would have been cut by the 200 that used to be here.
+     */
+    const wordy = await permRegistry.create({ agent: "kimi", cwd: workdir });
+    wordy.prompt("run it, wordy");
+    await quiesce();
+    const carried = wordy.snapshot().pendingPermissions[0];
+    check("a long title and a long option name are still asked", wordy.status, "blocked");
+    report(
+      "and the snapshot carries both of them whole",
+      (carried?.title.length ?? 0) > 400 && (carried?.options[0]?.name.length ?? 0) > 300,
+      `title ${carried?.title.length ?? -1}, option ${carried?.options[0]?.name.length ?? -1}`,
+    );
+    report(
+      "with no truncation marker anywhere in the pair",
+      !/\u2026\[truncated \d+ bytes\]/.test(`${carried?.title ?? ""}${carried?.options[0]?.name ?? ""}`),
+      "read off the snapshot the relay would send",
+    );
+    await permRegistry.stop(wordy.id);
+
+    /*
+     * ⚠ **The same bound, spelled in a script where a character is not a byte.**
+     * The refusal above is `MAX_PERMISSION_SNAPSHOT_BYTES` and it was measured with
+     * `jsonSize`, which is `JSON.stringify(...).length` — UTF-16 code units. Every
+     * BMP character above U+07FF is one unit and three bytes, so a title of 8,000
+     * CJK characters weighed 8,002 against a limit of 8,192, passed, and put 24,002
+     * bytes on the wire. Three times the number the sentence quotes, on the pair
+     * that rides `GET /sessions` for every session on the machine, on every poll,
+     * through the relay, to a phone — which is the amplifier this whole block
+     * exists for, reached in the one alphabet nobody had measured.
+     *
+     * Driven through the wire for the reason written above: the arithmetic was
+     * never wrong, the unit was, and a pure-function assertion would have agreed
+     * with it.
+     */
+    const cjk = await permRegistry.create({ agent: "kimi", cwd: workdir });
+    cjk.prompt("run it, in Chinese");
+    await quiesce();
+    check("a title that is 8 KiB of characters and 24 KiB of bytes is refused too", cjk.snapshot().pendingPermissions.length, 0);
+    check("and that session is not left blocked on it either", cjk.status === "blocked", false);
+    await permRegistry.stop(cjk.id);
   }
 
   {
@@ -9166,8 +9368,8 @@ process.stdout.write("\nanswering a permission the agent is waiting on\n");
      * **Refused whole rather than trimmed**, and this is the one arm where that
      * is the only honest answer: an `optionId` round-trips verbatim in the
      * response, so a clipped one is an answer the agent will not recognise, and
-     * dropping options removes choices it offered — the thing `drawableOptions`
-     * spends four rules being careful about one layer up.
+     * dropping options removes choices it offered — which the client stopped doing
+     * in this release, `permissionLayout` giving up a *layout* instead.
      *
      * What has to be true is that the session does not end up *blocked* on a
      * card nobody bounded: the agent is told, and the turn carries on.
@@ -11381,6 +11583,6059 @@ process.stdout.write("\ntwo config changes at once\n");
   check("and lands", valueOf("b"), "X");
 
   await pairRegistry.shutdown();
+}
+
+/* ------------------------------------------------------------------------- *
+ * Plugins
+ *
+ * Everything here runs against a **fake `PluginRuntime`** rather than a real
+ * `fork`, which is the reason that interface exists at all: a timeout, a crash,
+ * an exhausted restart budget and a child that never answers are the paths that
+ * matter, and none of them is reachable in an offline driver by spawning a
+ * process and hoping. One case at the end drives the real `ForkedPluginRuntime`,
+ * so the path production takes is walked rather than assumed.
+ * ------------------------------------------------------------------------- */
+
+process.stdout.write("\nwhat a plugin manifest may say\n");
+{
+  /*
+   * ⚠ **The bounds are imported rather than retyped, and that is the whole reason
+   * they are exported at all.** `manifest.ts` has no caller for them — nothing
+   * outside that file compares a manifest against these — so before this line each
+   * number was written down three times: in the comparison, in the refusal
+   * sentence, and here as `"x".repeat(201)` beside the fragment `"name must be
+   * 1–64"`. A driver that copies a bound is a driver that goes on asserting the old
+   * one after somebody moves it, in green, which is the failure `envNameFor` and
+   * `SETTING_KEYS` are pure for.
+   */
+  const {
+    MAX_ACTIONS,
+    MAX_ACTION_TITLE_CHARS,
+    MAX_DESCRIPTION_CHARS,
+    MAX_NAME_CHARS,
+    MAX_NET_HOSTS,
+    MAX_SCREEN_TITLE_CHARS,
+    parseManifest,
+  } = await import("../src/plugins/manifest.js");
+  const { PLUGIN_API_VERSION, negotiatePluginApi } = await import("../src/plugins/protocol.js");
+
+  const base = {
+    id: "board",
+    name: "Task board",
+    version: "0.1.0",
+    api: PLUGIN_API_VERSION,
+    scopes: ["store"],
+    contributes: { screen: { title: "Board" }, settings: true, actions: [], hooks: ["turn.ended"] },
+  };
+  const of = (patch: Record<string, unknown>): ReturnType<typeof parseManifest> =>
+    parseManifest(JSON.stringify({ ...base, ...patch }));
+  const codeOf = (patch: Record<string, unknown>): string => {
+    const answer = of(patch);
+    return answer.ok ? "ok" : answer.code;
+  };
+
+  check("a manifest this daemon can run", codeOf({}), "ok");
+  check("and it comes back parsed rather than as text", of({}).ok ? of({}) : null, {
+    ok: true,
+    manifest: {
+      id: "board",
+      name: "Task board",
+      version: "0.1.0",
+      api: PLUGIN_API_VERSION,
+      description: null,
+      scopes: ["store"],
+      net: [],
+      contributes: { screen: { title: "Board" }, settings: true, actions: [], hooks: ["turn.ended"] },
+    },
+  });
+
+  /*
+   * Every refusal, because the refusals are the whole value of that file — a
+   * validator whose error paths are only reachable by building a real archive is
+   * a validator whose error paths are not driven. This is what `parseManifest`
+   * taking *text* rather than a path buys.
+   */
+  // Through one narrowing rather than two calls, so the type is what proves the
+  // second read is on the refusal arm rather than the caller remembering.
+  const rawCode = (text: string): string => {
+    const answer = parseManifest(text);
+    return answer.ok ? "ok" : answer.code;
+  };
+  check("not JSON at all", rawCode("{"), "manifest_unreadable");
+  check("JSON that is not an object", rawCode("[]"), "manifest_unreadable");
+  check("an id with a capital in it", codeOf({ id: "Board" }), "manifest_invalid");
+  check("an id with a slash in it", codeOf({ id: "a/b" }), "manifest_invalid");
+  check("an id that is empty", codeOf({ id: "" }), "manifest_invalid");
+  check("no name", codeOf({ name: "" }), "manifest_invalid");
+  check("a version that is not three numbers", codeOf({ version: "1.0" }), "manifest_invalid");
+  check("a version with a suffix", codeOf({ version: "1.0.0-beta" }), "manifest_invalid");
+  check("an api that is not a number", codeOf({ api: "1" }), "manifest_invalid");
+  check("an unknown scope", codeOf({ scopes: ["sessions.admin"] }), "manifest_invalid");
+  check("a scope listed twice", codeOf({ scopes: ["store", "store"] }), "manifest_invalid");
+  check("an unknown hook", codeOf({ contributes: { ...base.contributes, hooks: ["session.slept"] } }), "manifest_invalid");
+  check(
+    "an action with no id",
+    codeOf({ contributes: { ...base.contributes, actions: [{ title: "Go", on: "session" }] } }),
+    "manifest_invalid",
+  );
+  check(
+    "an action on a surface that does not exist",
+    codeOf({ contributes: { ...base.contributes, actions: [{ id: "go", title: "Go", on: "rail" }] } }),
+    "manifest_invalid",
+  );
+  check(
+    "two actions with one id",
+    codeOf({
+      contributes: {
+        ...base.contributes,
+        actions: [
+          { id: "go", title: "Go", on: "session" },
+          { id: "go", title: "Go again", on: "screen" },
+        ],
+      },
+    }),
+    "manifest_invalid",
+  );
+
+  /*
+   * `net` and its scope have to agree in **both** directions, and neither
+   * direction is the obvious one on its own: hosts with no scope is a manifest
+   * that under-declares, and a scope with no hosts is one that reads, to whoever
+   * is approving it, as a plugin talking to nowhere.
+   */
+  check("hosts listed without the scope", codeOf({ net: ["api.example.com"] }), "manifest_invalid");
+  check("the scope declared with no hosts", codeOf({ scopes: ["net"] }), "manifest_invalid");
+  check("the scope declared with an empty list", codeOf({ scopes: ["net"], net: [] }), "manifest_invalid");
+  check("both, agreeing", codeOf({ scopes: ["net"], net: ["api.example.com"] }), "ok");
+  check("a host with a scheme on it", codeOf({ scopes: ["net"], net: ["https://api.example.com"] }), "manifest_invalid");
+  check("a host with a port on it", codeOf({ scopes: ["net"], net: ["api.example.com:443"] }), "manifest_invalid");
+  check("an address rather than a name", codeOf({ scopes: ["net"], net: ["127.0.0.1"] }), "manifest_invalid");
+  check("a name for this machine", codeOf({ scopes: ["net"], net: ["thing.localhost"] }), "manifest_invalid");
+
+  /*
+   * The two api refusals are separate codes because their remedies are opposite:
+   * too old means republish the plugin, too new means update the machine. One
+   * "unsupported" sends half of everybody to the wrong place.
+   */
+  check("an api older than this daemon accepts", codeOf({ api: 0 }), "plugin_api_too_old");
+  check("an api newer than it speaks", codeOf({ api: PLUGIN_API_VERSION + 1 }), "plugin_api_too_new");
+  check(
+    "and the negotiation itself is a range, not an equality",
+    [negotiatePluginApi(PLUGIN_API_VERSION), negotiatePluginApi(PLUGIN_API_VERSION + 1), negotiatePluginApi(-1)],
+    ["ok", "too_new", "too_old"],
+  );
+
+  // Absence is the one thing repaired rather than refused, because an omitted
+  // optional has an obvious meaning and a wrong value does not.
+  check("no contributes at all is a plugin that contributes nothing", of({ contributes: undefined }).ok, true);
+  check("and no scopes is a plugin that may do nothing", of({ scopes: undefined }).ok, true);
+
+  /* ---------------------------------------------------------------- *
+   * The other eighteen.
+   *
+   * `manifest.ts` refuses in **thirty-seven** places: nine in `parseManifest`
+   * itself and twenty-eight spread over the five readers it delegates to. The
+   * cases above drive nineteen. These are the other eighteen, plus three
+   * conditions *inside* branches those already reach from the opposite side — a
+   * name too long rather than empty, an api that is a number and not a whole one,
+   * a screen title that is only spaces. Most of what was missing is the type
+   * refusals ("must be an array", "must be a string", "must be true or false"),
+   * which is the half of a hand-written validator nobody writes a case for and
+   * the half a `plugin.json` written by a person hits first.
+   *
+   * ⚠ **Asserted on the sentence rather than on the code**, because twenty-eight
+   * of the thirty-seven answer `manifest_invalid` and a case that reads only the
+   * code proves a manifest was refused rather than that it was refused for the
+   * reason it was written to catch — `{ contributes: { hooks: 7 } }` and
+   * `{ contributes: 7 }` are the same code and different bugs. The fragment is
+   * short on purpose: it names the branch and does not pin the prose around it.
+   *
+   * ⚠ **Nothing derives the thirty-seven and a thirty-eighth needs a line here.**
+   * Those refusals are prose returned from five different helpers — a bare string,
+   * a template literal, an `invalid(…)` and a `{ ok: false, code }` are all in
+   * there — so a grep for them is a check on a regular expression rather than on
+   * the file, which is the failure `docscheck` avoids by holding a file to what it
+   * says about *itself*. The count is stated instead, and it is the reason this
+   * comment is here rather than in a commit message.
+   * ---------------------------------------------------------------- */
+  const says = (name: string, patch: Record<string, unknown>, fragment: string): void => {
+    const answer = of(patch);
+    const message = answer.ok ? "(accepted)" : answer.message;
+    report(name, message.includes(fragment), message);
+  };
+  const contributing = (patch: Record<string, unknown>): Record<string, unknown> => ({
+    contributes: { ...base.contributes, ...patch },
+  });
+
+  says(
+    "a description longer than a manifest carries",
+    { description: "x".repeat(MAX_DESCRIPTION_CHARS + 1) },
+    `description must be a string of at most ${MAX_DESCRIPTION_CHARS} characters`,
+  );
+  says("a name past its ceiling rather than empty", { name: "n".repeat(MAX_NAME_CHARS + 1) }, `name must be 1–${MAX_NAME_CHARS}`);
+  says("an api that is a number and not a whole one", { api: 1.5 }, "api must be a whole number");
+  says("scopes that are not a list", { scopes: "store" }, "scopes must be an array");
+  says("a scope that is not a string", { scopes: [7] }, "every scope must be a string");
+  says("net that is not a list", { scopes: ["net"], net: "api.example.com" }, "net must be an array");
+  says("a net entry that is not a string", { scopes: ["net"], net: [7] }, "every net entry must be a string");
+  says(
+    "more hosts than a plugin talks to",
+    { scopes: ["net"], net: Array.from({ length: MAX_NET_HOSTS + 1 }, (_, index) => `h${index}.example.com`) },
+    `net may name at most ${MAX_NET_HOSTS} hosts`,
+  );
+  says(
+    "the same host twice",
+    { scopes: ["net"], net: ["api.example.com", "api.example.com"] },
+    "is listed twice",
+  );
+  says("contributes that is a list", { contributes: [] }, "contributes must be an object");
+  says("a screen that is a string", contributing({ screen: "Board" }), "contributes.screen must be an object");
+  says(
+    "a screen title past its own ceiling",
+    contributing({ screen: { title: "t".repeat(MAX_SCREEN_TITLE_CHARS + 1) } }),
+    `contributes.screen.title must be 1–${MAX_SCREEN_TITLE_CHARS} characters`,
+  );
+  says("a screen title of nothing", contributing({ screen: { title: "   " } }), "contributes.screen.title");
+  says("settings that is neither", contributing({ settings: "yes" }), "contributes.settings must be true or false");
+  says("actions that are not a list", contributing({ actions: {} }), "contributes.actions must be an array");
+  /*
+   * Eight, and the bound is on what a plugin may put on *somebody's screen*
+   * rather than on what it costs to hold: a session's kebab menu has never held
+   * eight rows, and a plugin able to declare forty would be a plugin able to make
+   * that menu unusable for everything else on it.
+   */
+  says(
+    "more actions than a menu has room for",
+    contributing({
+      actions: Array.from({ length: MAX_ACTIONS + 1 }, (_, index) => ({ id: `a${index}`, title: "Go", on: "session" })),
+    }),
+    `at most ${MAX_ACTIONS} actions`,
+  );
+  says("an action that is a string", contributing({ actions: ["go"] }), "every action must be an object");
+  says(
+    "an action with no title",
+    contributing({ actions: [{ id: "go", title: "", on: "session" }] }),
+    `needs a title of 1–${MAX_ACTION_TITLE_CHARS}`,
+  );
+  says("hooks that are not a list", contributing({ hooks: "turn.ended" }), "contributes.hooks must be an array");
+  says("a hook that is not a string", contributing({ hooks: [7] }), "every hook must be a string");
+  says("the same hook twice", contributing({ hooks: ["turn.ended", "turn.ended"] }), "is listed twice");
+
+  /* ---------------------------------------------------------------- *
+   * And the last character each of them allows, which is the half that makes the
+   * import above load-bearing.
+   *
+   * ⚠ **Every case above is one character *past* a ceiling, and a validator that
+   * refused one character early would pass all of them.** Off by one in that
+   * direction is the silent version — a plugin whose name is exactly 64 characters
+   * simply cannot be installed, with a sentence saying names may be 1–64 — and it
+   * is only reachable by asserting the accept beside the refusal. Derived from the
+   * same constants, so the pair moves together or not at all.
+   * ---------------------------------------------------------------- */
+  const atTheLine: [string, Record<string, unknown>][] = [
+    ["a name of exactly its ceiling", { name: "n".repeat(MAX_NAME_CHARS) }],
+    ["a description of exactly its ceiling", { description: "x".repeat(MAX_DESCRIPTION_CHARS) }],
+    ["a screen title of exactly its ceiling", contributing({ screen: { title: "t".repeat(MAX_SCREEN_TITLE_CHARS) } })],
+    [
+      "an action title of exactly its ceiling",
+      contributing({ actions: [{ id: "go", title: "g".repeat(MAX_ACTION_TITLE_CHARS), on: "session" }] }),
+    ],
+    [
+      "exactly as many actions as a menu holds",
+      contributing({
+        actions: Array.from({ length: MAX_ACTIONS }, (_, index) => ({ id: `a${index}`, title: "Go", on: "session" })),
+      }),
+    ],
+    [
+      "exactly as many hosts as a plugin talks to",
+      { scopes: ["net"], net: Array.from({ length: MAX_NET_HOSTS }, (_, index) => `h${index}.example.com`) },
+    ],
+  ];
+  check(
+    "each bound accepts its own last character rather than stopping one short",
+    Object.fromEntries(atTheLine.map(([name, patch]) => [name, codeOf(patch)])),
+    Object.fromEntries(atTheLine.map(([name]) => [name, "ok"])),
+  );
+}
+
+process.stdout.write("\nwhat a plugin may keep\n");
+{
+  const {
+    checkPluginWrite,
+    MAX_PLUGIN_KEYS,
+    MAX_PLUGIN_DATA_BYTES,
+    MAX_PLUGIN_KEY_CHARS,
+    MAX_PLUGIN_VALUE_BYTES,
+    PluginStoreError,
+  } = await import("../src/plugins/store.js");
+
+  const refusal = (
+    key: string,
+    value: string,
+    current: { keys: number; bytes: number; existing: number | null },
+  ): string => {
+    try {
+      checkPluginWrite(key, value, current);
+      return "ok";
+    } catch (error) {
+      return error instanceof PluginStoreError ? error.code : "threw";
+    }
+  };
+  const empty = { keys: 0, bytes: 0, existing: null };
+
+  check("an ordinary write", refusal("a", "1", empty), "ok");
+  check("an empty key", refusal("", "1", empty), "bad_request");
+  check("a key with a newline in it", refusal("a\nb", "1", empty), "bad_request");
+  check("a key with a NUL in it", refusal("a\u0000b", "1", empty), "bad_request");
+  /*
+   * ⚠ **The one bound in that file no case reached, and the only one a plugin
+   * author trips over by accident.** Three of the four here are imported and this
+   * one was written nowhere — so `MAX_PLUGIN_KEY_CHARS` could have moved in either
+   * direction and every line in this section would have gone on passing. The pair
+   * is what makes it a bound rather than a number: one short of it refuses a key
+   * the sentence promises, one long of it is a ceiling nobody enforces.
+   *
+   * ⚠ **And it is `key.length`, i.e. UTF-16 code units, against a constant named
+   * `CHARS`** — deliberately, and unlike the byte accounting one field over: what
+   * this bounds is a label somebody reads, and `plugins.md` prints it as "200
+   * chars per key". The astral case therefore costs two of the two hundred, which
+   * is the same thing every editor's column count would say.
+   */
+  check("a key of exactly the length a key may be", refusal("k".repeat(MAX_PLUGIN_KEY_CHARS), "1", empty), "ok");
+  check("and one character past it", refusal("k".repeat(MAX_PLUGIN_KEY_CHARS + 1), "1", empty), "bad_request");
+  check("a value over the per-value cap", refusal("a", "x".repeat(MAX_PLUGIN_VALUE_BYTES + 1), empty), "value_too_large");
+  check(
+    "a write that would take the plugin over its total",
+    refusal("a", "x".repeat(1000), { keys: 1, bytes: MAX_PLUGIN_DATA_BYTES, existing: null }),
+    "store_full",
+  );
+  /*
+   * The replaced value is credited back before the new one is charged. Without
+   * that, a plugin rewriting one key climbs to its own ceiling and stays there —
+   * which is the shape of every settings pane written against this API.
+   */
+  check(
+    "but rewriting a key charges only the difference",
+    refusal("a", "x".repeat(1000), { keys: 1, bytes: MAX_PLUGIN_DATA_BYTES, existing: 1000 }),
+    "ok",
+  );
+  check(
+    "a new key past the key ceiling",
+    refusal("new", "1", { keys: MAX_PLUGIN_KEYS, bytes: 0, existing: null }),
+    "store_full",
+  );
+  check(
+    "and rewriting an existing one is still allowed there",
+    refusal("held", "1", { keys: MAX_PLUGIN_KEYS, bytes: 0, existing: 1 }),
+    "ok",
+  );
+
+  /*
+   * ⚠ **And the row a plugin author actually reads, held to the four constants
+   * that produce it.** `docs/PLUGINS.md`'s bounds table is the only place any of
+   * these appears to the person writing against them — nothing on a screen, in a
+   * header or in a refusal says what the ceilings are before one is met — so a
+   * bound that moved without that table moving is a published contract this daemon
+   * has quietly stopped keeping. `MAX_PLUGIN_KEY_CHARS` is the reason this line
+   * exists: it had no reader outside `store.ts` at all, in source or in a driver.
+   *
+   * Here rather than in `docscheck` for the reason the ask bounds give at greater
+   * length: that driver's subject is prose held to what it says about *itself*,
+   * and this is prose held to a number in `src/`, which is a fact about the daemon
+   * and belongs beside the assertions that drive it.
+   */
+  const authored = readFileSync(new URL("../docs/PLUGINS.md", import.meta.url), "utf8");
+  const stated =
+    `${MAX_PLUGIN_DATA_BYTES / 1024 / 1024} MiB per plugin, ${MAX_PLUGIN_VALUE_BYTES / 1024} KiB per value, ` +
+    `${MAX_PLUGIN_KEYS} keys, ${MAX_PLUGIN_KEY_CHARS} characters per key`;
+  report("what PLUGINS.md tells an author a store holds is what it holds", authored.includes(stated), stated);
+}
+
+process.stdout.write("\nwhere a plugin's data actually lives\n");
+{
+  const { MAX_PLUGIN_DATA_BYTES, MAX_PLUGIN_KEYS, MAX_PLUGIN_VALUE_BYTES, PluginStoreError } = await import(
+    "../src/plugins/store.js"
+  );
+  const { SqlitePluginDataStore, openStores } = await import("../src/store/sqlite.js");
+
+  /**
+   * One script, run against both implementations and compared line for line.
+   *
+   * ⚠ **The comparison is the point, and it is why this is a function rather than
+   * a run of assertions.** Everything above this in the plugin sections drives the
+   * host, the API and the quota against `memoryPluginData`, so the whole of what
+   * `daemoncheck` knows about a plugin's storage is what a Map does — while what
+   * the fleet runs is `LIKE … ESCAPE`, a keyset cursor and a byte budget charged
+   * per row. Two of those cannot be reproduced by a Map on purpose, which is
+   * exactly why the script is run against the real store *first*: the fake is
+   * being held to SQLite rather than the other way round.
+   *
+   * A labelled record rather than an array, so a mismatch names the property
+   * instead of an index and so the readouts below can be asserted one at a time.
+   */
+  const script = (store: PluginDataStore): Record<string, unknown> => {
+    const refusal = (run: () => void): string => {
+      try {
+        run();
+        return "ok";
+      } catch (error) {
+        return error instanceof PluginStoreError ? error.code : "threw";
+      }
+    };
+
+    // Two plugins, one key name. Neither may see the other's, and nothing in the
+    // API namespaces this — `manifest.id` is passed down and the store is what
+    // keeps them apart.
+    const sameKey = [
+      refusal(() => store.set("one", "shared", JSON.stringify("first"))),
+      refusal(() => store.set("two", "shared", JSON.stringify("second"))),
+      store.get("one", "shared"),
+      store.get("two", "shared"),
+    ];
+
+    /*
+     * ⚠ **A key holding `%` or `_` is a key somebody wrote.** Those are `LIKE`'s
+     * two wildcards, so a prefix built without the escape matches every row the
+     * plugin has — `a%` would answer for `axb` and `ab` as readily as for the one
+     * key it names. The fake filters with `startsWith` and *cannot* reproduce the
+     * bug, which is what makes this the one property in this file that had to be
+     * driven against the real store or not at all.
+     */
+    for (const key of ["a%b", "axb", "a_b", "ab"]) refusal(() => store.set("one", key, JSON.stringify(key)));
+
+    /*
+     * ⚠ **Mixed case, because `LIKE` folds ASCII and this column does not** — and
+     * because the comment in `store/sqlite.ts` that records this defect also
+     * records why the assertion above did not catch it: the fake filters with
+     * `startsWith`, which is case sensitive, so **the parity line at the bottom of
+     * this block passed only while every fixture key was lower case**. That is a
+     * gap described in prose and left open, which is the one shape of gap this
+     * file exists to close.
+     *
+     * These are the three keys the defect was measured with, in the order it
+     * answered them: against this exact DDL `LIKE 'card:%'` gave
+     * `['CARD:3', 'Card:2', 'card:1']` where the plugin had named one namespace
+     * and `card:1` was the only key in it. A third plugin id so that nothing above
+     * moves — `everyKey` and `unprefixed` are asserted as literals.
+     */
+    for (const key of ["CARD:3", "Card:2", "card:1"]) {
+      refusal(() => store.set("three", key, JSON.stringify(key)));
+    }
+
+    const bounds = [
+      // The shared bound, met from the far side: a value one byte past the cap,
+      // an empty key, a key holding a control character.
+      refusal(() => store.set("one", "big", JSON.stringify("x".repeat(MAX_PLUGIN_VALUE_BYTES)))),
+      refusal(() => store.set("one", "", JSON.stringify("x"))),
+      refusal(() => store.set("one", `a${String.fromCharCode(10)}b`, JSON.stringify("x"))),
+    ];
+
+    /*
+     * Six rows of four thousand bytes against a ten-thousand-byte budget, which
+     * puts the cut two rows in and leaves the third to the next page. Coarse on
+     * purpose: SQLite charges twenty bytes of scaffolding a pair that the fake
+     * does not, so a fixture whose rows were a few bytes each would have the two
+     * implementations cutting in different places for a reason that says nothing
+     * about either of them.
+     */
+    for (let index = 0; index < 6; index += 1) {
+      refusal(() => store.set("two", `card:${index}`, JSON.stringify("y".repeat(4_000))));
+    }
+    refusal(() => store.set("two", "note", JSON.stringify("not a card")));
+    const first = store.entries("two", "card:", "", 10_000);
+    // The cursor is the last key of the page, echoed back rather than computed —
+    // a caller deriving the next one itself is a caller guessing at a collation.
+    const second = store.entries("two", "card:", String(first.entries.at(-1)?.key ?? ""), 10_000);
+    const rest = store.entries("two", "card:", String(second.entries.at(-1)?.key ?? ""), 10_000);
+
+    const answer = {
+      sameKey,
+      percentPrefix: store.keys("one", "a%"),
+      // The half-open binary range against the same prefix, read both ways: a
+      // regression to `LIKE` takes all three on SQLite and one on the fake, so it
+      // fails the literal below *and* the parity line.
+      casedPrefix: store.keys("three", "card:"),
+      casedEntries: store.entries("three", "card:", "", 1_000_000).entries.map((one) => one.key),
+      underscorePrefix: store.keys("one", "a_"),
+      everyKey: store.keys("one", "a"),
+      bounds,
+      page: [first.entries.map((one) => one.key), first.more],
+      nextPage: [second.entries.map((one) => one.key), second.more],
+      lastPage: [rest.entries.map((one) => one.key), rest.more],
+      // The prefix is a filter on the page as well as on the listing, or a board
+      // reading its cards would get whatever else that plugin keeps. Asked with a
+      // budget nothing can cut, so what this shows is the two rows the three
+      // `card:` pages above never saw rather than a page that ended early.
+      unprefixed: store.entries("two", "", "", 1_000_000).entries.map((one) => one.key),
+      // What one card actually is, so this is a page of *pairs* rather than of
+      // keys with a shape asserted about them.
+      firstValue: first.entries[0]?.value === "y".repeat(4_000),
+    };
+
+    // Uninstalling is the only thing that drops data, and it drops one plugin's.
+    store.dropPlugin("one");
+    return { ...answer, afterDrop: [store.keys("one", ""), store.keys("two", "").length] };
+  };
+
+  const stores = openStores({ path: join(tmp("plugin-data-"), "d.db"), instanceId: "i_plugin_data" });
+  const real = script(stores.pluginData);
+
+  /*
+   * ⚠ **What a key nobody set reads as, pinned on both implementations at once.**
+   *
+   * `PluginDataStore.get` is typed `unknown`, so the type promises nothing and a
+   * plugin author has to guess. One guessed `undefined`, wrote `held !== undefined`
+   * as an idempotency check, and every session took the "already done" branch —
+   * for weeks, silently, because a hook that returns early leaves no key, no log
+   * and no history to distinguish it from a hook that was never called. The whole
+   * plugin looked dead while every part of the daemon was working.
+   *
+   * The two implementations already agreed — SQLite answers `null`, and
+   * `memoryPluginData` answers `null` — and **nothing said so**. Two stores behind
+   * one interface, agreeing by coincidence, is the pair this file exists to stop
+   * drifting, and it was the one pair with no assertion on it.
+   *
+   * ⚠ **A stored `null` is indistinguishable from a key nobody set**, which is
+   * asserted rather than left to be discovered: a plugin that needs the difference
+   * has to store a wrapper, and this is the line that tells its author so before
+   * they find out from a bug.
+   */
+  {
+    const fake = memoryPluginData();
+    for (const [name, store] of [["sqlite", stores.pluginData], ["the driver's own", memoryPluginData()]] as const) {
+      check(`a key nobody set reads as null on ${name}, never undefined`, store.get("p", "no_such_key"), null);
+    }
+    fake.set("p", "held", JSON.stringify(null));
+    stores.pluginData.set("p", "held", JSON.stringify(null));
+    check("a stored null is the same answer as a missing key, on both", [fake.get("p", "held"), stores.pluginData.get("p", "held")], [null, null]);
+    // And the value that is *not* null round-trips, so the two lines above are not
+    // green about a store that answers null to everything.
+    fake.set("p", "real", JSON.stringify({ a: 1 }));
+    stores.pluginData.set("p", "real", JSON.stringify({ a: 1 }));
+    check("while an ordinary value comes back as itself", [fake.get("p", "real"), stores.pluginData.get("p", "real")], [{ a: 1 }, { a: 1 }]);
+  }
+
+  check("one plugin's key and another's of the same name", real["sameKey"], ["ok", "ok", "first", "second"]);
+  check("a prefix holding a % names one key rather than every key", real["percentPrefix"], ["a%b"]);
+  check("a prefix is case sensitive, because the column is", real["casedPrefix"], ["card:1"]);
+  check("and the paged read agrees with the listing about that", real["casedEntries"], ["card:1"]);
+  check("and one holding an _ likewise", real["underscorePrefix"], ["a_b"]);
+  check("while a prefix holding neither takes them all", real["everyKey"], ["a%b", "a_b", "ab", "axb"]);
+  check("the bounds are the shared ones", real["bounds"], ["value_too_large", "bad_request", "bad_request"]);
+  check("a page cut by the byte budget says so", real["page"], [["card:0", "card:1"], true]);
+  check("and asking again with the last key continues rather than repeats", real["nextPage"], [["card:2", "card:3"], true]);
+  check("until there is nothing left to say more about", real["lastPage"], [["card:4", "card:5"], false]);
+  check("the prefix filters the page as well as the listing", real["unprefixed"], [
+    "card:0",
+    "card:1",
+    "card:2",
+    "card:3",
+    "card:4",
+    "card:5",
+    "note",
+    "shared",
+  ]);
+  check("and a page is pairs rather than keys", real["firstValue"], true);
+  check("dropping one plugin takes its rows and only its rows", real["afterDrop"], [[], 8]);
+
+  /*
+   * ⚠ **And the fake this driver runs everything else against answers the same.**
+   * `checkPluginWrite` is shared for exactly this — a quota that holds only where
+   * there is a file is a quota nothing drives — and `entries` makes the same claim
+   * about paging. Without this line the fake could drift into refusing less or
+   * paging differently, and every plugin assertion in this file would go on
+   * passing while describing a store nobody runs.
+   */
+  check("and the memory store the rest of this file uses answers all of it", script(memoryPluginData()), real);
+
+  /* ---------------------------------------------------------------- *
+   * Where a prefix stops, at the one code point that is not one more than itself.
+   *
+   * ⚠ **The range's upper bound was `at + 1` and that is wrong at exactly one
+   * place: U+D7FF, the code point below the surrogate block.** A JS string holds
+   * UTF-16 code units and this column holds UTF-8, and the two disagree about
+   * D800–DFFF — `node:sqlite` binds a *lone* surrogate as U+FFFD rather than as
+   * its own three bytes. So the successor of a prefix ending U+D7FF was computed
+   * as U+D800, arrived at SQLite as U+FFFD, and the half-open range swallowed the
+   * whole of E000–FFFC on the way: a plugin asking for one namespace was handed
+   * every private-use key it holds as well.
+   *
+   * ⚠ **The parity line above cannot see any of this, and that is why this block
+   * is separate rather than five more fixtures inside `script`.** Every key in
+   * that script is ASCII, and the fake filters with `startsWith` — so the range
+   * arithmetic is never asked a question whose answer depends on the encoding, and
+   * the two implementations agreed by never being made to differ. Held to
+   * `startsWith` directly here, which is the definition of a prefix and is what
+   * the caller believes it asked for.
+   * ---------------------------------------------------------------- */
+  {
+    const edge = ["\uD7FFa", "\uD7FFb", "\uE000private", "\uF8FFapple", "\uFFFCobj"];
+    const fake = memoryPluginData();
+    for (const key of edge) {
+      stores.pluginData.set("edge", key, JSON.stringify(key));
+      fake.set("edge", key, JSON.stringify(key));
+    }
+    /*
+     * Named, so a mismatch says which prefix rather than which array index. All
+     * five are BMP and none is a surrogate, which keeps SQLite's UTF-8 byte order
+     * and JS's UTF-16 code-unit order agreeing — an astral key here would make the
+     * `.sort()` below the thing under test instead of the range.
+     *
+     * Written as `\uXXXX` throughout rather than as the characters themselves:
+     * two of these five are unprintable and one is private use, so pasted
+     * literally they are a blank space a reader cannot check and an editor is free
+     * to normalise.
+     */
+    const around: [string, string][] = [
+      ["one below the surrogates", "\uD7FF"],
+      ["the first code point above them", "\uE000"],
+      ["inside the private use area", "\uF8FF"],
+      ["in specials, below the replacement character", "\uFFFC"],
+      ["and no prefix at all", ""],
+    ];
+    const walk = (store: PluginDataStore): Record<string, string[]> =>
+      Object.fromEntries(around.map(([name, prefix]) => [name, store.keys("edge", prefix)]));
+    const byHand = Object.fromEntries(
+      around.map(([name, prefix]) => [name, edge.filter((key) => key.startsWith(prefix)).sort()]),
+    );
+    check("a prefix around the surrogate block names what startsWith names", walk(stores.pluginData), byHand);
+    check("and the memory store this file runs on answers the same", walk(fake), byHand);
+
+    /*
+     * ⚠ **The other arm, and the only one the fake genuinely cannot reproduce:
+     * the prefix's own last code point being a lone surrogate.** `[...prefix]`
+     * yields one, `JSON.parse` carries `"\ud800"` through intact and nothing on
+     * the way here refuses it — and the bind has already turned it into U+FFFD by
+     * the time the comparison happens, which is why the successor is U+FFFE
+     * rather than one past a code point that never arrived. With `at + 1` both
+     * ends of the range bound as U+FFFD's bytes and the answer was **empty for a
+     * row sitting right there**.
+     *
+     * Against SQLite alone, deliberately: the fake keeps the lone surrogate the
+     * caller wrote, so the two stores disagree about what the *key* is before
+     * anything asks what a prefix names. That is a property of the bind rather
+     * than of the range, it is measured here rather than asserted as parity, and
+     * the round-trip below is what says so out loud.
+     */
+    stores.pluginData.set("edge", "\uD800zz", JSON.stringify("lone"));
+    check(
+      "a lone surrogate in a key reaches the column as the replacement character",
+      stores.pluginData.keys("edge", "\uFFFD"),
+      ["\uFFFDzz"],
+    );
+    check("and the prefix that wrote it still finds it", stores.pluginData.keys("edge", "\uD800"), ["\uFFFDzz"]);
+    check(
+      "under either spelling",
+      [stores.pluginData.get("edge", "\uD800zz"), stores.pluginData.get("edge", "\uFFFDzz")],
+      ["lone", "lone"],
+    );
+  }
+
+  /* ---------------------------------------------------------------- *
+   * The quota, against a running pair rather than a fresh count.
+   *
+   * ⚠ **`set` used to answer `COUNT(*), SUM(LENGTH(...))` on every single write,
+   * and the pair it carries instead is what makes filling a store linear** —
+   * measured at `MAX_PLUGIN_KEYS`, 42.9 ms → 2.3 ms, with the shape rather than
+   * the ratio as the evidence: doubling the rows used to roughly quadruple the
+   * time. What that buys in speed it owes in truth, and the debt is the subject
+   * here: the refusal now rests on a number this class is *keeping* rather than on
+   * one the table has just answered, and a running pair that drifts is a ceiling
+   * that has moved without anybody saying so.
+   *
+   * So none of this asserts the arithmetic — `checkPluginWrite` has its own
+   * section for that, against both implementations. What is asserted is **where it
+   * refuses**, walked over the three mutations that move the pair (`set`, `delete`
+   * and `dropPlugin`) and then asked again through a second store object built
+   * over the same open database, which is what a daemon restart is.
+   * ---------------------------------------------------------------- */
+  {
+    const refusal = (run: () => void): string => {
+      try {
+        run();
+        return "ok";
+      } catch (error) {
+        return error instanceof PluginStoreError ? error.code : "threw";
+      }
+    };
+    // Derived from the two constants rather than written down, so a ceiling that
+    // moves moves the fixture with it: a value whose JSON is exactly the per-value
+    // cap, and however many of those the per-plugin total holds.
+    const value = JSON.stringify("x".repeat(MAX_PLUGIN_VALUE_BYTES - 2));
+    const fits = Math.floor(MAX_PLUGIN_DATA_BYTES / MAX_PLUGIN_VALUE_BYTES);
+    report(
+      "the fixture meets the ceiling exactly rather than near it",
+      Buffer.byteLength(value, "utf8") === MAX_PLUGIN_VALUE_BYTES && fits * MAX_PLUGIN_VALUE_BYTES === MAX_PLUGIN_DATA_BYTES,
+      `${fits} values of ${Buffer.byteLength(value, "utf8")} bytes against ${MAX_PLUGIN_DATA_BYTES}`,
+    );
+
+    const filled = new Set(
+      Array.from({ length: fits }, (_, index) => refusal(() => stores.pluginData.set("quota", `k${index}`, value))),
+    );
+    check("a plugin fills its store to the byte", [...filled], ["ok"]);
+    check("and the write after that is refused", refusal(() => stores.pluginData.set("quota", "over", value)), "store_full");
+    // The credit-back, through the pair rather than through a fresh sum: a `set`
+    // that charged without crediting climbs 64 KiB a write while the table never
+    // moves, which is every settings pane written against this API.
+    check(
+      "while rewriting a key it already holds is not a new charge",
+      refusal(() => stores.pluginData.set("quota", "k0", value)),
+      "ok",
+    );
+
+    /*
+     * ⚠ **A `delete` as the first thing a store object ever does to this plugin,
+     * because that is the ordering the pair can get wrong and nothing else
+     * reaches it.** A restarted daemon whose plugin clears a key it wrote in a
+     * previous life seeds `usage` on that call — and seeding it *after* the
+     * statement seeds it from a table the delete has already changed, then
+     * subtracts the same row a second time. Measured at exactly this fixture:
+     * the store then took **two** more values where one fits and sat at
+     * 1,114,112 bytes under a 1,048,576-byte ceiling. A quota a restart widens is
+     * not a quota, which is why the second line is here rather than only the
+     * first: "one write came back" passes against both.
+     */
+    const restarted = new SqlitePluginDataStore(stores.db);
+    restarted.delete("quota", "k0");
+    check("a store that has just come up credits a delete exactly once", refusal(() => restarted.set("quota", "k0", value)), "ok");
+    check("and not twice", refusal(() => restarted.set("quota", "spare", value)), "store_full");
+
+    // Uninstalling gives the whole budget back, and `dropPlugin` forgets the entry
+    // rather than zeroing it — so this also drives the reseed, over a row set the
+    // drop really did empty.
+    restarted.dropPlugin("quota");
+    const again = new Set(
+      Array.from({ length: fits }, (_, index) => refusal(() => restarted.set("quota", `k${index}`, value))),
+    );
+    check("an uninstall gives the whole budget back", [...again], ["ok"]);
+    check("up to the same ceiling and no further", refusal(() => restarted.set("quota", "over", value)), "store_full");
+
+    /*
+     * The other ceiling on the same pair, and it is the half a byte count cannot
+     * see: a thousand one-byte values is nothing in bytes and is a thousand rows.
+     * Cheap enough to drive at the real bound only because of the change this
+     * block is about — `MAX_PLUGIN_KEYS` writes against the old full re-scan is
+     * the 42.9 ms case, per write.
+     */
+    const counted = new SqlitePluginDataStore(stores.db);
+    const rows = new Set(
+      Array.from({ length: MAX_PLUGIN_KEYS }, (_, index) => refusal(() => counted.set("count", `k${index}`, "1"))),
+    );
+    check("a plugin may hold exactly as many keys as it is allowed", [...rows], ["ok"]);
+    check("and the next key is refused", refusal(() => counted.set("count", "one-more", "1")), "store_full");
+    check("while rewriting one of them is not", refusal(() => counted.set("count", "k0", "2")), "ok");
+  }
+
+  stores.close();
+}
+
+process.stdout.write("\nwhat a restart collects that a half-finished uninstall left\n");
+{
+  /*
+   * ⚠ **`plugin_data` was the one child table in `store/sqlite.ts` with no orphan
+   * sweep**, and the two deletes that should keep it consistent are written in
+   * another file: `host.ts` runs `records.remove(id)` and then `data.dropPlugin(id)`
+   * as two implicit transactions with no BEGIN around them, in `doRemove` and again
+   * in the install rollback. A throw from either, a SIGKILL between them, or a
+   * backup taken between them strands up to `MAX_PLUGIN_KEYS` rows under an id with
+   * no plugin.
+   *
+   * **Stranded there means stranded for ever**, which is what makes this worse than
+   * the `uploads` case beside it: afterwards `installed()` is false on both halves —
+   * no row, and no directory under the plugin root — so `DELETE /plugins/:id` can
+   * never reach `dropPlugin` again. And the rows are not inert: `plugin_data` is
+   * keyed on the id and never on the version, deliberately, so that an update keeps
+   * it — which means the next install of that id inherits somebody else's keys
+   * against its own quota.
+   *
+   * Driven as the restart it is: the rows are stranded against a live database, the
+   * stores are closed, and the file is opened again. `prune()` runs inside
+   * `openStores` before `SqlitePluginDataStore` is constructed and long before any
+   * `PluginHost` exists, so there is nothing running for it to race — which is what
+   * lets it be a blunt `DELETE` rather than a reconciliation.
+   */
+  const orphanPath = join(tmp("plugin-orphan-"), "d.db");
+  const manifestOf = (id: string, api = 1): unknown => ({
+    id,
+    name: id,
+    version: "1.0.0",
+    api,
+    scopes: [],
+    contributes: {},
+  });
+
+  {
+    const { parseManifest } = await import("../src/plugins/manifest.js");
+    const first = openStores({ path: orphanPath, instanceId: "i_orphan_a" });
+    for (const id of ["board", "ghost", "veiled"]) {
+      const parsed = parseManifest(JSON.stringify(manifestOf(id)));
+      if (!parsed.ok) throw new Error(parsed.message);
+      first.plugins.put({
+        id,
+        version: "1.0.0",
+        manifest: parsed.manifest,
+        enabled: false,
+        installedAt: 1,
+        updatedAt: 1,
+        source: null,
+      });
+      for (let index = 0; index < 5; index += 1) first.pluginData.set(id, `k${index}`, JSON.stringify(index));
+    }
+    /*
+     * ⚠ **A row this build cannot validate is not an uninstalled plugin, and the
+     * sweep asks the *table* rather than `records.list()` for exactly this.**
+     * `list` reports such a row through `onDegraded` and skips it, `get` answers
+     * `null`, and `has` is the method that exists because neither of those can
+     * tell "never installed" from "installed and unreadable here". A sweep built
+     * on `list` would make a daemon downgrade a data loss — silently, on the boot
+     * that rolled back.
+     */
+    first.db
+      .prepare("UPDATE plugins SET manifest_json = ? WHERE id = ?")
+      .run(JSON.stringify(manifestOf("veiled", 9_999)), "veiled");
+    // The half-completed uninstall itself: the row goes, the data does not.
+    first.db.prepare("DELETE FROM plugins WHERE id = ?").run("ghost");
+    check(
+      "before the restart the machine holds keys under an id with no plugin",
+      [first.pluginData.keys("board", "").length, first.pluginData.keys("ghost", "").length],
+      [5, 5],
+    );
+    first.close();
+  }
+
+  const degraded: string[] = [];
+  const after = openStores({ path: orphanPath, instanceId: "i_orphan_b", onDegraded: (detail) => degraded.push(detail) });
+  check("the stranded rows are collected", after.pluginData.keys("ghost", ""), []);
+  check("and every other plugin's are untouched", after.pluginData.keys("board", ""), ["k0", "k1", "k2", "k3", "k4"]);
+  /*
+   * The downgrade half, and it is the assertion that keeps the sweep from being
+   * written the obvious way: `veiled` is absent from `list()` and present in the
+   * table, so a sweep reading the record store would have destroyed it here.
+   */
+  check("a plugin this build cannot read is not a plugin that was uninstalled", after.plugins.list().map((one) => one.id), ["board"]);
+  check("its row is still a row", [after.plugins.has("veiled"), after.plugins.has("ghost")], [true, false]);
+  check("and everything it kept is still there", after.pluginData.keys("veiled", ""), ["k0", "k1", "k2", "k3", "k4"]);
+  report(
+    "with somebody told why it vanished from the listing",
+    degraded.some((one) => one.includes("plugin veiled") && one.includes("cannot read")),
+    degraded[0] ?? "nothing reported",
+  );
+  after.close();
+}
+
+process.stdout.write("\na plugin row this build cannot read\n");
+{
+  const { PluginHost } = await import("../src/plugins/host.js");
+  const { SessionRegistry } = await import("../src/registry.js");
+  const { hostGit } = await import("../src/git.js");
+  const { parseManifest } = await import("../src/plugins/manifest.js");
+  const { openStores } = await import("../src/store/sqlite.js");
+
+  const manifestFor = (id: string): PluginManifest => {
+    const parsed = parseManifest(
+      JSON.stringify({ id, name: id, version: "1.0.0", api: 1, scopes: [], contributes: {} }),
+    );
+    if (!parsed.ok) throw new Error(parsed.message);
+    return parsed.manifest;
+  };
+
+  const degraded: string[] = [];
+  const stores = openStores({
+    path: join(tmp("plugin-degraded-"), "d.db"),
+    instanceId: "i_degraded",
+    onDegraded: (detail) => degraded.push(detail),
+  });
+  for (const id of ["p", "q"]) {
+    stores.plugins.put({
+      id,
+      version: "1.0.0",
+      manifest: manifestFor(id),
+      // Off, so opening the host below launches nothing: what is being driven is
+      // a row rather than a process.
+      enabled: false,
+      installedAt: 1,
+      updatedAt: 1,
+      source: null,
+    });
+  }
+  check("two rows, both readable", stores.plugins.list().map((one) => one.id), ["p", "q"]);
+  check("and nothing to report about either", degraded.length, 0);
+
+  /*
+   * ⚠ **A downgrade, and nothing more exotic than that.** Install a plugin
+   * declaring `api: 2`, roll the daemon back to a build whose
+   * `PLUGIN_API_VERSION` is 1, and `negotiatePluginApi` answers `too_new` for a
+   * row that was perfectly good yesterday. Written straight into the column here
+   * because this build has no future api to declare — the manifest is what a
+   * newer daemon would have written, and `toRecord` re-validates on **every**
+   * read, which is the whole reason that column holds the manifest whole rather
+   * than a field per column.
+   */
+  stores.db
+    .prepare("UPDATE plugins SET manifest_json = ? WHERE id = ?")
+    .run(JSON.stringify({ ...manifestFor("p"), api: 9_999 }), "p");
+  stores.pluginData.set("p", "card:1", JSON.stringify("kept"));
+
+  check("the listing skips it", stores.plugins.list().map((one) => one.id), ["q"]);
+  check("and so does get", stores.plugins.get("p"), null);
+  report(
+    "but somebody is told, once per read rather than never",
+    degraded.some((one) => one.includes("plugin p") && one.includes("cannot read")),
+    degraded[0] ?? "nothing reported",
+  );
+  /*
+   * ⚠ **`has` is the method that exists because `get` cannot answer this.** Both
+   * `list` and `get` report `null` for a row they cannot parse, so neither can
+   * tell "nobody ever installed this" from "installed here, and unreadable by
+   * this build" — and that difference is the whole of what `remove` is asking.
+   * `SELECT 1`, so it parses nothing.
+   */
+  check("the row is still a row", [stores.plugins.has("p"), stores.plugins.has("nobody")], [true, false]);
+
+  const registry = new SessionRegistry(stores.events, stores.sessions);
+  const host = await PluginHost.open({
+    root: join(tmp("plugin-degraded-root-"), "plugins"),
+    records: stores.plugins,
+    data: stores.pluginData,
+    registry,
+    api: { git: hostGit },
+  });
+  check("the host builds nothing for it", host.list().map((one) => one.id), ["q"]);
+  check("and cannot find it", host.find("p"), null);
+
+  /*
+   * ⚠ **The one kind of plugin somebody most wants gone used to be the one kind
+   * that needed a shell.** `remove` consulted `this.live`, which never held this
+   * row, so `DELETE /plugins/:id` answered 404 and the row, its `plugin_data` and
+   * its directory stayed on the machine for good. Falling through to the store is
+   * what closes it, and the assertions after it are the closing half: a 404 that
+   * turned into a 200 while leaving the row behind would be worse than the 404.
+   */
+  check("removing it is still possible", await host.remove("p"), true);
+  check("the row goes", stores.plugins.has("p"), false);
+  check("what it kept goes with it", stores.pluginData.keys("p", ""), []);
+  check("its readable neighbour does not", host.list().map((one) => one.id), ["q"]);
+  // The other half of the fall-through, and the reason it is not simply `true`:
+  // an id nobody ever installed has no row and no directory either.
+  check("and an id nobody ever installed is still a no", await host.remove("nothing"), false);
+
+  await host.shutdown();
+  await registry.shutdown();
+  stores.close();
+}
+
+process.stdout.write("\nwhat a plugin returns, and what is forwarded\n");
+{
+  const { clampView, fitView, noteClamp, PLUGIN_BLOCK_TYPES, PLUGIN_SETTINGS_BLOCK_TYPES, PLUGIN_VIEW_LIMITS } =
+    await import("../src/plugins/protocol.js");
+  const { MAX_PLUGIN_MESSAGE_BYTES } = await import("../src/plugins/runtime.js");
+
+  /*
+   * The whole record, field for field, rather than a spot check — which is why
+   * adding `unknownBlocks` failed here first. That is the assertion working: a new
+   * field on this type is a new thing every caller of `clampView` now receives,
+   * and it should not arrive without one line somewhere saying what it is on the
+   * quietest possible input.
+   */
+  check("nothing at all is an empty view rather than a throw", clampView(null), {
+    view: { title: null, refreshMs: null, blocks: [] },
+    clamped: false,
+    substituted: false,
+    unknownBlocks: [],
+  });
+  check("a block this daemon does not draw is dropped", clampView({ blocks: [{ type: "canvas" }] }).view.blocks, []);
+  /*
+   * ⚠ **Reported as a *shape* problem, never as a size one — and this assertion
+   * used to pin the wrong one of the two.**
+   *
+   * It read `.clamped === true`, which was written when there was a single flag
+   * and never revisited when it became two. So the one check covering this line
+   * asserted the same misunderstanding the code had, and the pair passed together
+   * for a release.
+   *
+   * What it cost, measured: a real plugin returned a one-row list and a block type
+   * its author had invented. Nothing exceeded any ceiling — and the screen said
+   * *"some of what this plugin returned was too large to show"*, which sends
+   * somebody to count rows and measure bytes when the answer is a list of five
+   * type names. The invented block itself rendered as nothing and said nothing.
+   *
+   * Both halves are asserted, because "it is reported" is what the old line said
+   * and is exactly what stayed true while being useless.
+   */
+  const invented = clampView({ blocks: [{ type: "canvas" }] });
+  check("and dropping one is reported as a shape it does not know", invented.substituted, true);
+  check("and never as something that was too large", invented.clamped, false);
+  const drawn = noteClamp(invented).blocks.filter((block) => block.type === "notice");
+  check(
+    "so the notice a person reads names the protocol rather than the bounds",
+    drawn.map((block) => (block as { text: string }).text.includes("too large")),
+    [false],
+  );
+  /*
+   * ⚠ **And it names the type, and the five that exist.** A notice that says only
+   * *not a shape this machine recognises* is true and leaves an author with the
+   * whole protocol to search — and an author has no copy of it, so the only way
+   * left to find the cause is to obtain this repository and run `clampView` over
+   * the payload by hand. That is what actually happened.
+   */
+  check(
+    "and it names the type nobody here knows",
+    drawn.map((block) => (block as { text: string }).text.includes('"canvas"')),
+    [true],
+  );
+  check(
+    "and the ones it does",
+    PLUGIN_BLOCK_TYPES.every((type) => (drawn[0] as { text: string }).text.includes(type)),
+    true,
+  );
+  /*
+   * The name comes from the plugin and is repeated to a person, so it is bounded
+   * on both axes: clipped for length, deduplicated, and capped in number. A
+   * broken plugin can invent a different type in every one of its blocks, and
+   * twenty-four names is the wall of text the notice replaced.
+   */
+  const many = clampView({
+    blocks: [
+      { type: "a".repeat(400) },
+      { type: "b" },
+      { type: "b" },
+      { type: "c" },
+      { type: "d" },
+      { type: "" },
+    ],
+  });
+  check("a long invented type is clipped before it is repeated back", (many.unknownBlocks[0] ?? "").length <= 40, true);
+  check("repeats of one type are named once", many.unknownBlocks.includes("b"), true);
+  check("and the list stops rather than growing with the plugin", many.unknownBlocks.length <= 3, true);
+  check("every one of those blocks was still dropped", many.view.blocks, []);
+  /*
+   * A block with no `type` at all is the same shape problem and must not become an
+   * empty pair of quotes in a sentence somebody reads.
+   */
+  const nameless = clampView({ blocks: [{ notype: true }] });
+  check("a block with no type says so rather than naming nothing", nameless.unknownBlocks, ["(no type)"]);
+  /*
+   * The other direction, so the two are pinned as opposites rather than one at a
+   * time: a list past its ceiling is a size clamp and says nothing about shape.
+   */
+  const overRows = clampView({ blocks: [{ type: "list", rows: new Array(PLUGIN_VIEW_LIMITS.rows + 1).fill({ id: "r" }) }] });
+  check("a list past its ceiling is the other flag", [overRows.clamped, overRows.substituted], [true, false]);
+
+  const rows = Array.from({ length: PLUGIN_VIEW_LIMITS.rows + 10 }, (_, index) => ({ id: String(index), title: "x" }));
+  const big = clampView({ blocks: [{ type: "list", rows, empty: "" }] });
+  const first = big.view.blocks[0];
+  report(
+    "a list past the row bound is cut rather than refused",
+    first?.type === "list" && first.rows.length === PLUGIN_VIEW_LIMITS.rows,
+    `${first?.type === "list" ? first.rows.length : -1} of ${rows.length} forwarded`,
+  );
+  check("and the cut is reported so the screen can say so", big.clamped, true);
+
+  const long = clampView({ blocks: [{ type: "text", text: "x".repeat(PLUGIN_VIEW_LIMITS.text + 50), tone: "muted" }] });
+  const text = long.view.blocks[0];
+  report(
+    "an oversized string is clipped",
+    text?.type === "text" && text.text.length === PLUGIN_VIEW_LIMITS.text,
+    `${text?.type === "text" ? text.text.length : -1} chars`,
+  );
+  check("and that is reported too", long.clamped, true);
+
+  /*
+   * A tone this daemon does not know falls to the ordinary one, which is the safe
+   * direction: a plugin cannot make a destructive control look harmless by
+   * misspelling the word, only fail to make an ordinary one look dangerous.
+   */
+  const toned = clampView({ blocks: [{ type: "notice", text: "hi", tone: "catastrophic" }] });
+  check("an unknown tone is the ordinary one", toned.view.blocks[0], { type: "notice", text: "hi", tone: "default" });
+
+  const field = clampView({
+    blocks: [{ type: "form", submit: "Go", action: "save", fields: [{ key: "k", label: "L", kind: "quantum" }] }],
+  });
+  const form = field.view.blocks[0];
+  check(
+    "an unknown field kind becomes a text input rather than nothing",
+    form?.type === "form" ? form.fields[0]?.kind : null,
+    "text",
+  );
+
+  /* ---------------------------------------------------------------- *
+   * ...and the bound that was enforced on the wrong side of the wire.
+   *
+   * ⚠ **`PLUGIN_VIEW_LIMITS` could never do its job, because `clampView` ran in
+   * the host — one hop after the child had already refused to send.** The two
+   * bounds sit two lines apart in the author's guide as though both applied, and
+   * only `MAX_PLUGIN_MESSAGE_BYTES` ever fired: a view inside every documented
+   * limit came back as "this plugin returned more than can be sent", and the
+   * clamp that exists to cut it never saw it.
+   *
+   * Measured 2026-08-23 against a real forked child, the reference plugin and a
+   * real store: its board fits at 903 cards and not at 904, while the store lets
+   * a plugin keep 1000 and the session prune never removes them. `fitView` runs
+   * in the child now, so the count bound applies first and a byte bound finishes
+   * the job — and rows are the lever because they are the only dimension a
+   * plugin's data grows without limit.
+   * ---------------------------------------------------------------- */
+  {
+    const budget = MAX_PLUGIN_MESSAGE_BYTES - 1024;
+    const bytesOf = (value: unknown): number => new TextEncoder().encode(JSON.stringify(value)).length;
+    const rowsOf = (n: number): unknown[] =>
+      Array.from({ length: n }, (_, i) => ({ id: `s_${i}`, title: "an ordinary session title", subtitle: "claude" }));
+
+    const small = fitView({ title: "T", blocks: [{ type: "list", rows: rowsOf(10), empty: "" }] }, budget);
+    check("a view that already fits is passed through untouched", small.clamped, false);
+
+    // The board's own shape: three columns, more cards than a column may hold.
+    const board = fitView(
+      { title: "Board", blocks: [{ type: "columns", columns: [0, 1, 2].map(() => ({ title: "c", rows: rowsOf(400) })) }] },
+      budget,
+    );
+    const cols = board.view.blocks[0];
+    check(
+      "a column past the row bound is cut to it, and says so",
+      [cols?.type === "columns" ? cols.columns.map((one) => one.rows.length) : null, board.clamped],
+      [[PLUGIN_VIEW_LIMITS.rows, PLUGIN_VIEW_LIMITS.rows, PLUGIN_VIEW_LIMITS.rows], true],
+    );
+
+    /*
+     * A view at every documented ceiling — which the counts alone do **not** make
+     * fit, and which is the half a smaller `PLUGIN_VIEW_LIMITS` could not have
+     * fixed without making the honest cases smaller too.
+     */
+    const worst = {
+      title: "W",
+      blocks: Array.from({ length: PLUGIN_VIEW_LIMITS.blocks }, () => ({
+        type: "columns",
+        columns: Array.from({ length: PLUGIN_VIEW_LIMITS.columns }, () => ({ title: "c", rows: rowsOf(PLUGIN_VIEW_LIMITS.rows) })),
+      })),
+    };
+    report("every count at its ceiling is still too large for the channel", bytesOf(clampView(worst).view) > budget, `${bytesOf(clampView(worst).view)} bytes clamped by counts alone`);
+    const fitted = noteClamp(fitView(worst, budget));
+    report("but it is cut until it fits rather than refused", bytesOf(fitted) <= budget, `${bytesOf(fitted)} bytes`);
+    report(
+      "and the cut is said rather than swallowed",
+      JSON.stringify(fitted).includes("too large to show"),
+      "the notice rides the view",
+    );
+
+    /*
+     * The tail of the halving, at budgets no real channel has. It keeps the
+     * largest cap that fits rather than the first that is small — one row at 200
+     * bytes, none at 120 — and at a budget below even the empty block it drops the
+     * block itself.
+     *
+     * ⚠ **This last case used to end in `post`'s refusal, and that was the bug
+     * rather than the design.** `fitView` halved rows and returned whatever it had
+     * when the cap reached zero, fitting or not — so "cut until it fits" held only
+     * for views whose bulk was rows. A form has none: one form block at the
+     * published ceilings (40 fields × 40 options × a 200-character label) is
+     * 534,576 bytes with `rowsIn` reading 0, so the loop never ran and an
+     * oversized view went out flagged as clamped. The reduction is total now —
+     * rows, then whole blocks, then the title alone — so the post-condition is
+     * real and `post`'s refusal is no longer anybody's fallback.
+     */
+    const tight = fitView({ blocks: [{ type: "list", rows: rowsOf(PLUGIN_VIEW_LIMITS.rows), empty: "" }] }, 200);
+    const kept = tight.view.blocks[0];
+    check(
+      "the cut keeps as many rows as the budget allows, not as few",
+      [kept?.type === "list" ? kept.rows.length : -1, bytesOf(tight.view) <= 200, tight.clamped],
+      [1, true, true],
+    );
+    const airless = fitView({ blocks: [{ type: "list", rows: rowsOf(PLUGIN_VIEW_LIMITS.rows), empty: "" }] }, 50);
+    check(
+      "and a budget that not even an empty block fits drops the block and still fits",
+      [airless.view.blocks.length, bytesOf(airless.view) <= 50, airless.clamped],
+      [0, true, true],
+    );
+
+    /*
+     * ⚠ **The shape that had no lever at all, and the reason the reduction had to
+     * become total.** Every count here is at its published ceiling and `rowsIn` is
+     * 0, so the halving above is a no-op — this is the case that went out
+     * oversized, was refused by the child's own `post`, and left a settings pane
+     * inside every documented limit permanently undrawable.
+     */
+    const formOnly = {
+      title: "F",
+      blocks: [
+        {
+          type: "form",
+          id: "cfg",
+          submit: "Save",
+          fields: Array.from({ length: PLUGIN_VIEW_LIMITS.fields }, (_, f) => ({
+            id: `f${f}`,
+            kind: "select",
+            label: "x".repeat(PLUGIN_VIEW_LIMITS.short),
+            help: "h".repeat(PLUGIN_VIEW_LIMITS.text),
+            options: Array.from({ length: PLUGIN_VIEW_LIMITS.options }, (_, o) => ({
+              value: `v${o}`,
+              label: "y".repeat(PLUGIN_VIEW_LIMITS.short),
+            })),
+          })),
+        },
+      ],
+    };
+    const formRaw = clampView(formOnly, "settings").view;
+    report(
+      "a form at every ceiling is past the channel with no row to cut",
+      bytesOf(formRaw) > budget,
+      `${bytesOf(formRaw)} bytes, and not one of them a row`,
+    );
+    const formFit = fitView(formOnly, budget, "settings");
+    report("but it is cut until it fits rather than sent and refused", bytesOf(formFit.view) <= budget, `${bytesOf(formFit.view)} bytes`);
+
+    /*
+     * The other half, and the one a false `clamped` costs: a view that needed no
+     * cutting must not be described as cut. `fitView` reported every view reaching
+     * its second pass as clamped, including the ones the pass changed by nothing —
+     * so a complete form drew a "this was shortened" line and sent its author to
+     * count rows that were never touched.
+     */
+    check(
+      "and a view that fits is not described as cut",
+      fitView({ title: "S", blocks: [{ type: "text", text: "small" }] }, budget).clamped,
+      false,
+    );
+  }
+
+  check("a view that is already fine is not reported as clamped", clampView({ title: "T", blocks: [] }).clamped, false);
+
+  /*
+   * ⚠ **A substitution is a clamp, and used to be the one kind nobody was told
+   * about.** `plugins.ts`'s fail-open rule is right and stays — an unknown field
+   * kind becomes a text input and still round-trips, nothing throws. What it did
+   * not do is *say so*, and that is worse for a substitution than for a
+   * truncation: a cut list is visibly short, while a form whose fields all lost
+   * their `key` renders perfectly, submits nothing, and looks like it works.
+   *
+   * Every case below is one a real plugin shipped to the market with, and it
+   * survived two releases: fields sending `id` where `clampField` reads `key`,
+   * `submit` sent where the action identifier belongs, and `kind: "string"` /
+   * `"boolean"` — neither of which is in the enum. The plugin's own driver was
+   * green throughout, because it asserted the author's misunderstanding
+   * (`form.submit === "save"`) rather than the protocol.
+   */
+  const shipped = clampView({
+    blocks: [
+      {
+        type: "form",
+        submit: "save",
+        fields: [
+          { id: "apiKey", kind: "string", label: "Anthropic API key", value: "" },
+          { id: "rename", kind: "boolean", label: "Rename new sessions", value: "true" },
+        ],
+      },
+    ],
+  });
+  check(
+    "a form that shipped broken is reported as substituted rather than silently drawn",
+    [shipped.substituted, shipped.clamped],
+    [true, false],
+  );
+  /*
+   * The two halves of the flag are independent facts and are asserted apart,
+   * because they send an author to two different places: "too large" means look
+   * at the bounds, "not a shape this daemon knows" means look at the protocol.
+   */
+  const keyless = clampView({ blocks: [{ type: "form", action: "save", fields: [{ label: "A" }] }] });
+  check("a field with no key cannot round-trip, and says so", keyless.substituted, true);
+  const actionless = clampView({ blocks: [{ type: "form", submit: "Save", fields: [{ key: "a", label: "A" }] }] });
+  check("a form with no action submits nowhere, and says so", actionless.substituted, true);
+  const unknownKind = clampView({
+    blocks: [{ type: "form", action: "save", fields: [{ key: "a", label: "A", kind: "string" }] }],
+  });
+  check("a kind this daemon does not know is a substitution", unknownKind.substituted, true);
+  /*
+   * ⚠ **Absence is a default, not a substitution.** Omitting `kind` means "an
+   * ordinary text field" and is a perfectly good thing for a plugin to do — if
+   * that raised the flag, every well-formed plugin in the world would draw a
+   * notice saying it was broken, and the notice would stop meaning anything.
+   */
+  const plain = clampView({
+    blocks: [{ type: "form", action: "save", fields: [{ key: "a", label: "A" }] }],
+  });
+  check("but omitting kind entirely is a default rather than a substitution", plain.substituted, false);
+  /*
+   * ⚠ **And `null` spelled out is the same default, which the line above does not
+   * cover.** The guard is `kind !== undefined && kind !== null` — two spellings of
+   * absence — and only one of them was driven. Delete the `!== null` half and this
+   * file stays green while **every plugin that serialises a missing field as
+   * `null`** starts drawing "not in a shape this machine recognises" on a form
+   * that is perfectly fine.
+   *
+   * It is not the unlikely spelling, either. This crosses as JSON, which has no
+   * `undefined` at all: an author writing `kind: config.kind ?? null`, or reading
+   * a row out of a database, sends `null` and cannot send anything else. The half
+   * that was covered is the one that only arises from leaving the key out.
+   *
+   * Found by the author of a plugin who had just been bitten by the mirror of it —
+   * `store.get` answering `null` where they expected `undefined` — and then again
+   * by their own driver, where a parameter with a default value made passing
+   * `undefined` impossible and silently ran the `null` case twice. Three of one
+   * shape in a day: the spelling of absence is not a detail.
+   */
+  const nulled = clampView({
+    blocks: [{ type: "form", action: "save", fields: [{ key: "a", label: "A", kind: null }] }],
+  });
+  check("and neither is null spelled out", nulled.substituted, false);
+  /*
+   * The other half of the pair: not raising the flag is only right if the field
+   * came out as a text input. A `clampField` that dropped the field entirely would
+   * pass the two lines above and lose the control off the form.
+   */
+  const kindOf = (view: typeof plain.view): unknown => {
+    const block = view.blocks[0];
+    return block !== undefined && block.type === "form" ? block.fields[0]?.kind : "<not a form>";
+  };
+  check("both spellings still give an ordinary text field", [kindOf(plain.view), kindOf(nulled.view)], ["text", "text"]);
+
+  /*
+   * And the notice itself: two facts, two lines, both where both happened —
+   * `noteClamp` is the half a person actually reads, and the half the author
+   * sees by opening their own plugin.
+   */
+  const noticed = noteClamp(shipped);
+  const lines = noticed.blocks.filter((one) => one.type === "notice").length;
+  check("the substitution is said out loud rather than swallowed", lines, 1);
+  check(
+    "and it names the consequence rather than the size",
+    noticed.blocks.some((one) => one.type === "notice" && one.text.includes("will not work")),
+    true,
+  );
+  const both = noteClamp({ view: shipped.view, clamped: true, substituted: true, unknownBlocks: [] });
+  check(
+    "both facts get their own line, because they have different remedies",
+    both.blocks.filter((one) => one.type === "notice").length,
+    2,
+  );
+
+  /* ---------------------------------------------------------------- *
+   * What v2 added.
+   * ---------------------------------------------------------------- */
+  const { PLUGIN_REFRESH_MIN_MS, PLUGIN_REFRESH_MAX_MS } = await import("../src/plugins/protocol.js");
+
+  check(
+    "a refresh interval is floored and capped rather than refused",
+    [
+      clampView({ refreshMs: 10, blocks: [] }).view.refreshMs,
+      clampView({ refreshMs: 5_000, blocks: [] }).view.refreshMs,
+      clampView({ refreshMs: 999_999_999, blocks: [] }).view.refreshMs,
+      clampView({ refreshMs: 0, blocks: [] }).view.refreshMs,
+      clampView({ refreshMs: -1, blocks: [] }).view.refreshMs,
+      clampView({ refreshMs: "soon", blocks: [] }).view.refreshMs,
+      clampView({ blocks: [] }).view.refreshMs,
+    ],
+    [PLUGIN_REFRESH_MIN_MS, 5_000, PLUGIN_REFRESH_MAX_MS, null, null, null, null],
+  );
+  /*
+   * Clamped **silently**, unlike a cut list. The difference is what anybody could
+   * do about it: a shortened list is a wrong number on screen, while an interval
+   * moved from 500ms to 2000ms is invisible to everyone and actionable by nobody.
+   */
+  check("and moving one is not reported as a clamp", clampView({ refreshMs: 10, blocks: [] }).clamped, false);
+
+  /*
+   * ⚠ **The field a plugin would most like to put a URL in.** Anything that is
+   * not one of this app's own two destinations becomes a row that does not go
+   * anywhere — a URL above all, in either shape somebody would try it.
+   */
+  const opened = clampView({
+    blocks: [
+      {
+        type: "list",
+        empty: "",
+        rows: [
+          { id: "a", open: { session: "s_1" } },
+          { id: "b", open: { screen: true } },
+          { id: "c", open: { url: "https://evil.example" } },
+          { id: "d", open: "https://evil.example" },
+          { id: "e", open: { session: "" } },
+          { id: "f", open: { screen: false } },
+          { id: "g", open: { session: "s_2", url: "https://evil.example" } },
+          { id: "h" },
+        ],
+      },
+    ],
+  });
+  const openedRows = opened.view.blocks[0];
+  check(
+    "only a session on this machine or the plugin's own screen survives",
+    openedRows?.type === "list" ? openedRows.rows.map((row) => row.open) : null,
+    [{ session: "s_1" }, { screen: true }, null, null, null, null, { session: "s_2" }, null],
+  );
+
+  const rowTones = clampView({
+    blocks: [{ type: "list", empty: "", rows: [{ id: "a", tone: "danger" }, { id: "b", tone: "puce" }, { id: "c" }] }],
+  });
+  const tonedRows = rowTones.view.blocks[0];
+  check(
+    "a tone this daemon knows survives, and one it does not is no tone",
+    tonedRows?.type === "list" ? tonedRows.rows.map((row) => row.tone) : null,
+    ["danger", null, null],
+  );
+
+  /* ---------------------------------------------------------------- *
+   * A settings pane draws less than a screen does.
+   *
+   * ⚠ **Two vocabularies over one protocol, and the whole risk is that the
+   * narrow one silently becomes the wide one again.** A settings pane is a form
+   * plus the words around it — three block types, three field kinds — while a
+   * plugin's own screen keeps all five of each. Nothing in the type system
+   * expresses "narrower", so every assertion below is paired with its negative
+   * control on the other surface: dropping a `list` is only correct if a screen
+   * still draws one, and downgrading `password` is only correct if a screen
+   * still masks one.
+   * ---------------------------------------------------------------- */
+  {
+    const listBlock = { type: "list", empty: "nothing", rows: [{ id: "a", title: "A" }] };
+    const onScreen = clampView({ blocks: [listBlock] }, "screen");
+    const onSettings = clampView({ blocks: [listBlock] }, "settings");
+    check("a screen draws a list", onScreen.view.blocks.map((one) => one.type), ["list"]);
+    check("a settings pane does not", onSettings.view.blocks, []);
+    /*
+     * ⚠ **`substituted`, never `clamped`.** Nothing here was too large — the two
+     * flags send an author to two different places, and reported as a size clamp
+     * this one sends them to go and count rows in a list that was the wrong shape
+     * for the surface rather than too long.
+     */
+    check(
+      "and says so as a shape problem rather than a size one",
+      [onSettings.substituted, onSettings.clamped, [...onSettings.unknownBlocks]],
+      [true, false, ["list"]],
+    );
+    check("while the screen reports neither", [onScreen.substituted, onScreen.clamped], [false, false]);
+    /*
+     * ⚠ **The notice must not say "this machine does not draw a list".** It does
+     * draw one, one surface over — told that, an author goes looking for a typo in
+     * a block type they spelled correctly, which is the wrong-diagnosis failure
+     * the naming branch exists to end. And it names what a settings pane *does*
+     * draw, because the author has no copy of this protocol.
+     */
+    const settingsNotice = noteClamp(onSettings, "settings").blocks.filter((one) => one.type === "notice");
+    const settingsText = settingsNotice[0]?.type === "notice" ? settingsNotice[0].text : "";
+    check("the notice is about the surface, not about the machine", settingsText.startsWith("A settings pane"), true);
+    check("and names the three block types a pane draws", /text, notice, form/.test(settingsText), true);
+    check("and does not offer the two it just refused", /list|columns/.test(settingsText.split(" It draws")[1] ?? ""), false);
+    check("and never says anything was too large", /too large/.test(settingsText), false);
+    /*
+     * ⚠ **A danger notice keeps its tone on a settings pane, and that is
+     * load-bearing rather than cosmetic.** Found by the first plugin this
+     * narrowing hit: it has no screen — a screen for one function is a page nobody
+     * visits — and its pane carried the only record of *refusals*. A hook's
+     * failure has nobody waiting on it, so nothing is owed an error and there is
+     * no session left to warn through; `notice` is the entire diagnostic channel
+     * for a plugin shaped like that. Drawn in the ordinary ink it is a diagnostic
+     * nobody reads, so the tone is asserted and not merely the block.
+     */
+    const danger = clampView(
+      { blocks: [{ type: "notice", text: "could not rename", tone: "danger" }] },
+      "settings",
+    ).view.blocks[0];
+    check(
+      "a settings pane keeps a danger notice, and its tone",
+      danger?.type === "notice" ? [danger.tone, danger.text] : null,
+      ["danger", "could not rename"],
+    );
+
+    /*
+     * The field kinds. `password` and `number` are spellings of a text box rather
+     * than a fourth and fifth kind of setting — see `PLUGIN_SETTINGS_FIELD_KINDS`
+     * — so on a settings pane they become `text` **and are reported**, which is
+     * the half that matters: a masked box that silently stops being masked is the
+     * one substitution here that looks like it worked.
+     */
+    const form = (kind: unknown): unknown => ({
+      blocks: [{ type: "form", action: "save", submit: "Save", fields: [{ key: "k", label: "L", kind }] }],
+    });
+    const kindOn = (surface: "screen" | "settings", kind: unknown): string | null => {
+      const block = clampView(form(kind), surface).view.blocks[0];
+      return block?.type === "form" ? (block.fields[0]?.kind ?? null) : null;
+    };
+    check(
+      "a screen keeps all five field kinds",
+      ["text", "password", "number", "toggle", "select"].map((kind) => kindOn("screen", kind)),
+      ["text", "password", "number", "toggle", "select"],
+    );
+    check(
+      "a settings pane keeps three and spells the other two as a text box",
+      ["text", "password", "number", "toggle", "select"].map((kind) => kindOn("settings", kind)),
+      ["text", "text", "text", "toggle", "select"],
+    );
+    check(
+      "and reports the two it changed, so an author finds out",
+      ["text", "password", "number", "toggle", "select"].map((kind) => clampView(form(kind), "settings").substituted),
+      [false, true, true, false, false],
+    );
+    check(
+      "while the screen reports none of them",
+      ["text", "password", "number", "toggle", "select"].map((kind) => clampView(form(kind), "screen").substituted),
+      [false, false, false, false, false],
+    );
+    /*
+     * ⚠ **Absence is still a default on both surfaces.** Omitting `kind` means an
+     * ordinary text box and is a perfectly good thing for a plugin to do — if it
+     * raised the flag, every well-written plugin would draw the notice and it
+     * would stop meaning anything. Both spellings of absence, because JSON has no
+     * `undefined` and `null` is the likelier one on the wire.
+     */
+    check(
+      "a field with no kind is a default rather than a substitution",
+      [
+        clampView({ blocks: [{ type: "form", action: "s", fields: [{ key: "k" }] }] }, "settings").substituted,
+        clampView(form(null), "settings").substituted,
+      ],
+      [false, false],
+    );
+    /*
+     * The notice for a substitution *inside* a block, where no block was refused:
+     * on a settings pane the commonest cause is a kind the machine recognises and
+     * declines, so "not in a shape this machine recognises" is exactly wrong and
+     * the three kinds are named instead.
+     */
+    const inner = noteClamp(clampView(form("password"), "settings"), "settings").blocks.filter(
+      (one) => one.type === "notice",
+    );
+    const innerText = inner[0]?.type === "notice" ? inner[0].text : "";
+    check("a refused field kind names the three that are not", /text, toggle, select/.test(innerText), true);
+
+    /*
+     * ⚠ **The default is the wide surface**, and that direction is the safe one:
+     * a call site nobody has told about surfaces draws a settings pane as though
+     * it were a screen — today's behaviour — rather than silently deleting
+     * controls off somebody's pane.
+     */
+    check(
+      "an untold caller gets the screen's vocabulary",
+      clampView({ blocks: [listBlock] }).view.blocks.map((one) => one.type),
+      ["list"],
+    );
+    check(
+      "and `fitView` carries the surface through the size pass",
+      fitView({ blocks: [listBlock] }, 64_000, "settings").view.blocks,
+      [],
+    );
+    /*
+     * A settings type that is not a screen type is a value `PluginView` has no arm
+     * for: it would render as nothing and say nothing about itself. Asserted as a
+     * subset rather than as two lists, so adding a block type to the wide set
+     * cannot quietly fail to be considered for the narrow one.
+     */
+    check(
+      "what a pane draws is a subset of what a screen draws",
+      PLUGIN_SETTINGS_BLOCK_TYPES.filter((one) => !PLUGIN_BLOCK_TYPES.some((two) => two === one)),
+      [],
+    );
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * A tar writer, small enough to read.
+ *
+ * Built here rather than shelled out for the reason the import section's own
+ * builder gives: neither `tar` nor `zip` is guaranteed on a CI box. This one is
+ * deliberately *separate* from that builder rather than hoisted out of it — that
+ * one exists to write archives no honest tool will produce, and lifting it here
+ * would couple a plugin's happy path to a fixture whose whole job is to be
+ * malformed.
+ *
+ * At module scope because three sections build one now: installing, the hooks a
+ * freshly-installed plugin is seeded with, and `POST /plugins` over HTTP. Two of
+ * those want the same bytes an install already proved good, and a second copy of
+ * a tar writer is a second place for a checksum to be wrong.
+ * ------------------------------------------------------------------ */
+const tarOf = (files: Record<string, string>): Buffer => {
+  const parts: Buffer[] = [];
+  for (const [name, body] of Object.entries(files)) {
+    const data = Buffer.from(body, "utf8");
+    const head = Buffer.alloc(512);
+    head.write(name, 0, "utf8");
+    head.write("000644 \0", 100);
+    head.write("000000 \0", 108);
+    head.write("000000 \0", 116);
+    head.write(data.length.toString(8).padStart(11, "0") + " ", 124);
+    head.write("00000000000 ", 136);
+    head.write("        ", 148);
+    head.write("0", 156);
+    head.write("ustar\0", 257);
+    head.write("00", 263);
+    let sum = 0;
+    for (const byte of head) sum += byte;
+    head.write(sum.toString(8).padStart(6, "0") + "\0 ", 148);
+    parts.push(head, data, Buffer.alloc((512 - (data.length % 512)) % 512));
+  }
+  parts.push(Buffer.alloc(1024));
+  return gzipSync(Buffer.concat(parts));
+};
+
+const bodyOf = (bytes: Buffer): ReadableStream<Uint8Array> =>
+  new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(bytes));
+      controller.close();
+    },
+  });
+
+/**
+ * The same bytes, plus whether anybody released the stream.
+ *
+ * ⚠ **The one property of this route that is argued everywhere and asserted
+ * nowhere.** `PluginHost.install` cancels the request body on the busy path and
+ * again in its `finally`, and `POST /plugins`'s own docblock spends a paragraph
+ * on why: the relay grants a stream's window on consumption, so a reader that
+ * stops parks the sender at one window, and the valve after that closes the
+ * **whole tunnel for this machine**. Every plugin fixture here used `bodyOf` or
+ * `stallingBody`, neither of which records a cancel — so both calls could have
+ * been deleted and this driver would have stayed green. The uploads section has
+ * had exactly this fixture since Q5.72.
+ */
+const watchedBody = (bytes: Buffer): { body: ReadableStream<Uint8Array>; state: { cancelled: boolean; pulled: number } } => {
+  const state = { cancelled: false, pulled: 0 };
+  return {
+    state,
+    body: new ReadableStream<Uint8Array>({
+      pull(controller) {
+        state.pulled += 1;
+        controller.enqueue(new Uint8Array(bytes));
+        controller.close();
+      },
+      cancel() {
+        state.cancelled = true;
+      },
+    }),
+  };
+};
+
+/**
+ * The same bytes, held until the returned `release` is called.
+ *
+ * What it buys is the *middle* of an install, which no other body here can reach:
+ * `PluginHost.install` claims the daemon-wide mutex and then awaits the stream, so
+ * this is the window in which a `remove` or a `setEnabled` arrives — the window a
+ * measured `DELETE` used to walk straight through, dropping the row and every
+ * `plugin_data` key of a plugin the install then re-created.
+ */
+const stallingBody = (bytes: Buffer): { body: ReadableStream<Uint8Array>; release: () => void } => {
+  let release = (): void => {};
+  const parked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return {
+    release: () => release(),
+    body: new ReadableStream({
+      async pull(controller) {
+        await parked;
+        controller.enqueue(new Uint8Array(bytes));
+        controller.close();
+      },
+    }),
+  };
+};
+
+process.stdout.write("\ninstalling a plugin, and updating one\n");
+{
+  const { PluginHost } = await import("../src/plugins/host.js");
+  const { SessionRegistry } = await import("../src/registry.js");
+  const { hostGit } = await import("../src/git.js");
+  const { openStores } = await import("../src/store/sqlite.js");
+
+  const manifestOf = (patch: Record<string, unknown> = {}): string =>
+    JSON.stringify({
+      id: "board",
+      name: "Task board",
+      version: "0.1.0",
+      api: 1,
+      scopes: ["store"],
+      contributes: { settings: true, actions: [{ id: "save", title: "Save", on: "screen" }], hooks: ["turn.ended"] },
+      ...patch,
+    });
+
+  /** A plugin whose `server.js` answers everything out of its own store. */
+  const SERVER = `
+    export async function settings(ctx) {
+      const held = await ctx.store.get("v");
+      return { title: null, blocks: [{ type: "text", text: String(held ?? "unset"), tone: "default" }] };
+    }
+    export async function action(ctx, event) {
+      await ctx.store.set("v", event.form?.v ?? "set");
+      return { kind: "toast", text: "saved", tone: "default" };
+    }
+    export async function hook(ctx, event) {
+      await ctx.store.set("last", event.hook);
+    }
+  `;
+
+  const root = tmp("plugin-root-");
+  const stores = openStores({ path: join(tmp("plugin-db-"), "d.db"), instanceId: "i_plugins" });
+  const registry = new SessionRegistry(stores.events, stores.sessions);
+  const warnings: string[] = [];
+  const host = await PluginHost.open({
+    root: join(root, "plugins"),
+    records: stores.plugins,
+    data: stores.pluginData,
+    registry,
+    api: { git: hostGit },
+    onWarning: (detail) => warnings.push(detail),
+    timeouts: { start: 3_000, invoke: 3_000 },
+  });
+
+  const install = (files: Record<string, string>, name = "p.tar.gz"): ReturnType<typeof host.install> =>
+    host.install({ body: bodyOf(tarOf(files)), name });
+
+  const first = await install({ "plugin.json": manifestOf(), "server.js": SERVER });
+  check("a plugin installs", first.kind === "ok" ? [first.summary.id, first.summary.version, first.replaced] : first, [
+    "board",
+    "0.1.0",
+    null,
+  ]);
+  check("and it is running", host.list().map((one) => [one.id, one.state, one.enabled]), [["board", "running", true]]);
+
+  /*
+   * A directory rather than loose members, which is what somebody who compresses
+   * a folder produces. Both shapes have to work — the one thing `findManifestRoot`
+   * exists for — and nothing deeper than one level is searched.
+   */
+  const nested = await install({ "board/plugin.json": manifestOf({ version: "0.1.1" }), "board/server.js": SERVER });
+  check("an archive holding one folder is the same plugin", nested.kind === "ok" ? nested.replaced : nested, "0.1.0");
+
+  /* ---------------------------------------------------------------- *
+   * What an update keeps, which is the whole of what makes it an update.
+   * ---------------------------------------------------------------- */
+  const plugin = host.find("board");
+  if (plugin === null) throw new Error("the plugin vanished");
+  await plugin.invoke("action", "save", { action: "save", form: { v: "kept" } });
+  const before = await plugin.invoke("view", "settings", {});
+  check(
+    "a plugin can write to its own store and read it back",
+    before.kind === "view" ? before.view.blocks[0] : null,
+    { type: "text", text: "kept", tone: "default" },
+  );
+
+  const updated = await install({ "plugin.json": manifestOf({ version: "0.2.0" }), "server.js": SERVER });
+  check("installing the same id again is an update", updated.kind === "ok" ? updated.replaced : updated, "0.1.1");
+  check("and the row is the new version", host.list().map((one) => one.version), ["0.2.0"]);
+  const after = await host.find("board")?.invoke("view", "settings", {});
+  check(
+    "what it stored survived the update",
+    after?.kind === "view" ? after.view.blocks[0] : null,
+    { type: "text", text: "kept", tone: "default" },
+  );
+  check(
+    "the old version's directory is gone",
+    [existsSync(join(root, "plugins", "board", "0.1.1")), existsSync(join(root, "plugins", "board", "0.2.0"))],
+    [false, true],
+  );
+
+  // Reinstalling the same version is how somebody iterates on a plugin they are
+  // writing. It used to fail `ENOTEMPTY`, because the guard on the removal was
+  // comparing an unresolved root against a path that did not exist yet.
+  const again = await install({ "plugin.json": manifestOf({ version: "0.2.0" }), "server.js": SERVER });
+  check("reinstalling the same version works", again.kind, "ok");
+
+  /* ---------------------------------------------------------------- *
+   * A refusal changes nothing, which is the second half of every one of them.
+   * ---------------------------------------------------------------- */
+  const refusals: [string, Record<string, string>, string][] = [
+    ["no manifest at all", { "server.js": SERVER }, "manifest_missing"],
+    ["no server.js beside it", { "plugin.json": manifestOf({ version: "9.9.9" }) }, "entry_missing"],
+    ["a manifest that is not JSON", { "plugin.json": "{", "server.js": SERVER }, "manifest_unreadable"],
+    ["an id this daemon will not make a directory of", { "plugin.json": manifestOf({ id: "A B" }), "server.js": SERVER }, "manifest_invalid"],
+    ["an api from the future", { "plugin.json": manifestOf({ api: 99, version: "9.9.9" }), "server.js": SERVER }, "plugin_api_too_new"],
+  ];
+  for (const [name, files, code] of refusals) {
+    const answer = await install(files);
+    check(name, answer.kind === "refused" ? answer.code : answer.kind, code);
+  }
+  check(
+    "and after every one of them the machine is exactly as it was",
+    [host.list().map((one) => [one.id, one.version, one.state]), existsSync(join(root, "plugins", "board", "9.9.9"))],
+    [[["board", "0.2.0", "running"]], false],
+  );
+
+  const empty = await host.install({ body: bodyOf(gzipSync(Buffer.alloc(1024))), name: "empty.tar.gz" });
+  check("an archive with nothing in it", empty.kind === "refused" ? empty.code : empty.kind, "archive_empty");
+  const junk = await host.install({ body: bodyOf(Buffer.from("not an archive")), name: "x.tar.gz" });
+  check("something that is not an archive", junk.kind === "refused" ? junk.code : junk.kind, "unsupported_archive");
+
+  /* ---------------------------------------------------------------- *
+   * The archive reader's own refusals, in this route's vocabulary.
+   *
+   * ⚠ **`unpackArchive` is shared with `POST /fs/import` and the codes are not.**
+   * One unpacker, one set of containment rules — `..` refused rather than
+   * normalised, the ceiling charged against what the decompressor produced — and
+   * then each caller translates an `ArchiveError` into its own namespace: an
+   * import answers `archive_too_large` where a plugin answers
+   * `plugin_unpacked_too_large`. The import section drives every one of these
+   * *shapes* already; what it cannot drive is `archiveCode`, which is the whole
+   * translation and which nothing reached.
+   *
+   * `PLUGIN_LIMITS` is the other half of the same argument: 2 MiB on the wire,
+   * 8 MiB unpacked and 500 members, against the import's 50 MiB / 500 MiB /
+   * 20,000. The same archive is refused at wildly different sizes depending on
+   * which door it arrived at, which is exactly why the numbers are a parameter and
+   * nothing in `safeMemberPath` is.
+   *
+   * Four arms rather than five: `ArchiveError("empty")` is raised only inside
+   * `importArchive`, so the `archive_empty` arm of `archiveCode` is unreachable
+   * from here — `unpackArchive` reports an empty archive as a *kind* and `install`
+   * answers that itself, which is the case two assertions up.
+   * ---------------------------------------------------------------- */
+  const { PLUGIN_LIMITS } = await import("../src/archive.js");
+
+  /**
+   * A tar whose header lies about how long its member is.
+   *
+   * ⚠ **Every archive `tarOf` writes is one the reader could have trusted**, which
+   * is why none of them can reach `archive_unreadable`: the size field is computed
+   * from the bytes that follow it. Only a member *declaring* more than it carries
+   * walks the reader off the end of the stream, and a size field somebody else
+   * wrote is the entire reason that arm exists. The import section's own builder
+   * makes the same point with its `declaredSize`, and it is deliberately not
+   * borrowed — that one exists to write archives no honest tool produces.
+   */
+  const lyingTarGz = (): Buffer => {
+    const head = Buffer.alloc(512);
+    head.write("plugin.json", 0, "utf8");
+    head.write("000644 \0", 100);
+    head.write("000000 \0", 108);
+    head.write("000000 \0", 116);
+    // Four kilobytes promised; five hundred and twelve bytes follow.
+    head.write((4096).toString(8).padStart(11, "0") + " ", 124);
+    head.write("00000000000 ", 136);
+    head.write("        ", 148);
+    head.write("0", 156);
+    head.write("ustar\0", 257);
+    head.write("00", 263);
+    let sum = 0;
+    for (const byte of head) sum += byte;
+    head.write(sum.toString(8).padStart(6, "0") + "\0 ", 148);
+    return gzipSync(Buffer.concat([head, Buffer.alloc(512, 0x7a)]));
+  };
+
+  const crowded: Record<string, string> = {};
+  for (let index = 0; index <= PLUGIN_LIMITS.maxEntries; index += 1) crowded[`f${index}.txt`] = "x";
+  const archiveRefusals: [string, Buffer, string][] = [
+    ["a member that climbs out of the tree", tarOf({ "plugin.json": manifestOf(), "../escaped.txt": "x" }), "archive_unsafe"],
+    ["more members than a plugin has", tarOf(crowded), "plugin_too_many_entries"],
+    [
+      "one that unpacks past what a plugin may be",
+      tarOf({ "plugin.json": manifestOf(), "big.js": "x".repeat(PLUGIN_LIMITS.maxUnpackedBytes + 1) }),
+      "plugin_unpacked_too_large",
+    ],
+    ["one this daemon cannot read to the end", lyingTarGz(), "archive_unreadable"],
+  ];
+  for (const [name, bytes, code] of archiveRefusals) {
+    const answer = await host.install({ body: bodyOf(bytes), name: "p.tar.gz" });
+    check(name, answer.kind === "refused" ? answer.code : answer.kind, code);
+  }
+  /*
+   * The second half of every one of them, and `readdirSync` rather than an
+   * `existsSync` per case: three of those four are refused *after* members have
+   * already been written, so what has to be true is that the plugin root holds
+   * nothing but the plugin that was there — no staging directory, no partial tree
+   * under a name nobody will look for again.
+   */
+  check(
+    "and after every one of those the machine is exactly as it was",
+    [host.list().map((one) => [one.id, one.version, one.state]), readdirSync(join(root, "plugins"))],
+    [[["board", "0.2.0", "running"]], ["board"]],
+  );
+
+  /* ---------------------------------------------------------------- *
+   * One install at a time, for the whole daemon.
+   *
+   * Q7.97's argument for `POST /fs/import` verbatim: this is a route with **no
+   * accounting that outlives the request** — an installed plugin is charged
+   * against nothing once it has landed — and the relay allows 256 concurrent
+   * streams, so a per-request size cap cannot see what a hundred of them do to a
+   * disk. The bound has to be on arrival, and a person installs a plugin about as
+   * often as they install anything.
+   *
+   * The version is the one already there, so whichever of the two wins leaves the
+   * machine where the cases below expect to find it — and the losing body is
+   * cancelled rather than read, which is what keeps a refusal from parking a
+   * sender against the relay's window.
+   * ---------------------------------------------------------------- */
+  const contended = tarOf({ "plugin.json": manifestOf({ version: "0.2.0" }), "server.js": SERVER });
+  const overlapping = await Promise.all([
+    host.install({ body: bodyOf(contended), name: "a.tar.gz" }),
+    host.install({ body: bodyOf(contended), name: "b.tar.gz" }),
+  ]);
+  check(
+    "two at once, and exactly one of them is turned away",
+    overlapping.map((one) => one.kind).sort(),
+    ["busy", "ok"],
+  );
+  check("the one that landed is still the only plugin", host.list().map((one) => [one.id, one.version]), [["board", "0.2.0"]]);
+
+  /* ---------------------------------------------------------------- *
+   * A throw *after* the row is written, which is the window the rollback
+   * exists for and the one nothing reached.
+   *
+   * ⚠ **`target` carries the version, so the incumbent is only ever moved aside
+   * on a reinstall of the version already there** — which is the documented way
+   * somebody iterates on a plugin they are writing, not a rare race. On that path
+   * `aside` is the running plugin's own directory and `published` is the same
+   * path, so destroying `aside` before the last fallible statement meant a throw
+   * from `seed` ran a catch that discarded the new tree and found the old one
+   * already gone: both trees lost, the row naming a directory that is not there,
+   * the plugin permanently failed.
+   *
+   * A registry whose `list()` throws is how `seed` is made to fail, and `seed`
+   * is not an invented source — the catch's own docblock names it.
+   * ---------------------------------------------------------------- */
+  {
+    let listThrows = false;
+    const shaky = {
+      watchSessions: () => () => {},
+      list: () => {
+        if (listThrows) throw new Error("the registry was being torn down");
+        return [];
+      },
+      get: () => undefined,
+    } as unknown as SessionRegistry;
+
+    const shakyStores = openStores({ path: join(tmp("plugin-shaky-db-"), "d.db"), instanceId: "i_shaky" });
+    const shakyRoot = join(tmp("plugin-shaky-root-"), "plugins");
+    const shakyHost = await PluginHost.open({
+      root: shakyRoot,
+      records: shakyStores.plugins,
+      data: shakyStores.pluginData,
+      registry: shaky,
+      api: { git: hostGit },
+      timeouts: { start: 3_000, invoke: 3_000 },
+    });
+    const put = (files: Record<string, string>): ReturnType<typeof shakyHost.install> =>
+      shakyHost.install({ body: bodyOf(tarOf(files)), name: "p.tar.gz" });
+
+    await put({ "plugin.json": manifestOf({ version: "2.0.0" }), "server.js": SERVER });
+    shakyStores.pluginData.set("board", "card:1", JSON.stringify({ keep: true }));
+
+    listThrows = true;
+    const blown = await put({ "plugin.json": manifestOf({ version: "2.0.0" }), "server.js": SERVER });
+    listThrows = false;
+
+    check(
+      "a reinstall that throws after the row is written is refused",
+      blown.kind === "refused" ? blown.code : blown.kind,
+      "plugin_write_failed",
+    );
+    /*
+     * Id and version, and that it is not `failed` — deliberately not `running`.
+     * The rollback restarts the incumbent with `void existing.ensureStarted(...)`,
+     * so `install` answers without waiting to find out: at this instant the state
+     * is `starting`, and asserting `running` here would be pinning the scheduler
+     * rather than the recovery. (That the answer goes out before the restart is
+     * known to have worked is its own open question, and a separate one.)
+     */
+    const back = shakyHost.list().map((one) => [one.id, one.version, one.state !== "failed"]);
+    check("and the plugin somebody was iterating on is still there, and not failed", back, [["board", "2.0.0", true]]);
+    // The half that used to be gone: the row named this directory and nothing was
+    // in it, so every start burned a budget on ENOENT.
+    check("with the tree its row names", existsSync(join(shakyRoot, "board", "2.0.0")), true);
+    check("and nothing moved aside left behind", readdirSync(join(shakyRoot, "board")), ["2.0.0"]);
+    check("and its data untouched", shakyStores.pluginData.keys("board", ""), ["card:1"]);
+
+    /*
+     * The other half of the same catch. A **first** install that fails is
+     * documented to leave nothing — and it left the `plugin_data` rows, which
+     * afterwards nothing can reach: no row and no directory means `installed()`
+     * is false on both halves, so `DELETE /plugins/:id` answers 404 and
+     * `dropPlugin` is unreachable for good. They then reappear under the next
+     * install of that id, because `plugin_data` is keyed by id rather than by
+     * version.
+     */
+    shakyStores.pluginData.set("ghost", "card:9", JSON.stringify({ stale: true }));
+    listThrows = true;
+    const fresh = await put({ "plugin.json": manifestOf({ id: "ghost", version: "1.0.0" }), "server.js": SERVER });
+    listThrows = false;
+    check(
+      "a first install that throws after the row is written is refused too",
+      fresh.kind === "refused" ? fresh.code : fresh.kind,
+      "plugin_write_failed",
+    );
+    check(
+      "and leaves nothing — the row, the tree and the data",
+      [
+        shakyStores.plugins.has("ghost"),
+        existsSync(join(shakyRoot, "ghost")),
+        shakyStores.pluginData.keys("ghost", "").length,
+      ],
+      [false, false, 0],
+    );
+
+    /*
+     * The third arm, and the one where "first install" was a **guess**.
+     *
+     * ⚠ **`install` asked `this.live` whether a plugin was installed, and `remove`
+     * asks `records.has`.** `PluginRecordStore.has`'s own docblock is about exactly
+     * the state where the two disagree: a row whose `manifest_json` this build
+     * cannot validate is reported and skipped, so `list` omits it and `get` answers
+     * `null` — and `live` is filled from `list`. A daemon downgraded under a plugin
+     * declaring a newer `api` is in that state, which is the case `remove` was
+     * given `has` for in the first place.
+     *
+     * So `existing` read `null` over a plugin that was installed, a throw after
+     * `records.put` took the first-install arm, and `dropPlugin` destroyed data an
+     * update was promised to keep. Simulated here by hiding the row from `list` and
+     * `get` while leaving it under `has`, which is what that build sees.
+     */
+    const hidden = new Set<string>();
+    const veiled: PluginRecordStore = {
+      list: () => shakyStores.plugins.list().filter((one) => !hidden.has(one.id)),
+      get: (id) => (hidden.has(id) ? null : shakyStores.plugins.get(id)),
+      has: (id) => shakyStores.plugins.has(id),
+      put: (record) => shakyStores.plugins.put(record),
+      setEnabled: (id, enabled, now) => shakyStores.plugins.setEnabled(id, enabled, now),
+      remove: (id) => shakyStores.plugins.remove(id),
+    };
+    const veiledRoot = join(tmp("plugin-veiled-root-"), "plugins");
+    {
+      const first = await PluginHost.open({
+        root: veiledRoot,
+        records: veiled,
+        data: shakyStores.pluginData,
+        registry: shaky,
+        api: { git: hostGit },
+        timeouts: { start: 3_000, invoke: 3_000 },
+      });
+      await first.install({
+        body: bodyOf(tarOf({ "plugin.json": manifestOf({ id: "veiled", version: "1.0.0" }), "server.js": SERVER })),
+        name: "p.tar.gz",
+      });
+      shakyStores.pluginData.set("veiled", "card:7", JSON.stringify({ keep: true }));
+      await first.shutdown();
+    }
+
+    // Reopened with the row present but unreadable, which is what a downgrade is.
+    hidden.add("veiled");
+    const veiledHost = await PluginHost.open({
+      root: veiledRoot,
+      records: veiled,
+      data: shakyStores.pluginData,
+      registry: shaky,
+      api: { git: hostGit },
+      timeouts: { start: 3_000, invoke: 3_000 },
+    });
+    // `find`, not `list().length`: this record store is shared with `shakyHost`
+    // above, so its rows are in here too. The question is about this one id.
+    check("a row this build cannot read is not a plugin it knows about", veiledHost.find("veiled"), null);
+    check("but the store still says one is installed under that id", veiled.has("veiled"), true);
+
+    listThrows = true;
+    const overIt = await veiledHost.install({
+      body: bodyOf(tarOf({ "plugin.json": manifestOf({ id: "veiled", version: "2.0.0" }), "server.js": SERVER })),
+      name: "p.tar.gz",
+    });
+    listThrows = false;
+    check(
+      "an install over it that throws after the row is written is refused",
+      overIt.kind === "refused" ? overIt.code : overIt.kind,
+      "plugin_write_failed",
+    );
+    check("and the data it was never told about is still there", shakyStores.pluginData.keys("veiled", ""), ["card:7"]);
+    await veiledHost.shutdown();
+
+    await shakyHost.shutdown();
+    shakyStores.close();
+  }
+
+  /*
+   * ...and the sentence above about the losing body, now asserted rather than
+   * asserted-in-prose. Two paths, because they cancel in two different places:
+   * the busy arm cancels before it returns (`install`'s first statement), and a
+   * refusal cancels in the `finally` that covers every other exit.
+   */
+  {
+    const held = stallingBody(tarOf({ "plugin.json": manifestOf({ version: "0.2.0" }), "server.js": SERVER }));
+    const flight = host.install({ body: held.body, name: "held.tar.gz" });
+    const turned = watchedBody(tarOf({ "plugin.json": manifestOf({ version: "0.2.0" }), "server.js": SERVER }));
+    const busy = await host.install({ body: turned.body, name: "turned.tar.gz" });
+    check(
+      "an install turned away for busy is released rather than left parked",
+      [busy.kind, turned.state.cancelled, turned.state.pulled],
+      ["busy", true, 0],
+    );
+    held.release();
+    await flight;
+
+    /*
+     * ⚠ **A refusal that stops *mid-stream*, which is the only kind that has
+     * anything left to release.** `manifest_missing` and its neighbours are
+     * decided after the whole archive has been unpacked, so by then the body has
+     * ended on its own and `cancelBody` is correctly a no-op — asserting a cancel
+     * there would pin the wrong thing. The reachable case is the ceiling:
+     * `unpackArchive` stops reading at `PLUGIN_LIMITS.maxBytes` and refuses, and
+     * everything the sender still has queued is what parks against the relay's
+     * window if nobody releases it.
+     */
+    let sent = 0;
+    const endless = { cancelled: false };
+    const flood = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        sent += 1;
+        controller.enqueue(new Uint8Array(64 * 1024));
+      },
+      cancel() {
+        endless.cancelled = true;
+      },
+    });
+    const answer = await host.install({ body: flood, name: "endless.tar.gz" });
+    check(
+      "and one refused while the sender was still sending is released mid-stream",
+      [answer.kind === "refused" ? answer.code : answer.kind, endless.cancelled, sent > 0],
+      ["plugin_too_large", true, true],
+    );
+  }
+
+  /* ---------------------------------------------------------------- *
+   * An update that will not start puts everything back.
+   *
+   * The most important case here: a person pushing a broken update to a machine
+   * they are not sitting in front of must end up with the plugin they had, not
+   * with none.
+   * ---------------------------------------------------------------- */
+  const broken = await install({
+    "plugin.json": manifestOf({ version: "0.3.0" }),
+    "server.js": 'throw new Error("this plugin is broken");',
+  });
+  check("a plugin that throws on load is refused", broken.kind === "refused" ? broken.code : broken.kind, "plugin_start_failed");
+  report(
+    "and the refusal says what the plugin said",
+    broken.kind === "refused" && broken.message.includes("this plugin is broken"),
+    broken.kind === "refused" ? broken.message.slice(0, 60) : broken.kind,
+  );
+  check("the old version is still the installed one", host.list().map((one) => one.version), ["0.2.0"]);
+  check("its directory was not touched", existsSync(join(root, "plugins", "board", "0.2.0")), true);
+  check("and the broken one left nothing behind", existsSync(join(root, "plugins", "board", "0.3.0")), false);
+  const survived = await host.find("board")?.invoke("view", "settings", {});
+  check(
+    "the plugin that was there is running again",
+    survived?.kind === "view" ? survived.view.blocks[0] : null,
+    { type: "text", text: "kept", tone: "default" },
+  );
+
+  /* ---------------------------------------------------------------- *
+   * The same refusal, at the version that is already installed.
+   *
+   * ⚠ **The case above passes for a reason that is not the rule.** It pushes
+   * 0.3.0 over 0.2.0, so the two live in different directories and the rollback
+   * has somewhere to roll back *to*. Reinstalling the version that is already
+   * there is the documented way to iterate on a plugin somebody is writing —
+   * `docs/PLUGINS.md` opens on it — and there the destination *is* the running
+   * plugin's own directory. Clearing it first destroyed the working copy and
+   * then removed the broken one on top, leaving a row naming a version whose
+   * tree was gone and a plugin that could not be started again. Measured before
+   * `install` moved the old tree aside instead: "Cannot find module
+   * .../board/0.2.0/server.js".
+   * ---------------------------------------------------------------- */
+  const clobber = await install({
+    "plugin.json": manifestOf({ version: "0.2.0" }),
+    "server.js": 'throw new Error("broken at the same version");',
+  });
+  check("a broken build at the installed version is refused", clobber.kind === "refused" ? clobber.code : clobber.kind, "plugin_start_failed");
+  check("the tree it would have replaced is still there", existsSync(join(root, "plugins", "board", "0.2.0", "server.js")), true);
+  check("and nothing was left lying beside it", readdirSync(join(root, "plugins", "board")), ["0.2.0"]);
+  const clobbered = await host.find("board")?.invoke("view", "settings", {});
+  check(
+    "the plugin that was there is still the one running",
+    clobbered?.kind === "view" ? clobbered.view.blocks[0] : null,
+    { type: "text", text: "kept", tone: "default" },
+  );
+
+  /* ---------------------------------------------------------------- *
+   * And the same again for a plugin somebody has switched off.
+   *
+   * ⚠ **`enabled` used to gate the whole proof.** A disabled plugin's update was
+   * committed without the new build ever having run: the row was rewritten and
+   * the previous version's directory removed, so re-enabling it was the first
+   * anybody heard it was broken, with nothing to go back to. The build is now
+   * started whatever the switch says and stopped again straight after, which is
+   * what the third case here is for — a *good* update to a disabled plugin must
+   * still be off when it lands.
+   * ---------------------------------------------------------------- */
+  /*
+   * `setEnabled` answers `"busy"` while an install holds the daemon-wide mutex —
+   * see the case at the end of this section. None of the calls below is racing
+   * one, so a `"busy"` here would be a defect rather than a state to assert
+   * around: it is turned into `null` so the existing `?.` reads on, and the
+   * dedicated case is what proves the refusal actually happens.
+   */
+  const switched = async (id: string, on: boolean) => {
+    const answer = await host.setEnabled(id, on);
+    return answer === "busy" ? null : answer;
+  };
+  check("switching it off before an update", (await switched("board", false))?.enabled, false);
+  const offBroken = await install({
+    "plugin.json": manifestOf({ version: "0.4.0" }),
+    "server.js": 'throw new Error("broken while switched off");',
+  });
+  check("a broken update is refused even for a plugin that would not have run", offBroken.kind === "refused" ? offBroken.code : offBroken.kind, "plugin_start_failed");
+  check("the row still names the version that works", host.list().map((one) => [one.version, one.enabled]), [["0.2.0", false]]);
+  check("whose tree is still there", existsSync(join(root, "plugins", "board", "0.2.0", "server.js")), true);
+  check("and the broken one left nothing behind", existsSync(join(root, "plugins", "board", "0.4.0")), false);
+  const offGood = await install({ "plugin.json": manifestOf({ version: "0.5.0" }), "server.js": SERVER });
+  check("a good update to a switched-off plugin lands", offGood.kind === "ok" ? offGood.replaced : offGood, "0.2.0");
+  check("and is still switched off, at the new version", host.list().map((one) => [one.version, one.state, one.enabled]), [["0.5.0", "stopped", false]]);
+  check("with what it kept", stores.pluginData.keys("board", "").length > 0, true);
+  check("switching it back on", (await switched("board", true))?.state, "running");
+
+  /* ---------------------------------------------------------------- *
+   * Switching one off, and removing it.
+   * ---------------------------------------------------------------- */
+  check("switching it off", (await switched("board", false))?.enabled, false);
+  check("and it stops", host.list().map((one) => one.state), ["stopped"]);
+  check("a plugin that is off will not draw", await host.find("board")?.invoke("view", "settings", {}).then(
+    () => "drew",
+    (error: unknown) => (error as { code?: string }).code ?? "threw",
+  ), "plugin_unavailable");
+  check("switching it back on", (await switched("board", true))?.enabled, true);
+  const revived = await host.find("board")?.invoke("view", "settings", {});
+  check(
+    "and it still has what it kept",
+    revived?.kind === "view" ? revived.view.blocks[0] : null,
+    { type: "text", text: "kept", tone: "default" },
+  );
+
+  /* ---------------------------------------------------------------- *
+   * One mutation at a time, for the whole daemon.
+   *
+   * The mutex used to cover installs against each other and nothing else, so a
+   * `DELETE` landing while an archive was still being read took the row, the
+   * directory and every `plugin_data` key — and the install then re-created the
+   * row and left the plugin running with its data gone, answering `replaced:
+   * null` because `existing` had been captured before the removal. Both halves
+   * are asserted: that the mutation is refused while the install holds the flag,
+   * and that what the plugin kept is still there when the install lands.
+   * ---------------------------------------------------------------- */
+  {
+    const stalled = stallingBody(tarOf({ "plugin.json": manifestOf({ version: "0.6.0" }), "server.js": SERVER }));
+    const flight = host.install({ body: stalled.body, name: "board.tgz" });
+    check("a remove during an install is refused rather than run", await host.remove("board"), "busy");
+    check("and so is a switch", await host.setEnabled("board", false), "busy");
+    stalled.release();
+    const landed = await flight;
+    check("and the install it was racing still lands", landed.kind === "ok" ? landed.replaced : landed.kind, "0.5.0");
+    check("with what the plugin kept", stores.pluginData.keys("board", "").length > 0, true);
+    check("and the switch is answerable again", (await switched("board", true))?.enabled, true);
+  }
+
+  check("removing one that is not there", await host.remove("nothing"), false);
+  check("removing one that is", await host.remove("board"), true);
+  check("takes its row", host.list(), []);
+  check("its directory", existsSync(join(root, "plugins", "board")), false);
+  // Its data goes with it, and only here — an update keeps it, which is the pair
+  // this assertion makes with the one above.
+  check("and everything it kept", stores.pluginData.keys("board", ""), []);
+
+  await host.shutdown();
+  await registry.shutdown();
+  stores.close();
+}
+
+process.stdout.write("\nwhat a plugin root's litter is, and what is not\n");
+{
+  const { PluginHost } = await import("../src/plugins/host.js");
+  const { SessionRegistry } = await import("../src/registry.js");
+  const { hostGit } = await import("../src/git.js");
+
+  /*
+   * ⚠ **`install`'s `finally` is exactly what an OOM and a `SIGKILL` do not
+   * reach**, and this file took `importArchive`'s staging pattern without taking
+   * the sweeper that answers it. Nothing on this side collected what was left:
+   * `open` builds `live` from the record store rather than by walking the root,
+   * `list` never sees a directory nobody has a row for, and `installed` probes
+   * `join(root, id)` for an id `manifest.ts` will not let begin with a dot. Every
+   * daemon killed mid-install left up to `PLUGIN_LIMITS.maxBytes` of
+   * `archive.bin` plus up to eight megabytes of unpacked tree under a name
+   * nothing would ever look for again.
+   *
+   * ⚠ **Two shapes at two depths, and that is the whole reason this descends.**
+   * Staging is `<root>/.reemoat-plugin-<16 hex>`; the tree a rollback moves aside
+   * is `<root>/<id>/<version>.replaced-<8 hex>`. A sweep of the root alone
+   * collects the larger of the two and leaves the one that holds a whole working
+   * plugin — and that one now has a second producer as well as a crash, since the
+   * failed-rollback arm of `install` leaves it deliberately rather than lying
+   * about where the tree is.
+   *
+   * The root is laid out by hand rather than by driving installs into it, because
+   * what is being asserted is a decision about names and ages taken on the way
+   * *in*, before a single record is read. `utimesSync` is the whole of the clock
+   * this needs: the sweep reads `Date.now()` on purpose and there is no seam to
+   * hold, which is the same argument `doShutdown`'s deadline makes one section
+   * down.
+   */
+  const root = realpathSync(tmp("plugin-litter-"));
+  /** Two hours back, so an hour's cutoff is past whichever way a filesystem rounds. */
+  const old = Date.now() / 1000 - 7_200;
+  const made = (...parts: string[]): string => {
+    const full = join(root, ...parts);
+    mkdirSync(full, { recursive: true });
+    return full;
+  };
+
+  const staleStaging = made(".reemoat-plugin-00112233445566aa");
+  writeFileSync(join(staleStaging, "archive.bin"), "half an install");
+  const freshStaging = made(".reemoat-plugin-00112233445566bb");
+  // Shaped almost right, which is the whole reason `STAGING_NAME` is exact rather
+  // than a prefix test.
+  const oddStaging = made(".reemoat-plugin-nothex");
+
+  /** A directory this daemon never named, and a link wearing a name it does. */
+  const elsewhere = made("not-staging");
+  writeFileSync(join(elsewhere, "keep.txt"), "mine");
+  const linkStaging = join(root, ".reemoat-plugin-00112233445566cc");
+  symlinkSync(elsewhere, linkStaging);
+
+  const published = made("board", "0.1.0");
+  writeFileSync(join(published, "server.js"), "the version somebody has installed");
+  const deepReplaced = made("board", "0.1.0", "nested.replaced-11223344");
+  const staleReplaced = made("board", "1.0.0.replaced-aabbccdd");
+  writeFileSync(join(staleReplaced, "server.js"), "the tree a rollback moved aside");
+  const freshReplaced = made("board", "2.0.0.replaced-ccddeeff");
+  const oddReplaced = made("board", "3.0.0.replaced-nothex");
+  const deepStaging = made("board", ".reemoat-plugin-00112233445566dd");
+
+  // Aged last, after every write: creating an entry bumps the *parent's* mtime, so
+  // a directory aged before its contents exist is a fresh directory again.
+  for (const path of [staleStaging, oddStaging, staleReplaced, oddReplaced, deepReplaced, deepStaging, published]) {
+    utimesSync(path, old, old);
+  }
+  /*
+   * `lutimes` rather than `utimes`, and the difference decides what the assertion
+   * is worth: ageing *through* the link would age the directory it points at and
+   * leave the link itself seconds old, so what saved it would be the mtime test
+   * rather than `lstat().isDirectory()` — and the case would pass while the
+   * narrowing it is named for was doing nothing.
+   */
+  lutimesSync(linkStaging, old, old);
+
+  const stores = openStores({ path: join(tmp("plugin-litter-db-"), "d.db"), instanceId: "i_litter" });
+  const registry = new SessionRegistry(stores.events, stores.sessions);
+  const warnings: string[] = [];
+  const host = await PluginHost.open({
+    root,
+    records: stores.plugins,
+    data: stores.pluginData,
+    registry,
+    api: { git: hostGit },
+    onWarning: (detail) => warnings.push(detail),
+  });
+
+  check("a stale staging directory is swept", existsSync(staleStaging), false);
+  check("and so is a tree a rollback moved aside, two levels down", existsSync(staleReplaced), false);
+  check("one of each still inside the cutoff is left alone", [existsSync(freshStaging), existsSync(freshReplaced)], [true, true]);
+  check("a name that is not exactly ours is not ours to delete", [existsSync(oddStaging), existsSync(oddReplaced)], [true, true]);
+  check("a symlink wearing the name is not followed", readFileSync(join(elsewhere, "keep.txt"), "utf8"), "mine");
+  check("nor removed", existsSync(linkStaging), true);
+  check("the version somebody actually has installed is untouched", existsSync(join(published, "server.js")), true);
+  /*
+   * ⚠ **The half with no symptom.** Every assertion above still passes for a sweep
+   * that walked the whole tree — and such a sweep deletes a plugin's own files the
+   * moment an author ships one called `something.replaced-deadbeef`. `install`
+   * writes staging at the root and nowhere else, and moves a tree aside one level
+   * below an id and nowhere else; anything wearing either name at any other depth
+   * is somebody's directory rather than this daemon's litter.
+   */
+  check("nothing three levels down is even looked at", existsSync(deepReplaced), true);
+  check("nor is a staging name anywhere but the root", existsSync(deepStaging), true);
+  check("and what it removed is what somebody is told about, once each", warnings.length, 2);
+  report(
+    "each naming the directory it took and why it was there",
+    warnings.every((one) => one.includes("left behind by an install that did not finish")) &&
+      warnings.some((one) => one.includes(staleStaging)) &&
+      warnings.some((one) => one.includes(staleReplaced)),
+    warnings.join(" · ") || "nothing reported",
+  );
+
+  await host.shutdown();
+  await registry.shutdown();
+  stores.close();
+}
+
+process.stdout.write("\nshutting a plugin host down, with somebody still sending\n");
+{
+  const { PluginHost } = await import("../src/plugins/host.js");
+  const { SessionRegistry } = await import("../src/registry.js");
+  const { hostGit } = await import("../src/git.js");
+  const { parseManifest } = await import("../src/plugins/manifest.js");
+
+  const manifestText = (): string =>
+    JSON.stringify({ id: "board", name: "Task board", version: "1.0.0", api: 1, scopes: [], contributes: {} });
+  const SERVER = "export async function settings() { return { title: null, blocks: [] }; }";
+  const archive = (): Buffer => tarOf({ "plugin.json": manifestText(), "server.js": SERVER });
+  const parsed = parseManifest(manifestText());
+  if (!parsed.ok) throw new Error(parsed.message);
+  const manifest = parsed.manifest;
+
+  /** Long enough for a `void`ed start or a resolved promise to have been observed. */
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 50));
+
+  /* ---------------------------------------------------------------- *
+   * A second shutdown is the same shutdown.
+   *
+   * ⚠ **This was an early-return latch (`if (this.stopped) return; this.stopped =
+   * true;`), and the deviation from `this.x ??= this.doX()` was behavioural rather
+   * than cosmetic.** A second `await host.shutdown()` resolved *immediately* while
+   * the first was still inside `plugin.stop()` on live children — so a caller that
+   * awaited it had no guarantee any child was down, which is the one guarantee this
+   * method exists to make. `scripts/daemon.ts` is that caller, and what follows it
+   * there is `registry.shutdown()` and `stores.close()`.
+   *
+   * The identity is the cheap half and is asserted first; the behaviour below is
+   * the one that fails against the latch for the reason the latch was wrong.
+   * ---------------------------------------------------------------- */
+  {
+    let stops = 0;
+    let release = (): void => {};
+    /** A child that goes down only when this driver says so, which is the whole fixture. */
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const runtime: PluginRuntime = {
+      launch(options) {
+        return Promise.resolve({
+          send(message) {
+            if (message.t === "init") queueMicrotask(() => options.onMessage({ t: "ready" }));
+            return true;
+          },
+          async stop() {
+            await held;
+            stops += 1;
+          },
+          recentLogs: () => [],
+        });
+      },
+    };
+
+    const stores = openStores({ path: join(tmp("plugin-idiom-db-"), "d.db"), instanceId: "i_idiom" });
+    stores.plugins.put({
+      id: "board",
+      version: "1.0.0",
+      manifest,
+      enabled: true,
+      installedAt: 1,
+      updatedAt: 1,
+      source: null,
+    });
+    const registry = new SessionRegistry(stores.events, stores.sessions);
+    const host = await PluginHost.open({
+      root: join(tmp("plugin-idiom-root-"), "plugins"),
+      records: stores.plugins,
+      data: stores.pluginData,
+      registry,
+      api: { git: hostGit },
+      runtime,
+      timeouts: { start: 200, invoke: 200 },
+    });
+    await settle();
+    check("the plugin this host holds is up", host.list().map((one) => one.state), ["running"]);
+
+    const first = host.shutdown();
+    check("a second shutdown is the same promise", host.shutdown() === first, true);
+    let firstAnswered = false;
+    void first.then(() => {
+      firstAnswered = true;
+    });
+    const second = host.shutdown();
+    let secondAnswered = false;
+    void second.then(() => {
+      secondAnswered = true;
+    });
+    await settle();
+    check(
+      "and neither of them resolves while a child is still going down",
+      [firstAnswered, secondAnswered, stops],
+      [false, false, 0],
+    );
+    release();
+    await second;
+    check("both of them resolve once it is", [firstAnswered, secondAnswered, stops], [true, true, 1]);
+
+    await registry.shutdown();
+    stores.close();
+  }
+
+  /* ---------------------------------------------------------------- *
+   * And it does not wait for ever, which the loop it replaces did.
+   * ---------------------------------------------------------------- */
+  {
+    const stores = openStores({ path: join(tmp("plugin-bound-db-"), "d.db"), instanceId: "i_bound" });
+    const registry = new SessionRegistry(stores.events, stores.sessions);
+    const warnings: string[] = [];
+    const host = await PluginHost.open({
+      root: join(tmp("plugin-bound-root-"), "plugins"),
+      records: stores.plugins,
+      data: stores.pluginData,
+      registry,
+      api: { git: hostGit },
+      onWarning: (detail) => warnings.push(detail),
+      timeouts: { start: 200, invoke: 200 },
+    });
+
+    /*
+     * ⚠ **A body that charges bytes and never charges time**, which is the whole of
+     * why the drain needed a deadline. `install` claims the daemon-wide mutex and
+     * then awaits `unpackArchive`, whose `for await (const chunk of request.body)`
+     * counts what arrives against `PLUGIN_LIMITS.maxBytes` and counts nothing at
+     * all against the clock — so a client trickling two megabytes a byte at a time
+     * holds the mutex for as long as it likes. This is that client with the
+     * trickle turned all the way down: the stream is opened, the first `pull` is
+     * asked for, and no chunk is ever produced.
+     */
+    const trickle = new ReadableStream<Uint8Array>({ pull: () => new Promise<void>(() => {}) });
+    const parked = host.install({ body: trickle, name: "trickle.tar.gz" });
+    // Nothing will ever settle this, and an install left with no handler is an
+    // unhandled rejection three sections later if anything ever does.
+    void parked.then(
+      () => {},
+      () => {},
+    );
+    await settle();
+
+    /*
+     * ⚠ **Raced against a bell rather than simply awaited, because what is being
+     * pinned is a hang.** The loop this replaces was `while (this.installing) await
+     * new Promise((r) => setTimeout(r, 10))` with no second condition, so a driver
+     * that only awaited `shutdown()` would sit here until somebody killed it
+     * instead of printing a FAIL — and a red nobody can read is a red nobody acts
+     * on. Twelve seconds because the bound is a few, and because
+     * `scripts/daemon.ts` gives the whole of this, `registry.shutdown()` and
+     * `stores.close()` twenty-five between them.
+     */
+    let bell: NodeJS.Timeout | undefined;
+    const started = Date.now();
+    const outcome = await Promise.race([
+      host.shutdown().then(() => "shut down" as const),
+      new Promise<"still waiting">((resolve) => {
+        bell = setTimeout(() => resolve("still waiting"), 12_000);
+      }),
+    ]);
+    clearTimeout(bell);
+    const elapsed = Date.now() - started;
+    check("a shutdown behind a body that never produces a chunk is not held by it", outcome, "shut down");
+    /*
+     * ⚠ **The deadline is read off the sentence rather than mirrored here.**
+     * `SHUTDOWN_MUTATION_WAIT_MS` is module-private — deliberately, it is not
+     * configuration — so the one place its value reaches this side is the warning
+     * it writes on the way past. Deriving the expectation from that is what keeps
+     * this an assertion about the *property* rather than about the number, which
+     * is `report`'s own reason for existing.
+     *
+     * Both directions, because only one of them is about the fix: a wait that had
+     * been **deleted** rather than bounded would write the same sentence and take
+     * no time at all, and the drain is what keeps a child from being forked after
+     * `live` has been emptied.
+     */
+    const said = warnings.find((one) => one.includes("shutting down without waiting"));
+    const bound = Number(/after (\d+)ms/.exec(said ?? "")?.[1] ?? Number.NaN);
+    report(
+      "and it says so, naming the deadline it gave up at",
+      said !== undefined,
+      said ?? `${warnings.length} warnings, none of them this`,
+    );
+    report(
+      "and it waited that long rather than less, or longer",
+      Number.isFinite(bound) && elapsed >= bound - 200 && elapsed < bound + 2_000,
+      `${elapsed}ms against the ${bound}ms it names`,
+    );
+
+    /*
+     * ⚠ **What the bound gives back, refused at the door.** An install admitted
+     * after this point would fork a child that no `stop()` here will reach — which
+     * is exactly what `shuttingDown` is for, and it is a barrier only because the
+     * `??=` above assigns before anything can ask.
+     */
+    const turned = watchedBody(archive());
+    const after = await host.install({ body: turned.body, name: "after.tar.gz" });
+    check(
+      "and nothing new is admitted after it",
+      [after.kind === "refused" ? after.code : after.kind, turned.state.cancelled],
+      ["shutting_down", true],
+    );
+
+    await registry.shutdown();
+    stores.close();
+  }
+
+  /* ---------------------------------------------------------------- *
+   * One mutation at a time, swept over all four of them.
+   *
+   * ⚠ **Swept rather than asserted one call site at a time, because what is being
+   * pinned is `exclusive` rather than any of its callers.** The two checks and the
+   * `try`/`finally` were written out verbatim twice, and a claim that exists in two
+   * copies is a claim one of them will be missing — which is not hypothetical for
+   * this one: it had exactly one copy when it was called `installing`, `remove` and
+   * `setEnabled` had none, and a measured `DELETE` landing mid-upload dropped the
+   * row and every `plugin_data` key of a plugin the install then re-created.
+   * `install` and `installFromSource` are deliberately *outside* the helper — their
+   * two-stage check is a check that claims nothing — so a sweep is the only shape
+   * that covers both kinds at once.
+   * ---------------------------------------------------------------- */
+  {
+    /** A child that comes up at once and goes down at once: the lock is the subject here. */
+    const runtime: PluginRuntime = {
+      launch(options) {
+        return Promise.resolve({
+          send(message) {
+            if (message.t === "init") queueMicrotask(() => options.onMessage({ t: "ready" }));
+            return true;
+          },
+          stop: () => Promise.resolve(),
+          recentLogs: () => [],
+        });
+      },
+    };
+    const stores = openStores({ path: join(tmp("plugin-lock-db-"), "d.db"), instanceId: "i_lock" });
+    const registry = new SessionRegistry(stores.events, stores.sessions);
+    const host = await PluginHost.open({
+      root: join(tmp("plugin-lock-root-"), "plugins"),
+      records: stores.plugins,
+      data: stores.pluginData,
+      registry,
+      api: { git: hostGit },
+      runtime,
+      timeouts: { start: 200, invoke: 200 },
+      // No network is reached: what the address is built out of is the routes
+      // section's assertion, and what this one is about is the claim
+      // `installFromSource` makes *before* it fetches anything.
+      fetchArchive: () => Promise.resolve(new Response(new Uint8Array(archive()), { status: 200 })),
+    });
+    const source = { kind: "github", repo: "rends-east/reemoat-board", commit: "b".repeat(40) } as const;
+
+    /** Four mutations in one vocabulary, so the sweep reads as a table. */
+    const answerOf = (answer: unknown): string => {
+      if (answer === "busy") return "busy";
+      if (typeof answer === "object" && answer !== null && "kind" in answer) {
+        const outcome = answer as { kind: string; code?: string };
+        return outcome.kind === "refused" ? (outcome.code ?? "refused") : outcome.kind;
+      }
+      return String(answer);
+    };
+    const mutations: [string, () => Promise<unknown>][] = [
+      ["remove", () => host.remove("board")],
+      ["a switch", () => host.setEnabled("board", false)],
+      ["an install", () => host.install({ body: watchedBody(archive()).body, name: "rival.tar.gz" })],
+      ["one from a commit", () => host.installFromSource(source, null)],
+    ];
+    const sweep = async (): Promise<[string, string][]> => {
+      const answers: [string, string][] = [];
+      // Serially, so what each one is answering about is the state this driver put
+      // the host in rather than about whichever of its neighbours got there first.
+      for (const [name, run] of mutations) answers.push([name, answerOf(await run())]);
+      return answers;
+    };
+
+    const held = stallingBody(archive());
+    const flight = host.install({ body: held.body, name: "held.tar.gz" });
+    check(
+      "every mutation refuses while another holds the lock",
+      await sweep(),
+      mutations.map(([name]) => [name, "busy"]),
+    );
+    held.release();
+    check("and the one that was holding it lands", (await flight).kind, "ok");
+    /*
+     * The flag is released rather than wedged. Written as `report` over the sweep
+     * rather than as four expected answers, because what each of them *does* once
+     * it is let through is four other sections' subject — this one is only asking
+     * that none of them is still saying "busy".
+     */
+    const afterwards = await sweep();
+    report(
+      "and every one of them is answerable again",
+      afterwards.every(([, answer]) => answer !== "busy"),
+      afterwards.map(([name, answer]) => `${name}: ${answer}`).join(", "),
+    );
+
+    /*
+     * ⚠ **And a shutdown refuses all four, in two vocabularies.** `exclusive`
+     * answers `"busy"` for a shutdown as well as for a rival mutation — at the
+     * moment a machine is going away, "try again" is exactly as true as it is for
+     * the other one — while the two that check for themselves say what is actually
+     * happening, because they are the two a person is watching an upload against.
+     */
+    await host.shutdown();
+    check("and a shutdown refuses all four", await sweep(), [
+      ["remove", "busy"],
+      ["a switch", "busy"],
+      ["an install", "shutting_down"],
+      ["one from a commit", "shutting_down"],
+    ]);
+
+    await registry.shutdown();
+    stores.close();
+  }
+}
+
+process.stdout.write("\na rollback that cannot put the tree back, and one that cannot remove one\n");
+{
+  const { PluginHost } = await import("../src/plugins/host.js");
+  const { SessionRegistry } = await import("../src/registry.js");
+  const { hostGit } = await import("../src/git.js");
+
+  const manifestText = (): string =>
+    JSON.stringify({ id: "board", name: "Task board", version: "1.0.0", api: 1, scopes: [], contributes: {} });
+  const SERVER = "export async function settings() { return { title: null, blocks: [] }; }";
+  const archive = (): Buffer => tarOf({ "plugin.json": manifestText(), "server.js": SERVER });
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 50));
+
+  /**
+   * A child that starts on cue, so that a launch which should **not** happen is a
+   * number rather than an absence.
+   *
+   * `PluginRuntime`'s reason again: what has to be true below is that the rollback
+   * did not fork anything against a path that is not there, and a real `fork`
+   * answers that with a `Cannot find module` several hundred milliseconds later —
+   * a sentence about Node's resolver, arriving after the assertion.
+   */
+  const counting = (): { runtime: PluginRuntime; launches: () => number } => {
+    let launches = 0;
+    return {
+      launches: () => launches,
+      runtime: {
+        launch(options) {
+          launches += 1;
+          return Promise.resolve({
+            send(message) {
+              if (message.t === "init") queueMicrotask(() => options.onMessage({ t: "ready" }));
+              return true;
+            },
+            stop: () => Promise.resolve(),
+            recentLogs: () => [],
+          });
+        },
+      },
+    };
+  };
+
+  /* ---------------------------------------------------------------- *
+   * The tree could not be put back, and the row says so rather than lying.
+   *
+   * ⚠ **A rollback that could not roll back used to be a `warn` and nothing else,
+   * and the two statements after it then made the machine lie.** The row was
+   * restored naming `<id>/<version>`; the tree was still sitting at
+   * `<version>.replaced-…`; and `ensureStarted` forked a child against an entry
+   * point that is not there — so `GET /plugins` showed the plugin `running` for as
+   * long as the fork took, then `failed` with `Cannot find module`. Nothing
+   * anywhere named the tree that was left, and the person reading the row had no
+   * way to reach the one line that would have said so.
+   * ---------------------------------------------------------------- */
+  {
+    const pluginRoot = join(realpathSync(tmp("plugin-unrestored-")), "plugins");
+    const stores = openStores({ path: join(tmp("plugin-unrestored-db-"), "d.db"), instanceId: "i_unrestored" });
+    let puts = 0;
+    /*
+     * ⚠ **The row refused and the tree carried off in one act, because that is the
+     * only shape a driver can produce.** What `install` is guarding against is a
+     * `rename(aside, target)` that fails — EACCES on a mount that went read-only,
+     * EIO on a disk answering badly — and neither is something a driver can ask a
+     * filesystem for portably. Taking the *source* away is the same failure by the
+     * other door: `rename` answers ENOENT, `unrestored` comes back non-null, and
+     * the arm under test is the one that runs. The throw is what gets `install`
+     * into its catch at all; the rename is what makes the catch's own recovery
+     * fail. `put` is the hook because it is the last statement before the tail of
+     * the `try`, and because a database refusing a write is the throw the catch's
+     * own docblock names first.
+     */
+    const records: PluginRecordStore = {
+      list: () => stores.plugins.list(),
+      get: (id) => stores.plugins.get(id),
+      has: (id) => stores.plugins.has(id),
+      setEnabled: (id, enabled, now) => stores.plugins.setEnabled(id, enabled, now),
+      remove: (id) => stores.plugins.remove(id),
+      put: (record) => {
+        puts += 1;
+        if (puts !== 2) {
+          stores.plugins.put(record);
+          return;
+        }
+        const holder = join(pluginRoot, "board");
+        const moved = readdirSync(holder).find((one) => one.includes(".replaced-"));
+        if (moved !== undefined) renameSync(join(holder, moved), join(holder, "carried-off"));
+        throw new Error("the database would not take the row");
+      },
+    };
+
+    const counted = counting();
+    const registry = new SessionRegistry(stores.events, stores.sessions);
+    const host = await PluginHost.open({
+      root: pluginRoot,
+      records,
+      data: stores.pluginData,
+      registry,
+      api: { git: hostGit },
+      runtime: counted.runtime,
+      timeouts: { start: 200, invoke: 200 },
+    });
+    const put = (): ReturnType<typeof host.install> => host.install({ body: bodyOf(archive()), name: "p.tar.gz" });
+
+    check("a plugin installs", (await put()).kind, "ok");
+    stores.pluginData.set("board", "card:1", JSON.stringify({ keep: true }));
+    const launchedBefore = counted.launches();
+
+    /*
+     * The same version again, which is the only path on which anything is moved
+     * aside at all: `target` carries the version, so `aside` is non-null exactly
+     * when somebody is reinstalling what is already there — the documented way to
+     * iterate on a plugin they are writing rather than a rare race.
+     */
+    const blown = await put();
+    // The restart the old arm fired is `void`ed, so a driver that read the row in
+    // the same tick would find it `stopped` and pass either way.
+    await settle();
+    check(
+      "an update whose row will not land is refused",
+      blown.kind === "refused" ? blown.code : blown.kind,
+      "plugin_write_failed",
+    );
+    /*
+     * *Kept*, because the row is the only thing on this machine that can say any of
+     * this: removing it would leave a plugin whose files are demonstrably still
+     * under the root with nothing in `GET /plugins` naming it, and the whole of
+     * what somebody would be told is one `onWarning` line in a log nobody is
+     * reading.
+     */
+    check(
+      "the row is still there rather than silently dropped",
+      [records.has("board"), host.list().map((one) => one.id)],
+      [true, ["board"]],
+    );
+    /*
+     * ⚠ **`failed` rather than started, and that is the second half of the
+     * choice.** `entryFor` resolves `<id>/<version>/server.js`, which is precisely
+     * the path the `rename` failed to produce — so `ensureStarted` here forks a
+     * child against a missing module and puts a sentence about Node's resolver on
+     * the row where a sentence about what this daemon did belongs. `drain` holds a
+     * `failed` plugin rather than restarting it, and `setEnabled(true)` is still
+     * the way to ask for another attempt once somebody has moved the directory
+     * back by hand.
+     */
+    check("and it does not claim the plugin is running", host.list().map((one) => one.state), ["failed"]);
+    const failure = host.find("board")?.failure ?? "";
+    report(
+      "its failure names both the path its row promises and the one the tree is at",
+      failure.includes(join(pluginRoot, "board", "1.0.0")) && failure.includes(".replaced-"),
+      failure || "nothing on the row",
+    );
+    /*
+     * One launch, and it is the new build's own — the incumbent is not started
+     * again. The budget is deliberately not returned either, unlike the arm where
+     * the tree *did* go back: there is nothing here to spend it on.
+     */
+    report(
+      "and nothing was started against the path that is not there",
+      counted.launches() - launchedBefore === 1,
+      `${counted.launches() - launchedBefore} launches, of which the build that failed is one`,
+    );
+
+    // `remove` still works either way, which is what makes keeping the row cost
+    // nothing — and it is the second half of "kept rather than dropped".
+    check("it can still be uninstalled", await host.remove("board"), true);
+    check(
+      "with nothing of it left",
+      [records.has("board"), existsSync(join(pluginRoot, "board")), stores.pluginData.keys("board", "")],
+      [false, false, []],
+    );
+
+    await host.shutdown();
+    await registry.shutdown();
+    stores.close();
+  }
+
+  /* ---------------------------------------------------------------- *
+   * An `rm` that fails inside the rollback, which used to take the rollback with it.
+   *
+   * ⚠ **Four of `discard`'s eight callers are inside a rollback, and the throw was
+   * the only one of its three failure modes that was not already a `warn`.** A path
+   * outside the root and a filesystem that will not answer are both reported and
+   * returned from; an `rm` that threw came straight back out of `install`'s catch,
+   * so `install` **rejected** instead of returning an `InstallOutcome`, the
+   * incumbent never went back into `live`, and its tree was never renamed back —
+   * a filesystem failure during recovery producing exactly the state the recovery
+   * exists to prevent. `force: true` already swallows ENOENT, so what is left is
+   * EPERM, EBUSY and EIO: a file somebody else has open, a mount going away
+   * underneath, a disk answering badly.
+   * ---------------------------------------------------------------- */
+  if (process.getuid?.() === 0) {
+    // A mode of 0o500 refuses root nothing, so the only way to reach the failure
+    // here would be to fake it — and a driver that fakes the thing it is asserting
+    // answers "is this covered?" with a false yes.
+    process.stdout.write("  skip  running as root, for whom a read-only directory is not a refusal\n");
+  } else {
+    const pluginRoot = join(realpathSync(tmp("plugin-unremovable-")), "plugins");
+    const holder = join(pluginRoot, "board");
+    let bite = false;
+    /*
+     * `seed` is the throw the install catch's own docblock names, and it is the one
+     * hook a driver has *between* `records.put` and the end of the `try` — the
+     * window in which `wrote` is already true and `published` and `aside` are both
+     * set. What it does on the way past is take the write bit off the one directory
+     * the rollback is about to need.
+     */
+    const shaky = {
+      watchSessions: () => () => {},
+      list: () => {
+        if (!bite) return [];
+        bite = false;
+        chmodSync(holder, 0o500);
+        throw new Error("the registry was being torn down");
+      },
+      get: () => undefined,
+    } as unknown as SessionRegistry;
+
+    const stores = openStores({ path: join(tmp("plugin-unremovable-db-"), "d.db"), instanceId: "i_unremovable" });
+    const counted = counting();
+    const warnings: string[] = [];
+    const host = await PluginHost.open({
+      root: pluginRoot,
+      records: stores.plugins,
+      data: stores.pluginData,
+      registry: shaky,
+      api: { git: hostGit },
+      onWarning: (detail) => warnings.push(detail),
+      runtime: counted.runtime,
+      timeouts: { start: 200, invoke: 200 },
+    });
+    const put = (): ReturnType<typeof host.install> => host.install({ body: bodyOf(archive()), name: "p.tar.gz" });
+    check("a plugin installs", (await put()).kind, "ok");
+    const incumbent = host.find("board");
+
+    /*
+     * ⚠ **A `discard` that fails necessarily leaves the destination occupied, so
+     * the `rename` after it cannot succeed either** — the two are reached by one
+     * act and each assertion below names its own half. What separates them is that
+     * before the `rm` was wrapped, *none* of the lines after it ran at all.
+     */
+    bite = true;
+    const outcome = await put().then(
+      (answer) => (answer.kind === "refused" ? answer.code : answer.kind),
+      () => "threw",
+    );
+    // Put back before anything is asserted, so a FAIL below does not also leave a
+    // directory `sweepTmp` cannot remove.
+    chmodSync(holder, 0o700);
+    await settle();
+
+    check("an rm that fails inside a rollback is a refusal rather than a throw", outcome, "plugin_write_failed");
+    report(
+      "and the failure is reported rather than swallowed",
+      warnings.some((one) => one.startsWith(`could not remove ${join(holder, "1.0.0")}`)),
+      warnings.join(" · ") || "nothing reported",
+    );
+    /*
+     * ⚠ **The identity, not merely the presence.** `install` put its own
+     * `LivePlugin` into `live` well before the throw and nothing takes it out on
+     * the way past — so a `find` that only asked for non-null answered `true` about
+     * the build that failed, sitting in `live` under the incumbent's id with the
+     * incumbent unreachable from anywhere.
+     */
+    check("the incumbent is the plugin this host still holds", host.find("board") === incumbent, true);
+    check(
+      "and its row still names the version somebody installed, without claiming it runs",
+      [stores.plugins.has("board"), host.list().map((one) => [one.id, one.version, one.state])],
+      [true, [["board", "1.0.0", "failed"]]],
+    );
+    /*
+     * The sentence, checked against the disk rather than against itself. `install`
+     * writes both paths into it precisely so that somebody reading the row can find
+     * the tree without a shell, and a row naming a path that is not there is the
+     * failure this whole arm replaced.
+     */
+    const named = /are at (\S+)$/.exec(host.find("board")?.failure ?? "")?.[1] ?? "";
+    report(
+      "and the tree its row names is really where it says",
+      named !== "" && existsSync(named),
+      host.find("board")?.failure ?? "nothing on the row",
+    );
+
+    /*
+     * ⚠ **The other direction, and the one that made `discard` stop throwing a
+     * trade rather than a free win.** `doRemove` drops the row and the data and
+     * *then* removes the tree, so it is the one caller for which "the `rm` failed"
+     * may not be carried on past: answering `removed: true` over a tree still on
+     * disk is a claim the next call disproves. `installed()`'s directory half reads
+     * that leftover as installed for ever, and `<root>/<id>` matches neither
+     * `STAGING_NAME` nor `REPLACED_NAME`, so no boot sweep will ever collect it —
+     * a `DELETE` answering `true` and removing nothing, permanently.
+     *
+     * The write bit off the *root* rather than off the id directory, because that
+     * is what `rm` needs to unlink the entry.
+     */
+    chmodSync(pluginRoot, 0o500);
+    const refusedRemove = await host
+      .remove("board")
+      .then((one) => `answered ${String(one)}`, (error: unknown) => (error instanceof Error ? "threw" : "threw a non-error"));
+    chmodSync(pluginRoot, 0o700);
+    check("a remove whose rm fails does not report a removal it did not make", refusedRemove, "threw");
+    report(
+      "and the tree it could not remove is still there to be found",
+      existsSync(holder),
+      `${holder} ${existsSync(holder) ? "is" : "is not"} on disk`,
+    );
+    // And with the bit back, the same call finishes — the refusal above is the
+    // filesystem's, not a plugin this daemon has decided it can never be rid of.
+    check("and once the filesystem allows it, the same remove lands", await host.remove("board"), true);
+    check("with nothing of it left, and nothing claiming otherwise", existsSync(holder), false);
+
+    await host.shutdown();
+    stores.close();
+  }
+}
+
+process.stdout.write("\nwhat a plugin is allowed to ask the daemon for\n");
+{
+  const { MAX_PLUGIN_FETCH_BYTES, PluginApi, PluginApiError } = await import("../src/plugins/api.js");
+  const { MAX_PLUGIN_MESSAGE_BYTES } = await import("../src/plugins/runtime.js");
+  const { parseManifest } = await import("../src/plugins/manifest.js");
+  const { PLUGIN_SCOPES } = await import("../src/plugins/protocol.js");
+  const { SessionRegistry } = await import("../src/registry.js");
+  const { hostGit } = await import("../src/git.js");
+
+  /*
+   * `id` is a parameter because `PluginApi` keys its fetch window on it and
+   * nothing gives the window back: the 40-request spray below spends `p`'s budget
+   * for the rest of the process, so a later section wanting a real `net.fetch`
+   * answer has to ask under a different name. (That the window outlives the
+   * plugin is its own finding — a plugin uninstalled and reinstalled under one id
+   * inherits the previous one's spent budget.)
+   */
+  const manifestWith = (scopes: string[], net: string[] = [], id = "p"): PluginManifest => {
+    const parsed = parseManifest(
+      JSON.stringify({ id, name: "P", version: "1.0.0", api: 1, scopes, net, contributes: {} }),
+    );
+    if (!parsed.ok) throw new Error(parsed.message);
+    return parsed.manifest;
+  };
+
+  const reached: string[] = [];
+  const warned: string[] = [];
+  /*
+   * What the far end says, swappable — because the *response* half of `net.fetch`
+   * was driven by nothing at all. This answered `"hi"` and only ever `"hi"`, so
+   * neither the `content-length` refusal nor `readBounded` — a function whose
+   * whole reason for existing is that `response.text()` arrived too late to be a
+   * measurement — was ever reached.
+   */
+  let answers: () => Response = () => new Response("hi", { status: 200 });
+
+  const api = new PluginApi({
+    registry: new SessionRegistry(),
+    /*
+     * Written out here once, and hoisted to {@link memoryPluginData} the moment
+     * `SqlitePluginDataStore` had to be driven against the same object: the two
+     * implementations refuse and page identically or `checkPluginWrite` is shared
+     * for nothing, and a second copy of the fake is exactly how that stops being
+     * true. Its docblock keeps the argument for why it is keyed on the *pair*.
+     */
+    data: memoryPluginData(),
+    git: hostGit,
+    onWarning: (detail) => warned.push(detail),
+    fetchImpl: ((url: URL) => {
+      reached.push(String(url));
+      return Promise.resolve(answers());
+    }) as unknown as typeof fetch,
+  });
+
+  const codeOf = async (manifest: PluginManifest, method: string, args: unknown = {}): Promise<string> => {
+    try {
+      await api.call(manifest, method, args);
+      return "ok";
+    } catch (error) {
+      return error instanceof PluginApiError ? error.code : "threw";
+    }
+  };
+
+  /*
+   * **Every method, refused for a plugin that declared nothing.** Written as a
+   * sweep over one manifest rather than as a case per method, so a method added
+   * without a `SCOPE_OF` entry is caught here rather than being reachable by
+   * everybody — which is the failure mode that gate has.
+   */
+  const nothing = manifestWith([]);
+  const METHODS: [string, unknown][] = [
+    ["sessions.list", {}],
+    ["sessions.get", { id: "s" }],
+    ["sessions.events", { id: "s" }],
+    ["sessions.changes", { id: "s" }],
+    ["sessions.diff", { id: "s", path: "a" }],
+    ["sessions.workspace", { id: "s" }],
+    ["sessions.create", { agent: "claude", cwd: "/tmp" }],
+    ["sessions.prompt", { id: "s", text: "hi" }],
+    ["sessions.cancel", { id: "s" }],
+    ["sessions.stop", { id: "s" }],
+    ["sessions.setMeta", { id: "s" }],
+    ["sessions.answerPermission", { id: "s", permissionId: "p", optionId: "o" }],
+    ["sessions.answerElicitation", { id: "s", elicitationId: "e" }],
+    ["agents.list", {}],
+    ["files.read", { sessionId: "s", path: "a" }],
+    ["store.get", { key: "k" }],
+    ["store.set", { key: "k", value: 1 }],
+    ["store.delete", { key: "k" }],
+    ["store.keys", {}],
+    ["store.entries", {}],
+    ["net.fetch", { url: "https://api.example.com/" }],
+    /*
+     * The one method that spends the operator's quota rather than the machine's
+     * access. In this sweep for the same reason as every other: the plugin
+     * declaring nothing must be refused *before* anything is asked of an agent —
+     * the scope gate runs ahead of the availability check, so this is refused on
+     * a daemon that has no asker wired at all.
+     */
+    ["model.complete", { agent: "claude", prompt: "hi" }],
+    /*
+     * And its sibling, which spends no quota and still spawns an agent — so it
+     * sits behind the same scope and is refused on the same terms. In this sweep
+     * for the same reason as every other: the gate runs ahead of the availability
+     * check, so a plugin declaring nothing is refused on a daemon with no asker
+     * wired at all.
+     */
+    ["model.list", { agent: "claude" }],
+  ];
+  const denied: string[] = [];
+  for (const [method, args] of METHODS) {
+    if ((await codeOf(nothing, method, args)) !== "plugin_scope_denied") denied.push(method);
+  }
+  check("every method needs a scope, and a plugin with none reaches nothing", denied, []);
+  report(
+    "and every scope in the union is the gate for at least one of them",
+    PLUGIN_SCOPES.length === 6,
+    `${METHODS.length} methods behind ${PLUGIN_SCOPES.length} scopes`,
+  );
+  /*
+   * ⚠ **The number is written here and has to be moved by hand, which is the
+   * whole of what this line is worth.** `SCOPE_OF` holds twenty-three entries —
+   * twenty-two scoped methods plus `log`, which needs none and is driven on its
+   * own below — and the table above is a hand-written mirror of it. The sweep
+   * claims "every method", and that claim is only as good as somebody having
+   * added a row here; nothing on this side can derive the list, because `SCOPE_OF`
+   * is module-private and exporting it so a driver could read it would make the
+   * gate importable by anything else that wanted to reason about it. **Measured
+   * while writing this**: `store.entries` had been added to `SCOPE_OF` and never
+   * here, so the assertion above was true of twenty of the twenty-one and said
+   * "every method" about a table missing one. A further scoped method needs
+   * a row and this count moved in the same edit — which `model.complete` duly
+   * did, failing all three of these lines until it was written down here — and
+   * `model.list` after it.
+   */
+  check("and the sweep is the whole of that table", METHODS.length, 23);
+
+  /*
+   * ⚠ **Every method a plugin may call is one it can *reach*, and this assertion
+   * exists because one was not.**
+   *
+   * `model.complete` had an entry in `SCOPE_OF`, an arm in the dispatcher, a row
+   * in the table above, a sentence on the consent screen and a version bump — and
+   * no line in the object the child process is handed. `ctx.model` was
+   * `undefined`, so a plugin calling it got a `TypeError` before a byte crossed
+   * the IPC channel. Eight drivers were green: every one of them tested the host's
+   * half, and the two halves meet at `api.ts` and part at `context.ts`.
+   *
+   * That is the sixth bug of the same shape in one day — *the only check of a
+   * place contained the same misunderstanding as the code* — and the first in this
+   * direction. The table above says what a plugin is *allowed* to call; this says
+   * what a plugin can *say*, and the gap between the two was invisible.
+   *
+   * Two properties, and the second is the one a smoke test would miss: the
+   * function is there, **and** it asks for the method it is named for. A branch
+   * calling the wrong string is reachable, well-typed, and answers
+   * `unknown_method` at runtime.
+   */
+  {
+    const { pluginContext } = await import("../src/plugins/context.js");
+    const asked: string[] = [];
+    const ctx = pluginContext(
+      (method) => {
+        asked.push(method);
+        return Promise.resolve(null);
+      },
+      { id: "p", version: "1.0.0" },
+    ) as Record<string, unknown>;
+
+    const unreachable: string[] = [];
+    const misnamed: string[] = [];
+    for (const [method] of METHODS) {
+      const [group, name] = method.split(".");
+      const holder = group === undefined ? undefined : ctx[group];
+      const fn = holder !== null && typeof holder === "object" ? (holder as Record<string, unknown>)[name ?? ""] : undefined;
+      if (typeof fn !== "function") {
+        unreachable.push(method);
+        continue;
+      }
+      const before = asked.length;
+      // Three empty objects: every builder either ignores its arguments or spreads
+      // them, so this reaches the `call` without depending on any one signature.
+      void (fn as (...args: unknown[]) => unknown)({}, {}, {});
+      if (asked[before] !== method) misnamed.push(`${method} asked for ${asked[before] ?? "nothing"}`);
+    }
+    check("every method a plugin may call is one it can reach", unreachable, []);
+    check("and each one asks the host for the method it is named for", misnamed, []);
+    /*
+     * `log` is not in the table above because it needs no scope — and it is the
+     * one method whose absence would leave a plugin unable to say anything about
+     * itself, so it is asserted separately rather than left out with its scope.
+     */
+    check("and logging is reachable too, though it is behind no scope", typeof ctx["log"], "function");
+    check("nothing was asked for that the table does not hold", asked.length, METHODS.length);
+  }
+
+  check("a method that does not exist", await codeOf(manifestWith(["store"]), "sessions.destroy"), "unknown_method");
+  // The one method with no scope at all, because it is how a plugin says anything
+  // about itself and refusing it would make a plugin that declared nothing silent.
+  check("logging needs nothing", await codeOf(nothing, "log", { message: "hello" }), "ok");
+  report("and it reaches the warning sink", warned.some((one) => one.includes("hello")), `${warned.length} warnings`);
+
+  /*
+   * A scope is refused **and reported**. A plugin exceeding what it told somebody
+   * it needed is exactly the thing an operator would want to know about, and it is
+   * invisible from the plugin's own screens.
+   */
+  const before = warned.length;
+  await codeOf(nothing, "store.get", { key: "k" });
+  report("a refused scope is reported as well as refused", warned.length > before, warned[warned.length - 1] ?? "");
+
+  const stored = manifestWith(["store"]);
+  check("with the scope it works", await codeOf(stored, "store.set", { key: "k", value: { a: 1 } }), "ok");
+  check("and reads back parsed rather than as text", await api.call(stored, "store.get", { key: "k" }), { a: 1 });
+  check("a key that was never written", await api.call(stored, "store.get", { key: "nope" }), null);
+  check("and a prefix listing is a prefix listing", await api.call(stored, "store.keys", { prefix: "k" }), ["k"]);
+
+  /* ---------------------------------------------------------------- *
+   * The one outbound door.
+   * ---------------------------------------------------------------- */
+  const netted = manifestWith(["net"], ["api.example.com"]);
+  check("a host the manifest lists", await codeOf(netted, "net.fetch", { url: "https://api.example.com/x" }), "ok");
+  check("and it really went there", reached, ["https://api.example.com/x"]);
+  check("a host it does not list", await codeOf(netted, "net.fetch", { url: "https://elsewhere.example/" }), "host_not_allowed");
+  check("http rather than https", await codeOf(netted, "net.fetch", { url: "http://api.example.com/" }), "insecure_url");
+  check("something that is not a URL", await codeOf(netted, "net.fetch", { url: "api.example.com" }), "invalid_url");
+  // A refusal on the *host* must not have gone out first.
+  check("and nothing refused was ever requested", reached, ["https://api.example.com/x"]);
+
+  const spray: string[] = [];
+  for (let i = 0; i < 40; i += 1) spray.push(await codeOf(netted, "net.fetch", { url: "https://api.example.com/" }));
+  report(
+    "a plugin cannot poll a host as fast as it likes",
+    spray.includes("fetch_rate_limited"),
+    `${spray.filter((one) => one === "ok").length} of ${spray.length} allowed`,
+  );
+
+  /* ---------------------------------------------------------------- *
+   * `files.read`, which had no behavioural assertion at all.
+   *
+   * ⚠ **The one host method that hands a plugin the contents of a file, and it
+   * appeared in this section exactly twice — both times as a row in the scope
+   * table.** So what was proven is that it needs the `files.read` scope, and
+   * nothing whatever about what it does once it has it. Its five refusals include
+   * the pair `files-paths-git.md` calls load-bearing: `safeRelPath` refuses a
+   * `.git` segment somebody *typed*, and the resolved re-test through
+   * `probeRequestable` is what refuses the same directory reached through a
+   * symlink. `server.ts` has a second caller of that pair and drives it; this one
+   * did not, and it is the caller that answers a plugin rather than a person.
+   *
+   * A stub registry rather than the section's real one: this method reads exactly
+   * `managed.workspace.root`, and standing up a real session to hand it one path
+   * would be a fixture about `SessionRegistry` rather than about this arm.
+   * ---------------------------------------------------------------- */
+  {
+    const tree = join(homedir(), ".reemoat-check-files");
+    rmSync(tree, { recursive: true, force: true });
+    mkdirSync(join(tree, "sub"), { recursive: true });
+    mkdirSync(join(tree, ".git"), { recursive: true });
+    writeFileSync(join(tree, "notes.txt"), "hello\n");
+    writeFileSync(join(tree, ".git", "config"), "[core]\n");
+    writeFileSync(join(tree, "fat.bin"), "z".repeat(64 * 1024 + 1));
+    // The link is the whole reason the resolved re-test exists.
+    symlinkSync(join(tree, ".git"), join(tree, "g"));
+
+    const filed = new PluginApi({
+      registry: {
+        get: (id: string) => (id === "s" ? { workspace: { root: tree } } : undefined),
+      } as unknown as SessionRegistry,
+      data: memoryPluginData(),
+      git: hostGit,
+      onWarning: () => {},
+    });
+    const reads = async (path: string): Promise<string> => {
+      try {
+        return String(await filed.call(manifestWith(["files.read"], [], "files"), "files.read", { sessionId: "s", path }));
+      } catch (error) {
+        return error instanceof PluginApiError ? error.code : String(error);
+      }
+    };
+
+    check("a file inside the tree reads", await reads("notes.txt"), "hello\n");
+    check("one above it does not", await reads("../secret"), "invalid_path");
+    check("nor an absolute path", await reads("/etc/hosts"), "invalid_path");
+    check("nor .git spelled out", await reads(".git/config"), "invalid_path");
+    // The half `safeRelPath` alone cannot answer, and the reason `probeRequestable`
+    // is called at all.
+    check("nor .git reached through a link", await reads("g/config"), "invalid_path");
+    check("a directory is not a file", await reads("sub"), "not_a_file");
+    check("and a file past the ceiling is refused rather than truncated", await reads("fat.bin"), "file_too_large");
+    // The stub answers `undefined` for every other id, which is what a registry
+    // does for a session that is not here.
+    check("and a path is never even looked at for a session this machine does not have", await (async () => {
+      try {
+        await filed.call(manifestWith(["files.read"], [], "files"), "files.read", { sessionId: "gone", path: "notes.txt" });
+        return "no refusal";
+      } catch (error) {
+        return error instanceof PluginApiError ? error.code : String(error);
+      }
+    })(), "session_not_found");
+    rmSync(tree, { recursive: true, force: true });
+  }
+
+  /* ---------------------------------------------------------------- *
+   * What comes back, which nothing asked about.
+   *
+   * Two bounds and they catch different servers: a `content-length` is refused
+   * before a byte is read, and a server that declares nothing is refused *while*
+   * it is still sending. The second is the one that matters — a plugin's own
+   * allowlisted host answering an endless chunked body could otherwise spend the
+   * whole 10s window growing this daemon's heap, which is the measurement
+   * `readBounded`'s docblock records.
+   * ---------------------------------------------------------------- */
+  {
+    const fresh = manifestWith(["net"], ["late.example.com"], "late");
+    answers = () =>
+      new Response("x", { status: 200, headers: { "content-length": String(8 * 1024 * 1024) } });
+    check(
+      "a response that declares more than a plugin may read",
+      await codeOf(fresh, "net.fetch", { url: "https://late.example.com/a" }),
+      "response_too_large",
+    );
+
+    // The case the header cannot see: no `content-length`, and it never stops.
+    let pulls = 0;
+    answers = () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            pulls += 1;
+            controller.enqueue(new Uint8Array(64 * 1024));
+          },
+        }),
+        { status: 200 },
+      );
+    check(
+      "and one that simply keeps sending",
+      await codeOf(fresh, "net.fetch", { url: "https://late.example.com/b" }),
+      "response_too_large",
+    );
+    // Charged per chunk rather than once the body is whole, which is the whole
+    // point: a bound that reads everything first is not a bound.
+    report("refused while it was still arriving", pulls > 0 && pulls < 64, `${pulls} chunks read`);
+
+    /*
+     * ⚠ **Refused before a byte of it is read — which the `/a` case above cannot
+     * show.** Its body was the two-character string `"x"`, so a header gate that
+     * read the whole thing first and refused it afterwards would have passed that
+     * assertion unchanged. A body that counts its own pulls is what separates the
+     * two, and the assertion is zero.
+     *
+     * ⚠ **`highWaterMark: 0`, or this fails against its own fixture.** A
+     * `ReadableStream` built with no strategy gets a `CountQueuingStrategy` of one
+     * and calls `pull` once at construction — before any reader exists, whatever
+     * this daemon does, and `body.cancel()` does not undo it. Measured: one pull
+     * with the default, none at zero. At zero the only thing that can move this
+     * counter is somebody reading.
+     */
+    let declaredPulls = 0;
+    answers = () =>
+      new Response(
+        new ReadableStream<Uint8Array>(
+          {
+            pull(controller) {
+              declaredPulls += 1;
+              controller.enqueue(new Uint8Array(1024));
+            },
+          },
+          { highWaterMark: 0 },
+        ),
+        { status: 200, headers: { "content-length": String(MAX_PLUGIN_FETCH_BYTES + 1) } },
+      );
+    check(
+      "one byte past the bound, honestly declared",
+      await codeOf(fresh, "net.fetch", { url: "https://late.example.com/c" }),
+      "response_too_large",
+    );
+    report("and its body was never pulled at all", declaredPulls === 0, `${declaredPulls} chunks read`);
+
+    /*
+     * ⚠ **The bound against the channel it has to cross, which nothing checked.**
+     * `MAX_PLUGIN_FETCH_BYTES` was `1024 * 1024` while one IPC message carries
+     * `MAX_PLUGIN_MESSAGE_BYTES`, so every answer past roughly 250 KiB was
+     * fetched in full, charged to the plugin's thirty a minute, read into this
+     * daemon's heap — and then refused by `ForkedPlugin.send`, which was the only
+     * place the two numbers ever met. So the largest answer the API will hand
+     * back is built here and measured inside the `{"t":"answer",…}` envelope
+     * `LivePlugin.onChildMessage` actually sends.
+     *
+     * A body that is all `"` because that is a body's worst *realistic* escape:
+     * `JSON.stringify` doubles it, and a JSON payload — the thing `net.fetch`
+     * exists to go and fetch — is already a third quotes. Measured at this bound:
+     * 131,182 bytes of the 262,144 the channel takes, against 262,254 for the
+     * half-channel bound this would otherwise have inherited from `store.entries`.
+     */
+    answers = () =>
+      new Response('"'.repeat(MAX_PLUGIN_FETCH_BYTES), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    const largest = (await api.call(fresh, "net.fetch", { url: "https://late.example.com/d" })) as {
+      body: string;
+    };
+    check("a body of exactly the bound is answered rather than refused", largest.body.length, MAX_PLUGIN_FETCH_BYTES);
+    const wire = Buffer.byteLength(JSON.stringify({ t: "answer", id: 1, ok: true, value: largest }), "utf8");
+    report(
+      "and the largest answer it will hand back still crosses the channel it is delivered on",
+      wire <= MAX_PLUGIN_MESSAGE_BYTES,
+      `${wire} of ${MAX_PLUGIN_MESSAGE_BYTES} bytes`,
+    );
+
+    // The other side of that boundary, undeclared, so `readBounded` is the only
+    // thing that can catch it. `new Response(string)` sets no `content-length` —
+    // measured — which is what makes this the chunked path rather than the header
+    // one, with a body one byte over instead of an endless stream.
+    answers = () => new Response("a".repeat(MAX_PLUGIN_FETCH_BYTES + 1), { status: 200 });
+    check(
+      "and one byte more than that is refused",
+      await codeOf(fresh, "net.fetch", { url: "https://late.example.com/e" }),
+      "response_too_large",
+    );
+
+    /*
+     * ⚠ **Inside the read bound and still undeliverable**, which is the case the
+     * assembled-answer check at the end of `fetch` exists for. Every C0 control
+     * byte is a six-character `\u00XX` escape, so a body at exactly the read bound
+     * serialises to 393,326 against a 262,144-byte channel. Refused here with the
+     * code the docs publish, rather than assembled, charged and then dropped by
+     * `ForkedPlugin.send` naming a limit the plugin was never given.
+     */
+    answers = () =>
+      new Response(String.fromCharCode(1).repeat(MAX_PLUGIN_FETCH_BYTES), { status: 200 });
+    check(
+      "a body inside the bound that could not be delivered is refused here, not at the channel",
+      await codeOf(fresh, "net.fetch", { url: "https://late.example.com/f" }),
+      "response_too_large",
+    );
+
+    answers = () => new Response("hi", { status: 200 });
+  }
+
+  /*
+   * `agents.list` sits behind `sessions.read` rather than a scope of its own: it
+   * is the fact a plugin needs *before* `sessions.create`, and a fifth scope for
+   * one method would be a fifth line somebody has to understand in the install
+   * list.
+   */
+  report(
+    "asking what this machine could run needs only sessions.read",
+    Array.isArray(await api.call(manifestWith(["sessions.read"]), "agents.list", {})),
+    "an array of availability rows",
+  );
+
+  check("a session this machine does not have", await codeOf(manifestWith(["sessions.read"]), "sessions.get", { id: "s_nope" }), "session_not_found");
+  check("and an argument that is not a string", await codeOf(manifestWith(["sessions.read"]), "sessions.get", { id: 7 }), "bad_request");
+
+  /* ---------------------------------------------------------------- *
+   * Which scope, and not merely that there is one.
+   *
+   * ⚠ **The sweep above proves every method needs *a* scope. It cannot prove any
+   * of them needs the right one** — it runs one manifest declaring nothing, so a
+   * table mapping `"sessions.stop"` to `"sessions.read"` would satisfy every
+   * assertion in this file up to here while handing a read-only plugin the verb
+   * that ends somebody's session. The two halves are not the same claim and only
+   * one of them was being made.
+   *
+   * Derived rather than restated: each method is asked five times, once per
+   * manifest holding four of the five scopes, and the scope whose absence is the
+   * one that draws `plugin_scope_denied` is the scope that method actually needs.
+   * That is what a driver can find out from outside `api.ts`. The comparison at
+   * the end is against a literal, which is the copy — **exporting `SCOPE_OF` would
+   * let this be derived instead, and it is deliberately not exported**: it is the
+   * gate, and a gate exported so a test can read it is a gate anything else can
+   * import and reason about.
+   *
+   * Every probe is sent `{}`, so the four that pass the gate fail immediately on
+   * `bad_request` or `session_not_found` rather than doing the thing. That is not
+   * tidiness — with real arguments this loop would call `sessions.create` sixteen
+   * times and `sessions.stop` on whatever it made.
+   * ---------------------------------------------------------------- */
+  const scopeNeededBy = async (method: string): Promise<string> => {
+    const refused: string[] = [];
+    for (const missing of PLUGIN_SCOPES) {
+      const held = PLUGIN_SCOPES.filter((one) => one !== missing);
+      // A manifest declaring `net` must name hosts, so the list rides the scope
+      // rather than being constant — `readNet` refuses the pair that disagrees.
+      const manifest = manifestWith([...held], held.includes("net") ? ["api.example.com"] : []);
+      if ((await codeOf(manifest, method, {})) === "plugin_scope_denied") refused.push(missing);
+    }
+    // Never "the first one refused": a method behind two scopes, or behind none
+    // once somebody edits the table, is a different fact from a mis-mapping and
+    // has to read differently in the output.
+    return refused.length === 1 ? String(refused[0]) : `${refused.length} scopes: ${refused.join("+")}`;
+  };
+  const mapping: [string, string][] = [];
+  for (const [method] of METHODS) mapping.push([method, await scopeNeededBy(method)]);
+  check("and each of them is behind the right one", mapping, [
+    ["sessions.list", "sessions.read"],
+    ["sessions.get", "sessions.read"],
+    ["sessions.events", "sessions.read"],
+    ["sessions.changes", "sessions.read"],
+    ["sessions.diff", "sessions.read"],
+    ["sessions.workspace", "sessions.read"],
+    ["sessions.create", "sessions.write"],
+    ["sessions.prompt", "sessions.write"],
+    ["sessions.cancel", "sessions.write"],
+    ["sessions.stop", "sessions.write"],
+    ["sessions.setMeta", "sessions.write"],
+    ["sessions.answerPermission", "sessions.write"],
+    ["sessions.answerElicitation", "sessions.write"],
+    // The one that is not obvious from its name, and the one a refactor would get
+    // wrong first. See the comment on `SCOPE_OF` for why it is not its own scope.
+    ["agents.list", "sessions.read"],
+    ["files.read", "files.read"],
+    ["store.get", "store"],
+    ["store.set", "store"],
+    ["store.delete", "store"],
+    ["store.keys", "store"],
+    ["store.entries", "store"],
+    ["net.fetch", "net"],
+    ["model.complete", "model"],
+    // Not `sessions.read`, which is where a method called "list" would land by
+    // reflex — reading an agent's model list spawns that agent, so it belongs
+    // with the one that spends, not with the ones that only look.
+    ["model.list", "model"],
+  ]);
+}
+
+process.stdout.write("\nasking an agent one question, and every way that is refused\n");
+{
+  const { AgentAskRuns, AgentAskError, MAX_ASK_PROMPT_BYTES, MAX_CONCURRENT_ASKS } = await import(
+    "../src/agentask.js"
+  );
+
+  /**
+   * A runtime that answers `availability()` and nothing else.
+   *
+   * ⚠ **Every case below is refused *before* `launch` is reached**, which is the
+   * property that makes this fake honest rather than convenient: `launch` throws,
+   * so any assertion that accidentally got past the gate would fail loudly rather
+   * than pass on a stub. The refusals that need a real ACP session — the deadline,
+   * the output ceiling, the text collection — are not here and are named at the
+   * foot of this section rather than left to look covered.
+   */
+  const runtimeWith = (agents: { id: string; available: boolean; loggedIn: boolean | null; hint?: string }[]): never =>
+    ({
+      availability: () =>
+        Promise.resolve(
+          agents.map((one) => ({
+            id: one.id,
+            displayName: one.id,
+            available: one.available,
+            hint: one.hint ?? null,
+            loggedIn: one.loggedIn,
+          })),
+        ),
+      launch: () => {
+        throw new Error("this driver refuses before anything is launched");
+      },
+    }) as never;
+
+  const codeOfAsk = async (runs: InstanceType<typeof AgentAskRuns>, agent: string, prompt = "hi"): Promise<string> => {
+    try {
+      await runs.ask(agent as never, prompt);
+      return "none";
+    } catch (error) {
+      return error instanceof AgentAskError ? error.code : `unexpected: ${String(error)}`;
+    }
+  };
+
+  const claudeOnly = runtimeWith([{ id: "claude", available: true, loggedIn: true }]);
+  const runs = new AgentAskRuns({ runtime: claudeOnly, cwd: tmp("ask-") });
+
+  check("an agent this machine does not have", await codeOfAsk(runs, "kimi"), "model_agent_unknown");
+  check(
+    "a prompt larger than a prompt may be",
+    await codeOfAsk(runs, "claude", "x".repeat(MAX_ASK_PROMPT_BYTES + 1)),
+    "model_prompt_too_large",
+  );
+  check("and nothing to ask at all", await codeOfAsk(runs, "claude", "   "), "model_prompt_empty");
+
+  /*
+   * ⚠ **`loggedIn` is three-valued, and `null` must be attempted rather than
+   * refused.** Q7.99 records this exact mistake one subsystem over: `null` means
+   * *this agent has no non-interactive way to answer*, which is permanently true
+   * of kimi — so reading it as "not signed in" refuses an agent that works, and
+   * on this path there is no screen on which anybody could discover otherwise.
+   *
+   * The assertion is that `null` gets **past** the gate: it reaches `launch`,
+   * which this fake throws from, so `model_failed` here is the proof that the
+   * check did not short-circuit. `false` is refused before that.
+   */
+  const mixed = new AgentAskRuns({
+    runtime: runtimeWith([
+      { id: "claude", available: true, loggedIn: false },
+      { id: "kimi", available: true, loggedIn: null },
+      { id: "codex", available: false, loggedIn: null, hint: "install codex first" },
+    ]),
+    cwd: tmp("ask-"),
+  });
+  check("an agent that is installed and signed out", await codeOfAsk(mixed, "claude"), "model_agent_signed_out");
+  check(
+    "an agent that cannot say whether it is signed in is tried, not refused",
+    await codeOfAsk(mixed, "kimi"),
+    "model_failed",
+  );
+  check("an agent that is not installed carries the runtime's own hint", await codeOfAsk(mixed, "codex"), "model_agent_unavailable");
+  check(
+    "and the hint is what it says rather than a sentence this file invented",
+    await mixed.ask("codex" as never, "hi").catch((error: unknown) => (error as Error).message),
+    "install codex first",
+  );
+
+  /*
+   * ⚠ **The daemon-wide cap, and it counts starts as well as running turns.** A
+   * cap that only counted `live` would let N calls all get past the check while
+   * every one of them was still inside `Session.start` — which is a subprocess
+   * spawn and an ACP handshake, i.e. the expensive part. `inFlight` is the sum,
+   * and `starting` is why.
+   */
+  const slow = new AgentAskRuns({
+    runtime: {
+      availability: () => Promise.resolve([{ id: "claude", displayName: "claude", available: true, hint: null, loggedIn: true }]),
+      // `Session.start` asks for this *before* it launches, so a fake without it
+      // throws there and never reaches the park — which is how the first version
+      // of this case measured `model_failed` and an empty `starting`.
+      describe: () => ({ displayName: "claude", authHint: "" }),
+      clientFileIo: false,
+      // Never resolves, so every accepted ask stays in `starting`.
+      launch: () => new Promise(() => {}),
+    } as never,
+    cwd: tmp("ask-"),
+  });
+  const parked = Array.from({ length: MAX_CONCURRENT_ASKS }, () => slow.ask("claude" as never, "hi").catch(() => "parked"));
+  // Let each of them get past the availability await and into `starting`.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  check("one more than the machine will run at once", await codeOfAsk(slow, "claude"), "model_busy");
+  check("and the cap counted the ones still starting", slow.inFlight, MAX_CONCURRENT_ASKS);
+
+  /*
+   * ⚠ **Shutdown waits for what was still being born.** An ask accepted moments
+   * before SIGTERM is inside `Session.start` when the drain runs; without
+   * awaiting `starting` it would spawn *after* the drain and outlive
+   * `process.exit(0)` with nothing holding it. `AgentLoginRuns` records the same
+   * measurement. Driven here by leaving two parked starts and asserting that a
+   * shutdown does not race past them — and that the door is shut afterwards.
+   */
+  const closing = slow.shutdown();
+  check("an ask arriving during shutdown is refused rather than started", await codeOfAsk(slow, "claude"), "model_unavailable");
+  void parked;
+  void closing;
+
+  /*
+   * ⚠ **Not covered here, and said rather than left looking covered:** the wall
+   * clock, the output ceiling and the text collection all need a real ACP
+   * handshake, so they are exercised by `pnpm harness` against a live agent
+   * rather than by this driver. What this section does cover is every refusal
+   * that happens before a process is spawned — which is every refusal a plugin
+   * author can actually provoke by getting the call wrong.
+   */
+}
+
+process.stdout.write("\nwhich model a one-shot ask runs on\n");
+{
+  /* ---------------------------------------------------------------- *
+   * ⚠ **This daemon has no list of models and could not have one.** There is no
+   * field called `model` anywhere in `src/`: selection travels over ACP's
+   * `session/set_config_option`, where "model" is one value of the option's
+   * `category`, and what exists is whatever the agent's CLI decided this week. So
+   * the only honest answer to *which models are there* is to start the agent and
+   * read what it publishes — and the only way to drive that offline is a real
+   * `Session` over pipes with a fake agent on the far end, which is what this is.
+   *
+   * The three things a refusal-only fake could never reach: that the list really
+   * comes off `session/new`, that a chosen model really reaches
+   * `session/set_config_option`, and that a *stale* choice is refused against the
+   * agent standing in front of us rather than against the cache somebody read.
+   * ---------------------------------------------------------------- */
+  const acp = await import("@agentclientprotocol/sdk");
+  const { LocalRuntime } = await import("../src/runtime/local.js");
+  const { PassThrough } = await import("node:stream");
+  const { AgentAskRuns, AgentAskError, ASK_TIMEOUT_MS, MAX_ASK_OUTPUT_BYTES, MAX_ASK_PROMPT_BYTES, MAX_CONCURRENT_ASKS, MODELS_TTL_MS } =
+    await import("../src/agentask.js");
+  const { PLUGIN_INVOKE_TIMEOUT_MS } = await import("../src/plugins/runtime.js");
+
+  /** Every `session/set_config_option` the daemon sent, as it sent it. */
+  const configured: { configId: string; value: unknown }[] = [];
+  /** How many `session/new` calls this fake has answered. Feeds the cache case. */
+  let opened = 0;
+  /** What the agent claims its models are. Rewritten mid-section, on purpose. */
+  let models = [
+    { value: "opus", name: "Opus 5", description: "the big one" },
+    { value: "haiku", name: "Haiku 4.5", description: null },
+  ];
+
+  /*
+   * ⚠ **A fresh pair of pipes per launch, not one pair shared.** Every case here
+   * starts and disposes a session, and `dispose` ends the agent's stdin — so a
+   * single pair works exactly once and every case after the first dies with "ACP
+   * connection closed". That is an artefact of both ends being in this process,
+   * and it is the reason the peer is built inside `launch` rather than around it.
+   */
+  /*
+   * ⚠ **A turn that never answers, opt-in, so every assertion below keeps the fake
+   * it already had.** The cancellation case needs an agent that has started and is
+   * still talking — a `session/prompt` that resolves at once can only ever be
+   * raced by a deadline, never by a caller walking away.
+   */
+  let hangPrompt = false;
+  /*
+   * What the agent *says* before it stops, which every case above leaves empty —
+   * `stopReason: end_turn` and not one word of answer. The output ceiling is
+   * charged **as chunks arrive** rather than measured at the end, so a fixture
+   * that answered in one lump could not tell the two apart.
+   */
+  let sayBack: string[] = [];
+  const speak = (): { toAgent: PassThrough; toClient: PassThrough } => {
+    const toAgent = new PassThrough();
+    const toClient = new PassThrough();
+    const send = (message: unknown): boolean => toClient.write(`${JSON.stringify(message)}\n`);
+    /**
+     * The `session/prompt` this peer has been asked and has not answered.
+     *
+     * ⚠ **A cancelled prompt is answered rather than abandoned, because a real
+     * agent answers it and the difference is five seconds a case.** `dispose`
+     * sends `session/cancel` and then waits the cancel grace out for the turn to
+     * end; a peer that never ends one makes every {@link hangPrompt} case cost
+     * that whole grace *after* it already has the answer it was asserting about.
+     * Measured before this was here: an ask with a 300 ms deadline rejected on
+     * time and settled at 5.3 s, which is long enough to make the deadline
+     * unassertable inside any window a driver may sit out.
+     */
+    let parked: unknown = null;
+    let buffer = "";
+    toAgent.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      for (let nl = buffer.indexOf("\n"); nl >= 0; nl = buffer.indexOf("\n")) {
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (line.trim().length === 0) continue;
+        const message = JSON.parse(line) as Record<string, any>;
+        const id = message["id"];
+        switch (message["method"]) {
+          case acp.methods.agent.initialize:
+            send({
+              jsonrpc: "2.0",
+              id,
+              result: { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: {}, authMethods: [] },
+            });
+            break;
+          case acp.methods.agent.session.new:
+            opened += 1;
+            /*
+             * ⚠ **Two options, and the model one is *not* first.** Found by
+             * `category`, never by id or position — the standing rule about every
+             * agent control in this fleet, and the one a reflex `options[0]` would
+             * break silently on the agent that happens to order them the other way.
+             */
+            send({
+              jsonrpc: "2.0",
+              id,
+              result: {
+                sessionId: "s_models",
+                configOptions: [
+                  {
+                    id: "effort",
+                    name: "Effort",
+                    category: "thought_level",
+                    type: "select",
+                    currentValue: "default",
+                    options: [{ value: "default", name: "Default" }],
+                  },
+                  {
+                    id: "model-picker",
+                    name: "Model",
+                    category: "model",
+                    type: "select",
+                    currentValue: "opus",
+                    options: models,
+                  },
+                ],
+              },
+            });
+            break;
+          case acp.methods.agent.session.setConfigOption:
+            configured.push({ configId: message["params"]?.configId, value: message["params"]?.value });
+            // ACP defines the response's `configOptions` as the complete list, so
+            // this answers with the whole thing rather than a delta.
+            send({
+              jsonrpc: "2.0",
+              id,
+              result: {
+                configOptions: [
+                  {
+                    id: "model-picker",
+                    name: "Model",
+                    category: "model",
+                    type: "select",
+                    currentValue: message["params"]?.value,
+                    options: models,
+                  },
+                ],
+              },
+            });
+            break;
+          case acp.methods.agent.session.prompt:
+            // Deliberately unanswered where the case under test is a caller that
+            // leaves mid-turn; see {@link hangPrompt} — held rather than dropped,
+            // so the cancel below can end it the way an agent would.
+            if (hangPrompt) {
+              parked = id;
+              break;
+            }
+            for (const chunk of sayBack) {
+              send({
+                jsonrpc: "2.0",
+                method: acp.methods.client.session.update,
+                params: {
+                  sessionId: "s_models",
+                  update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: chunk } },
+                },
+              });
+            }
+            send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+            break;
+          case acp.methods.agent.session.cancel:
+            // A notification, so there is no id to reply to and the `default` arm
+            // below would do nothing at all. What it ends is the parked turn.
+            if (parked !== null) {
+              send({ jsonrpc: "2.0", id: parked, result: { stopReason: "cancelled" } });
+              parked = null;
+            }
+            break;
+          default:
+            if (id !== undefined) send({ jsonrpc: "2.0", id, result: {} });
+        }
+      }
+    });
+    return { toAgent, toClient };
+  };
+
+  // A runtime that is the local one in every respect except where the agent is —
+  // subclassing rather than hand-rolling, so a new required member is a type
+  // error here rather than a silently untested path.
+  class ModelPipes extends LocalRuntime {
+    override describe(agent: AgentId): AgentLaunchConfig {
+      return stubAgentConfig(agent);
+    }
+    override availability(): Promise<any> {
+      return Promise.resolve([{ id: "claude", displayName: "claude", available: true, hint: null, loggedIn: true }]);
+    }
+    override async launch(): Promise<any> {
+      const { toAgent, toClient } = speak();
+      return {
+        stdin: toAgent,
+        stdout: toClient,
+        stderr: new PassThrough(),
+        handle: null,
+        onceStartError: () => () => {},
+        onceExit: () => () => {},
+        hasExited: false,
+        waitForExit: async () => true,
+        endStdin: () => toAgent.end(),
+        kill: async () => {},
+      };
+    }
+  }
+
+  const runs = new AgentAskRuns({ runtime: new ModelPipes() as never, cwd: process.cwd() });
+
+  const listed = await runs.models("claude" as never);
+  check(
+    "the models are the ones the agent published, not a list this daemon holds",
+    listed.map((one) => [one.id, one.name, one.description]),
+    [
+      ["opus", "Opus 5", "the big one"],
+      ["haiku", "Haiku 4.5", null],
+    ],
+  );
+  check("and it cost one agent to find out", opened, 1);
+
+  /*
+   * ⚠ **Cached, because the answer costs a subprocess and an ACP handshake.** A
+   * settings pane opened twice must not spawn twice. The negative control is the
+   * whole assertion: without it, "the list is right" passes on a build that spawns
+   * every time.
+   */
+  const again = await runs.models("claude" as never);
+  check("asking again spawns nothing", opened, 1);
+  check("and answers the same thing", again.length, listed.length);
+  report("the cache is a ceiling on staleness rather than for ever", MODELS_TTL_MS > 0, `${MODELS_TTL_MS}ms`);
+
+  /*
+   * ⚠ **A chosen model reaches `session/set_config_option`, with the option's own
+   * id.** `model-picker` is deliberately not `model`: a build that sent the
+   * *category* as the id would look right in every log and be refused by every
+   * real agent.
+   */
+  await runs.ask("claude" as never, "hi", "haiku");
+  check("a chosen model is sent as the option the agent named", configured, [{ configId: "model-picker", value: "haiku" }]);
+
+  /*
+   * ⚠ **Three spellings of "not chosen", and all three mean the agent's own
+   * default.** Absent, `null` and `""` arrive from shapes nobody controls — a
+   * field left out of a JSON body, a `ctx.store.get` for a key nobody wrote, and a
+   * form submitting an untouched control. Picking one as *the* spelling makes the
+   * other two an error a plugin author discovers in production, which is exactly
+   * what the store contract cost somebody a day of. Swept rather than sampled.
+   */
+  configured.length = 0;
+  const spellings: [string, string | undefined][] = [
+    ["left out", undefined],
+    ["empty", ""],
+    ["whitespace", "   "],
+  ];
+  /*
+   * ⚠ **Both halves, because "set nothing" alone passes on a build that
+   * *threw*.** An implementation reading `""` as a chosen model refuses it as
+   * unknown — which also configures nothing, so an assertion about `configured`
+   * would be green while every plugin storing an untouched setting was broken.
+   * The refusals are collected rather than allowed to reject, so the difference is
+   * a named failure rather than a driver that dies here.
+   */
+  const refused: string[] = [];
+  for (const [name, model] of spellings) {
+    await runs.ask("claude" as never, "hi", model).catch((error: unknown) => refused.push(`${name}: ${String(error)}`));
+  }
+  check("no model chosen, in any of its spellings, is refused", refused, []);
+  check("and none of them sets anything", configured, []);
+
+  const codeOfAsk = async (model: string): Promise<string> => {
+    try {
+      await runs.ask("claude" as never, "hi", model);
+      return "none";
+    } catch (error) {
+      return error instanceof AgentAskError ? error.code : `unexpected: ${String(error)}`;
+    }
+  };
+  const messageOf = async (model: string): Promise<string> =>
+    await runs.ask("claude" as never, "hi", model).then(
+      () => "none",
+      (error: unknown) => (error as Error).message,
+    );
+
+  check("a model this agent does not offer", await codeOfAsk("gpt-9"), "model_unknown");
+  /*
+   * ⚠ **The refusal names what is really there.** "Unknown model" and a full stop
+   * sends somebody to guess — and a plugin author has no copy of the agent's list,
+   * so guessing is all that is left.
+   */
+  report("and says what it does offer", (await messageOf("gpt-9")).includes("opus"), await messageOf("gpt-9"));
+  check("and nothing was sent for the one it refused", configured, []);
+
+  /*
+   * ⚠ **Validated against the agent in front of us, never against the cache.**
+   * The list somebody chose from may be up to `MODELS_TTL_MS` old and a CLI update
+   * can retire a model in between — so a choice that was valid when the dropdown
+   * was drawn has to be refused *by name* rather than sent. Driven by retiring a
+   * model behind the cache's back: `models()` still answers the old pair, and the
+   * ask still refuses.
+   */
+  models = [{ value: "opus", name: "Opus 5", description: "the big one" }];
+  const stale = await runs.models("claude" as never);
+  check("the cache still believes the retired model exists", stale.map((one) => one.id), ["opus", "haiku"]);
+  check("but using it is refused against what the agent says now", await codeOfAsk("haiku"), "model_unknown");
+
+  /* ---------------------------------------------------------------- *
+   * How much an agent may answer with, and what happens one chunk past it.
+   *
+   * ⚠ **This was named at the foot of the refusal section as "not covered here",
+   * and it stayed uncovered because it needs an agent that actually talks.** It is
+   * reachable from this section and from nowhere else in this file: the fake up
+   * there throws from `launch` on purpose, and the one down here is a real ACP
+   * peer over real pipes.
+   *
+   * The ceiling **refuses rather than clips**, which is the decision worth pinning
+   * rather than the number: an agent answering a request for a six-word title with
+   * sixteen kilobytes has misunderstood the question, and half of a misunderstood
+   * answer is a worse title than none. So the second case asserts the code and, by
+   * asserting a code at all, that no text came back — a build that clipped would
+   * answer here rather than throw.
+   *
+   * Both fixtures are built from the constant, in chunks small enough that the
+   * ceiling is met part way through a stream. One oversized message would be
+   * refused by a build that measured at the end, which is the build this is about.
+   * ---------------------------------------------------------------- */
+  const chunk = "y".repeat(1_024);
+  const chunksFor = (bytes: number): string[] => Array.from({ length: Math.ceil(bytes / chunk.length) }, () => chunk);
+
+  sayBack = chunksFor(MAX_ASK_OUTPUT_BYTES);
+  const whole = await runs.ask("claude" as never, "hi");
+  check(
+    "an answer that meets the ceiling exactly comes back whole",
+    [Buffer.byteLength(whole.text, "utf8"), whole.agent],
+    [MAX_ASK_OUTPUT_BYTES, "claude"],
+  );
+  sayBack = chunksFor(MAX_ASK_OUTPUT_BYTES + chunk.length);
+  check(
+    "and one chunk past it is refused rather than clipped",
+    await runs.ask("claude" as never, "hi").then(
+      (answer) => `answered with ${Buffer.byteLength(answer.text, "utf8")} bytes`,
+      (error: unknown) => (error instanceof AgentAskError ? error.code : `unexpected: ${String(error)}`),
+    ),
+    "model_too_large",
+  );
+  sayBack = [];
+
+  /*
+   * ⚠ **The deadline is asserted as a *default* rather than as a number, because
+   * driving 120 seconds is not something a driver may do.** What can go wrong here
+   * is not the clock: it is `collect` reading `options.timeoutMs` and finding a
+   * value where a plugin's call has none. Two sections of this file build their own
+   * runs with a driver-sized `timeoutMs` precisely so they do not sit out the real
+   * one — so a default that had quietly become half a second would look identical
+   * in every other assertion here, and a plugin's ask would die a hundred times
+   * faster than the document promises.
+   *
+   * ⚠ **Asserted as a pair over one window, and the first arm is what makes the
+   * second mean anything.** "It was still waiting" is also what a run that never
+   * started looks like: a fake that failed to hand back an agent at all would pass
+   * that line alone. So the same call is made twice against the same hanging peer,
+   * once with a deadline a fifth of the window and once with none, and the answer
+   * is that one of them fired and the other did not. The window is deliberately
+   * far longer than the short deadline rather than close to it — what precedes
+   * `collect` is a real spawn and a real ACP handshake, and an assertion sitting
+   * just past the deadline measures those instead.
+   */
+  hangPrompt = true;
+  const patience = 1_500;
+  const settlesIn = async (waiting: InstanceType<typeof AgentAskRuns>): Promise<string> =>
+    await Promise.race([
+      waiting
+        .ask("claude" as never, "hi")
+        .then(() => "answered", (error: unknown) => (error instanceof AgentAskError ? error.code : "threw")),
+      new Promise<string>((resolve) => setTimeout(() => resolve("still waiting"), patience)),
+    ]);
+  const impatient = new AgentAskRuns({ runtime: new ModelPipes() as never, cwd: process.cwd(), timeoutMs: patience / 5 });
+  const defaulted = new AgentAskRuns({ runtime: new ModelPipes() as never, cwd: process.cwd() });
+  check(
+    "a deadline the caller set fires, and the one it did not set is not a driver's",
+    [await settlesIn(impatient), await settlesIn(defaulted)],
+    ["model_timeout", "still waiting"],
+  );
+  hangPrompt = false;
+  await impatient.shutdown();
+  await defaulted.shutdown();
+
+  /*
+   * ⚠ **And the numbers a plugin author is handed, held to the constants that
+   * enforce them.** `docs/PLUGINS.md` is the only place any of these appears to
+   * the person writing against them — there is no screen, no header and no reply
+   * that says what the ceilings are — so a bound that moved without that file
+   * moving is a published contract this daemon has quietly stopped keeping. Three
+   * of the four have no other reader at all: nothing outside `agentask.ts` names
+   * `MAX_ASK_OUTPUT_BYTES` or `ASK_TIMEOUT_MS`.
+   *
+   * Here rather than in `docscheck` because that driver's subject is prose held to
+   * what it says about *itself* — its own counts, its own citations. This is a
+   * document held to a number in `src/`, which is a fact about the daemon, and it
+   * belongs beside the assertions that drive the same number.
+   *
+   * The blockquote markers and the wrapping are folded out first: these sentences
+   * are wrapped for reading, and a fragment that spans a line break would make
+   * this an assertion about where somebody's editor put a newline.
+   */
+  const authors = readFileSync(new URL("../docs/PLUGINS.md", import.meta.url), "utf8").replace(/\n>?[ \t]*/g, " ");
+  const published: [string, string][] = [
+    ["what one ask may carry", `${MAX_ASK_PROMPT_BYTES / 1024} KiB of prompt, ${MAX_ASK_OUTPUT_BYTES / 1024} KiB back, ${ASK_TIMEOUT_MS / 1_000} s`],
+    ["how many at once", `and ${MAX_CONCURRENT_ASKS} at a time for the whole machine`],
+    /*
+     * The pair that document prints together on purpose, and the one worth
+     * checking hardest: an invocation's deadline against this call's, which is
+     * the gap that makes `await`ing a model call inside a hook a plugin that
+     * stops itself.
+     */
+    ["the gap between an invocation and an ask", `**${PLUGIN_INVOKE_TIMEOUT_MS / 1_000} seconds** to answer against this call's **${ASK_TIMEOUT_MS / 1_000}**`],
+  ];
+  for (const [name, sentence] of published) {
+    report(`what PLUGINS.md says about ${name} is what this daemon does`, authors.includes(sentence), sentence);
+  }
+
+  /*
+   * ⚠ **A caller that walks away ends the turn, rather than the turn outliving it
+   * by nearly two minutes.** `ASK_TIMEOUT_MS` is 120 s and the only caller this
+   * has is a plugin invocation with `PLUGIN_INVOKE_TIMEOUT_MS` — 10 s — to answer
+   * in, three of those stopping the plugin altogether. So the measured shape was a
+   * plugin timed out, then stopped, then removed with its row and tree deleted,
+   * and an agent subprocess still holding one of the two slots this machine allows
+   * for another 110 seconds. `LivePlugin.hostCallsAbort` is what now says so, and
+   * this is the far end of that signal.
+   *
+   * ⚠ **Its own `AgentAskRuns`, with a driver-only half-second deadline.** Reusing
+   * the section's `runs` would leave a build with the signal reverted hanging out
+   * the full two minutes before failing; here it fails in half a second, and as
+   * `model_timeout` rather than `model_cancelled`, which is the difference the
+   * assertion is about. `timeoutMs` is documented as existing for exactly this.
+   */
+  const leaving = new AgentAskRuns({ runtime: new ModelPipes() as never, cwd: process.cwd(), timeoutMs: 500 });
+  hangPrompt = true;
+  const walkAway = new AbortController();
+  const asked = leaving.ask("claude" as never, "hi", undefined, walkAway.signal);
+  // Long enough for the handshake, `session/new` and the prompt to be in flight —
+  // the window this is about is the one *after* the agent has started.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  walkAway.abort(new Error("plugin board was stopped"));
+  check(
+    "a caller that has gone ends the turn rather than waiting the deadline out",
+    await asked.then(
+      () => "none",
+      (error: unknown) => (error instanceof AgentAskError ? error.code : `unexpected: ${String(error)}`),
+    ),
+    "model_cancelled",
+  );
+  /*
+   * ⚠ **And the agent it started is disposed rather than merely unwaited-for.**
+   * The refusal travelling is half the fix; `ask`'s `finally` letting go of the
+   * subprocess is the half that gives the slot back, and `inFlight` counts
+   * `reserved`, `starting` and `live` together — so this is also the assertion
+   * that the abort did not corrupt that accounting.
+   */
+  check("and the agent it started is let go of", leaving.inFlight, 0);
+  hangPrompt = false;
+  await leaving.shutdown();
+
+  await runs.shutdown();
+}
+
+process.stdout.write("\na plugin that will not start, or will not answer\n");
+{
+  const { PluginHost } = await import("../src/plugins/host.js");
+  const { SessionRegistry } = await import("../src/registry.js");
+  const { hostGit } = await import("../src/git.js");
+  const { parseManifest } = await import("../src/plugins/manifest.js");
+  const { openStores } = await import("../src/store/sqlite.js");
+
+  const parsed = parseManifest(
+    JSON.stringify({ id: "p", name: "P", version: "1.0.0", api: 1, scopes: [], contributes: { settings: true } }),
+  );
+  if (!parsed.ok) throw new Error(parsed.message);
+  const manifest = parsed.manifest;
+
+  /**
+   * A child this driver controls completely.
+   *
+   * **This is why `PluginRuntime` is an interface.** A start that never completes,
+   * an invocation that is never answered and a crash after `ready` are the three
+   * paths worth being sure about, and none of them is reachable by spawning a real
+   * process and hoping it misbehaves on cue.
+   */
+  const scripted = (
+    behaviour: { init: "ready" | "fail" | "silent"; answer: "yes" | "silent" },
+  ): { runtime: PluginRuntime; launches: () => number; stops: () => number; crash: () => void } => {
+    let launches = 0;
+    let stops = 0;
+    let crash = (): void => undefined;
+    const runtime: PluginRuntime = {
+      launch(options) {
+        launches += 1;
+        crash = () => options.onExit("exited with code 1");
+        return Promise.resolve({
+          send(message) {
+            if (message.t === "init") {
+              if (behaviour.init === "ready") queueMicrotask(() => options.onMessage({ t: "ready" }));
+              if (behaviour.init === "fail") queueMicrotask(() => options.onMessage({ t: "fail", error: "no" }));
+              return true;
+            }
+            if (message.t === "invoke" && behaviour.answer === "yes") {
+              queueMicrotask(() =>
+                options.onMessage({ t: "done", id: message.id, ok: true, value: { title: null, blocks: [] } }),
+              );
+            }
+            // Reports the write, as `ForkedPlugin` does; nothing here ever refuses one.
+            return true;
+          },
+          stop() {
+            stops += 1;
+            return Promise.resolve();
+          },
+          recentLogs: () => ["a line the child printed"],
+        });
+      },
+    };
+    return { runtime, launches: () => launches, stops: () => stops, crash: () => crash() };
+  };
+
+  const openWith = async (
+    runtime: PluginRuntime,
+  ): Promise<{ host: Awaited<ReturnType<typeof PluginHost.open>>; warnings: string[]; close: () => Promise<void> }> => {
+    const stores = openStores({ path: join(tmp("plugin-life-"), "d.db"), instanceId: `i_${Math.floor(Math.random() * 1e6)}` });
+    stores.plugins.put({
+      id: "p",
+      version: "1.0.0",
+      manifest,
+      enabled: true,
+      installedAt: 1,
+      updatedAt: 1,
+      source: null,
+    });
+    const registry = new SessionRegistry(stores.events, stores.sessions);
+    const warnings: string[] = [];
+    const host = await PluginHost.open({
+      root: join(tmp("plugin-life-root-"), "plugins"),
+      records: stores.plugins,
+      data: stores.pluginData,
+      registry,
+      api: { git: hostGit },
+      onWarning: (detail) => warnings.push(detail),
+      runtime,
+      timeouts: { start: 60, invoke: 60 },
+    });
+    return {
+      host,
+      warnings,
+      close: async () => {
+        await host.shutdown();
+        await registry.shutdown();
+        stores.close();
+      },
+    };
+  };
+
+  const codeOf = async (run: Promise<unknown>): Promise<string> => {
+    try {
+      await run;
+      return "ok";
+    } catch (error) {
+      return (error as { code?: string }).code ?? "threw";
+    }
+  };
+
+  {
+    const silent = scripted({ init: "silent", answer: "yes" });
+    const { host, close } = await openWith(silent.runtime);
+    const plugin = host.find("p");
+    if (plugin === null) throw new Error("no plugin");
+    check("a child that never says it is ready", await codeOf(plugin.invoke("view", "settings", {})), "plugin_unavailable");
+    check("is stopped rather than left running", silent.stops() > 0, true);
+    report("and its failure carries what it printed", plugin.failure?.includes("a line the child printed") === true, plugin.failure ?? "");
+    check("the row says so", host.list().map((one) => one.state), ["failed"]);
+    await close();
+  }
+
+  {
+    const broken = scripted({ init: "fail", answer: "yes" });
+    const { host, close } = await openWith(broken.runtime);
+    const plugin = host.find("p");
+    if (plugin === null) throw new Error("no plugin");
+    /*
+     * Three attempts and then no more, for the reason `autoResume` has a budget:
+     * a plugin that cannot start will not start because it was asked a fourth
+     * time, and a daemon that keeps trying spends a core on it.
+     *
+     * ⚠ **Who is asking decides whether the attempt is charged**, so this drives
+     * both halves. A `view` is `read`-scoped and `PluginScreen` re-reads it on a
+     * timer, so a passive caller must be able to hammer a broken plugin without
+     * moving the counter — otherwise a grant that can press nothing on a screen
+     * spends a budget only `machine:admin` can give back. A `hook` is this
+     * daemon's own traffic and pays. See `StartIntent`.
+     */
+    const launchedBefore = broken.launches();
+    const codes: string[] = [];
+    for (let i = 0; i < 5; i += 1) codes.push(await codeOf(plugin.invoke("view", "settings", {})));
+    check("five read-only views against a broken plugin start nothing", broken.launches(), launchedBefore);
+    check("and every attempt still answers rather than hanging", new Set(codes).has("plugin_unavailable"), true);
+    /*
+     * The supervised half. `deliver` is what the daemon's own hook traffic goes
+     * through, and it drains through `ensureStarted("supervised")` — so this is
+     * the caller that walks the budget down, and the one the refusal is written for.
+     */
+    const hookCodes: string[] = [];
+    for (let i = 0; i < 5; i += 1) hookCodes.push(await codeOf(plugin.invoke("hook", "turn.ended", {})));
+    report("but the daemon's own traffic does spend it", broken.launches() > launchedBefore, `${broken.launches()} launches`);
+    check("and a hook that cannot be delivered still answers", new Set(hookCodes).has("plugin_unavailable"), true);
+    report("and stops at three", broken.launches() <= 3, `${broken.launches()} launches`);
+    report(
+      "the last refusal says it has given up",
+      plugin.failure?.includes("will not be tried again") === true,
+      plugin.failure ?? "",
+    );
+    // Switching it off and on is new information, exactly as a restart is for
+    // auto-resume, so the budget comes back.
+    const beforeToggle = broken.launches();
+    await host.setEnabled("p", false);
+    await host.setEnabled("p", true);
+    report("switching it back on returns the budget", broken.launches() > beforeToggle, `${broken.launches()} launches`);
+    await close();
+  }
+
+  {
+    const mute = scripted({ init: "ready", answer: "silent" });
+    const { host, close } = await openWith(mute.runtime);
+    const plugin = host.find("p");
+    if (plugin === null) throw new Error("no plugin");
+    check("a child that never answers", await codeOf(plugin.invoke("view", "settings", {})), "plugin_timeout");
+    check("and again", await codeOf(plugin.invoke("view", "settings", {})), "plugin_timeout");
+    check("and a third time", await codeOf(plugin.invoke("view", "settings", {})), "plugin_timeout");
+    // Three in a row and it is stopped rather than asked a fourth. A person is
+    // waiting behind each of these, so what matters is that they all *end*.
+    report("three of those stop it", mute.stops() > 0, `${mute.stops()} stops`);
+    await close();
+  }
+
+  {
+    const crashy = scripted({ init: "ready", answer: "yes" });
+    const { host, warnings, close } = await openWith(crashy.runtime);
+    const plugin = host.find("p");
+    if (plugin === null) throw new Error("no plugin");
+    check("a plugin that is up answers", (await plugin.invoke("view", "settings", {})).kind, "view");
+    crashy.crash();
+    check("a child that dies on its own is a failure", host.list().map((one) => one.state), ["failed"]);
+    report("and it is reported", warnings.some((one) => one.includes("exited with code 1")), `${warnings.length} warnings`);
+    await close();
+  }
+}
+
+process.stdout.write("\nhooks reaching a plugin\n");
+{
+  const { PluginHost } = await import("../src/plugins/host.js");
+  const { SessionRegistry } = await import("../src/registry.js");
+  const { hostGit } = await import("../src/git.js");
+  const { openStores } = await import("../src/store/sqlite.js");
+  const { PLUGIN_HOOKS } = await import("../src/plugins/protocol.js");
+
+  /**
+   * A plugin whose answers this driver holds until it lets go.
+   *
+   * The `hold`/`release` pair is what makes the queue drivable at all. `drain` is
+   * sequential — one hook in flight, the next taken only once the last has been
+   * answered — so a runtime that answers immediately empties the queue as fast as
+   * `deliver` fills it and the bound is never reached. Holding the first answer
+   * parks the drain with the queue growing behind it, which is exactly the state
+   * {@link MAX_HOOK_QUEUE} exists for: a plugin that has stopped answering while
+   * the machine keeps working.
+   */
+  const scripted = (): {
+    runtime: PluginRuntime;
+    seen: () => { kind: string; hook: string; session: string; mark: number }[];
+    launches: () => number;
+    hold: () => void;
+    release: () => void;
+  } => {
+    let launches = 0;
+    let holding = false;
+    const seen: { kind: string; hook: string; session: string; mark: number }[] = [];
+    const held: number[] = [];
+    let answer: (id: number) => void = () => undefined;
+    const runtime: PluginRuntime = {
+      launch(options) {
+        launches += 1;
+        answer = (id) => queueMicrotask(() => options.onMessage({ t: "done", id, ok: true, value: null }));
+        return Promise.resolve({
+          send(message) {
+            if (message.t === "init") {
+              queueMicrotask(() => options.onMessage({ t: "ready" }));
+              return true;
+            }
+            if (message.t === "invoke") {
+              const input = message.input as { hook?: unknown; session?: { id?: unknown }; mark?: unknown } | null;
+              seen.push({
+                kind: message.kind,
+                /*
+                 * Read off the **payload** rather than off `name`, because they
+                 * are two writes and only one of them is what a plugin sees: the
+                 * host sends the hook as the invocation's name *and* folds it into
+                 * the object the child is handed, and `runner.ts` passes the
+                 * second one to `hook(ctx, event)`. A plugin switching on
+                 * `event.hook` is switching on this.
+                 */
+                hook: String(input?.hook ?? ""),
+                session: String(input?.session?.id ?? ""),
+                mark: typeof input?.mark === "number" ? input.mark : -1,
+              });
+              if (holding) held.push(message.id);
+              else answer(message.id);
+            }
+            return true;
+          },
+          stop: () => Promise.resolve(),
+          recentLogs: () => [],
+        });
+      },
+    };
+    return {
+      runtime,
+      seen: () => seen,
+      launches: () => launches,
+      hold: () => {
+        holding = true;
+      },
+      release: () => {
+        holding = false;
+        for (const id of held.splice(0)) answer(id);
+      },
+    };
+  };
+
+  /**
+   * Wait until a counter stops moving.
+   *
+   * A fixed sleep would be a guess: one hook is a handful of microtasks and the
+   * queue case below is two hundred and fifty-seven of them in a row. This ends
+   * on the first round that added nothing, so the ordinary case costs one tick.
+   */
+  const settle = async (of: () => number): Promise<void> => {
+    let last = -1;
+    for (let round = 0; round < 400 && last !== of(); round += 1) {
+      last = of();
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+  };
+
+  /**
+   * An agent that cannot be started, on purpose.
+   *
+   * ⚠ **What is being driven here is the announcement, not the agent.**
+   * `registry.create` calls `announce(managed, "created")` *before*
+   * `managed.start()` — the ordering is written into that function so an observer
+   * is attached before the first thing the agent says — so a runtime whose
+   * `launch` throws produces the real announcement, the real `observe` and a real
+   * snapshot in the hook's payload, without this section standing up a second ACP
+   * handshake over pipes. The throw is not incidental either: a start that failed
+   * is an exit, and an exit is the only thing `session.ended` is derived from.
+   */
+  class NoAgent extends LocalRuntime {
+    override async availability(): Promise<AgentAvailability[]> {
+      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null }];
+    }
+    override describe(agent: AgentId): AgentLaunchConfig {
+      return stubAgentConfig(agent);
+    }
+    override async launch(): Promise<never> {
+      throw new Error("this driver has no agent to start");
+    }
+  }
+
+  const root = tmp("hooks-");
+  // Populated *before* the host is opened, which is what makes `seed` a real
+  // question: a board installed on a working machine is empty until somebody
+  // starts something, unless the install offers it what is already there.
+  const registry = new SessionRegistry(
+    new MemoryEventStore(),
+    storeOf([rowFor("s_restored", join(root, "wt"))]),
+    undefined,
+    new NoAgent(),
+  );
+  registry.restore({ reapOrphans: false });
+
+  const plugin = scripted();
+  const stores = openStores({ path: join(tmp("hooks-db-"), "d.db"), instanceId: "i_hooks" });
+  const warnings: string[] = [];
+  const host = await PluginHost.open({
+    root: join(root, "plugins"),
+    records: stores.plugins,
+    data: stores.pluginData,
+    registry,
+    api: { git: hostGit },
+    onWarning: (detail) => warnings.push(detail),
+    runtime: plugin.runtime,
+    timeouts: { start: 500, invoke: 500 },
+  });
+
+  const installed = await host.install({
+    body: bodyOf(
+      tarOf({
+        "plugin.json": JSON.stringify({
+          id: "watcher",
+          name: "Watcher",
+          version: "1.0.0",
+          api: 1,
+          scopes: [],
+          // Every one of them, so a hook added to the union without a `fan` arm
+          // shows up here as a hook nothing ever produced rather than as nothing.
+          contributes: { hooks: [...PLUGIN_HOOKS] },
+        }),
+        "server.js": "export function hook() {}",
+      }),
+    ),
+    name: "watcher.tar.gz",
+  });
+  check("a plugin declaring hooks installs", installed.kind === "ok" ? installed.summary.id : installed, "watcher");
+  check(
+    "and its manifest is what decides which it is sent",
+    installed.kind === "ok" ? installed.summary.contributes.hooks : null,
+    [...PLUGIN_HOOKS],
+  );
+
+  await settle(() => plugin.seen().length);
+  /*
+   * `seed`, which is the one delivery that is not an event: every session this
+   * daemon already knows about, offered to a plugin that has only just arrived.
+   * It is `install`'s last act and it is why `session.created` is the only hook
+   * with two producers.
+   */
+  check(
+    "and it is offered the session that was already here",
+    plugin.seen().map((one) => [one.kind, one.hook, one.session]),
+    [["hook", "session.created", "s_restored"]],
+  );
+
+  /*
+   * ⚠ **And again on an update, which reads as a replay if it is found without
+   * this note.** `install` calls `seed` unconditionally — first install and update
+   * alike — so a plugin updated on a machine holding forty sessions is handed
+   * forty `session.created` deliveries it has been handed once already, and its
+   * store survives the update (`plugin_data` is keyed on the id and never on the
+   * version, deliberately), so a plugin doing anything once-only has to say so
+   * itself. `docs/PLUGINS.md` is where an author is told; this is where the daemon
+   * is held to it.
+   *
+   * It is the answer rather than an oversight, and the argument is `open()` one
+   * file over: what a seed is *for* is a child that has just come up knowing
+   * nothing, and an update makes one — the incumbent is stopped, a fresh
+   * `LivePlugin` is built, and the new process has been told nothing at all. Every
+   * boot does the same for every installed plugin, for the same reason. So the
+   * rule is "a child that has just come up is offered what is already here", and
+   * install, update and restart are three ways of coming up rather than three
+   * policies. A build that seeded a first install only would pass every line above
+   * this one, which is why the pair is here rather than the sentence.
+   */
+  const seenBeforeUpdate = plugin.seen().length;
+  const updated = await host.install({
+    body: bodyOf(
+      tarOf({
+        "plugin.json": JSON.stringify({
+          id: "watcher",
+          name: "Watcher",
+          version: "2.0.0",
+          api: 1,
+          scopes: [],
+          contributes: { hooks: [...PLUGIN_HOOKS] },
+        }),
+        "server.js": "export function hook() {}",
+      }),
+    ),
+    name: "watcher.tar.gz",
+  });
+  check(
+    "the same id again is an update rather than a second plugin",
+    updated.kind === "ok" ? [updated.summary.version, updated.replaced] : updated,
+    ["2.0.0", "1.0.0"],
+  );
+  await settle(() => plugin.seen().length);
+  check(
+    "and the child it brings up is offered that session again, exactly as a boot would",
+    plugin.seen().slice(seenBeforeUpdate).map((one) => [one.hook, one.session]),
+    [["session.created", "s_restored"]],
+  );
+
+  // A mark rather than `slice(1)`, which is what this was: the seed above is no
+  // longer one delivery, and a positional literal here made adding the update case
+  // fail an assertion that is about something else entirely. Every other slice in
+  // this section already takes its mark first.
+  const seenBeforeBirth = plugin.seen().length;
+  const failed = await registry
+    .create({ agent: "kimi", cwd: tmp("hooks-cwd-") })
+    .then(() => null, (error: unknown) => error);
+  report("a session whose agent will not start still threw", failed !== null, String(failed).slice(0, 48));
+  await settle(() => plugin.seen().length);
+  const born = registry.list().map((one) => one.id).filter((id) => id !== "s_restored");
+  check("but the session exists, and there is one of it", born.length, 1);
+  check(
+    "the plugin was told it appeared, and then that it was over",
+    plugin.seen().slice(seenBeforeBirth).map((one) => [one.hook, one.session === born[0]]),
+    [
+      ["session.created", true],
+      ["session.ended", true],
+    ],
+  );
+
+  /*
+   * ⚠ **The echo of a plugin's own write is not sent back to it**, which is what
+   * keeps `ctx.sessions.create` inside a `session.created` handler from making
+   * sessions until `MAX_LIVE_SESSIONS` — each one a worktree and an agent
+   * process. `src/agentask.ts`'s header records the same recursion against a
+   * session nobody can address; this is the one a plugin is handed on purpose.
+   *
+   * Driven through `registry.create`'s own `origin` rather than through the API,
+   * because that argument *is* the mechanism: the announcement happens inside
+   * `create`, so there is no moment afterwards at which anything could stamp it.
+   */
+  const before = plugin.seen().length;
+  await registry
+    .create({ agent: "kimi", cwd: tmp("hooks-own-"), origin: "watcher" })
+    .then(() => null, () => null);
+  await settle(() => plugin.seen().length);
+  const echoed = plugin.seen().slice(before).map((one) => one.hook);
+  check("a plugin is not told about the session it asked for itself", echoed.includes("session.created"), false);
+  /*
+   * ⚠ **And `session.ended` still arrives, which is a named non-goal rather than
+   * an oversight.** A create whose `start()` throws is an exit, so the plugin
+   * that asked is told its own session ended — and a handler answering *that* by
+   * creating another still loops. `MAX_LIVE_SESSIONS` does not bound it, because
+   * `liveSessionCount` skips terminal sessions; what is left is
+   * `SESSION_CREATE_BURST` and a worktree left behind each time round. Closing it
+   * needs a per-plugin create budget. Asserted so the gap is written down as
+   * behaviour rather than left to be rediscovered.
+   */
+  check("but it is still told that session ended, which the loop above does not close", echoed, ["session.ended"]);
+
+  /* ---------------------------------------------------------------- *
+   * The three hooks derived from the log.
+   *
+   * ⚠ **Derived, never forwarded.** A plugin is told `turn.ended`, not a
+   * `StoredEvent` — the event union is the wire three agents move, and coupling a
+   * plugin to it would make every ACP change somebody else's breaking change.
+   * Appending straight to the log is therefore the honest way to drive these: it
+   * is exactly what the pump does, and what crosses to the plugin is a summary
+   * this daemon built rather than the row that produced it.
+   * ---------------------------------------------------------------- */
+  const restored = registry.get("s_restored");
+  if (restored === undefined) throw new Error("the restored session vanished");
+  const fromLog = plugin.seen().length;
+  restored.log.append({ type: "turn_end", stopReason: "end_turn", usage: null });
+  restored.log.append({
+    type: "permission_request",
+    permissionId: "perm_1",
+    toolCallId: null,
+    title: "Run the tests?",
+    options: [],
+    decision: null,
+  });
+  restored.log.append({
+    type: "permission_resolved",
+    permissionId: "perm_1",
+    toolCallId: null,
+    title: "Run the tests?",
+    outcome: "selected",
+    optionId: "allow",
+    by: "client",
+  });
+  await settle(() => plugin.seen().length);
+  check(
+    "a turn ending, a question asked and the same question answered",
+    plugin.seen().slice(fromLog).map((one) => one.hook),
+    ["turn.ended", "permission.requested", "permission.resolved"],
+  );
+
+  /* ---------------------------------------------------------------- *
+   * A throwing subscriber is reported and **kept**.
+   *
+   * ⚠ This is the opposite of what `SessionLog.append` does to a listener that
+   * throws, and the difference is the whole reason the guard exists. There a
+   * listener is one WebSocket and evicting it costs that socket its events; here
+   * it is every plugin hook for this session, its unsubscribe is recorded in
+   * `watching`, and `observe` reads that map as "already handled" — so one throw
+   * out of `managed.snapshot()` ended hooks for that session **for the life of the
+   * daemon**, with nothing anywhere saying so and no path back short of a
+   * restart. The second append is the half that matters: a report with the
+   * subscription gone would look identical in the warnings.
+   * ---------------------------------------------------------------- */
+  const realSnapshot = restored.snapshot.bind(restored);
+  (restored as unknown as { snapshot: () => unknown }).snapshot = () => {
+    throw new Error("a snapshot this driver broke");
+  };
+  const beforeThrow = warnings.length;
+  const seenBeforeThrow = plugin.seen().length;
+  restored.log.append({ type: "turn_end", stopReason: "end_turn", usage: null });
+  await settle(() => warnings.length);
+  report(
+    "a hook payload that throws is reported",
+    warnings.slice(beforeThrow).some((one) => one.includes("a snapshot this driver broke")),
+    warnings.at(-1) ?? "nothing reported",
+  );
+  check("and nothing was delivered for it", plugin.seen().length, seenBeforeThrow);
+  (restored as unknown as { snapshot: () => unknown }).snapshot = realSnapshot;
+  restored.log.append({ type: "turn_end", stopReason: "end_turn", usage: null });
+  await settle(() => plugin.seen().length);
+  check(
+    "but the next one still arrives, which is the whole property",
+    plugin.seen().slice(seenBeforeThrow).map((one) => one.hook),
+    ["turn.ended"],
+  );
+
+  /* ---------------------------------------------------------------- *
+   * What a plugin that has stopped answering misses.
+   *
+   * Drop-**oldest**, because the newest events are the ones still worth acting
+   * on: a board catching up cares about the turn that just ended and not about
+   * the one from an hour ago. The count is what keeps that honest — it goes to
+   * `onWarning` rather than being swallowed, since a plugin quietly missing half
+   * its events looks exactly like a plugin with a bug in it.
+   *
+   * `deliver` is called directly rather than through a session, because what is
+   * being driven is the queue and three hundred real turns would be three hundred
+   * fixtures for one bound.
+   * ---------------------------------------------------------------- */
+  const live = host.find("watcher");
+  if (live === null) throw new Error("the plugin vanished");
+  plugin.hold();
+  const beforeFlood = plugin.seen().length;
+  const warnedBeforeFlood = warnings.length;
+  for (let mark = 1; mark <= 300; mark += 1) live.deliver("turn.ended", { hook: "turn.ended", mark });
+  report(
+    "a plugin falling behind is said out loud",
+    warnings
+      .slice(warnedBeforeFlood)
+      .some((one) => one.includes("is behind") && one.includes("hook deliveries dropped")),
+    warnings.at(-1) ?? "nothing reported",
+  );
+  plugin.release();
+  await settle(() => plugin.seen().length);
+  const delivered = plugin.seen().slice(beforeFlood).map((one) => one.mark);
+  // The first was taken by `drain` before the queue could hold anything, so it is
+  // in flight rather than queued and no bound can reach it.
+  check("the one already in flight was delivered", delivered[0], 1);
+  const queued = delivered.slice(1);
+  report(
+    "and what survived is a contiguous run ending at the newest",
+    queued.length > 0 &&
+      queued.length < 299 &&
+      queued.at(-1) === 300 &&
+      queued.every((mark, index) => mark === (queued[0] ?? 0) + index),
+    `${delivered.length} of 300 delivered, ${String(queued[0])}…${String(queued.at(-1))}`,
+  );
+
+  /* ---------------------------------------------------------------- *
+   * Two invocations arriving together join one launch.
+   *
+   * `this.starting ??=` written out longhand, because the passive gate has to sit
+   * between the join and the launch: joining a start somebody else is paying for
+   * is free and starting one is not. Without the memo the second caller loses to a
+   * half-started child and spends a second of the three `MAX_PLUGIN_STARTS`
+   * allows, which is a budget only `machine:admin` can give back.
+   * ---------------------------------------------------------------- */
+  await live.stop();
+  const launchedBefore = plugin.launches();
+  const together = await Promise.all([
+    live.invoke("hook", "turn.ended", { hook: "turn.ended" }).then(() => "answered", () => "refused"),
+    live.invoke("hook", "turn.ended", { hook: "turn.ended" }).then(() => "answered", () => "refused"),
+  ]);
+  check("both are answered", together, ["answered", "answered"]);
+  report(
+    "and one launch served both",
+    plugin.launches() - launchedBefore === 1,
+    `${plugin.launches() - launchedBefore} launches for 2 invocations`,
+  );
+
+  await host.shutdown();
+  await registry.shutdown();
+  stores.close();
+}
+
+process.stdout.write("\nthe plugin routes\n");
+{
+  const { PluginHost } = await import("../src/plugins/host.js");
+  const { SessionRegistry } = await import("../src/registry.js");
+  const { hostGit } = await import("../src/git.js");
+  const { parseManifest } = await import("../src/plugins/manifest.js");
+  const { PLUGIN_API_VERSION } = await import("../src/plugins/protocol.js");
+  const { openStores } = await import("../src/store/sqlite.js");
+
+  const parsed = parseManifest(
+    JSON.stringify({
+      id: "p",
+      name: "P",
+      version: "1.0.0",
+      api: 1,
+      scopes: [],
+      contributes: { screen: { title: "P" }, settings: true, actions: [{ id: "go", title: "Go", on: "screen" }] },
+    }),
+  );
+  if (!parsed.ok) throw new Error(parsed.message);
+
+  const runtime: PluginRuntime = {
+    launch(options) {
+      return Promise.resolve({
+        send(message) {
+          if (message.t === "init") {
+            queueMicrotask(() => options.onMessage({ t: "ready" }));
+            return true;
+          }
+          if (message.t === "invoke") {
+            queueMicrotask(() =>
+              options.onMessage({
+                t: "done",
+                id: message.id,
+                ok: true,
+                /*
+                 * ⚠ **A `list` beside the text, and it is here to be *refused* on
+                 * one of the two surfaces.** The clamp's own section drives
+                 * `clampView` directly; this is the other half — that the surface
+                 * actually reaches it from the route, which is a wiring question
+                 * no pure-function assertion can answer. It was on the wire the
+                 * whole time (`viewId` is the invoke's `name`) and neither side
+                 * read it.
+                 */
+                value: {
+                  title: message.name,
+                  blocks: [
+                    { type: "text", text: message.name, tone: "default" },
+                    { type: "list", empty: "nothing", rows: [{ id: "a", title: "A" }] },
+                  ],
+                },
+              }),
+            );
+          }
+          // Reports the write, as `ForkedPlugin` does; nothing here ever refuses one.
+          return true;
+        },
+        stop: () => Promise.resolve(),
+        recentLogs: () => [],
+      });
+    },
+  };
+
+  /*
+   * ⚠ **A second fixture that contributes neither surface, because the view route
+   * reads the manifest now and every case here asked the other question.** `p`
+   * above declares both, so "is this one of the two words this daemon knows" was
+   * the whole of what `/views/:viewId` could be driven on, and whether *this
+   * plugin* said it draws either was unreachable from this section. `contributes:
+   * {}` is what `readContributions` turns into `{ screen: null, settings: false }`,
+   * and it is a real plugin rather than a degenerate one: hooks and actions are
+   * the other two things a plugin can be, and one that only listens draws nothing.
+   */
+  const quiet = parseManifest(
+    JSON.stringify({ id: "quiet", name: "Quiet", version: "1.0.0", api: 1, scopes: [], contributes: {} }),
+  );
+  if (!quiet.ok) throw new Error(quiet.message);
+
+  const stores = openStores({ path: join(tmp("plugin-routes-"), "d.db"), instanceId: "i_routes" });
+  stores.plugins.put({
+    id: "p",
+    version: "1.0.0",
+    manifest: parsed.manifest,
+    enabled: true,
+    installedAt: 1,
+    updatedAt: 1,
+    source: null,
+  });
+  // Enabled, or the routes below would answer 503 for a reason that has nothing to
+  // do with what it contributes — the same trap the read-only pair one screen down
+  // states at length.
+  stores.plugins.put({
+    id: "quiet",
+    version: "1.0.0",
+    manifest: quiet.manifest,
+    enabled: true,
+    installedAt: 1,
+    updatedAt: 1,
+    source: null,
+  });
+  const registry = new SessionRegistry(stores.events, stores.sessions);
+  const host = await PluginHost.open({
+    root: join(tmp("plugin-routes-root-"), "plugins"),
+    records: stores.plugins,
+    data: stores.pluginData,
+    registry,
+    api: { git: hostGit },
+    runtime,
+    timeouts: { start: 500, invoke: 500 },
+  });
+
+  const { app: pluginApp } = createApp({
+    registry,
+    verifier,
+    instanceId: "i_routes",
+    startedAt: Date.now(),
+    plugins: host,
+  });
+  const { app: bareApp } = createApp({
+    registry,
+    verifier,
+    instanceId: "i_bare",
+    startedAt: Date.now(),
+  });
+
+  const call = async (
+    app: typeof pluginApp,
+    path: string,
+    init: RequestInit = {},
+    token = tokenFor("routes"),
+  ): Promise<{ status: number; body: Record<string, unknown> }> => {
+    const response = await app.request(path, {
+      ...init,
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    });
+    const text = await response.text();
+    return { status: response.status, body: text.length === 0 ? {} : (JSON.parse(text) as Record<string, unknown>) };
+  };
+  const codeOf = (body: Record<string, unknown>): string =>
+    ((body["error"] as { code?: string } | undefined)?.code ?? "none");
+
+  const listing = await call(pluginApp, "/plugins");
+  // The api is read from the constant rather than written down, so this assertion
+  // survives the next accept-both step instead of pinning today's ceiling.
+  check(
+    "the listing",
+    [listing.status, (listing.body["plugins"] as { id?: string }[]).map((one) => one.id), listing.body["api"]],
+    [200, ["p", "quiet"], PLUGIN_API_VERSION],
+  );
+
+  /*
+   * **A daemon built without a plugin host answers 503, never an empty list.**
+   * "There are none" and "this daemon does not do that" are different answers, and
+   * a client shown the first has no way to discover the second. Same shape
+   * `credentials`, `logins` and `uploads` already use.
+   */
+  const off = await call(bareApp, "/plugins");
+  check("a daemon with plugins switched off", [off.status, codeOf(off.body)], [503, "plugins_unavailable"]);
+  /*
+   * ⚠ **And the same answer from all six, not from the one route somebody
+   * happened to drive.** That refusal is written once now — `withPlugins` wraps
+   * every one of them — and it was written six times before, with the sentence
+   * retyped at five of them and each free to drift into saying something slightly
+   * different about the same state. The collapse does not make the sweep
+   * unnecessary; the sweep is what keeps the collapse true, because a seventh
+   * route written outside the wrapper answers 404 or 500 here rather than 503.
+   *
+   * `POST /plugins` is the one worth being deliberate about: it is a streaming
+   * route, so this refusal is also a body nobody read being released, which is
+   * what the exemption middleware's `finally` is for.
+   */
+  const sweep: [string, RequestInit][] = [
+    ["/plugins", {}],
+    ["/plugins", { method: "POST", body: "an archive nobody will look at" }],
+    /*
+     * ⚠ **The list is the assertion, which is why a seventh route has to be
+     * added here by hand.** Every one of these goes through `withPlugins`, and a
+     * route written outside it on a daemon with `REEMOAT_PLUGINS=0` would not
+     * answer `503` — it would throw, or worse, act. `installFromSource` is the
+     * one that would act: it opens a socket to GitHub.
+     */
+    [
+      "/plugins/source",
+      {
+        method: "POST",
+        body: JSON.stringify({ source: { kind: "github", repo: "o/r", commit: "a".repeat(40) } }),
+      },
+    ],
+    ["/plugins/p", { method: "DELETE" }],
+    ["/plugins/p/state", { method: "POST", body: JSON.stringify({ enabled: true }) }],
+    ["/plugins/p/views/screen", {}],
+    ["/plugins/p/actions/go", { method: "POST", body: "{}" }],
+  ];
+  const swept: [number, string][] = [];
+  for (const [path, init] of sweep) {
+    const answer = await call(bareApp, path, init);
+    swept.push([answer.status, codeOf(answer.body)]);
+  }
+  check(
+    "and so does every one of the seven",
+    swept,
+    sweep.map(() => [503, "plugins_unavailable"]),
+  );
+
+  check(
+    "no credential at all",
+    (await pluginApp.request("/plugins")).status,
+    401,
+  );
+
+  const blocksOf = (body: Record<string, unknown>): string[] => {
+    const shown = (body["result"] as { view?: { blocks?: { type?: string }[] } } | undefined)?.view?.blocks ?? [];
+    return shown.map((one) => one.type ?? "?");
+  };
+  const view = await call(pluginApp, "/plugins/p/views/screen");
+  check("a screen", [view.status, ((view.body["result"] as { view?: { title?: string } })?.view?.title ?? null)], [200, "screen"]);
+  const settings = await call(pluginApp, "/plugins/p/views/settings");
+  check("and a settings pane", ((settings.body["result"] as { view?: { title?: string } })?.view?.title ?? null), "settings");
+  /*
+   * ⚠ **The surface reaches the clamp, over HTTP, on the route that knows it.**
+   * Both answers are the same bytes from the same plugin; the only difference is
+   * the last segment of the URL. A screen keeps the list, a settings pane drops it
+   * and says so — and asserting the *pair* is what makes this a wiring check
+   * rather than a second copy of the clamp's own assertions: either one alone
+   * passes for a build that clamps both surfaces the same way.
+   */
+  check("a screen keeps a list", blocksOf(view.body), ["text", "list"]);
+  check("and a settings pane drops it, with a line saying so", blocksOf(settings.body), ["text", "notice"]);
+
+  const noView = await call(pluginApp, "/plugins/p/views/board");
+  check("a view that is not one of the two", [noView.status, codeOf(noView.body)], [404, "view_not_found"]);
+  const noPlugin = await call(pluginApp, "/plugins/nope/views/screen");
+  check("a plugin that is not installed", [noPlugin.status, codeOf(noPlugin.body)], [404, "plugin_not_found"]);
+
+  /*
+   * ⚠ **The vocabulary and the manifest are two questions, and only the first was
+   * ever asked.** `board` above is refused because no plugin draws a view by that
+   * name; `screen` on a plugin contributing none is a view this daemon knows the
+   * name of perfectly well and that *this* plugin never said it had. Both are 404
+   * `view_not_found`, deliberately — the code is what a client branches on and
+   * there is one state here, a view that is not there — so the two are told apart
+   * by the sentence, which is why these read the message and the last line holds
+   * the older refusal to its own.
+   *
+   * What the second one used to be is the reason it earns a case: the request
+   * reached the child, `runner.ts` threw "this plugin exports no screen",
+   * `PluginApiError` made that `plugin_failed`, and `pluginErrorStatus` had no arm
+   * for it and defaulted to **502 — "something downstream of this daemon answered
+   * badly"**. Nothing answered badly. A working plugin was reported broken for a
+   * request its own manifest had already declined, and the traffic that gets here
+   * is `pnpm client plugin view` or a hand-typed `/p/:machineId/:pluginId`, since
+   * `screenPlugins` and `settingsBlockFor` narrow both surfaces in the browser.
+   *
+   * ⚠ **That 502 is not what this section sees with the gate taken out, and the
+   * difference is the whole reason to assert here rather than to trust the read.**
+   * The stub `PluginRuntime` above answers every `invoke` regardless of the
+   * manifest — so without the gate these two are a cheerful `200` drawing a screen
+   * the plugin does not have, which is a worse answer than the 502 and the one a
+   * driver with no `fork` in it can actually produce.
+   */
+  const sayOf = (body: Record<string, unknown>): string =>
+    String((body["error"] as { message?: string } | undefined)?.message ?? "");
+  const noScreen = await call(pluginApp, "/plugins/quiet/views/screen");
+  check(
+    "a screen on a plugin that declares none",
+    [noScreen.status, codeOf(noScreen.body), sayOf(noScreen.body)],
+    [404, "view_not_found", "this plugin declares no such view"],
+  );
+  const noSettings = await call(pluginApp, "/plugins/quiet/views/settings");
+  check(
+    "and a settings pane on the same one",
+    [noSettings.status, codeOf(noSettings.body), sayOf(noSettings.body)],
+    [404, "view_not_found", "this plugin declares no such view"],
+  );
+  check(
+    "while the vocabulary refusal still says the other thing",
+    sayOf(noView.body),
+    "a plugin draws a screen and a settings pane, and no other view",
+  );
+
+  const acted = await call(pluginApp, "/plugins/p/actions/go", { method: "POST", body: "{}" });
+  check("an action the manifest declares", acted.status, 200);
+  /*
+   * An action id reaching a plugin is a string somebody put in a URL. Checked here
+   * rather than inside the plugin, because a plugin author writing a `switch` over
+   * their own ids should not also have to defend against ones they never declared.
+   */
+  const undeclared = await call(pluginApp, "/plugins/p/actions/nope", { method: "POST", body: "{}" });
+  check("one it does not", [undeclared.status, codeOf(undeclared.body)], [404, "action_not_found"]);
+
+  const state = await call(pluginApp, "/plugins/p/state", { method: "POST", body: JSON.stringify({ enabled: false }) });
+  check("switching one off over HTTP", [state.status, ((state.body["plugin"] as { enabled?: boolean })?.enabled ?? null)], [200, false]);
+  const badState = await call(pluginApp, "/plugins/p/state", { method: "POST", body: JSON.stringify({ enabled: "no" }) });
+  check("with something that is not a boolean", [badState.status, codeOf(badState.body)], [400, "bad_request"]);
+
+  /* ---------------------------------------------------------------- *
+   * The other axis.
+   *
+   * These scopes are the **caller's**, and they are not the plugin's. A read-only
+   * grant may look at a plugin's screen and may press nothing on it; installing
+   * needs `machine:admin`, which is the same scope removing a workspace needs and
+   * the only other route that asks for it. Neither has anything to say about what
+   * the plugin itself may reach, which is `manifest.scopes` and is checked
+   * somewhere else entirely.
+   * ---------------------------------------------------------------- */
+  const readOnly = tokenWith("reader", ["session:read"]);
+  const writer = tokenWith("writer", ["session:read", "session:write"]);
+  const readList = await call(pluginApp, "/plugins", {}, readOnly);
+  check("a read-only grant may list plugins", readList.status, 200);
+  /*
+   * ⚠ **The positive half, which is the half that was only ever asserted in
+   * prose.** "May look at a plugin's screen and press nothing on it" is one
+   * sentence and two claims, and a `read` that had drifted to `write` would break
+   * the sheet for every read-only grant on the machine while every assertion here
+   * went on passing — the negative half below cannot see it.
+   *
+   * Switched back on with an admin token first, because the pair is only a pair
+   * while there is something to look at: a disabled plugin answers 503 for a
+   * reason that has nothing to do with who is asking, and a 503 read as "allowed"
+   * would make this assertion pass against a route nobody may reach.
+   */
+  await call(pluginApp, "/plugins/p/state", { method: "POST", body: JSON.stringify({ enabled: true }) });
+  const readView = await call(pluginApp, "/plugins/p/views/screen", {}, readOnly);
+  check(
+    "and may look at its screen",
+    [readView.status, ((readView.body["result"] as { view?: { title?: string } })?.view?.title ?? null)],
+    [200, "screen"],
+  );
+  const readAction = await call(pluginApp, "/plugins/p/actions/go", { method: "POST", body: "{}" }, readOnly);
+  check("and may press nothing", [readAction.status, codeOf(readAction.body)], [403, "insufficient_scope"]);
+  const writerInstall = await call(pluginApp, "/plugins", { method: "POST", body: "" }, writer);
+  check("installing needs more than session:write", [writerInstall.status, codeOf(writerInstall.body)], [403, "insufficient_scope"]);
+  const writerRemove = await call(pluginApp, "/plugins/p", { method: "DELETE" }, writer);
+  check("and so does removing", [writerRemove.status, codeOf(writerRemove.body)], [403, "insufficient_scope"]);
+  const writerState = await call(pluginApp, "/plugins/p/state", { method: "POST", body: JSON.stringify({ enabled: true }) }, writer);
+  check("and switching one off", [writerState.status, codeOf(writerState.body)], [403, "insufficient_scope"]);
+
+  /*
+   * Only `GET`, `POST` and `DELETE`, which is what `CORS_ALLOW_METHODS` advertises
+   * — the driver asserts that containment globally, and this is the note saying
+   * these six routes were written inside it deliberately.
+   */
+  const removed = await call(pluginApp, "/plugins/p", { method: "DELETE" });
+  check("removing one", [removed.status, removed.body["removed"]], [200, true]);
+  /*
+   * ⚠ **The same answer twice — and this pair wanted a 404 for the second send
+   * until the route was the only 404 left on a replayable verb.** `isReplayable`
+   * in `packages/web/src/machine.ts` whitelists `GET` and `DELETE` on a stated
+   * property that this route sat inside while contradicting: "the daemon's are
+   * idempotent — stopping an already-stopped session or removing an
+   * already-removed workspace answers the same way twice".
+   *
+   * The failure is not the mistyped id anybody thinks of first. It is a removal
+   * that **worked** and whose answer was lost on the wire: the replay lands after
+   * the row, the data and the tree are already gone, the daemon says
+   * `plugin_not_found`, and `pluginFailure` draws that as "That plugin is not
+   * installed on this machine any more." — true, exactly what the caller asked
+   * for, and read by a person as the act having failed. Across a fleet that is one
+   * red row per dropped packet, on machines where nothing went wrong.
+   *
+   * So the two sends are asserted as a *pair* rather than one at a time: what a
+   * replay must not be able to see is any difference at all between them, and the
+   * pair is the only shape that says so — either line alone passes for a build
+   * that answers 200 to the first and something else to the second. `removed` is
+   * the one field that legitimately tells them apart, which is the next line and
+   * is what keeps this from being green against a route that answered `{}` twice.
+   *
+   * `409 plugin_busy` is untouched and is now the only refusal on the route: there
+   * nothing was removed *and* the answer would be different a moment later, which
+   * is not what `removed: false` says. The cost is stated where the route states
+   * it — a mistyped id is no longer refused, and `pnpm client plugin remove`
+   * prints "removed" over one.
+   */
+  const gone = await call(pluginApp, "/plugins/p", { method: "DELETE" });
+  check(
+    "and removing it again answers exactly as the first send did",
+    [
+      [removed.status, codeOf(removed.body)],
+      [gone.status, codeOf(gone.body)],
+    ],
+    [
+      [200, "none"],
+      [200, "none"],
+    ],
+  );
+  check(
+    "with `removed` the only thing telling the two apart",
+    [removed.body["removed"], gone.body["removed"]],
+    [true, false],
+  );
+
+  const verbs = new Set(
+    pluginApp.routes.filter((route) => route.path.startsWith("/plugins")).map((route) => route.method.toUpperCase()),
+  );
+  check("the plugin routes use no verb the CORS list withholds", [...verbs].sort(), ["DELETE", "GET", "POST"]);
+
+  /*
+   * ⚠ **`shutting_down` is the first thing the install handler tests**, before
+   * the name, before the declared length and before a byte of the body is read.
+   * A daemon on its way out has 20 seconds of shutdown budget and a hard exit
+   * behind it, so unpacking an archive it will never finish starting is work that
+   * ends as a half-published tree with no process to prove it. Driven last here
+   * because it is a one-way flag on the registry, and the routes above need one
+   * that is still serving.
+   */
+  await registry.shutdown();
+  const late = await call(pluginApp, "/plugins", { method: "POST", body: "an archive that arrived too late" });
+  check("installing into a daemon that is going away", [late.status, codeOf(late.body)], [503, "shutting_down"]);
+
+  await host.shutdown();
+  await registry.shutdown();
+  stores.close();
+}
+
+process.stdout.write("\ninstalling a plugin over HTTP, and what each refusal is worth\n");
+{
+  const { PluginHost } = await import("../src/plugins/host.js");
+  const { SessionRegistry } = await import("../src/registry.js");
+  const { hostGit } = await import("../src/git.js");
+  const { openStores } = await import("../src/store/sqlite.js");
+  const { PLUGIN_LIMITS } = await import("../src/archive.js");
+
+  /**
+   * A child that comes straight up, or one whose build will not run.
+   *
+   * `fail` rather than silence for the second, because what is being driven here
+   * is `pluginInstallStatus` and not the start deadline: a start that times out
+   * takes the whole `timeouts.start` window to reach the same code, and the code
+   * is the subject.
+   */
+  const childThat = (starts: boolean): PluginRuntime => ({
+    launch(options) {
+      return Promise.resolve({
+        send(message) {
+          if (message.t === "init") {
+            queueMicrotask(() =>
+              options.onMessage(starts ? { t: "ready" } : { t: "fail", error: "this build will not run" }),
+            );
+            return true;
+          }
+          if (message.t === "invoke") {
+            queueMicrotask(() => options.onMessage({ t: "done", id: message.id, ok: true, value: null }));
+          }
+          return true;
+        },
+        stop: () => Promise.resolve(),
+        recentLogs: () => [],
+      });
+    },
+  });
+
+  const manifestOf = (patch: Record<string, unknown> = {}): string =>
+    JSON.stringify({ id: "board", name: "Board", version: "1.0.0", api: 1, scopes: [], contributes: {}, ...patch });
+  const archiveOf = (patch: Record<string, unknown> = {}): Buffer =>
+    tarOf({ "plugin.json": manifestOf(patch), "server.js": "export function settings() { return {}; }" });
+
+  /**
+   * A daemon whose plugin host is scripted, and the HTTP surface in front of it.
+   *
+   * `refusesToWrite` swaps the record store for one whose `put` throws, which is
+   * the only honest way to reach `plugin_write_failed` — the alternative is a
+   * filesystem that has actually failed, and `PluginRecordStore` is an interface
+   * precisely so that a driver does not need one. It also drives the half of
+   * `install`'s catch nothing else reaches: a throw **after** the tree has been
+   * published used to leave the new `LivePlugin` running out of a directory the
+   * catch had just deleted.
+   */
+  const rigFor = async (
+    name: string,
+    options: {
+      starts: boolean;
+      refusesToWrite?: boolean;
+      /**
+       * What `POST /plugins/source` gets back instead of reaching GitHub.
+       *
+       * The seam exists so this driver can hold every refusal on that path — a
+       * 404, a redirect, a body over the bound — with no network. See
+       * `PluginHostOptions.fetchArchive`.
+       */
+      fetchArchive?: (url: string, signal: AbortSignal) => Promise<Response>;
+    } = { starts: true },
+  ): Promise<{
+    host: Awaited<ReturnType<typeof PluginHost.open>>;
+    app: ReturnType<typeof createApp>["app"];
+    /** The real store behind the host, so a case can ask what is durably there. */
+    rows: PluginRecordStore;
+    close: () => Promise<void>;
+  }> => {
+    const stores = openStores({ path: join(tmp(`plugin-http-${name}-`), "d.db"), instanceId: `i_http_${name}` });
+    const registry = new SessionRegistry(stores.events, stores.sessions);
+    const records: PluginRecordStore =
+      options.refusesToWrite === true
+        ? {
+            // Delegated one method at a time rather than spread, because a spread
+            // of a class instance copies its fields and loses its prototype.
+            list: () => stores.plugins.list(),
+            get: (id) => stores.plugins.get(id),
+            has: (id) => stores.plugins.has(id),
+            put: () => {
+              throw new Error("the database would not take that row");
+            },
+            setEnabled: (id, enabled, at) => stores.plugins.setEnabled(id, enabled, at),
+            remove: (id) => stores.plugins.remove(id),
+          }
+        : stores.plugins;
+    const host = await PluginHost.open({
+      root: join(tmp(`plugin-http-root-${name}-`), "plugins"),
+      records,
+      data: stores.pluginData,
+      registry,
+      api: { git: hostGit },
+      runtime: childThat(options.starts),
+      timeouts: { start: 500, invoke: 500 },
+      ...(options.fetchArchive === undefined ? {} : { fetchArchive: options.fetchArchive }),
+    });
+    const { app } = createApp({
+      registry,
+      verifier,
+      instanceId: `i_http_${name}`,
+      startedAt: Date.now(),
+      plugins: host,
+    });
+    return {
+      host,
+      app,
+      rows: stores.plugins,
+      close: async () => {
+        await host.shutdown();
+        await registry.shutdown();
+        stores.close();
+      },
+    };
+  };
+
+  const post = async (
+    app: ReturnType<typeof createApp>["app"],
+    query: string,
+    body: Uint8Array | null,
+    headers: Record<string, string> = {},
+  ): Promise<{ status: number; body: Record<string, unknown> }> => {
+    const init: RequestInit = { method: "POST", headers: { authorization: `Bearer ${tokenFor("http")}`, ...headers } };
+    // Assigned rather than passed as `null`, because a `body: null` and no body at
+    // all are the same Request and the route's own `body === null` arm needs the
+    // second one.
+    if (body !== null) init.body = body;
+    const response = await app.request(`/plugins${query}`, init);
+    const text = await response.text();
+    return { status: response.status, body: text.length === 0 ? {} : (JSON.parse(text) as Record<string, unknown>) };
+  };
+  const errorOf = (body: Record<string, unknown>): { code: string; detail: unknown } => {
+    const error = body["error"] as { code?: string; detail?: unknown } | undefined;
+    return { code: error?.code ?? "none", detail: error?.detail ?? null };
+  };
+
+  const good = await rigFor("good");
+
+  /*
+   * ⚠ **201 and 200 are the answer to "which of the two happened".** Install and
+   * update are one verb because the manifest is what says which — a separate
+   * `PUT` would need the caller to know whether the plugin is already there,
+   * which is a question the archive answers on arrival. `replaced` carries the
+   * version that went, and the status carries the same fact for anything reading
+   * only that.
+   */
+  const created = await post(good.app, "?name=board.tar.gz", new Uint8Array(archiveOf()));
+  check("a plugin arrives over HTTP", [created.status, created.body["replaced"]], [201, null]);
+  const updated = await post(good.app, "?name=board.tar.gz", new Uint8Array(archiveOf({ version: "1.1.0" })));
+  check(
+    "and the same id again is an update rather than a second plugin",
+    [updated.status, updated.body["replaced"], (updated.body["plugin"] as { version?: string } | undefined)?.version],
+    [200, "1.0.0", "1.1.0"],
+  );
+
+  /*
+   * The name is a **label** — recorded beside the row, never turned into a path —
+   * and it is sanitized anyway, because it is echoed back and a control character
+   * in an echoed string is the response-splitting `sanitizeUploadName` exists to
+   * refuse. The same function the upload and import routes use, so all three
+   * agree about what a filename may be.
+   *
+   * The empty case is not a corner: the route reads `?name=` with `?? ""`, so a
+   * client that forgets the query is refused rather than storing `null`.
+   */
+  const badNames: [string, string, string][] = [
+    ["with no name at all", "", "empty"],
+    [
+      "with a name holding a control character",
+      `?name=${encodeURIComponent(`a${String.fromCharCode(7)}b.tgz`)}`,
+      "control_char",
+    ],
+    ["with a name that is a directory rather than a file", "?name=..", "reserved"],
+  ];
+  for (const [label, query, reason] of badNames) {
+    const answer = await post(good.app, query, new Uint8Array(archiveOf()));
+    const error = errorOf(answer.body);
+    check(label, [answer.status, error.code, (error.detail as { reason?: string } | null)?.reason ?? null], [
+      400,
+      "invalid_name",
+      reason,
+    ]);
+  }
+
+  /*
+   * ⚠ **A `content-length` is honoured to refuse and never to accept.** Refusing
+   * on one this daemon believes costs nothing; *trusting* one would let a body
+   * that lies walk past `unpackArchive`'s counter, which is the thing actually
+   * enforcing the bound. Both halves are here: a header claiming more than a
+   * plugin may be is refused with nothing read, and a body that really is larger
+   * is refused by the counter with the same code.
+   */
+  const overDeclared = await post(good.app, "?name=board.tar.gz", new Uint8Array(archiveOf()), {
+    "content-length": String(PLUGIN_LIMITS.maxBytes + 1),
+  });
+  check(
+    "a request declaring more than a plugin may be",
+    [overDeclared.status, errorOf(overDeclared.body).code],
+    [413, "plugin_too_large"],
+  );
+  const overSent = await post(good.app, "?name=board.tar.gz", new Uint8Array(Buffer.alloc(PLUGIN_LIMITS.maxBytes + 1)));
+  check(
+    "and one that simply is",
+    [overSent.status, errorOf(overSent.body).code],
+    [413, "plugin_too_large"],
+  );
+
+  /*
+   * The rest of `pluginInstallStatus`, one case per arm. **The split is by whose
+   * problem it is**: `413` for the bounds so a client can tell "too big" from
+   * "wrong", `409` for a plugin that will not start — the tree is unchanged and
+   * the old version is still running, which is a conflict rather than a failure —
+   * and `400` for everything about the archive or the manifest, all of which are
+   * things the person who built it can fix.
+   */
+  const crowded: Record<string, string> = {};
+  for (let index = 0; index <= PLUGIN_LIMITS.maxEntries; index += 1) crowded[`f${index}.txt`] = "x";
+  const installRefusals: [string, Buffer, number, string][] = [
+    ["more members than a plugin has", tarOf(crowded), 413, "plugin_too_many_entries"],
+    [
+      "one that unpacks past what a plugin may be",
+      tarOf({ "plugin.json": manifestOf(), "big.js": "x".repeat(PLUGIN_LIMITS.maxUnpackedBytes + 1) }),
+      413,
+      "plugin_unpacked_too_large",
+    ],
+    ["an archive with no manifest in it", tarOf({ "server.js": "export function settings() {}" }), 400, "manifest_missing"],
+    ["a manifest this daemon will not read", tarOf({ "plugin.json": "{", "server.js": "x" }), 400, "manifest_unreadable"],
+    ["something that is not an archive at all", Buffer.from("not an archive"), 400, "unsupported_archive"],
+    ["an archive holding nothing", gzipSync(Buffer.alloc(1024)), 400, "archive_empty"],
+  ];
+  for (const [label, bytes, status, code] of installRefusals) {
+    const answer = await post(good.app, "?name=board.tar.gz", new Uint8Array(bytes));
+    check(label, [answer.status, errorOf(answer.body).code], [status, code]);
+  }
+
+  // A `POST` with no body at all, which is what a client that built its request
+  // wrong sends. Refused before the host is reached, so there is nothing to undo.
+  const bodyless = await post(good.app, "?name=board.tar.gz", null);
+  check("a request with no body", [bodyless.status, errorOf(bodyless.body).code], [400, "bad_request"]);
+
+  /*
+   * One install at a time, for the whole daemon, and this is the half that is
+   * actually reachable from outside: the relay allows 256 concurrent streams, so
+   * "a person installs a plugin about as often as they install anything" is a
+   * statement about people rather than about what can arrive.
+   */
+  const both = await Promise.all([
+    post(good.app, "?name=a.tar.gz", new Uint8Array(archiveOf({ version: "1.2.0" }))),
+    post(good.app, "?name=b.tar.gz", new Uint8Array(archiveOf({ version: "1.2.0" }))),
+  ]);
+  report(
+    "two installs at once, and one of them is told to come back",
+    both.some((one) => one.status === 409 && errorOf(one.body).code === "plugin_busy") &&
+      both.some((one) => one.status === 200),
+    both.map((one) => `${one.status} ${errorOf(one.body).code}`).join(", "),
+  );
+  check("and the machine holds one plugin either way", good.host.list().map((one) => one.id), ["board"]);
+  await good.close();
+
+  /*
+   * ⚠ **`409` rather than `400` for a build that will not run, and the reason is
+   * what the machine looks like afterwards.** The tree is unchanged, the row is
+   * untouched and the version that was there is running again — that is a
+   * conflict with the state of the machine, not a malformed request, and a `400`
+   * would tell somebody to go and fix an archive that is fine.
+   */
+  const broken = await rigFor("broken", { starts: false });
+  const refused = await post(broken.app, "?name=board.tar.gz", new Uint8Array(archiveOf()));
+  check(
+    "a plugin whose build will not start",
+    [refused.status, errorOf(refused.body).code],
+    [409, "plugin_start_failed"],
+  );
+  check("and nothing was installed", broken.host.list(), []);
+  await broken.close();
+
+  /*
+   * `503`, because the remedy is on this machine and the request itself was fine
+   * — which is what that status says and what a `400` would deny. The row is
+   * where the throw happens, so everything the try moved has to move back: the
+   * published tree is discarded and the plugin is not left running out of a
+   * directory that is no longer there.
+   */
+  const unwritable = await rigFor("unwritable", { starts: true, refusesToWrite: true });
+  const notWritten = await post(unwritable.app, "?name=board.tar.gz", new Uint8Array(archiveOf()));
+  check(
+    "a row the database would not take",
+    [notWritten.status, errorOf(notWritten.body).code],
+    [503, "plugin_write_failed"],
+  );
+  check("and no row was written", unwritable.rows.has("board"), false);
+  check("and the tree it had published is gone", existsSync(join(unwritable.host.pluginRoot, "board", "1.0.0")), false);
+  /*
+   * ⚠ **The half that used to be missing, and it was the worse half.**
+   * `install`'s catch restored `existing` and had no arm for the case where there
+   * was none — while the `plugin_start_failed` path a few lines above it did, and
+   * the catch's own docblock claimed it made "the same restore" and named
+   * `records.put` on a busy database as its case. So a *first* install that threw
+   * after the tree was published answered `503` and left a `LivePlugin` in `live`
+   * with a child running, no row behind it and no directory under it: `list()`
+   * reported `running` at the version that had just been refused, and went on
+   * doing so until the daemon was restarted, at which point the plugin silently
+   * disappeared. `<root>/board` was left behind as well, which
+   * `PluginHost.installed` reads as something installed — so `remove` of an id
+   * nobody ever installed answered `true`.
+   *
+   * All four are asserted rather than the two that happened to hold, because the
+   * two that held are exactly what made the other two easy to miss.
+   */
+  check("and the listing does not report a plugin that is not installed", unwritable.host.list(), []);
+  check("nor is one left running out of a tree that is gone", await unwritable.host.remove("board"), false);
+  check(
+    "and the directory made to hold it went with it",
+    existsSync(join(unwritable.host.pluginRoot, "board")),
+    false,
+  );
+  await unwritable.close();
+
+  /* ── installing from a commit, rather than from a file ─────────────────── */
+
+  const SHA = "a".repeat(40);
+  const REPO_NAME = "rends-east/reemoat-board";
+
+  /** What the far end said, scripted. The daemon never reaches a network here. */
+  const sourceRig = async (
+    name: string,
+    answer: (url: string) => Response | Promise<Response>,
+  ): Promise<Awaited<ReturnType<typeof rigFor>> & { urls: string[] }> => {
+    const urls: string[] = [];
+    const rig = await rigFor(name, {
+      starts: true,
+      fetchArchive: async (url) => {
+        urls.push(url);
+        return await answer(url);
+      },
+    });
+    return { ...rig, urls };
+  };
+
+  const postSource = async (
+    app: ReturnType<typeof createApp>["app"],
+    body: unknown,
+    scopes: Scope[] = ["session:read", "session:write", "machine:admin"],
+  ): Promise<{ status: number; body: Record<string, unknown> }> => {
+    const response = await app.request("/plugins/source", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${tokenWith("http", scopes)}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    const text = await response.text();
+    return { status: response.status, body: text.length === 0 ? {} : (JSON.parse(text) as Record<string, unknown>) };
+  };
+
+  const tarball = (patch: Record<string, unknown> = {}): Response =>
+    new Response(new Uint8Array(archiveOf(patch)), { status: 200 });
+
+  /*
+   * ⚠ **The address is built by the daemon and asserted here, because that is the
+   * whole of the fence.** Nothing on the wire names a host: a caller who could
+   * would have a daemon that fetches arbitrary addresses as its owner. `codeload`
+   * directly rather than `github.com/<repo>/archive/<sha>.tar.gz`, which answers
+   * `302` — and this path refuses redirects, so building the redirecting spelling
+   * would make every install fail.
+   */
+  const fromSource = await sourceRig("source", () => tarball());
+  const arrived = await postSource(fromSource.app, {
+    source: { kind: "github", repo: REPO_NAME, commit: SHA },
+    consent: { scopes: [], net: [], hooks: [] },
+  });
+  check("a plugin arrives from a commit", [arrived.status, arrived.body["replaced"]], [201, null]);
+  check("and the daemon built the address itself", fromSource.urls, [
+    `https://codeload.github.com/${REPO_NAME}/tar.gz/${SHA}`,
+  ]);
+  /*
+   * The row records where it came from, and on this path that is the pin rather
+   * than a filename somebody's browser happened to choose. Written and never read
+   * for a decision — the same standing this column already had.
+   */
+  check("and the row records the commit it came from", fromSource.rows.get("board")?.source, `github:${REPO_NAME}@${SHA}`);
+
+  const again = await postSource(fromSource.app, {
+    source: { kind: "github", repo: REPO_NAME, commit: SHA },
+    consent: { scopes: [], net: [], hooks: [] },
+  });
+  check("and the same id again is an update, exactly as an upload would be", [again.status, again.body["replaced"]], [200, "1.0.0"]);
+  await fromSource.close();
+
+  /*
+   * ⚠ **The normalisation case, and it is the one worth a named test.**
+   * `parseManifest` synthesises an absent `contributes` into
+   * `{screen: null, settings: false, actions: [], hooks: []}` and turns an absent
+   * `description` into `null`. A consent check comparing the manifest field for
+   * field would therefore fire on a plugin that simply did not write a
+   * `contributes` block — which is most of them — and an alarm that cries wolf is
+   * an alarm people learn to click through. `consentGap` compares three fields
+   * that survive normalisation as plain string arrays, and this asserts that the
+   * plainest possible manifest installs without one.
+   */
+  const plainest = await sourceRig("plain", () => tarball({ contributes: undefined, description: undefined }));
+  const plain = await postSource(plainest.app, {
+    source: { kind: "github", repo: REPO_NAME, commit: SHA },
+    consent: { scopes: [], net: [], hooks: [] },
+  });
+  check("a manifest that writes no contributes at all is not a consent breach", plain.status, 201);
+  await plainest.close();
+
+  /*
+   * ⚠ **Refused, and refused *before the plugin ran*.** On the upload path the
+   * browser opened the archive itself and `consentBroken` reports afterwards —
+   * tolerable, because the reader there read the very bytes that were sent. Here
+   * nothing local ever opened the archive, so this one has to be a refusal rather
+   * than a notification, and it has to land before `ensureStarted`. The second
+   * assertion is the half that matters: not merely a 409, but nothing installed.
+   */
+  const sneaky = await sourceRig("sneaky", () =>
+    tarball({ scopes: ["store", "sessions.read"], contributes: { hooks: ["permission.requested"] } }),
+  );
+  const overreached = await postSource(sneaky.app, {
+    source: { kind: "github", repo: REPO_NAME, commit: SHA },
+    consent: { scopes: [], net: [], hooks: [] },
+  });
+  check(
+    "a commit asking for more than was shown",
+    [overreached.status, errorOf(overreached.body).code],
+    [409, "plugin_consent_broken"],
+  );
+  check("and nothing was installed", [sneaky.host.list(), sneaky.rows.has("board")], [[], false]);
+
+  /*
+   * A caller that sends no consent at all is not a client bug: `pnpm client` has
+   * no screen to have shown anybody, and `install` skips the check for it. What
+   * that costs is stated rather than hidden — the archive is still validated, and
+   * the scopes still land on the row where somebody can read them.
+   */
+  const unasked = await postSource(sneaky.app, { source: { kind: "github", repo: REPO_NAME, commit: SHA } });
+  check("a caller that consented to nothing at all is not held to nothing", unasked.status, 201);
+  await sneaky.close();
+
+  /*
+   * ⚠ **The bound holds with no `content-length`, which is the only way it is
+   * ever exercised in the fleet.** Measured: codeload sends none — the tarball is
+   * generated as it is sent. So a guard reading that header would bound precisely
+   * nothing on the one URL this path fetches, and the real bound is
+   * `unpackArchive` charging each chunk against `PLUGIN_LIMITS.maxBytes` as it
+   * reads. This drives exactly that shape: a streamed body, no header, over the
+   * ceiling.
+   */
+  const flood = await sourceRig("flood", () => {
+    const chunk = new Uint8Array(1024 * 1024);
+    let sent = 0;
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (sent >= PLUGIN_LIMITS.maxBytes + chunk.byteLength) {
+            controller.close();
+            return;
+          }
+          sent += chunk.byteLength;
+          controller.enqueue(chunk);
+        },
+      }),
+      { status: 200 },
+    );
+  });
+  const flooded = await postSource(flood.app, { source: { kind: "github", repo: REPO_NAME, commit: SHA } });
+  check(
+    "an archive over the ceiling, arriving with no content-length",
+    [flooded.status, errorOf(flooded.body).code],
+    [413, "plugin_too_large"],
+  );
+  await flood.close();
+
+  /*
+   * What the far end said, as codes a person can act on. `404` keeps its own,
+   * because "that commit is not there, or the repository is private" is the one
+   * refusal here somebody can do something about; everything else is `502`,
+   * because nothing was wrong with the request and this daemon is not the thing
+   * that is unwell.
+   */
+  const farEnd: [string, () => Response | Promise<Response>, number, string][] = [
+    ["a commit that is not there", () => new Response("no", { status: 404 }), 502, "plugin_source_not_found"],
+    ["a forge having a bad day", () => new Response("no", { status: 500 }), 502, "plugin_source_unavailable"],
+    [
+      // What `redirect: "error"` produces, which is a throw rather than a status.
+      // The `github.com/<repo>/archive` spelling is the one that redirects, and it
+      // is built nowhere — this is the guard that says so.
+      "a redirect, which this path refuses to follow",
+      () => Promise.reject(new Error("unexpected redirect")),
+      502,
+      "plugin_source_unavailable",
+    ],
+  ];
+  for (const [label, answer, status, code] of farEnd) {
+    const rig = await sourceRig(`far-${code}-${status}-${label.length}`, answer);
+    const said = await postSource(rig.app, { source: { kind: "github", repo: REPO_NAME, commit: SHA } });
+    check(label, [said.status, errorOf(said.body).code], [status, code]);
+    await rig.close();
+  }
+
+  /*
+   * ⚠ **A tag and a short sha are refused, and that is a security decision.** A
+   * tag moves under `git tag -f`, so a plugin pinned "at v1.2.0" is a plugin whose
+   * code can change under an identifier that did not — and what is being pinned is
+   * code that runs as this machine's owner with no sandbox. Both are well-formed
+   * enough to look like an oversight when refused, which is why the message names
+   * them.
+   */
+  const bad = await sourceRig("bad", () => tarball());
+  const shapes: [string, unknown][] = [
+    ["no source at all", {}],
+    ["a forge this daemon does not install from", { source: { kind: "gitlab", repo: REPO_NAME, commit: SHA } }],
+    ["a repo that is not owner/name", { source: { kind: "github", repo: "board", commit: SHA } }],
+    ["a repo reaching for a third path segment", { source: { kind: "github", repo: "a/b/c", commit: SHA } }],
+    ["a tag where a commit belongs", { source: { kind: "github", repo: REPO_NAME, commit: "v1.2.0" } }],
+    ["a short sha", { source: { kind: "github", repo: REPO_NAME, commit: SHA.slice(0, 7) } }],
+  ];
+  const refusals: [number, string][] = [];
+  for (const [, body] of shapes) {
+    const said = await postSource(bad.app, body);
+    refusals.push([said.status, errorOf(said.body).code]);
+  }
+  check(
+    `every malformed source, refused before a socket is opened (${shapes.map(([label]) => label).join("; ")})`,
+    refusals,
+    shapes.map(() => [400, "plugin_source_invalid"]),
+  );
+  check("and none of them reached the far end", bad.urls, []);
+
+  /*
+   * ⚠ **Both axes, on the newest route.** A route's scope is the caller's;
+   * `manifest.scopes` is the plugin's, and neither implies the other. Installing
+   * is `machine:admin` — a grant that can drive sessions all day may not put code
+   * on the machine — and this is the route where getting that wrong would let a
+   * `session:write` grant fetch and run somebody else's code as the owner.
+   */
+  const asWriter = await postSource(
+    bad.app,
+    { source: { kind: "github", repo: REPO_NAME, commit: SHA } },
+    ["session:read", "session:write"],
+  );
+  check(
+    "a session:write grant may not install from a commit",
+    [asWriter.status, errorOf(asWriter.body).code],
+    [403, "insufficient_scope"],
+  );
+  check("and it reached the far end no more than the malformed ones did", bad.urls, []);
+  await bad.close();
+}
+
+process.stdout.write("\nwhat a plugin's own refusal becomes over HTTP\n");
+{
+  const { PluginHost } = await import("../src/plugins/host.js");
+  const { SessionRegistry } = await import("../src/registry.js");
+  const { hostGit } = await import("../src/git.js");
+  const { openStores } = await import("../src/store/sqlite.js");
+  const { parseManifest } = await import("../src/plugins/manifest.js");
+
+  const parsed = parseManifest(
+    JSON.stringify({
+      id: "p",
+      name: "P",
+      version: "1.0.0",
+      api: 1,
+      scopes: [],
+      contributes: { screen: { title: "P" }, settings: true },
+    }),
+  );
+  if (!parsed.ok) throw new Error(parsed.message);
+
+  /**
+   * A child scripted per bucket of `pluginErrorStatus`.
+   *
+   * ⚠ **Read the code, never the status.** That function exists so the statuses
+   * are at least not misleading, not so anybody branches on them, and the split is
+   * by *whose problem it is*: a plugin that is off or broken is on this machine
+   * and the request was fine (`503`), a plugin that did not answer in time is
+   * worth asking again (`504`), and everything else is something downstream of
+   * this daemon answering badly (`502`).
+   */
+  const childThat = (behaviour: "up" | "wontStart" | "silent" | "throws" | "asks" | "oversize" | "greedy"): PluginRuntime => ({
+    launch(options) {
+      /** Which invocation the `asks` child is still holding while it asks. */
+      let holding = 0;
+      /** The `greedy` child's tally: how many answers came back, and how many said no. */
+      let answered = 0;
+      let refused = 0;
+      return Promise.resolve({
+        send(message) {
+          if (message.t === "init") {
+            queueMicrotask(() =>
+              options.onMessage(
+                behaviour === "wontStart" ? { t: "fail", error: "this build will not run" } : { t: "ready" },
+              ),
+            );
+            return true;
+          }
+          if (message.t === "answer") {
+            if (behaviour === "greedy") {
+              // Counted rather than reported one at a time: the question is how
+              // many of the twenty-four the host would carry at once.
+              if (message.ok === false && String(message.error).includes("calls out")) refused += 1;
+              answered += 1;
+              if (answered === 24) {
+                queueMicrotask(() =>
+                  options.onMessage({ t: "done", id: holding, ok: true, value: { title: `refused ${refused}`, blocks: [] } }),
+                );
+              }
+              return true;
+            }
+            // Whatever the host said about the call below, handed back as this
+            // plugin's own view — which is the only way it is visible from
+            // outside the child at all.
+            const said = message.ok ? "allowed" : message.error;
+            queueMicrotask(() =>
+              options.onMessage({ t: "done", id: holding, ok: true, value: { title: said, blocks: [] } }),
+            );
+            return true;
+          }
+          if (message.t === "invoke" && behaviour === "asks") {
+            holding = message.id;
+            queueMicrotask(() => options.onMessage({ t: "call", id: 1, method: "store.get", args: { key: "k" } }));
+            return true;
+          }
+          /*
+           * ⚠ **A channel that refuses the write, which every fake here reported
+           * as succeeding.** `plugin_request_too_large` is raised where
+           * `child.send` answers `false`, so with five runtimes all returning
+           * `true` the arm — and the status it maps to — was unreachable from
+           * this driver. It settles the invocation immediately on purpose: the
+           * measured defect it replaced was three oversized forms spending the
+           * whole invoke deadline each and exhausting the timeout budget.
+           */
+          if (message.t === "invoke" && behaviour === "oversize") return false;
+          /*
+           * A plugin doing the obvious thing an author of a task board does:
+           * asking about every session at once. All of them are emitted inside a
+           * single microtask, so every one is counted before the first answer
+           * releases its slot — which is exactly the fan-out
+           * `MAX_INFLIGHT_HOST_CALLS` exists to bound, and which nothing bounded
+           * before. What the child hands back is how many it was refused.
+           */
+          if (message.t === "invoke" && behaviour === "greedy") {
+            holding = message.id;
+            queueMicrotask(() => {
+              for (let i = 1; i <= 24; i += 1) {
+                options.onMessage({ t: "call", id: i, method: "store.get", args: { key: `k${i}` } });
+              }
+            });
+            return true;
+          }
+          if (message.t === "invoke" && behaviour !== "silent") {
+            queueMicrotask(() =>
+              options.onMessage(
+                behaviour === "throws"
+                  ? { t: "done", id: message.id, ok: false, error: "the plugin threw" }
+                  : { t: "done", id: message.id, ok: true, value: { title: "screen", blocks: [] } },
+              ),
+            );
+          }
+          return true;
+        },
+        stop: () => Promise.resolve(),
+        recentLogs: () => [],
+      });
+    },
+  });
+
+  const rigFor = async (
+    name: string,
+    behaviour: "up" | "wontStart" | "silent" | "throws" | "asks" | "oversize" | "greedy",
+  ): Promise<{ app: ReturnType<typeof createApp>["app"]; close: () => Promise<void> }> => {
+    const stores = openStores({ path: join(tmp(`plugin-code-${name}-`), "d.db"), instanceId: `i_code_${name}` });
+    stores.plugins.put({
+      id: "p",
+      version: "1.0.0",
+      manifest: parsed.manifest,
+      enabled: true,
+      installedAt: 1,
+      updatedAt: 1,
+      source: null,
+    });
+    const registry = new SessionRegistry(stores.events, stores.sessions);
+    const host = await PluginHost.open({
+      root: join(tmp(`plugin-code-root-${name}-`), "plugins"),
+      records: stores.plugins,
+      data: stores.pluginData,
+      registry,
+      api: { git: hostGit },
+      runtime: childThat(behaviour),
+      // Short, because two of these cases are a deadline being reached and the
+      // production ten seconds each would put most of a minute into `pnpm check`.
+      timeouts: { start: 100, invoke: 100 },
+    });
+    const { app } = createApp({
+      registry,
+      verifier,
+      instanceId: `i_code_${name}`,
+      startedAt: Date.now(),
+      plugins: host,
+    });
+    return {
+      app,
+      close: async () => {
+        await host.shutdown();
+        await registry.shutdown();
+        stores.close();
+      },
+    };
+  };
+
+  const view = async (
+    app: ReturnType<typeof createApp>["app"],
+  ): Promise<{ status: number; code: string; title: string | null }> => {
+    const response = await app.request("/plugins/p/views/screen", {
+      headers: { authorization: `Bearer ${tokenFor("codes")}` },
+    });
+    const text = await response.text();
+    const body = text.length === 0 ? {} : (JSON.parse(text) as Record<string, unknown>);
+    return {
+      status: response.status,
+      code: (body["error"] as { code?: string } | undefined)?.code ?? "none",
+      // Carried out of the view, because the last case below is a plugin
+      // reporting what the daemon told *it* and the route's status says nothing
+      // about that.
+      title: (body["result"] as { view?: { title?: string | null } } | undefined)?.view?.title ?? null,
+    };
+  };
+
+  const up = await rigFor("up", "up");
+  check("a plugin that answers", await view(up.app), { status: 200, code: "none", title: "screen" });
+
+  /*
+   * Eight at once is the bound and the ninth is **refused rather than queued**:
+   * the caller is an HTTP request somebody is waiting on, and holding it behind
+   * seven others only moves the timeout. `503` and not `502` for the same reason
+   * a 429 is not a 400 — the remedy is to ask again.
+   */
+  const flood = await Promise.all(Array.from({ length: 9 }, () => view(up.app)));
+  report(
+    "and nine at once, one of which is told the plugin is busy",
+    flood.some((one) => one.status === 503 && one.code === "plugin_overloaded"),
+    flood.map((one) => `${one.status} ${one.code}`).join(", "),
+  );
+  await up.close();
+
+  const wontStart = await rigFor("wontStart", "wontStart");
+  check("a plugin that will not start", await view(wontStart.app), {
+    status: 503,
+    code: "plugin_unavailable",
+    title: null,
+  });
+  await wontStart.close();
+
+  /*
+   * A timeout is its own code and its own status, because the remedy differs:
+   * `plugin_failed` is the plugin author's problem and `plugin_timeout` is "ask
+   * again, or look at whether this machine is busy".
+   */
+  const silent = await rigFor("silent", "silent");
+  check("a plugin that never answers", await view(silent.app), { status: 504, code: "plugin_timeout", title: null });
+  await silent.close();
+
+  const throws = await rigFor("throws", "throws");
+  check("a plugin that answers with a failure", await view(throws.app), {
+    status: 502,
+    code: "plugin_failed",
+    title: null,
+  });
+  await throws.close();
+
+  /*
+   * ⚠ **`413`, and it used to be `502` by falling off the end.**
+   * `pluginErrorStatus` had no arm for `plugin_request_too_large`, so it took the
+   * default — whose stated reason is "something downstream of this daemon
+   * answered badly", when nothing downstream answered at all: the message never
+   * reached the child because it does not fit one IPC frame. `docs/API.md` said
+   * `503`, a third answer agreeing with neither. `413` is what this daemon already
+   * says for `payload_too_large` and both import ceilings, and it is the one that
+   * points at the caller, where the remedy is.
+   */
+  const oversize = await rigFor("oversize", "oversize");
+  check("a request too large for the channel", await view(oversize.app), {
+    status: 413,
+    code: "plugin_request_too_large",
+    title: null,
+  });
+  await oversize.close();
+
+  /*
+   * ⚠ **The other direction, which had no ceiling at all.**
+   * `MAX_INFLIGHT_INVOCATIONS` bounds host → child and was published in both
+   * bounds tables; nothing bounded child → host, and the two are not symmetric in
+   * cost — `sessions.changes` and `sessions.diff` each fork git. Twenty-four at
+   * once is one line an author of a task board writes without thinking about it,
+   * and the answer is a refusal per excess call rather than a queue: the child
+   * asked for them now, and holding them only moves the deadline it is already
+   * waiting on.
+   */
+  const greedy = await rigFor("greedy", "greedy");
+  check("a plugin that asks for everything at once is answered, and told no past the bound", await view(greedy.app), {
+    status: 200,
+    code: "none",
+    title: "refused 8",
+  });
+  await greedy.close();
+
+  /*
+   * ⚠ **`plugin_scope_denied → 403` is the one arm of `pluginErrorStatus` that
+   * nothing can reach, and it is unreachable rather than undriven.** A scope
+   * refusal is raised inside `PluginApi.call`, which is only ever entered from the
+   * child's own `call` message — `LivePlugin.onMessage` catches it and sends the
+   * plugin an `answer` carrying that code, so it crosses back to the **plugin**
+   * and never out of `invoke`. The two axes really are two: the caller's scope
+   * decided this request at the route, and the plugin's decided this call inside
+   * the child, and the second one has no way to become the first one's status.
+   *
+   * Driven from the only side it is visible from rather than written down as a
+   * note: a child that asks for a method its manifest does not declare, and hands
+   * back whatever it was told as its own view. What the route answers is `200`,
+   * because from where it is standing the plugin did its job.
+   */
+  const asks = await rigFor("asks", "asks");
+  const asked = await view(asks.app);
+  check("a plugin asking for something it did not declare is still a 200", [asked.status, asked.code], [200, "none"]);
+  report(
+    "and what it was told is the refusal, delivered to it rather than to the caller",
+    asked.title?.startsWith("plugin_scope_denied: store.get needs") === true,
+    asked.title ?? "nothing came back",
+  );
+  await asks.close();
+}
+
+process.stdout.write("\nbeing told a session appeared\n");
+{
+  const { SessionRegistry } = await import("../src/registry.js");
+
+  const root = tmp("observer-");
+  mkdirSync(root, { recursive: true });
+  const warnings: string[] = [];
+  const registry = new SessionRegistry(
+    undefined,
+    storeOf([rowFor("s_one", root), rowFor("s_two", root)]),
+    undefined,
+    undefined,
+    undefined,
+    (detail) => warnings.push(detail),
+  );
+
+  /*
+   * ⚠ **A throwing observer is reported, kept, and does not stop the ones after
+   * it.** All three are asserted here because all three are the opposite of what
+   * `SessionLog.append` does to a throwing listener, and the difference is
+   * deliberate: there, a listener is one WebSocket and evicting it costs that
+   * socket its events; here it is a whole subsystem, and dropping it on one bad
+   * frame would stop every plugin hook on the machine for the life of the daemon
+   * with nothing anywhere saying so.
+   *
+   * Registered **first**, so "the ones after it" is a real position rather than a
+   * hope about iteration order.
+   */
+  let threw = 0;
+  const unstable = registry.watchSessions(() => {
+    threw += 1;
+    throw new Error("this observer is broken");
+  });
+  const seen: [string, string][] = [];
+  const stop = registry.watchSessions((managed, arrival) => seen.push([managed.id, arrival]));
+
+  registry.restore({ reapOrphans: false });
+
+  check(
+    "every session already here is announced, as restored",
+    seen,
+    [
+      ["s_one", "restored"],
+      ["s_two", "restored"],
+    ],
+  );
+  report("a throwing observer is called for every one of them", threw === 2, `${threw} calls`);
+  report(
+    "each throw is reported rather than swallowed",
+    warnings.filter((one) => one.includes("this observer is broken")).length === 2,
+    `${warnings.length} warnings`,
+  );
+
+  unstable();
+  stop();
+  const before = seen.length;
+  registry.restore({ reapOrphans: false });
+  check("and unsubscribing really stops it", seen.length, before);
+
+  await registry.shutdown();
 }
 
 process.stdout.write(

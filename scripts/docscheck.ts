@@ -105,8 +105,24 @@ const MAX_RULE_CHARS: number | null = 32_000;
 
 // ---------------------------------------------------------------- the corpus
 
-const SOURCE_DIRS = ["src", "scripts", "deploy", "packages", ".github"];
-const SOURCE_EXT = /\.(ts|tsx|sql|sh|yml|yaml|json|in|md)$/;
+/**
+ * Where this driver looks for source.
+ *
+ * `plugins` is the demo plugin, and it is here for two reasons rather than for
+ * completeness. A rule file's `paths:` globs are matched against *this* list, so a
+ * rule scoped to a directory outside it silently never arrives — which is the one
+ * failure in this driver with no symptom of its own. And a symbol cited about the
+ * reference plugin should resolve against the reference plugin.
+ */
+const SOURCE_DIRS = ["src", "scripts", "deploy", "packages", ".github", "plugins"];
+/**
+ * `js` is in this list for one file: a plugin's `server.js`.
+ *
+ * A plugin is plain JavaScript on purpose — it must not depend on this daemon's
+ * toolchain — so the only executable half of the reference plugin would otherwise
+ * be invisible to the symbol check while its manifest was not.
+ */
+const SOURCE_EXT = /\.(ts|tsx|js|sql|sh|yml|yaml|json|in|md)$/;
 // `.gstack` is not part of this repository — it is a local agent-tooling
 // directory that some contributors have in their checkout. Skipped so a walk
 // never descends into somebody's private tooling and reports citations from it;

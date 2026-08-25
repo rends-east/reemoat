@@ -1815,3 +1815,229 @@ export interface CreatedUser {
   mailQueued?: boolean;
   mustChangePassword?: boolean;
 }
+
+/* ------------------------------------------------------------------ *
+ * Plugins
+ *
+ * Mirrored from `src/plugins/protocol.ts`, which is written to be
+ * mirrorable — it imports nothing, for this reason. The cost is the one
+ * this file's header already states: it can drift, and drift shows up at
+ * runtime rather than at build time, so **every narrowing over these
+ * shapes fails open**. `plugins.ts` is where that is done and asserted.
+ * ------------------------------------------------------------------ */
+
+export type PluginScope = "sessions.read" | "sessions.write" | "files.read" | "store" | "net" | "model";
+
+/**
+ * One line per scope, for the list somebody reads before installing.
+ *
+ * Copied rather than fetched. It is the *client's* job to explain what a
+ * capability means to the person looking at it, and a daemon that could choose
+ * these strings would be a daemon that could describe `net` as "nothing much".
+ *
+ * ⚠ **`Record<PluginScope, string>` and the fall-through at the call site are
+ * both load-bearing, and they answer different questions.** The exhaustive type
+ * is about *this* build: a sixth scope added to the union above is a compile
+ * error here, so the sentence is written by whoever adds the scope rather than
+ * found missing by whoever installs the first plugin asking for it. It was
+ * `Record<string, string>` and that caught nothing — the exhaustive copy was the
+ * one in `src/plugins/protocol.ts`, which is the copy nobody draws, so a new
+ * scope would have failed the build on the unused table and fallen through to a
+ * raw identifier on the rendered one. The fall-through is about the *other*
+ * build: this file is a hand mirror of a daemon that may be newer than the tab,
+ * so `PluginSummary.scopes` claiming `PluginScope[]` is a claim about a wire
+ * this file does not control. A scope this client has not heard of must still
+ * land as its own identifier — legible, and never a guess about what a newer
+ * daemon means by it. Removing the `??` because the type now says it cannot miss
+ * would be believing the mirror; it is the same fail-open rule `plugins.ts`
+ * keeps over every other shape here.
+ */
+export const PLUGIN_SCOPE_TEXT: Record<PluginScope, string> = {
+  /*
+   * ⚠ **One line each, and the length is the decision rather than the wording.**
+   * These were sentences — *"Start, prompt, stop and rename sessions, and answer
+   * the questions agents ask"* — and six of them stacked is the wall of text that
+   * pushed the install control off a phone and got read by nobody, which is the
+   * one failure a consent screen cannot survive: an unread disclosure discloses
+   * nothing. `webcheck` holds them to a line, because a table of sentences is one
+   * well-meant edit away from being a wall again.
+   *
+   * ⚠ **Lower-case fragments, because they are read as the tail of "It may".**
+   * The heading is the verb; each row completes it. Capitalised they read as six
+   * separate claims and take a line each to restate the subject.
+   *
+   * ⚠ **Two of the six carry a consequence rather than a mechanism, and those
+   * halves survive the shortening or the shortening was not worth having.**
+   * `sessions.write` also grants `sessions.answerPermission` and
+   * `sessions.answerElicitation` — so a plugin holding it plus the
+   * `permission.requested` hook approves every permission an agent raises on this
+   * machine, on a product whose own docs call that prompt the thing standing
+   * between an agent and arbitrary shell. And `model` spends the operator's
+   * **quota**, on an account they signed an agent into for their own work, from a
+   * hook that can fire on every turn of every session. "ask a model a question"
+   * describes the mechanism perfectly and hides the only part worth reading.
+   *
+   * "your agents" rather than a vendor: which agents exist is a fact about the
+   * machine, and naming Claude here would be wrong on a host that has only codex.
+   */
+  "sessions.read": "read your sessions and transcripts",
+  "sessions.write": "control sessions, and answer agents' questions",
+  "files.read": "read files in a session's workspace",
+  store: "keep its own data here",
+  net: "reach the hosts it lists",
+  model: "ask your agents, at your cost",
+};
+
+/**
+ * How long one of those lines may be.
+ *
+ * ⚠ **A number in the mirror rather than a rule in a review**, for the reason the
+ * table above gives: the shortening is the whole change, and nothing else in this
+ * build would notice it being undone one entry at a time. `webcheck` reads this,
+ * so the ceiling and the strings it bounds move together or not at all.
+ */
+export const PLUGIN_SCOPE_TEXT_MAX = 56;
+
+export type PluginHook =
+  | "session.created"
+  | "turn.ended"
+  | "session.ended"
+  | "permission.requested"
+  | "permission.resolved";
+
+export interface PluginAction {
+  id: string;
+  title: string;
+  on: "session" | "screen";
+}
+
+export interface PluginContributions {
+  screen: { title: string } | null;
+  settings: boolean;
+  actions: PluginAction[];
+  hooks: PluginHook[];
+}
+
+export type PluginState = "running" | "stopped" | "failed" | "starting";
+
+export interface PluginSummary {
+  id: string;
+  name: string;
+  version: string;
+  description: string | null;
+  scopes: PluginScope[];
+  net: string[];
+  contributes: PluginContributions;
+  enabled: boolean;
+  state: PluginState;
+  failure: string | null;
+  installedAt: number;
+  updatedAt: number;
+}
+
+export interface PluginListing {
+  plugins: PluginSummary[];
+  api: number;
+}
+
+export interface PluginRowAction {
+  id: string;
+  label: string;
+  tone: "plain" | "destructive";
+  confirm: string | null;
+}
+
+export type PluginRowTone = "ok" | "warn" | "danger";
+
+/**
+ * Where a row goes. **A destination this app has, never a URL** — see
+ * `src/plugins/protocol.ts` for the argument, which is the same one that keeps a
+ * session-menu action from navigating.
+ */
+export type PluginOpen = { session: string } | { screen: true };
+
+export interface PluginRow {
+  id: string;
+  title: string;
+  subtitle: string | null;
+  badge: string | null;
+  tone: PluginRowTone | null;
+  open: PluginOpen | null;
+  actions: PluginRowAction[];
+}
+
+export type PluginFieldKind = "text" | "password" | "number" | "toggle" | "select";
+
+/**
+ * Which of a plugin's two screens is being drawn. Mirrors `PluginSurface`.
+ *
+ * ⚠ **The browser is the only side that knows this for an action's answer**, and
+ * that is why the narrowing lives here as well as in the daemon. A `view` is
+ * invoked by its id, so the daemon knows which surface it is answering for — but
+ * a *form submit* reaches it as an action id, which says which action and never
+ * which pane it was pressed on. The component drawing the pane knows; nothing
+ * upstream of it does.
+ */
+export type PluginSurface = "screen" | "settings";
+
+/**
+ * What a settings pane draws. Mirrors `PLUGIN_SETTINGS_BLOCK_TYPES`.
+ *
+ * A settings pane is a form plus the words around it. `text` and `notice` are
+ * not settings — they are the sentence above a control and the warning beside
+ * it — and a form with no way to say anything about itself is a worse pane, not
+ * a stricter one. `list` and `columns` are a **screen**, which a plugin already
+ * has at `/p/:machineId/:pluginId`.
+ */
+export const PLUGIN_SETTINGS_BLOCK_TYPES: readonly PluginBlock["type"][] = ["text", "notice", "form"];
+
+/**
+ * The three controls a setting may be. Mirrors `PLUGIN_SETTINGS_FIELD_KINDS`.
+ *
+ * A box you type in, a switch, a dropdown. `password` and `number` are spellings
+ * of the first rather than a fourth and a fifth kind: `PluginField.value` is a
+ * string on the wire whatever the kind, so `number` only ever bought a keyboard,
+ * and `password` masked a value the daemon keeps in a plaintext SQLite column —
+ * an assurance this system does not provide, offered on the screen where a false
+ * one costs most.
+ */
+export const PLUGIN_SETTINGS_FIELD_KINDS: readonly PluginFieldKind[] = ["text", "toggle", "select"];
+
+export interface PluginFieldOption {
+  value: string;
+  label: string;
+}
+
+export interface PluginField {
+  key: string;
+  label: string;
+  kind: PluginFieldKind;
+  value: string | null;
+  options: PluginFieldOption[];
+  placeholder: string | null;
+  help: string | null;
+}
+
+export type PluginBlock =
+  | { type: "text"; text: string; tone: "default" | "muted" }
+  | { type: "notice"; text: string; tone: "default" | "danger" }
+  | { type: "list"; rows: PluginRow[]; empty: string }
+  | { type: "columns"; columns: { title: string; rows: PluginRow[] }[] }
+  | { type: "form"; fields: PluginField[]; submit: string; action: string };
+
+export interface PluginView {
+  title: string | null;
+  /** How often this view asks to be re-read. Already clamped by the daemon. */
+  refreshMs: number | null;
+  blocks: PluginBlock[];
+}
+
+export type PluginResult =
+  | { kind: "view"; view: PluginView }
+  | { kind: "toast"; text: string; tone: "default" | "danger" };
+
+export interface PluginInstalled {
+  plugin: PluginSummary;
+  /** The version this replaced, or `null` when it was a fresh install. */
+  replaced: string | null;
+}

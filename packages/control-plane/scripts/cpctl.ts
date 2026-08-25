@@ -43,7 +43,7 @@ const SECRET_KEYS = [...SECRET_SETTING_KEYS].join(", ");
 
 const USAGE = `cpctl — drive the Reemoat control plane
 
-  login <name>                              sign in; prints a REEMOAT_CP_KEY to export
+  login <name|email>                        sign in; prints a REEMOAT_CP_KEY to export
   logout                                    end this session
   sessions [--all]                          where you are signed in; --all signs them all out
   passwd                                    change your own password
@@ -423,7 +423,7 @@ async function main(): Promise<void> {
    */
   if (first === "login") {
     const name = rest[0];
-    if (!name) fail("usage: cpctl login <name>");
+    if (!name) fail("usage: cpctl login <name|email>");
     const password = await readSecret(`password for ${name}`);
     const response = await fetch(new URL("/v1/login", BASE_URL), {
       method: "POST",

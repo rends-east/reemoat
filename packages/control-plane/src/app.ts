@@ -45,7 +45,7 @@ import {
   VERIFY_TTL_MS,
   verifiedOwnerOf,
 } from "./emails.js";
-import { checkEmailAddress } from "./mail/address.js";
+import { checkEmailAddress, MAX_EMAIL_CHARS } from "./mail/address.js";
 import { mailHealth, NOTICE_INTERVAL_MS, sentRecently, type MailSender } from "./mail/outbox.js";
 import {
   emailChanged,
@@ -168,7 +168,7 @@ import {
  * against `package.json` instead, so the two cannot drift silently.
  */
 const SOURCE_URL = "https://github.com/rends-east/reemoat";
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 
 /**
  * Work a route answered before doing, still owed.
@@ -406,6 +406,23 @@ export interface ControlPlaneOptions {
    * so it must stay one value for the life of a fleet.
    */
   relayUrls?: Record<string, string> | null;
+  /**
+   * Where the plugin catalogue lives, or `null` for an instance that has none.
+   *
+   * ⚠ **Env only, and deliberately not a `SETTING_KEYS` row.** Every other
+   * product-shaped value on this service is env-seeded and database-owned, so
+   * that an admin can change it without a redeploy — and this one may not be,
+   * because it has to appear in `connect-src`. The CSP is built **once**, at app
+   * construction, from this value; a row an admin could write would let them name
+   * a catalogue the document's own header then refuses to reach, and the symptom
+   * would be a screen that stays empty with an error only the browser console
+   * carries. One source, one restart, no way for the two to disagree.
+   *
+   * `null` is an ordinary state rather than a misconfiguration: the market tab
+   * says there is no catalogue and everything else about plugins keeps working,
+   * because installing from a file never involved this at all.
+   */
+  pluginCatalogueUrl?: string | null;
   /** Live tunnel state, or `null` when the relay is switched off. */
   relay?: RelayView | null;
   /**
@@ -463,6 +480,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   const { db, issuer, tokenTtlSeconds } = options;
   const relayUrl = options.relayUrl ?? null;
   const relayUrls = options.relayUrls ?? null;
+  const pluginCatalogueUrl = options.pluginCatalogueUrl ?? null;
   const relay = options.relay ?? null;
   const trustedProxyHops = options.trustedProxyHops ?? DEFAULT_TRUSTED_PROXY_HOPS;
   const app = new Hono<AppEnv>();
@@ -587,13 +605,35 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * nothing either — it would only invite somebody to reason about it.
    */
   const relayOrigins = connectOrigins(relayUrl, relayUrls);
+  /*
+   * ⚠ **The plugin market reaches two hosts, and one of them needs two
+   * directives.** `catalogueOrigin` is where the list of official plugins comes
+   * from; `PLUGIN_MANIFEST_ORIGIN` is where a plugin's own `plugin.json` and its
+   * icon are read from, at the commit the catalogue pinned — which is what makes
+   * the permissions somebody consents to provably belong to the code being
+   * installed, rather than to a summary a service typed out.
+   *
+   * ⚠ **`raw.githubusercontent.com` is in `img-src` as well as `connect-src`, and
+   * the pair is the point.** A manifest is a `fetch` and an icon is an `<img>`,
+   * and CSP treats those as different questions. Getting only `connect-src` right
+   * is the failure mode that reads as working: every permission list renders, and
+   * every icon on the market screen is silently blank, with the reason only in a
+   * console nobody has open on a phone.
+   *
+   * Both are absent entirely on an instance with no catalogue configured, which
+   * is exactly what such an instance can reach — `connectOrigins`' own posture one
+   * value over.
+   */
+  const catalogueOrigin = originOf(pluginCatalogueUrl);
+  const marketOrigins = catalogueOrigin === null ? "" : ` ${catalogueOrigin} ${PLUGIN_MANIFEST_ORIGIN}`;
+  const marketImages = catalogueOrigin === null ? "" : ` ${PLUGIN_MANIFEST_ORIGIN}`;
   const csp = [
     "default-src 'self'",
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' blob:",
+    `img-src 'self' blob:${marketImages}`,
     "font-src 'self'",
-    `connect-src 'self'${relayOrigins}`,
+    `connect-src 'self'${relayOrigins}${marketOrigins}`,
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
@@ -1070,8 +1110,19 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     if (!body) return jsonError(c, 400, "bad_request", "expected a JSON object body");
     const name = body["name"];
     const password = body["password"];
-    if (typeof name !== "string" || name.trim().length === 0 || name.length > 200) {
-      return jsonError(c, 400, "bad_request", "name is required");
+    /*
+     * ⚠ **The field is still called `name` and now takes a name *or* an email
+     * address.** Renaming it would break every older client and `cpctl` at once
+     * for the sake of a label, and there is one identifier on this wire either
+     * way — the lookup below decides which kind it turned out to be.
+     *
+     * `MAX_EMAIL_CHARS` rather than the 200 that used to be here: 200 is
+     * `users.name`'s own ceiling, and `mail/address.ts` allows an address 254, so
+     * leaving it refuses a legal address as `bad_request` — a *different* answer
+     * from `invalid_login`, i.e. an oracle that says "too long to be one of ours".
+     */
+    if (typeof name !== "string" || name.trim().length === 0 || name.length > MAX_EMAIL_CHARS) {
+      return jsonError(c, 400, "bad_request", "a name or email address is required");
     }
     if (typeof password !== "string" || password.length === 0) {
       return jsonError(c, 400, "bad_request", "password is required");
@@ -1121,7 +1172,42 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     throttle.fail(attemptKey);
     addressThrottle.fail(sprayKey);
 
-    const user = db.prepare("SELECT id, name, is_admin, disabled_at FROM users WHERE name = ?").get(name.trim());
+    /*
+     * **A name, then a verified address. In that order, and the order is the whole
+     * of the ambiguity rule.**
+     *
+     * `USER_NAME` has no `@` in its character class, so no name created through a
+     * validated route can also be an address — but names are checked at *creation
+     * only* and a row written before that rule keeps working, so a legacy name
+     * holding an `@` is reachable. Trying the name first makes that case
+     * deterministic without a new status code. A `409 user_ambiguous` — what
+     * `POST /v1/provision` answers for a name two accounts share bar case — would
+     * be wrong here twice over: this route is unauthenticated, so a distinguishable
+     * refusal is an oracle telling a stranger the string names *something*, and
+     * `webcheck` pins the set of codes that may end a browser session at six.
+     *
+     * **Verified addresses only**, through `verifiedOwnerOf`. `idx_user_emails_verified`
+     * is a *partial* unique index — uniqueness holds for `verified_at IS NOT NULL`
+     * and for nothing else — because an unverified claim arrives from the anonymous
+     * `/v1/register` and reserves nothing. Resolving on the address alone would let
+     * anybody claim a stranger's address unverified and become a second candidate
+     * for it, which is the squatting hazard that index was shaped against.
+     *
+     * Two indexed `.get()`s with no `await` between them, which is what keeps the
+     * decoy branch below honest: "no such name" and "no such address" cost the same
+     * handful of microseconds and both arrive at the same KDF.
+     */
+    const submitted = name.trim();
+    let user = db.prepare("SELECT id, name, is_admin, disabled_at FROM users WHERE name = ?").get(submitted);
+    if (user === undefined) {
+      const checked = checkEmailAddress(submitted);
+      if (checked.ok) {
+        const owner = verifiedOwnerOf(db, checked.folded);
+        if (owner !== null) {
+          user = db.prepare("SELECT id, name, is_admin, disabled_at FROM users WHERE id = ?").get(owner);
+        }
+      }
+    }
     const stored =
       user === undefined
         ? undefined
@@ -1144,13 +1230,13 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         // out of the defence against flooding, under load and therefore exactly
         // when somebody is looking.
         await verifyAgainstDecoy(password, "public");
-        return jsonError(c, 401, "invalid_login", "that name and password do not match");
+        return jsonError(c, 401, "invalid_login", "those sign-in details do not match");
       }
 
       const verified = await verifyPassword(password, String(stored["hash"]), "public");
       if (!verified.ok) {
         // No `fail` here — the attempt was recorded before the await.
-        return jsonError(c, 401, "invalid_login", "that name and password do not match");
+        return jsonError(c, 401, "invalid_login", "those sign-in details do not match");
       }
 
       /*
@@ -1416,6 +1502,22 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     return c.json({
       registration: { enabled: mode.enabled, requiresEmail: mode.requiresEmail },
       mail: { configured: mailConfigured(db).configured },
+      /*
+       * Where the plugin market's catalogue lives, or `null`.
+       *
+       * ⚠ **The value rather than a boolean, and it is safe to publish because
+       * the CSP already names it.** A client cannot be told "there is a
+       * catalogue" and left to guess the address — and it cannot be handed one
+       * the document's own `connect-src` does not list, because both come from
+       * the same variable read once at construction. Publishing it here is
+       * therefore publishing something already in a response header on this very
+       * page.
+       *
+       * Above the credential line with the rest of `/v1/instance`, which is
+       * correct: whether this instance has a market is a fact about the instance,
+       * not about who is asking.
+       */
+      plugins: { catalogue: pluginCatalogueUrl },
       // The AGPL §13 offer. Public because the people it is owed to are the ones
       // who have not signed in — see `SOURCE_URL`.
       source: { url: SOURCE_URL, version: VERSION },
@@ -5746,6 +5848,34 @@ function readScopes(value: unknown): Scope[] | null {
  * Leading space included so the caller concatenates rather than deciding whether
  * to.
  */
+/**
+ * Where a plugin's manifest and its icon are read from.
+ *
+ * Written down rather than derived, because it is not configuration: the
+ * catalogue pins a **GitHub commit**, and this is the host that serves a file at
+ * one. A second forge would arrive as a second `PluginSource.kind` on the daemon
+ * and a second entry here, together — which is the shape that keeps the CSP and
+ * the fetcher from disagreeing about what is reachable.
+ */
+const PLUGIN_MANIFEST_ORIGIN = "https://raw.githubusercontent.com";
+
+/**
+ * A configured URL's origin, or `null` for one that is absent or unparseable.
+ *
+ * `null` rather than a throw, `connectOrigins`' posture: this runs at app
+ * construction and a driver may build an app with anything. An instance whose
+ * catalogue URL is nonsense reaches no catalogue, which is both the honest policy
+ * and the same one it would have had with none configured.
+ */
+function originOf(url: string | null): string | null {
+  if (url === null || url.length === 0) return null;
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
 function connectOrigins(relayUrl: string | null, relayUrls: Record<string, string> | null): string {
   const sources = new Set<string>();
   /*

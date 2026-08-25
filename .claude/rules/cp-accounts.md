@@ -21,7 +21,7 @@ paths:
 ```bash
 pnpm cpctl admin machines            # drive it; needs REEMOAT_CP_KEY
 pnpm cpctl admin setmachine <id> --name <n>  # rename it; there is no address to set
-pnpm cpctl login <name>              # sign in with a password; prints a REEMOAT_CP_KEY
+pnpm cpctl login <name|email>        # sign in with a password; prints a REEMOAT_CP_KEY
 pnpm cpctl passwd                    # change your own. There is no way to change anybody else's
 pnpm cpctl key                       # mint yourself an API key; `keys --revoke <id>` retires one
 pnpm cpctl email [<address>]         # your address, the only thing that makes recovery work
@@ -85,7 +85,17 @@ them one `env_file` so the standard deployment cannot disagree; a relay on anoth
 host has its own `environment:` block and can. Setting it from Settings → Server
 settings writes a row, and a row wins in both processes out of the one database.
 
-**A person signs in with a name and a password.** One password per user (scrypt, in
+**A person signs in with a name *or a confirmed email address*, and a password.**
+The route resolves the name first and the address second, through `verifiedOwnerOf`
+— **verified only**, because `idx_user_emails_verified` is a *partial* unique index
+and an unverified claim, which anybody may write from the anonymous `/v1/register`,
+reserves nothing. `USER_NAME` has no `@`, so the two spaces cannot collide for any
+name a validated route created; the fixed order settles a legacy one without a new
+status code, which on an unauthenticated route would be an existence oracle. One
+account named two ways spends **two** throttle counters — `loginKey` is built from
+what was submitted, and folding them would key the counter on the account, which is
+the lockout weapon `throttle.ts` exists to have removed. `addressKey` is what bounds
+the doubling. One password per user (scrypt, in
 `user_passwords`); the session token is sent as a bearer and **never** a cookie,
 because `src/cors.ts` answers `*` and never sends
 `Access-Control-Allow-Credentials`. API keys survive for everything that is not a

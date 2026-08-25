@@ -112,6 +112,36 @@ stays off, because it is untrusted text quoting an untrusted repository.
   exists* rather than on the request's `decision` field, which the daemon leaves
   null for the request's whole life. A question is drawn as an exchange (the
   answer entered the model's context); an approval is drawn as one line.
+- **A settled question draws what was asked, not just what was picked.**
+  `ElicitationResolvedEvent` carries `message` plus `{key, label, value}` per
+  answer, and for a multi-question form `message` is the adapter's preamble while
+  each real question sits in its field's *description*, which the resolution does
+  not carry — so the row read *"Please answer the following questions."* over four
+  bare values. `answeredQuestions` recovers the wording from the arguments of the
+  tool call `askedThrough` merges away, joining **by identity on the chosen label**
+  and never by parsing `question_0` / `<question>__other`, which are two adapters'
+  spellings of one idea. A label two questions share matches neither, because
+  attributing an answer to the wrong question is worse than attributing it to none.
+  The join is in `tail.ts` and arrives as `EventNode.asked`, the same arrangement
+  `heading` uses; `null` means *draw what you drew before* and is reached three
+  honest ways — the call is outside the window, its `rawInput` is the
+  `{truncated, bytes}` stand-in, or the form was never an `AskUserQuestion`.
+- **Consecutive plan updates are one card, drawn where the newest one landed.**
+  One `TodoWrite` emits a `plan` per streaming refinement — nine events for a
+  three-item list, each a full replacement — so the same checklist was drawn nine
+  times in a row. `planFloor` in `buildTail` suppresses an older one, and
+  **"consecutive" is over *emitted nodes***: over raw events an invisible
+  `session_info_update` saves a stale card, and over *drawable* events a
+  `permission_request` this walk merges away does. It is one compare, because
+  `collected.length` already is that count. **The flush is untouched and that is
+  provable rather than a compromise** — `flush()` runs *before* the node decision,
+  so an open text run grows `collected` and the older plan is therefore drawn: a
+  plan with a message on either side of it is always a real boundary. `plan` stays
+  **out** of `TRANSCRIPT_SILENT`, where it would be a lie. Nothing says how many
+  were absorbed, and the "a number survives collapse" idiom does not extend: the
+  surviving card already contains everything every absorbed update said. ⚠ The row
+  is keyed on the newest plan's seq, so an update remounts it — safe only while the
+  plan arm holds no component state. Q3.455.
 - **A run of consecutive tool rows is one row.** `foldRuns` folds it into a
   `GroupNode` carrying a mechanical sentence — clauses from ACP's `kind`, in the
   order each first appeared, with `+N −M` beside it — that opens to the rows it
@@ -193,25 +223,84 @@ rather than replacing the label. De-emphasis in fill and border, never in text.
 `essentialContext` and `detailContext` are a **partition**, so nothing is drawn
 twice and the disclosure sits *between* them. There is **no scrim** — Q3.39.
 
-**A row of buttons carries its meaning by position, so an option that cannot be a
-button is not drawn.** With the colour removed, what says which button is which is
-*where it is*: the refusal alone on the left, the reversible approval filled on the
-right — and the halves are **nested groups rather than one row with a `flex-1`
-spacer**, because a spacer only spaces the line it is on and any wrap at all
-dissolves the rule silently.
+**A plan is the one payload on that card that is *rendered*, and the gate above it
+is what makes that safe.** `context.plan` is read from a `plan` field in the tool's
+arguments and drawn through `Markdown` on `bg-raised/50`; everything else keeps the
+verbatim `<pre>`, whose rule — *a text block may be the command, so it is never
+parsed* — is untouched and still governs every other request. A plan survives only
+when the request **authorizes nothing**: no command, no body, no diff, no location,
+which is `askedQuestion`'s own test reused, and half of it falls out of
+`computeInput`'s early returns. ACP's `switch_mode` kind is deliberately *not* part
+of that gate — it rides the `tool_call`, i.e. it is missing exactly when the
+transcript has not paged in — and **is** required one level up, where the
+consequence is larger. The card takes `size="tall"` for a plan, keyed on
+`context.plan` and never on the title. **The plan's own source goes behind
+`details`** — `essentialContext` drops the text blocks, `detailContext` puts the
+source in their place, and `withheldDetail` gains a clause so a plan with no
+`planFilePath` still gets a disclosure. ⚠ The echo test is **trimmed**, because
+`pick` trims and a markdown document ends with a newline: 6818 against 6819 drew
+the document twice, once readable and once not. Q3.452.
 
-`drawableOptions` is the removal, and it is narrowed four ways. *By length, never
-by id*: nothing knows the string `accept_execpolicy_amendment`, because
-recognising an option by its id or its wording is the guessing this codebase
-refuses everywhere. *Approvals only* — a refusal is kept whatever it is called,
-being the one option whose absence reads as "there was no way to say no".
-*Decisions only* — more than one `allow_once` means these are a question's
-**answers** rather than one approval's scopes, the same test `askedQuestion` makes,
-and nothing is filtered. *Never a scope's only representative* — an over-long
-approval goes only when another option of the **same kind** survives it. The last
-two are not decoration and `webcheck` fails in three places without them; what is
-lost when it fires is the **broadest** grant on offer, and only ever while a
-narrower one of the same kind is still on the card. Q3.92.
+**`planControls` recognises claude's plan-mode options by `optionId`, and that is a
+named exception to the rule below rather than a softening of it.** All three
+approvals are `allow_always`, so ACP's enum separates none of them and the id is
+the only thing that does. Three narrowings make being wrong free: structure before
+ids (a plan *and* `switch_mode`), **exact set equality** over five ids and five
+kinds, and `null` meaning today's card. What it gives up is `bypassPermissions` —
+which the fourth narrowing below already licenses — and `default`, the only
+`allow_once`, which it does **not**: after this the narrowest grant on the card is
+`acceptEdits`, and the filled `bg-fg` primary goes to `auto`, reversing "the
+reversible one" on the card that invented that convention. `drawableOptions` is
+untouched. Q3.453.
+
+**"What to change" is written in the message box, and the card has no control for
+it.** ACP has no field for text on a permission response, so a correction cannot
+ride the answer — and every control that tried built a second message box above
+the one this app already has. Instead the **composer takes over** while a plan is
+on screen: `revising` reaches it from `SessionView`, which is the only place the
+pending permission and the transcript are both in scope. The placeholder says *say
+what to change…*, `sendRefused` lifts, `stoppable` yields the Stop slot to Send,
+and `parked` stands down so the blur rule does not take the caret from somebody
+just invited to type. Sending **cancels the turn, then prompts** — measured: a
+refused plan does *not* end the turn, and the operator was pressing Stop by hand
+before typing. All four flags are pinned as source text; a gate left reading
+`blocked || working` refuses the one send this state exists for. ⚠ **`awaitingPlan`
+is computed above `SessionView`'s guard clause and must stay there** — it holds a
+`useMemo`, and below the `if (row === undefined)` return it ran on some renders and
+not others, which is React #310 the moment a cold-opened session's row lands.
+Nothing else in this repository catches that: no eslint, `tsc` does not model hook
+order, `webcheck` has no DOM — so `webcheck` reads the file instead. Q3.454.
+
+**The number beside an answer is a keyboard shortcut, so it is not drawn on a
+touch device.** `pointer-coarse:hidden`, keyed on the **pointer and never on a
+breakpoint** — `sm:` would claim a narrow desktop window has no keyboard. The
+handler is untouched: a tablet with a bluetooth keyboard still answers on `2`.
+
+**A row of buttons carries its meaning by position, so an option that cannot be a
+button gets a different layout — never a deletion.** With the colour removed, what
+says which button is which is *where it is*: the refusal alone on the left, the
+reversible approval filled on the right — and the halves are **nested groups rather
+than one row with a `flex-1` spacer**, because a spacer only spaces the line it is
+on and any wrap at all dissolves the rule silently.
+
+`permissionLayout` is the decision, and it is one rule: *by length, never by id* —
+nothing knows the string `accept_execpolicy_amendment`, because recognising an
+option by its id or its wording is the guessing this codebase refuses everywhere.
+Past `BUTTON_LABEL_MAX` on any **approval's** rendered label the card draws `rows`
+instead, which is the arrangement it already uses for a question. A refusal never
+decides it: alone in its group it has no sibling to line up against, so a long one
+is a wide button and nothing worse. **The positional rule travels with the switch**
+— `permissionButtons` still orders refusals first and still names one `primaryId`,
+and `OptionRow` draws that one filled.
+
+⚠ **This replaced `drawableOptions`, which deleted the option instead, and the
+reversal is Q3.470.** That function was narrowed four separate ways and every
+narrowing was a case where deleting lost something: claude's path-scoped
+`allow_always` was the only one on its card, an over-long `allow_once` handed the
+filled button to the *permanent* grant, and kimi's `AskUserQuestion` arrives down
+this channel — so two of four **model-written answers** went with nothing said.
+Measured over the live log, five of fifteen real option labels exceed the ceiling.
+A layout is this app's problem and an option is the agent's. Q3.92, Q3.470.
 
 **Two options of one `kind` is why the labels there are the agent's own.**
 `optionLabel` substitutes our word only when the kind identifies the option;

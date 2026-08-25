@@ -55,6 +55,36 @@ fleet switched off until the last machine is touched by hand. `relaycheck` asser
 the negotiation in both directions, including a daemon that predates the header
 entirely.
 
+**The mirror is swept, field for field, and until recently nothing swept it.**
+`webcheck` compared the four plugin *unions* — a union member is a value that
+turns up in a `switch` — and compared no **interface** at all. A field added to
+`SessionSnapshot` on the daemon and not copied into `wire.ts` compiles on both
+sides, ships, and is `undefined` at runtime on the screen that reads it. The sweep
+is over every interface declared in both, currently 44, and asserts **`daemon ⊆
+client`, never equality**: a field added after the first release is *optional* on
+this side on purpose, because an older daemon does not send it. What is refused is
+the client knowing *less* than the daemon says. ⚠ Its first run reported two
+drifts and both were the sweep's own bugs — a prefix match (`Me` against
+`MemoryEventStore`) and `extends` it did not follow. A checker that cries wolf is
+turned off in a week, so it anchors the name and resolves inheritance, and the
+count has a floor under it: finding nothing to compare must not read as finding no
+drift. Two more, both from the same argument: an `extends` naming something the
+reader cannot find is a **refusal**, never a silent shortfall — an interface that
+reads as smaller than it is makes the sweep compare fewer fields and report no
+drift about the half it could not read. And the anchor has a **negative control**:
+a name that is only a prefix of real declarations must match nothing, beside an
+assertion that the real one still reads. Without it, "the anchor works" is a
+belief — unanchored, `Session` returns `SessionResumeState`'s fields and every
+other line here passes anyway. ⚠ **And two defences under one assertion is either
+redundancy or two *properties* sharing a name — only knocking them out one at a
+time says which.** Here it was the second: the depth counter holds a nested object
+and the paren counter holds a parameter list, and neither covers the other. Each
+is driven on a fixture written in the shape where it is the only thing holding,
+because a reader correct only for the input it has been shown is not correct. The
+parameter case was a real hole found this way — no mirrored file uses that shape
+today, so nothing was wrong, which is exactly why it was worth finding before
+somebody adds one.
+
 **2. An unknown value fails toward "keep working".** The client is allowed to be
 behind the wire — `wire.ts` is a hand mirror and says so — so every narrowing in
 it degrades rather than throws. The one that was wrong was `endedWithDaemon`,
@@ -84,6 +114,32 @@ production never has. That is why applying the schema is a function now.
 included, because the machine that decides whether `RELAY_PROTOCOL_MIN_VERSION`
 can move is the one that has been dark for a month. The numbers come off the
 handshake, not from asking a daemon anything.
+
+## Which side ships first
+
+**Whoever has to be able to *answer* ships first. Whoever will *ask* ships
+second.** One rule, and the two orders it produces read as contradictory advice
+until you notice which way the call goes:
+
+| The change | Who answers | Ships first |
+|---|---|---|
+| A new relay protocol version | the relay, on the tunnel handshake | **control plane** |
+| A new route on the daemon (`/plugins`, …) | the daemon | **the daemons** |
+
+⚠ **"New client against old daemon is the normal state of the fleet" is a
+statement about what this system *tolerates*, and not a recommendation about what
+to choose.** Tolerating a skew and electing to create one are different acts, and
+reading the first as the second is exactly how a release ships the control plane
+— which carries the web client — ahead of the daemons that would have to answer
+it. The cost of getting it backwards is not breakage, because the client degrades
+by design: it is every user being offered a feature that answers *"update your
+machine"* for as long as the slowest owner takes to do it.
+
+Where **both** apply in one release the protocol half forces control-plane-first,
+and that is not a tie being broken by preference: a relay that cannot accept what
+a daemon offers is a daemon that cannot dial in **at all**, while a route that is
+not there yet is a screen with a sentence on it. The hard requirement wins and the
+soft degrade is the price. Q4.105.
 
 ## Making a breaking change, in order
 

@@ -148,6 +148,7 @@ export function Composer({
   sessionRef,
   state,
   onSent,
+  revising,
 }: {
   sessionRef: SessionRef;
   state: AppState;
@@ -165,6 +166,14 @@ export function Composer({
    * which sends no message and leaves the transcript untouched.
    */
   onSent: () => void;
+  /**
+   * A plan is on screen waiting to be decided.
+   *
+   * **The one state where a parked request does not gate this box, because this
+   * box is one of the ways to answer it.** Decided by `SessionView`, which is the
+   * only place the pending permission and the transcript are both in scope.
+   */
+  revising: boolean;
 }): ReactNode {
   const key = keyOf(sessionRef);
   const row = state.rowsByKey.get(key);
@@ -622,7 +631,18 @@ export function Composer({
    * `row !== undefined && needsHuman(row.snapshot)` is the same expression
    * `shouldFocusComposer` is already given a few lines up, for the same reason.
    */
-  const parked = row !== undefined && needsHuman(row.snapshot);
+  /*
+   * ...**and a plan is not "parked" for this purpose**, which is the one
+   * exception the rule below needs.
+   *
+   * Releasing the caret exists so the digits beside a question's answers do
+   * something: with the composer focused, `isTypingInto` switches every bare
+   * shortcut off. In front of a plan that reasoning inverts — the box *is* one of
+   * the answers, its placeholder says so, and blurring it the instant the request
+   * lands would take the caret out from under somebody the screen has just
+   * invited to type.
+   */
+  const parked = row !== undefined && needsHuman(row.snapshot) && !revising;
   useEffect(() => {
     const box = areaRef.current;
     if (box === null) return;
@@ -681,7 +701,12 @@ export function Composer({
    * turn_in_flight`. `composerPlaceholder` already says which one it is, in the
    * box the sentence belongs in.
    */
-  const sendRefused = blocked || working;
+  /*
+   * ...**except while a plan is waiting, where a message *is* an answer.**
+   * Writing one stops the turn and sends it — see `send` — so the daemon takes
+   * it and the gate would be refusing the very thing this state exists for.
+   */
+  const sendRefused = revising ? false : blocked || working;
   /*
    * The two halves of the send slot's other state.
    *
@@ -691,7 +716,15 @@ export function Composer({
    * means rather than reusing the one above. `pendingCancel` is whether somebody
    * has already asked, which is the daemon's answer and not this tab's.
    */
-  const stoppable = canCancelTurn(session);
+  /*
+   * ...and while a plan is waiting the slot is **Send**, not Stop.
+   *
+   * Not because stopping stopped being possible — it is exactly what a send does
+   * first — but because there is a better verb for it here. The one control in
+   * that slot should say what somebody came to this screen to do, and in front of
+   * a plan that is "say what to change", not "stop".
+   */
+  const stoppable = canCancelTurn(session) && !revising;
   const pendingCancel = cancelInFlight(session);
 
   const reconnecting = waitingForDaemon(session) || resumeStalled(session);
@@ -1017,8 +1050,35 @@ export function Composer({
      * once B's own log passed A's seq; it is gone by construction now rather than
      * by a guard.
      */
-    void daemon
-      .prompt(sessionRef.sessionId, body, sending)
+    /*
+     * **A message written in front of a plan stops the turn first, and that
+     * ordering is measured rather than chosen.**
+     *
+     * The daemon refuses a prompt while a turn is in flight, and a parked
+     * permission is *inside* one — so something has to end the turn before this
+     * can land. Rejecting the plan does not: measured on this daemon, the agent
+     * takes the refusal, carries on talking, and the turn stayed open for the
+     * thirty seconds it took the operator to press Stop by hand. `POST
+     * /sessions/:id/cancel` is what they pressed, and it answers only once the
+     * turn has settled — which is what makes the prompt behind it land rather
+     * than come back `409 turn_in_flight`.
+     *
+     * The cancel also settles the permission, as `cancelled` and `by:
+     * turn_cancelled`. That is the same record the operator's own Stop already
+     * wrote, and it is the honest one: the plan was not approved, and the reason
+     * is the message that follows it.
+     *
+     * One chain, so the failure path below is the only one: a cancel that fails
+     * puts the text back in the box exactly as a refused prompt does.
+     */
+    const settled = revising
+      ? daemon.cancelTurn(sessionRef.sessionId).then((result) => {
+          store.applySnapshot(sessionRef, result.session);
+        })
+      : Promise.resolve();
+
+    void settled
+      .then(() => daemon.prompt(sessionRef.sessionId, body, sending))
       .then((result) => {
         // Both keyed, both unconditional. `promptLanded` is not just the seq
         // arriving: the `prompt` event routinely beats this answer down the
@@ -1325,7 +1385,7 @@ export function Composer({
            * `composerKey`'s `enterSends` makes true underneath.
            */
           enterKeyHint="enter"
-          placeholder={composerPlaceholder({ blocked, reconnecting: busy && reconnecting, working })}
+          placeholder={composerPlaceholder({ blocked, reconnecting: busy && reconnecting, working, revising })}
           aria-label="Message"
           role="combobox"
           // `combobox` on a `textarea` costs the multiline semantics a screen

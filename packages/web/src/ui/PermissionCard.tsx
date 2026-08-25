@@ -10,6 +10,8 @@ import {
   permissionButtons,
   permissionContext,
   permissionHeadline,
+  permissionLayout,
+  planControls,
   detailContext,
   withheldDetail,
 } from "../permission";
@@ -19,6 +21,7 @@ import type { PendingPermissionSnapshot, PermissionOptionSummary, StoredEvent } 
 import { AskAction, AskCard, type AskOption } from "./AskCard";
 import { Icon } from "./bits";
 import { DiffView } from "./DiffView";
+import { Markdown } from "./Markdown";
 
 /**
  * The `busy` marker for the cancel button.
@@ -145,6 +148,12 @@ export function PermissionCard({
   const buttons = useMemo(() => permissionButtons(pending.options), [pending.options]);
 
   /*
+   * The plan-mode decision, curated — or `null`, which is every other request in
+   * this daemon's history and is drawn by `buttons` above exactly as it always
+   * was. Everything that makes this narrow is argued at `planControls`.
+   */
+  const plan = useMemo(() => planControls(context, pending.options), [context, pending.options]);
+  /*
    * Everything below the title is joined out of the **loaded** transcript, so a
    * card can open before the conversation it is about has paged in — and then it
    * has one boilerplate sentence and nothing else, which is how an approval came
@@ -156,10 +165,20 @@ export function PermissionCard({
    * over the relay in four requests and 40ms total, so there is no reason for the
    * card to be the one place that gives up.
    */
+  /*
+   * ...and **`truncated` is the same sentence**, which is why it joins the gate.
+   *
+   * Both mean *the card cannot explain this request from what it is holding, and
+   * the log is the only other place to look*. A payload the daemon clamped at
+   * 8 KiB for the snapshot is sitting whole on the `tool_call_update` under the
+   * 128 KiB per-event cap, so paging the conversation in is what recovers it —
+   * and `permissionContext` now prefers that copy over the stand-in, so this
+   * self-terminates: the moment the join lands, `truncated` goes false.
+   */
   useEffect(() => {
-    if (!context.unavailable) return;
+    if (!context.unavailable && !context.truncated) return;
     void store.loadAll(sessionRef);
-  }, [context.unavailable, sessionRef.machineId, sessionRef.sessionId]);
+  }, [context.unavailable, context.truncated, sessionRef.machineId, sessionRef.sessionId]);
 
   /*
    * Answer by id, and **do nothing** if the id is not there.
@@ -189,7 +208,20 @@ export function PermissionCard({
           busy: busy === answer.optionId,
           onPick: () => pick(answer.optionId),
         }))
-      : buttons.order.map((option, index) => ({
+      : plan !== null
+        ? plan.map((control) => ({
+            id: control.option.optionId,
+            label: control.label,
+            // The agent's own wording, kept where it costs no width. Ours is on
+            // the face because claude's labels do not fit a row whose meaning is
+            // carried by position — see `PLAN_ORDER`.
+            hint: control.option.name,
+            leading: control.leading,
+            primary: control.primary,
+            busy: busy === control.option.optionId,
+            onPick: () => respond(control.option),
+          }))
+        : buttons.order.map((option, index) => ({
           id: option.optionId,
           label: optionLabel(pending.options, option),
           // The agent's own words, kept where they cost no width — as the
@@ -226,10 +258,21 @@ export function PermissionCard({
       more={more}
       busy={busy !== null}
       options={options}
-      // An answer is a row; a decision is a button. kimi's `AskUserQuestion`
-      // arrives down this route and takes the same rows claude's elicitation
-      // does, and everything else takes the confirmation-dialog row.
-      layout={asked !== null ? "rows" : "buttons"}
+      /*
+       * An answer is a row; a decision is a button. kimi's `AskUserQuestion`
+       * arrives down this route and takes the same rows claude's elicitation
+       * does, and everything else takes the confirmation-dialog row.
+       *
+       * ⚠ **The second clause is new, and it is what let `drawableOptions` go.** A
+       * decision whose labels do not fit a button row also takes rows — because the
+       * alternative, which shipped for a year, was *deleting the option that did
+       * not fit*. `permissionLayout` decides it by length and never by id, and the
+       * plan card is exempt because `PLAN_ORDER` writes our own short labels for
+       * exactly this reason. The positional rule survives the switch: refusals are
+       * still first and one option is still `primary`, which `OptionRow` draws
+       * filled.
+       */
+      layout={asked !== null || (plan === null && permissionLayout(pending.options) === "rows") ? "rows" : "buttons"}
       /*
        * **A question hides its arguments and nothing else**, and that distinction
        * is load-bearing rather than tidy.
@@ -287,6 +330,12 @@ export function PermissionCard({
           </>
         )
       }
+      /*
+       * A plan is a document rather than a line, so it gets the room to be read.
+       * Keyed on `context.plan` and **not** on `plan !== null`: a plan whose
+       * option set failed `planControls`' exact-match still has to be readable.
+       */
+      size={context.plan !== null ? "tall" : "normal"}
       extra={
         pending.options.length === 0 ? (
           <p className="text-xs text-muted">
@@ -345,6 +394,36 @@ function Context({ context }: { context: ReturnType<typeof permissionContext> })
   return (
     <div className="space-y-2">
       {/*
+        **The one thing on this card that is rendered rather than quoted, and the
+        gate above it is what makes that safe.**
+
+        The rule three blocks down — verbatim, never through `Markdown` — is about
+        `context.text`, and `context.text` is untouched. Its argument is that a
+        text block *may be the command*: for kimi it is, and a renderer that eats
+        an asterisk means the operator approves what they read while the agent runs
+        something else. A `plan` is the other thing entirely — a document named by
+        the tool's own schema, on a request `permissionContext` has already
+        established authorizes nothing at all: no command, no body, no diff, no
+        location. There is nothing here whose exact characters could cost anybody
+        anything, and 5000 characters of markdown drawn as raw monospace in a
+        160px box is not a plan somebody can read from a phone.
+
+        `bg-raised/50` is the palette's well for a plan, which is what
+        `EventList` already draws a checklist on — so the approval and the
+        transcript agree rather than resembling each other.
+
+        `Markdown` is the hardened one: no `rehype-raw`, `img` bound with no
+        `src`, links through `openableHref`. It is also outside
+        `FileAccessContext` here, so an inline path is a plain chip rather than a
+        download button — no new fetch surface on the card that approves things.
+      */}
+      {context.plan !== null && (
+        <div className="rounded-md bg-raised/50 px-2.5 py-2">
+          <Markdown text={context.plan} />
+        </div>
+      )}
+
+      {/*
         Truncation is one item in the list, not an early return.
         It used to replace everything, which meant an oversized `rawInput` also
         hid the request's text blocks and its diff — and for kimi the text block
@@ -372,8 +451,11 @@ function Context({ context }: { context: ReturnType<typeof permissionContext> })
         label; remark-gfm's `~~` deletes what it wraps. Everywhere else that is
         the right trade. Here it means the operator approves what they read and
         the agent runs something else, which is the one thing this card exists
-        to prevent. `SessionBrowser`'s one-line preview renders the same string
-        the same way, and the two must not diverge.
+        to prevent. The rule is about **`context.text`**, which is why a plan —
+        which has no command, no body, no diff and no location, by the gate in
+        `permissionContext` — renders through `Markdown` a few lines up without
+        touching it: there is nothing there whose characters a renderer could
+        consume to the operator's cost.
       */}
       {/*
         **Prose in a proportional font, or the command in monospace — and which

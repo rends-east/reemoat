@@ -361,8 +361,14 @@ function Register({ state }: { state: AppState }): ReactNode {
           spellCheck={false}
           className={field}
         />
+        {/* The shape rule is unchanged and still true; the sentence after it was
+            not, from the moment `POST /v1/login` started taking a confirmed
+            address as well. Saying so here is the only place somebody signing up
+            learns that the address below is a second way in rather than only a
+            way to recover the account. */}
         <p className="mt-1 text-xs text-muted">
-          Letters, digits and . _ - only, and not an email address. This is what you sign in with.
+          Letters, digits and . _ - only, and not an email address. You can sign in with this or,
+          once it is confirmed, with your email address.
         </p>
 
         {/*

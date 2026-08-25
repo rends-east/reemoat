@@ -1399,6 +1399,46 @@ export function jsonSize(value: unknown): number {
   return size;
 }
 
+const BYTES = new WeakMap<object, number>();
+
+/**
+ * The same measurement in UTF-8 bytes, for the bounds whose names say bytes.
+ *
+ * ⚠ **`jsonSize` counts UTF-16 code units, and a bound that calls itself
+ * `…_BYTES` may not be built on it.** `String.length` is code units, so every BMP
+ * character above U+07FF — the whole of CJK, and every emoji at two units for four
+ * bytes — is charged one and weighs three or four on the wire. Measured against
+ * this tree: a title of 8,000 CJK characters weighs 8,002 by `jsonSize`, passes
+ * `MAX_PERMISSION_SNAPSHOT_BYTES` (8,192), and is 24,002 bytes to a phone. Three
+ * times the stated bound, on a pair that rides `GET /sessions` for every session
+ * on the machine, on every poll, to every attached client, through the relay.
+ *
+ * Kept apart from {@link jsonSize} rather than replacing it: that one feeds
+ * `estimateBytes` and the log's truncation heuristics, where the unit has been
+ * consistent with the stored sizes since before this existed and changing it would
+ * re-scale a budget nothing here is trying to move. This one is for the two
+ * refusals that quote their limit back to an agent in a sentence.
+ *
+ * Memoised on the same argument `jsonSize` makes, in its own map so the two units
+ * can never be served to each other's callers.
+ */
+export function jsonBytes(value: unknown): number {
+  if (value == null) return 0;
+  const memo = typeof value === "object" ? BYTES.get(value as object) : undefined;
+  if (memo !== undefined) return memo;
+  let size: number;
+  try {
+    size = Buffer.byteLength(JSON.stringify(value) ?? "", "utf8");
+  } catch {
+    // Cyclic or otherwise unserializable, and the worst case rather than 0 for
+    // {@link jsonSize}'s reason: the bound this feeds is a refusal, and a refusal
+    // that reads 0 is not one.
+    size = 4_096;
+  }
+  if (typeof value === "object") BYTES.set(value as object, size);
+  return size;
+}
+
 function optionBytes(options: PermissionOptionSummary[]): number {
   let total = 0;
   for (const option of options) total += option.optionId.length + option.name.length + 32;

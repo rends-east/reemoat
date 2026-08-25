@@ -18,6 +18,10 @@ import type {
   SessionList,
   SessionSnapshot,
   ImportAccepted,
+  PluginInstalled,
+  PluginListing,
+  PluginResult,
+  PluginSummary,
   UploadAccepted,
 } from "./wire";
 
@@ -311,6 +315,115 @@ export class DaemonClient {
   ): Promise<ImportAccepted> {
     const query = `path=${encodeURIComponent(path)}&name=${encodeURIComponent(name)}`;
     return this.machine.upload<ImportAccepted>(`/fs/import?${query}`, file, onProgress, signal);
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Plugins
+   * ---------------------------------------------------------------- */
+
+  plugins(): Promise<PluginListing> {
+    return this.machine.request<PluginListing>("/plugins");
+  }
+
+  /**
+   * Install a plugin, or update one — the same call, because they are one act.
+   *
+   * Through `upload` rather than `request` for `importArchive`'s reason one method
+   * up: it is the only path in this client that reports progress, and a person
+   * watching an archive move wants to see it move. The name rides the query string
+   * because the relay answers preflights from a fixed header list.
+   */
+  installPlugin(
+    file: File,
+    onProgress: (fraction: number) => void,
+    signal: AbortSignal,
+  ): Promise<PluginInstalled> {
+    return this.machine.upload<PluginInstalled>(`/plugins?name=${encodeURIComponent(file.name)}`, file, onProgress, signal);
+  }
+
+  /**
+   * Install a plugin the *daemon* fetches, from a commit the catalogue pinned.
+   *
+   * ⚠ **The browser cannot be the courier here, and that is measured rather than
+   * chosen.** `codeload.github.com` answers `access-control-allow-origin:
+   * https://render.githubusercontent.com`, so a cross-origin fetch for the
+   * archive is refused before it leaves this page — there is no header the
+   * catalogue could send that would change it. So the machine fetches its own
+   * bytes, and what crosses this wire is a repository, a commit, and what the
+   * person was shown.
+   *
+   * `consent` is what the disclosure screen actually drew, read from
+   * `plugin.json` at that same commit. The daemon compares its own parse against
+   * it and refuses with `plugin_consent_broken` **before starting the plugin** —
+   * which is stronger than the upload path's after-the-fact `consentBroken`, and
+   * has to be, because nothing in this browser ever opened the archive.
+   *
+   * ⚠ **`signal` is not optional decoration: without it this route was the one
+   * install in the client that could not be called off.** `request` already
+   * composes a caller's signal with its own deadline (`withTimeout(timeout,
+   * init.signal)`), so the plumbing was there and only this method declined to
+   * use it — which is invisible from the call site, because a `MachineInstalls`
+   * install closure that simply omits the parameter is still assignable to
+   * `InstallAct`. The daemon unpacks and starts the plugin either way, so an
+   * un-abortable fan-out is a plugin arriving on machines after somebody pressed
+   * Cancel.
+   *
+   * Answers `PluginInstalled`, exactly as {@link installPlugin} does, down to
+   * `replaced`. It is the same act on the same host reached by a different door,
+   * and a caller that can read one answer can read the other.
+   */
+  installPluginFromSource(
+    source: { kind: "github"; repo: string; commit: string },
+    consent: { scopes: readonly string[]; net: readonly string[]; hooks: readonly string[] } | null,
+    signal?: AbortSignal,
+  ): Promise<PluginInstalled> {
+    return this.machine.request<PluginInstalled>("/plugins/source", {
+      method: "POST",
+      body: JSON.stringify({ source, ...(consent === null ? {} : { consent }) }),
+      ...(signal === undefined ? {} : { signal }),
+    });
+  }
+
+  removePlugin(pluginId: string): Promise<{ removed: boolean }> {
+    return this.machine.request<{ removed: boolean }>(`/plugins/${encodeURIComponent(pluginId)}`, { method: "DELETE" });
+  }
+
+  setPluginEnabled(pluginId: string, enabled: boolean): Promise<{ plugin: PluginSummary }> {
+    return this.machine.request<{ plugin: PluginSummary }>(`/plugins/${encodeURIComponent(pluginId)}/state`, {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    });
+  }
+
+  /**
+   * What one of a plugin's screens draws right now.
+   *
+   * A `GET`, so `isReplayable` lets the transport repeat it — which is the wire's
+   * way of saying a view must be a read. The plugin's contract, not this client's
+   * to enforce.
+   */
+  pluginView(pluginId: string, view: "screen" | "settings"): Promise<{ result: PluginResult }> {
+    return this.machine.request<{ result: PluginResult }>(
+      `/plugins/${encodeURIComponent(pluginId)}/views/${view}`,
+    );
+  }
+
+  /**
+   * Press something on a plugin.
+   *
+   * All three pieces of context are optional and the surface decides which are
+   * sent: `session` from a session's menu, `row` from a row on the plugin's own
+   * screen, `form` from a form's submit.
+   */
+  pluginAction(
+    pluginId: string,
+    actionId: string,
+    context: { session?: SessionId; row?: string; form?: Record<string, string> },
+  ): Promise<{ result: PluginResult }> {
+    return this.machine.request<{ result: PluginResult }>(
+      `/plugins/${encodeURIComponent(pluginId)}/actions/${encodeURIComponent(actionId)}`,
+      { method: "POST", body: JSON.stringify(context) },
+    );
   }
 
   /** The bytes of one file in the session's tree, by workspace-relative path. */

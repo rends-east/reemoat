@@ -63,6 +63,20 @@ export interface PermissionContext {
    * What a heading can honestly be built from — see {@link permissionHeadline}.
    */
   summary: string | null;
+  /**
+   * The document a plan-mode request is asking you to approve.
+   *
+   * **Separate from `text` because it is the one payload on this card that is
+   * prose to read rather than a command to check**, and that distinction is what
+   * lets it be rendered as markdown while everything else on this card stays a
+   * verbatim `<pre>` — see the carve-out at `PermissionCard`'s `Context`.
+   *
+   * Set only when {@link permissionContext} has established all three gates: a
+   * string `plan` in the arguments, **nothing being authorized** (no command, no
+   * body, no diff, no location), and — where the tool call has loaded — ACP's own
+   * `switch_mode` kind. Never a title match and never an option id.
+   */
+  plan: string | null;
   /** True when the daemon replaced the payload with its truncation stand-in. */
   truncated: boolean;
   diffs: FileChangeEvent[];
@@ -77,6 +91,7 @@ const EMPTY: PermissionContext = {
   target: null,
   body: null,
   summary: null,
+  plan: null,
   rawInput: null,
   text: [],
   truncated: false,
@@ -84,6 +99,17 @@ const EMPTY: PermissionContext = {
   locations: [],
   unavailable: true,
 };
+
+/**
+ * A payload that is actually a payload.
+ *
+ * The daemon's `clampBlob` replaces an oversized value with `{truncated, bytes}`,
+ * which is an object and therefore not `null` — so every `??` chain in this file
+ * treated the stand-in as an answer. This is the predicate that stops it.
+ */
+function usable(value: unknown): boolean {
+  return value !== null && value !== undefined && !isTruncationMarker(value);
+}
 
 export function permissionContext(
   pending: PendingPermissionSnapshot,
@@ -150,7 +176,30 @@ export function permissionContext(
    * input as a JSON *string* inside a content block, so as prose it is a wall of
    * escaped newlines and as arguments it is a path and a file.
    */
-  const source = pending.rawInput ?? callInput ?? blocks.args ?? fromCall.args;
+  /*
+   * ...and **a clamped stand-in is not a payload, so it does not get to outrank
+   * one.** `clampBlob` replaces an oversized value with `{truncated, bytes}`,
+   * which is not `null`, so a plain `??` chain stopped at it and the card
+   * apologised for a request whose arguments were sitting in the log intact.
+   *
+   * Measured against claude's plan mode: the whole document rides
+   * `tool_call_update.rawInput.plan` under the 128 KiB per-event cap, while the
+   * copy on the pending permission is cut at 8 KiB because it rides the snapshot
+   * (`MAX_PERMISSION_BLOB_BYTES`). The join below already walks the log for
+   * exactly this; the marker was simply winning ahead of it.
+   *
+   * The marker stays as the **last** fallback, so a payload that is genuinely
+   * nowhere still reports itself as clipped rather than as absent.
+   */
+  const source = usable(pending.rawInput)
+    ? pending.rawInput
+    : usable(callInput)
+      ? callInput
+      : usable(blocks.args)
+        ? blocks.args
+        : usable(fromCall.args)
+          ? fromCall.args
+          : (pending.rawInput ?? callInput ?? blocks.args ?? fromCall.args);
   const extracted = readInput(source);
   const allDiffs = diffs.length > 0 ? diffs : blocks.diffs;
   const text = blocks.text.length > 0 ? blocks.text : fromCall.text;
@@ -176,8 +225,47 @@ export function permissionContext(
    * and both would rather drop a boilerplate announcement than print it three
    * times.
    */
+  /*
+   * **A plan, and the gate that makes rendering it as markdown safe.**
+   *
+   * `readInput` has already found a `plan` field, and its two early returns mean
+   * a request carrying a `command` or a `body` never gets one — which is half of
+   * the rule below enforced by structure rather than by a condition. This is the
+   * other half, and it is `askedQuestion`'s own gate reused rather than
+   * reinvented: **a request that authorizes a concrete action is not a
+   * document.** A diff or a location means there is something to approve, and
+   * something to approve is never prose to read.
+   *
+   * That is what the markdown carve-out in `PermissionCard` rests on. It is
+   * deliberately *not* also gated on ACP's `switch_mode` kind: the kind rides the
+   * `tool_call`, so it is missing exactly when the transcript has not paged in,
+   * and a plan that renders as monospace on a cold open and as markdown a moment
+   * later is a worse rendering than either. The kind **is** required one level
+   * up, where the consequence is larger — see {@link planControls}.
+   */
+  const plan =
+    extracted.plan !== null && allDiffs.length === 0 && (call?.locations ?? []).length === 0
+      ? extracted.plan
+      : null;
+
   const echoed = extracted.command ?? extracted.target;
-  const prose = echoed === null ? text : text.filter((line) => !line.includes(echoed));
+  const prose = (echoed === null ? text : text.filter((line) => !line.includes(echoed)))
+    /*
+     * The plan is drawn from its own field, so the content block that repeats it
+     * would be the same document a second time in a monospace box.
+     *
+     * ⚠ **Compared trimmed, and that one call is the whole of it.** `pick` trims
+     * what it extracts, and a markdown document ends with a newline — so the
+     * field was 6818 characters and the block that echoed it was 6819, strict
+     * equality said "different", and the card drew the rendered plan with its own
+     * source underneath. Measured against a real 11 KiB plan; the shorter fixture
+     * this was first written against had no trailing newline and passed.
+     *
+     * Still equality rather than containment: a paragraph that merely *mentions*
+     * the plan is not the plan. `null` matches no string, so this is inert off
+     * the path.
+     */
+    .filter((line) => line.trim() !== plan);
 
   /*
    * `content` is clamped by the same `clampBlob` as `rawInput`, so it can be the
@@ -190,14 +278,35 @@ export function permissionContext(
    * explanation for a payload that existed and was cut for size, and it points the
    * reader at the wrong thing entirely.
    */
-  const contentTruncated = isTruncationMarker(pending.content);
-  const truncated = extracted.truncated || contentTruncated;
+  /*
+   * **Clamped is not the same as lost, and only lost is worth saying.**
+   *
+   * Read per payload rather than in one lump, and off the *request* rather than
+   * off `extracted` — the marker no longer reaches `readInput` at all now that
+   * `source` prefers an intact copy, so `extracted.truncated` would be
+   * permanently false and the notice would vanish even where nothing was
+   * recovered.
+   *
+   * `content` counts as recovered when the log put back the text blocks, the
+   * diffs, **or** the plan: measured, the plan-mode content block is
+   * byte-for-byte `rawInput.plan`, so a recovered plan *is* the recovered
+   * content. Scoped to the plan gate above, so no other clamped payload stops
+   * reporting itself.
+   */
+  const argsLost = isTruncationMarker(pending.rawInput) && !usable(source);
+  const contentLost =
+    isTruncationMarker(pending.content) &&
+    fromCall.text.length === 0 &&
+    allDiffs.length === 0 &&
+    plan === null;
+  const truncated = argsLost || contentLost;
 
   const empty =
     extracted.command === null &&
     extracted.target === null &&
     extracted.pretty === null &&
     extracted.body === null &&
+    plan === null &&
     !truncated &&
     text.length === 0 &&
     allDiffs.length === 0 &&
@@ -210,7 +319,8 @@ export function permissionContext(
     target: extracted.target,
     body: extracted.body,
     summary: extracted.summary,
-    rawInput: withoutEchoedFields(source, extracted.pretty, prose),
+    plan,
+    rawInput: withoutEchoedFields(source, extracted.pretty, prose, plan),
     text: prose,
     truncated,
     diffs: allDiffs,
@@ -320,13 +430,34 @@ function withoutEchoedFields(
   source: unknown,
   pretty: string | null,
   prose: readonly string[],
+  plan: string | null,
 ): string | null {
-  if (pretty === null || prose.length === 0) return pretty;
+  if (pretty === null || (prose.length === 0 && plan === null)) return pretty;
   if (typeof source !== "object" || source === null || Array.isArray(source)) return pretty;
   const record = source as Record<string, unknown>;
   const kept: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
-    if (typeof value === "string" && prose.includes(value)) continue;
+    if (typeof value !== "string") {
+      kept[key] = value;
+      continue;
+    }
+    /*
+     * `plan` as well as the prose, and it has to be both.
+     *
+     * The prose test alone worked only because the plan arrives *twice* — as a
+     * field and as a content block whose text is byte-for-byte identical — so
+     * dropping the block from `prose` (which is what makes the plan render once
+     * rather than twice) also stopped the field being recognised as echoed, and
+     * the whole document came back in the arguments blob with every newline
+     * escaped. Equality either way: a field that merely mentions a path is not an
+     * echo of a paragraph.
+     */
+    // Trimmed against the plan for the reason the prose filter is — and this is
+    // the half that fails *second*: once the filter above stops leaving the
+    // document in `prose`, `prose.includes(value)` no longer catches it either,
+    // and the whole plan comes back in the arguments blob with every newline
+    // escaped. Which is the defect this function was written for.
+    if (prose.includes(value) || value.trim() === plan) continue;
     kept[key] = value;
   }
   const keys = Object.keys(kept).length;
@@ -369,6 +500,8 @@ export interface ExtractedInput {
   body: string | null;
   /** {@link SUMMARY_FIELDS} — the tool's own sentence about this call. */
   summary: string | null;
+  /** {@link PLAN_FIELDS} — a document, on a request that acts on nothing. */
+  plan: string | null;
   pretty: string | null;
   truncated: boolean;
 }
@@ -378,6 +511,7 @@ const NOTHING: ExtractedInput = {
   target: null,
   body: null,
   summary: null,
+  plan: null,
   pretty: null,
   truncated: false,
 };
@@ -398,6 +532,23 @@ const BODY_FIELDS = ["content", "new_string", "newText", "new_str", "text", "bod
  * built out of it.
  */
 const SUMMARY_FIELDS = ["description", "summary", "explanation"];
+/**
+ * A document the tool is asking approval to act on, rather than a thing to do.
+ *
+ * One name, because one agent sends it and it is that agent's own schema:
+ * measured, claude's plan-mode request is `rawInput: {plan, planFilePath}` on a
+ * `switch_mode` tool call. It is deliberately **not** a `BODY_FIELD` — a body is
+ * what a write is about to put on disk and goes behind `details`, while this is
+ * the whole of what is being decided and belongs on screen — and deliberately not
+ * a `COMMAND_FIELD`, which would put a markdown document in the box a shell line
+ * gets.
+ *
+ * It is picked on the last arm only, so a request carrying a `command` or a
+ * `body` never has one: that is half of "a request that authorizes a concrete
+ * action is not a document" enforced by the shape of this function rather than by
+ * a condition somewhere else.
+ */
+const PLAN_FIELDS = ["plan"];
 
 /**
  * Pull something human-readable out of a tool's arguments.
@@ -485,6 +636,7 @@ function computeInput(rawInput: unknown): ExtractedInput {
   const target = pick(TARGET_FIELDS);
   const body = pick(BODY_FIELDS);
   const summary = pick(SUMMARY_FIELDS);
+  const plan = pick(PLAN_FIELDS);
   // A command is the whole action, so it wins and the JSON is not worth showing
   // beside it. A target alone is not — "notes.txt" does not say what is being
   // done to it — so the arguments stay available underneath.
@@ -501,7 +653,7 @@ function computeInput(rawInput: unknown): ExtractedInput {
     // exception thrown while rendering a transcript.
     pretty = null;
   }
-  return { ...NOTHING, target, summary, pretty };
+  return { ...NOTHING, target, summary, plan, pretty };
 }
 
 /** `path` or `path:line`, in the one format the whole client uses. */
@@ -716,82 +868,64 @@ export function optionLabel(
 const BUTTON_LABEL_MAX = 32;
 
 /**
- * The options the card will actually draw.
+ * Whether this card's options can be a **row of buttons**, or have to be a column
+ * of rows.
  *
- * **This removes a choice the agent offered, which is why the rule is narrow in
- * three separate directions.**
+ * ⚠ **This replaces `drawableOptions`, which answered the same question by
+ * deleting options, and that is a reversal of Q3.92 rather than a refactor of it.**
+ * The old function dropped an approval whose rendered label exceeded
+ * {@link BUTTON_LABEL_MAX} — under four narrowings, each of which was a real
+ * measured case and none of which made the underlying trade acceptable. It removed
+ * a choice the agent offered because *this app could not lay it out*, and on the
+ * one channel where an option is a model-written **answer** — kimi's
+ * `AskUserQuestion` arrives as a `session/request_permission`, and when
+ * `askedQuestion` cannot classify it the card falls back to buttons — it deleted
+ * two of four answers with nothing said.
  *
- * The card draws decisions as a row of buttons, and that row carries its meaning
- * by *position* — the refusal alone on the left, the reversible approval filled on
- * the right — because the colour these buttons used to have was removed. A label
- * that cannot fit a button breaks the row, and a broken row does not merely look
- * untidy: it puts the buttons in an arrangement where the left/right rule says
- * nothing while still looking deliberate. Measured against codex, which words a
- * scoped grant as "Allow Commands Starting With `node /Users/…/fetch-codex-manual
- * .mjs`" — a label containing a path, and therefore unbounded by construction.
+ * The reason it existed is still entirely real, so nothing about it is softened:
+ * the button row carries its meaning by **position** — the refusal alone on the
+ * left, the reversible approval filled on the right — because the colour those
+ * buttons had was removed, and `OptionButton` draws its label as a bare text child
+ * with no wrapping inside a `flex-wrap` group. codex words a scoped grant as
+ * ``Allow Commands Starting With `node /Users/…/fetch.mjs` ``, unbounded by
+ * construction because it embeds a path, and a label like that wraps the row into
+ * an arrangement where the left/right rule says nothing while still looking
+ * deliberate.
  *
- * The four narrowings:
+ * **What changes is which of the two gives way.** A layout is this app's problem
+ * and an option is the agent's, so the layout gives way: past the ceiling the card
+ * draws `rows`, which is the arrangement it already uses for a question — full
+ * width, wrapping labels, descriptions, twenty-four of them if need be. The
+ * positional rule travels with it rather than being lost: `permissionButtons`
+ * still orders refusals first and still names one `primaryId`, and `OptionRow`
+ * draws that one filled.
  *
- *   - **By length, never by id.** Nothing here knows `accept_execpolicy_amendment`
- *     or any other agent's vocabulary. Recognising an option by its id or its
- *     wording is the guessing this codebase refuses everywhere, and it would break
- *     on the next agent to word one differently. What is measured is the property
- *     that actually breaks the layout.
- *   - **Approvals only.** A refusal is never dropped, whatever it is called. That
- *     is the one option whose absence could be read as "there was no way to say
- *     no".
- *   - **Decisions only.** More than one `allow_once` means these are *answers to a
- *     question*, not scopes of one approval — the same structural test
- *     `askedQuestion` makes, reused rather than invented. That matters because a
- *     question reaches this function at all: kimi's `AskUserQuestion` arrives down
- *     the permission channel, and when its `rawInput` is truncated or the
- *     transcript has not paged in yet, `askedQuestion` answers null and the card
- *     falls back to buttons. Filtering there deletes the *model's own answers* —
- *     measured, two of four, each one a sentence and none of them a scope of
- *     another. There is also nothing to preserve by dropping: answers carry no
- *     left/right meaning, which is the whole thing this function protects.
- *   - **Never a scope's only representative.** An over-long approval is dropped
- *     only when another option of the *same kind* survives it. That is the case
- *     this exists for — codex sends two `allow_always` and the wide one goes —
- *     and it is the only case where dropping loses nothing a person can still
- *     reach. Written as "drop everything that does not fit", it also took
- *     claude's path-scoped `Always Allow Read(//tmp/svgout/**), …`, which is 64
- *     characters and the *only* `allow_always` on that card: a standing grant
- *     that became unreachable from a phone, on the one request where the scope is
- *     the thing being decided. Symmetrically, an agent wording `allow_once` long
- *     enough would have left the permanent grant as the filled primary button,
- *     which is the opposite of what that button promises.
+ * ⚠ **This is the function `AskCard.tsx` said had never existed.** Its footer
+ * comment named `permissionLayout` as "the other half — past a certain size these
+ * stop being buttons at all", and a correction was written beneath it recording
+ * that there was no such function and that `drawableOptions` had therefore been
+ * justified partly by a fallback nobody built. Building it is what lets the
+ * deletion go.
  *
- * What is lost when it fires: the *broadest* grant on offer — a standing policy
- * rule written to the agent's disk, outliving the session — and only ever while a
- * narrower grant of the same kind is still on the card. The wide one remains
- * available where it is legible, in the agent's own terminal.
+ * **Approvals only, and never by id.** A refusal is measured but never decides the
+ * layout on its own — it is one option in a group of one and has no sibling to line
+ * up against, so a long refusal is a wide button and nothing worse. Nothing here
+ * knows `accept_execpolicy_amendment` or any other agent's vocabulary; what is
+ * measured is the property that actually breaks the layout.
  */
-export function drawableOptions(
-  options: readonly PermissionOptionSummary[],
-): readonly PermissionOptionSummary[] {
-  // Answers, not scopes. See the third narrowing above.
-  if (options.filter((option) => option.kind === "allow_once").length > 1) return options;
-  const fits = (option: PermissionOptionSummary): boolean =>
-    optionLabel(options, option).length <= BUTTON_LABEL_MAX;
-  const kept = new Set(options.map((option) => option.optionId));
-  for (const option of options) {
-    if (option.kind.startsWith("reject") || fits(option)) continue;
-    // Dropped only if somebody can still choose this scope. `kept` rather than
-    // `options` so two over-long siblings cannot each justify the other's
-    // removal and take the kind with them.
-    const survivor = options.some(
-      (other) => other.kind === option.kind && other.optionId !== option.optionId && fits(other) && kept.has(other.optionId),
-    );
-    if (survivor) kept.delete(option.optionId);
-  }
-  return kept.size === options.length ? options : options.filter((option) => kept.has(option.optionId));
+export function permissionLayout(options: readonly PermissionOptionSummary[]): "buttons" | "rows" {
+  const wide = options.some(
+    (option) =>
+      !option.kind.startsWith("reject") && optionLabel(options, option).length > BUTTON_LABEL_MAX,
+  );
+  return wide ? "rows" : "buttons";
 }
 
 export function permissionButtons(options: readonly PermissionOptionSummary[]): PermissionButtons {
-  const drawable = drawableOptions(options);
-  const refusals = drawable.filter((option) => option.kind.startsWith("reject"));
-  const rest = drawable.filter((option) => !option.kind.startsWith("reject"));
+  // Every option the agent offered, ordered. Nothing is filtered any more — see
+  // `permissionLayout` for what took the filter's place.
+  const refusals = options.filter((option) => option.kind.startsWith("reject"));
+  const rest = options.filter((option) => !option.kind.startsWith("reject"));
   // Stable inside each group, so an unknown kind keeps the place the agent gave
   // it — only `allow_once` is deliberately moved, and only to the end.
   const approvals = [
@@ -803,6 +937,117 @@ export function permissionButtons(options: readonly PermissionOptionSummary[]): 
     leading: refusals.length,
     primaryId: approvals.at(-1)?.optionId ?? null,
   };
+}
+
+/**
+ * claude's plan-mode decision, curated — and **`null` for anything else at all.**
+ *
+ * ⚠ **This recognises options by `optionId`, which is a documented reversal**, so
+ * the reason it is unavoidable comes first. Measured, the request offers three
+ * approvals and all three are `kind: "allow_always"` — "Yes, and bypass
+ * permissions", "Yes, and use \"auto\" mode", "Yes, and auto-accept edits". ACP's
+ * enum is therefore carrying nothing that separates them, and the id is the only
+ * thing that does. `permissionLayout`'s rule ("by length, never by id") is untouched
+ * and still governs every other card; this is a named exception on one measured
+ * shape, not a softening of the rule.
+ *
+ * Everything about it is arranged so that being wrong costs nothing:
+ *
+ *   - **Structure before ids.** A `plan` in the arguments and ACP's own
+ *     `switch_mode` kind are both required before the table below is consulted.
+ *     The kind is demanded here and *not* for the markdown rendering, because
+ *     that is where the consequence is: drawing a document cannot approve
+ *     anything, removing two of five options can.
+ *   - **Exact set equality.** Five options, these five ids, these five kinds, and
+ *     nothing else. One extra option, one renamed id, one changed kind → `null`.
+ *   - **`null` is today's card.** The caller falls back to `permissionButtons`,
+ *     so an agent that words plan mode differently, or a claude release that adds
+ *     a sixth option, loses nothing whatever.
+ *
+ * **Saying what to change is not one of these buttons.** It is the message box,
+ * which takes over while a plan is on screen: its placeholder says so, Stop
+ * becomes Send, and a message written there stops the turn and goes. A fourth
+ * button that opened a second text field two inches above the one this app
+ * already has was built here and taken back out — see Q3.454.
+ *
+ * **What is given up when it fires, said plainly.** `bypassPermissions` — the
+ * broadest grant on the card, and the one this table drops on purpose rather than
+ * for want of room; nothing else in this file removes an option any more. And
+ * `default`, "Yes, and manually approve edits" — the only `allow_once` in
+ * the request, i.e. *"yes, but keep asking me about every edit"*. That one is
+ * outside every existing rule: after this the narrowest grant the card offers is
+ * `acceptEdits`, and the reversal is one entry in {@link PLAN_ORDER}.
+ *
+ * The primary is `auto` and **that reverses what the filled button means here** —
+ * `permissionButtons` gives `bg-fg` to `allow_once` precisely because it is the
+ * reversible one. What makes it survivable rather than merely asked for is that
+ * `auto` sets a session *mode*, which the agent republishes as an `agent_config`
+ * control the composer's strip can set back; it is not a policy rule written to
+ * the agent's disk.
+ */
+export interface PlanControl {
+  option: PermissionOptionSummary;
+  /** Ours — see {@link PLAN_ORDER}. */
+  label: string;
+  leading: boolean;
+  primary: boolean;
+}
+
+/**
+ * The shape, exactly as measured — `~/.reemoat/reemoat.db`, seq 48,
+ * claude-agent-acp on a `switch_mode` tool call titled "Ready to code?".
+ */
+const PLAN_SHAPE: readonly (readonly [string, PermissionOptionSummary["kind"]])[] = [
+  ["bypassPermissions", "allow_always"],
+  ["auto", "allow_always"],
+  ["acceptEdits", "allow_always"],
+  ["default", "allow_once"],
+  ["plan", "reject_once"],
+];
+
+/**
+ * What is drawn, left to right, and what each is called.
+ *
+ * **The words are ours here and nowhere else on this card.** `optionLabel`'s rule
+ * is that the agent's own wording survives wherever it carries something the kind
+ * does not — a *scope*. None of these carries one, the id is already what
+ * identified them, and claude's own labels are 17–26 characters each: four of
+ * them wrap into an unreadable block on a 390px phone, on the card whose button
+ * row carries its meaning by position. The agent's wording is not lost — it rides
+ * `AskOption.hint` as the `title`, which is exactly what that field is for.
+ */
+const PLAN_ORDER: readonly (readonly [string, string])[] = [
+  ["plan", "Reject"],
+  ["acceptEdits", "Auto-accept edits"],
+  ["auto", "Auto mode"],
+];
+
+export function planControls(
+  context: PermissionContext,
+  options: readonly PermissionOptionSummary[],
+): PlanControl[] | null {
+  if (context.plan === null || context.kind !== "switch_mode") return null;
+  if (options.length !== PLAN_SHAPE.length) return null;
+  for (const [id, kind] of PLAN_SHAPE) {
+    if (!options.some((option) => option.optionId === id && option.kind === kind)) return null;
+  }
+
+  const byId = new Map(options.map((option) => [option.optionId, option]));
+  const controls: PlanControl[] = [];
+  for (const [id, label] of PLAN_ORDER) {
+    const option = byId.get(id);
+    // Unreachable — the sweep above proved every id is there — and spelled so
+    // that it stays unreachable rather than acting if it ever became reachable.
+    if (option === undefined) return null;
+    controls.push({
+      option,
+      label,
+      // Refusals left, approvals right — `permissionButtons`' rule, kept.
+      leading: option.kind.startsWith("reject"),
+      primary: id === "auto",
+    });
+  }
+  return controls;
 }
 
 /**
@@ -828,7 +1073,11 @@ export function withheldDetail(context: PermissionContext): boolean {
     context.body !== null ||
     context.diffs.length > 0 ||
     context.rawInput !== null ||
-    context.locations.length > 0
+    context.locations.length > 0 ||
+    // A plan's own source. Named separately because a request carrying a plan and
+    // nothing else has a `null` blob, and the disclosure would then not be drawn
+    // at all — hiding the one thing it exists to reveal.
+    context.plan !== null
   );
 }
 
@@ -851,6 +1100,20 @@ export function essentialContext(context: PermissionContext): PermissionContext 
   return {
     ...context,
     /*
+     * **A plan's *source* goes behind `details` too, and that is what the
+     * markdown above it costs.** The rendered document is the thing to read; the
+     * characters it was written with are for checking, which is exactly what the
+     * disclosure is for. Drawn inline it was the same document twice, once
+     * readable and once not — reported from a phone, and the reason the echo
+     * filter one function up is compared trimmed.
+     *
+     * Every text block goes, not only the one that is the plan: on a plan request
+     * anything else the agent sent alongside it is commentary on a document that
+     * is already on screen, and `detailContext` takes all of it so the two halves
+     * stay a partition.
+     */
+    text: context.plan === null ? context.text : [],
+    /*
      * **The file, the diff and the arguments go behind `details`; a command does
      * not.** They are not the same kind of thing even though both are "what the
      * tool is about to do". A command is one line and *is* the decision — hiding
@@ -871,7 +1134,21 @@ export function essentialContext(context: PermissionContext): PermissionContext 
  * thing twice and the button can be rendered between them.
  */
 export function detailContext(context: PermissionContext): PermissionContext {
-  return { ...context, text: [], command: null, summary: null, target: null };
+  /*
+   * `plan` is cleared and its **source** takes its place in `text`, which is what
+   * makes the two halves a partition rather than an overlap: above the disclosure
+   * the plan is a rendered document, below it the characters it was written with,
+   * in the same verbatim `<pre>` every other payload on this card gets. Anything
+   * else the agent sent comes with it — see {@link essentialContext}.
+   */
+  return {
+    ...context,
+    text: context.plan === null ? [] : [context.plan, ...context.text],
+    command: null,
+    summary: null,
+    target: null,
+    plan: null,
+  };
 }
 
 
@@ -1017,8 +1294,16 @@ export function askedQuestion(
   return null;
 }
 
-/** The `AskUserQuestion` tool's input, validated as a shape and never by key name. */
-function readQuestions(
+/**
+ * The `AskUserQuestion` tool's input, validated as a shape and never by key name.
+ *
+ * Exported because the *transcript* wants it too, and for the same reason the card
+ * does: a settled question's own wording exists in exactly one place a client can
+ * reach — the arguments of the tool call the question was asked through — and both
+ * readers must agree about what that shape is. `tail.ts` does the join and hands
+ * the result down as a node field; see `answeredQuestions` there.
+ */
+export function readQuestions(
   input: unknown,
 ): { question: string; options: { label: string; description: string | null }[] }[] | null {
   if (typeof input !== "object" || input === null || Array.isArray(input)) return null;

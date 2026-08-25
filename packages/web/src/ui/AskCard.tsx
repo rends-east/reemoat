@@ -74,6 +74,60 @@ export interface AskOption {
 export type AskLayout = "rows" | "buttons";
 
 /**
+ * How much of the conversation this card may take, as **whole class strings**.
+ *
+ * Literal, and a table rather than an interpolation, because Tailwind v4 reads
+ * this file as *text*: a class assembled from fragments emits no CSS at all and
+ * fails by silently having no height rule, which is the worst possible way for a
+ * height to be wrong.
+ *
+ * ⚠ **`100%` is what actually governs, and the first number is a ceiling on it
+ * rather than a target.** The frame is `absolute inset-0` inside the conversation
+ * region, so `100%` *is* that region — roughly 640px of an 844px viewport on a
+ * 390×844 phone, i.e. about 76dvh, and less in a short desktop window. At `tall`
+ * the `min()` therefore resolves to `100%` in every realistic geometry, and the
+ * honest reading of it is *"as tall as the region allows, and not one pixel over
+ * the session header or the composer"*. Nobody should try to make 88 literal:
+ * the only routes out of the region are a `z-index` or a portal, and the docblock
+ * at the return statement records the measured regression that caused.
+ *
+ * `dvh` rather than `vh`: everything else in this app that measures the viewport
+ * is `dvh` (`h-dvh` on the shell, `92dvh` on a sheet), and on iOS `vh` is the
+ * *largest* viewport, so it over-measures whenever the URL bar is showing.
+ *
+ * `tall` is spent on a plan and nothing else. A `Bash` approval is one line; the
+ * paragraph below measures the ordinary card at 92% of the conversation already,
+ * and growing that for a one-line request buys nothing while costing the last
+ * transcript row on the requests that least need it.
+ */
+const BOX_MAX = {
+  normal: "max-h-[min(70dvh,100%)]",
+  tall: "max-h-[min(88dvh,100%)]",
+} as const;
+
+export type AskSize = keyof typeof BOX_MAX;
+
+/**
+ * The number beside an answer, which is a **keyboard** shortcut and nothing else.
+ *
+ * On a phone it is a digit next to every option that presses nothing, on the one
+ * card in this app where every glyph is competing for a 390px row — and beside a
+ * *refusal* it reads as an ordering somebody chose rather than as a key. The
+ * handler is left alone: a tablet with a bluetooth keyboard still answers on `2`,
+ * and hiding the label is the whole of what a touch device needs.
+ *
+ * **Keyed on the pointer and deliberately not on a breakpoint.** `sm:` would say
+ * "a narrow window has no keyboard", which is false and would take the numbers off
+ * a half-width desktop browser; `pointer: coarse` is the actual question. Same
+ * medium as `shouldFocusComposer`'s own `pointerCoarse` clause, which declines to
+ * raise a soft keyboard for the same class of reason.
+ *
+ * A whole class string in a table, for {@link BOX_MAX}'s reason: Tailwind reads
+ * this file as text.
+ */
+const KEYS_ONLY = "pointer-coarse:hidden";
+
+/**
  * An unpicked row, and there is exactly one look because **this card has no
  * colour on it**.
  *
@@ -165,6 +219,7 @@ export function AskCard({
   context,
   extra,
   actions,
+  size = "normal",
 }: {
   /** One line at the top: the question, or the tool being asked about. */
   title: string;
@@ -188,6 +243,8 @@ export function AskCard({
   extra?: ReactNode;
   /** The footer row: Back, Skip, Submit. Never scrolls. */
   actions?: ReactNode;
+  /** How much room the card may take. See {@link BOX_MAX}. */
+  size?: AskSize;
 }): ReactNode {
   /*
    * The number beside each row, wired.
@@ -382,9 +439,26 @@ export function AskCard({
          * card cannot come back looking like something else.
          */
         <div
-          className={`${COLUMN} animate-rise pointer-events-auto flex min-h-11 shrink-0 items-center gap-1 rounded-lg border border-edge-strong bg-surface pr-1 pl-3 shadow-2xl`}
+          className={`${COLUMN} animate-rise pointer-events-auto flex min-h-11 shrink-0 items-center gap-1 rounded-lg border border-edge-strong bg-surface py-1.5 pr-1 pl-3 shadow-2xl`}
         >
-          <span className="min-w-0 flex-1 truncate text-xs font-medium">{title}</span>
+          {/*
+           * ⚠ **`wrap-anywhere`, not `truncate`, and this is the one place on this
+           * card where that was ever in question.**
+           *
+           * A collapsed bar is one line by intent and it has a control that opens
+           * it, so clipping looked defensible — and it is exactly what the rule
+           * this release is built on forbids: *nothing an agent asked may reach a
+           * person shortened.* The daemon stopped clipping a question's prose and a
+           * permission's title in the same commit; leaving a CSS ellipsis over the
+           * result would move the same loss one layer out, where it is worse
+           * because nothing can even say it happened.
+           *
+           * `min-h-11` stays the floor rather than the height, so a short title
+           * still draws the same 44px bar it always did and a long one grows the
+           * bar instead of hiding its own end. `py-1.5` is what makes the grown
+           * case sit off the edges; the controls are `shrink-0` and unaffected.
+           */}
+          <span className="min-w-0 flex-1 text-xs font-medium wrap-anywhere">{title}</span>
           {controls}
         </div>
       ) : (
@@ -408,16 +482,31 @@ export function AskCard({
          *
          * **The portrait budget, which the paragraph above works through landscape
          * in detail and never states: this card can take 92% of the conversation.**
-         * On a 390×844 phone the region is roughly 640px and `min(70vh,100%)`
+         * On a 390×844 phone the region is roughly 640px and `min(70dvh,100%)`
          * resolves to 590 of them, leaving about one transcript row visible behind
          * it. That is intended — a parked question is meant to be the loudest thing
          * in the app — but it is *why* the collapse control has to be a real 44px
          * target rather than the 26px one it was, and somebody asked to "make the
          * card smaller" should know which of the four numbers they are reaching for
          * before they start.
+         *
+         * At `size="tall"` — a plan, which is a document rather than a line — the
+         * ceiling rises to the region itself and the card takes all of it. That
+         * changes a `max-height` and nothing structural, which is the whole reason
+         * it is safe: raising a max can only ever give flexbox more room to resolve
+         * in. Re-run the landscape arithmetic above at its minimums — header ~44 +
+         * the context floor 48 + a shrinkable answer box + footer ~60 — and 227px
+         * of region still resolves without pushing the footer out, which is the
+         * failure that paragraph exists to prevent. See {@link BOX_MAX}.
+         *
+         * `max-h-[45vh]` on the answers is deliberately left in `vh` here: it
+         * governs every question card, its floor was measured in `vh`, and mixing
+         * a units change into a size change on the one region this does not need
+         * would make a regression there unattributable. It is the file's remaining
+         * outlier and is named so nobody thinks it was missed.
          */
         <div
-          className={`${COLUMN} animate-rise pointer-events-auto flex max-h-[min(70vh,100%)] min-h-0 flex-col overflow-hidden rounded-lg border border-edge-strong bg-surface shadow-2xl`}
+          className={`${COLUMN} animate-rise pointer-events-auto flex ${BOX_MAX[size]} min-h-0 flex-col overflow-hidden rounded-lg border border-edge-strong bg-surface shadow-2xl`}
         >
           <div className="flex shrink-0 items-start gap-1 px-3 pt-2.5 pb-2">
             <div className="mt-1 min-w-0 flex-1">
@@ -462,15 +551,23 @@ export function AskCard({
                * group wrapping inside itself — so the rule holds at any width and a
                * wrap costs alignment rather than meaning.
                *
-               * This used to name `permissionLayout` as "the other half — past a
-               * certain size these stop being buttons at all". There is no such
-               * function and there never was: `layout` is chosen at
-               * `PermissionCard.tsx` by `asked !== null`, with no size input. The
-               * sentence mattered because it was load-bearing in an argument —
-               * `drawableOptions` was justified partly by a fallback that does not
-               * exist, and it grew wide enough to delete a model's own answers.
-               * Named here rather than deleted quietly, because a comment promising
-               * a safety net is worse than no comment.
+               * ⚠ **`permissionLayout` exists now, and this comment is the record of
+               * how long it did not.** It was named here for a release as "the other
+               * half — past a certain size these stop being buttons at all", then
+               * corrected to say there was no such function and there never had
+               * been: `layout` was chosen in `PermissionCard.tsx` by
+               * `asked !== null` with no size input at all. That mattered because
+               * the missing fallback was load-bearing in somebody else's argument —
+               * `drawableOptions` was justified partly by it, and in its absence
+               * grew wide enough to delete a model's own answers.
+               *
+               * It is built. `permissionLayout` reads the rendered labels and
+               * answers `rows` when a button row will not hold them, so an option
+               * is never removed for want of room. The correction stays written
+               * down rather than replaced with a clean sentence, because what it
+               * records is the shape of the mistake: a comment promising a safety
+               * net is worse than no comment, and the way that ends is somebody
+               * building the net.
                */}
               {layout === "buttons" && (
                 <>
@@ -542,8 +639,26 @@ function OptionRow({
     <button
       onClick={option.onPick}
       disabled={disabled}
+      title={option.hint !== undefined && option.hint !== null && option.hint !== option.label ? option.hint : undefined}
+      /*
+       * ⚠ **`primary` reaches this layout now, and it has to.** A decision whose
+       * labels will not fit a button row is drawn here instead of having an option
+       * deleted (see `permissionLayout`), and the whole reason a button row is
+       * legible without colour is *position plus the one filled control*. Carrying
+       * the order over and dropping the fill would land the reader on a column of
+       * identical rows where one of them writes a standing policy rule to the
+       * agent's disk. `bg-fg` is licensed here by the same clause it is licensed on
+       * the button — the affirmative action inside a decision, and nothing else.
+       *
+       * Inert for every other caller: an elicitation's answers and a kimi question
+       * set no `primary`, because none of their options is the reversible one.
+       */
       className={`tap press relative flex min-h-11 w-full items-start gap-2.5 rounded-md border px-3 py-2 text-left disabled:opacity-40 ${
-        option.chosen === true ? CHOSEN : ROW
+        option.primary === true
+          ? "border-fg bg-fg text-ink hover:bg-fg/90"
+          : option.chosen === true
+            ? CHOSEN
+            : ROW
       }`}
     >
       {/*
@@ -559,11 +674,21 @@ function OptionRow({
       <span className="min-w-0 flex-1">
         <span className="block text-xs font-medium wrap-anywhere">{option.label}</span>
         {option.description !== null && option.description !== undefined && (
-          <span className="mt-0.5 block text-2xs text-muted wrap-anywhere">{option.description}</span>
+          <span
+            className={`mt-0.5 block text-2xs wrap-anywhere ${option.primary === true ? "text-ink/70" : "text-muted"}`}
+          >
+            {option.description}
+          </span>
         )}
       </span>
       {index < 9 && (
-        <span className="mt-0.5 shrink-0 text-2xs text-faint tabular-nums">{index + 1}</span>
+        <span
+          className={`mt-0.5 shrink-0 text-2xs tabular-nums ${KEYS_ONLY} ${
+            option.primary === true ? "text-ink/50" : "text-faint"
+          }`}
+        >
+          {index + 1}
+        </span>
       )}
     </button>
   );
@@ -615,7 +740,7 @@ function OptionButton({
       )}
       {option.label}
       {index < 9 && (
-        <span className={`tabular-nums ${option.primary === true ? "text-ink/50" : "text-faint"}`}>
+        <span className={`tabular-nums ${KEYS_ONLY} ${option.primary === true ? "text-ink/50" : "text-faint"}`}>
           {index + 1}
         </span>
       )}

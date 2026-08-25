@@ -54,8 +54,21 @@ export function expandHome(value: string): string {
  * A path that cannot be resolved is compared as written. That is deliberate:
  * these are also called on paths that do not exist yet (a worktree about to be
  * created), and refusing to answer would turn "not yet there" into "outside".
+ *
+ * **Exported, because a caller holding a root has to put it in this namespace
+ * itself.** The fallback above is what makes that necessary: a caller that keeps
+ * an unresolved root and builds not-yet-existing paths by joining onto it is
+ * comparing a resolved root against an unresolved child, and `containedIn`
+ * correctly answers no. Measured on macOS, where `/var` is a symlink: the plugin
+ * host refused to remove its own directory on every reinstall until it resolved
+ * its root at open. `createWorkspace` solves the same problem the same way, and
+ * `worktree.ts` still holds a private twin of this function — that copy is the
+ * one to delete next time somebody is in there.
+ *
+ * ⚠ It is **not** a containment decision by itself, and nothing may use it as
+ * one. It answers "what is this path called", never "is this path allowed".
  */
-function resolved(value: string): string {
+export function resolved(value: string): string {
   try {
     return realpathSync(value);
   } catch {

@@ -37,13 +37,15 @@ control plane takes a session token (`rs_`) or an API key (`rk_`), resolved by
 prefix. The web UI never sends its control-plane credential to a daemon or to the
 relay.
 
-**Bodies** are capped: 1 MiB on the daemon (uploads excepted, which stream against
-their own 100 MiB bound), 64 KiB on the control plane's public routes and 256 KiB
-below the auth gate.
+**Bodies** are capped: 1 MiB on the daemon, except the three routes that stream
+their own — `POST /sessions/:id/uploads` (100 MiB), `POST /fs/import` (50 MiB) and
+`POST /plugins` (2 MiB), each of which counts its own bytes and cancels the body on
+every refusal. 64 KiB on the control plane's public routes and 256 KiB below the
+auth gate.
 
 ---
 
-## The daemon — 37 routes
+## The daemon — 44 routes
 
 Runs on your machine, reachable through the relay. `pnpm client` drives all of it.
 
@@ -104,6 +106,46 @@ Runs on your machine, reachable through the relay. `pnpm client` drives all of i
 | `GET /sessions/:id/changes` · `GET /sessions/:id/changes/diff` | git's own numbers |
 | `GET /sessions/:id/workspace` · `DELETE /sessions/:id/workspace` | The worktree's path and branch; the delete removes the worktree, not the session |
 
+### Plugins
+
+Installed per machine, and they run there. What a *caller* may do is the scope on
+the route; what the *plugin* may do is `scopes` in its manifest, which applies
+inside a hook where there is no caller at all. Neither implies the other. See
+`docs/PLUGINS.md`.
+
+| | |
+|---|---|
+| `GET /plugins` | What is installed, what each may reach, and the plugin API this daemon speaks |
+| `POST /plugins` | Install **or update** — one verb, because the manifest says which. The archive is the body and `?name=` is the filename it arrived as, sanitized like an upload's and recorded as the row's `source`; it is the sole cause of `400 invalid_name`, and omitting it is one. Streams its body past the 1 MiB bound and cancels it on every refusal; `409 plugin_start_failed` means the tree is unchanged and the old version is still running |
+| `POST /plugins/source` | The same act, for a plugin this daemon fetches itself: `{source: {kind: "github", repo, commit}, consent?}`. The address is **built here** from `repo` and `commit` and is never taken from the caller, the commit must be a full 40-character sha (a tag moves; the pin has to be content-addressed), and redirects are refused. `consent` is what the installer was shown — `{scopes, net, hooks}` — and a manifest exceeding it is `409 plugin_consent_broken`, refused *before the plugin is started*. Answers exactly as `POST /plugins` does, `replaced` included |
+| `DELETE /plugins/:pluginId` | Uninstall, and drop everything it kept. An update keeps that; this does not |
+| `POST /plugins/:pluginId/state` | `{enabled}`. The state a caller wants rather than the transition, so a lost answer is safe to send again |
+| `GET /plugins/:pluginId/views/:viewId` | `screen` or `settings`. A **read** by contract — `isReplayable` lets the transport repeat it |
+| `POST /plugins/:pluginId/actions/:actionId` | Press something. Refused unless the manifest declared that action |
+
+All seven answer `503 plugins_unavailable` where the daemon was built without a plugin
+host or started with `REEMOAT_PLUGINS=0`, and the four that mutate — both installs,
+remove and the state switch — answer `409 plugin_busy` while another one is in flight,
+since one mutation at a time is a property of the whole daemon rather than of a plugin.
+A first install answers `201` and an update answers `200`; `replaced` on the body is
+which of the two it was.
+
+`POST /plugins/source` is the **only** route on this daemon that reaches the network on
+its own behalf, and it does so to one hardcoded host. Its refusals from the far end are
+`502 plugin_source_not_found` (that repository and commit are not there, or it is
+private) and `502 plugin_source_unavailable` (anything else, including a redirect) —
+`502` rather than `400` because nothing about the request was wrong, and rather than
+`503` because this daemon is not the thing that is unwell. A malformed `repo` or
+`commit` is `400 plugin_source_invalid` and never opens a socket.
+
+Both of the last two answer through one plugin, so both carry its failures:
+`503 plugin_unavailable` (not running), `504 plugin_timeout` (did not answer inside the
+invoke deadline), `503 plugin_overloaded` (already answering as many calls as the channel
+holds in flight), `413 plugin_request_too_large` (what was sent does not fit one IPC
+message — the remedy is to send less, which is why it is neither a timeout nor a
+`502`: nothing downstream answered, because nothing reached the child) and `502
+plugin_failed` for anything the plugin's own code raised.
+
 ### Files
 
 | | |
@@ -129,8 +171,8 @@ these, so a new route is private by doing nothing. "Public" is not
 | | |
 |---|---|
 | `GET /health` · `GET /v1/jwks` | Liveness, and the public keys every daemon verifies tokens against |
-| `GET /v1/instance` | What this instance allows, and its AGPL §13 source offer |
-| `POST /v1/login` | Name and password for a session cookie. Throttled on the pair |
+| `GET /v1/instance` | What this instance allows, its plugin catalogue address (`plugins.catalogue`, `null` on an instance with no market) and its AGPL §13 source offer |
+| `POST /v1/login` | A name **or a confirmed email address**, plus a password, for a bearer session token — not a cookie; nothing here is ambient. Throttled on the submitted identifier and the caller's address |
 | `POST /v1/enroll` | A daemon's one and only control-plane request, ever |
 | `POST /v1/provision` | Add a daemon for somebody else. Takes a `pk_`, not an account |
 | `POST /v1/register` · `POST /v1/register/confirm` | Sign up, then prove the address. A taken name answers 409; a taken address does not |

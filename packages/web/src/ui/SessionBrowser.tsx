@@ -1,14 +1,4 @@
-import {
-  Bell,
-  Check,
-  ChevronRight,
-  Folder as FolderIcon,
-  Layers,
-  ListFilter,
-  Pin,
-  Plus,
-  Search,
-} from "lucide-react";
+import { Bell, Check, ChevronRight, Folder as FolderIcon, Layers, ListFilter, Pin, Plus, Search } from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { MachineId, SessionKey } from "../ids";
 import { machineQuotaNotice, mayAddMachine } from "../quota";
@@ -20,7 +10,7 @@ import { humanRequests, needsHuman, resumeStalled } from "../wire";
 import {
   Button,
   Icon,
-  MENU_ROW,
+  menuRow,
   Menu,
   Skeleton,
   StatusDot,
@@ -806,7 +796,7 @@ function ChatSearch({ value }: { value: string }): ReactNode {
                   setFilter(item.value);
                   close();
                 }}
-                className={`${MENU_ROW} items-center hover:bg-raised ${
+                className={`${menuRow("center")} hover:bg-raised ${
                   item.value === filter ? "font-medium text-fg" : "text-muted"
                 }`}
               >
@@ -1340,8 +1330,22 @@ function SidebarFoot({ state, machine }: { state: AppState; machine: MachineId |
         <Icon as={Plus} size={16} />
         New session
       </Button>
+      {/*
+       * ⚠ **The launcher is inside the account menu now, and it is still not in
+       * the list.** It used to be one bordered button per plugin, stacked directly
+       * under New session — which put an unbounded, machine-dependent column
+       * between the one control somebody presses all day and the account row, and
+       * grew the footer by a row for every plugin installed.
+       *
+       * The rule it was written for is untouched: the rail is the sessions, and a
+       * plugin able to add rows to the list would open a hole in `waitingFloor`,
+       * which is computed by subtraction precisely so that a new section cannot.
+       * A menu row takes part in no ordering, no filter and no count either — it
+       * is one door further in than it was, in a menu that is already where the
+       * other doors out of the rail live.
+       */}
       <div className="mt-2 flex items-center gap-1">
-        <ProfileMenu state={state} className="min-w-0 flex-1" />
+        <ProfileMenu state={state} machine={machine} className="min-w-0 flex-1" />
         <HelpButton />
       </div>
     </div>

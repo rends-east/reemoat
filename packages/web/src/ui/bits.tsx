@@ -7,7 +7,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { Check, ChevronDown, X } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, X } from "lucide-react";
 import { listNavKey, nextOptionIndex } from "../keys";
 import { displayCwd, shortPath } from "../paths";
 import type { OfflineReason, Reach } from "../machine";
@@ -143,6 +143,22 @@ export const COLUMN = "mx-auto w-full max-w-3xl";
  * the token: this box has no fill of its own to identify it, so its boundary is
  * the control, and a boundary that identifies a control is held at 3:1.
  */
+/**
+ * A search box, glyph-inset and complete.
+ *
+ * ⚠ **A whole string rather than `` `${FIELD} pl-8` ``, and that is the trap
+ * {@link FIELD} documents.** Tailwind emits every utility at equal specificity, so
+ * `px-3` and `pl-8` race by stylesheet order and the loser is whichever the build
+ * happens to emit second. The caller draws the magnifier as an absolutely
+ * positioned `pointer-events-none` span in a `relative` wrapper.
+ *
+ * `bg-surface` because a control is drawn in the colour of what it sits on, and
+ * everything using this sits on a sheet. The rail's own search box is the same
+ * shape at `bg-ink` and is deliberately not this constant.
+ */
+export const SEARCH_FIELD =
+  "min-h-9 w-full rounded-md border border-edge-strong bg-surface py-2 pr-2.5 pl-8 text-sm outline-none [@media(pointer:coarse)]:min-h-11";
+
 export const FIELD =
   "min-h-9 rounded-md border border-edge-strong bg-surface px-3 text-sm leading-5 outline-none [@media(pointer:coarse)]:min-h-11";
 
@@ -393,11 +409,11 @@ const TONE_TEXT: Record<StatusTone, string> = {
  *   slightly dim dot. See the keyframe in `index.css` for why it also glows
  *   rather than only fading.
  *
- *   {@link WorkingDot} draws the same dot at the foot of a transcript, and that
- *   is one decision rather than two: the same keyframe, the same colour and the
- *   same eight pixels saying the same sentence one screen deeper — the argument
- *   `SessionView`'s header already makes for reusing `StatusDot` rather than
- *   inventing a second vocabulary for the same fact.
+ *   It used to be one decision in two places: `WorkingDot` drew the same dot at
+ *   the foot of a transcript, off the same keyframe and the same eight pixels.
+ *   That is gone — the transcript's working row is `WorkingMark` in `ui/Mark.tsx`
+ *   with a keyframe of its own — so `animate-blink` has exactly one user, which is
+ *   what the driver asserts and why a stray second one would be worth catching.
  * * **bright, with a halo** — it is waiting for *you*. Deliberately the loudest
  *   thing a row can carry, and the ring is what makes it distinguishable from
  *   the pulsing state at a glance rather than only by colour, which is what a
@@ -848,15 +864,35 @@ export type ButtonTone = "primary" | "plain" | "destructive" | "ghost";
  * enough. It is never reached directly: {@link DangerButton} is the only door, and
  * it requires a glyph.
  */
+/**
+ * ⚠ **Disabled dims the ink and keeps the box, and only on the outlined tones.**
+ *
+ * `disabled:opacity-40` used to ride the base string for all four, and on an
+ * outlined button that is not a dimming — it is a *deletion*. `--color-edge-strong`
+ * is held at ≥3:1 precisely because a control drawn in the colour of what it sits
+ * on has its border as its **only** identification, and 40% of that is ~1.2:1: the
+ * hairline `index.css` forbids for exactly this job. So a disabled `plain` button
+ * had no boundary at all, and the moment one became live it read as having *grown*
+ * — reported in those words, off a strip of four where three are inert most of the
+ * time. Nothing about the box ever changed: `min-h-11 px-3` in both states, and
+ * `opacity` cannot move layout.
+ *
+ * `primary` and `ghost` keep the opacity, because neither has a boundary to lose —
+ * one is a fill and the other is bare text.
+ *
+ * The `disabled:` variants are emitted after their unvariant counterparts in the
+ * same layer, which is what lets `disabled:border-edge` beat `border-edge-strong`
+ * — the same ordering `hover:bg-raised` already relies on one property over.
+ */
 const BUTTON_TONE: Record<ButtonTone, string> = {
-  primary: "bg-fg text-ink hover:bg-fg/85",
+  primary: "bg-fg text-ink hover:bg-fg/85 disabled:opacity-40",
   // Hover moves the *fill*, not the border. See `--color-edge-strong` in
   // `index.css`: the gap between the two line weights is now large enough that
   // swapping them on hover is a louder change than the press itself.
-  plain: "border border-edge-strong bg-surface text-fg hover:bg-raised",
+  plain: "border border-edge-strong bg-surface text-fg hover:bg-raised disabled:border-edge disabled:bg-surface disabled:text-faint",
   destructive:
-    "border border-danger/45 bg-surface text-danger font-medium hover:bg-danger/10",
-  ghost: "text-muted hover:bg-raised hover:text-fg",
+    "border border-danger/45 bg-surface text-danger font-medium hover:bg-danger/10 disabled:border-edge disabled:bg-surface disabled:text-faint",
+  ghost: "text-muted hover:bg-raised hover:text-fg disabled:opacity-40",
 };
 
 /**
@@ -914,7 +950,7 @@ export function Button({
       disabled={disabled}
       title={title}
       aria-label={ariaLabel}
-      className={`tap press inline-flex items-center justify-center gap-1.5 rounded-md font-medium disabled:opacity-40 ${BUTTON_SIZE[size]} ${BUTTON_TONE[tone]} ${className}`}
+      className={`tap press inline-flex items-center justify-center gap-1.5 rounded-md font-medium ${BUTTON_SIZE[size]} ${BUTTON_TONE[tone]} ${className}`}
     >
       {children}
     </button>
@@ -1194,9 +1230,47 @@ export function Icon({
  * describes had already happened underneath it.
  */
 export const MENU_PANEL = `${LAYER.menu} max-h-72 overflow-y-auto overscroll-contain rounded-lg border border-edge bg-surface p-1.5 shadow-lg`;
-/** 44px, the one menu-row height in this app. See the note at `Dropdown`'s rows. */
-export const MENU_ROW =
-  "tap flex min-h-11 w-full items-start gap-2 rounded-md px-2.5 py-3 text-left text-xs";
+/**
+ * One row in a menu: 44px, and its cross-axis alignment stated rather than
+ * defaulted.
+ *
+ * ⚠ **A function rather than a constant, because a constant could not be
+ * overridden and seven call sites believed it could.** This was
+ * `MENU_ROW = "… items-start …"`, and the four rows in `ProfileMenu`, the filter
+ * in `SessionBrowser`, `RowAction` below and the plugin row in `MachineInstalls`
+ * all wrote `` `${MENU_ROW} items-center` `` — including {@link RowAction}, whose
+ * own docblock said so in words. **None of them won.** Tailwind v4 emits its
+ * utilities in alphabetical order, so `.items-center` is printed *before*
+ * `.items-start` in the stylesheet and the constant outranks the append no matter
+ * which way round the class string reads. Order inside a `class` attribute
+ * decides nothing; order inside the generated CSS decides everything.
+ *
+ * What that looked like: a 14px icon pinned to the top of a `text-xs` line box
+ * while the glyphs beside it start a half-leading plus the ascender/cap-height
+ * gap lower — reported as "the text sits slightly below the icons to its left".
+ *
+ * Two values and no default, which is the whole point of the pair. `start` is for
+ * a row that can carry a description under its label — `Dropdown`'s rows,
+ * `CommandMenu`'s, `AgentConfigBar`'s — and each of those pads its leading glyph
+ * with `mt-0.5` to match. `center` is for a row that is one line. Leaving
+ * `items-*` off altogether was the other candidate and is worse: flex defaults to
+ * `stretch`, which stretches the icon rather than aligning it, so a call site that
+ * forgot would fail in a way nobody reads as forgetting.
+ *
+ * `webcheck` sweeps every call site of every exported class-string constant for
+ * an appended utility from a family the constant already sets, which is the
+ * mechanism this comment cannot be.
+ */
+export function menuRow(align: "start" | "center"): string {
+  /*
+   * Both class names written out, never `items-${align}`. Tailwind extracts
+   * candidates by scanning source *text*, so an interpolated utility is a rule it
+   * never generates — and the failure is silent, since flex would then fall back
+   * to `stretch` and the icon would grow instead of moving.
+   */
+  const cross = align === "center" ? "items-center" : "items-start";
+  return `tap flex min-h-11 w-full ${cross} gap-2 rounded-md px-2.5 py-3 text-left text-xs`;
+}
 export const MENU_HEADING =
   "px-2.5 py-1.5 text-2xs font-semibold tracking-wider text-faint uppercase";
 
@@ -1229,14 +1303,88 @@ export const SETTINGS_HEADING = "text-2xs font-semibold tracking-wider text-mute
 export const SETTINGS_SECTION = "mt-8 border-t border-edge pt-5";
 
 /**
+ * A tab in a strip of them.
+ *
+ * ⚠ **The same pill the machine bar in the rail draws, and it is one function so
+ * it stays that way.** That component argues the palette decision at length and
+ * it is not repeated here, only the conclusion: a selected tab is `bg-raised`,
+ * because `raised` means *state* in this app and `bg-fg` means the affirmative
+ * action inside a decision — a near-black pill for "you are looking at this" was
+ * the loudest object on a page whose whole palette sits within 1.22:1. And an
+ * unselected tab keeps `raised/50` rather than nothing, or a strip of two reads
+ * as one tab and one label, with the only cue that the strip is a strip existing
+ * where you already are.
+ *
+ * A function rather than two constants because the pair *is* the rule: the two
+ * states are only meaningful against each other, and two exported strings is an
+ * invitation to use one of them somewhere the other never appears.
+ *
+ * `min-h-8` is 32px and deliberately below the 44px floor, which the rail's own
+ * pills already are: this is navigation between two views of the same pop-up, not
+ * a control that answers anything. `webcheck`'s 44px sweep covers the three cards
+ * where a mis-tap *decides* something, and this is not one of them.
+ */
+export function tabPill(selected: boolean): string {
+  return `tap flex min-h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs whitespace-nowrap ${
+    selected ? "bg-raised font-medium text-fg" : "bg-raised/50 text-muted hover:bg-raised hover:text-fg"
+  }`;
+}
+
+/**
+ * One row in a pop-up's left rail — a settings section, a market tab.
+ *
+ * ⚠ **The row is shared and the list is not, and the split is where the drift
+ * actually is.** What two rails must agree on is height, padding, the active wash
+ * and the chevron: they sit one tap apart inside sheets that look the same, so a
+ * 2px difference reads as two apps. What they must *not* share is which rows
+ * exist — for settings that is `navRows(me)`, a function precisely because
+ * computing it in JSX draws a **Server** heading over nothing for a non-admin, and
+ * a generalised list component would hand that obligation back to the caller.
+ *
+ * `blurb` is optional because a market tab is a word: a second line of prose under
+ * "Market" would be a caption for a noun.
+ *
+ * `bg-raised` for the active row is `raised`'s one meaning — state, the tab you are
+ * on, the toggle that is on — and never `bg-fg`, which is the affirmative action
+ * inside a decision and would make a navigation row the loudest thing on screen.
+ */
+export function RailRow({
+  title,
+  blurb,
+  active,
+  onClick,
+}: {
+  title: string;
+  blurb?: string;
+  active: boolean;
+  onClick: () => void;
+}): ReactNode {
+  return (
+    <button
+      onClick={onClick}
+      className={`tap press flex min-h-11 w-full items-center gap-2 px-4 py-3.5 text-left hover:bg-raised ${
+        active ? "bg-raised" : ""
+      }`}
+    >
+      <span className="min-w-0 flex-1">
+        <span className="block text-sm font-medium">{title}</span>
+        {blurb !== undefined && <span className="block truncate text-xs text-muted">{blurb}</span>}
+      </span>
+      <Icon as={ChevronRight} size={14} className="shrink-0 text-faint" />
+    </button>
+  );
+}
+
+/**
  * One act inside a settings row's kebab.
  *
  * Promoted out of `UsersSection` when `MachinesSection` grew a kebab of its own,
  * rather than copied: a second hand-written copy is how one of the two loses
  * `role="menuitem"`, or picks a slightly different danger wash, and nothing
- * anywhere says they were meant to match. {@link MENU_ROW} is `items-start`
- * because a `Dropdown` row can carry a description under its label; a menu act
- * is one line, so this overrides it to `items-center`.
+ * anywhere says they were meant to match. A menu act is one line, so it asks
+ * {@link menuRow} for `center`; a `Dropdown` row, which can carry a description
+ * under its label, asks for `start`. ⚠ This sentence used to say "overrides it to
+ * `items-center`", and the override did not work for a year — see `menuRow`.
  *
  * **`danger` is a tone here and not a {@link DangerButton}, deliberately.** That
  * component's "must lead with a glyph" rule is about a *button among buttons* —
@@ -1265,7 +1413,7 @@ export function RowAction({
     <button
       role="menuitem"
       onClick={onClick}
-      className={`${MENU_ROW} items-center ${
+      className={`${menuRow("center")} ${
         danger ? "text-danger hover:bg-danger/15" : "text-fg hover:bg-raised"
       }`}
     >
@@ -1616,7 +1764,7 @@ export function Dropdown<T extends string>({
         // being made to cover both. In CSS and not in JavaScript, because
         // `AppShell` is explicit that this app holds no breakpoint state — a
         // media query cannot disagree with the window it is in.
-        className="tap press inline-flex min-h-8 w-full items-center gap-1.5 rounded-md border border-edge-strong bg-surface px-2.5 text-xs text-fg hover:bg-raised disabled:opacity-40 [@media(pointer:coarse)]:min-h-11"
+        className="tap press inline-flex min-h-8 w-full items-center gap-1.5 rounded-md border border-edge-strong bg-surface px-2.5 text-xs text-fg hover:bg-raised disabled:border-edge disabled:text-faint [@media(pointer:coarse)]:min-h-11"
       >
         {trigger}
         {busy ? <Spinner /> : <Icon as={ChevronDown} size={12} className="ml-auto text-faint" />}
@@ -1659,7 +1807,7 @@ export function Dropdown<T extends string>({
                   // Selection is weight, not colour, and the reserved 12px `Check`
                   // slot below was already doing most of the work — the accent
                   // text was a second mark for the same fact.
-                  className={`${MENU_ROW} text-fg hover:bg-raised disabled:opacity-40 disabled:hover:bg-transparent ${
+                  className={`${menuRow("start")} text-fg hover:bg-raised disabled:opacity-40 disabled:hover:bg-transparent ${
                     selected ? "font-medium" : ""
                   }`}
                 >

@@ -27,7 +27,22 @@ export function composerPlaceholder(state: {
   /** A send is in flight *and* the agent is being brought back. */
   reconnecting: boolean;
   working: boolean;
+  /**
+   * A plan is on screen waiting to be decided, and this box is one of the ways
+   * to decide it. See {@link Composer}'s send path.
+   */
+  revising: boolean;
 }): string {
+  /*
+   * **First, because it is the one state where `blocked` does not mean "wait".**
+   *
+   * A plan is the only request whose answer can be a sentence: writing one here
+   * stops the turn and sends it, which refuses the plan and says why in a single
+   * gesture. So the box that would otherwise tell you to go and answer something
+   * is itself the answer, and the placeholder has to say so or the control is
+   * invisible.
+   */
+  if (state.revising) return "say what to change…";
   // Blocked first: nothing typed here moves until the request above is answered.
   if (state.blocked) return "answer the request above first";
   /*

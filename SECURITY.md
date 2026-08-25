@@ -42,7 +42,8 @@ promise nobody has made.
 ## Scope
 
 **In scope**, roughly: anything that lets somebody reach a machine they hold no
-grant on; anything that lets a token minted for one machine verify at another;
+grant on; anything that gets a plugin's code, or anything it returns, *executing*
+in the browser rather than being drawn as data; anything that lets a token minted for one machine verify at another;
 anything that lets a caller past the control plane's password, session, throttle
 or grant checks; a way to make the relay parse, log or leak what it carries; a
 credential written somewhere it should not be (a log line, an image layer, a
@@ -52,9 +53,11 @@ walked out of by a path, a symlink or an upload name.
 **Out of scope**, because they are the design and are described below: an agent
 reading or writing anything your user can; an agent pushing to a remote with your
 credentials; a git hook running during a checkout; anything that follows from
-somebody legitimately holding a grant on your machine; and anything that follows
+somebody legitimately holding a grant on your machine; anything that follows
 from `~/.claude/settings.json` already answering a question the permission
-machinery would have asked.
+machinery would have asked; and anything a plugin does with the authority it was
+installed with, since a plugin is code somebody chose to run on their own
+machine.
 
 **Also out of scope, and said here so it is not anybody's first report: there is a
 private key committed to this repository on purpose.** `scripts/relaycheck.ts`
@@ -93,6 +96,44 @@ same read itself. This is the trade every coding agent on a laptop already makes
 What this daemon adds is that it can be driven from a phone, over a relay, by
 anybody holding a grant on the machine. The seam for a sandbox, if one is ever
 wanted, is `SessionRuntime`.
+
+**A plugin runs as you, and it is somebody else's code.** It arrives as a file
+whoever owns the machine chose, and it runs as a child process of the daemon with
+your uid, your `HOME`, your files and your keys — the same trade the agent already
+makes, through a different door. The scope list in its manifest is declared, shown
+at install and refused when exceeded, and it is **hygiene rather than a fence**:
+the child can `import("node:fs")` and read everything the daemon can. What it does
+buy is that the blast radius is named before somebody consents to it, that a
+plugin which hangs or crashes cannot take the daemon's single event loop with it,
+and that a plugin never holds the daemon's token or its database handle.
+
+**"Before" is load-bearing, and it is why the manifest is read by whoever is
+installing rather than by the machine.** The archive is not sent until its scopes,
+the hosts it named and the events it asks to be told about have been drawn and
+agreed to — in the browser by `packages/web/src/pluginArchive.ts`, and at a
+terminal by `pnpm client plugin install`, which prints the same list and waits.
+Neither is a validator: the daemon still refuses authoritatively on arrival. They
+exist because the alternative was what this used to do — unpack the archive, write
+the row, start the plugin, and *then* show somebody the scopes of something already
+running, on a screen whose own copy told them to read it first. A disclosure after
+the fact is not consent. Where the archive cannot be read locally at all, that is
+said plainly and the way through is a separate, named press; it is never guessed at.
+
+**What is a real boundary is that the browser executes none of it.** A plugin
+returns a *description* of a screen and the web client draws it with its own
+components, so the origin holding `reemoat.credential` runs nothing a plugin
+author wrote. There is no plugin bundle, no sandboxed frame and no `postMessage`
+bridge, because there is nothing of theirs to run.
+
+`net.fetch` is a **tap rather than a fence**, for the reason everything else here
+is: the daemon makes the request, against the host names the manifest listed, over
+https, following no redirects — but a name somebody controls can resolve to a
+private address, and the plugin could open its own socket regardless. It exists so
+that a plugin which stays inside the API is auditable, not so that one which
+leaves it is stopped.
+
+Nothing downloads a plugin, nothing updates one by itself, and there is no
+registry. Install one you would run in your own terminal.
 
 **The environment strip is hygiene, not a fence.** `agentEnv()` removes
 `REEMOAT_*` and the session-scoped `CLAUDE_*` names, and an agent running as this
@@ -156,13 +197,22 @@ conceded: an **address** is not something the person at the keyboard chooses, so
 taken one answers the same `200` as a fresh one, and `POST /v1/forgot` answers
 byte-identically for known, unknown and unverified.
 
-**The upload route's body-cancel discipline under the middlewares above it is
-measured-unknown** (Q7.62). `POST /sessions/:id/uploads` reasons carefully about
-cancelling a body it refuses, and the auth gate and the scope check sit *above*
-it — so a 401 or a 403 may answer without draining the upload the client is still
-sending. Neither half of the described outcome is established, and the obvious
-remedy is worse than the defect. What would settle it is one real full-size upload
-through the relay under a read-only grant.
+**The body-cancel discipline under the middlewares above a streaming route is
+now enforced, and measured in one process rather than through a relay** (Q7.62).
+The three streaming routes reason carefully about cancelling a body they refuse,
+but the auth gate and the scope check sit *above* them, so a 401 or a 403 used to
+answer without releasing the upload the client was still sending. The obligation
+now hangs off the same guard that grants the exemption from the ordinary body
+bound, so every answer produced below that line releases the body — measured
+against all three routes, with a stream that records whether anybody cancelled it.
+
+What is still not established is the half that needs a relay: whether an
+unreleased body really does park a sender and trip the tunnel valve, and how much
+of one it takes. Two gaps remain in the guard itself, both stated rather than
+fixed: `cors()` answers an OPTIONS preflight *above* it, and a handler that took a
+`getReader()` and abandoned it would leave the stream locked, which `cancelBody`
+swallows. Neither is reachable today — a preflight carries no body worth parking,
+and every streaming handler reads with `for await`.
 
 **The first admin's password and API key are printed to the container log**, and
 that is the contract rather than an accident: `main.ts` writes them on the one

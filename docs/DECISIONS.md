@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 104 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 69 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 191 | `####` |
-| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 41 | `###` |
-| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 96 | `####` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 114 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 72 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 217 | `####` |
+| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 44 | `###` |
+| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 106 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 64 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 103 | `###` |
-| | | **668** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 113 | `###` |
+| | | **730** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 668 rather than the 381
+dividers. So the count is over **both** depths, and it says 730 rather than the 407
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -2411,6 +2411,378 @@ tunnel is gone.
 
 **Status.** Current
 
+
+### Q1.612 — What is a plugin trusted with?
+
+**Position.** A plugin runs as you. It is a child process of the daemon, with your
+uid, your `HOME`, your files and your keys — the same trade an agent already makes
+on the same machine, and for the same reason: this is one person's own computer.
+
+**Why the scope table is not a fence.** `manifest.scopes` is declared, shown at
+install, and refused when exceeded. None of that stops anything: the child can
+`import("node:fs")` and read everything the daemon can. The standing is exactly
+`agentEnv()`'s — **hygiene, not a fence** — and the comment saying so is in
+`api.ts` next to the gate, so nobody restores the stronger claim by reading the
+code alone.
+
+**What it does buy, which is three things and all of them real.** The blast radius
+is *named*, which is what makes an install a decision somebody can take rather
+than a leap. A plugin that hangs or crashes cannot take the daemon's single event
+loop with it — that is what the child process is for, and it is the property that
+matters most on a machine also running four agents. And the plugin never holds the
+daemon's token or its database handle, because `pluginEnv()` strips every
+`REEMOAT_*` name before the child starts.
+
+**Rejected.** Claiming a sandbox. Node's permission model is process-wide rather
+than per-worker, so a `Worker` cannot be confined at all and a child process could
+only be confined by flags this daemon would have to guarantee across every
+platform it runs on. Writing "sandboxed" over that would be the same lie the
+settings screen refuses to tell next to a `~/.claude/settings.json` that has
+already answered. The seam if one is ever wanted is `PluginRuntime` (Q1.616).
+
+**Status.** Current
+
+### Q1.613 — Why does no plugin code run in the browser?
+
+**Decision.** A plugin returns a **description** of a screen and the web client
+draws it with its own components. No plugin JavaScript is loaded, evaluated or
+framed.
+
+**Why.** `reemoat.credential` lives in that origin's `localStorage` and is the one
+credential in this system that reaches the control plane. A plugin bundle
+executing there would hold it, and every mitigation for that is a mitigation
+rather than a boundary: a sandboxed iframe needs a second CSP, a versioned
+`postMessage` bridge, and a decision about `frame-ancestors 'none'`, and it still
+ends with somebody else's code running in a page this app also draws approvals in.
+Refusing to run it at all is the only version of this that is a property rather
+than a defence.
+
+**What it costs, stated rather than hidden.** A plugin screen is a list, a form, a
+set of columns and some text. It is not a canvas, and no amount of manifest will
+make it one. That is written into `docs/PLUGINS.md` in those words, because an
+author who discovers it after building something is an author who was misled.
+
+**What it buys beyond the boundary.** Three things that would each have been work:
+a plugin screen matches the rest of the app without its author thinking about it,
+it works on a phone without its author thinking about it, and it cannot make the
+session list slow.
+
+**Precedent.** The app already renders a form somebody else described —
+`ElicitationCard` draws an ACP elicitation from a schema an agent sent. The idea
+is borrowed; the *type* deliberately is not, because that shape belongs to ACP and
+one type serving two wires is one type changed by the wrong release.
+
+**Status.** Current
+
+### Q1.614 — A plugin has scopes and so does the caller. Which decides what?
+
+**Rule.** Two axes, and neither implies the other. The scope on the route —
+`session:read`, `session:write`, `machine:admin` — decides what the **caller** may
+do. `manifest.scopes` decides what the **plugin** may do.
+
+**Why both are needed.** A read-only grant may look at a plugin's screen and press
+nothing on it; that is the caller axis, and it is the same one every other route
+uses. But a hook has no caller at all — it runs because an agent finished a turn —
+so the manifest is the only authority there is on that path. A design with one
+axis either leaves hooks unauthorized or makes a plugin's authority depend on who
+happened to open a screen.
+
+**Measured consequence.** `daemoncheck` drives both: a read-only token listing
+plugins and being refused an action, and a manifest declaring nothing being
+refused every method in `SCOPE_OF` — swept over the table rather than asserted one
+at a time, so a method added without an entry fails there rather than being
+reachable by everybody.
+
+**Rejected.** A new token scope for plugins. Unknown scope strings are dropped
+rather than rejected on the way in, so a daemon that had not learnt it would
+silently treat every plugin call as unauthorized — and the three that exist
+already describe what a caller is doing here.
+
+**Status.** Current
+
+### Q1.615 — `src/` held exactly one `fetch`. It now holds two.
+
+**Decision.** `enroll.ts`, and `net.fetch` made on a plugin's behalf in
+`plugins/api.ts`. Both are named, here and in `.claude/rules/plugins.md`.
+
+**Why the count mattered.** *"The daemon makes exactly one control-plane request,
+ever"* is what makes a control-plane outage cost reachability rather than work in
+flight (Q1.9), and the way that property was kept true was by counting: one
+`fetch` in `src/`, and the count *was* the property.
+
+**Why this one does not break it.** The substance is unchanged. This call is never
+made by the daemon on its own behalf, never on a start path, never on a session
+path, and only ever to a host somebody wrote into a manifest and approved at
+install. A control plane that is down changes nothing about it.
+
+**What is conceded.** The number is two, and a number is a worse guard than a
+zero. So both are written down in two places, and the rule file says in as many
+words that a count nobody restates is a count that becomes three. A plugin
+*registry* to poll would be exactly that third one, and is refused for it
+(Q7.104).
+
+**Why the host makes the request rather than the plugin.** The plugin could open
+its own socket — see Q1.612 — so this is not a fence either. It is a **tap**: one
+place a plugin's outbound traffic can be seen, and one place the allowlist,
+the https rule, the redirect refusal and the rate window are applied. Q7.86 is the
+same lesson learnt the expensive way, when agent markdown could fetch from
+anywhere with nothing watching.
+
+**Status.** Current
+
+### Q1.616 — Is `PluginRuntime` a sandbox seam or leftovers?
+
+**Decision.** An interface with one implementation, kept as one deliberately —
+the same standing `SessionRuntime` has, and written down for the same reason.
+
+**Why.** It is the single place a confined plugin would be built, and naming it
+now is cheaper than finding it later. But it earns its keep today without any of
+that: it is what lets `daemoncheck` drive a start that never completes, an
+invocation that is never answered, a crash after `ready` and an exhausted restart
+budget — none of which is reachable by spawning a real process and hoping it
+misbehaves on cue. Four lifecycle paths are asserted rather than hoped for
+because this interface exists.
+
+**Rejected.** A `kind` discriminant on it, for `SessionRuntime`'s stated reason:
+an unread discriminant on the one interface that survived a deletion is how an
+`if (kind === "sandboxed")` branch against nothing comes to be written.
+
+**Status.** Current
+
+
+### Q1.617 — Why can a plugin not send CSS?
+
+**Question.** A plugin returns a description and the app draws it. Why not let it
+send stylesheets, or restyle the app?
+
+**The argument that does not carry the decision.** "CSS is dangerous" is mostly
+untrue here. `expression()` is dead, `url(javascript:)` is dead, and the classic
+selector-based exfiltration — `input[value^="a"] { background: url(https://…) }`
+— is **already blocked by the CSP this app sends**: `default-src 'self'`,
+`img-src 'self' blob:`. Refusing on those grounds would be overstating a narrow
+risk, so it is written down here that it was considered and is not the reason.
+
+**What is genuinely dangerous, and it is one thing.** This page approves shell
+commands with a tap. Anything able to move pixels near that control is a
+tap-jacking surface — cover the card, shift Approve under a thumb, make Deny
+transparent. Scoping does not close it: Shadow DOM isolates *styles*, not
+positioning, and a `position: fixed; inset: 0` element inside a plugin's own root
+still paints over the whole app. It can be contained (`contain: paint`), and the
+shape of that sentence is the tell: it is a defence being built around somebody
+else's stylesheet rather than a property.
+
+**Three reasons that outrank the security one.**
+
+*The class names become a public API.* A plugin able to target `bg-surface`,
+`edge-strong` or `--rail-w` is a plugin that breaks when `Sheet` or `bits.tsx` is
+refactored — and unlike a protocol, CSS has no version to negotiate. This is
+`DAEMON_VERSION`'s lockstep problem arriving through the stylesheet.
+
+*Consistency is the feature.* A plugin screen currently gets a phone layout, the
+monochrome palette, 44px on decision controls and legible type for free. CSS opts
+its author out of all of it, and the first thing most would do is make their thing
+**stand out** — in an interface built around *does anything need me*, where
+attention is the scarce resource.
+
+*The measured decisions stop binding.* Q3.205–Q3.210 carry chroma in OKLCH, a
+≥3:1 floor on `edge-strong`, and the rule that `bg-fg` is only the affirmative
+action inside a decision. A plugin with CSS violates all of them, and **its author
+cannot see it**: they are on a desktop, and the failure is somebody outdoors with
+a phone.
+
+**What people actually want, and what is offered instead.** Almost always meaning
+rather than pixels — *this row is urgent, this one is broken*. So the answer is
+**more vocabulary, in tokens**: `PluginRowTone` is `ok|warn|danger` and the host
+picks the ink, exactly as `PluginRowAction.tone` already did one field over. A
+vocabulary is versioned, driven, and lands for every plugin at once.
+
+**Reconsider if** a real plugin is blocked by the vocabulary — at which point the
+answer is a block type for what it needs, not a stylesheet. The honest escape
+hatch already exists: something needing full visual control is a web application,
+and the plugin is the integration with it.
+
+**Status.** Current
+
+### Q1.618 — The install screen parses the archive a second time. What is it allowed to get wrong?
+
+**Question.** `peekPluginArchive` re-implements enough of tar and zip, in the
+browser, to find a plugin's `plugin.json` and show what it asks for before
+anything is sent. The daemon then parses the same bytes with `unpackArchive` and
+installs whatever *it* finds. Two parsers, one archive. What happens where they
+disagree?
+
+**Rule.** A member must be named here exactly as the daemon will name it, or the
+archive must be refused. There is no third option, and "read it generously" is
+not leniency — a reader that resolves a member the daemon resolves differently is
+describing a different archive.
+
+**Why.** The screen's whole purpose is that nothing is sent until somebody has
+read what the plugin asks for. Where the two spellings diverge, the operator reads
+one manifest and the machine installs another — under the ordinary "Install it"
+button, not the named blind-install path. A manifest declaring no scopes at all
+can therefore stand in for one holding `sessions.write` together with the
+`permission.requested` hook, which between them let a plugin answer every
+permission an agent raises on that machine.
+
+**Measured.** Four ways to diverge, found 2026-08-23 and each reproduced against
+both parsers end to end: the ustar `prefix` field, which the daemon composes into
+the name and this reader ignored; the pax and GNU long-name headers, which the
+daemon honours as an override; the zip end-of-directory *entry count*, which this
+reader trusted while `extractZip` bounds itself by the directory's declared size
+and walks by record signature; and the `.` path segments that `safeMemberPath`
+drops before joining, which made a member invisible here and a root-level file
+there. The daemon's own `parseManifest` accepts the substituted manifest in each
+case, so nothing downstream catches it.
+
+**Decision.** `canonical` normalises a member's name the way `safeMemberPath`
+does, before `isManifestPath` and before the depth that ranks candidates; the tar
+walk composes the `prefix` and refuses any archive carrying an extended header it
+does not follow; the zip walk is bounded by the directory's size and walked by
+signature, and a declared count that disagrees with what is there is a refusal
+rather than a preference. Two candidates at one depth stay a refusal, and now so
+do two that normalise to one path — `findManifestRoot` breaks no tie and the
+daemon refuses a duplicate member outright, so neither may be resolved here.
+
+**Why refusing is the safe half.** An archive this reader cannot name is routed to
+the existing "Install without reading it" control, which says plainly that nobody
+has read it. Costing an operator a second, named press is a real cost; describing
+the wrong manifest is not a cost, it is the failure.
+
+**Rejected.** Sharing one parser between the two. `packages/web` may not import
+from `src/` — `wire.ts`'s standing reason — so the copy is structural, and this
+entry is the rule that makes a copy survivable rather than the wish that it were
+not one.
+
+**Status.** Current. This changes behaviour shipped in 0.3.0, so it wants a
+release rather than a quiet landing.
+
+### Q1.619 — Is this screen's own correctness the only thing between an operator and a plugin's authority?
+
+**Question.** Q1.618 fixes four ways the consent screen could describe the wrong
+manifest. What catches the fifth?
+
+**Decision.** `consentBroken` compares what the screen showed against the manifest
+the daemon reports having installed, and says so loudly when the plugin ended up
+with authority nobody was shown. It replaces the success line rather than sitting
+beside it: "Installed Clock 1.0.0" next to a plugin that can answer every
+permission on the machine is the same lie one step later.
+
+**Why.** Every fix in Q1.618 depends on somebody having thought of that
+divergence. This one does not: the daemon returns the manifest it really parsed,
+so the comparison holds for classes nobody has found yet. It is the difference
+between a reader that is believed and a reader that is checked.
+
+**What it compares, and what it deliberately does not.** Only authority — scopes,
+net hosts, hooks — and only what was *gained*. A plugin that ends up with less
+than the screen showed is a reader that was generous, which costs nobody
+anything. Names and versions are not compared: a manifest may say what it likes
+about itself, and the question is not "is this the file I picked" but "is this
+what I agreed to give it".
+
+**Status.** Current
+
+### Q1.620 — `src/` held two `fetch` calls. It now holds three.
+
+**Position.** The third is `fetchArchive` in `src/plugins/source.ts`, reached only
+by `POST /plugins/source`. The other two are unchanged: `enroll.ts`, and
+`net.fetch` made on a plugin's own behalf.
+
+**Why the count is written down at all.** Q1.615 answered that: a number nobody
+restates is a number that becomes four. So this entry exists before the code does
+anything else.
+
+**What forced it, and it is a measurement rather than a preference.** The plugin
+catalogue lives on its own host and the browser reads it directly. Q7.106 assumed
+the browser could therefore also carry the *archive* — "it already talks to both
+sides" — and it cannot: `codeload.github.com` answers
+`access-control-allow-origin: https://render.githubusercontent.com`, so a
+cross-origin fetch for a tarball is refused by the browser before it leaves the
+page. There is no header the catalogue could send that changes that, because the
+header would have to come from GitHub.
+
+**Why the property Q1.615 protects survives.** That property is *the daemon asks
+the control plane nothing* — Q1.9 — so that a control-plane outage costs
+reachability rather than work in flight. This call does not go to the control
+plane. It goes to one hardcoded host, on a request a person made, on no start path
+and no session path, and a failure of it fails one install rather than anything
+already running.
+
+**Why Q7.104's objection does not reach it.** That objection was to **a registry
+to poll**, which would make somebody else's outage able to stop an install on your
+own machine and would be a channel by which code arrives on a host nobody named it
+on. Nothing here polls, nothing here discovers, and nothing here updates a plugin
+by itself. The daemon does not know a catalogue exists: what reaches it is a
+repository and a commit that a person read the permissions of.
+
+**What bounds it.** https only, `redirect: "error"`, a 30s deadline, one hardcoded
+host, and a `repo`/`commit` this daemon validates itself — so no part of the
+address comes from the caller, which makes the host a real fence rather than the
+spelling check `net`'s allowlist honestly calls itself. The size bound is
+`unpackArchive` charging each chunk against `PLUGIN_LIMITS.maxBytes` as it reads:
+**codeload sends no `content-length`**, measured, so a header check would bound
+nothing on the one URL this ever fetches.
+
+**What would make it four.** A second forge. That is an added `PluginSource.kind`
+and an added CSP entry, together, and it should arrive as one change or the
+fetcher and the policy will disagree about what is reachable.
+
+**Status.** Decided
+
+### Q1.621 — Signing in by email was refused as a labelling complaint. What changed?
+
+**Decision.** `POST /v1/login` resolves the submitted string as a `users.name`
+first and, failing that, as a **verified** email address through
+`verifiedOwnerOf`. The body field is still called `name`, the answer to every
+failure is still one `401 invalid_login`, and no new status code exists.
+
+**This reverses Q3.439**, which rejected it in one line — *"a control-plane schema
+and auth change for a labelling complaint"*. That was wrong on the premise rather
+than on the reasoning: it is not a schema change at all. `user_emails`,
+`email_folded`, `foldEmail` and `verifiedOwnerOf` all already exist and are already
+on the recovery path, so what was actually being asked for is a second call to a
+function `POST /v1/forgot` has been making all along. The complaint was also not
+about a label: an address the product asks for, mails a confirmation to, and then
+refuses as a way in is a door drawn on a wall.
+
+**Verified only, and the partial index is the reason.**
+`idx_user_emails_verified` is `UNIQUE … WHERE verified_at IS NOT NULL`, because
+`POST /v1/register` is anonymous and an unverified claim must reserve nothing.
+Resolving on `email_folded` alone therefore has no uniqueness behind it at all: a
+stranger claiming somebody's address unverified becomes a second candidate for it,
+and on an account nobody else has claimed, a way in. The rule the index states as a
+constraint is the rule this route has to state as a query.
+
+**Why name-then-address rather than a refusal on ambiguity.** `USER_NAME` has no
+`@` in its class, so no name a validated route created can also be an address —
+but names are checked at creation only, and `app.ts` says so, so a legacy row
+holding one is reachable. `POST /v1/provision` answers `409 user_ambiguous` for a
+name two accounts share bar case, and copying that here is wrong twice: this route
+takes no credential, so a distinguishable refusal is an oracle telling a stranger
+the string names *something*; and `webcheck` pins at six the set of error codes
+that may end a browser session. A fixed order settles the case for nothing.
+
+**The throttle is where the real cost is, and it is accepted rather than hidden.**
+`loginKey` is built from what was *submitted*, so one account named two ways spends
+**two** counters. Folding them means resolving the string to an account before the
+key exists — a counter keyed on the account, which is the lockout weapon
+`throttle.ts` exists to have removed, arrived at from the other side. What bounds
+the doubling is `addressKey`: 30 attempts per address whatever they name, shared by
+every spelling one caller tries. The identifier half also moved from
+`MAX_NAME_KEY_CHARS` (120) to `MAX_EMAIL_KEY_CHARS` (254), because at 120 a long
+address is cut at the point that throws the address half away and every host
+guessing at any long address shares one counter — the exact failure that second
+constant was introduced to end, one value-kind along.
+
+**Measured on the body limit.** The route validated `name.length > 200`, which is
+`users.name`'s ceiling; `mail/address.ts` allows 254. Left alone, a legal address
+between the two answers `400 bad_request` where an unknown one answers `401` — a
+smaller oracle than user enumeration and the same kind, so the limit moved with the
+meaning.
+
+**Status.** Reversed an earlier decision
+
+
+
 ## Session lifecycle, questions and attachments
 
 ### Q2.1 — What happens to a live session when the daemon restarts?
@@ -2923,6 +3295,11 @@ projected total over 32 KiB refuses the whole elicitation with the cap named
 in the message; a long `message`, `title` or `description` is clipped.
 `pattern` is dropped at ingest and never carried.
 
+⚠ **The second half of that first sentence was taken back in Q2.214.** Prose is
+carried whole now — the three character caps are gone and the 32 KiB projected
+total is what bounds it. The half that stands is the first: structure is still
+refused, and for exactly the reason given below.
+
 **Why.** This is the `MAX_COMMAND_NAME_CHARS` asymmetry one level up. A form
 missing a question is not a smaller form, it is one whose answer *means
 something different*, and an option's value round-trips to the agent so a
@@ -2932,7 +3309,7 @@ above a form. An agent-chosen regular expression run in this process is a
 ReDoS on the event loop, and carrying it for a client to enforce only moves
 the hazard into a tab.
 
-**Status.** Current
+**Status.** Reversed in part — see Q2.214
 
 ### Q2.24 — Does an elicitation form ride the session snapshot?
 
@@ -4124,6 +4501,149 @@ members registers twenty thousand. Node warns at eleven, which is how it was fou
 positionally and has no such bookkeeping.
 
 **Status.** Current
+
+
+
+### Q2.212 — A plugin child is not detached and nothing reaps it. Why is that not the gap it looks like?
+
+**Decision.** A plugin's child process is spawned **without** `detached`, no pid
+is recorded, and there is no reaper. `runner.ts` exits when its IPC channel
+closes, and that is the whole of plugin cleanup.
+
+**Why it is the opposite of an agent's.** An agent is spawned `detached` because
+`claude-agent-acp` runs the CLI as its own child and cleans up only on
+`process.on("exit")`, which does not run under SIGKILL — so the process *group* is
+the only thing that can be killed reliably. That is why `sessions` has a pid
+column, why the reaper exists and why it is fenced by `os.uptime()`: a pid
+recorded before a reboot names somebody else's process afterwards.
+
+A plugin has none of those problems. It spawns nothing, holds no conversation, and
+its channel dies with the daemon — gracefully or not. A daemon that crashes leaves
+children whose `disconnect` fires, and they go. The next daemon start spawns fresh
+ones from the rows.
+
+**What this means for a change.** If a plugin ever needs to outlive the daemon —
+it should not — the pid column, the fence and the reaper all come back with it,
+and this entry is where the argument for the current shape is.
+
+**Status.** Current
+
+### Q2.213 — What may a failed install destroy, and when?
+
+**Question.** `PluginHost.install` publishes the new tree, writes the row, starts
+the child, and then removes what it replaced. Its catch is supposed to put
+everything back. Which of the two orders is load-bearing — the order things are
+committed in, or the order they are destroyed in?
+
+**Rule.** The way back is destroyed **last**: after every statement that can
+throw, and after the plugin being replaced is certainly stopped. The commit point
+stays where it is.
+
+**Why the reinstall path is the only one that matters here.** The target path
+carries the version, so on a version-changing update nothing is moved aside at
+all — the new tree goes to a directory that does not exist yet. A plugin is moved
+aside on exactly one path: reinstalling the version already installed, which is
+the documented way somebody iterates on a plugin they are writing. So this is not
+a rare window in a rare path; it is the only path on which the machinery runs.
+
+**What went wrong.** The old tree was discarded immediately after the row was
+written, with three fallible statements still to come — the second discard,
+seeding the new plugin with the sessions this daemon already has, and the second
+stop of the incumbent. On the reinstall path the thing discarded *is* the running
+plugin's directory and the newly published tree is the same path, so a throw ran a
+catch that removed the new tree and found the old one already gone. Both trees
+lost, the row naming a directory that is not there, and the plugin permanently
+failed on a budget spent against a missing file. The catch's own order — remove
+the new tree, then rename the old one back — was always right; it simply had
+nothing left to put back.
+
+**A second reason, independent of any throw.** The incumbent can come back
+through the hook queue's drain between the first stop and the swap, which the code
+above that stop already explains. If it did, it is executing out of the directory
+that was renamed aside — and deleting that from under a live child is its own
+defect. Hence *after* the stop specifically, rather than merely later.
+
+**Rejected.** Moving the row write below the cleanup. The filesystem and the row
+part company earlier than that, when the incumbent's tree is renamed out from
+under a row still naming it, so this moves the window rather than closing it — and
+it costs the flag the catch reads in two places to know whether it must restore.
+The row write is the commit point and it is correctly placed; the defect was in
+the order of destruction.
+
+**And the data.** The same catch removed the row of a failed *first* install
+without dropping that plugin's stored keys, which `doRemove` never does — it pairs
+the two and says why. Unpaired here is permanent: afterwards there is neither a
+row nor a directory, so an uninstall answers 404 and `dropPlugin` can never be
+reached again. The keys then reappear under the next install of that id, because
+plugin data is keyed by id rather than by version — deliberately, so that an
+update keeps it. Safe to drop for the reason that same comment gives from the
+other side: a first install that failed is not an update, and before it there was
+no data of that id to keep.
+
+**Deliberately still open.** A hard crash between the two renames leaves the same
+divergence, and no in-process ordering closes that. Reconciling it at open — a
+missing version directory beside exactly one directory this daemon moved aside —
+is a separate change with a separate justification (power loss, not logic), and it
+should not ship without a driver that can walk it: a recovery path nothing
+exercises runs for the first time exactly when everything is already wrong.
+
+**Status.** Current
+
+### Q2.214 — Prose was clipped so a person would not be shown a wall of text. What did that cost?
+
+**Decision.** The three character caps on an elicitation's prose are gone —
+`MAX_ELICITATION_MESSAGE_CHARS` (512), `MAX_ELICITATION_TITLE_CHARS` (100) and
+`MAX_ELICITATION_DESCRIPTION_CHARS` (300). `message`, a field's `title` and
+`description`, and an option's `label` and `description` are carried exactly as the
+agent sent them. `MAX_ELICITATION_FORM_BYTES` — 32 KiB over the projected form — is
+the only bound left, and it **refuses** rather than shortening.
+
+**Why. Because that is where the question lives.** `askTitle` reads a step's
+heading from the field's `description` first, the form's `message` second and the
+field's `title` last, and the order is not arbitrary: with several questions on one
+form the adapter puts each *question* in its field's description and leaves
+`message` as a preamble. So `MAX_ELICITATION_DESCRIPTION_CHARS` was a 300-character
+cap on the sentence somebody is being asked to answer, and on the sentence
+explaining what each answer means. The asymmetry Q2.23 argued — *structure is
+refused because a form missing a question means something different* — applies word
+for word to a question missing its second half.
+
+**Measured 2026-08-24 against `~/.reemoat/reemoat.db`.** Over every
+`AskUserQuestion` in the log: questions 26 median and **155** longest, option labels
+29 median and **48** longest, option descriptions 139 median and **318** longest.
+One of fifteen option descriptions was over the cap and was being cut on screen —
+not a pathological case, an ordinary one, and the caps sat close enough to real
+values that the next one along would go too.
+
+**Why a byte backstop is enough, where three character caps were not.** The form
+does **not** ride `SessionSnapshot` (Q2.24) — it is fetched by
+`GET /sessions/:id/elicitations/:id` when a card opens — so the thing being bounded
+is one response to one request, not sixty rows every four seconds. 32 KiB was
+already the number for that, already a refusal, and already named in its own
+message. What it did not have was an assertion against a *single* enormous string,
+which the per-item caps used to catch; `daemoncheck` now drives both shapes.
+
+**What was kept.** Every refusal: 24 fields, 24 options, an option `value` over 512
+characters, an unknown property type, a list with no choices. A `value`
+round-trips to the agent verbatim, so a clipped one is an answer it cannot
+recognise — that argument is untouched and is why the split now runs between
+*structure* and *prose* rather than between refusing and clipping.
+
+**And the same measurement, one channel over.** `MAX_PERMISSION_TITLE_CHARS` and
+`MAX_PERMISSION_OPTION_NAME_CHARS` went with them, replaced by
+`MAX_PERMISSION_SNAPSHOT_BYTES` — 8 KiB over `{title, options}`, refused. Those two
+*do* ride the snapshot, which is why they were bounded at all (Q7.82), but the
+amplifier was never the string length: it was the pair being re-sent for sixty
+sessions every four seconds, and one whole-object number says that where two
+per-string ones only approximated it. Clipping `option.name` also had a cost nobody
+had noticed: kimi's `AskUserQuestion` arrives down the permission channel, so that
+name is a model-written *answer*, and `askedQuestion` recovers the question by
+matching it against the same string in `rawInput` **by identity** — `rawInput` is
+bounded by bytes and never by characters, so past 200 the two sides disagreed and
+the whole question fell back to a row of buttons. Measured maxima on the same log:
+title **14**, option name **31**.
+
+**Status.** Reversed an earlier decision
 
 
 ## The web client
@@ -6138,6 +6658,13 @@ the first paint.
 
 #### Q3.92 — May the card decline to draw an option the agent offered?
 
+⚠ **Reversed by Q3.470: no, and nothing does any more.** The problem stated here is
+unchanged and the entry is kept whole for it; what went is the remedy —
+`permissionLayout` gives up the *layout* instead, and the four narrowings below are
+the best evidence that removing an option was the wrong half to concede. The
+measurement that settled it is in Q3.470: five of fifteen real option labels in the
+log exceed this ceiling.
+
 **Decision.** Yes, and under four narrowings at once — `drawableOptions` in
 `permission.ts`. An approval whose rendered label exceeds `BUTTON_LABEL_MAX` (32)
 is not drawn **only if another option of the same `kind` survives it**. A refusal
@@ -6176,7 +6703,7 @@ size-based layout fallback to rows* — this was cited in a comment in `AskCard.
 as `permissionLayout`, a function that has never existed; the layout is chosen by
 `asked !== null` with no size input at all.
 
-**Status.** Current
+**Status.** Reversed by Q3.470
 
 #### Q3.93 — Why is a boolean refused on both sides of a nested control?
 
@@ -8848,10 +9375,14 @@ when mail is not configured, and password recovery here is by mail and by nothin
 else. So there is none on that instance — which is a thing to know before choosing
 a password, not after forgetting one.
 
-**Rejected — signing in by email.** It is a control-plane schema and auth change
+⚠ **Rejected — signing in by email.** It is a control-plane schema and auth change
 (`USER_NAME`, `nameTaken`, the sessions table, `cpctl`, every throttle key) for a
-labelling complaint. **Rejected — requiring SMTP for registration**, which closes
-sign-up on a local-only instance to fix a sentence.
+labelling complaint. **Taken back in Q1.621**, on the ground that the premise was
+wrong rather than the reasoning: it is no schema change at all — `verifiedOwnerOf`
+and `foldEmail` were already on the recovery path — and the sessions table never
+came into it. What survived the reversal is the throttle clause, which was the one
+real cost and is accepted there in as many words. **Rejected — requiring SMTP for
+registration**, which closes sign-up on a local-only instance to fix a sentence.
 
 **Status.** Current
 
@@ -9179,6 +9710,1225 @@ sheet's body, and `rise` rather than `sheet` on a close; the phone runs
 section, and `sheet` with **no body group at all** for a close.
 
 **Status.** Current
+
+
+#### Q3.446 — Four places a plugin may appear. Why is the set closed?
+
+**Rule.** A screen, a settings pane, an action on a session's menu, and
+server-side hooks. There are no others, and adding one is a decision rather than
+an implementation.
+
+**Why.** This client is shaped around one question — *does anything anywhere need
+me* — and the three signals answering it are held together by `waitingFloor`,
+which is computed by **subtraction**: everything blocked, minus everything this
+view can draw. That is what makes it impossible for a new section, filter or
+needle to open a gap by accident. A contribution point able to insert rows into
+the session list would be a contribution point able to open exactly that gap, and
+nothing downstream could see it.
+
+The four that exist all sit somewhere the subtraction does not reach: a sheet, a
+settings pane, a row below everything the app draws itself, and the server.
+
+**Rejected, with the seams named rather than half-built.** A card in the
+transcript (`renderEvent` in `EventList.tsx`) and a slash command
+(`buildCommands` in `ui/commands.ts`). Both are recorded as non-goals in Q7.105
+with their addresses, so widening later is an addition rather than a rewrite.
+
+**Status.** Current
+
+#### Q3.447 — Where does a plugin's screen live?
+
+**Decision.** A plugin's **settings** are at
+`/settings/machines/:machineId/plugins/:pluginId`, inside the machine, beside that
+machine's agents. Its **screen** is at `/p/:machineId/:pluginId`, a route-backed
+sheet of its own.
+
+**Why the settings are inside a machine.** `MachineAgentsSection`'s argument,
+unchanged: what is configured lives in one daemon's database and on one host's
+disk, so a fleet-wide screen would have to open with a machine dropdown — a screen
+asking a question its own copy answers. A plugin's code and its stored data are
+per-machine in exactly the way an agent's credentials are.
+
+**Why the screen is not there too.** They are different things. Settings are
+configuration, visited when something needs changing. A board is opened several
+times a day, from a phone, to look at — and four taps into a settings sheet is
+filing a bookmark under a preference. `/p/…` is short because it is typed and
+shared.
+
+**What it inherits by being a route.** Deep links, survival across the reload a
+phone performs on its own, and the Back button closing it for free. `isSheet` and
+`isOverlayPath` both had to learn it, and `webcheck` asserts they agree — a route
+in one and not the other is a pop-up that either forgets what it was drawn over or
+records one while being a screen.
+
+**Rejected.** A fifth top-level settings section. The machine is where the answer
+already lives, and a section would have needed the dropdown.
+
+**Status.** Current
+
+#### Q3.448 — What does a narrowing over a plugin's output owe?
+
+**Rule.** Everything in `packages/web/src/plugins.ts` fails open. An unknown block
+is dropped, an unknown field kind becomes a text input and still round-trips, a
+missing string becomes an empty one, and nothing throws.
+
+**Why this is rule 2 again rather than a new rule.** `compatibility.md` already
+says an unknown value must fail toward "keep working", and the failure that taught
+it is on record: `endedWithDaemon` asked "is this a daemon reason?", answered *no*
+for a reason it had never heard of, and took the composer off the screen for a
+conversation that was coming back.
+
+**Why it binds harder here.** A plugin is a **third** release schedule. The web
+client ships with the control plane weekly, a daemon ships when its owner runs
+`deploy.sh`, and a plugin ships when its author feels like it — coordinated with
+neither. So a client meeting output it does not recognise is not an edge case, it
+is Tuesday.
+
+**The direction of every guess is chosen.** An unrecognised tone falls to the
+ordinary one, which means a plugin can fail to make a control *look* dangerous and
+cannot make a destructive one look harmless.
+
+**Status.** Current
+
+#### Q3.449 — What may a plugin's screen draw before the plugin has answered?
+
+**Rule.** Nothing. No skeleton board, no optimistic row, no locally applied
+action.
+
+**Why, and why it differs from the config chip.** The app does draw optimistically
+in one place — a config choice, where `withChoice` overrides the drawn value and
+nothing is claimed about what the *agent* is doing (Q3.408). The line that
+decision drew is exactly the one here: a client may draw a local intention it can
+retract, and may never draw an assertion about what something else did.
+
+A plugin's view **is** that assertion. It is the plugin's statement about its own
+state, computed from data this client has no second copy of, so there is nothing
+to guess from and nothing to retract. Pressing something therefore replaces the
+view with what came back — which is also why an action may return a whole view
+rather than only a sentence, and why a row disappears rather than being reported
+gone.
+
+**Where a clamp is drawn instead.** A view over the bounds is cut and a notice is
+appended saying so. A list silently shortened is a list showing a wrong number,
+and the person reading it has no way to find out.
+
+**Status.** Current
+
+
+#### Q3.450 — Where may a plugin send somebody?
+
+**Rule.** A row names `{session}` or `{screen}`. It cannot name a URL, and
+`{url: …}` is not a shape — it narrows to `null` and the row is simply not
+tappable.
+
+**Why.** A board whose cards could not open the session they are about was a dead
+end, so the capability had to exist; the question was only how wide. Two things
+close it at "destinations this app already has". A link chosen by a plugin is a
+phishing surface **on the page that approves shell commands** — the one page in
+this product where being somewhere unexpected is expensive. And "a plugin deciding
+where somebody goes" was already refused for a session-menu action, so allowing it
+here would have made that refusal arbitrary rather than a rule.
+
+What is permitted is a pointer into what the plugin can already *read*: a plugin
+holding `sessions.read` knows those ids, and opening one is what a board is for.
+
+**Narrowed twice, deliberately.** On the daemon in `clampView`, and again in
+`packages/web/src/plugins.ts`. `wire.ts` is a hand mirror, so a client trusting
+the daemon's narrowing would be trusting a copy of a rule rather than the rule;
+`daemoncheck` and `webcheck` each drive their own side against a URL in both
+shapes somebody would try it.
+
+**A `<button>` rather than an `<a>`**, because there is no href — the destination
+is resolved at the call site from an id. Pretending otherwise would put a
+middle-clickable link on the one thing this entry exists to keep from being one.
+
+**Status.** Current
+
+#### Q3.451 — A plugin screen was a photograph. What made it a window?
+
+**Rule.** A view may declare `refreshMs`. The host floors it at
+`PLUGIN_REFRESH_MIN_MS`, caps it, and spends it **only while somebody is looking**
+— stopped on `document.hidden`, stopped when the sheet closes.
+
+**Why it was needed.** The screen read once, when it was opened, and was stale
+from the next turn onward. For a board whose entire job is watching agents work,
+that is the wrong medium: it was a photograph of the moment the sheet opened.
+
+**Why polling rather than a subscription.** A push would mean the daemon holding a
+per-plugin channel open to every tab, and a new frame type on a socket that is
+deliberately read-only. This is a `GET` the client already makes, on a screen that
+is on the screen. The cost is bounded by the same thing that bounds its value:
+nobody is looking at a background tab.
+
+**Two rules that make it usable rather than merely correct.** A refresh **never
+blanks the view** — the old one stays until the new one arrives, or the board
+flashes every five seconds. And a failed refresh is **silent**: a machine dropping
+off LTE for one tick is not news, and a board that replaced itself with an error
+every time a train entered a tunnel would be worse than one briefly stale.
+
+**Clamped silently, unlike a cut list.** The difference is what anybody could do
+about it: a shortened list is a wrong number on screen, while an interval moved
+from 500 ms to 2 s is invisible to everyone and actionable by nobody.
+
+**A settings pane is not refreshed, whatever it asks.** It is a form somebody is
+typing into, and re-reading it under them either discards what they typed or keeps
+it over a value the plugin has since changed.
+
+**Status.** Current
+
+#### Q3.452 — A plan arrived as 5000 characters of markdown and was drawn as raw monospace in a 160px box. What changed, and why is that not a hole in the rule above it?
+
+**Rule.** `PermissionContext` carries a `plan`, read from a `plan` field in the
+tool's arguments, and `PermissionCard` renders it through `Markdown`. Everything
+else on that card keeps the verbatim `<pre>` it has always had.
+
+**Why the `<pre>` rule exists, and why a plan is not what it is about.** The rule
+is *"a text block may be the command, so it is never parsed"* — measured against
+kimi, where the command really is a text block, and where a renderer that eats an
+asterisk means the operator approves what they read while the agent runs something
+else. A plan is the other kind of thing entirely: a document named by the tool's
+own schema, on a request that authorizes nothing.
+
+**"Authorizes nothing" is the gate, and it is `askedQuestion`'s own.** A `plan`
+survives only when there is no command, no body, no diff and no location — the
+same structural test, reused rather than reinvented, and half of it is enforced by
+the shape of `computeInput`, whose early returns on `command` and `body` mean a
+request carrying either never has a plan at all. So there is nothing on this path
+whose exact characters could cost anybody anything.
+
+**Why the kind is not part of that gate.** ACP's `switch_mode` is on the
+`tool_call`, i.e. missing exactly when the transcript has not paged in — and the
+card can open before it has. Requiring it would mean a plan drawn as monospace on
+a cold open and as markdown a moment later. The kind **is** required for
+Q3.453, where the consequence is larger.
+
+**What it is drawn on.** `bg-raised/50`, which is the palette's well for a plan
+and already what `EventList` draws a checklist on — so the approval and the
+transcript agree rather than resembling each other. It is also outside
+`FileAccessContext`, so an inline path is a plain chip rather than a download
+button: no new fetch surface on the card that approves things.
+
+**The source goes behind `details`, and the echo test is trimmed.** The rendered
+document is the thing to read; the characters it was written with are for
+checking, which is what the disclosure is for — so `essentialContext` drops the
+text blocks on a plan request and `detailContext` puts the plan's own source in
+their place, keeping the two halves a partition. `withheldDetail` gains a clause
+of its own, because a plan with no `planFilePath` has a `null` arguments blob and
+the disclosure would otherwise not be drawn at all.
+
+⚠ **And the echo is compared *trimmed*, which is one call and was the whole
+defect.** `pick` trims what it extracts and a markdown document ends with a
+newline, so the field came out 6818 characters against the 6819 of the content
+block that echoed it — strict equality said "different", and the card drew the
+rendered plan with its own source underneath. Measured against a real 11 KiB
+plan; the first fixture had no trailing newline and passed throughout. Both halves
+of the test are trimmed now, and the second one fails *only once the first is
+fixed*: with the document no longer in `prose`, nothing else would drop the field
+from the arguments blob, and the escaped copy would come back.
+
+**One correction made in passing.** The `<pre>` docblock claimed *"`SessionBrowser`'s
+one-line preview renders the same string the same way, and the two must not
+diverge."* It does not — that row draws `pending.title`, and has never drawn a text
+block. A comment promising a coupling that does not exist is worse than no comment.
+
+**Status.** Current
+
+#### Q3.453 — Five buttons the agent chose, three of them indistinguishable. What is the narrowest way to draw four?
+
+**Rule.** `planControls` curates claude's plan-mode request into four controls —
+**Reject · Revise · Auto-accept edits · Auto mode** — and answers `null` for
+everything else, which is drawn by `permissionButtons` exactly as it always was.
+
+**This recognises options by `optionId`, and that reverses a documented rule.**
+`drawableOptions`' first narrowing is *"by length, never by id… recognising an
+option by its id or its wording is the guessing this codebase refuses
+everywhere."* It is unavoidable here and the measurement says why: all three
+approvals are `kind: "allow_always"` — "Yes, and bypass permissions", "Yes, and use
+\"auto\" mode", "Yes, and auto-accept edits" — so ACP's enum carries nothing that
+separates them and the id is the only thing that does. `drawableOptions` itself is
+untouched and still governs every other card.
+
+**Three narrowings make being wrong free.** Structure before ids: a `plan` in the
+arguments *and* ACP's own `switch_mode` kind are required before the table is
+consulted. Exact set equality: five options, these five ids, these five kinds, and
+nothing else — one renamed id, one changed kind, one option added or removed and
+it refuses. And `null` is today's card, so an agent that words plan mode
+differently loses nothing at all.
+
+**What is given up.** `bypassPermissions`, the broadest grant on the card — which
+`drawableOptions`' fourth narrowing already licenses dropping, since two narrower
+`allow_always` survive it. And `default`, "Yes, and manually approve edits", which
+is **outside** every existing rule: it is the only `allow_once` in the request,
+i.e. *"yes, but keep asking me about every edit"*, and after this the narrowest
+grant the card offers is `acceptEdits`. That trade was asked for explicitly; the
+reversal is one entry in `PLAN_ORDER`.
+
+**And the primary reverses what the filled button means.** `bg-fg` on this card is
+*the reversible option*, which is why `permissionButtons` gives it to `allow_once`.
+`auto` is a standing grant. What makes it survivable rather than merely requested
+is that it sets a session **mode**, which the agent republishes as an
+`agent_config` control the composer's own strip can set back — not a policy rule
+written to the agent's disk.
+
+**The labels are ours, and only here.** `optionLabel`'s rule is that the agent's
+wording survives wherever it carries something the kind does not — a *scope*. None
+of these does, the id is already what identified them, and four of claude's own
+labels wrap into a block on a 390px phone, on the one row whose meaning is carried
+by position. The agent's wording rides `AskOption.hint` as the `title`.
+
+**Status.** Current
+
+#### Q3.454 — ACP cannot attach a sentence to a refusal. Where does "what to change" get written?
+
+**Rule.** In the message box. While a plan is on screen the composer takes over:
+its placeholder reads *"say what to change…"*, the **Stop** control becomes
+**Send**, and a message written there **cancels the turn and then sends** — which
+settles the plan and says why in one gesture. There is no Revise button.
+
+**Why the box and not a control on the card.** Every other route was tried and
+each one built a second message box two inches above the one this app already has.
+The answer to "where do I write a sentence" is the same in this state as in every
+other, and the only thing that has to change is that the box says so and is not
+gated.
+
+**Why a cancel and not a refusal, which is the measured half.** Rejecting the plan
+does **not** end the turn: the agent takes the refusal and carries on talking, and
+the daemon answers `409 turn_in_flight` to anything sent inside it. Measured on
+this daemon — after a plan was refused the turn stayed open for thirty seconds,
+until the operator pressed Stop by hand and only then typed. So the cancel is not
+an extra act invented here; it is the one they were already performing, and
+`POST /sessions/:id/cancel` answers only once the turn has settled, which is what
+lets the prompt behind it land. It settles the permission as `cancelled` /
+`by: turn_cancelled` — the same record their own Stop wrote.
+
+**Three flags move together and none has a pure function behind it**, so all three
+are pinned as source text: `sendRefused` lifts rather than gates, `stoppable`
+yields the slot, and `parked` stands down so the blur rule does not take the caret
+out from under somebody the placeholder has just invited to type. A gate left
+reading `blocked || working` refuses the very send this state exists for, and
+nothing else in the build would notice.
+
+**Two designs were built for this and taken back out**, recorded because both
+looked right. The **first** put a textarea on the card, refused the plan, held the
+text in a module keyed by session, and delivered it on the first snapshot where a
+predicate said the session would take one — with a bounded retry, an in-flight
+flag against the four-second poll, a row in the transcript saying it was waiting,
+and a take-back. It worked, and it cost a documented invariant: `webcheck`'s
+"Nothing queues anywhere in this system" had to be amended, to buy something the
+composer does for free. The **second** was a Revise button that refused the plan
+and handed the caret to the composer — smaller, but it left two buttons sending
+one `optionId` and differing only in where they put your cursor, and it still made
+the operator find the difference. Both are gone; the sentence about queueing is
+true again.
+
+**What it costs, plainly.** Sending from this state ends the turn, so whatever the
+agent was about to say after the plan is lost. That is what the operator was doing
+by hand anyway, and the alternative is waiting for an agent whose plan you have
+already decided against.
+
+**Status.** Current
+
+#### Q3.455 — One TodoWrite is nine plan events. Why was the same checklist drawn three times, and what counts as "consecutive"?
+
+**Rule.** `buildTail` draws only the newest of a run of `plan` events. Consecutive
+is defined over **emitted nodes**: a plan is suppressed exactly when nothing was
+pushed to `collected` between it and the plan newer than it.
+
+**Why the other two definitions fail.** Over *raw events*, anything invisible
+saves a stale card — a codex `session_info_update` lands about five times a turn,
+and the reader still sees two identical tables touching. Over *drawable* events
+(`showsInTranscript`) it fails the other way: that answers true for a
+`permission_request` this walk merges away and for a superseded
+`tool_call_update` it drops. Emitted nodes is what "the reader can see something
+between them" actually means.
+
+**It is one integer compare**, because `collected.length` already is that count.
+
+**The flush is untouched, and that is provable rather than a compromise.** A row
+that draws nothing and still cuts the coalesced run splits one streamed message
+into two independently parsed `<Markdown>` blocks — the failure `TRANSCRIPT_SILENT`
+exists to prevent. It is unreachable here: `flush()` runs *before* the node
+decision, so an open text run is pushed at that moment and `collected` grows,
+which means the older plan is drawn. A plan with a message on either side of it is
+always a real boundary. `plan` therefore stays **out** of `TRANSCRIPT_SILENT`,
+where it would be a lie — that set means "this type never draws a row".
+
+**Nothing says how many were absorbed**, and the house idiom does not extend here.
+`1 failed` counts an outcome, `N approved` a decision somebody made, `… N more
+changed lines` content withheld. A superseded plan update is none of those: the
+card on screen already contains everything every absorbed update said, which is
+also why `supersedes` folds hundreds of streaming tool drafts one screen over and
+says nothing about how many either.
+
+**The `cut` needs no clause.** The walk `break`s below it, so a plan on the far
+side of a `/clear` is never reached and can neither suppress nor be suppressed.
+
+**One consequence, noted because it is a trap later.** The surviving row is keyed
+on the newest plan's seq, so an arriving update changes the key and React
+remounts it. That is safe only because the plan arm holds no component state. A
+collapsible plan card would make the key a bug.
+
+**Status.** Current
+
+#### Q3.456 — The card said part of the request was too large. It was sitting in the log. Why did it not look?
+
+**Rule.** `permissionContext` prefers an intact payload over the daemon's
+truncation stand-in, and reports `truncated` only for a half that was clamped
+**and** not recovered.
+
+**The two caps are different by design and by an order of magnitude.**
+`MAX_PERMISSION_BLOB_BYTES` is 8 KiB because a pending permission rides the
+*snapshot*, which a phone polls every four seconds for up to sixty sessions per
+machine. `DEFAULT_MAX_EVENT_BYTES` is 128 KiB, and the same `rawInput` is on the
+`tool_call_update`. Measured on a real plan: 5174 characters, on the update, twice
+— as `rawInput.plan` and as a content block.
+
+**What was actually wrong was one `??`.** `clampBlob` replaces an oversized value
+with `{truncated, bytes}`, which is not `null`, so the stand-in won a chain whose
+next term was the log. The join it needed was already there.
+
+**Raising the snapshot bound is refused.** It would multiply by the session count
+on the path a phone pays for continuously, to fix something the client can fix for
+free — and it would still be a bound, so the join would still be needed. Two
+bounds on one resource means the wrong one decides.
+
+**`loadAll` is now driven by `truncated` as well as `unavailable`**, because they
+say the same thing: the card cannot explain this request from what it holds, and
+the log is the only other place to look. It self-terminates — the moment the join
+lands, `truncated` goes false.
+
+**Status.** Current
+
+#### Q3.457 — Where does a plugin market live, given that plugin settings live inside a machine?
+
+**Position.** Its own route-backed pop-up at `/plugins`, opened from the profile
+menu beside Settings — not a fifth `SECTION_SPEC` inside the settings sheet, and
+not a screen in the rail.
+
+**The rule it looks like it breaks.** Q3.447: *a plugin's settings live inside its
+machine, beside its agents*, because the code is on one host's disk and its data
+in one daemon's database, so a fleet-wide screen would open with a machine
+dropdown — a screen asking a question its own copy answers.
+
+**Why it does not break it.** That argument is about **configuration**, and it
+still holds: a plugin's settings pane, its switch and its own screen are all
+unchanged and all still inside the machine, and every row in the market links
+through to them. What the market owns is the one question that genuinely spans
+machines and had nowhere to live: *where is this plugin, and where should it be*.
+A machine dropdown would be wrong there for the same reason it is wrong in
+settings — which is why the answer is a **multi-select** rather than a picker, and
+why the panel that lists what happened lists it per machine.
+
+**Why the profile menu rather than Settings.** `ProfileMenu` takes rows that are
+*places to go*, and this is one at Settings' own rank: acquiring a plugin is not
+configuring one, and burying it four taps into a settings sheet is filing a
+shopfront under preferences. The same distinction already put a plugin's *screen*
+at `/p/:machineId/:pluginId` rather than under `/settings` (Q3.447).
+
+**What it costs.** A third pop-up route, so `isSheet`, `isOverlayPath`, `depthOf`
+and `upFrom` each gain an arm — and `webcheck` asserts the first two agree over
+every shape, which is what makes that cost bounded rather than a place to forget.
+
+**Status.** Decided
+
+#### Q3.458 — Should a checkbox on the install screen *be* where a plugin is, or a draft of where it should be?
+
+**Decision.** A draft. The boxes are edited freely and one button at the foot
+applies the whole change; nothing reaches a daemon until it is pressed.
+
+**What was built first, and why it looked right.** The boxes were the live state:
+ticking one installed, unticking one removed. That is a genuinely attractive
+model — it removed three controls in one go (a results panel, a Clear button, and
+the "installed on 3 of 5" summary that had to be dismissed), because the list
+*was* the answer and there was nothing left to announce.
+
+**What it cannot express.** Moving a plugin from one machine to another. There is
+no single act for it: untick, wait for a daemon to answer, tick, wait again. Two
+irreversible steps with no state in between that anybody chose, and a mis-tap in
+the middle leaves the fleet somewhere nobody asked for — with the plugin's
+`plugin_data` already gone from the first machine. The person who found this
+described the case exactly: *a machine to remove it from and a machine to put it
+on, in one press.*
+
+**What the draft buys, beyond that one case.** The act becomes reviewable before
+it happens and abandonable by walking away — neither of which a live checkbox has
+— and the confirmation moves off the rows and onto the button, where it guards the
+whole change instead of interrupting somebody halfway through composing it.
+
+**Only the removal is confirmed.** An install drafted by mistake is undone by
+unticking it and pressing again; an uninstall takes `plugin_data` with it and
+nothing brings that back. A prompt in front of the reversible half is how the
+prompt in front of the irreversible one stops being read.
+
+**It also absorbed a control.** "0.2.1 is installed, 0.3.0 exists" had no gesture
+under live checkboxes — a ticked box ticked again is nothing — so it had grown a
+strip of its own in the middle of the screen with a second button on it. It is now
+one arm of the same button: `Reinstall`, which is what the foot says when the
+machine set is unchanged and `available` is ahead. This is also the one case where
+the button is live without the set having changed, and it is not an exception to
+*disabled until the draft differs* — there is something to do, it is just not a
+box that moved.
+
+**And it retired a sentence.** Under live checkboxes, "All machines" had to carry
+a line explaining that it meant *the machines in this list right now* rather than
+an account-wide policy (Q7.42) — somebody with two machines assumes the latter by
+default. Ticking it now fills the list below with ticked boxes, so the snapshot is
+on screen before anything is sent, and the sentence was explaining something the
+screen shows.
+
+**What checked it.** A pure, DOM-free decision in `packages/web/src/install.ts`,
+so `webcheck` swept the whole space — three sizes in each of three directions
+against both flags — rather than the four cases somebody thought of, and asserted
+the two properties that mattered: that the button moved *exactly* when something
+had been drafted, and that every cell named one of the four acts. Left as a nested
+ternary in the JSX it was the one decision on that screen with nothing checking it.
+
+**Status.** **Reversed by Q3.465**, which is where the machine table lives now.
+The draft is gone and with it the one act it could express that a live control
+cannot — *moving* a plugin in a single press. What survives is the method rather
+than the answer: `rowActs` and `bulkEnabled` are the pure, swept decisions that
+replaced it, extracted for exactly the reason given above, and **only a removal is
+confirmed** is still the rule. The reversal's own cost is recorded there: the code
+was the smaller half, and the assertions that were the argument for it being right
+went with it.
+
+
+#### Q3.459 — A plugin's settings were inside its machine. Why did nobody find them, and where are they now?
+
+**Decision.** Under `/plugins`, with the plugin — not in the settings sheet. The
+settings sheet keeps what is genuinely per-machine and **links out** for the rest;
+the `…/plugins/:pluginId` leaf is gone. *(Where exactly under `/plugins` is
+Q3.462: it was a section on the plugin's page for one round, and is now a screen
+of its own behind a gear.)*
+
+**The question, verbatim.** *"Where in settings is the normal plugin setting?"* —
+asked by the person who owns the product, looking at the screen that had them.
+
+**Where they were.** Settings → Machines → *a* machine → Plugins → the row's kebab
+→ Settings. Six taps, the last two behind a control that looks like a row's
+overflow menu, on a sheet that shows one machine at a time. Q3.447 put them there
+on a good argument: the code is on one host's disk and `plugin_data` is in one
+daemon's SQLite, so a fleet-wide settings screen would open with a machine
+dropdown — a screen asking a question its own copy answers.
+
+**Why that argument is answered rather than reversed.** The plugin's page already
+knows which machines it is on, because it draws them. So the choice is over *those
+machines* and not over the fleet — and where the plugin is on one machine there is
+no choice and no control at all. The dropdown appears exactly when a person
+genuinely has two answers, which is the case Q3.447 never covered: it argued
+against asking a question with an obvious answer, not against asking one with two.
+
+**What stays inside the machine, and why it is not a half-measure.** What is
+installed there, whether it is switched on, what a failed one said, and handing
+that daemon an archive from a file. Every one of those is a fact about the *host*
+that cannot be read anywhere else. Configuration is not: two machines running the
+same plugin are two configurations, and the page that says so is the page about the
+plugin.
+
+**The row also lost a wall of prose.** It drew the plugin's description and then
+every scope as a full sentence — *"Read your sessions, their transcripts and what
+they changed"*, four of those — on the argument that a capability nobody re-reads
+is a capability nobody withdraws. What it produced was a machine screen where three
+plugins filled a phone twice over with text that is **identical on every machine**,
+above a kebab nobody opened. The scopes are one tap away in the permissions fold on
+the page the row now links to, and that fold is where somebody reads them before
+consenting in the first place.
+
+**The old address still parses.** `…/plugins/:pluginId` resolves to the machine,
+which is `parseSettingsRoute`'s standing posture — fall up to the nearest real
+screen — and the machine's list is one tap from the plugin. A redirect was refused
+because that function is pure and a redirect is a navigation.
+
+**What checks it.** `webcheck` reads three files off disk, because all three are
+decisions about *placement* and nothing in the type system holds one:
+`MarketEntry.tsx` draws the settings section and draws it **above** Install;
+`PluginsPanel.tsx` offers no `label="Settings"`, navigates to `marketEntryPath`,
+and does not import `PLUGIN_SCOPE_TEXT`; and both the parse and `depthOf`/`upFrom`
+are driven through `parseSettingsRoute` rather than through a hand-written literal,
+since a literal is what keeps agreeing with a shape that no longer exists.
+
+**Status.** Decided
+
+#### Q3.460 — "Strictly limit the kinds of setting." What is a setting allowed to be?
+
+**Decision.** Three controls: a box you type in, a switch, a dropdown. A settings
+pane draws `text`, `notice` and `form` blocks and nothing else; a field is `text`,
+`toggle` or `select`. A plugin's own **screen** keeps all five blocks and all five
+field kinds.
+
+**What it was.** A settings pane was a whole view. A plugin could return a `list`
+of rows with their own action buttons, or a two-column board, on the pane whose job
+is *what do I want this thing to do* — and the only thing bounding it was the
+screen it shared a renderer with. "There is no second vocabulary for settings" was
+true and was the problem: one vocabulary meant the wide one.
+
+**Why `text` and `notice` stay.** Neither is a setting. They are the sentence above
+a control and the warning beside it — *"you are not signed in yet"* — and a form
+with no way to say anything about itself is a worse pane rather than a stricter
+one.
+
+**And there is a stronger reason than that, found by the first plugin the
+narrowing hit.** `autotitle` has no screen — deliberately, because a screen for one
+function is a page nobody visits — and its settings pane carried a `list` that was
+the **only place a refusal existed**. A hook's failure has nobody waiting on it:
+nothing asked, so nothing is owed an error, and by the time it fails the daemon
+session that would have carried a warning is not reachable from the plugin. A
+refused model call is an ordinary answer, not an exception. So for a plugin with no
+screen, `notice` on the settings pane is the **entire diagnostic channel**, and it
+is load-bearing rather than decorative. Anybody tempted to tighten this one step
+further — *a settings pane should be a form and nothing else* — would remove the
+last place a whole class of plugins can say that something went wrong. That plugin
+rewrote its record into `notice` with `tone: "danger"` and `text` in muted, which is
+the intended shape; both drivers now assert that a settings pane keeps a danger
+notice **and its tone**, because a diagnostic drawn in the ordinary ink is a
+diagnostic nobody reads.
+
+**What it costs, stated rather than discovered later.** `open` lives on a
+`PluginRow`, and rows live only in `list` and `columns` — so a settings pane can
+name nothing navigable. In the case above, five session names that used to be links
+became prose. That is the right trade for a *setting*, and it is exactly why a
+plugin that wants rows has a screen; but it means the narrowing and *"remove the
+screen nobody visits"* pull against each other, and a plugin that takes both pieces
+of advice ends up with prose where it had links.
+
+**Why `list` and `columns` go.** A plugin that has rows has a **screen**, at
+`/p/:machineId/:pluginId`, which is one tap from the same page. That is the split
+this subsystem already makes everywhere else: configuration is a form, looking at
+things is a screen.
+
+**Why `password` and `number` are not a fourth and a fifth kind.** They are
+spellings of the first.
+
+  - `PluginField.value` is `string | null` on the wire by design — *one narrowing,
+    not five* — so `number` never round-tripped as a number. The plugin parsed a
+    string either way, and all the kind ever bought was a numeric keyboard.
+  - `password` masked a value the daemon keeps in `plugin_data`, a column in a
+    plaintext SQLite file that every process running as this uid can read,
+    including the plugin next to it. The mask was an assurance this system does not
+    provide, offered on the one screen where a false one costs most —
+    `SECURITY.md` says a plugin's blast radius is *named* rather than fenced, and a
+    password box says the opposite in one glyph. Removing it removes a false
+    assurance rather than a capability, and it is **reported as a substitution**, so
+    the author finds out rather than shipping a pane that believes it hides
+    something.
+
+**Why the narrowing is applied twice.** The daemon clamps the view it answers a
+*read* with — that is what produces the notice an author sees, and the surface was
+already on the wire as the view id, unread by both sides. It cannot clamp an
+**action's** answer: an action reaches it as an action id, which says which action
+and never which pane was pressed, and the same submit comes from a form on a screen
+and from a form on a settings pane. Guessing from the presence of a `form` context
+is worse than not knowing — a screen's form would then be told it may not draw a
+list. So the browser clamps what it draws, being the only side that knows.
+
+**The notice had to learn the surface too.** *"This machine does not draw blocks of
+type `list`"* is false on a settings pane: it draws one perfectly well one surface
+over. Told that, an author goes looking for a typo in a block type they spelled
+correctly — the same wrong-diagnosis failure the named-types branch exists to end.
+So it says *a settings pane* does not draw it, and names the three that it does.
+
+**What checks it.** `daemoncheck` drives `clampView` on both surfaces with every
+block type and every field kind, always in pairs — dropping a `list` is only right
+if a screen still draws one — and asserts the flag is `substituted` rather than
+`clamped`, the notice's wording, and that absence of `kind` is still a *default*.
+Then it drives the pair over HTTP through a fake runtime returning the same bytes
+to `…/views/screen` and `…/views/settings`, which is the wiring question no pure
+assertion can answer. `webcheck` mirrors the two constants and asserts the settings
+set is a **subset** of the screen set — a settings type that is not a screen type is
+a value `PluginView` has no arm for, so it would render as nothing and say nothing
+about itself. Injecting a fourth field kind fails four assertions across both
+drivers; forcing the host's surface to `screen` fails the HTTP pair.
+
+**Status.** Decided
+
+#### Q3.461 — Plugin rows sat below Stop so that Stop would not move. Why did that not work?
+
+**Decision.** Plugin actions sit in their own band **above** the Resume/Stop group.
+Stop is the last row of the session menu at every install.
+
+**The rule it reverses, and the property it was protecting.** *Never above Stop:
+the rows a person reaches for without reading must not move because a plugin was
+installed.* The property is right and is about **Stop's position** — it is the one
+action in that menu with no way back.
+
+**Why the old ordering did not deliver it.** Stop stopped being the last row the
+moment anything was installed. It sat in the middle of a list whose remaining rows
+are somebody else's words, and its position moved with the *number* of plugin
+actions on that machine — which is exactly the thing the rule forbade, achieved by
+obeying the rule. Above the separator, Stop is last whatever is installed, which is
+a stronger version of the same property rather than a relaxation of it.
+
+**And the row could not fit itself.** `"Rename this session · Auto title"` is one
+string in a 208px panel, so the row wrapped to a second line — one menu row at twice
+the height of every other, moving Stop down by however long a plugin author's title
+happened to be. Split into two elements, the *verb* keeps the space it needs and
+the plugin's name gives way first: what somebody is looking for is the action, and
+the name is there to tell two plugins apart when both offer one. Nothing wraps at
+any title length, because both halves truncate rather than reflow. The whole label
+is still on the `title` attribute for a pointer that can hover, which is a
+consolation and not the fix.
+
+**What checks it.** `webcheck` reads `SessionMenu.tsx` and asserts the offers are
+drawn before `label="Stop"`, that the name is a separate `note`, and that both
+halves truncate. Moving the band back below Stop fails the first.
+
+**Status.** Decided
+
+#### Q3.462 — A section on the plugin's page, or a screen of its own?
+
+**Decision.** A screen of its own at `/plugins/p/:id/settings`, reached by a
+**gear in the head**, one push deep, with the ◀ back to the plugin.
+
+**What it was for one round.** A section on the entry page, between the
+permissions fold and the install control. That was already a large improvement on
+six taps inside a settings sheet (Q3.459) and it was still wrong.
+
+**Why.** The two screens answer questions asked at different rates. The entry page
+is *what this plugin is* — what it does, what it may do, what it costs you, where
+it is installed, what versions came before — and it is read **once**, when
+somebody is deciding. Its settings are what they come back for, every time, for
+the life of the plugin. As a section, the thing read a hundred times sat below the
+thing read once, under a fold, above an install control, on a page that also
+carries a version history. A form buried in a brochure.
+
+**Why a gear rather than a row or a tab.** A gear top-right is the one control
+every operating system has trained everybody to look for, and the head already had
+an empty right-hand slot on that depth — the tab strip only exists at the tabs.
+*(**The gear is gone as of Q3.468**, and the screen is not: what it could not do
+was say* which *machines, and it opened onto a picker over a set that is not the
+set the plugin is on. Everything below about the two rates still holds.)*
+A row in the body would have been a fourth thing competing with the install
+control for the same attention; a third tab would have forced the head back into
+pills, and the heading-plus-one-link shape is what makes two tabs readable at all.
+
+**Drawn only where there is something to configure.** `offersSettings` is pure and
+swept, and it holds two rules that read as bugs without the argument. *Anywhere,
+not everywhere*: the screen picks a machine, so one install with a pane is enough
+— and a fleet mid-update, one host new and one old, is the ordinary case rather
+than the edge. *`enabled` is not consulted*: a plugin somebody switched off is the
+commonest reason to open its settings, and a control that disappears when a thing
+stops working is one they go looking for.
+
+**The head names the screen where the body no longer can.** The entry head draws
+the plugin's name and version; the settings head draws the name and the word
+*settings* in its place. Not the version — settings are per machine, and the
+machines may be on different ones, so a version there would be the wrong fact
+stated confidently. And no `Settings` heading in the body: a section so titled
+under a bar you reached by pressing a gear says the same thing twice.
+
+**What it costs.** A third depth in the pop-up. `MarketRoute` gains `settings`,
+`parseMarketRoute` a fall-up for any other leaf, `marketUp` one more level,
+`depthOf` one more arm — and `webcheck` asserts the pairing of `marketUp` and
+`marketPaneTitle` over the new shape, which is what keeps that cost bounded rather
+than a place to forget.
+
+**Status.** **Current in its argument, superseded in its mechanism by Q3.468.**
+The settings screen is still a screen of its own, one push deep, with the ◀ back
+to the plugin, and still for the reason above. Only the way in moved.
+
+#### Q3.463 — A plugin returned a `select`. Why did the screenshot look like the stylesheet had failed to load?
+
+**Decision.** Because it was a native `<select>`, and now it is `Dropdown` — the
+one popover picker this app has.
+
+**What was wrong.** `PluginView` drew a plugin's `select` field as
+`<select className={FIELD}>`. `FIELD` sets a border, a radius, a background and a
+height, and a native select **ignores nearly all of it**: without `appearance:
+none` plus a hand-drawn arrow, the platform keeps its own chrome. So a plugin's
+settings pane had a heavy system-drawn outline sitting in a column of
+`edge-strong` boxes, and opening it produced a menu in the operating system's
+colours — blue selection bar and all — in an app whose whole palette is
+monochrome by decision. Reported, correctly, as *"the CSS did not apply"*.
+
+**Why `Dropdown` rather than `appearance-none` and an arrow.** That would have
+been a second picker: `Dropdown` already exists as "the one popover picker",
+takes Escape through `overlay.ts` rather than owning the key, carries the full
+listbox ARIA set, draws group headings and per-row descriptions, and gets 44px
+rows at every pointer. Its own docblock states the rule this field meets exactly —
+*a control whose option count can exceed about five is a dropdown* — and a
+plugin's options are bounded only by `PLUGIN_VIEW_LIMITS.options`, which is 40.
+
+**One behaviour changed on purpose.** A `value` that is not among the `options` —
+an old stored setting, a list that changed under somebody — is now drawn **as
+itself** in the trigger. A native select silently shows the first option instead,
+which is the fail-open rule this client keeps everywhere, applied in the one
+direction that lies: it makes a stale setting look like a current one.
+
+**What checks it.** `webcheck` reads the file with its comments stripped and
+asserts there is **no `<select>` element in it at all**. The absence rather than
+`Dropdown`'s presence, because a second native select added anywhere in that file
+is the same regression and only the absence catches it — and the comments are
+stripped because the file now argues about the element it must not contain, so a
+lock its own docblock satisfies would pass over the code it was written to
+protect.
+
+**Status.** Decided
+
+#### Q3.464 — "Where is K2.6, where is haiku?" Why did a plugin's picker offer agents instead of models?
+
+**Decision.** Because a model could not be named before a session existed, and now
+it can: `ctx.model.complete` takes an optional `model`, and `ctx.model.list`
+answers what an agent offers — by **starting that agent and reading what it
+publishes**, cached ten minutes.
+
+**What was actually wrong, and it was not a missing parameter.** The plugin's
+picker offered `claude`, `kimi`, `codex` because that is the only granularity that
+existed. **This daemon names no model anywhere**: there is no field called `model`
+in `src/`, and selection travels entirely over ACP's `session/set_config_option`,
+where "model" is one value of the option's `category`. The daemon is a relay — it
+renders whatever an agent publishes under that category and validates a chosen
+value against the agent's own `choices`. Everything downstream follows from that:
+
+| surface | model selectable |
+|---|---|
+| `POST /sessions` | no |
+| CLI argv / env at spawn | no |
+| `Session.start` options | no — only `ultracode?: boolean` |
+| `AgentAskRuns.ask` | **was no, now optional** |
+| mid-session `POST /sessions/:id/config` | yes, and always did |
+| survives a daemon restart | no — `agentConfigState` is memory (Q2.45) |
+
+So it was an **ordering** problem rather than a missing argument: the model lives
+in a control the agent publishes *after* `session/new`, and a one-shot ask creates
+a session every time. The fix is to set the option between the handshake and the
+prompt, which is a thing this daemon can do and had never been asked to.
+
+**Listing them costs a process, and there was no cheaper honest source.** Three
+shapes were weighed. A **text field** validated at use is free and makes somebody
+guess a spelling they can only learn from a refusal. Reading models off a **live
+session** is free where one is open — and was refused twice over: the snapshot's
+copy is not the agent's (`dedupeAliasChoices` rewrites the model value off
+claude's `default` placeholder, which is exactly what Q2.45 says must never be
+replayed), reaching the untouched copy needs a new accessor across a dependency
+edge pointing the other way, and a list whose contents depend on whether somebody
+happens to have a chat open changes for reasons nobody on screen can see. So:
+**start the agent**. No prompt, so no quota; a subprocess and a handshake, so
+cached for `MODELS_TTL_MS` and charged against the plugin's six-a-minute budget
+and the machine's two-at-a-time cap.
+
+**The TTL's two failures are deliberately asymmetric.** A model that has *gone* is
+caught at use — `ask` validates against the agent standing in front of it, never
+against the cache — so a stale choice is refused **by name** with what is really
+there. A model that is *new* is invisible until the cache expires, which costs
+waiting and nothing else.
+
+**Absence has three spellings and they all mean the agent's default.** Left out,
+`null` and `""` — a field omitted from a JSON body, a `ctx.store.get` for a key
+nobody wrote, and a form submitting an untouched control. This was decided *before*
+the first plugin read it rather than after, on the direct advice of the author
+whose plugin lost a day to the same question about `ctx.store.get`: pick one
+spelling as canonical and the other two become an error somebody discovers in
+production. Whitespace-only is the same as empty.
+
+**`model.list` sits behind the `model` scope, not `sessions.read`.** A method
+called "list" lands under a read scope by reflex, and this one **spawns an agent**.
+It belongs with the one that spends, not with the ones that only look.
+
+**`PLUGIN_API_VERSION` moved to 4, for v2's reason rather than v3's.** A new
+*method* is not refused at install the way an unknown scope is — `SCOPE_OF` decides
+at call time — so a plugin declaring `3` and calling `ctx.model.list` gets
+`unknown_method` when somebody presses something, with nothing saying which side is
+out of date. Declaring `4` moves that to install and names the machine. A plugin
+that only wants to *pass* a model needs no bump: the field is optional and an older
+daemon ignores it, which means the naming quietly runs on the default — worth
+knowing, not worth refusing an install over.
+
+**What checks it.** A real `Session` over in-memory pipes with a fake agent on the
+far end, because none of the three things that matter is reachable from a
+refusal-only stub: that the list really comes off `session/new`, that a choice
+really reaches `session/set_config_option` **with the option's own id** (the fake
+calls it `model-picker`, so a build sending the *category* would look right in
+every log and be refused by every real agent), and that a stale choice is refused
+against the agent rather than the cache — driven by retiring a model behind the
+cache's back. The absence sweep asserts **both** halves, that nothing was set *and*
+that nothing was refused, because "set nothing" alone is green on a build that
+throws. Five drifts were injected: finding the option by position, treating `""` as
+a choice, skipping validation, dropping the cache, and each fails only its own.
+
+**Status.** Decided
+
+#### Q3.465 — The plugin page's boxes were a draft. What made them a selection?
+
+**Decision.** A table. A fixed-height scroller with a select-all, a search box and
+a filter above it; per-row Install, Update and Remove that happen when pressed; and
+a bar of four below that acts on whatever is ticked. The boxes select rather than
+draft, and **only a removal is confirmed** — on the row and in the bar.
+
+**What the draft could do that this cannot, stated first.** *Move* a plugin from
+one host to another in a single press. Q3.458 was built for that case and the
+argument was sound: untick, wait, tick, wait is two irreversible steps with no
+state in between that anybody chose. That is the price, and it is paid knowingly.
+
+**What it could not do, which is everything else.** Put a plugin on one machine
+without composing a fleet-wide act. Find a host by name in a fleet. See only the
+machines that have it. And — a fleet being unbounded — it answered *size* with a
+collapsed disclosure, so the list somebody came to read was behind a fold, and so
+were the per-machine failures written into it. Q7.111 records the other end of the
+same complaint: a fleet of one paid three controls and a two-step model to put a
+plugin on the only host there is.
+
+**What "only a removal is confirmed" now costs, and why it is unchanged.** Under
+the draft, the confirmation guarded one act and sat on one button. There are two
+questions now — a row's and the bar's — and both **end with Cancel**, because both
+groups lay out in the same box, so the last child occupies the same pixels and a
+second tap aimed at a control that has just gone inert lands on the undo. Q3.218's
+measured property, reaching a row of icons.
+
+**Six things that read as arbitrary without the measurement.**
+
+  - **Row icons are `size="lg"`, never `sm`.** An `sm` is 24px of ink reaching 44
+    through `after:-inset-2.5`, so two adjacent ones overlap their targets by 18px
+    whatever the gap — and the later element in the DOM wins the hit test, which on
+    this row is the destructive one. A tap on the right of Update's ink would remove
+    a plugin and its `plugin_data`. `chip`'s own docblock warns about this shape.
+  - **The row is a `<div>` with a `<label htmlFor>`.** It *was* a `<label>` wrapping
+    the checkbox so the strip toggled it — and a `<label>` may hold no `<button>`.
+    Left as one, a tap on Remove would also select the row.
+  - **Epochs are per machine.** Act-wide is right while a draft is applied
+    wholesale; two rows pressed a second apart are two acts, and one counter makes
+    the second discard the first's answer for a machine it never touched, leaving
+    that row on "installing" for ever.
+  - **The scroller carries no `overscroll-contain`** and takes a `max-h` rather than
+    a height. Chrome ends the scroll chain at a box carrying containment **even when
+    it has nothing to scroll** — measured at 400px of wheel travel against 0px — and
+    a fleet of one puts one row in a box that then cannot move.
+  - **A hidden row is still a selected row.** Narrowing the filter does not
+    unselect, because hiding is not choosing; `selectionLine` says so, or one press
+    reaches machines that are not on screen.
+  - **`cancellable` is written from the controller the job holds**, inside the job
+    body. Set from `adding.length > 0` it is a fact about the jobs the *screen*
+    drafted, and a removal-only act then draws a live Cancel over an act holding no
+    controller. That defect was reintroduced by this very rewrite and caught by its
+    own assertion.
+
+**And one fact moved onto the row.** An install never switches a plugin on and an
+update **inherits** the switch. That lived in `outcomeText` — which this screen
+never rendered, since it wrote `null` on success and let the store answer — so
+*"I updated it and it does not work"* had nothing preventing it. `installedSubline`
+says it now, and says it above both version comparisons, because the Update icon
+beside the line already carries "behind" while "switched off" has no other
+representation on the row.
+
+**What checks it.** `rowActs` over 32 cells and `bulkEnabled` over 2048, both pure
+and DOM-free — the method Q3.458 established, kept while its answer was reversed —
+plus an **independence** property the single button could not have had: holding
+three counts fixed and moving the fourth never changes the other three answers. The
+placements are read off the file, because nothing typed can hold one: the bulk bar
+after the scroller has closed, exactly one scroller with the list inside it, no
+`overscroll-contain`, no `sm` icon on a row, two questions and neither on an
+install. Eight drifts were injected and each fails at least one.
+
+**Status.** Decided
+
+#### Q3.466 — Two pop-ups, one tap apart, that did not look alike
+
+**Decision.** `/plugins` draws Settings' rail at `sm` and above — Market and
+Installed as rows, the content beside them — sharing `RailRow` with `SettingsNav`
+so the two cannot measure differently.
+
+**The argument it reverses.** `PluginsSheet` held that Settings earns its 224px
+column by having four sections with sub-depths under two of them, while two tabs in
+a column would be a rail with more chrome than content. That is true about the
+*content* and misses what the column is: the shape somebody arrives already knowing
+how to use. These two are siblings a tap apart in the same profile menu, drawn in
+the same sheet — one opening as a heading with a pill beside it and the other as a
+rail beside a pane reads as two applications.
+
+**What the phone keeps, and why it is not an inconsistency.** The strip, `sm:hidden`.
+Settings has an index depth — `/settings` draws the section list and a row drills in
+— and the market has none: a tab *is* the content, so `parseMarketRoute` answers
+`market` for a bare `/plugins` and there is no address for a list to live at.
+Inventing one would move that parser's pinned answers, `depthOf`'s arms and
+`marketUp`'s parenthood, to buy a phone screen whose entire content is two words.
+Both the strip and the rail iterate `MARKET_TABS`, so they cannot drift.
+
+**The ◀ needed a new pure answer, and it is subtler than the sheet's.**
+`settingsUp.withinNav` hides the chevron at `sm`+ when the parent is a row the rail
+draws. Here `marketUpFrom` can answer an **origin** — a settings path somebody
+crossed in from — which this rail cannot draw, so that chevron is the only way back
+at every width. `marketUpWithinNav` is a sibling function rather than a widened
+return type, which is the split Q3.432 already made once for `settingsUpLabel`.
+
+**One thing measured and written down rather than claimed.** Deriving it from
+`marketUpFrom !== marketUp` and writing `origin !== null` give identical answers on
+every shape this parser can produce, so injecting the proxy fails nothing. The
+comparison is kept because it asks the question actually being asked — *did the
+override fire* — and would carry a fourth depth that consulted the origin; the
+docblock says that instead of implying a distinction no driver can see.
+
+**Status.** Decided
+
+#### Q3.467 — Settings opened on a pane whose only content was "use the list"
+
+**Decision.** No neutral state at `sm` and above. `DEFAULT_SECTION` is what the
+pane draws at `/settings` and what the rail highlights, from one constant — and
+`SECTION_SPECS` puts Account first, so the highlighted row and the default are the
+same screen.
+
+**What was there.** *"Pick a setting from the list."* beside a rail with nothing
+selected: half of a 672px sheet spent instructing somebody to use the control next
+to it, on the depth this pop-up opens at.
+
+**Why the order swap is load-bearing rather than cosmetic.** A rail whose
+highlighted row is not the first reads as a selection somebody made. Machines led
+while the pane opened on nothing, where the order was only a reading order.
+
+**Three things it deliberately does not do.** It does not move the parser:
+`/settings` still answers `section: null`, because below `sm` that address really
+*is* the section list and the phone keeps list → detail. It never reaches the
+chrome — fed to `settingsUp` the default answers `{path: "/settings", withinNav:
+true}`, a chevron on a phone pointing at the screen it is already on, so the call
+site is pinned as a literal. And it **may never be an `adminOnly` section**, which
+is asserted rather than commented: the pane draws it with nobody having tapped for
+it, so an admin-only default opens a non-admin on a screen whose every request
+answers 403 — the failure `visibleSections` exists to prevent, arriving by the one
+door that does not go through it.
+
+**One behaviour changed with it.** A non-admin who types `/settings/users` used to
+land on the empty pane at `sm`+ and now lands on Account. That is the same fall-up
+posture and strictly better than a pane that says nothing.
+
+**Status.** Decided
+
+#### Q3.468 — A plugin's settings asked which machine. Why do they now state it?
+
+**Decision.** Settings is the fourth act in the machine table's bulk bar, it writes
+to the machines that are **ticked**, and the scope rides the URL —
+`/plugins/p/:id/settings/:m1/:m2…`, one segment per machine. The screen states that
+scope on a sticky line instead of asking for it, and the gear is gone.
+
+**What the gear could not do.** It was the only route in and it asked no question
+about *which* machines. The screen it opened picked one from a `Dropdown` over
+`installs.filter(contributes.settings)` — a set that is not the set the plugin is on
+— and where that came to one it drew no control at all, so the commonest state named
+no machine anywhere on the screen. That is Q7.108, and this closes it by deleting
+the control rather than varying it: with the scope chosen upstream, a picker here
+would be a second scope control able to disagree with the address.
+
+**Why the path and not `history.state`.** The standing rule is that a
+`history.state` field must degrade to the previous behaviour when absent — and there
+is no previous behaviour, so it degrades to "no machines", i.e. a screen that cannot
+draw, for every shared link, bookmark and reload. Second, `under` and `origin` are
+facts about *how you got here* while the machine set is a fact about *what this
+screen is*: in `history.state` two navigations to one path would be two different
+screens, which breaks `parsePath` — exported precisely so `App` can draw an open
+pop-up's background from a string.
+
+**Repeated segments, never a comma-joined list.** `encodeURIComponent` does not
+escape a comma, so `a,b` and a single id holding one are the same string — and the
+failure is silent and in the direction that writes to hosts nobody chose. The
+parser dedupes and drops empty segments, because the fan-out is over this list, and
+does **not** sort, since the builder joins in the order given. **Empty is the entry
+page and never "all machines"**: writing a form into a host nobody selected is what
+the shape exists to prevent, and a wildcard is how it would arrive.
+
+**Settings is "every" where the other three are "any", and the asymmetry is the
+decision.** Install, Update and Remove are fan-outs: a machine the act cannot reach
+falls out and says so on its own row, which is `planTargets`' partition. Settings is
+a **navigation** — one screen, nothing to skip — so a selection of seven opening a
+screen about a subset is the "selected and never heard about again" failure in
+different clothes. ⚠ Its predicate is **not** `skipReasonFor`: installing is an act
+on the machine and takes `machine:admin`, while a pane is read behind `session:read`
+and written behind `session:write`, so a grant that may configure may not install.
+And `not_installed` sits **below** `no_scope` and `unreachable`, because
+`fetchPlugins` swallows every failure into an empty list — *"that machine does not
+have this plugin"* about an unread host is a claim this client cannot make.
+
+**Writing one form to several machines is only honest where they agree.** `pane.ts`
+decides that, and it is its own module because everything in `plugins.ts` fails
+**open** while this refuses to draw — two opposite postures in one file is how the
+next reader applies the wrong one. Same shape and same values: seed it. Same shape,
+different values: **blank, with a red line naming the keys that differed**, because
+a blanked toggle is *off* rather than empty and a checkbox has no third state.
+Different shape: **draw no form at all**, and group the machines, each group a link
+to its own scope — submitting one machine's keys to another writes fields it does
+not have and omits ones it does, silently in both directions. That remedy exists
+only because the scope is an address.
+
+**Two judgements inside that, named rather than buried.** Values are compared after
+`seedForm` normalisation, so `null` and `""` agree — comparing the wire values would
+report `mixed` for an identical fleet, and the red warning would be a lie about
+somebody's configuration. And `options` are excluded from the form signature, which
+is a **named hole rather than a covered one**: a `select` whose options differ per
+machine is usually a plugin describing local facts, but a value chosen where it
+exists and saved where it does not reaches a daemon whose plugin may not recognise
+it.
+
+**Nothing a machine said is dropped, and identical blocks collapse.** `notice` is
+the entire diagnostic channel for a plugin with no screen (Q3.460), so drawing the
+first machine's and hiding four others' is exactly what that rule forbids. The
+collapse is what makes a real diagnostic *visible*: a danger notice on one host
+becomes the only attributed line on the screen. And the red warning is drawn
+**outside** the block renderer, never as a synthesized `notice`, or a sentence this
+app wrote would be indistinguishable from the plugin's own words.
+
+**What checks it.** The agreement's partition over 125 fleet shapes — every machine
+handed in is a target or is named, exactly once — plus the four not-divergent cases
+that would each refuse a whole fleet over something that changes no write. Four
+drifts injected: raw-value comparison, merging divergent forms, drawing only the
+first machine's notices, and folding `options` into the signature.
+
+**Status.** Decided
+
+#### Q3.469 — Nothing on this screen may move, and an inert control may not vanish
+
+**Decision.** Three fixes off one screenshot pass, and they are one rule seen from
+three sides: **removal leaves the row entirely**, **the line above the button strip
+reserves its own height**, and **a disabled outlined button keeps its border**.
+
+**The row's bin, and why moving it is not merely tidier.** It put an unrecoverable
+act 44px from a checkbox on the busiest strip here — and the question guarding it
+had to *replace the row* to fit, because a pair of buttons plus the sentence on a
+second line grew the row by ~40px and moved every row under it, the table, and the
+bar beneath. A control that answers for itself inside the space it occupies is
+already a compromise; one that does so while the layout jumps is the wrong thing
+under a thumb at the moment it matters most. Off the row, a removal always goes
+through a selection: two deliberate acts, one place to confirm, and a sentence
+naming every machine it reaches rather than a truncated one naming the row it
+happened to sit on.
+
+**`rowActs` still reports `remove` and `drawnActs` is what narrows it**, which is
+the part that reads as redundant and is not: the *bar* reads `rowActs` to decide
+whether its own Remove may move, so a row that could not report a removable machine
+would take the bar's Remove down with it. What is asserted is not the filter — it
+is that everything a row draws is undone by pressing something else on the same
+row.
+
+**Two conditionally mounted lines were two ways to move the bar.** The selection
+count arrived on the first tick of a box; the reason Settings will not move arrived
+on the tick that made the selection unconfigurable. Both sat above the strip and
+both pushed it. One line now, always mounted at a reserved `min-h-4`, truncating so
+a long blocker cannot wrap into a second — and the **blocker wins where there is
+one**, because the count is already visible in the ticked boxes three lines up
+while *why a control will not move* is visible nowhere else.
+
+**And the disabled button, which is the one with reach beyond this screen.**
+`disabled:opacity-40` rode `Button`'s base string for all four tones. On an
+outlined tone that is not a dimming, it is a **deletion**: `--color-edge-strong` is
+held at ≥3:1 precisely because a control drawn in the colour of what it sits on has
+its border as its only identification, and 40% of that is ~1.2:1 — the hairline
+`index.css` forbids for exactly this job. So a disabled `plain` button had no
+boundary, and the moment one became live it read as having *grown*. Reported in
+those words, off a strip of four where three are inert most of the time.
+
+**Nothing about the box ever changed**, and that is worth stating because the report
+was about size: `min-h-11 px-3` in both states, and `opacity` cannot move layout.
+What changed was the only thing that said a control was there.
+
+`primary` and `ghost` keep the opacity — a fill and bare text have no boundary to
+lose — so the change is scoped to the two tones that draw one, plus `Dropdown`'s
+trigger, which is an outlined control with the same token. It reaches every
+disabled outlined button in the app, ~91 call sites, and it is strictly the right
+direction at all of them.
+
+**What checks it.** `drawnActs` swept over the same 32 row cells `rowActs` is, with
+the reversibility property rather than the filter; the row read off disk for the
+absence of a bin and for drawing through `drawnActs`; one asker in the file, and
+neither install nor update is it; and the reserved height pinned as a literal with
+both old conditional mounts asserted gone. Injected: `drawnActs` passing everything
+through fails three, the row drawing every act fails one, and the line losing its
+reserve fails one.
+
+**A residual, and it is about this repository rather than this screen.** The rule
+about a disabled control keeping its border belongs in `web-shell.md`'s palette
+bullet, which scopes `bits.tsx` and would deliver it to whoever edits that file.
+It does not fit: that file is at 31,998 of `docscheck`'s 32,000, and the clause is
+~200. The argument lives in `BUTTON_TONE`'s own docblock instead, which is where
+somebody changing it is standing — but the file wanting a split is now costing
+rules their home, which is the signal `plugins.md` and `plugin-ui.md` acted on.
+
+**Status.** Decided
+
+#### Q3.470 — An option that could not be a button was deleted. What replaced it?
+
+**Decision.** Nothing is deleted. `drawableOptions` is gone and
+`permissionLayout` is what took its place: it reads the rendered labels and
+answers `rows` when a button row will not hold them, so the *layout* gives way
+instead of the agent's option.
+
+**This reverses Q3.92**, and only its remedy. The problem it named is real and
+unchanged: the button row carries its meaning by **position** — the refusal alone
+on the left, the reversible approval filled on the right — because the colour those
+buttons had was removed, and `OptionButton` draws its label as a bare text child
+inside a `flex-wrap` group, so a long one wraps the row into an arrangement where
+the rule says nothing while still looking deliberate. codex words a scoped grant as
+``Allow Commands Starting With `node /Users/…/fetch.mjs` ``, which embeds a path and
+is therefore unbounded by construction.
+
+**Why the remedy was wrong.** A layout is this app's problem and an option is the
+agent's, and Q3.92 resolved that by removing the option. Its own four narrowings
+are the evidence: each one is a case where deleting lost something that mattered —
+claude's path-scoped `allow_always` was the only one on its card, an over-long
+`allow_once` handed the filled button to the *permanent* grant, and kimi's
+`AskUserQuestion` arrives down this channel so two of four **model-written answers**
+were deleted with nothing said. Four narrowings on a rule is a rule arguing with
+itself.
+
+**Measured 2026-08-24 against `~/.reemoat/reemoat.db`.** Of fifteen option labels in
+the log, **five** exceed the 32-character ceiling — 34, 40, 43, 48 and one at
+exactly 32. Two more sit at 32 exactly. This was not a rare shape.
+
+**What `rows` is.** The arrangement the card already draws for a question: full
+width, wrapping labels, room for the description each option carries. Nothing was
+invented for it. The positional rule travels rather than being lost —
+`permissionButtons` still orders refusals first and still names one `primaryId`, and
+`OptionRow` draws that one filled, which is the same `bg-fg` licence Q3.209 gives
+the affirmative action inside a decision.
+
+**A refusal never decides the layout**, and that is the one narrowing that
+survives: it is one option in a group of one with no sibling to line up against, so
+a long refusal is a wide button and nothing worse.
+
+**And it closes a promise this codebase had been keeping open.** `AskCard.tsx` named
+`permissionLayout` as "the other half — past a certain size these stop being buttons
+at all", then carried a correction saying there was no such function and there never
+had been, and that `drawableOptions` had therefore been justified partly by a
+fallback nobody built. The correction stays written where it is; the function now
+exists under the name it was promised.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.471 — Seven call sites asked for `items-center` and none of them got it
+
+**Rule.** A shared class string states no utility a call site is expected to
+override. `MENU_ROW` is now `menuRow(align)`, and `webcheck` sweeps every call site
+of every exported class-string constant for an appended utility from a family the
+constant already sets.
+
+**Why.** Reported as *"the text sits slightly below the icons to its left"* on the
+account menu. `MENU_ROW` was `"… items-start …"` — right for a `Dropdown` row, which
+can carry a description under its label — and the four rows in `ProfileMenu`, the
+filter in `SessionBrowser`, `RowAction` and the plugin row in `MachineInstalls` all
+wrote `` `${MENU_ROW} items-center` ``. **None of them won.** Tailwind v4 emits
+utilities in alphabetical order, so the generated stylesheet holds `.items-center`
+*before* `.items-start` and the constant outranks every append regardless of which
+way round the class attribute reads. Order inside `class` decides nothing; order
+inside the CSS decides everything.
+
+What that draws is a 14px icon pinned to the top of a `text-xs` line box while the
+glyphs beside it start a half-leading plus the ascender gap lower — four pixels, on
+every menu in the app, for a year.
+
+**The docblock was part of the bug.** `RowAction`'s own comment read *"a menu act
+is one line, so this overrides it to `items-center`"*. Every type was right, every
+assertion was green, and the file said in words that the thing it was not doing was
+what it did. That is why the remedy is a sweep and not a fix: what failed is the
+**idiom**, and the next shared string to grow an `items-`/`justify-`/`text-size`
+opinion inherits the same trap.
+
+**Rejected — dropping `items-*` from the constant.** Flex defaults to `stretch`,
+which stretches the icon rather than aligning it, so a call site that forgot would
+fail in a way nobody reads as forgetting. A function with two values and no default
+makes the caller state it and makes the statement win.
+
+**Rejected — asserting the fixed call sites.** Seven checks that go stale the moment
+somebody adds an eighth. The sweep is over the property.
+
+**Measured.** The sweep over `packages/web/src` finds exactly those seven and no
+other family collision anywhere in the package.
+
+**Status.** Current
+
 
 ## Deployment, packaging and code layout
 
@@ -9953,16 +11703,32 @@ starting a second teardown.
 ### Q4.29 — May anything in `src/` write to stdout or stderr?
 
 **Decision.** No. Everything reports through an injected callback
-(`onDegraded`, `onWarning`), and only `scripts/` print. There is exactly one
-sanctioned exception: `store/sqlite.ts`'s v6 migration prints when it destroys
-something — a dropped forge account, a collapsed credential, sessions cut by a
-cap that used to be per-person.
+(`onDegraded`, `onWarning`), and only `scripts/` print. There are exactly two
+sanctioned exceptions, and both are places where no callback exists to report
+through:
+
+1. `store/sqlite.ts`'s v6 migration prints when it destroys something — a
+   dropped forge account, a collapsed credential, sessions cut by a cap that
+   used to be per-person.
+2. `src/plugins/runner.ts`'s `unhandledRejection` handler writes to the child's
+   own stderr.
 
 **Why.** Those migration prints happen inside `openStores`, before any callback
 the daemon could have wired, so they are the only moment anybody can be told
 that data was destroyed.
 
-**Status.** Current
+The second is a different argument for the same reason. `runner.ts` runs in the
+**child** process, not the daemon: it has no `onWarning` to reach, because the
+callback lives on the other side of an IPC channel a floated rejection may have
+nothing to do with. What it writes goes to the stderr `runtime.ts` already
+captures into a ring of `PLUGIN_LOG_LINES`, which is what a failed plugin's row
+shows — so the write *is* the report, arriving by the only route there is.
+Deliberately not fatal: a floated promise in one hook must not take a plugin's
+screens down with it.
+
+**Status.** Current — amended when the plugin subsystem landed. The count is
+stated here rather than only in `CLAUDE.md` because a rule with a number in it
+is a rule that goes stale silently, and this is the sentence people quote.
 
 ### Q4.30 — What is a comment required to say?
 
@@ -10128,6 +11894,137 @@ differs only in that it does not share a restart (Q4.33). Every value it reads
 was already answered by the control plane's own interview, so a third arm would
 present a configuration decision that does not exist and a fourth question with
 no answer of its own.
+
+**Status.** Current
+
+
+### Q4.103 — Why does a plugin ship as one artifact?
+
+**Decision.** One archive holds the manifest, the server half and — by way of the
+descriptions that server half returns — the screens. There is no separate client
+package and no version negotiation between the two halves.
+
+**Why.** Three things ship on three schedules here and nothing coordinates them:
+the control plane weekly from a tag, the web client **inside that image**, and a
+daemon whenever its owner runs `deploy.sh`. That is what
+`.claude/rules/compatibility.md` calls the fact that decides everything else, and
+a plugin split across two of those schedules would inherit the whole problem —
+plus a third schedule of its own.
+
+A plugin whose halves arrive together cannot see the skew at all: whatever
+`server.js` returns is drawn by whatever client is loaded, through a vocabulary
+whose version is negotiated once, at install, as a **range**
+(`PLUGIN_API_VERSION` / `PLUGIN_API_MIN_VERSION`). That is rule 1 applied
+honestly — negotiated, never a label — and it is why nothing in this subsystem
+reads `DAEMON_VERSION`.
+
+**What that forced.** The UI had to be declarative, since a bundle is a second
+artifact by definition. Q1.613 is the security half of that same decision; this is
+the packaging half, and either one alone would have led here.
+
+**Status.** Current
+
+### Q4.104 — Why does the control plane host no plugins?
+
+**Decision.** Plugins are installed on a daemon, per machine. The control plane
+holds none, runs none, and has no route for them.
+
+**Why.** It has nothing a plugin wants. There are no sessions there, no
+transcripts, no worktrees and no files — it issues identity and relays bytes it is
+written never to parse. An integration that reacts to what an agent did cannot be
+built from anything the control plane can see.
+
+And it ships differently: that image is rebuilt by a release, so "installing"
+something into it would be a deploy rather than an install, performed by whoever
+owns the box rather than by the person who wants the plugin.
+
+**What is genuinely lost.** An admin cannot install something for everybody at
+once. That is the same shape as fleet rollout (Q7.42) and is refused for the same
+reason — a daemon is updated by its owner, and nothing here is a step toward
+changing that. What a future distribution mechanism could do without touching any
+of this is carry the *archive*, with the browser as the courier and the install
+still an act on the machine; that costs no daemon change and is recorded as
+Q7.106.
+
+**Status.** Current
+
+
+### Q4.105 — Which side of the fleet ships first?
+
+**Rule.** Whoever has to be able to **answer** ships first. Whoever will **ask**
+ships second.
+
+**Why it needed saying.** The procedure for a breaking change was already written
+down — *accept-both first, send-new second* — but only for the relay protocol,
+where the answering side happens to be the control plane. Read as a fact about
+*the control plane* rather than about *the answering side*, it generalises exactly
+backwards, and the first advice given about deploying plugins was that backwards
+generalisation: control plane first, then daemons.
+
+For a new route on the daemon the direction is reversed. The web client calls
+`GET /plugins`; the daemon answers it. So a control plane deployed first — and it
+carries the web client — hands every user a Plugins screen that says *"update your
+machine"* until each owner gets round to it, which for a fleet whose daemons are
+updated by hand is measured in weeks.
+
+**The mistake underneath it, because it is the part worth not repeating.**
+`compatibility.md` states that *new client against old daemon is the normal state
+of the fleet*. That is a claim about what this system **tolerates** — the client
+degrades by design, `fetchPlugins` treats an old daemon and a machine with nothing
+installed as the same thing, and `pluginFailure` says the honest sentence. It is
+not a claim about what to **choose**. Tolerating a skew and electing to create one
+are different acts, and collapsing them is how the tolerance gets spent for
+nothing.
+
+**What the right order buys, beyond avoiding the window.** With daemons first, a
+plugin can be installed before any screen exists — `pnpm client plugin install`
+needs no UI — so its hooks are already writing by the time the control plane
+ships, and the first board anybody opens is populated rather than empty with an
+invitation.
+
+**Where the two rules meet, the protocol wins.** In a release carrying both a new
+protocol version and a new daemon route, control-plane-first is forced, and not as
+a tie broken by taste: a relay that cannot accept what a daemon offers is a daemon
+that cannot dial in **at all**, while a route that is not there yet is a screen
+with a sentence on it. The hard requirement takes the order and the soft degrade
+is the price.
+
+**What made this release unambiguous.** Nothing forced the other way:
+`RELAY_PROTOCOL_VERSION` stayed `1`, `CP_SCHEMA_VERSION` stayed `1`, and the
+control plane's image never reaches `src/plugins` — checked rather than assumed,
+by walking the import closure of the five files `deploy/docker/Dockerfile` copies.
+Its deploy here is the web client and nothing else.
+
+**A third party joined this rule with `PLUGIN_API_VERSION` 4, and it does not
+answer anything.** The catalogue service holds a ceiling of its own and refuses to
+publish a manifest above it, so *whoever has to answer ships first* does not
+obviously decide where it goes: it neither asks a daemon anything nor answers one.
+What settles it is that its ceiling is **a claim about the fleet**, and the two
+skews are not symmetric.
+
+  - **Catalogue ahead of the daemons** publishes a plugin declaring an `api` every
+    daemon refuses. The result is an entry on the market screen that installs
+    nowhere — the failure is on somebody else's machine, at the moment they press
+    a button, about a plugin somebody else published.
+  - **Catalogue behind the daemons** refuses to publish a plugin every daemon
+    would happily run. The failure is on the author's own terminal, at the moment
+    they publish, about their own plugin, and nothing already installed is
+    affected.
+
+So the catalogue ships **last**, after the fleet — which is the same shape as the
+control plane going second, arrived at from a different direction. Stated because
+the general rule as written does not reach it: a service that publishes is neither
+of the two roles the rule names.
+
+**The two ceilings are one decision and must land together.** A daemon release
+that moves `PLUGIN_API_VERSION` and a catalogue that has not moved is a
+conservative, self-healing state; the reverse is a market advertising code nothing
+can run. Neither repository can check the other — they are two repositories, and
+this one's CI has no copy of the service — so what stands in for a check is that
+the *service* mirrors this constant and compares, loudly skipping where the other
+side is absent. That is the same arrangement `catalogue.ts` already has pointing
+the other way, and it caught this bump by itself: the first drift either of these
+mirrors has found that nobody planted.
 
 **Status.** Current
 
@@ -11689,7 +13586,7 @@ a clock.
 | Grants listing | 500 per page, 2000 max, with a `total` — the one admin list that grows as users × machines |
 | Uploads | **100 MiB per file**, 10 per message, **1 GiB** *and* 100 files per session — two bounds because a byte cap cannot see a hundred thousand one-byte uploads and each of those is a directory — plus **300 MiB per 5 minutes** per session (`UPLOAD_RATE_BYTES`), the one refusal here that expires on its own and the only one carrying `Retry-After`. 200 bytes of filename, 128 of mime, both clamped at ingest so `truncateEvent` never has to touch an attachment. Inline images 5 MiB raw *to* the agent (~6.8 MiB of base64 in one write to its stdin); **25 MiB *from* one** (`MAX_AGENT_IMAGE_BYTES` — its own constant since the per-file cap moved, sharing one having put a ~133 MiB string in the base64 pre-check on the emit path). Unconsumed uploads expire at 24h; consumed ones have no TTL and die with their session row. Q5.101 |
 | Downloads | 100 MiB, which **equals the upload cap by coincidence rather than by coupling** — this row said "deliberately not the upload number" and that was true at 25 MiB. Neither may be set by reading the other: that one bounds what a client may push onto disk against budgets outliving the request, this bounds a bearer-token-readable read of a whole workspace, where the cost of no bound is one of 256 tunnel streams held open for as long as somebody likes. The client refuses at the same number from `content-length`, before a `Blob` is resident on a phone |
-| Permission payload | 8 KiB each for `rawInput` and `content`, clamped by `clampBlob`. Far below the per-event cap because this rides the snapshot, which `GET /sessions` returns for every session at once |
+| Permission payload | 8 KiB each for `rawInput` and `content`, clamped by `clampBlob`, and **8 KiB over `{title, options}` together** (`MAX_PERMISSION_SNAPSHOT_BYTES`) — a **refusal**, not a clip. Far below the per-event cap because all of it rides the snapshot, which `GET /sessions` returns for every session at once. **24 options**, `optionId` 256, both refusals. The two 200-character clips on `title` and an option `name` are gone: they cut a model-written answer on the one channel where kimi asks a question, breaking `askedQuestion`'s identity match against `rawInput` — Q2.214, Q7.82 |
 | Session title | 120 characters accepted from a rename, 60 for the one derived from the first prompt. Bounded for the same reason as the row above: it rides the snapshot, which `GET /sessions` returns for sixty sessions every four seconds |
 | Agent login | one run per agent (a second supersedes), 64 KiB of transcript, 10 minute TTL. Pasted credentials capped at 8 KiB, which is far above an OAuth token and far below an argv |
 | Passwords | scrypt N=2^15 r=8 p=1 — ~51ms on the machine this was measured on (Node 26, 2026-08-07), against ~25ms at 2^14 and ~103ms at 2^16 — holding `128·N·r` = 32 MiB for the duration of each. `maxmem` is passed explicitly at **128 MiB**, because Node's default ceiling is 32 MiB and OpenSSL refuses *at* the boundary: measured, N=2^15 r=8 throws `memory limit exceeded` while N=2^14 succeeds, and a KDF that throws for some parameter sets looks like a wrong password on one deployment rather than a configuration error. 12–256 characters, NFKC and never trimmed; the maximum is not about KDF cost (scrypt passes the input through one PBKDF2 iteration, so bcrypt's folklore does not apply) but about not storing a string somebody else sized. **4 concurrent hashes, at most 2 of them public** (Q1.39); wait lists per lane, 32 authenticated and 16 public, then `503 overloaded` with `Retry-After: 1` |
@@ -11699,7 +13596,7 @@ a clock.
 | Control-plane bodies | 64 KiB above THE LINE and 256 KiB below it. The two public routes are the only places in this service where somebody with **no credential** decides how many bytes it reads, and neither had ever bounded it; below the line there was no bound at all, on the reasoning that a caller past the gate has a credential — a statement about *who* is asking and not about *how much*, when every route calls `readJsonObject`, which buffers before it looks. Both answer `413 payload_too_large` in the envelope every client here parses, because `bodyLimit`'s default `onError` is `text/plain` and none of them can read it. `currentPassword`/`newPassword` are refused over 512 characters |
 | Agent commands | 256 per session; 64 characters of name, 200 of description, 100 of hint — clamped at **ingest** in `session.ts`, like `MAX_PARENT_ID_CHARS`: the agent chooses the strings, the list rides no event so `truncateEvent` never sees it, and "bounded by what the agent sent" is not a bound. Measured 2026-08-03, claude publishes **100 commands / 18.7 KiB**, longest name 24, longest hint exactly 64, descriptions median 68 and max 1135. So 256 is for an MCP server publishing hundreds of prompts rather than for trimming a real list; the hint cap sits *above* the longest real one; the description cap is the only one that bites. **The name cap is a refusal and the other two are truncations** — `clip` appends `…[truncated N bytes]`, right for prose and wrong for a name, since a command is invoked by *sending* `/<name>`; dedup running on the unclipped name while the clipped one was stored made two long names collide with `dropped` reporting none. What is cut is *counted* into `dropped`, and the menu draws that count. Off the snapshot entirely; only `commandsRevision`, a number, rides the poll |
 | Web client | 3 live sockets (LRU by most recently viewed), **16 MiB held per session and every event of it drawn** (`MAX_TRANSCRIPT_BYTES`, the **only** ceiling — the event count beside it is deleted, see Q3.114) — there is no render window under it, and the only cut is the newest `context_cleared`. History pages backwards at **5000** (`EVENTS_PAGE_LIMIT`) and **does not stop until it reaches the log's start, that cut, or those bytes** — there is no per-run budget and no control that offers to fetch more; `MAX_AUTO_HISTORY` (5000) is only where the loop yields the main thread. A page that fails is retried at 500ms and 2s, transport failures only, and `attachWanted` re-drives a run that gave up on the next poll a session list survives. What pays for it is `sameNode`. **60 sessions per machine per poll** — a pinned row that falls out of that window is invisible until the daemon's `listRank` keeps it, which is why pinned outranks live there. 4s list poll while visible, 15s re-probe for an unreachable machine, 1.5s reachability probe, token refreshed at `exp − 90s`, socket rotated at `exp − 60s`. 15s per request, except those that spawn a process — `POST /sessions`, `POST /sessions/:id/resume`, `POST /sessions/:id/config`, `GET /agents`, `/agent-auth/*` **and `POST /sessions/:id/prompt`** — which get 90s; the prompt is on that list unconditionally, because `request` is handed a method and a path and a deadline that depended on session state would be state leaking into the transport. A login transcript is polled every 700ms while its wizard is open, and one `GET /sessions/:id/commands` per session per revision change — for the open session only |
-| Elicitation form | 24 fields, 24 options per field, **32 KiB** on the projected total, and an option value of 512 — all four **refusals**, because `clampBlob`'s `{truncated: true, bytes}` is fine above an Approve button and useless above a form. 512 characters of `message`, 100 of a field title, 300 of a description, all clipped: structure is refused and prose is truncated. 32 KiB rather than a permission's 8 because the form does **not** ride the snapshot. An answer over 2048 characters is refused on the route and never cut, while the *log's* rendering of it is clipped, visibly. Measured 2026-08-06 against live claude: a two-question `AskUserQuestion` is 4 fields, 4 options each, longest value 19 characters, ~2.5 KiB, and the tool's own schema caps it at 4 questions — so every one of these bounds the pathological case rather than a real form |
+| Elicitation form | 24 fields, 24 options per field, **32 KiB** on the projected total, and an option value of 512 — all four **refusals**, because `clampBlob`'s `{truncated: true, bytes}` is fine above an Approve button and useless above a form. **Prose is carried whole** — the three character caps on `message`, a field title and a description were removed in Q2.214, because with several questions on one form the *question itself* is the field's description and a 300-character cap was a cap on it. Structure is refused; the byte total is the only bound left, and it is asserted against one enormous string as well as a thousand small ones. 32 KiB rather than a permission's 8 because the form does **not** ride the snapshot. An answer over 2048 characters is refused on the route and never cut, while the *log's* rendering of it is clipped, visibly. Measured 2026-08-06 against live claude: a two-question `AskUserQuestion` is 4 fields, 4 options each, longest value 19 characters, ~2.5 KiB, and the tool's own schema caps it at 4 questions — so every one of these bounds the pathological case rather than a real form |
 | Auto-resume | 3 attempts per session per **daemon life** — in memory, so a restart tries again, deliberately: a restart is new information and refusing to retry would make the deploy that fixes the bug fix nothing. 2 agents starting at once, because each is a node subprocess with a `claude` grandchild. Backoff 2s→60s with **full** jitter, since the attempts start together and a narrow band keeps them synchronised. The failure on the snapshot is capped at 64 characters of code and 512 of message — an order tighter than a pending permission's 8 KiB, because unlike a permission nothing here has to be *acted on* from the list, only recognised |
 | Shutdown | 20s for the graceful stops, then a **bounded** 3s parallel SIGKILL sweep, inside `daemon.ts`'s 25s hard exit. The sweep is a syscall per session rather than an exec, so the bound costs nothing — and it stays, because the reason a teardown is bounded does not depend on what it costs |
 
@@ -11812,6 +13709,309 @@ directory, which is the only alternative and enough of a cost that it would have
 gone unasserted instead.
 
 **Status.** Current
+
+
+#### Q5.102 — Two callers unpack somebody else's archive. Why is there one unpacker?
+
+**Rule.** `unpackArchive` is the middle of `importArchive`, extracted rather than
+copied. `POST /fs/import` and `POST /plugins` both go through it, with their own
+`ArchiveLimits`.
+
+**Why.** Everything in that function is a containment rule: `..` refused rather
+than normalised — normalising is how every surviving zip-slip works — `.git`
+refused case-folded, backslashes never translated to slashes, absolute paths and
+`C:` refused, and the size ceiling charged against what the **decompressor
+produced** rather than against what a member declares. A second implementation of
+that list is how one of the rules comes to be missing from one of them, which is
+the argument `paths.ts` already wrote out for `containedIn` and the reason there
+is exactly one containment primitive file.
+
+**What is parameterised and what is not.** The *numbers* differ and are passed in:
+`IMPORT_LIMITS` is somebody's whole source tree, `PLUGIN_LIMITS` is a manifest and
+a file of JavaScript, and giving the second the first's headroom would mean the
+bound that stops a zip bomb is 500 MiB for a thing never past a few hundred KiB.
+Nothing in `safeMemberPath` is parameterised, because what a member path may *be*
+does not depend on who is unpacking — a caller able to relax it would be a caller
+able to accept `..`.
+
+**What each caller keeps.** Where the result is published, what it is called, and
+whether something is already there. Those genuinely differ, and nothing is shared
+by pretending otherwise.
+
+**Status.** Current
+
+#### Q5.103 — An update that will not start must change nothing
+
+**Rule.** If the newly installed version fails to start, the new directory is
+removed, the row is left untouched, the previous version is started again, and the
+refusal carries what the child actually said.
+
+**Why.** The person installing is often not sitting in front of the machine — that
+is the entire premise of this product — so the failure mode being designed against
+is *a broken update leaves you with nothing*, discovered from a phone. Leaving the
+plugin that was there is the only acceptable outcome, and it is only achievable
+because the old version's directory is not removed until the new one is known to
+run.
+
+**Two defects this shape had while it was being built, both found by driving it.**
+The failed start called `child.stop()` rather than `this.stop()` — and `stop()` is
+what sets `stopping`, which is the only thing telling `onExit` a kill we asked for
+from a crash. Without it the rollback **scheduled a restart for the plugin it was
+in the middle of discarding**, which would have brought a broken update back to
+life minutes after it was refused. And the surviving plugin's restart budget was
+being spent by the rollback, so three refused updates left a working plugin that
+would no longer start; it is returned before the restart now.
+
+**What the refusal carries.** The child's last twenty lines of output, stdout as
+well as stderr. "did not start within 10000ms" says nothing anybody can act on;
+the `SyntaxError` their `server.js` threw says everything.
+
+**Status.** Current
+
+#### Q5.104 — What survives an update, and what is keyed on what
+
+**Rule.** `plugin_data` is keyed on the plugin's **id** and never on its version.
+An update replaces the row in `plugins` and touches nothing in `plugin_data`; an
+uninstall drops both.
+
+**Why.** This is the whole of what makes an update an update rather than a
+reinstall. A board keeps its cards across `0.1.0` → `0.2.0` because no part of the
+key mentions a version, and the demo plugin exists partly to make that
+demonstrable in two commands.
+
+**Why two tables rather than a JSON column on the row.** For the bound rather than
+the shape: the per-plugin byte and key ceilings are enforced by counting rows, and
+a blob makes "how many keys does this plugin hold" a parse. `checkPluginWrite`
+lives beside the interface rather than inside the SQLite implementation, so the
+memory implementation a driver uses refuses exactly what the real one refuses — a
+quota that holds only where there is a file is a quota nothing drives.
+
+**One arithmetic detail that is load-bearing.** The replaced value's length is
+credited back before the new one is charged. Without it a plugin rewriting a
+single key climbs to its own ceiling and stays there, which is the shape of every
+settings pane written against this API.
+
+**Status.** Current
+
+#### Q5.105 — A root, compared against a path that does not exist yet
+
+**Rule.** A component holding a root it will build paths under must resolve that
+root **once**, at open, and keep the resolved form.
+
+**Why.** `containedIn` resolves both sides and falls back to comparing as written
+when `realpath` throws — which it does for every path about to be *created*. So a
+caller keeping an unresolved root and joining onto it is comparing a resolved root
+against an unresolved child, and the guard correctly answers no.
+
+**Measured.** On macOS, where `/var` is a symlink to `/private/var`: the plugin
+host refused to remove its own directory on **every** reinstall of a version it
+already had — `refused to remove …/plugins/board/0.1.0, which is not under the
+plugin root` — and the `rename` that followed then failed `ENOTEMPTY`. The symptom
+was a warning nobody would have read and an install that worked the first time.
+
+**Where this was already known.** `createWorkspace` solves the identical problem
+for worktrees: it resolves the deepest component that exists and rebuilds the
+not-yet-created leaves onto that answer, *or every `POST /sessions` throws
+`outside_worktree_root` wherever the worktree root traverses a symlink*. That
+sentence was in `files-paths-git.md` before this bug was written; the general form
+is now stated at the primitive itself, and `worktree.ts`'s private twin of the
+resolver is marked as the copy to delete next.
+
+**Status.** Current
+
+#### Q5.106 — A hook must never reach the emit path
+
+**Rule.** Hook delivery is queued and drained on its own. Nothing on that path
+awaits inside `SessionLog.append`, and the queue is bounded drop-oldest with the
+drops reported.
+
+**Why.** `append` is synchronous by contract and runs inside the agent's own RPC
+handler — that is what makes gap-free attach true by construction. A hook that
+blocked there would put a plugin between an agent and its transcript, and a plugin
+that hangs would stop the session's events rather than its own screens.
+
+**Why drop-oldest rather than drop-newest or unbounded.** Unbounded means a plugin
+that stopped answering grows a queue for the life of the daemon. Between the two
+directions, the newest events are the ones still worth acting on: a board catching
+up cares about the turn that just ended, not the one from an hour ago.
+
+**Why the drops are reported.** A plugin quietly missing half its events looks
+exactly like a plugin with a bug in it, and the person who would investigate has
+no way to tell the difference. It goes to `onWarning`.
+
+**What crosses, and what deliberately does not.** A derived summary, never a
+`StoredEvent`. The session event union is a wire three coding agents move, so
+coupling a plugin to it would make every ACP change somebody else's breaking
+change.
+
+**Status.** Current
+
+#### Q5.107 — A throwing observer is reported and kept
+
+**Rule.** `SessionRegistry.watchSessions` guards each observer, reports a throw
+through `onWarning`, and **does not evict it**.
+
+**Why this is the opposite of the neighbouring rule, deliberately.**
+`SessionLog.append` evicts a listener that throws, and is right to: there a
+listener is one WebSocket, and evicting it costs that one socket its events while
+every other listener carries on.
+
+An observer here is a whole *subsystem*. Dropping the plugin host on one bad frame
+would stop every hook on the machine for the life of the daemon, with nothing
+anywhere saying so — the same shape of silent, permanent loss that the fan-out
+guard's own comment warns about for sockets, one level larger.
+
+**Asserted rather than assumed.** `daemoncheck` registers a throwing observer
+**first**, so "the ones after it" is a real position rather than a hope about
+iteration order, and checks that a second observer still sees every session, that
+the thrower is called for each of them, and that each throw is reported.
+
+**Status.** Current
+
+#### Q5.108 — The bounds table says how many calls a plugin may be answering. What bounds the calls it makes?
+
+**Question.** `MAX_INFLIGHT_INVOCATIONS` bounds host → child and is published in
+both bounds tables. Nothing bounded child → host. Is that an omission or a
+decision?
+
+**Rule.** An omission. `MAX_INFLIGHT_HOST_CALLS` bounds it, and a call past the
+bound is refused to the child rather than queued.
+
+**Why.** The two directions are not symmetric in cost. Several host methods fork
+git, so the fan-out is not "a plugin is chatty", it is one child process starting
+one git per session at once, against a registry that holds up to sixty of them, on
+the machine its owner is working on. No hostile plugin is needed to reach it:
+asking about every session inside a single hook is the obvious line an author of a
+task board writes, and the reference plugin in this repository is a task board.
+
+**Why refused rather than queued.** The child asked for these now, and holding
+them only moves the cost onto the invoke deadline the caller is already waiting
+on — the same argument the inbound bound already makes one field over.
+
+**Why the ceiling is higher than the inbound one.** This is a plugin doing its own
+work, not tabs queueing on a slow child. A plugin that legitimately reads a
+handful of sessions per hook should never meet the bound; what it stops is the
+unbounded fan-out, not concurrency.
+
+**Where the slot is released.** On both arms, and before the generation check. The
+count is about this process's load rather than about who deserves an answer: a
+superseded child's call still ran, and leaving its slot spent would bleed the
+successor's budget one call per replaced generation.
+
+**Status.** Current
+
+#### Q5.109 — Which status does a message that never left the daemon get?
+
+**Question.** An invocation whose payload does not fit one IPC frame is refused
+before it is written to the child. `pluginErrorStatus` splits by whose problem it
+is: a plugin that is off or broken is a `503`, and everything else is a `502`
+because "something downstream of this daemon answered badly". Which half is this?
+
+**Decision.** Neither, and it now has its own arm: `413`. Nothing downstream
+answered, because nothing reached the child; the remedy is on the caller's side,
+which is what `413` says. It is also already this daemon's word for the same fact
+at `payload_too_large` and at both import ceilings, and it was already in the
+shared error-status union.
+
+**Why it mattered.** With no arm it took the `502` default, whose stated reason is
+the one thing that is definitely not true here, while `docs/API.md` documented a
+`503` — a third answer agreeing with neither. All three were reachable by a plugin
+author reading a different source, which is the failure mode this function's own
+docblock is about: the statuses exist so as not to mislead, since the code is what
+a client should branch on.
+
+**Status.** Current
+
+#### Q5.110 — A view is bounded twice. Which bound actually fires?
+
+**Question.** `PLUGIN_VIEW_LIMITS` says how large a view may be — blocks, rows,
+columns, fields, text — and `MAX_PLUGIN_MESSAGE_BYTES` says how large a message
+may be. The author's guide prints them two lines apart as though both applied.
+Do they?
+
+**Rule.** They do now. `clampView` ran in the **host**, which is one hop after the
+child had already refused to send an oversized message — so the published view
+bound could never fire, and the byte bound was the only real one. `fitView` runs
+in the child, before the message is built: the counts apply first, and a byte cut
+finishes the job when the counts alone are not enough.
+
+**Why it was not a tidiness problem.** A view inside every documented limit came
+back as "this plugin returned more than can be sent", and the clamp whose whole
+purpose is to cut it never saw it. The bound a plugin author can read was
+unenforceable, and the one that fired is the one the guide does not emphasise.
+
+**Measured.** 2026-08-23, against a real forked child, the reference plugin and a
+real store. Its board fits at 903 cards and does not at 904, while the store lets
+a plugin keep 1000 keys and the session prune never touches them — so cards
+outlive the sessions they name. A plugin doing exactly what the guide walks
+through therefore reaches a screen that cannot be drawn, permanently, with nothing
+in the interface able to shrink it: the only control that deletes a card belongs
+to a session that by then no longer exists. Afterwards the same board is cut to
+200 rows a column and fits at any number of cards.
+
+**Why rows are the lever.** Every other dimension is bounded by a count small
+enough to be irrelevant against 256 KiB — 24 blocks, 8 columns, 40 fields, 4000
+characters. The number of rows a plugin holds is whatever its data grew to, so
+that is the only thing worth cutting. The cap is halved until the message fits,
+which is at most eight measurements and terminates at zero rows.
+
+**Rejected.** Lowering `PLUGIN_VIEW_LIMITS` until the worst legal view fits. The
+worst legal view is 24 blocks of 8 columns of 200 rows, which measures 4.9 MB —
+making the counts guarantee the bytes would mean cutting them by a factor that
+punishes every honest view for a shape nobody sends.
+
+**Rejected.** Leaving the refusal and fixing the reference plugin instead. The
+refusal is graceful and stays as the last resort, but the defect is in the daemon:
+a bound published to plugin authors was enforced where it could not act. Fixing
+the one plugin in this repository would have left the same wall in front of every
+plugin that is not in it.
+
+**Where the notice goes.** `noteClamp` moved to `protocol.ts` beside the clamp,
+because a cut announced on one side of the channel and not the other is a cut
+nobody is told about. The host still clamps and still notes; on an answer the
+child has already fitted, both are no-ops.
+
+**Status.** Current
+
+#### Q5.111 — Nothing in the browser opens the archive on the market path. What is consent, then?
+
+**Position.** Three things, and the third is new. The browser reads `plugin.json`
+from `raw.githubusercontent.com` **at the pinned commit** and draws the disclosure
+from that; the daemon compares its own `parseManifest` against what it was told and
+refuses with `409 plugin_consent_broken` **before the plugin is started**; and the
+client checks `consentBroken` against the row that came back, per machine.
+
+**Why the middle one had to exist.** On the upload path the browser opened the very
+bytes that were sent, so `consentBroken` after the fact is a check on a reader that
+might be wrong about an archive it *read*. Here nothing local ever opens the
+archive. The manifest at a commit and the tarball of that commit are the same
+object by construction — but "by construction" is not a check, and this is the
+screen where being wrong means somebody grants a capability they never saw. So the
+machine refuses rather than reports, and it refuses early enough that no code ran.
+
+**What is compared, and this is the part that decides whether it works.** Exactly
+three fields — `scopes`, `net` and `contributes.hooks`. Not the manifest.
+`parseManifest` **normalises**: it trims `name` and every action title, turns an
+absent `description` into `null`, and synthesises an absent `contributes` into
+`{screen: null, settings: false, actions: [], hooks: []}`. A plugin that simply did
+not write a `contributes` block therefore does not match its own raw `plugin.json`
+field for field, and a check that fired on that would fire on most plugins. An
+alarm that cries wolf is an alarm people learn to click through, which would cost
+more than having no alarm. The three that survive normalisation as plain string
+arrays are also the three that decide what a plugin can *do* on the machine; a name
+or a screen title differing is a cosmetic surprise.
+
+**One direction only.** A plugin asking for *less* than it was shown is a person
+who agreed to more than they had to, not a breach — so only what was gained is
+reported. `consentBroken` in the client already had that rule and this is it on the
+daemon.
+
+**What a caller that sends no consent gets.** The archive is still validated and
+the scopes still land on the row. `pnpm client plugin install` has no screen to
+have shown anybody, and a route that refused it would break every script.
+
+**Status.** Decided
+
 
 ## Measured behaviour of the agents and the tools
 
@@ -14268,34 +16468,71 @@ reset that replaced it leaves enrollment codes alone on purpose
 
 ### Q7.62 — Is the upload route's body-cancel discipline reachable past the middlewares above it?
 
-**Position.** Unverified, not fixed, and worth measuring against a real relayed
-upload before anybody patches it.
+**Position.** Answered, and the question named the wrong half. The handlers'
+discipline was complete; the middlewares above them were the gap. The obligation
+now hangs off the exemption that creates it rather than off each handler.
 
 **The claim.** `POST /sessions/:id/uploads` reasons carefully about always
 cancelling a body it refuses (Q5.72), and the auth gate and the scope check sit
 *above* it — so a 401 or a 403 answers without reading or cancelling the 25 MiB
 the client is still sending.
 
-**Why it was not acted on.** Two things have to be true for the described outcome
-and neither is established: that the daemon holds the loopback socket open without
-reading after answering (Node's `resOnFinish` calls `req._dump()` for a body
-nothing consumed, and otherwise closes the connection rather than parking), and
-that the sender therefore stalls until the tunnel's 8 MiB connection valve fires.
+**What was found.** The claim is right about the gap and wrong about where to look
+for it. Every refusal *inside* the three streaming handlers already cancels —
+`refuse()` at `/sessions/:id/uploads`, at `/fs/import` and at `POST /plugins` —
+and there is no path through any of those three that answers with a body it has
+neither read nor released. What has no wrapper is everything above them: the auth
+gate's `return jsonError(c, 401, …)` and `requireScope`'s
+`return jsonError(c, 403, "insufficient_scope", …)` both answer having never
+touched the stream. So the reachable case is not "a handler forgot one", it is
+"the handler never ran" — a bad token, or a valid one without `machine:admin`,
+refused in about a millisecond with the whole body still to come.
 
-**And the proposed remedy is worse than the defect.** `cancelBody` in the global
-`app.use("*")` gate destroys the request stream on *every* refusal carrying a
-body, which through the relay surfaces as `502 tunnel_failed` instead of the
-daemon's own status — the exact trade the upload route's "honoured to refuse,
-never to accept" comment reasons about — and it would break `401 token_expired` on
-`POST /sessions/:id/prompt`, which `machine.ts`'s single-retry refresh depends on
-receiving as a readable envelope. Narrowing to just the scope half fixes one of the
-two named paths, leaves the clock-skew 401 untouched, and moves a scope check off
-its registration line, which Q4.28's convention places there deliberately.
+**Decision.** The cancel goes where the exemption is granted: the one
+`app.use("*")` that consults `isStreamingRoute` now runs `next()` in a `try` and
+releases `c.req.raw.body` in the `finally`. Two halves of one rule, in one place,
+so the fourth streaming route inherits both by adding one string to the predicate
+— which matters because `isStreamingRoute`'s own docblock had already predicted
+this failure one axis over, and the third route had just arrived.
 
-**What would settle it.** A real 25 MiB upload through the relay with a read-only
-grant, watching whether the sender stalls and what the browser is told.
+**Why not the remedy this entry refused.** That objection was to `cancelBody` in
+the *global* gate, which would destroy the request stream on every refusal
+carrying a body and break `401 token_expired` on `POST /sessions/:id/prompt`,
+which `machine.ts`'s single-retry refresh depends on receiving as a readable
+envelope. It still would. This is the narrow version: the guard is inside the
+`isStreamingRoute` branch, so it is reachable **only** on the three routes
+`boundedBody` does not wrap, and a prompt's 401 never meets it. Nothing moved off
+a route's registration line either, so Q4.28's convention is untouched.
 
-**Status.** Open.
+**What is measured.** 2026-08-22, against this adapter (`@hono/node-server`
+1.19.17) with a `serve()` on loopback, in the four states the guard can find a
+body in. A middleware that cancels an untouched body and *then* answers 403, and
+one that answers 403 and then cancels, both deliver the 403 to the client — a
+64 MiB streamed body, refused after 1.4–2.1 MiB had been sent, arrived as
+`{"error":{"code":"insufficient_scope"}}` and not as a reset connection. A body
+the handler had already drained cancels in 0 ms and changes nothing, because a
+fully-read request is `complete` and the `destroy()` underneath never reaches the
+socket — the 64 MiB case still answered 200 with all 67108864 bytes counted. A
+body the handler left locked rejects with `TypeError: Invalid state:
+ReadableStream is locked`, which `cancelBody` swallows. That last one is why the
+guard is unconditional rather than gated on a status: there is no state it can
+find the stream in that costs anything, so it needs no second copy of "which
+answers are refusals".
+
+**What is still not measured**, and it is the half this entry was originally
+about: the same refusal *through a real relay*. Whether destroying a half-sent
+body on an h2 CONNECT stream reaches the browser as the daemon's own status or as
+the relay's `502 tunnel_failed` is the trade the upload route's "honoured to
+refuse, never to accept" comment reasons about, and loopback cannot answer it.
+What has changed is which way the risk runs: before, an unread body parked the
+sender and the tunnel's 8 MiB valve took **every session on the machine** down
+with it; now the worst case is one caller told the wrong thing about one refused
+request. That is the right way round even unmeasured.
+
+**What would still settle it.** A 25 MiB upload and a 2 MiB plugin archive pushed
+through the relay under a read-only grant, watching what the browser is told.
+
+**Status.** Fixed — with the relayed half of the measurement still outstanding.
 
 ### Q7.63 — Does BSD `script` survive a full device flow with no stdin?
 
@@ -15888,7 +18125,14 @@ What the second route changes is only the arithmetic: the remedy, whenever someb
 measures it, now fixes two places instead of one. It is not a reason to measure it
 sooner than Q7.62 already argues.
 
-**Status.** Open
+**Since.** A third route arrived (`POST /plugins`) and the remedy was written: the
+cancel hangs off `isStreamingRoute` rather off each handler, so all three are
+covered by one guard and the arithmetic this entry was about stopped being a
+reason to wait. Q7.62 carries the finding, the measurement and what is still
+missing; this entry's answer — *the same question, not a new one* — is unchanged
+and was right.
+
+**Status.** Closed by Q7.62
 
 ### Q7.97 — Import is serialised for the whole daemon. Is that a bound or a bottleneck?
 
@@ -16274,3 +18518,397 @@ suppress fired anyway, saying "this session has ended" over a notice already
 saying it better. The assertion reads the code off `src/server.ts` now.
 
 **Status.** Reversed an earlier decision
+
+### Q7.104 — Is there a plugin market, and why not?
+
+**Position.** There is no registry, no directory, no search and no signature
+checking. A plugin is a file somebody has, installed by somebody who chose it.
+
+**Why not, and this is the strongest of the reasons.** A registry is something to
+poll, and polling it would be a **second** request the daemon makes on its own
+behalf — against the property that a control-plane outage costs reachability
+rather than work in flight (Q1.9, Q1.615). It would also be a channel by which
+code arrives on somebody's machine without them naming it, which is Q7.42's
+argument about fleet rollout wearing different clothes.
+
+**What is deliberately not conceded either.** Signature verification. It sounds
+like the missing safety and is not: the thing a signature proves is *who built
+this*, and the trust decision here is already "I chose this file", which is the
+same decision `npm i` and a git clone present. A signature scheme with no registry
+to anchor it is ceremony.
+
+**What would change the answer.** Somebody wanting to hand one plugin to a whole
+company. That is Q7.106, and it needs no registry inside the daemon — the browser
+already talks to both sides.
+
+**What actually happened, and which half of this survived.** There is a catalogue
+now — its own service, on its own host, read **by the browser**. Every sentence
+above about the *daemon* is untouched and is the half that mattered: the daemon has
+no registry, polls nothing, discovers nothing, and updates nothing by itself. It
+does not know a catalogue exists. What reaches it is a repository and a commit that
+a person read the permissions of, on `POST /plugins/source` — Q1.620 for why that
+is a third `fetch` and what bounds it, Q5.111 for what consent means when nothing
+local opened the archive.
+
+The half that was wrong was the assumption underneath Q7.106 rather than anything
+here: the browser cannot carry the bytes, because `codeload.github.com` will not
+answer it cross-origin.
+
+**Signature verification is still declined**, and the catalogue's own
+`sha256Seen` is named to make that hard to get wrong: it is what the catalogue saw
+once at publish, GitHub's generated tarballs are not byte-stable by contract, and
+gating on it would stop healthy plugins installing the day the compression under
+them changes. The pin is the **commit**, which is content-addressed and is the only
+thing here that proves anything.
+
+**Status.** Partly reversed — the daemon half stands, the browser half did not
+
+### Q7.105 — Should a plugin be able to draw in the transcript, or add a slash command?
+
+**Position.** Neither, in the first version, and the seams are named rather than
+half-built: `renderEvent` in `EventList.tsx` for a transcript card, `buildCommands`
+in `ui/commands.ts` for a slash command.
+
+**Why not yet.** Both are inside the two screens with the most rules attached to
+them and the least room for somebody else's content. `buildTail` rebuilds the
+whole node array on every streamed token, and what keeps that cheap is a memo
+comparator over a closed node union; a plugin-supplied card lands inside that.
+Commands are a merge of what the agent published with controls synthesized by
+*category* rather than by id, with a precedence rule between them — a third source
+needs its own place in that order, decided rather than appended.
+
+**What it would take.** For a card: a `TailNode` member that `sameNode` can
+compare without allocating, and a decision about what a plugin's card does when it
+is inside a folded run. For a command: a third source in `buildCommands` with a
+stated precedence against the other two, and an answer for what happens when two
+plugins claim one name.
+
+**Why the four that exist were enough to ship.** The demo plugin uses all of them
+and wants neither of these. Until something real does, adding them is guessing at
+the shape.
+
+**Status.** Not built
+
+### Q7.106 — Could an organisation hand one plugin to everybody?
+
+**Position.** Not today, and the shape it would take is known and needs **no
+change to the daemon at all**.
+
+**What it would be.** The control plane holds a catalogue — an archive and its
+manifest, with a rule about who may see it — and the *browser* is the courier: it
+already talks to the control plane and to each daemon, so it fetches the archive
+from one and `POST /plugins` it to the other. Paid works by the catalogue refusing
+to serve the bytes, which is a `403` on a route below the auth gate rather than
+any new mechanism.
+
+**Why that keeps every property.** The daemon still makes exactly one
+control-plane request ever (Q1.9): it is not the one fetching. Installing is still
+an act by whoever owns the machine, so Q7.42 is untouched. And it is additive —
+new tables on the control plane, which its schema rule already allows, plus a
+screen.
+
+**What it does not do, and would not.** Install silently on somebody's machine.
+That is fleet rollout, and it is refused for Q7.42's reasons rather than because
+nobody has written it.
+
+**Why it is not built.** Nobody has needed it yet, and building a catalogue before
+there is a plugin worth distributing is building the market this record has
+already declined once (Q7.104).
+
+**What was built instead, and the one sentence above that turned out to be false.**
+A catalogue exists — but on **its own service**, not on the control plane, and the
+browser is **not** the courier for the archive. That last part is the correction:
+"it fetches the archive from one and `POST /plugins` it to the other" cannot be
+done, because `codeload.github.com` answers `access-control-allow-origin:
+https://render.githubusercontent.com` and the browser refuses its own request
+before it leaves. Measured, and there is no header the catalogue could send to
+change it — the header would have to come from GitHub.
+
+So the daemon fetches its own bytes from a commit somebody named. Q1.620 is the
+argument for that being acceptable and what bounds it; the properties this entry
+was protecting are otherwise intact — the control plane hosts nothing, the daemon
+still makes exactly one control-plane request ever, and installing is still an act
+by whoever owns the machine.
+
+**The paid case this entry was really about is still not built**, and now needs
+less: a catalogue that refuses to serve an *entry* is a `403` on a route below an
+auth gate, and the daemon end already exists.
+
+**Status.** Superseded in shape by Q1.620 and Q3.457; the paid case remains not built
+
+### Q7.107 — A hidden session that lives, rather than one that vanishes: what does it cost?
+
+**Where this came from.** `model.complete` needed a session nobody sees — a plugin
+asks one question, reads the answer, and nothing about it should appear in
+anybody's list. That shipped, and it cost nothing (Q1.620): `AgentAskRuns` starts
+a **bare `Session`**, which is not a `ManagedSession`, never enters the registry,
+has no row, no log and no observers. There is nothing to filter out of a list it
+was never in.
+
+**The clarification that reopens it.** Hidden was then read as meaning
+*unrecorded*, and it does not. The owner's statement: a hidden session may be
+**long-lived**, and then it *is* recorded, and shows up in a **Hidden** tab of its
+own — needed for plugin orchestration, where a plugin holds several agents of its
+own and a person has to be able to see what they did. Writing every hidden session
+down is explicitly refused as the alternative, because it duplicates the ordinary
+list and each row then needs a title of its own.
+
+**So there are three states, not four.** Visible-and-recorded is an ordinary
+session; hidden-and-recorded is orchestration; hidden-and-unrecorded is what
+`model.complete` already does. The fourth cell — visible but not recorded — is a
+row in the list that disappears on restart, which is worse than never showing it,
+so the two axes are not independent and *recorded* follows from *visible*.
+
+**Shape, decided in advance of the work: one enum of three, never two booleans.**
+Not for tidiness. `packages/web/src/wire.ts` mirrors `src/plugins/protocol.ts` by
+hand and `webcheck` compares the **members** — so a new enum member breaks every
+exhaustive `switch` and fails that comparison, which is the mirror announcing
+itself. A new boolean field silently defaults to `false` in every mirror and every
+consumer, and nobody finds out until somebody notices the tab is empty. This is
+the same property `PLUGIN_SCOPES.length` already buys, arriving through a
+different door.
+
+**What it actually costs, measured rather than assumed.** A hidden-and-recorded
+session must be a `ManagedSession` — it has a transcript, it survives a restart,
+it is drawn in a tab — so it goes through `registry.create`, and the path that
+`AgentAskRuns` escaped comes back in full:
+
+```
+registry.create → announce → observers → host.observe
+                → managed.log.subscribe → turn_end → fan("turn.ended")
+```
+
+Traced in this tree at `src/registry.ts:4440` and `src/plugins/host.ts:969`. Which
+means a plugin's own long-lived session ends a turn, `turn.ended` goes to every
+plugin declaring that hook, and **autotitle is one of them** — it will try to
+rename a session it has no business naming. An orchestrator, meanwhile, probably
+*wants* the event about its own. So the enumeration problem the bare `Session`
+walked away from — `list()` and its consumers, `get()` and its funnels — has to be
+paid here in full. That is not a reason not to build it; it is the price, and it
+was worth knowing before rather than after.
+
+**It also needs an owner, not only a state.** Three questions are unanswerable
+without one, and the third is a real consequence rather than a convenience: which
+plugin gets hooks for which hidden session; whose sessions the tab is showing when
+two orchestrators are running; and — the one that matters — that `sessions.list`
+today hands a plugin **every** session on the machine rather than only its own.
+While every session is a person's, that is tolerable. With hidden-and-recorded it
+becomes *plugin A reading plugin B's orchestration transcripts*, which is exactly
+the thing the second case exists to produce. So the owner belongs in the same
+value as the state: a state without one is expressible but useless, and therefore
+should not be expressible.
+
+**Why it was not built alongside `model.complete`.** They share a word and nothing
+else. `model.complete` creates no recorded session and must not.
+
+---
+
+**Built, then taken back out on the owner's decision — and the reason is worth
+more than the code was.** The whole of it shipped and was green: the enum, the
+owning plugin, the hook gate that closed the recursion, a tab of its own, and the
+drivers to hold all of it. Then: *"remove these hidden sessions, keep only the
+one-shot ones for plugins, every other session must be visible."*
+
+That is a smaller product and a better one. What was built answered "how do we show
+a person work they did not start"; what was asked for answers "do not create work a
+person did not start". The second question does not need a tab, an ownership axis,
+a per-plugin ceiling or a seventh scope — it needs `model.complete`, which already
+existed and already had every bound this was about to re-derive.
+
+**What the attempt was worth, since none of it survives in the tree.** Four things
+were found by building it that reading would not have produced, and all four are
+facts about this codebase rather than about the feature:
+
+*`seed` is a second hook-delivery path and does not go through `fan`.* Both call
+sites hand a newly-installed plugin the whole session list. Nothing today has a
+reason to care, and anything that ever filters hook delivery has to filter there
+too or the gate is bypassed by the plugin installed one second later.
+
+*`recentCwds` iterates the session map directly.* It reaches no list function, and
+it feeds the one surface on the machine made of **paths** rather than sessions — so
+anything that ever wants a session left out of what a person sees has to leave it
+out there by hand.
+
+*The client prunes what a list omits.* `store.ts` forgets any row missing from an
+**untruncated** `GET /sessions`, closing its socket and discarding the transcript.
+So a session the daemon declines to list is not hidden from the client, it is
+*deleted* from it. Any future filtering belongs on the client with the row present,
+never on the daemon by omission.
+
+*An argument is not a scope.* `sessions.create` gaining a `form` would have been
+silently ignored by an older daemon, which hands back an ordinary session — so the
+plugin API version had to move for an **argument**, which is not what the two
+previous bumps were for.
+
+**And one thing about the drivers.** Building it produced a driver section that
+caught its own bugs when they were injected, and removing it took that section with
+it. The cost of a reversal is not only the code: it is the assertions that were the
+argument for the code being right.
+
+**Status.**  — one enum of three carrying its owner, a required
+`list()` scope, `sessions.hidden` at plugin API 4
+
+### Q7.108 — A settings pane on one machine names no machine
+
+**Position.** `PluginSettings.tsx` draws the `On <machine>` picker only where
+`offering.length > 1`, on the argument Q3.447 makes and Q3.459 answers: a control
+asking a question its own copy already answers is chrome. That argument covers the
+*picker*; it does not cover the *attribution*, and the file's own docblock is the
+reason — "two machines running the same plugin are two configurations, and a
+control implying otherwise would be the one lie this screen can tell."
+
+**Where it bites.** The set the picker ranges over is not the set the plugin is
+installed on: it is `installs.filter((one) => one.plugin.contributes.settings)`.
+A fleet of three, one of them mid-update on a version whose manifest had no
+`settings`, offers **one** — so the picker is not drawn, and nothing on the screen,
+in the sheet's head (which carries the name and the word *settings*, and
+deliberately not a version) or in the pane says which of the three hosts is being
+configured. `offersSettings` drew the gear precisely *because* one machine offers a
+pane, so this is the state the entry path selects for rather than an edge.
+
+**What it would take.** Always draw the attribution and vary only the control: a
+static `On laptop` line at one, the `Dropdown` at several. Sticky, because a long
+pane scrolls the line off and the question is asked while typing.
+
+**Status.** **Built, and more strongly than this asked** — see Q3.468. The line is
+always drawn, at every count, and it is sticky for exactly the reason given here.
+The *control* it proposed varying was deleted rather than varied: the scope is
+chosen on the plugin's page and carried in the URL, so a picker on this screen
+would be a second scope control able to disagree with the address.
+
+### Q7.109 — The consent card's own strings are the one place a stranger's text is not wrapped
+
+**Position.** `PluginView` wraps a plugin's row titles with `break-words` and
+`MachineInstalls` wraps a daemon's failure text with `wrap-anywhere`, each with a
+docblock giving the measurement: an absolute path is one unbreakable token that
+`min-w-0` cannot help with. `PluginConsent`'s own name and description paragraphs
+have neither, and they hold the same class of string from the same class of
+author.
+
+**Why it survived.** The rule arrived at the two surfaces where it was *measured*
+— a three-column board, and a `plugin_consent_broken` paragraph — and the consent
+card was written before either. Its strings come from a manifest rather than from
+a running plugin, which reads as more trustworthy and is not: `name` and
+`description` are compared by neither `consentGap` nor `consentBroken`, which is
+exactly what a forged catalogue address buys.
+
+**Status.** Not built — deferred at the 2026-08-24 design review
+
+### Q7.110 — `MarketRow` and `InstalledRow` say they are one shape and are not
+
+**Position.** `InstalledList.tsx` states "the same row shape the market uses,
+because it is the same kind of thing." They differ in four ways: `items-center`
+against `items-baseline`, `gap-1.5` against `gap-x-2`, no wrap against
+`flex-wrap`, and a 32px icon against none. The two tabs are one tap apart, so the
+same plugin visibly changes shape when somebody switches between them.
+
+**Why it is debt rather than a defect.** Each row is individually right for its
+tab — the market has an icon because the catalogue carries one and an installed
+plugin has no icon to draw. What is wrong is the comment, which asserts a
+shared shape that nothing shares, so the next edit to one will be made in the
+belief that it moves both.
+
+**What it would take.** One component taking `{icon?, trailing}`, which also fixes
+the un-`shrink-0` `Badge` in `MarketRow` — "on 3 of 40" wraps to two lines against
+a long name and grows the row.
+
+**Status.** Not built — deferred at the 2026-08-24 design review
+
+### Q7.111 — A fleet of one still pays for the draft model
+
+**Position.** `MachineInstalls` is built around a draft because a live checkbox
+cannot express *moving* a plugin (Q3.458), and that argument is unchanged. It is
+also an argument about fleets, and this product's stated shape is "one person, one
+machine, many agents."
+
+**What a one-machine fleet gets.** A checkbox reading **All machines** over one
+machine, a disclosure whose closed row says `installed` with no name — because
+`installedSummary` drops the name at one — and a button that is disabled until the
+single box changes. Three controls and a two-step model to put a plugin on the only
+host there is.
+
+**Why not simply special-case it.** Because the second machine is bought at the
+moment the first is not enough, and a screen that changes shape when a fleet grows
+from one to two teaches the one-machine layout and then withdraws it. That is the
+argument for leaving it, and it is weaker than it sounds: the draft *is* the
+general case, and collapsing to a single Install/Remove at `machines.length === 1`
+is a narrowing of the same model rather than a second one.
+
+**Status.** Not built — deferred at the 2026-08-24 design review
+
+### Q7.112 — `JSON.stringify` is doing the job of a quotation mark
+
+**Position.** `MarketList` draws its no-results line as `Nothing here is called
+{JSON.stringify(query.trim())}`, which is a serialiser standing in for typography.
+For every ordinary query it is right by accident; for one holding a quote or a
+backslash it shows somebody their own input escaped — `a\"b` for `a"b`.
+
+**Why it is here rather than fixed in place.** It is two characters of change and
+no argument, which is exactly the kind of thing that is never written down and
+therefore never done. The wider rule it belongs to is that this app quotes a
+person's own words back at them in three places and only this one does it through
+a serialiser.
+
+**Status.** Not built — deferred at the 2026-08-24 design review
+
+### Q7.113 — A background task is visible when it starts and invisible when it ends. What was built?
+
+**Decision.** Nothing, deliberately. The transcript still says nothing about a
+background task, and this entry is the record of why — with the measurement, so the
+next person does not have to take it again.
+
+**Measured 2026-08-24 against `~/.reemoat/reemoat.db`**, the live log on the
+development machine, 5555 events.
+
+*The start is on the wire, verbatim.* Session `s_5d26f98e`: seq 103 is a
+`tool_call` — `Task`, `kind: "think"`, `subagent: true` — and seq 106-107 are
+`tool_call_update`s carrying `rawInput.run_in_background: true` beside
+`subagent_type: "Plan"`. That is the **only** occurrence of `run_in_background` in
+the whole database, and it is on a subagent spawn rather than on a `Bash` call; the
+tool names a background *shell* would leave behind — BashOutput, KillShell, neither
+of them ours — appear **zero** times.
+
+*The end is nowhere.* seq 110 is the same call reaching `status: "completed"` with
+`content: ["Async agent launched successfully. …agentId: a70f8b0…"]` — so
+`completed` means **started**, not finished. That `agentId` appears in no other
+event of the session, which runs to seq 271.
+
+*And the drain does not carry it either.* Over every `turn_end` in the database, the
+next event is `status` (17), `prompt` (17) or `agent_config` (1). Not one is a
+background agent reporting back. `ManagedSession.startIdleDrain` is doing its job;
+there is simply nothing to drain.
+
+*What the reader saw instead.* At seq 124-126 the agent wrote *"Plan-агент пока
+догоняет — интегрирую его дизайн, когда вернётся"* — the model knew it was waiting
+and said so in prose. The transcript's own machinery said nothing: the operator sent
+another message at seq 154 before anything acknowledged the return at seq 155.
+
+**Why nothing was built.** `outstandingTasks` counts a delegation between `pending`
+and `completed`, which for a backgrounded spawn is about one second. Extending it to
+count `run_in_background: true` calls is easy and is the wrong half of the problem:
+what has no answer is when to stop counting. Every candidate is a guess dressed as a
+signal — *until your next message*, *until the agent speaks again*, *never* — and a
+row that says "still running" about something that finished four minutes ago is
+worse than the silence it replaces, because silence is at least honest about being
+silence.
+
+**Rejected — reading Claude Code's own task files.** The daemon spawns the agent as
+a child on the same machine, so the files under its session directory are readable.
+They are a vendor's private state at an undocumented path, they change with any
+release, and the daemon would be reaching into another program's internals to
+recover a fact that program is not sending. The one boundary this codebase does keep
+around an agent is that it is driven over a protocol; this crosses it for a badge.
+
+**Rejected — ACP's terminal capability.** `AcpClient` declares `terminal: false`.
+Turning it on would make the daemon the owner of the agent's shells, which brings
+`terminal/wait_for_exit` and therefore an exact lifecycle. It is refused for two
+reasons and the second is decisive: it is a large change to how every command an
+agent runs is executed, and it is about **shells**, while the case measured above is
+a backgrounded *subagent*. It would not close this.
+
+**What would close it** is an ACP message for "I am waiting", or an agent that
+reports its background work as an ordinary tool call with an ordinary completing
+update. Neither exists, and neither is ours to add.
+
+**Status.** Deliberate non-goal
+

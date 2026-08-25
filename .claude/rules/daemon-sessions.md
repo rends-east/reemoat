@@ -245,6 +245,18 @@ terminal and `stopping`, the two states where a spawn can never complete.
 message describes background shell work, so the drain is the fix and this is the only
 honest client-side signal there is. Q2.44.
 
+⚠ **A backgrounded subagent is the measured case, and half of it *is* observable —
+which is exactly why nothing was built.** The spawn arrives with
+`rawInput.run_in_background: true` and is on the wire verbatim; then the same call
+reaches `completed` **at launch**, carrying "Async agent launched successfully", and
+that is the last the ACP stream ever says about it. Measured over the whole live
+log: no later event names the agent it started, and every `turn_end` is followed by
+`status`, a `prompt` or `agent_config` — the drain carries no return. So a box could
+be drawn when the work starts and nothing could honestly take it down; every
+candidate for "it finished" is a guess, and a row claiming work is still running
+four minutes after it stopped is worse than the silence it replaces. Deliberate
+non-goal, with the numbers, at Q7.113.
+
 ## Invariants
 
 **The log**

@@ -581,6 +581,35 @@ const mailPump = startMailPump({
   },
 });
 
+/**
+ * Where the plugin market's catalogue lives, or nothing.
+ *
+ * ⚠ **Env only, and it needs a restart.** `SETTING_KEYS` is where a value goes
+ * when an admin should be able to change it from the Server settings screen, and
+ * this one may not be: `createControlPlaneApp` builds the `Content-Security-Policy`
+ * from it **once**, so a database-owned value could name a catalogue the
+ * document's own `connect-src` refuses to reach — and the browser refuses such a
+ * request before it leaves, so the symptom is an empty screen with the reason in
+ * a console nobody has open on a phone. One source, one restart, nothing to
+ * disagree.
+ *
+ * Absent is an ordinary state: the market tab says so and installing a plugin
+ * from a file is untouched, that path never having involved this.
+ *
+ * ⚠ **Validated the way the relay URL is** — a browser has to `fetch` it, so a
+ * scheme `fetch` does not accept is a setting that cannot work. Warned rather
+ * than fatal, unlike the relay: a fleet with no relay is unreachable, while a
+ * fleet with a bad catalogue URL is a fleet that installs plugins from files.
+ */
+const pluginCatalogueUrl = (process.env["REEMOAT_CP_PLUGIN_CATALOGUE_URL"] ?? "").trim() || null;
+if (pluginCatalogueUrl !== null && !isBrowserReachable(pluginCatalogueUrl)) {
+  console.warn(
+    `REEMOAT_CP_PLUGIN_CATALOGUE_URL must be an absolute http:// or https:// URL, got "${pluginCatalogueUrl}".\n` +
+      "  The browser fetches it directly, so it needs a scheme fetch() accepts. Ignoring it:\n" +
+      "  this instance will offer no plugin market, and installing from a file still works.",
+  );
+}
+
 const app = createControlPlaneApp({
   db: store.db,
   issuer,
@@ -591,6 +620,10 @@ const app = createControlPlaneApp({
   mail: mailPump,
   trustedProxyHops,
   relayUrls,
+  // `isBrowserReachable` decides, in one place, rather than the app re-deriving
+  // it: `originOf` there answers `null` for anything unparseable, so a warned
+  // value and an absent one reach exactly the same policy.
+  pluginCatalogueUrl: pluginCatalogueUrl !== null && isBrowserReachable(pluginCatalogueUrl) ? pluginCatalogueUrl : null,
 });
 
 /*

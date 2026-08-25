@@ -20,6 +20,7 @@ import {
   type AgentConfig,
   type LaggedFrame,
   type Me,
+  type PluginSummary,
   type SessionSnapshot,
   type SessionToken,
   type StoredEvent,
@@ -850,6 +851,16 @@ export interface AppState {
    * not answer — both of which draw a path exactly as it was drawn before.
    */
   rootsByMachine: ReadonlyMap<MachineId, readonly string[]>;
+  /**
+   * What is installed on each machine, or an empty list for one that has not
+   * answered — including a daemon too old to have the route at all.
+   *
+   * Held here rather than fetched by the screens that draw it, because three of
+   * them do: the machine's settings screen, the launcher in the rail's footer,
+   * and a session's menu. Three independent fetches of the same list would mean
+   * three different answers on screen at once whenever one of them was stale.
+   */
+  pluginsByMachine: ReadonlyMap<MachineId, readonly PluginSummary[]>;
   sessions: SessionRow[];
   /**
    * The same rows, keyed.
@@ -939,6 +950,7 @@ class AppStore implements StreamSink {
     me: null,
     machines: [],
     rootsByMachine: new Map(),
+    pluginsByMachine: new Map(),
     sessions: [],
     rowsByKey: new Map(),
     listed: new Set(),
@@ -1054,6 +1066,7 @@ class AppStore implements StreamSink {
    * is a request per machine per poll for a value that cannot change.
    */
   private readonly rootsByMachine = new Map<MachineId, readonly string[]>();
+  private readonly pluginsByMachine = new Map<MachineId, readonly PluginSummary[]>();
   private machinesCache: MachineState[] | null = null;
   private sessionsCache: SessionRow[] | null = null;
   private rowsByKeyCache: ReadonlyMap<SessionKey, SessionRow> | null = null;
@@ -1098,6 +1111,7 @@ class AppStore implements StreamSink {
       ...this.snapshot,
       machines: this.machinesCache,
       rootsByMachine: this.rootsByMachine,
+      pluginsByMachine: this.pluginsByMachine,
       sessions: this.sessionsCache,
       rowsByKey: this.rowsByKeyCache,
       listed: this.listedCache,
@@ -1685,6 +1699,37 @@ class AppStore implements StreamSink {
     }
   }
 
+  /**
+   * Read one machine's plugins, once, and never fail loudly.
+   *
+   * The `catch` is doing real work here rather than being tidy: a daemon that
+   * predates plugins answers a bare `404` on this route, and that is the **normal
+   * state of the fleet** between a control-plane deploy and whenever each owner
+   * next runs `deploy.sh`. An empty list is exactly right for it — every screen
+   * that reads this draws nothing for a machine with no plugins, which is what a
+   * daemon without the feature has.
+   */
+  private async fetchPlugins(id: MachineId): Promise<void> {
+    const daemon = this.daemons.get(id);
+    if (daemon === undefined) return;
+    // Written first so a slow answer cannot be asked for twice by the next poll.
+    this.pluginsByMachine.set(id, []);
+    try {
+      const listing = await daemon.plugins();
+      this.pluginsByMachine.set(id, listing.plugins);
+      this.emit();
+    } catch {
+      // Left empty. See the docblock: an old daemon and a machine with nothing
+      // installed are the same thing to every reader of this map.
+    }
+  }
+
+  /** Ask this machine for its plugins again. The install screen calls it; the poll does not. */
+  refreshPlugins(id: MachineId): void {
+    this.pluginsByMachine.delete(id);
+    void this.fetchPlugins(id);
+  }
+
   private async refreshMachineSessions(connection: MachineConnection, epoch: number): Promise<void> {
     const daemon = this.daemons.get(connection.id);
     if (daemon === undefined) return;
@@ -1709,6 +1754,11 @@ class AppStore implements StreamSink {
     // Once per machine, and never again: `REEMOAT_ROOTS` is read at startup and
     // cannot change under a running daemon. See `fetchRoots`.
     if (!this.rootsByMachine.has(connection.id)) void this.fetchRoots(connection.id);
+    // Once per machine as well, and **not** on the poll: what is installed changes
+    // only when somebody installs something, and the screen that does that
+    // refreshes this itself. Polling it would put a request per machine every four
+    // seconds behind a list nobody is watching change.
+    if (!this.pluginsByMachine.has(connection.id)) void this.fetchPlugins(connection.id);
 
     const name = connection.state().name;
     const fetchedAt = Date.now();

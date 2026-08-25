@@ -36,7 +36,7 @@ import {
   type DrawnControls,
   type PieLevel,
 } from "./agentConfig";
-import { Icon, MENU_HEADING, MENU_PANEL, MENU_ROW, TAP_GROW_Y } from "./bits";
+import { Icon, MENU_HEADING, MENU_PANEL, menuRow, TAP_GROW_Y } from "./bits";
 import { toast } from "./Toast";
 
 /**
@@ -1090,7 +1090,7 @@ function ChoiceSection({
                     if (refusal !== null) return;
                     onChoose(String(choice.value));
                   }}
-                  className={`${MENU_ROW} hover:bg-raised ${
+                  className={`${menuRow("start")} hover:bg-raised ${
                     choice.value === option.value ? "font-medium" : ""
                   }`}
                 >

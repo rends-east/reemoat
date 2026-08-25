@@ -3,7 +3,7 @@ import { useEffect, useRef, type ReactNode, type RefObject } from "react";
 import type { AgentConfigOption } from "../wire";
 import { labelFor } from "./agentConfig";
 import type { ChoiceRow, CommandEntry } from "./commands";
-import { Icon, MENU_HEADING, MENU_PANEL, MENU_ROW, Spinner } from "./bits";
+import { Icon, MENU_HEADING, MENU_PANEL, menuRow, Spinner } from "./bits";
 
 /**
  * The composer's command menu.
@@ -153,7 +153,7 @@ export function CommandMenu({
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => onChooseValue(index)}
                 onMouseEnter={() => onHover(index)}
-                className={`${MENU_ROW} ${index === active ? "bg-raised" : ""} ${
+                className={`${menuRow("start")} ${index === active ? "bg-raised" : ""} ${
                   selected ? "font-medium" : ""
                 }`}
               >
@@ -190,7 +190,7 @@ export function CommandMenu({
             // Highlighted by the keyboard's index rather than by `:hover`, so the
             // row the arrows are on and the row Enter will take are the same one.
             // `aria-selected` alone is invisible.
-            className={`${MENU_ROW} text-fg ${index === active ? "bg-raised" : ""}`}
+            className={`${menuRow("start")} text-fg ${index === active ? "bg-raised" : ""}`}
           >
             <span className="mt-0.5 w-3 shrink-0">
               {/* Three states in one column, because there are three kinds of row.

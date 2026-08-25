@@ -45,6 +45,7 @@ import {
   toolSummary,
   outstandingTasks,
   SUMMARY_CHARS,
+  type AnsweredQuestion,
   type ChangeNode,
   type EventNode,
   type GroupNode,
@@ -875,7 +876,14 @@ function PermissionResolvedRow({
  * tool. Skipping and cancelling have no answer to draw, so they stay one quiet
  * line — there is nothing there that a person said.
  */
-function ElicitationResolvedRow({ event }: { event: ElicitationResolvedEvent }): ReactNode {
+function ElicitationResolvedRow({
+  event,
+  asked,
+}: {
+  event: ElicitationResolvedEvent;
+  /** The questions, recovered in `tail.ts`. `null` means "draw what you drew before". */
+  asked: readonly AnsweredQuestion[] | null;
+}): ReactNode {
   const outcome = elicitationOutcome(event);
   const answers = event.answers ?? [];
 
@@ -889,10 +897,41 @@ function ElicitationResolvedRow({ event }: { event: ElicitationResolvedEvent }):
    * happened, and on a phone two right-aligned bubbles in a row read as two
    * messages. The box says "the agent asked, this came back" in one object.
    */
+  /*
+   * ⚠ **The questions go above the answers, and until 0.3.0 they were nowhere.**
+   *
+   * `event.message` is what this box used to open with, and for a multi-question
+   * form that string is the adapter's preamble — literally *"Please answer the
+   * following questions."* — while each real question sits in its field's
+   * description, which the resolution does not carry. So a settled
+   * `AskUserQuestion` was drawn as a generic sentence over four bare values: the
+   * answers to questions the transcript had lost.
+   *
+   * With `asked` present the preamble earns nothing and is dropped: every row now
+   * says what was asked, so a line above them saying "answer the following" is
+   * furniture over its own content. Without it, exactly the old rendering — which
+   * is what the three fallbacks in `EventNode.asked` are for.
+   *
+   * `wrap-anywhere` throughout and no clip anywhere, which is the rule this whole
+   * release turns on: a question a person reads half of is a question they answer
+   * wrongly, and the record of one they already answered is worth no less.
+   */
   return (
     <div className="rounded-md border border-edge px-2.5 py-2 text-xs">
-      <p className="text-muted wrap-anywhere">{event.message}</p>
-      {answers.length > 0 ? (
+      {asked === null && <p className="text-muted wrap-anywhere">{event.message}</p>}
+      {asked !== null ? (
+        <div className="space-y-1.5">
+          {asked.map((answer) => (
+            <div key={answer.key}>
+              {/* The question when it was recoverable, the field's own title when
+                  it was not — which is the "let me describe something else" box,
+                  and the only honest label there is for a typed answer. */}
+              <p className="text-muted wrap-anywhere">{answer.question ?? answer.label}</p>
+              <p className="wrap-anywhere">{answer.value}</p>
+            </div>
+          ))}
+        </div>
+      ) : answers.length > 0 ? (
         <div className="mt-1 space-y-0.5">
           {answers.map((answer) => (
             <p key={answer.key} className="wrap-anywhere">
@@ -1050,7 +1089,7 @@ function renderEvent(node: EventNode, files: FileAccess | null): ReactNode {
      * deliberately not copied.
      */
     case "elicitation_resolved":
-      return <ElicitationResolvedRow event={event} />;
+      return <ElicitationResolvedRow event={event} asked={node.asked} />;
 
     case "plan":
       return (
