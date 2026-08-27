@@ -5,7 +5,15 @@ import { parseMarketRoute, type MarketRoute } from "./market";
 import { machineId, sessionId, type MachineId, type SessionRef } from "./ids";
 import { parseSettingsRoute, type SettingsRoute } from "./settings";
 import { isOverlayPath } from "./ui/overlay";
-import { navMove, originFor } from "./nav";
+import {
+  agentBuilderPath,
+  agentEditPath as editPath,
+  isAgentStep,
+  navMove,
+  newSessionPath,
+  originFor,
+  type AgentStep,
+} from "./nav";
 
 /**
  * Four screens, so four lines of routing.
@@ -29,6 +37,39 @@ export type Route =
    * going back and forward again does not silently forget which one you meant.
    */
   | { name: "new"; machineId: MachineId | null; cwd: string | null }
+  /**
+   * `/agent/:machineId`, optionally `/agent/:machineId/:cwd` — assembling one.
+   *
+   * ⚠ **A pop-up of its own rather than a pane inside New session, and the `cwd`
+   * segment is what makes that affordable.** The folder somebody already chose
+   * lives in `NewSession`'s component state, so navigating away would discard it
+   * — the failure that put the *sign-in* flow inline in the first place. Carrying
+   * the folder through the address means the way back can restore it, which is
+   * `router.ts`'s standing answer: sidebar state feeding a routed dialog forgets
+   * itself, so the dialog's state goes in the URL.
+   *
+   * The machine rides it for `new`'s reasons, and because every question this
+   * screen asks — which harnesses, which models, which keys — is answered by one
+   * daemon.
+   *
+   * `step` names which of the flow's two choosing screens is open, and sits
+   * *before* the folder: `/agent/:machineId/llm/:cwd`. Every rule about that
+   * encoding is in `nav.ts` beside `agentBuilderPath`, for the reason
+   * `settings.ts` gives — `webcheck` cannot import this file at all.
+   *
+   * `preset` names an agent that has already been assembled, and the address says
+   * so with a literal `edit` segment rather than by recognising the daemon's
+   * `ca_`+8-hex ids: this client must not hold a copy of that generator. That
+   * rule, and the direction an address it cannot read fails in, are in `nav.ts`
+   * beside `agentBuilderPath` for the same reason the other two are.
+   */
+  | {
+      name: "agent";
+      machineId: MachineId;
+      cwd: string | null;
+      step: AgentStep | null;
+      preset: string | null;
+    }
   /**
    * `/settings`, optionally `/settings/:section`.
    *
@@ -148,6 +189,31 @@ function parse(pathname: string): Route {
       name: "new",
       machineId: parts[1] === undefined ? null : machineId(decodeSegment(parts[1])),
       cwd: parts[2] === undefined ? null : decodeSegment(parts[2]),
+    };
+  }
+  if (parts[0] === "agent" && parts[1] !== undefined) {
+    /*
+     * Both tail segments are optional and neither is a placeholder, which works
+     * because a folder can never look like a step — see `agentBuilderPath`.
+     *
+     * ⚠ **`edit` is read at one position and taken with the id after it**, which
+     * is what leaves the two lines below identical to the address that carries no
+     * preset: the step and the folder are still the last two optional segments,
+     * still told apart by the leading `%2F` a folder cannot lose. A marker with
+     * nothing after it answers `preset: null` rather than a preset named nothing —
+     * the new-agent screen, which is the arm holding none of somebody else's work.
+     */
+    const editing = parts[2] === "edit";
+    const preset = editing && parts[3] !== undefined ? decodeSegment(parts[3]) : null;
+    const tail = parts.slice(editing ? 4 : 2);
+    const stepped = tail[0] !== undefined && isAgentStep(tail[0]);
+    const folder = stepped ? tail[1] : tail[0];
+    return {
+      name: "agent",
+      machineId: machineId(decodeSegment(parts[1])),
+      cwd: folder === undefined ? null : decodeSegment(folder),
+      step: stepped ? (tail[0] as AgentStep) : null,
+      preset,
     };
   }
   const gate = parseGateScreen(parts);
@@ -352,12 +418,41 @@ export function navigate(path: string, replace = false): void {
   announce();
 }
 
+/**
+ * Re-exported rather than written here, because `upFrom` needs the same rule and
+ * `nav.ts` may not import this file. See `newSessionPath`.
+ */
 export function newPath(machine?: MachineId, cwd?: string): string {
-  if (machine === undefined) return "/new";
-  const base = `/new/${encodeURIComponent(machine)}`;
-  // A folder without a machine is not expressible and should not be: the picker
-  // it seeds is a listing of *that daemon's* filesystem.
-  return cwd === undefined ? base : `${base}/${encodeURIComponent(cwd)}`;
+  return newSessionPath(machine, cwd);
+}
+
+/**
+ * Where an agent is assembled, carrying the folder back with it.
+ *
+ * `cwd` is not this screen's business at all — it is `New session`'s, held so the
+ * ◀ can put somebody back exactly where they were. A builder that dropped it
+ * would send them to a picker at the root of the tree after they had walked down
+ * it.
+ */
+export function agentPath(
+  machine: MachineId,
+  cwd?: string | null,
+  step: AgentStep | null = null,
+  preset: string | null = null,
+): string {
+  return agentBuilderPath(machine, cwd, step, preset);
+}
+
+/**
+ * Where an *already assembled* agent is edited — `agentBuilderPath`'s wrapper,
+ * re-exported here for `agentPath`'s reason and narrowed to a `MachineId` the way
+ * every path built in this file is.
+ *
+ * Aliased on import rather than re-declared, so the `edit` segment is written
+ * down in exactly one place: `nav.ts`, which is the half `webcheck` can reach.
+ */
+export function agentEditPath(machine: MachineId, preset: string, cwd?: string | null): string {
+  return editPath(machine, preset, cwd);
 }
 
 export function sessionPath(ref: SessionRef): string {

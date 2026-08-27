@@ -45,7 +45,7 @@ auth gate.
 
 ---
 
-## The daemon — 44 routes
+## The daemon — 52 routes
 
 Runs on your machine, reachable through the relay. `pnpm client` drives all of it.
 
@@ -67,6 +67,19 @@ Runs on your machine, reachable through the relay. `pnpm client` drives all of i
 | `GET /agent-auth/login/:loginId` | What the pty has printed so far |
 | `POST /agent-auth/login/:loginId/input` | Type into it |
 | `DELETE /agent-auth/login/:loginId` | Abandon it |
+
+### Systems, and the agents assembled out of them
+
+A *system* is who serves a model and who you sign in to; a *harness* is the CLI
+that runs the loop. Nothing here accepts a URL, a header name or a variable name
+— a request names a system id and `src/acp/systems.ts` resolves it.
+
+| | |
+|---|---|
+| `GET /systems` | Every system, and whether a key is saved. Spawns nothing |
+| `PUT /systems/:system` · `DELETE /systems/:system` | Set or clear that system's key |
+| `GET /agents/capabilities` | What each harness offers and what it can be pointed at. **Starts an agent per harness**, cached ten minutes |
+| `GET /custom-agents` · `POST /custom-agents` · `PATCH /custom-agents/:id` · `DELETE /custom-agents/:id` | The harness+system+model presets on this machine. A `PATCH` carries all four fields — an edit is a replace, so the pairing is never weighed against a merge |
 
 ### The filesystem the picker sees
 

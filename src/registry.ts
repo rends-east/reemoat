@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type * as acp from "@agentclientprotocol/sdk";
 import { AgentUnavailableError, type AgentId } from "./acp/agents.js";
+import type { SystemId } from "./acp/systems.js";
 import { resolveCwd } from "./browse.js";
 import {
   MemoryEventStore,
@@ -42,6 +43,7 @@ import {
   SessionForgottenError,
   type PendingElicitation,
   type PendingPermission,
+  type SessionOptions,
 } from "./session.js";
 import { inlinesImage, type UploadRow } from "./uploads.js";
 import {
@@ -889,6 +891,21 @@ export function isPersistedGiveUp(value: string | null | undefined): value is Re
 export interface SessionSnapshot {
   id: string;
   agent: AgentId;
+  /**
+   * The assembled agent this session was started as, or `null` for a bare
+   * harness.
+   *
+   * ⚠ **An id, and nothing about what it *says*.** The name, the system and the
+   * model are not here: they are the preset's, they can be edited, and a copy on
+   * a snapshot fanned out per client on every output token is a copy that goes
+   * stale in the one place it would be read. The client already lists the
+   * presets to draw its picker; this is the join key.
+   *
+   * On the snapshot rather than only in the log for the same reason `agent` is: a
+   * **restored** session has no live agent to have published anything, and its
+   * row still has to say what it is.
+   */
+  customAgent: string | null;
   /** Where the agent runs. Always equal to `workspace.root`. */
   cwd: string;
   workspace: SessionWorkspace;
@@ -1292,6 +1309,39 @@ export interface ManagedSessionOptions {
    */
   ultracodeDefault?: () => boolean;
   /**
+   * Which assembled agent this session was started as, or `null` for a bare
+   * harness.
+   *
+   * Carried rather than resolved: what a preset *says* — its system and its
+   * model — is read at every launch through `customAgents`, so editing one
+   * changes what its sessions come back as. What this holds is only the
+   * reference, which is what makes it safe to be immutable.
+   */
+  customAgent?: string | null;
+  /**
+   * How to read back what an assembled agent says, by id.
+   *
+   * ⚠ **A function read at launch, never a value captured at construction** —
+   * `LocalRuntimeOptions.secrets`' argument, and it buys the same thing: editing
+   * a preset takes effect on the next start without a daemon restart, and a
+   * session restored before the store existed does not hold a stale copy.
+   *
+   * `null` from it is not an error and must not fail the launch. A preset can be
+   * deleted while a session that names it is asleep, and the honest outcome then
+   * is the harness on its own — the session's `agent` column still says which
+   * one — rather than a conversation that can never be resumed again.
+   *
+   * ⚠ **The harness is in the answer, and it is not there to be used.** It is
+   * there to be *compared*: `PATCH /custom-agents/:id` accepts a change of
+   * harness, so a preset can be re-pointed at a different CLI under a session
+   * that was started on the old one, and `agent` is immutable. Without this
+   * field the pair `{system, model}` was spread over the session's own harness
+   * and produced a triple nobody chose and, half the time, one `hostable`
+   * refuses — a live session that answers `502 system_not_routable` for ever.
+   * See {@link ManagedSession.assembled}, which is the only reader.
+   */
+  resolveCustomAgent?: (id: string) => { harness: AgentId; system: SystemId; model: string } | null;
+  /**
    * Where a degradation nobody else can see gets reported.
    *
    * Exists for exactly one thing today: `SessionLog`'s fan-out guard evicts a
@@ -1662,6 +1712,12 @@ export class ManagedSession {
   private readonly keepAgentImage = (mime: string, data: string): StoredFileRef | null =>
     this.uploads?.keepAgentImage(this.id, mime, data) ?? null;
 
+  /** See `ManagedSessionOptions.customAgent`. Immutable, like `agent`. */
+  readonly customAgent: string | null;
+  private readonly resolveCustomAgent: (
+    id: string,
+  ) => { harness: AgentId; system: SystemId; model: string } | null;
+
   constructor(
     readonly id: string,
     readonly agent: AgentId,
@@ -1669,6 +1725,8 @@ export class ManagedSession {
     store: EventStore,
     options: ManagedSessionOptions = {},
   ) {
+    this.customAgent = options.customAgent ?? null;
+    this.resolveCustomAgent = options.resolveCustomAgent ?? (() => null);
     // The third argument is what `SessionLog` has always taken and nobody ever
     // supplied: an evicted listener is a live socket that has silently stopped
     // receiving, and every other degradation in this codebase reports through a
@@ -1744,6 +1802,7 @@ export class ManagedSession {
   ): ManagedSession {
     return new ManagedSession(row.id, row.agent, row.workspace, store, {
       ...options,
+      customAgent: row.customAgent,
       restore: {
         createdAt: row.createdAt,
         agentSessionId: row.agentSessionId,
@@ -1969,6 +2028,7 @@ export class ManagedSession {
     return Object.freeze({
       id: this.id,
       agent: this.agent,
+      customAgent: this.customAgent,
       cwd: this.cwd,
       workspace: { ...this.workspace, git: this.workspace.git && { ...this.workspace.git } },
       status: this.status,
@@ -2140,20 +2200,94 @@ export class ManagedSession {
     return this.ultracodeChoice ?? this.ultracodeDefault();
   }
 
+  /**
+   * Which system and model this session runs on, read fresh at every launch.
+   *
+   * `{}` for a bare harness, which is every session started before assembled
+   * agents existed — and spreading nothing is what keeps `Session.start`'s
+   * behaviour for those byte for byte what it was.
+   *
+   * **Two degradations, and they are the same demotion for the same reason.** A
+   * preset can be deleted under a sleeping session, and a preset can be
+   * *re-pointed at another harness* under one — `PATCH /custom-agents/:id`
+   * accepts a change of `harness` and weighs `hostable` against the body it was
+   * given, which says nothing about a session that already exists. Either way
+   * the preset has stopped describing this session, and either way the honest
+   * answer is the bare harness the session's own `agent` column names rather
+   * than a pairing nobody chose.
+   */
+  private get assembled(): { system?: SystemId; model?: string } {
+    if (this.customAgent === null) return {};
+    const one = this.resolveCustomAgent(this.customAgent);
+    // A preset deleted under a sleeping session: the harness on its own is the
+    // honest outcome, and it is what `agent` has said all along.
+    if (one === null) return {};
+    /*
+     * An edit that re-points a preset at a different harness leaves the sessions
+     * already started on it where they are, on the harness they were started
+     * with, because **a conversation cannot change vendor underneath itself** —
+     * `agent` is immutable, the agent process is spawned from it, and the
+     * transcript on the other side belongs to that CLI.
+     *
+     * Spreading the new pair over the old harness was the behaviour this arm
+     * replaces, and it failed both ways. Loudly: preset `{claude, anthropic,
+     * opus}` edited to `{codex, openai, gpt-5-codex}` left a claude session
+     * resuming with `system: "openai"`, whose `nativeHarness` is codex, so
+     * `applySystem` reached `hostable` and every resume from then on answered
+     * `502 system_not_routable` with nothing on any screen connecting it to the
+     * edit. Quietly, which is worse: edited to `{kimi, moonshot,
+     * kimi-k2-thinking}` it left the claude harness routed at Moonshot on that
+     * model — a triple `hostable` permits and `POST /sessions` could never have
+     * produced — while the preset, the tile and the glyph all said Kimi Code.
+     */
+    if (one.harness !== this.agent) return {};
+    return { system: one.system, model: one.model };
+  }
+
+  /**
+   * The whole option bag a launch is made with, in one place.
+   *
+   * ⚠ **One getter because there are three launch sites, and an omission at any
+   * of them is silent.** `doResume`'s empty-conversation arm wrote the bag out
+   * by hand and left `...assembled` off it, and nothing refused the result:
+   * with no `system`, `spawnEnvOf` returns `{}` so no routed-model variable is
+   * set, and `applySystem` returns at its first line so `client.routing()`,
+   * `hostable` and `providers/set` are never reached and `SystemRoutingError`
+   * cannot fire. The agent opened a conversation on the harness's own vendor,
+   * account and default model while `sessions.custom_agent` and the snapshot went
+   * on naming the assembled agent — exactly the failure with no symptom
+   * `.claude/rules/agent-systems.md` names under *"Routable and un-pinnable must
+   * refuse"*. That arm is not an edge, either: `conversationKnownEmpty` answers
+   * `true` for every `turnCounter === 0`, so every created-but-unprompted session
+   * took it, on a restart, on Resume, and on an ultracode toggle.
+   *
+   * ⚠ **Everything here is re-read at the launch and nothing is remembered.**
+   * `assembled` goes back to the preset store, so an edit takes effect without a
+   * daemon restart and routing — which lives in the agent *process* — cannot be
+   * lost by a resume; `ultracodeWanted` folds in the machine default, which
+   * claude reads when the conversation is opened, so a resume without it comes
+   * back quietly demoted; `elicitationAllowed` is a thunk for the same reason.
+   *
+   * A resume adds `agentSessionId` and nothing else, which is what makes one bag
+   * correct for all three sites — and what makes a fourth site unable to
+   * disagree with the other three.
+   */
+  private get launchOptions(): SessionOptions {
+    return {
+      agent: this.agent,
+      ...this.assembled,
+      cwd: this.cwd,
+      permissions: this.resolvePermission,
+      elicitations: this.elicitationAllowed() ? this.resolveElicitation : null,
+      runtime: this.runtime,
+      keepImage: this.keepAgentImage,
+      ultracode: this.ultracodeWanted,
+    };
+  }
+
   async start(timeoutMs = START_TIMEOUT_MS): Promise<void> {
     this.safeAppend({ type: "status", status: "starting", exit: null });
-    await this.launch(
-      Session.start({
-        agent: this.agent,
-        cwd: this.cwd,
-        permissions: this.resolvePermission,
-        elicitations: this.elicitationAllowed() ? this.resolveElicitation : null,
-        runtime: this.runtime,
-        keepImage: this.keepAgentImage,
-        ultracode: this.ultracodeWanted,
-      }),
-      timeoutMs,
-    );
+    await this.launch(Session.start(this.launchOptions), timeoutMs);
   }
 
   /** Adopts a starting agent, bounded by `timeoutMs`. Shared by start and resume. */
@@ -2403,30 +2537,20 @@ export class ManagedSession {
      */
     const empty = this.conversationKnownEmpty();
     try {
+      /*
+       * ⚠ **Both arms take the same bag, and the asymmetry that used to be here
+       * was a bug rather than a decision.** This arm was written out by hand
+       * without the assembled agent's system and model, so every unprompted
+       * session — which is every session at `turnCounter === 0` — came back on
+       * the harness's own vendor and default model, silently, while still
+       * reporting itself as the assembled agent. What differs between a start
+       * and a resume is `agentSessionId` and nothing else; see
+       * {@link launchOptions}.
+       */
       await this.launch(
         empty
-          ? Session.start({
-              agent: this.agent,
-              cwd: this.cwd,
-              permissions: this.resolvePermission,
-              elicitations: this.elicitationAllowed() ? this.resolveElicitation : null,
-              runtime: this.runtime,
-              keepImage: this.keepAgentImage,
-              ultracode: this.ultracodeWanted,
-            })
-          : Session.resume({
-              agent: this.agent,
-              cwd: this.cwd,
-              agentSessionId,
-              permissions: this.resolvePermission,
-              elicitations: this.elicitationAllowed() ? this.resolveElicitation : null,
-              runtime: this.runtime,
-              keepImage: this.keepAgentImage,
-              // The whole reason a resume carries it: the setting is read when
-              // the conversation is opened, so a session brought back without it
-              // comes back quietly demoted.
-              ultracode: this.ultracodeWanted,
-            }),
+          ? Session.start(this.launchOptions)
+          : Session.resume({ ...this.launchOptions, agentSessionId }),
         timeoutMs,
       );
       this.onResumed();
@@ -4009,6 +4133,7 @@ export class ManagedSession {
     return {
       id: this.id,
       agent: this.agent,
+      customAgent: this.customAgent,
       createdAt: this.createdAt,
       workspace: this.workspace,
       agentSessionId: snapshot.agentSessionId,
@@ -4047,6 +4172,25 @@ export class ManagedSession {
  */
 export interface CreateSessionOptions {
   agent: AgentId;
+  /**
+   * The assembled agent this session is being started as, or `null`/omitted for
+   * a bare harness.
+   *
+   * ⚠ **An id, and `agent` beside it is still the harness.** The two are not
+   * alternatives and the route does not choose between them: it resolves the row
+   * and fills in `agent` from what the row names, so they agree **at creation**.
+   *
+   * ⚠ **They can come apart afterwards, and this comment used to deny it.**
+   * `PATCH /custom-agents/:id` accepts a change of `harness`, so the preset a
+   * live session names can be re-pointed at another CLI while `agent` stays
+   * what it was — a conversation cannot change vendor underneath itself.
+   * `ManagedSession.assembled` is where that is caught, and it degrades to the
+   * bare harness rather than launching a triple nobody chose.
+   *
+   * Everything downstream of here — the worktree, the launch, the
+   * restart, the sign-out sweep — reads `agent` and has no idea this exists.
+   */
+  customAgent?: string | null;
   cwd: string;
   /** Omitted, the daemon-wide default applies. */
   worktree?: WorktreePolicy;
@@ -4200,6 +4344,20 @@ export class SessionRegistry {
   private elicitationAllowed = true;
 
   /**
+   * How an assembled agent's id is turned back into a system and a model.
+   *
+   * A switch rather than a constructor collaborator, for `elicitationAllowed`'s
+   * reason exactly: `restore()` runs before `daemon.ts` has opened anything, so
+   * a store handed in at construction would be absent for every session on the
+   * machine — which after a restart is all of them. Defaults to answering `null`,
+   * which every driver and `harness.ts` run with and which means "a bare
+   * harness".
+   */
+  private resolveCustomAgentBy: (
+    id: string,
+  ) => { harness: AgentId; system: SystemId; model: string } | null = () => null;
+
+  /**
    * What a session nobody has decided about asks claude for.
    *
    * Off by default, because it is a real change to how the agent works and
@@ -4244,6 +4402,19 @@ export class SessionRegistry {
      */
     private readonly onWarning: ((detail: string) => void) | undefined = undefined,
   ) {}
+
+  /**
+   * Where assembled agents are read back from. See `resolveCustomAgentBy`.
+   *
+   * The harness rides along with the system and the model because a preset's
+   * harness is editable and a session's is not — `ManagedSession.assembled` is
+   * the one reader and it compares rather than uses it.
+   */
+  setCustomAgents(
+    resolve: (id: string) => { harness: AgentId; system: SystemId; model: string } | null,
+  ): void {
+    this.resolveCustomAgentBy = resolve;
+  }
 
   /**
    * Be told when a session appears, until the returned function is called.
@@ -4446,6 +4617,9 @@ export class SessionRegistry {
     });
 
     const managed = new ManagedSession(id, options.agent, workspace, this.store, {
+      customAgent: options.customAgent ?? null,
+      // Re-read through `this` at every call, never captured — see the field.
+      resolveCustomAgent: (id) => this.resolveCustomAgentBy(id),
       sessionStore: this.sessionStore,
       runtime: this.runtime,
       uploads: this.uploads,
@@ -4505,6 +4679,7 @@ export class SessionRegistry {
         // on the machine.
         elicitationAllowed: () => this.elicitationAllowed,
         ultracodeDefault: () => this.ultracodeByDefault,
+        resolveCustomAgent: (id) => this.resolveCustomAgentBy(id),
         onWarning: this.onWarning,
       });
       this.sessions.set(row.id, managed);

@@ -36,6 +36,7 @@
  * ────────────────────────────────────────────────────────────────────────── */
 
 import type { AgentId } from "./acp/agents.js";
+import type { AgentRouting } from "./acp/systems.js";
 import type { AgentConfigOption } from "./events.js";
 import type { SessionRuntime } from "./runtime/types.js";
 import { isAuthRequiredMessage, Session } from "./session.js";
@@ -121,7 +122,7 @@ const MODEL_NAMES_IN_REFUSAL = 8;
  * one agent's controls and none of the other's. The same holds for the model.
  */
 function modelOptionOf(session: Session): AgentConfigOption | null {
-  return session.agentConfig.options.find((one) => one.category === "model") ?? null;
+  return session.modelOption;
 }
 
 /**
@@ -180,6 +181,36 @@ export interface AgentModelChoice {
   group: string | null;
 }
 
+/**
+ * Everything one spawn can be asked about an agent, answered together.
+ *
+ * ⚠ **One trip, because the trip is the cost.** Reading either half means a node
+ * subprocess plus an ACP handshake plus `session/new` — see {@link
+ * AgentAskRuns.capabilities} — so splitting them into two methods would have
+ * doubled the only expensive thing here to answer two questions the same screen
+ * asks at the same moment.
+ */
+export interface AgentCapabilities {
+  models: AgentModelChoice[];
+  /** `null` where this agent cannot be pointed at another system at all. */
+  routing: AgentRouting | null;
+}
+
+/**
+ * The one thing `server.ts` asks of this file.
+ *
+ * ⚠ **A port rather than the class, for `AgentCredentialStore`'s reason one
+ * directory over.** `GET /agents/capabilities` and the compatibility check on
+ * `POST /custom-agents` both need an agent spawned and read; nothing else about
+ * `AgentAskRuns` — its prompt budget, its two-slot ceiling, its shutdown — is
+ * theirs to know. Narrowing it is also what makes both routes drivable with no
+ * agent on the machine running the driver: a stub satisfies this in four lines,
+ * where standing in for the class would mean a subprocess.
+ */
+export interface AgentCapabilityReader {
+  capabilities(agent: AgentId, signal?: AbortSignal): Promise<AgentCapabilities>;
+}
+
 export interface AgentAskAnswer {
   text: string;
   agent: AgentId;
@@ -222,7 +253,19 @@ export class AgentAskRuns {
    * fact about a CLI on this disk right now, and a stale row read off a restart
    * would be worse than the spawn it saved. See {@link MODELS_TTL_MS}.
    */
-  private readonly models_ = new Map<AgentId, { at: number; choices: AgentModelChoice[] }>();
+  private readonly models_ = new Map<AgentId, { at: number; answer: AgentCapabilities }>();
+  /**
+   * The read already running for this harness, so N callers cost one spawn.
+   *
+   * ⚠ **A TTL cache without this collapses nothing on a cold start**, which is
+   * the moment it matters: two clients opening the builder together, or one whose
+   * `GET /agents/capabilities` was replayed by the transport, each spawn their own
+   * agent for the same harness — and against `MAX_CONCURRENT_ASKS` of two, the
+   * loser is refused `model_busy` and draws as a permanently disabled row.
+   * `LocalRuntime.loginState` keeps exactly this map beside exactly this TTL, for
+   * exactly this reason.
+   */
+  private readonly capsInFlight = new Map<AgentId, Promise<AgentCapabilities>>();
   private stopped = false;
 
   constructor(private readonly options: AgentAskOptions) {}
@@ -492,8 +535,25 @@ export class AgentAskRuns {
    * nobody on the screen can see.
    */
   async models(agent: AgentId, signal?: AbortSignal): Promise<AgentModelChoice[]> {
+    return (await this.capabilities(agent, signal)).models;
+  }
+
+  /**
+   * {@link models}, plus what this agent will let us do about *which system* it
+   * talks to — off the same spawn, under the same cache and the same slot.
+   */
+  async capabilities(agent: AgentId, signal?: AbortSignal): Promise<AgentCapabilities> {
     const held = this.models_.get(agent);
-    if (held !== undefined && Date.now() - held.at < MODELS_TTL_MS) return held.choices;
+    if (held !== undefined && Date.now() - held.at < MODELS_TTL_MS) return held.answer;
+
+    /*
+     * Joined rather than raced. The signal is deliberately *not* consulted before
+     * this: a caller that has gone must not leave a spawn behind, which is what
+     * `stopIfGone` below is for — but it also must not cancel the answer somebody
+     * else is waiting on, and a run in flight belongs to whoever started it.
+     */
+    const running = this.capsInFlight.get(agent);
+    if (running !== undefined) return running;
 
     /*
      * ⚠ **Checked once here, where {@link ask} checks three times, and the
@@ -507,15 +567,34 @@ export class AgentAskRuns {
      */
     stopIfGone(signal);
 
+    const run = this.readCapabilities(agent);
+    this.capsInFlight.set(agent, run);
+    try {
+      return await run;
+    } finally {
+      this.capsInFlight.delete(agent);
+    }
+  }
+
+  /** {@link capabilities} with the cache and the in-flight collapse taken off. */
+  private async readCapabilities(agent: AgentId): Promise<AgentCapabilities> {
     const session = await this.claim(agent);
     try {
       const option = modelOptionOf(session);
       /*
-       * An agent that publishes no model control is not an error — kimi does not
-       * — and an empty list is the honest answer. The refusal belongs at the point
-       * somebody tries to *use* a model, where there is a value to name.
+       * An agent that publishes no model control is not an error, and an empty
+       * list is the honest answer. The refusal belongs at the point somebody tries
+       * to *use* a model, where there is a value to name.
+       *
+       * ⚠ **This used to say "kimi does not", and that was measured wrong.**
+       * Re-measured 2026-08-26 against the installed kimi 0.29.x: it publishes
+       * four — `kimi-code/kimi-for-coding`, `…-highspeed`, `kimi-code/k3` and
+       * `kimi-code/k3-256k` — and answers `null` to `providers/list`, which is the
+       * half that was right. The two are independent questions and the stale
+       * sentence folded them, which cost a client-side refusal that told people
+       * kimi "lists this model under another name" while claiming it listed none.
        */
-      const choices =
+      const models =
         option === null
           ? []
           : option.choices.map((one) => ({
@@ -524,8 +603,12 @@ export class AgentAskRuns {
               description: one.description,
               group: one.group,
             }));
-      this.models_.set(agent, { at: Date.now(), choices });
-      return choices;
+      // `routing` answers `null` on every failure rather than throwing — an
+      // agent that cannot be re-pointed is two of the three, not a broken one —
+      // so the model list is never lost to a question about providers.
+      const answer: AgentCapabilities = { models, routing: await session.routing() };
+      this.models_.set(agent, { at: Date.now(), answer });
+      return answer;
     } finally {
       await this.release(session);
     }

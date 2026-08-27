@@ -1,5 +1,5 @@
 import { machineId, type MachineId } from "./ids";
-import { isAgentId, type AgentId, type Me } from "./wire";
+import type { Me } from "./wire";
 
 /**
  * Which settings screen a URL names, and who may see it.
@@ -43,10 +43,19 @@ export type SettingsGroup = "server";
  */
 export interface SettingsRoute {
   section: SettingsSection | null;
-  /** The machine whose agents or plugins are being configured, if the URL names one. */
+  /** The machine whose systems or plugins are being configured, if the URL names one. */
   machineId: MachineId | null;
   /**
-   * The agent being configured, if the URL names one. Never without a machine.
+   * The **system** being configured, if the URL names one. Never without a machine.
+   *
+   * ⚠ **It was `agent`, and the rename is the whole point rather than tidying.**
+   * What this segment addresses is a screen you sign in on, and what you sign in
+   * to is Anthropic, OpenAI or Moonshot — not `claude`, `codex` or `kimi`. The
+   * two were indistinguishable while each harness spoke only to its own vendor;
+   * they came apart the moment one could be pointed at another system, and a
+   * screen still called "Agents" would be asking which CLI you have an account
+   * with. `…/agents/:agent` still parses, to the machine, which is this
+   * function's standing "fall up to the nearest real screen".
    *
    * ⚠ **There is no `plugin` beside it any more, and its absence is the
    * decision.** A plugin used to have a leaf here — `…/plugins/:pluginId` — which
@@ -61,7 +70,7 @@ export interface SettingsRoute {
    * the same reason `…/agents` does: an address that used to work should land on
    * the nearest real screen rather than on nothing.
    */
-  agent: AgentId | null;
+  system: string | null;
 }
 
 export interface SectionSpec {
@@ -108,7 +117,7 @@ export const SECTION_SPECS: readonly SectionSpec[] = [
     // Not "Add a machine, …": adding one is not always on offer, and a nav blurb
     // promising it on an instance that hands out none is the same false claim
     // the intro on that screen had to stop making.
-    blurb: "Your machines, their agents, and which are reachable.",
+    blurb: "Your machines, the systems they sign in to, and which are reachable.",
     adminOnly: false,
     group: null,
   },
@@ -187,14 +196,22 @@ export function parseSettingsSection(segment: string | undefined): SettingsSecti
  * 404, which is `parseSettingsSection`'s posture applied one level down:
  *
  *   - a machine id under any section but `machines` is ignored;
- *   - `…/agents/<not an agent>` drops the agent and shows the chooser, because
- *     an unknown id is a stale link and the chooser is where you pick again;
- *   - anything between the machine and `agents` that is not the literal
- *     `agents` drops to the machine's own screen.
+ *   - `…/systems/<not a system>` drops it and shows the chooser, because an
+ *     unknown id is a stale link and the chooser is where you pick again;
+ *   - anything between the machine and `systems` that is not the literal
+ *     `systems` drops to the machine's own screen — `…/agents/:agent`, the
+ *     address this replaced, is exactly that case and is deliberately **not**
+ *     redirected, for the reason `/settings/agents` is not: a redirect would
+ *     have to guess, and the screen it falls to is one tap from the answer.
  *
- * The agent id is validated against `AGENT_IDS`, not merely decoded, because it
- * is handed straight to `PUT /agent-auth/:agent` — the daemon refuses an unknown
- * one, so an unvalidated id would draw a screen whose every control 400s.
+ * ⚠ **The system id is *not* validated against a list here, and that is a change
+ * from the agent segment it replaces.** An agent was one of three compiled into
+ * this client; systems are a table on the daemon, and a machine running a newer
+ * build may know one this client does not. Validating would make that system
+ * unreachable from a client that is merely older — `compatibility.md`'s rule 2,
+ * where an unknown value degrades rather than throws. What refuses an id that is
+ * genuinely wrong is the daemon, by name. It is still *bounded*: a segment longer
+ * than any real id is dropped, so what reaches a request path cannot be an essay.
  */
 export function parseSettingsRoute(
   segments: readonly (string | undefined)[],
@@ -202,7 +219,7 @@ export function parseSettingsRoute(
 ): SettingsRoute {
   const section = parseSettingsSection(segments[0]);
   if (section !== "machines" || segments[1] === undefined) {
-    return { section, machineId: null, agent: null };
+    return { section, machineId: null, system: null };
   }
   const machine = machineId(decode(segments[1]));
   /*
@@ -218,12 +235,25 @@ export function parseSettingsRoute(
    * one tap from the plugin anyway — every row on it is a link to exactly that
    * page.
    */
-  if (segments[2] !== "agents" || segments[3] === undefined) {
-    return { section, machineId: machine, agent: null };
+  if (segments[2] !== "systems" || segments[3] === undefined) {
+    return { section, machineId: machine, system: null };
   }
   const wanted = decode(segments[3]);
-  return { section, machineId: machine, agent: isAgentId(wanted) ? wanted : null };
+  return {
+    section,
+    machineId: machine,
+    system: wanted.length > 0 && wanted.length <= MAX_SYSTEM_ID_CHARS ? wanted : null,
+  };
 }
+
+/**
+ * The longest a system id in a URL may be before the segment is ignored.
+ *
+ * Not a check on *which* systems exist — see `parseSettingsRoute` — but a bound
+ * on what this client will carry into a request path at all. Real ids are one
+ * short word.
+ */
+const MAX_SYSTEM_ID_CHARS = 64;
 
 /**
  * The path for a settings screen.
@@ -237,7 +267,7 @@ export function parseSettingsRoute(
 export function settingsPath(
   section?: SettingsSection,
   machine?: MachineId,
-  agent?: AgentId,
+  system?: string,
 ): string {
   if (section === undefined) return "/settings";
   if (machine === undefined) return `/settings/${section}`;
@@ -249,7 +279,7 @@ export function settingsPath(
    * it; this one line is what opens the machine screen. Q3.432.
    */
   const base = `/settings/${section}/${encodeURIComponent(machine)}`;
-  return agent === undefined ? base : `${base}/agents/${encodeURIComponent(agent)}`;
+  return system === undefined ? base : `${base}/systems/${encodeURIComponent(system)}`;
 }
 
 /**
@@ -279,10 +309,10 @@ export function settingsPath(
 export function settingsUp(route: SettingsRoute): { path: string; withinNav: boolean } | null {
   if (route.section === null) return null;
   if (route.section === "machines" && route.machineId !== null) {
-    // One agent goes up to its machine — the list is drawn on that screen, so
+    // One system goes up to its machine — the list is drawn on that screen, so
     // there is no list depth in between. `false` because it is not a row the nav
     // draws, which makes the chevron the only way back at every width.
-    if (route.agent !== null) {
+    if (route.system !== null) {
       return { path: settingsPath("machines", route.machineId), withinNav: false };
     }
     return { path: settingsPath("machines"), withinNav: false };

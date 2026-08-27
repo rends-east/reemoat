@@ -15,9 +15,35 @@
 export type AgentStance = "not_installed" | "signed_in" | "signed_out" | "unchecked";
 export type TokenBlock = "hidden" | "stored_only" | "editable";
 
-const AGENT_LABEL: Record<string, string> = { claude: "Claude", kimi: "Kimi", codex: "Codex" };
+/**
+ * What each harness is called, in its own vendor's words.
+ *
+ * ⚠ **The *program*, not the company and not the model.** It read "Claude", "Kimi"
+ * and "Codex" for several releases and the first of those was simply wrong:
+ * Anthropic ships a program called **Claude Code**, and "Claude" is the model
+ * family it happens to run — which is exactly the confusion this screen exists to
+ * remove, since Claude Code can be pointed at Kimi K2 and a row reading "Claude"
+ * beside a model reading "Kimi K2 Thinking" says the opposite of what is true.
+ *
+ * ⚠ **None of them may end in "CLI", and the check that catches it is this file's
+ * own.** `webcheck` sweeps every sentence this module can produce against the
+ * vocabulary the deleted wall was made of, and `CLI` is in it — a reader who has
+ * never seen an environment variable must not meet an acronym either. Which is
+ * lucky, because each vendor's own product name is the shorter one anyway:
+ * **Claude Code**, **Kimi Code** (`~/.kimi-code`, and the `kimi-code/…` model ids
+ * it publishes), **Codex**.
+ *
+ * Still never the package: "Codex", not "Codex (codex-acp)". The adapter is an
+ * implementation detail of how this daemon speaks to the program, and the
+ * daemon's own `displayName` carries it for whoever is reading a log.
+ */
+const AGENT_LABEL: Record<string, string> = {
+  claude: "Claude Code",
+  kimi: "Kimi Code",
+  codex: "Codex",
+};
 
-/** "Codex", never "Codex (codex-acp)" — the package name is the wall in miniature. */
+/** The program's own name. An id this build has never heard of is drawn as itself. */
 export function agentLabel(id: string): string {
   return AGENT_LABEL[id] ?? id;
 }

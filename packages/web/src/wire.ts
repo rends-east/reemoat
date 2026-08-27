@@ -864,6 +864,20 @@ export interface ElicitationResolvedEvent {
 export interface SessionSnapshot {
   id: string;
   agent: AgentId;
+  /**
+   * The assembled agent this session was started as, or `null` for a bare
+   * harness.
+   *
+   * ⚠ **An id and nothing else** — not the name, not the system, not the model.
+   * Those belong to the preset, which can be edited, and a copy riding a
+   * snapshot fanned out per client on every output token is a copy that goes
+   * stale exactly where it would be read. This is the join key into
+   * `GET /custom-agents`, which the strip already fetches.
+   *
+   * Optional for this file's usual reason: a daemon older than this feature
+   * sends nothing, and `undefined` reads the same as `null` at every call site.
+   */
+  customAgent?: string | null;
   cwd: string;
   workspace: SessionWorkspace;
   status: SessionStatus;
@@ -1416,6 +1430,73 @@ export interface AgentAuthListing {
    */
   loginSupported: boolean;
   agents: AgentAuthInfo[];
+}
+
+/**
+ * A *system* — who serves a model and who you sign in to.
+ *
+ * ⚠ **The distinction this whole screen is built on: a system is not a harness.**
+ * A harness (`AgentId`) is the CLI that runs the loop; a system is where its
+ * traffic goes. They were the same thing while each of the three agents spoke
+ * only to its own vendor, which is why the settings screen used to say "Agents"
+ * and then ask you to sign in to Anthropic.
+ */
+export interface SystemInfo {
+  id: string;
+  displayName: string;
+  /** The wire shape it speaks. Compared against what a harness accepts. */
+  apiType: string;
+  /**
+   * Whether a foreign harness can be pointed at it at all.
+   *
+   * Optional for this file's usual reason — an older daemon does not send it —
+   * and the fallback is "assume not", which greys a cross-system pairing rather
+   * than offering one that would fail at the start.
+   */
+  routable?: boolean;
+  /** The harness that reaches it without being routed, or `null`. */
+  nativeHarness: AgentId | null;
+  /** Whose CLI drives its sign-in wizard, or `null` for a key-only system. */
+  loginVia: AgentId | null;
+  /**
+   * What to offer when this system is *routed* into a foreign harness.
+   *
+   * Empty for a natively-reached one, where the agent publishes its own list —
+   * which is not a gap. See `AgentCapabilities.models`.
+   */
+  models: { id: string; name: string }[];
+  keySet: boolean;
+  keyUpdatedAt: number | null;
+}
+
+/**
+ * What a harness will let us do about which system it talks to.
+ *
+ * `null` where it will not let us do anything, which is kimi. ⚠ **`providerId`
+ * is the agent's own and differs between them** — claude says `main`, codex says
+ * `custom-gateway` — so nothing here may be written down client-side either.
+ */
+export interface AgentRouting {
+  providerId: string;
+  supported: string[];
+}
+
+/** One harness's answer to what it offers and what it accepts. */
+export interface AgentCapabilities {
+  models: { id: string; name: string; description: string | null; group: string | null }[];
+  routing: AgentRouting | null;
+  /** Why this harness could not be asked, or `null`. Never throws the picker away. */
+  error: string | null;
+}
+
+/** A harness, a system and a model, under a name somebody chose. */
+export interface CustomAgent {
+  id: string;
+  name: string;
+  harness: AgentId;
+  system: string;
+  model: string;
+  createdAt: number;
 }
 
 export interface LoginRunView {

@@ -5,7 +5,8 @@ paths:
   - packages/web/src/ui/login.ts
   - packages/web/src/ui/agentCard.ts
   - packages/web/src/ui/settings/AgentsPanel.tsx
-  - packages/web/src/ui/settings/MachineAgentsSection.tsx
+  - packages/web/src/ui/settings/MachineSystemsSection.tsx
+  - packages/web/src/ui/settings/SystemsPanel.tsx
 ---
 
 ## Logging an agent in

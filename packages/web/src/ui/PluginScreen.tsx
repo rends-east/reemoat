@@ -6,7 +6,6 @@ import { store } from "../store";
 import type { PluginOpen, PluginView as PluginViewShape } from "../wire";
 import { Empty, Spinner } from "./bits";
 import { PluginView } from "./PluginView";
-import { Sheet } from "./Sheet";
 import { toast } from "./Toast";
 
 /**
@@ -24,7 +23,16 @@ import { toast } from "./Toast";
  * to guess from. Pressing something replaces the view with what came back, which
  * is why an action may return a whole view rather than only a sentence.
  */
-export function PluginScreen({ machineId, pluginId }: { machineId: MachineId; pluginId: string }): ReactNode {
+export function PluginScreen({
+  machineId,
+  pluginId,
+  onTitle,
+}: {
+  machineId: MachineId;
+  pluginId: string;
+  /** What the panel's head should say. See the effect at the foot of this file. */
+  onTitle: (title: string) => void;
+}): ReactNode {
   const [view, setView] = useState<PluginViewShape | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -245,17 +253,25 @@ export function PluginScreen({ machineId, pluginId }: { machineId: MachineId; pl
     [machineId, pluginId],
   );
 
-  return (
-    <Sheet title={view?.title ?? pluginId}>
-      {error !== null ? (
-        <Empty>{error}</Empty>
-      ) : view === null ? (
-        <div className="flex justify-center py-8">
-          <Spinner />
-        </div>
-      ) : (
-        <PluginView view={view} busy={busy} onAction={act} onOpen={go} />
-      )}
-    </Sheet>
+  /*
+   * ⚠ **The title is reported up rather than rendered here**, because the panel is
+   * one element for every route-backed pop-up now and its head belongs to
+   * `OverlaySheet`. This is the only pop-up whose name is not a constant — it is
+   * whatever the plugin called its view — so it is the only one that has to say
+   * so. One frame late, which costs nothing: the name arrives with the view and
+   * the head shows the plugin's id until it does. Q3.484.
+   */
+  useEffect(() => {
+    onTitle(view?.title ?? pluginId);
+  }, [onTitle, view?.title, pluginId]);
+
+  return error !== null ? (
+    <Empty>{error}</Empty>
+  ) : view === null ? (
+    <div className="flex justify-center py-8">
+      <Spinner />
+    </div>
+  ) : (
+    <PluginView view={view} busy={busy} onAction={act} onOpen={go} />
   );
 }

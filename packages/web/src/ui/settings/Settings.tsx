@@ -12,9 +12,8 @@ import type { AppState } from "../../store";
 import { ChevronLeft } from "lucide-react";
 import { navigate } from "../../router";
 import { IconButton } from "../bits";
-import { Sheet } from "../Sheet";
 import { AccountSection } from "./AccountSection";
-import { MachineAgentsSection } from "./MachineAgentsSection";
+import { MachineSystemsSection } from "./MachineSystemsSection";
 import { MachineSection } from "./MachineSection";
 import { MachinesSection } from "./MachinesSection";
 import { SettingsNav } from "./SettingsNav";
@@ -83,12 +82,16 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
 
   return (
     /*
-     * The head names the pop-up and nothing else — see `Sheet`'s own `<h1>`, which
-     * spans the rail as well as the pane. The screen's name is `paneTitle`, drawn
-     * below in the box it is about. Q3.427.
+     * ⚠ **No `<Sheet>` here.** The panel is one element for every route-backed
+     * pop-up, owned by `OverlaySheet` in `App.tsx`, so that moving between two of
+     * them dissolves the contents instead of unmounting a panel and sliding a new
+     * one up from the edge. This component is the *body*. Q3.484.
+     *
+     * The head still names the pop-up and nothing else — `Sheet`'s `<h1>` spans
+     * the rail as well as the pane. The screen's name is `paneTitle`, drawn below
+     * in the box it is about. Q3.427.
      */
-    <Sheet title="Settings">
-      <div className="-mx-4 -my-5 flex min-h-0 flex-1 sm:-mx-5">
+    <div className="-mx-4 -my-5 flex min-h-0 flex-1 sm:-mx-5">
         {/*
          * The section list, beside the section. Hidden below `sm`, where the
          * section takes the whole body and the index renders the list into it —
@@ -182,23 +185,26 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
               </div>
             </>
           ) : drilled && route.machineId !== null ? (
-            /* The machine's own screen, and one level in, its agents. Both parse
-               to the same `machineId`; the segment after it is what tells them
-               apart. There is no plugin leaf here any more — a plugin's settings
-               are on the plugin's page under `/plugins`, and the list on the
-               machine screen links to it. */
-            route.agent === null ? (
+            /* The machine's own screen, and one level in, its systems. Both
+               parse to the same `machineId`; the segment after it is what tells
+               them apart. There is no plugin leaf here any more — a plugin's
+               settings are on the plugin's page under `/plugins`, and the list on
+               the machine screen links to it. */
+            route.system === null ? (
               <MachineSection state={state} machineId={route.machineId} />
             ) : (
-              <MachineAgentsSection state={state} machineId={route.machineId} agent={route.agent} />
+              <MachineSystemsSection
+                state={state}
+                machineId={route.machineId}
+                system={route.system}
+              />
             )
           ) : (
             <SectionBody state={state} section={active} />
           )}
-          </div>
         </div>
       </div>
-    </Sheet>
+    </div>
   );
 }
 

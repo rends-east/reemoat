@@ -1000,6 +1000,16 @@ export interface PersistedSession {
    */
   ultracode: boolean | null;
   /**
+   * The assembled agent this session was started as, or `null` for one started
+   * on a bare harness.
+   *
+   * A *reference* into `custom_agents` rather than a copy of what it said, so
+   * editing a preset changes what its sessions resume as. `agent` beside it
+   * still holds the harness, which is why nothing about a restart, a sign-out or
+   * a relaunch has to read this at all.
+   */
+  customAgent: string | null;
+  /**
    * Why the daemon permanently stopped trying to bring this session back, if it
    * has — and `null` for every session where trying again is still worthwhile.
    *

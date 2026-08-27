@@ -984,6 +984,29 @@ kbd {
 }
 
 /*
+ * **And two different pop-ups swap in place.**
+ *
+ * There is one `[data-sheet-panel]` for every route-backed pop-up (`OverlaySheet`
+ * in `App.tsx`), so Settings → Plugins changes what is *inside* a panel that does
+ * not move. Both named groups therefore have identical old and new boxes, and the
+ * default cross-fade on each is exactly the movement: the head dissolves from
+ * "Settings" to "Plugins" and the body with it. Nothing is declared here for them.
+ *
+ * What has to be declared is the *absence* below: the screen behind the scrim was
+ * there all along and is not arriving, which is the same pin `section-*` and
+ * `sheet-close` take. Without it the root pair slides, because
+ * `:root[data-nav]::view-transition-old(root)` has no default of `none`.
+ *
+ * Before this, the two pop-ups were two panels: one unmounted, the other mounted
+ * and replayed `animate-sheet` from off-screen, with a frame showing neither.
+ * Q3.484.
+ */
+:root[data-nav="sheet-swap"]::view-transition-old(root),
+:root[data-nav="sheet-swap"]::view-transition-new(root) {
+  animation: none;
+}
+
+/*
  * At `sm` and above a sheet is a centred card with the section list beside the
  * section, so neither slide describes what happens: the pane changes next to a
  * list that stays, and the card has no edge to have come from. `rise` is what

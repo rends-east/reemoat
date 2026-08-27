@@ -17,14 +17,20 @@ import { settingsUp } from "./settings";
  */
 
 /**
- * The five things a navigation can be, as the value `router.ts` writes onto the
+ * The six things a navigation can be, as the value `router.ts` writes onto the
  * document and `index.css` keys every rule off.
  *
  * One attribute rather than a direction plus a scope, because the pair is never
  * free: there is no "forward, sheet-close", and a shape that can express one is a
  * shape somebody has to check for. What each moves is in `index.css`.
  */
-export type NavMove = "push" | "pop" | "section-push" | "section-pop" | "sheet-close";
+export type NavMove =
+  | "push"
+  | "pop"
+  | "section-push"
+  | "section-pop"
+  | "sheet-close"
+  | "sheet-swap";
 
 /**
  * How deep a screen sits.
@@ -69,8 +75,28 @@ export function depthOf(route: Route): number {
      */
     case "new":
       return 1;
+    /*
+     * Deeper than `new`, because that is where it is opened from and where its ◀
+     * goes back to — and one deeper again for a choice being made, which is the
+     * same list-then-leaf shape a machine and its systems have inside settings.
+     *
+     * ⚠ **A picker is a depth rather than a menu, and the reason is the phone.**
+     * `Dropdown` is right for a handful of options anchored to their control;
+     * these two lists are unbounded (every model of every system this daemon can
+     * reach) and carry a search box and a filter, which is a *screen*. Making it a
+     * route is what gives it the horizontal slide, Android's Back, and a ◀ that
+     * cannot disagree with either.
+     *
+     * **Editing an assembled agent is the same depth as assembling one**, and the
+     * `edit` segment does not move it: it is the same screen with its rows already
+     * filled in, reached from the same place and left to the same place. A preset
+     * changes what the screen is *about*, never where it sits — and a depth that
+     * disagreed would slide a push into something no deeper than what opened it.
+     */
+    case "agent":
+      return route.step === null ? 2 : 3;
     case "settings":
-      if (route.agent !== null) return 4;
+      if (route.system !== null) return 4;
       if (route.machineId !== null) return 3;
       return route.section !== null ? 2 : 1;
     /*
@@ -104,9 +130,42 @@ export function depthOf(route: Route): number {
  * pop-up that either forgets what it was drawn over or records one while being a
  * screen.
  */
+/**
+ * **Which** pop-up a route belongs to, or `null` for a screen.
+ *
+ * The route-shaped member of the `isSheet`/`isOverlayPath`/`overlayKind` family:
+ * those answer *whether*, this answers *which*, from a parsed route rather than
+ * from a string.
+ *
+ * ⚠ **`new` and `agent` are one pop-up**, which is the whole of why moving between
+ * them slides a pane rather than replacing a panel — see `StartSheet`. `plugin`
+ * and `plugins` are two, sharing four letters and nothing else.
+ */
+export function sheetKind(route: Route): string | null {
+  switch (route.name) {
+    case "settings":
+      return "settings";
+    case "new":
+    case "agent":
+      return "new";
+    case "plugins":
+      return "plugins";
+    case "plugin":
+      return "plugin";
+    case "home":
+    case "gate":
+    case "session":
+      return null;
+  }
+}
+
 export function isSheet(route: Route): boolean {
   return (
-    route.name === "settings" || route.name === "new" || route.name === "plugin" || route.name === "plugins"
+    route.name === "settings" ||
+    route.name === "new" ||
+    route.name === "agent" ||
+    route.name === "plugin" ||
+    route.name === "plugins"
   );
 }
 
@@ -138,6 +197,21 @@ export function navMove(from: Route, to: Route): NavMove | null {
   // Opening is CSS's, per the docblock above.
   if (!leaving && arriving) return null;
 
+  /*
+   * ⚠ **Two *different* pop-ups, and this arm has to come before the depths.**
+   * A depth is a position inside one stack and means nothing across two: Settings
+   * → a section is 1 → 2, Plugins → a tab is 1, so settings-account → plugins
+   * compared 2 against 1 and answered `section-pop` — sliding one pop-up's pane
+   * rightwards into another's, on top of a panel that was being replaced anyway.
+   * Reported as the pop-up vanishing for a frame and a different one appearing.
+   *
+   * What it is instead is a **swap**: the panel holds still and its contents
+   * dissolve. That works because the panel is now one element for every
+   * route-backed pop-up — see `OverlaySheet` — so there is nothing to remount and
+   * the two groups already share a box. `index.css` only has to pin the root.
+   */
+  if (leaving && arriving && sheetKind(from) !== sheetKind(to)) return "sheet-swap";
+
   const here = depthOf(from);
   const there = depthOf(to);
   if (here === there) return null;
@@ -168,6 +242,195 @@ export function navMove(from: Route, to: Route): NavMove | null {
  * altogether — which in Telegram means closing the mini app from a conversation,
  * i.e. exactly the thing this exists to stop.
  */
+/**
+ * `/new`, `/new/:machineId`, `/new/:machineId/:cwd`.
+ *
+ * ⚠ **Defined here rather than in `router.ts`, which is where its caller lives.**
+ * `upFrom` needs it — the way back out of the agent builder is the New session
+ * sheet it was opened from — and `nav.ts` may not import `router.ts`, which reads
+ * `window.location` in its module body. `router.ts` re-exports this as `newPath`,
+ * so there is one encoding of the rule rather than two that drift.
+ *
+ * A folder without a machine is not expressible and should not be: the picker it
+ * seeds is a listing of *that daemon's* filesystem.
+ */
+export function newSessionPath(machine?: string, cwd?: string): string {
+  if (machine === undefined) return "/new";
+  const base = `/new/${encodeURIComponent(machine)}`;
+  return cwd === undefined ? base : `${base}/${encodeURIComponent(cwd)}`;
+}
+
+/**
+ * Which of the assembly flow's screens is on, or `null` for the builder itself.
+ *
+ * Two, and they are the two questions the builder asks — which model, which
+ * harness. Named rather than numbered so the address says what it is showing.
+ *
+ * ⚠ **`llm` is an address, and it is no longer a word anybody reads.** The head
+ * over that screen says "Choose model" — {@link sheetTitle} carries the argument
+ * — while the segment stays exactly as it was: it is what every link already
+ * written down is made of, and the rule above is about what the address *shows*,
+ * which "llm" still says truthfully. Only one of the two is read by a person, so
+ * only one of them had to move.
+ */
+export type AgentStep = "llm" | "harness";
+
+const AGENT_STEPS: readonly AgentStep[] = ["llm", "harness"];
+
+export function isAgentStep(value: string): value is AgentStep {
+  return (AGENT_STEPS as readonly string[]).includes(value);
+}
+
+/**
+ * What the one panel's head says, or `null` where only the body knows.
+ *
+ * ⚠ **Two different conventions, and which applies is a fact about the pop-up's
+ * *shape* rather than a preference.** A head that spans a section rail can only
+ * honestly carry the pop-up's own name — `SHEET_HEAD` is a child of the panel, so
+ * above `sm` it sits over Settings' 224px list *and* the pane beside it — and
+ * those pop-ups draw the screen's name, with their ◀, inside the pane (Q3.427,
+ * Q3.432). A pop-up that is one column at every width has no such problem, so its
+ * head names the **screen** and the ◀ goes in the head beside it (Q3.473).
+ *
+ * `null` is the plugin screen, and only that: its name is whatever the plugin
+ * called its view, which arrives with the view. It reports it up. Q3.484.
+ */
+export function sheetTitle(route: Route): string | null {
+  switch (route.name) {
+    case "settings":
+      return "Settings";
+    case "plugins":
+      return "Plugins";
+    case "plugin":
+      return null;
+    case "new":
+      return "New session";
+    case "agent":
+      switch (route.step) {
+        case "llm":
+          /*
+           * ⚠ **"Choose model", over a route segment that still reads `llm`.**
+           * This was the one string in the flow that used an acronym for the
+           * thing beside it: every refusal on the same screen already says
+           * *model* — `choiceRefusal` and `keyMissing` both do — and
+           * `defaultAgentName` names a preset after the model it runs.
+           * `agentCard.ts` states the standing rule and why it is swept at all:
+           * a reader who has never seen an environment variable must not meet an
+           * acronym either. The sweep could not have caught this one, because it
+           * is a closure over `hostable`'s return values and reads no `.tsx` and
+           * not this file — which is the argument for the rule being written
+           * down here rather than trusted to the driver.
+           *
+           * The **segment** is deliberately untouched. It is an address: a link
+           * written down last week has to keep opening this screen, and
+           * `AgentStep` carries the rule that keeps the two allowed to differ.
+           */
+          return "Choose model";
+        case "harness":
+          return "Choose harness";
+        case null:
+          /*
+           * Not "New agent": the screen's first line *is* the agent's name and an
+           * unnamed one is called "New agent", so the head said the same two words
+           * 40px above the thing they were naming — and editing the name left the
+           * head claiming the old one. Q3.476.
+           *
+           * The same screen over a preset says **"Edit agent"**, which is the one
+           * thing on it that says an existing agent is about to be overwritten
+           * rather than a second one added — the fields are identical either way,
+           * the button is identical either way, and the name in the first line is
+           * somebody's own and reads exactly like a name they just typed.
+           */
+          return route.preset === null ? "Configure agent" : "Edit agent";
+      }
+    // eslint-disable-next-line no-fallthrough
+    case "home":
+    case "gate":
+    case "session":
+      return null;
+  }
+}
+
+/**
+ * Whether the panel's **head** draws the ◀, and what it is named by.
+ *
+ * `null` where it must not: the pop-ups with a section rail draw their own in the
+ * pane, and a second chevron in the head would be two controls for one act. So
+ * this answers for exactly one screen today — a choice being made inside the New
+ * session pop-up — and says so by *shape* (`sheetTitle` names the screen there)
+ * rather than by listing route names twice.
+ *
+ * The label is never painted; it is what the control is *named* by, and it names
+ * the destination rather than saying "Back" — `Header`'s standing rule for this
+ * control and the whole difference between it and the history button it must
+ * never become.
+ */
+export function sheetUpLabel(route: Route): string | null {
+  if (route.name !== "agent") return null;
+  if (route.step === null) return "New session";
+  // Both strings are the destination's own head, read off `sheetTitle` above
+  // rather than restated: a ◀ named "Configure agent" pointing at a screen
+  // titled "Edit agent" is the control naming somewhere you are not going.
+  return route.preset === null ? "Configure agent" : "Edit agent";
+}
+
+/**
+ * `/agent/:machineId`, `/agent/:machineId/:step`,
+ * `/agent/:machineId/edit/:presetId`, and any of those with the folder on the
+ * end.
+ *
+ * ⚠ **The step goes *before* the folder, and a folder can never be mistaken for
+ * one.** A `cwd` is an absolute POSIX path from the daemon's own listing — it
+ * always begins with `/`, which `encodeURIComponent` writes as `%2F` — so no
+ * folder segment can ever decode to `llm` or `harness`. That is what lets both
+ * be optional in one path without a placeholder segment standing in for the one
+ * that is absent.
+ *
+ * ⚠ **Editing an assembled agent is a literal `edit` marker, and deliberately
+ * not the shape of the id that follows it.** A preset's id is `ca_` and eight hex
+ * characters, minted by `randomBytes(4)` inside the daemon's own `POST
+ * /custom-agents` — so a client that recognised it by *shape* would be a second,
+ * silent copy of the daemon's id generator, and the day that generator changes
+ * width every address already written down stops naming an edit and starts
+ * naming a folder. The marker joins the argument above rather than weakening it:
+ * `edit` is not a step and is read at a position no step is read at, and it can
+ * never be a folder, because a folder always arrives as `%2F…`.
+ *
+ * And what it does when it cannot be read is the direction `compatibility.md`'s
+ * rule 2 asks for: an address this build cannot make sense of parses to
+ * `preset: null`, which is the screen that assembles a *new* agent — the arm with
+ * none of somebody else's work on it to overwrite. Every address written before
+ * the marker existed lands there too, unchanged.
+ *
+ * Here rather than in `router.ts` for {@link newSessionPath}'s reason: `upFrom`
+ * needs it, and `nav.ts` may not import a module that reads `window.location`.
+ */
+export function agentBuilderPath(
+  machine: string,
+  cwd?: string | null,
+  step: AgentStep | null = null,
+  preset: string | null = null,
+): string {
+  const forMachine = `/agent/${encodeURIComponent(machine)}`;
+  const base = preset === null ? forMachine : `${forMachine}/edit/${encodeURIComponent(preset)}`;
+  const stepped = step === null ? base : `${base}/${step}`;
+  return cwd === undefined || cwd === null ? stepped : `${stepped}/${encodeURIComponent(cwd)}`;
+}
+
+/**
+ * The same address with the preset named — `/agent/:machineId/edit/:presetId`.
+ *
+ * A second name rather than a fourth argument at every call site: an edit is
+ * opened at the builder and never at a step, so every caller would be writing
+ * `agentBuilderPath(m, cwd, null, id)` and passing `null` through the middle of
+ * it. One encoding of the rule, two ways of asking for it — {@link upFrom} keeps
+ * the four-argument form, because it is rebuilding an address it was handed and
+ * is the one place a step and a preset are both in hand.
+ */
+export function agentEditPath(machine: string, preset: string, cwd?: string | null): string {
+  return agentBuilderPath(machine, cwd, null, preset);
+}
+
 export function upFrom(route: Route, under: string, origin: string | null = null): string | null {
   switch (route.name) {
     case "home":
@@ -180,6 +443,25 @@ export function upFrom(route: Route, under: string, origin: string | null = null
       // Nothing deeper inside either, so up is out — onto whatever it was opened
       // over, which is what the sheet's own ✕ does.
       return under;
+    /*
+     * One level up is the New session sheet it was opened from, rebuilt from the
+     * route's own segments.
+     *
+     * ⚠ **Not `under`, and that is the whole reason this arm exists.** `under`
+     * carries forward what the *first* pop-up was drawn over, so it would close
+     * the whole stack and lose the folder — the same trap `marketUpFrom` needed
+     * `origin` for. Here the address holds every half — the machine, the folder
+     * and, since editing became an address, the preset — so nothing extra has to
+     * be recorded in `history.state`.
+     */
+    case "agent":
+      return route.step === null
+        ? newSessionPath(route.machineId, route.cwd ?? undefined)
+        : // ⚠ The preset travels back with it, for the reason the folder does:
+          // dropped here, the ◀ out of a picker would land on the *new agent*
+          // screen and the agent being edited would be gone from the address —
+          // the same loss the `cwd` segment exists to prevent one field over.
+          agentBuilderPath(route.machineId, route.cwd, null, route.preset);
     case "settings": {
       // A section walks one level up inside the sheet; the index leaves it. Both
       // are `settingsUp`'s answer, which is what the ◀ and the ✕ already draw.

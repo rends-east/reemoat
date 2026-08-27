@@ -95,6 +95,10 @@ import {
   type FileChange,
 } from "../src/changes.js";
 import { toolCallLineage } from "../src/acp/subagents.js";
+// Type only: every *value* in that module is reached through a dynamic import
+// inside the block that drives it, so each section reads the table rather than a
+// binding somebody could have shadowed at the top of this file.
+import type { SystemId } from "../src/acp/systems.js";
 import { atOrUnder, atOrUnderResolved, containedIn, containedInResolved } from "../src/paths.js";
 import { gitArgs, gitEnv, GitError, hostGit, type GitExec, type GitRun } from "../src/git.js";
 import {
@@ -428,6 +432,7 @@ function rowFor(
     pinned: meta.pinned ?? false,
     // Nobody chose, which is what every row on disk says until somebody does.
     ultracode: null,
+    customAgent: null,
   };
 }
 
@@ -1829,6 +1834,37 @@ process.stdout.write("\nthe database, across a restart\n");
     first.sessions.put(persisted("s_plain"));
     first.credentials.save("claude", "CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01");
     first.credentials.save("kimi", "KIMI_API_KEY", "kimi-key");
+    first.systemCredentials.save("moonshot", "sk-moonshot");
+    first.customAgents.save({
+      id: "ca_abcd1234",
+      name: "Claude Code · K2",
+      harness: "claude",
+      system: "moonshot",
+      model: "kimi-k2-thinking",
+      createdAt: now,
+    });
+    // A session started on it, so the reference survives a restart alongside the
+    // preset it names.
+    first.sessions.put({ ...persisted("s_routed"), customAgent: "ca_abcd1234" });
+    /*
+     * ⚠ **Rows naming things this build cannot resolve, written by hand.** They
+     * are what a database from a build that knew a fourth harness or a fifth
+     * system looks like, and there is no other way to produce one. What is being
+     * driven is that they come back as *nothing* rather than as well-typed values
+     * `resolveAgent` fails on later, with a worktree already made — Q7.31's
+     * precondition, which this work reaches.
+     */
+    first.db.exec(
+      "INSERT INTO custom_agents (id, name, harness, system, model, created_at) " +
+        "VALUES ('ca_future1', 'from tomorrow', 'gemini', 'moonshot', 'x', 1), " +
+        "('ca_future2', 'also', 'claude', 'bedrock-direct', 'x', 1)",
+    );
+    first.db.exec("INSERT INTO system_credentials (system, secret, updated_at) VALUES ('gemini', 's', 1)");
+    // A row of its own rather than rewriting one of the fixtures above: those
+    // are the controls for the title, the pin and the sweep, and a dropped row
+    // would make three unrelated assertions fail for a reason none of them names.
+    first.sessions.put(persisted("s_future"));
+    first.db.exec("UPDATE sessions SET agent = 'gemini' WHERE id = 's_future'");
     first.uploads.insert({
       sessionId: "s_named",
       uploadId: "u_keepme",
@@ -1842,10 +1878,121 @@ process.stdout.write("\nthe database, across a restart\n");
     first.close();
   }
 
-  const second = openStores({ path: dbPath, instanceId: "i_reader" });
+  /*
+   * ⚠ **The drops are *reported* now, and for a release they were silent.** Three
+   * rows below are unreadable on purpose — a session naming a fourth agent, two
+   * presets naming a harness and a system this build lacks, and a key for an
+   * unknown system — and `list()` returning one fewer row is not a symptom
+   * anybody can act on. The session one is the case with teeth: `restore()` walks
+   * `list()`, so a dropped row is never announced and its recorded agent handle
+   * never reaches the only `reap` in `src/`, leaving a process alive after the
+   * daemon that spawned it died. This file's own convention for exactly this
+   * class of fact is `onDegraded`, which the plugin record store already uses.
+   */
+  const degraded: string[] = [];
+  const second = openStores({
+    path: dbPath,
+    instanceId: "i_reader",
+    onDegraded: (detail) => degraded.push(detail),
+  });
   const rows = second.sessions.list();
-  // The assertion that catches a swallowed write: the rows are *there at all*.
-  check("a session written by one daemon is there for the next", rows.map((r) => r.id).sort(), ["s_named", "s_plain"]);
+  const aboutFuture = degraded.filter((one) => one.includes("s_future"));
+  check(
+    "a dropped session says so, with its id and the agent it names",
+    // Deduplicated on the *message*, not counted: `openStores` walks the table
+    // itself before this driver does, so the same row is reported more than once
+    // and the count is an implementation detail. What must hold is that every
+    // report names the agent, which is the half an operator acts on.
+    [aboutFuture.length > 0, aboutFuture.every((one) => one.includes("gemini"))],
+    [true, true],
+  );
+  check(
+    "and says the two things a shorter list cannot",
+    degraded.some((one) => one.includes("s_future") && one.includes("reaped")),
+    true,
+  );
+  /*
+   * The assertion that catches a swallowed write: the rows are *there at all*.
+   *
+   * ⚠ **`s_future` is absent and that is the new half.** It was written above and
+   * then rewritten to name an agent this build does not have, and `fromRow` drops
+   * it rather than casting. The three rows beside it are the positive control — a
+   * reader that dropped everything would pass a check written the other way round.
+   */
+  check("a session written by one daemon is there for the next", rows.map((r) => r.id).sort(), ["s_named", "s_plain", "s_routed"]);
+  check(
+    "a session naming an agent this build does not have is dropped, not cast",
+    rows.some((r) => r.id === "s_future"),
+    false,
+  );
+  check(
+    "an assembled agent's reference survives",
+    rows.find((r) => r.id === "s_routed")?.customAgent,
+    "ca_abcd1234",
+  );
+  check("and a bare harness records none", rows.find((r) => r.id === "s_named")?.customAgent, null);
+
+  check("a system key written by one daemon is readable by the next", second.systemCredentials.get("moonshot"), "sk-moonshot");
+  check("one nobody saved is null", second.systemCredentials.get("anthropic"), null);
+  check(
+    "a key naming a system this build does not know is not listed",
+    second.systemCredentials.list().map((one) => one.system),
+    ["moonshot"],
+  );
+  check(
+    "and it is reported rather than only dropped",
+    degraded.some((one) => one.includes('system "gemini"')),
+    true,
+  );
+  check(
+    "an assembled agent survives whole",
+    second.customAgents.get("ca_abcd1234"),
+    { id: "ca_abcd1234", name: "Claude Code · K2", harness: "claude", system: "moonshot", model: "kimi-k2-thinking", createdAt: now },
+  );
+  check(
+    "and rows naming a harness or a system this build lacks are dropped from the listing",
+    second.customAgents.list().map((one) => one.id),
+    ["ca_abcd1234"],
+  );
+  check("read one at a time, the same", second.customAgents.get("ca_future1"), null);
+  check("both halves of that, not just the harness", second.customAgents.get("ca_future2"), null);
+
+  /*
+   * ⚠ **Saving an assembled agent that is already there is an *upsert*, and only
+   * the real store can say so.** The route section at the foot of this file stands
+   * a `Map` in for `customAgents`, and `Map.set` is an upsert by construction — so
+   * `PATCH /custom-agents/:id` satisfies every route assertion there while
+   * `SqliteCustomAgentStore.save` remains the bare `INSERT` it was written as, and
+   * a real daemon answers the edit `500 internal_error` out of
+   * `SQLITE_CONSTRAINT_PRIMARYKEY`. It was a bare insert for as long as a preset
+   * was write-once, which is exactly why nothing had ever saved the same id twice.
+   *
+   * The `createdAt` handed in is deliberately wrong. `created_at` must be absent
+   * from the `DO UPDATE SET` list, so that the age of a preset cannot move even
+   * when a caller of this port gets it wrong — and the route is such a caller by
+   * design, since it reconstructs the whole row rather than patching columns.
+   */
+  let refusedSecondSave: string | null = null;
+  try {
+    second.customAgents.save({
+      id: "ca_abcd1234",
+      name: "Codex · GPT",
+      harness: "codex",
+      system: "openai",
+      model: "gpt-5-codex",
+      createdAt: 1,
+    });
+  } catch (error) {
+    // Caught rather than thrown: an uncaught throw here takes every assertion
+    // after it down with it, and the message is the answer being looked for.
+    refusedSecondSave = error instanceof Error ? error.message : String(error);
+  }
+  check("saving an assembled agent that is already there does not refuse", refusedSecondSave, null);
+  check(
+    "it replaces the row rather than adding a second, and the age does not move",
+    second.customAgents.list(),
+    [{ id: "ca_abcd1234", name: "Codex · GPT", harness: "codex", system: "openai", model: "gpt-5-codex", createdAt: now }],
+  );
   const named = rows.find((r) => r.id === "s_named");
   // v5's two columns, and the only ones on this table meant to change after
   // creation — so they are the only ones a `DO UPDATE` clause has to carry.
@@ -1945,26 +2092,61 @@ process.stdout.write("\nthe database, across a restart\n");
   check("while a recent session is untouched either way", afterAge.includes("s_plain"), true);
 
   /*
-   * A credential is deleted only when **both** halves are true, and the pairing is
-   * the whole rule.
+   * A pasted credential survives everything `prune()` does, and that is the rule.
    *
-   * Age alone would destroy a working token, since `updated_at` moves only when a
-   * new one is pasted. "Nothing left" alone would destroy the token of somebody
-   * who pasted it *before* their first session, which is precisely the flow
-   * Settings encourages. Together they mean "nothing has run here in a retention
-   * period and there is nothing left", which is the only state where destroying a
-   * recoverable secret is obviously right.
+   * ⚠ **This section used to assert the opposite, and the reversal is Q7.124.**
+   * Both tables had an age-plus-emptiness sweep. It went because `updated_at`
+   * moves only on a paste, so the age half was permanently true of any key in
+   * real use and the condition collapsed to "no sessions left" — eight idle days,
+   * since unpinned sessions age out at seven. What that cost was a machine put
+   * down over a holiday coming back with its tokens gone; what it bought was
+   * argued away, since deleting a local copy revokes nothing at the vendor and
+   * `identity.tunnel_key` sits unswept in the same file regardless.
+   *
+   * Driven in the state the old sweep was written for and would have fired in —
+   * everything aged past every horizon this file has, and not one session left —
+   * because an assertion taken with a session still present would pass against
+   * the sweep as well and prove nothing.
    */
-  const ageAll = (): void =>
-    void second.db.prepare("UPDATE agent_credentials SET updated_at = ?").run(old);
-  ageAll();
+  second.db.prepare("UPDATE agent_credentials SET updated_at = ?").run(old);
+  second.db.prepare("UPDATE system_credentials SET updated_at = ?").run(old);
   second.sessions.prune({ retainMs: week, maxSessions: 200 });
-  check("an old credential is kept while any session remains", second.credentials.list().length, 1);
+  check("an aged credential is kept while any session remains", second.credentials.list().length, 1);
+  check("and so is an aged system key", second.systemCredentials.list().length, 1);
 
-  // Now empty the table of sessions, which is the other half of the condition.
+  /*
+   * Now empty the table of sessions, which was the other half of the old
+   * condition and is the state the sweep existed to fire in.
+   *
+   * ⚠ **A row `fromRow` drops is still a row.** `s_future` names an agent this
+   * build does not have, so `list()` does not return it and this loop cannot
+   * reach it — while SQL sees it perfectly. That asymmetry mattered while the
+   * sweep read `NOT EXISTS (SELECT 1 FROM sessions)`; with no sweep it is only
+   * the session count that is affected, and the row is still deliberately kept:
+   * deleting one this build cannot read would destroy a session a rollback could,
+   * which `compatibility.md` forbids.
+   */
   for (const row of second.sessions.list()) second.sessions.remove(row.id);
+  second.db.prepare("UPDATE sessions SET created_at = ?").run(old);
+  second.db.exec("DELETE FROM sessions");
   second.sessions.prune({ retainMs: week, maxSessions: 200 });
-  check("and is swept once nothing is left at all", second.credentials.list(), []);
+  check("with no session left at all, the table is really empty", second.sessions.list(), []);
+  /*
+   * The four assertions the whole reversal rests on. Proven by putting either
+   * `DELETE` back into `prune()` and watching them go red — which is how the
+   * sweep they replace was proven in the first place.
+   */
+  check("a pasted CLI credential outlives every sweep", second.credentials.list().length, 1);
+  check("and a system key does too", second.systemCredentials.list().map((one) => one.system), ["moonshot"]);
+  check("with the secret still readable", second.systemCredentials.get("moonshot"), "sk-moonshot");
+  check(
+    "and the only thing that removes one is being asked to",
+    (() => {
+      second.systemCredentials.remove("moonshot");
+      return [second.systemCredentials.list(), second.systemCredentials.get("moonshot")];
+    })(),
+    [[], null],
+  );
 
   second.close();
 }
@@ -17636,6 +17818,1641 @@ process.stdout.write("\nbeing told a session appeared\n");
   check("and unsubscribing really stops it", seen.length, before);
 
   await registry.shutdown();
+}
+
+/* ------------------------------------------------------------------ *
+ * Systems, and the agents assembled out of them
+ *
+ * A *system* is who serves a model; a *harness* is the CLI that runs the loop.
+ * What is driven here is the seam between them: the table, the compatibility
+ * rule, and the seven routes.
+ *
+ * ⚠ **The compatibility rule is driven as a sweep over the whole matrix rather
+ * than at the two cells that happen to matter today.** `hostable` is what decides
+ * whether somebody's key is sent to a host that will accept it, and a rule
+ * asserted at its interesting points is a rule the next entry in `SYSTEMS`
+ * escapes silently.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nwhich harness can be pointed at which system\n");
+{
+  const { AGENT_IDS: harnesses } = await import("../src/acp/agents.js");
+  const {
+    hostable,
+    routedModelEnv,
+    routingHeaders,
+    SYSTEM_IDS,
+    SYSTEMS,
+    isSystemId,
+    ROUTED_MODEL_ENV,
+  } = await import("../src/acp/systems.js");
+
+  // The three answers the pinned adapters actually gave, measured 2026-08-25.
+  // Written out here so the matrix below is driven against reality rather than
+  // against whatever the table would like to be true.
+  const routings = {
+    claude: { providerId: "main", supported: ["anthropic", "bedrock", "vertex"] },
+    codex: { providerId: "custom-gateway", supported: ["openai"] },
+    kimi: null,
+  } as const;
+
+  /*
+   * ⚠ **Every native pairing is hostable *without consulting routing at all*.**
+   * That is the branch kimi depends on: it answers `-32601` to `providers/list`
+   * and still reaches Moonshot, because nothing is being configured. Driven with
+   * `null` routing for all three, so a version of `hostable` that reached for
+   * `supported` before checking native would fail here rather than in the fleet.
+   */
+  const nativeMisses = SYSTEM_IDS.flatMap((system) => {
+    const native = SYSTEMS[system].nativeHarness;
+    return native === null || hostable(native, system, null) === null ? [] : [system];
+  });
+  check("a native pairing needs no routing at all", nativeMisses, []);
+
+  // The whole matrix, as strings, so a change to any cell is visible as a diff
+  // rather than as a count.
+  const matrix = harnesses.flatMap((harness) =>
+    SYSTEM_IDS.map((system) => {
+      const refusal = hostable(harness, system, routings[harness]);
+      return `${harness} x ${system}: ${refusal === null ? "yes" : "no"}`;
+    }),
+  );
+  check("the matrix is what the adapters allow", matrix, [
+    "claude x anthropic: yes",
+    "claude x openai: no",
+    "claude x moonshot: yes",
+    "claude x zhipu: yes",
+    "claude x minimax: yes",
+    "kimi x anthropic: no",
+    "kimi x openai: no",
+    "kimi x moonshot: yes",
+    "kimi x zhipu: no",
+    "kimi x minimax: no",
+    "codex x anthropic: no",
+    "codex x openai: yes",
+    "codex x moonshot: no",
+    "codex x zhipu: no",
+    "codex x minimax: no",
+  ]);
+
+  /*
+   * ⚠ **Routable and un-pinnable must refuse.** `hostable` folds
+   * `ROUTED_MODEL_ENV` in for exactly this: a pairing this daemon can route but
+   * cannot point at a model would start, look right, and quietly run the
+   * endpoint's default. Driven by taking claude's entry away, which is the only
+   * way to reach the branch while the table has one arm.
+   */
+  const claudeEnv = ROUTED_MODEL_ENV.claude;
+  delete ROUTED_MODEL_ENV.claude;
+  check(
+    "a harness that cannot be told which model to run is refused",
+    hostable("claude", "moonshot", routings.claude) !== null,
+    true,
+  );
+  ROUTED_MODEL_ENV.claude = claudeEnv;
+  check("and putting it back restores the pairing", hostable("claude", "moonshot", routings.claude), null);
+
+  /*
+   * The two halves of a routed launch, and which one carries the secret.
+   *
+   * ⚠ **The key is in the headers and must never be in the environment.** An
+   * agent runs as this uid and can print its own environment into a transcript
+   * that is appended to the log and rendered in a browser.
+   *
+   * ⚠ **That property is *not* driven here, and a sweep that looked like it was
+   * stood at this line for a release.** It read every value of `routedModelEnv`'s
+   * answer and asserted none of them contained the secret — over a function that
+   * is pure in a harness, a system and a model id, called from a driver that
+   * hands it three literals none of which is a credential. There is no
+   * implementation short of one hardcoding the literal that could have failed it,
+   * so it protected nothing while reading exactly like the assertion that does.
+   * The real one is in "what an assembled session is launched as", over a launch
+   * from a rig whose `systemSecret` genuinely answers `sekrit`: the environment
+   * the agent process was spawned with and the `providers/set` headers it was
+   * sent are compared against each other, which is what "these two are not
+   * interchangeable" actually asserts. Both halves below stay here — they are
+   * about the *table*, and a table is what this section drives.
+   */
+  const env = routedModelEnv("claude", "moonshot", "kimi-k2-thinking");
+  check("a routed model is named in the environment", env["ANTHROPIC_MODEL"], "kimi-k2-thinking");
+  check("and also as a picker row, which is the documented door", env["ANTHROPIC_CUSTOM_MODEL_OPTION"], "kimi-k2-thinking");
+  check("a native pairing is spawned with nothing extra", routedModelEnv("kimi", "moonshot", "kimi-k2"), {});
+  check("the secret travels as a header", routingHeaders("moonshot", "sekrit"), {
+    authorization: "Bearer sekrit",
+  });
+  check("and a native system has none to send", routingHeaders("anthropic", "sekrit"), {});
+
+  /*
+   * ⚠ **What a refusal *says*, which this driver pinned nowhere.** Everything
+   * above reduces a cell to "yes"/"no", which is the right shape for the rule and
+   * blind to the sentence — and the sentence is the whole of what a person gets:
+   * `applySystem` throws it as a `SystemRoutingError`, the route answers `502
+   * system_not_routable` carrying it, and `errorText` puts it on a phone. The
+   * string this module records as having shipped for one release — "This agent
+   * accepts openai systems, and Moonshot is anthropic" — passes every assertion
+   * above, and passes `webcheck` too, because that driver imports the *client's*
+   * mirror in `packages/web/src/agents.ts` and never this function. Restoring it
+   * was a green build.
+   *
+   * ⚠ **Four templates, and the partition is what makes them four.** Pinning the
+   * literals alone pins the strings that exist today; the sweep below collects
+   * every sentence the whole matrix can produce — over both routing answers and
+   * with `ROUTED_MODEL_ENV` emptied, which is the only way to the fourth — puts
+   * each system's own display name back out, and asserts the set is exactly
+   * these four. Splitting one arm into two, which is precisely the change that
+   * added the vocabulary `webcheck` had to grow a rule for, fails here.
+   */
+  const templateOf = (why: string): string => {
+    // `split`/`join` rather than a regex: "Z.ai (GLM)" is a display name with
+    // three regex metacharacters in it, and escaping it would be a second thing
+    // to get wrong about a table this function is supposed to be reading.
+    let shape = why;
+    for (const system of SYSTEM_IDS) shape = shape.split(SYSTEMS[system].displayName).join("{system}");
+    return shape;
+  };
+
+  check(
+    "a system with no routed endpoint names the CLI that reaches it",
+    hostable("codex", "anthropic", routings.codex),
+    "Anthropic can only be reached by the CLI it ships with.",
+  );
+  check(
+    "a harness that answers nothing about routing says what it does instead",
+    hostable("kimi", "zhipu", routings.kimi),
+    "This agent only runs its own models.",
+  );
+  check(
+    "a protocol mismatch says which models, never which protocol",
+    hostable("codex", "moonshot", routings.codex),
+    "This agent cannot run Moonshot models.",
+  );
+  // The fourth is unreachable while the table has claude's arm, exactly as the
+  // yes/no assertion above is — same door, and it is put back immediately.
+  delete ROUTED_MODEL_ENV.claude;
+  check(
+    "and one that can be routed but not pinned names the thing that is wrong",
+    hostable("claude", "moonshot", routings.claude),
+    "This agent cannot be told which model to use on another system.",
+  );
+  ROUTED_MODEL_ENV.claude = claudeEnv;
+
+  /** Every (harness, system) a refusal can be drawn for, on both routing answers. */
+  const drawn: { system: SystemId; why: string }[] = [];
+  for (const pinnable of [true, false]) {
+    if (!pinnable) delete ROUTED_MODEL_ENV.claude;
+    for (const harness of harnesses) {
+      for (const system of SYSTEM_IDS) {
+        // Both the answer the adapter gave and `null`, because a harness that
+        // declares no provider capability at all is a third of this fleet and
+        // reaches a branch the measured answers cannot.
+        for (const routing of [routings[harness], null]) {
+          const why = hostable(harness, system, routing);
+          if (why !== null) drawn.push({ system, why });
+        }
+      }
+    }
+    ROUTED_MODEL_ENV.claude = claudeEnv;
+  }
+  check(
+    "every sentence this function can produce is one of four",
+    [...new Set(drawn.map((one) => templateOf(one.why)))].sort(),
+    [
+      "This agent cannot be told which model to use on another system.",
+      "This agent cannot run {system} models.",
+      "This agent only runs its own models.",
+      "{system} can only be reached by the CLI it ships with.",
+    ],
+  );
+
+  /*
+   * ⚠ **`webcheck` has a `noJargon` of its own and this is deliberately not it.**
+   * The two drivers are separate processes over separate packages and neither can
+   * import the other, so sharing would mean a third module written for two
+   * callers — and the honest reason not to build one is that the *rule* differs,
+   * not just the file. `webcheck`'s forbids the words `anthropic` and `openai`
+   * outright, which this side cannot: they are the `displayName` of two systems
+   * here, and "Anthropic can only be reached by the CLI it ships with." is a
+   * correct sentence naming a company somebody has heard of. And this side has
+   * one rule the client's cannot state — a refusal may not name a **harness**,
+   * because the daemon has no display name for one and its id is a wire word;
+   * the client's mirror puts "Codex" or "Kimi Code" in front of the same
+   * sentence, which is the whole reason `hostable`'s own comment says the
+   * harness's name "is a name this side does not have".
+   *
+   * So the shared property is stated as a *relation* instead of a word list: a
+   * refusal about one system may name that system and no other. That is
+   * case-insensitive, catches the recorded failure by construction — it named
+   * Moonshot **and** anthropic **and** openai — and does not have to guess which
+   * spelling of a protocol name somebody will reach for next.
+   *
+   * This repository's view that a copy is a second chance to be wrong is about
+   * tables that must agree, `hostable`'s matrix being the one right here. Two
+   * predicates that are *supposed* to differ are not that; a shared one would
+   * have to be widened until it permitted both, which is weaker than either.
+   */
+  const jargonIn = (why: string, about: SystemId): string[] => {
+    const found: string[] = [];
+    if (!why.endsWith(".")) found.push("no full stop");
+    if (/\bapiType\b|\bprovider(Id)?\b|\bsupported\b|\bnativeHarness\b|\bbaseUrl\b|\//i.test(why)) {
+      found.push("wire vocabulary");
+    }
+    const lower = why.toLowerCase();
+    for (const other of SYSTEM_IDS) {
+      if (other === about) continue;
+      if (lower.includes(other) || lower.includes(SYSTEMS[other].displayName.toLowerCase())) {
+        found.push(`names ${other}`);
+      }
+    }
+    // The harness half. Nothing this function returns names one today, and the
+    // assertion is what keeps the client's copy the only place that does.
+    for (const harness of harnesses) if (lower.includes(harness)) found.push(`names ${harness}`);
+    return found;
+  };
+  check(
+    "and none of them is written for a developer",
+    drawn.flatMap(({ system, why }) => jargonIn(why, system).map((reason) => `${why} — ${reason}`)),
+    [],
+  );
+  /*
+   * The predicate against the sentence that actually shipped, because every arm
+   * of the sweep above is green today and a predicate that tested nothing would
+   * read exactly the same. This is the string `hostable`'s own comment records.
+   */
+  check(
+    "while the sentence that really shipped is caught, and by what",
+    jargonIn("This agent accepts openai systems, and Moonshot is anthropic", "moonshot"),
+    ["no full stop", "names anthropic", "names openai"],
+  );
+
+  check("an id this daemon knows", isSystemId("moonshot"), true);
+  check("and one it does not", isSystemId("gemini"), false);
+}
+
+/* ------------------------------------------------------------------ *
+ * What an assembled session is actually launched as
+ *
+ * The section above drives the table and the one below drives the routes. This
+ * one drives the only thing either is for: the option bag a `ManagedSession`
+ * hands `Session.start` and `Session.resume`, which is where a preset stops
+ * being a row and becomes an agent process pointed at somebody's endpoint.
+ *
+ * ⚠ **Every failure here is silent, which is why it is driven rather than
+ * reasoned about.** Lose the system out of the bag and `spawnEnvOf` returns `{}`
+ * so no routed-model variable is set, and `applySystem` returns at its first
+ * line so `client.routing()`, `hostable` and `providers/set` are never reached —
+ * there is no refusal path left to fire. The session opens on the harness's own
+ * vendor, account and default model while its row, its snapshot and the tile on
+ * screen all go on naming the assembled agent. So the assertions are on what the
+ * *agent process* was handed — the environment it was spawned with and the
+ * `providers/set` it did or did not receive — and never on the absence of an
+ * error, which is exactly what the broken path also produced.
+ *
+ * ⚠ **The sweep is {empty, non-empty} × {assembled, bare} rather than the one
+ * cell that was wrong.** `doResume` has two arms and `start` is a third launch
+ * site; the defect was that one of the three wrote its bag out by hand. A matrix
+ * is what stops a fourth site being added the same way.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nwhat an assembled session is launched as\n");
+{
+  const acp = await import("@agentclientprotocol/sdk");
+  const { SYSTEMS } = await import("../src/acp/systems.js");
+
+  /** One agent process, and everything about the launch that produced it. */
+  interface Launch {
+    agent: AgentId;
+    /** Exactly what `spawnEnvOf` handed the runtime. */
+    env: NodeJS.ProcessEnv;
+    /** Which arm this was: `session/new` opens a conversation, `session/resume` restores one. */
+    how: "opened" | "resumed" | "(neither)";
+    /** The base URL `applySystem` configured, or `null` where it configured nothing. */
+    routed: string | null;
+    /**
+     * The conversation-opening call's params, minus the id only a resume sends.
+     *
+     * The whole of what makes the two arms comparable: `Session.start` and
+     * `Session.openResumed` build the same request but for `sessionId`, so an
+     * equality between two of these is the assertion that one bag reached both.
+     */
+    bag: Record<string, unknown> | null;
+    /**
+     * Every `session/set_config_option` this process was sent, as `id=value`.
+     *
+     * ⚠ **The only honest reading of a native pin.** A native pairing is named to
+     * the agent by this call and by nothing else — `spawnEnvOf` answers `{}` and
+     * `applySystem` returns at its first line — so a launch that never sent it
+     * still *succeeds*, on the agent's own default, with the row, the chip and the
+     * snapshot all naming the model it is not running. The outcome cannot see that
+     * and the wire can, which is why the sweep below reads calls rather than
+     * results.
+     */
+    configCalls: string[];
+    /** What `providers/set` was given, or `null` where it was never sent. */
+    routedHeaders: Record<string, string> | null;
+    /**
+     * Whether this process's stdin was closed, which is what `AcpClient.close`
+     * does first and is the whole of a dispose as seen from out here.
+     *
+     * Read by the one cell that refuses: a `Session.start` that throws must leave
+     * no live agent behind, and "it threw" says nothing at all about that.
+     */
+    closed: boolean;
+  }
+
+  const launches: Launch[] = [];
+  let conversations = 0;
+
+  /**
+   * What the fake agent publishes as its model control, and what it is on.
+   *
+   * ⚠ **A `let`, because the third axis of the pin sweep is a CLI that retired a
+   * model between the start and the resume.** That is not a corner: the pinned
+   * model is a string in a preset somebody saved months ago, and the list is
+   * whatever the agent's own binary decided this week — which is exactly why
+   * `pinNativeModel` weighs it against the agent standing in front of us rather
+   * than against a cache.
+   *
+   * `{ choices: [] }` publishes **no** model option at all, which is what this rig
+   * did for its whole life before the sweep existed. That is the state every
+   * assertion above this point was measured in, and it is left as the default so
+   * they keep being measured in it — a `modelOption` of `null` is also a real
+   * agent (kimi publishes none), so it is not a fixture nobody ships.
+   *
+   * `current` is deliberately never the pinned model, so "the pin was sent" and
+   * "the agent happened to already be there" can never be confused.
+   */
+  let published: { choices: readonly string[]; current: string } = { choices: [], current: "" };
+
+  /**
+   * ACP's `category: "model"` select, in the shape `toConfigOptions` reads.
+   *
+   * Found by `category` and never by `id`, which is this fleet's standing rule
+   * about every agent control and is what `Session.modelOption` implements — so
+   * the id here is deliberately not the word "model".
+   */
+  const modelControl = (current: string, choices: readonly string[]): Record<string, unknown> => ({
+    id: "model-picker",
+    name: "Model",
+    description: null,
+    category: "model",
+    type: "select",
+    currentValue: current,
+    options: choices.map((value) => ({ value, name: value, description: null })),
+  });
+
+  const spawnRouted = (agent: AgentId, extra: NodeJS.ProcessEnv): AgentProcess => {
+    // Copied rather than held: `routedModelEnv` builds a fresh object per launch
+    // and nothing else keeps it, so a reference here would still be readable —
+    // but a copy is what makes it obvious that this is a record of one spawn.
+    const launch: Launch = {
+      agent,
+      env: { ...extra },
+      how: "(neither)",
+      routed: null,
+      routedHeaders: null,
+      bag: null,
+      configCalls: [],
+      closed: false,
+    };
+    launches.push(launch);
+    /*
+     * Per process, exactly as a real agent's config is: a `set_config_option` on
+     * one launch must not be visible to the next, or the resume arm of the sweep
+     * below would read the start arm's pin as its own and the defect being fixed
+     * would still be green.
+     */
+    let currentModel = published.current;
+    const configOptions = (): Record<string, unknown>[] =>
+      published.choices.length === 0 ? [] : [modelControl(currentModel, published.choices)];
+    const toAgent = new PassThrough();
+    const toClient = new PassThrough();
+    const send = (message: unknown): void => void toClient.write(`${JSON.stringify(message)}\n`);
+    let buffer = "";
+    toAgent.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      for (let nl = buffer.indexOf("\n"); nl >= 0; nl = buffer.indexOf("\n")) {
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (line.trim().length === 0) continue;
+        const message = JSON.parse(line) as Record<string, any>;
+        const id = message["id"];
+        const params = (message["params"] ?? {}) as Record<string, any>;
+        const conversation = (how: "opened" | "resumed"): void => {
+          launch.how = how;
+          const { sessionId: _conversationId, ...rest } = params;
+          launch.bag = rest;
+        };
+        switch (message["method"]) {
+          case acp.methods.agent.initialize:
+            send({
+              jsonrpc: "2.0",
+              id,
+              result: {
+                protocolVersion: acp.PROTOCOL_VERSION,
+                // Both markers are empty objects, exactly as the real adapters
+                // send them: `supportsSessionResume` and `AcpClient.routing`
+                // read `!= null` rather than `=== true`, and a `true` here would
+                // drive a shape no agent produces.
+                agentCapabilities: { sessionCapabilities: { resume: {} }, providers: {} },
+                authMethods: [],
+              },
+            });
+            break;
+          case acp.methods.agent.providers.list:
+            // `claude-agent-acp` 0.63.0's measured answer, which is what makes
+            // `hostable` permit moonshot over this harness at all.
+            send({
+              jsonrpc: "2.0",
+              id,
+              result: { providers: [{ providerId: "main", supported: ["anthropic", "bedrock", "vertex"] }] },
+            });
+            break;
+          case acp.methods.agent.providers.set:
+            launch.routed = String(params["baseUrl"] ?? "");
+            // The other half of "the key travels as a header and never in the
+            // environment", recorded so the two can be compared against each
+            // other over one launch. Kept as whatever arrived rather than parsed:
+            // what is being asserted is where the bytes went, not their shape.
+            launch.routedHeaders = { ...((params["headers"] ?? {}) as Record<string, string>) };
+            send({ jsonrpc: "2.0", id, result: {} });
+            break;
+          case acp.methods.agent.session.new:
+            conversation("opened");
+            conversations += 1;
+            send({ jsonrpc: "2.0", id, result: { sessionId: `conv_${conversations}`, modes: null, configOptions: configOptions() } });
+            break;
+          case acp.methods.agent.session.resume:
+            conversation("resumed");
+            /*
+             * ⚠ **A resume carries the *full* `configOptions`, exactly as
+             * `session/new` does**, and this fixture answered `{}` for its whole
+             * life. Read off the SDK's `ResumeSessionResponse` and off
+             * `claude-agent-acp` 0.63.0's `getOrCreateSession`, which builds one
+             * answer for both. An empty answer here is what made every native cell
+             * of the sweep below unreachable: with no list, `modelOption` is
+             * `null`, `pinNativeModel` takes its "offers no choice" arm, and a
+             * resume that pinned nothing looked identical to one that did.
+             */
+            send({ jsonrpc: "2.0", id, result: { modes: null, configOptions: configOptions() } });
+            break;
+          case acp.methods.agent.session.setConfigOption:
+            launch.configCalls.push(`${String(params["configId"])}=${String(params["value"])}`);
+            currentModel = String(params["value"]);
+            // The complete option set comes back, which is what ACP defines the
+            // response as and what `Session.setConfigOption` re-reads it for.
+            send({ jsonrpc: "2.0", id, result: { configOptions: configOptions() } });
+            break;
+          case acp.methods.agent.session.prompt:
+            send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+            break;
+          default:
+            if (id !== undefined) send({ jsonrpc: "2.0", id, result: {} });
+        }
+      }
+    });
+    return {
+      stdin: toAgent,
+      stdout: toClient,
+      stderr: new PassThrough(),
+      handle: null,
+      onceStartError: () => () => {},
+      onceExit: () => () => {},
+      hasExited: false,
+      waitForExit: async () => true,
+      endStdin: () => {
+        // `AcpClient.close` ends stdin first and only escalates if the child does
+        // not exit — which this one always does — so this is the only signal a
+        // dispose leaves out here.
+        launch.closed = true;
+        toAgent.end();
+      },
+      kill: async () => {},
+    } as unknown as AgentProcess;
+  };
+
+  class RoutedRig extends LocalRuntime {
+    // `create` asks before it builds anything, and the real answer depends on
+    // whether this machine happens to have a `claude` on its PATH.
+    override async availability(): Promise<AgentAvailability[]> {
+      return [{ id: "claude", displayName: "fake", available: true, loggedIn: true, hint: null }];
+    }
+    override describe(agent: AgentId): AgentLaunchConfig {
+      return stubAgentConfig(agent);
+    }
+    override async launch(agent: AgentId, extra: NodeJS.ProcessEnv = {}): Promise<AgentProcess> {
+      return spawnRouted(agent, extra);
+    }
+    // Without a key `applySystem` refuses one line before `providers/set`, and
+    // every routed assertion below would then be green for the wrong reason.
+    override systemSecret(): string | null {
+      return "sekrit";
+    }
+  }
+
+  /**
+   * What the preset store answers, swung under sessions that are already on it.
+   *
+   * A `let` rather than a map because there is one preset in this whole section
+   * and what is under test is what happens when its *contents* change — which is
+   * a thing only `PATCH /custom-agents/:id` can do to a live session.
+   */
+  let preset: { harness: AgentId; system: SystemId; model: string } | null = {
+    harness: "claude",
+    system: "moonshot",
+    model: "kimi-k2-thinking",
+  };
+  // Held rather than built inline: the demotion notice the sweep below asserts is
+  // an `error` event on the session's own log, and there is no other way in.
+  const ownLog = new MemoryEventStore();
+  const own = new SessionRegistry(ownLog, null, undefined, new RoutedRig());
+  own.setCustomAgents((id) => (id === "ca_assembled" ? preset : null));
+
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25));
+
+  /**
+   * One launch as one line, which is what makes a three-launch expectation
+   * readable as a diff rather than as four separate equalities.
+   *
+   * `ANTHROPIC_MODEL` is the cheapest proof the bag was not the bare one:
+   * `spawnEnvOf` sets `ROUTED_MODEL_ENV`'s variables only when the options carry
+   * **both** a system and a model, so a `-` here is a bag that lost the pairing.
+   * `routed` is the other half and cannot be derived from it — the environment is
+   * set before the process starts and `providers/set` happens after, so a launch
+   * with the variable and no base URL is a distinct, reachable failure.
+   */
+  const summary = (one: Launch | undefined): string =>
+    one === undefined
+      ? "(no launch)"
+      : `${one.agent} ${one.how} model=${one.env["ANTHROPIC_MODEL"] ?? "-"} routed=${one.routed ?? "-"}`;
+
+  /**
+   * One session through both arms of `doResume`, in order, and every launch it
+   * caused.
+   *
+   * The first resume is taken at `turnCounter === 0`, which is what makes
+   * `conversationKnownEmpty()` true: that arm **opens** a conversation rather
+   * than resuming one, and it is the arm the defect lived in. One turn later the
+   * same session takes the other. Driving one session rather than two is what
+   * lets the two bags be compared directly — they share a worktree, so the only
+   * field that may differ is the one a resume adds.
+   */
+  const bothArms = async (customAgent: string | null): Promise<Launch[]> => {
+    launches.length = 0;
+    const managed = await own.create({ agent: "claude", cwd: tmp("assembled-"), customAgent });
+    await own.stop(managed.id);
+    await managed.resume(5_000);
+    check(`${customAgent ?? "bare"}: a turn is accepted before the second stop`, managed.prompt("hello").kind, "accepted");
+    await settle();
+    await own.stop(managed.id);
+    await managed.resume(5_000);
+    await own.stop(managed.id);
+    return launches.slice();
+  };
+
+  const assembled = await bothArms("ca_assembled");
+  check("an assembled session: the start, the empty arm and the resume arm", assembled.map(summary), [
+    "claude opened model=kimi-k2-thinking routed=https://api.moonshot.ai/anthropic",
+    "claude opened model=kimi-k2-thinking routed=https://api.moonshot.ai/anthropic",
+    "claude resumed model=kimi-k2-thinking routed=https://api.moonshot.ai/anthropic",
+  ]);
+  /*
+   * ⚠ **The assertion a fourth launch site would break.** Both arms are handed
+   * one bag by `ManagedSession.launchOptions`, and a resume adds `agentSessionId`
+   * and nothing else — so the request that reaches the agent is equal on every
+   * other field. This is what the hand-written arm could not have satisfied.
+   */
+  /**
+   * Everything a launch is, minus the one thing the two arms are allowed to
+   * disagree about.
+   *
+   * `bag` alone is not enough and was measured not to be: the ACP request carries
+   * `cwd`, `mcpServers` and `_meta`, and losing the system out of the option bag
+   * changes **none** of them — it changes the spawn environment and whether
+   * `providers/set` was sent, which is why those travel here too.
+   */
+  const shapeOf = (one: Launch | undefined): unknown =>
+    one === undefined ? null : { agent: one.agent, env: one.env, routed: one.routed, bag: one.bag };
+  check("and both arms hand the agent the same bag but for the conversation id", shapeOf(assembled[1]), shapeOf(assembled[2]));
+  // The expectations above are literals on purpose — a change to any cell shows
+  // as a diff rather than as a count — so this is the one line that reads the
+  // table, which is what stops those three strings agreeing with each other and
+  // with nothing else.
+  check("and the endpoint it was pointed at is the table's own", assembled[2]?.routed, SYSTEMS.moonshot.baseUrl);
+
+  /*
+   * ⚠ **The key travels as a header and never in the environment, driven over a
+   * launch that really carries one.** `RoutedRig.systemSecret` answers `sekrit`,
+   * so these three launches are the only place in this file where a secret is
+   * genuinely in play — the agent process was spawned with one environment and
+   * sent `providers/set` with the other, and this is the disjointness between
+   * them. An agent runs as this uid and can print its own environment into a
+   * transcript that is appended to the log and rendered in a browser, which is the
+   * accident `agentEnv`'s strip exists to prevent and the reason
+   * `ROUTED_MODEL_ENV` carries a model id and nothing else.
+   *
+   * ⚠ **This assertion used to sit beside the table, over `routedModelEnv`'s
+   * return value, and could not fail.** That function is pure in a harness, a
+   * system and a model id; the driver handed it three literals, none of them a
+   * credential, so no implementation short of one hardcoding the string would have
+   * gone red. Both halves are asserted here instead — that the secret *is* in the
+   * headers, and that it is in no environment value — because either alone passes
+   * against a daemon that sends it nowhere at all.
+   */
+  const carried = assembled.map((one) => one.routedHeaders?.["authorization"] ?? null);
+  check("every routed launch signed its traffic with the stored key", carried, [
+    "Bearer sekrit",
+    "Bearer sekrit",
+    "Bearer sekrit",
+  ]);
+  check(
+    "and not one of them put it in the environment the agent can print",
+    assembled.flatMap((one) =>
+      Object.entries(one.env).flatMap(([name, value]) => (String(value).includes("sekrit") ? [name] : [])),
+    ),
+    [],
+  );
+  check("which is a bag rather than nothing at all", assembled[1]?.bag === null || assembled[1]?.bag === undefined, false);
+
+  const bare = await bothArms(null);
+  check("a bare harness takes both arms with nothing routed", bare.map(summary), [
+    "claude opened model=- routed=-",
+    "claude opened model=- routed=-",
+    "claude resumed model=- routed=-",
+  ]);
+  check("and its two arms agree with each other too", shapeOf(bare[1]), shapeOf(bare[2]));
+
+  /* ---------------------------------------------------------------- *
+   * A preset re-pointed at another harness, under a live session
+   * ---------------------------------------------------------------- */
+
+  launches.length = 0;
+  const live = await own.create({ agent: "claude", cwd: tmp("repointed-"), customAgent: "ca_assembled" });
+  check("a session on a preset starts routed", live.prompt("hello").kind, "accepted");
+  await settle();
+  await own.stop(live.id);
+  check("and one turn puts it on the resume arm for the rest of this block", launches.map(summary), [
+    "claude opened model=kimi-k2-thinking routed=https://api.moonshot.ai/anthropic",
+  ]);
+
+  /**
+   * Resume, and say whether it threw rather than letting a rejection end the run.
+   *
+   * The loud half of this defect is a resume that fails *for ever*, so "did it
+   * come back at all" has to be an assertion rather than the shape of the driver.
+   */
+  const resumed = async (): Promise<string> => {
+    launches.length = 0;
+    return live
+      .resume(5_000)
+      .then(() => "(resumed)", (error: unknown) => (error instanceof Error ? error.name : String(error)));
+  };
+
+  /*
+   * ⚠ **The loud repro.** `{codex, openai, gpt-5-codex}` over a claude session:
+   * OpenAI has no routed endpoint, so `hostable("claude", "openai", …)` refuses,
+   * `applySystem` throws `SystemRoutingError` and the route answers `502
+   * system_not_routable` — on this resume and on every resume after it, with
+   * nothing on any screen connecting it to the edit that caused it. A session
+   * cannot change vendor underneath itself, so the honest answer is the harness
+   * its own `agent` column names.
+   */
+  preset = { harness: "codex", system: "openai", model: "gpt-5-codex" };
+  check("re-pointing its preset at another harness does not strand the session", await resumed(), "(resumed)");
+  check("it comes back on the harness it was started with, and bare", launches.map(summary), [
+    "claude resumed model=- routed=-",
+  ]);
+
+  /*
+   * ⚠ **The quiet repro, which is the one with no symptom.** `{kimi, moonshot,
+   * kimi-k2-thinking}` is a pairing `hostable` **permits** — over kimi. Spread
+   * over the claude session that named this preset it starts, looks right, and
+   * runs the claude harness against Moonshot's endpoint on Moonshot's model,
+   * while the preset, the tile and the glyph all say Kimi Code. Nothing refuses
+   * it, so the only assertion that can catch it is on the launch itself.
+   */
+  await own.stop(live.id);
+  preset = { harness: "kimi", system: "moonshot", model: "kimi-k2-thinking" };
+  check("and a re-pointing the matrix permits is demoted just as flatly", await resumed(), "(resumed)");
+  check("rather than pointing this harness at somebody else's endpoint", launches.map(summary), [
+    "claude resumed model=- routed=-",
+  ]);
+
+  /*
+   * ⚠ **The guard is a comparison and not a blanket disable.** Without this, a
+   * mistake that made `assembled` answer `{}` for every session would leave every
+   * assertion above green and every assembled session silently bare — which is
+   * the original defect, arrived at from the other side. The model is a
+   * *different* one from the session's start, so this also says the preset is
+   * re-read at the launch rather than remembered from it.
+   */
+  await own.stop(live.id);
+  preset = { harness: "claude", system: "moonshot", model: "kimi-k2-0905-preview" };
+  check("while a preset still naming this harness is applied", await resumed(), "(resumed)");
+  check("at whatever it holds now, read fresh at the launch", launches.map(summary), [
+    "claude resumed model=kimi-k2-0905-preview routed=https://api.moonshot.ai/anthropic",
+  ]);
+
+  /*
+   * The deleted-preset arm, unchanged and pinned here rather than elsewhere: it
+   * sits one line above the harness comparison in `ManagedSession.assembled`, the
+   * two are the same demotion for two different facts about the world, and a
+   * reordering that swallows one swallows both.
+   */
+  await own.stop(live.id);
+  preset = null;
+  check("and a preset deleted underneath it still degrades rather than failing", await resumed(), "(resumed)");
+  check("to the same bare harness, by the same rule", launches.map(summary), ["claude resumed model=- routed=-"]);
+
+  /* ---------------------------------------------------------------- *
+   * Which model the agent is actually put on
+   *
+   * ⚠ **{start, resume} × {native, routed} × {the agent still offers it, the
+   * agent no longer does}, driven as a sweep and not at the cell that was
+   * wrong.** `Session.openResumed` never called `pinNativeModel`, so a resumed
+   * session on a **native** pairing was named to the agent by nothing at all:
+   * `spawnEnvOf` answers `{}` for a native system and `applySystem` returns at its
+   * first line for one, so there was no other mechanism and no refusal left to
+   * fire. The session came back on the agent's own default while the row, the chip
+   * and the snapshot all went on naming the assembled agent. Measured against a
+   * fake peer publishing a `category: "model"` select: start sent
+   * `set_config_option`, resume sent nothing.
+   *
+   * ⚠ **Every cell reads the calls on the wire, never the outcome.** Both resumes
+   * *succeed*, before the fix and after it — that is the whole of why the defect
+   * survived a green driver — so an assertion on "did it come back" would be the
+   * false coverage Q2.215 already names once. What separates them is a
+   * `session/set_config_option` that was or was not sent, which is why `Launch`
+   * grew `configCalls`.
+   *
+   * ⚠ **The third axis is the one carrying a decision, and the two ends of it
+   * disagree on purpose.** A start refuses an un-pinnable model: nothing exists
+   * yet to strand, and carrying on would be a session running a model nobody
+   * chose. A resume must not, because the conversation is already there and a
+   * model the CLI has since retired would make every resume of it fail for ever —
+   * the permanent refusal Q2.216 chose a demotion over. So the resume comes back
+   * *and says so*, in the transcript, and a driver asserting only one of the two
+   * records nothing about the asymmetry. Silence is the other trap and it is the
+   * defect above relocated, so the notice is counted rather than merely allowed.
+   * ---------------------------------------------------------------- */
+
+  /** One launch, read as the two doors a model can arrive through. */
+  const pinOf = (one: Launch | undefined): string =>
+    one === undefined
+      ? "(no launch)"
+      : `${one.how} config=[${one.configCalls.join(" ")}] env=${one.env["ANTHROPIC_MODEL"] ?? "-"} routed=${one.routed ?? "-"}`;
+
+  /** The demotion notices on a session's own log, in order. */
+  const notices = (id: string): { message: string; model: unknown }[] =>
+    ownLog.read(id, -1, 1000, Number.MAX_SAFE_INTEGER).flatMap(({ event }) => {
+      if (event.type !== "error") return [];
+      const data = event.data as { code?: unknown; model?: unknown } | null;
+      return data?.code === "model_not_pinned" ? [{ message: event.message, model: data.model }] : [];
+    });
+
+  /**
+   * One column of the sweep: four cells over one pairing.
+   *
+   * The three resume cells share a session on purpose — a resume needs something
+   * to resume, and "the agent retired the model between the start and the resume"
+   * is the real sequence rather than two unrelated launches. The fourth cannot
+   * share it: a start that refuses never produces a session at all, which is the
+   * asymmetry being asserted.
+   *
+   * A turn is sent before the first stop because `conversationKnownEmpty()` is
+   * true at `turnCounter === 0` and that arm **opens** a conversation rather than
+   * resuming one — the empty arm is already driven above, and what is wanted here
+   * is `session/resume` itself.
+   */
+  const column = async (
+    pairing: { harness: AgentId; system: SystemId; model: string },
+    offering: readonly string[],
+    withoutIt: readonly string[],
+  ): Promise<{ lines: string[]; id: string }> => {
+    preset = { ...pairing };
+
+    published = { choices: offering, current: "sonnet" };
+    launches.length = 0;
+    const managed = await own.create({ agent: pairing.harness, cwd: tmp("pinned-"), customAgent: "ca_assembled" });
+    const lines = [`start, offered:  ${pinOf(launches[0])}`];
+    check(`${pairing.system}: a turn is accepted before the model is retired`, managed.prompt("hi").kind, "accepted");
+    await settle();
+    await own.stop(managed.id);
+
+    launches.length = 0;
+    await managed.resume(5_000);
+    await settle();
+    lines.push(`resume, offered: ${pinOf(launches[0])} notices=${notices(managed.id).length}`);
+    await own.stop(managed.id);
+
+    published = { choices: withoutIt, current: "sonnet" };
+    launches.length = 0;
+    const came = await managed
+      .resume(5_000)
+      .then(() => "(resumed)", (error: unknown) => (error instanceof Error ? error.name : String(error)));
+    // The queue is drained by `startIdleDrain`, which is armed on adoption — so
+    // the notice is in the log a tick after the resume resolves rather than
+    // synchronously with it.
+    await settle();
+    lines.push(`resume, gone:    ${came} ${pinOf(launches[0])} notices=${notices(managed.id).length}`);
+    await own.stop(managed.id);
+
+    launches.length = 0;
+    const refused = await own
+      .create({ agent: pairing.harness, cwd: tmp("pinned-"), customAgent: "ca_assembled" })
+      .then(() => "(started)", (error: unknown) => (error instanceof Error ? error.name : String(error)));
+    lines.push(`start, gone:     ${refused} ${pinOf(launches[0])} disposed=${launches[0]?.closed ?? false}`);
+    return { lines, id: managed.id };
+  };
+
+  /*
+   * `{claude, anthropic, opus}` — the pairing `SYSTEMS.anthropic` calls native, so
+   * there is no `providers/set` and no `ROUTED_MODEL_ENV` and the whole of the
+   * routing is one `set_config_option`. The published list does not start on the
+   * pinned model, so "opus" in `config=[…]` can only have got there by being sent.
+   */
+  const native = await column({ harness: "claude", system: "anthropic", model: "opus" }, ["opus", "sonnet"], ["sonnet"]);
+  check("a native pairing, across both launches and both list states", native.lines, [
+    "start, offered:  opened config=[model-picker=opus] env=- routed=-",
+    "resume, offered: resumed config=[model-picker=opus] env=- routed=- notices=0",
+    "resume, gone:    (resumed) resumed config=[] env=- routed=- notices=1",
+    "start, gone:     SystemRoutingError opened config=[] env=- routed=- disposed=true",
+  ]);
+  /*
+   * ⚠ **What the notice *says*, because "not silent" is a claim about a sentence.**
+   * Both models are in it — the one that was asked for and the one the session
+   * came back on — and without the second half the row says a conversation is
+   * running something unnamed. A typo here is how the demotion becomes silent
+   * again while the count above stays at one.
+   */
+  check("and the demotion names both models, and its own code", notices(native.id), [
+    {
+      message:
+        'claude has no model called "opus" — it offers sonnet. ' +
+        "The conversation was resumed anyway, running sonnet.",
+      model: "opus",
+    },
+  ]);
+
+  /*
+   * `{claude, moonshot, kimi-k2-thinking}` — routed, and the regression fence for
+   * the fix above. The model is named at spawn and validated by the endpoint, so
+   * there is **no** "gone" for it at all: the last two cells publish a list this
+   * model is not in, and the correct answer is that nothing changes. A native pin
+   * leaking into this column would show as a `config=[…]` that is not empty, and
+   * a refusal leaking in would show as the fourth line refusing.
+   */
+  const routed = await column(
+    { harness: "claude", system: "moonshot", model: "kimi-k2-thinking" },
+    ["kimi-k2-thinking", "sonnet"],
+    ["opus", "sonnet"],
+  );
+  const endpoint = SYSTEMS.moonshot.baseUrl;
+  check("a routed pairing takes neither the pin nor the refusal", routed.lines, [
+    `start, offered:  opened config=[] env=kimi-k2-thinking routed=${endpoint}`,
+    `resume, offered: resumed config=[] env=kimi-k2-thinking routed=${endpoint} notices=0`,
+    `resume, gone:    (resumed) resumed config=[] env=kimi-k2-thinking routed=${endpoint} notices=0`,
+    `start, gone:     (started) opened config=[] env=kimi-k2-thinking routed=${endpoint} disposed=false`,
+  ]);
+  check("and says nothing in the transcript about a model it never asked the agent for", notices(routed.id), []);
+
+  // Back to the state the block was left in, so nothing below inherits a fixture.
+  published = { choices: [], current: "" };
+
+  await own.shutdown();
+
+  /*
+   * The resolver's third field, read off the one caller that fills it in.
+   *
+   * `harness` is the only member of the triple with no downstream *use* —
+   * `ManagedSession.assembled` compares it and then throws it away — so nothing
+   * else in this file, or in the fleet, would notice it going missing from
+   * `scripts/daemon.ts`'s thunk. Everything above would keep passing on this
+   * file's own stub.
+   */
+  const wiring = readFileSync(new URL("../scripts/daemon.ts", import.meta.url), "utf8");
+  check(
+    "and the daemon's own thunk hands the harness back beside the pair",
+    /setCustomAgents\(\(id\) => \{[\s\S]{0,400}?harness: one\.harness[\s\S]{0,200}?\}\);/.test(wiring),
+    true,
+  );
+}
+
+process.stdout.write("\nthe system and assembled-agent routes\n");
+{
+  const { createApp: build } = await import("../src/server.js");
+  // The other half of the pairing sweep below. `AGENT_IDS` is already imported at
+  // the top of this file; this one is not, and reaching for it here keeps the
+  // matrix driven off the table rather than off a list typed out beside it.
+  const { SYSTEM_IDS } = await import("../src/acp/systems.js");
+
+  const keys = new Map<string, { secret: string; updatedAt: number }>();
+  const presets = new Map<string, any>();
+  const systems = {
+    credentials: {
+      list: () => [...keys].map(([system, held]) => ({ system: system as never, updatedAt: held.updatedAt })),
+      get: (system: string) => keys.get(system)?.secret ?? null,
+      save: (system: string, secret: string) => void keys.set(system, { secret, updatedAt: 7 }),
+      remove: (system: string) => void keys.delete(system),
+    },
+    customAgents: {
+      list: () => [...presets.values()],
+      get: (id: string) => presets.get(id) ?? null,
+      save: (one: any) => void presets.set(one.id, one),
+      remove: (id: string) => void presets.delete(id),
+    },
+  };
+
+  /*
+   * ⚠ **A stub, which is the whole reason `ServerOptions.asks` is a port rather
+   * than `AgentAskRuns`.** The real one spawns an agent per harness; standing in
+   * for it here is what makes the compatibility refusal reachable on a machine
+   * with no agent installed and nobody signed in.
+   */
+  const asks = {
+    capabilities: async (agent: string) => ({
+      models: agent === "claude" ? [{ id: "opus", name: "Opus", description: null, group: null }] : [],
+      routing:
+        agent === "claude"
+          ? { providerId: "main", supported: ["anthropic"] }
+          : agent === "codex"
+            ? { providerId: "custom-gateway", supported: ["openai"] }
+            : null,
+    }),
+  };
+
+  const withSystems = build({
+    registry: new SessionRegistry(new MemoryEventStore()),
+    verifier,
+    instanceId: "i_systems",
+    startedAt: now,
+    systems: systems as never,
+    asks: asks as never,
+    roots: [users],
+  }).app;
+
+  // The same server without the stores, because "answers 503 rather than
+  // pretending" is a property of every one of these routes and is exactly what a
+  // daemon built with no database has.
+  const without = build({
+    registry: new SessionRegistry(new MemoryEventStore()),
+    verifier,
+    instanceId: "i_nosystems",
+    startedAt: now,
+    roots: [users],
+  }).app;
+
+  const call = async (
+    which: typeof withSystems,
+    method: string,
+    path: string,
+    body?: unknown,
+    // Defaulted rather than passed everywhere: the scope gate is one assertion
+    // out of many here and the rest are about the routes, not about who is asking.
+    token: string = tokenFor("u_alice"),
+  ): Promise<{ status: number; body: any }> => {
+    const response = await which.fetch(
+      new Request(`http://d${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${token}`,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }),
+    );
+    const text = await response.text();
+    return { status: response.status, body: text.length > 0 ? JSON.parse(text) : null };
+  };
+
+  /*
+   * Status and code as one pair, with `null` where the answer carried no error.
+   * Reading `body.error.code` straight would throw out of the driver the moment a
+   * refusal became an acceptance — which is exactly the regression these
+   * assertions exist to report, and a thrown `TypeError` takes every section
+   * after it down instead of naming the one that moved.
+   */
+  const answered = (one: { status: number; body: any }): [number, string | null] => [
+    one.status,
+    one.body?.error?.code ?? null,
+  ];
+
+  const listed = await call(withSystems, "GET", "/systems");
+  check("every system is listed", listed.body.systems.length, 5);
+  /*
+   * ⚠ **The secret sweep is *below*, on the listing taken after a key is saved,
+   * and it stood here for a release where it could not fail.** Nothing has been
+   * saved at this point — the assertion one line down is that very fact — so
+   * `JSON.stringify(listed.body).includes("sekrit")` was false over a daemon
+   * holding no secret at all, and would have stayed false against a route that
+   * returned every stored key verbatim. The same shape `routedModelEnv`'s sweep
+   * had one section up: a search for a value the subject could not have held.
+   */
+  check("nothing has a key yet", listed.body.systems.every((one: any) => one.keySet === false), true);
+
+  check(
+    "an unknown system is refused by name",
+    (await call(withSystems, "PUT", "/systems/gemini", { token: "x" })).body.error.code,
+    "invalid_system",
+  );
+  check(
+    "an empty token is refused",
+    (await call(withSystems, "PUT", "/systems/moonshot", { token: "   " })).status,
+    400,
+  );
+  check(
+    "and one past the ceiling",
+    (await call(withSystems, "PUT", "/systems/moonshot", { token: "x".repeat(9000) })).status,
+    400,
+  );
+  check("saving one works", (await call(withSystems, "PUT", "/systems/moonshot", { token: "sekrit" })).status, 200);
+  check("and the daemon can read it back", systems.credentials.get("moonshot"), "sekrit");
+  /*
+   * Both halves off **one** listing, taken with the key genuinely in the store —
+   * which is what makes the second half an assertion rather than a sentence. The
+   * line above is the precondition it needs: a sweep for a string nothing holds
+   * is the no-op this block used to open with.
+   */
+  const afterSave = await call(withSystems, "GET", "/systems");
+  check(
+    "the listing says so",
+    afterSave.body.systems.find((one: any) => one.id === "moonshot").keySet,
+    true,
+  );
+  check(
+    "and still shows no secret, over a daemon that is now holding one",
+    JSON.stringify(afterSave.body).includes("sekrit"),
+    false,
+  );
+
+  /*
+   * ⚠ **Rotating a key, which nothing drove.** `SqliteSystemCredentialStore.save`
+   * is an upsert, and against a bare `INSERT` this second `PUT` would be a `500`
+   * out of `SQLITE_CONSTRAINT_PRIMARYKEY` — which is exactly the defect the
+   * *preset* store shipped with and this section's `Map` stand-in cannot see,
+   * because a `Map` upserts by construction. Replacing a vendor key is the
+   * ordinary act, not an edge.
+   */
+  check("rotating one works", (await call(withSystems, "PUT", "/systems/moonshot", { token: "sekrit2" })).status, 200);
+  check("and the new secret is what is stored", systems.credentials.get("moonshot"), "sekrit2");
+  check("with one row still, not two", systems.credentials.list().length, 1);
+
+  /*
+   * ⚠ **Assembling is refused for a pairing that cannot run, on the route and
+   * not only in the picker.** A saved preset that cannot start is a row whose
+   * only button answers 502 for ever, days after anybody could connect the two.
+   */
+  const bad = await call(withSystems, "POST", "/custom-agents", {
+    name: "nope",
+    harness: "codex",
+    system: "moonshot",
+    model: "kimi-k2-thinking",
+  });
+  check("an impossible pairing is refused", bad.status, 400);
+  check("and says which two", bad.body?.error?.code ?? null, "incompatible_pairing");
+  check("and nothing was written", presets.size, 0);
+
+  const good = await call(withSystems, "POST", "/custom-agents", {
+    name: "Claude Code · K2",
+    harness: "claude",
+    system: "moonshot",
+    model: "kimi-k2-thinking",
+  });
+  check("a real one is created", good.status, 201);
+  check("with an id of ours", /^ca_[0-9a-f]{8}$/.test(good.body.customAgent.id), true);
+  check("and it is listed", (await call(withSystems, "GET", "/custom-agents")).body.customAgents.length, 1);
+
+  check(
+    "a nameless one is refused",
+    (await call(withSystems, "POST", "/custom-agents", { harness: "claude", system: "moonshot", model: "m" })).status,
+    400,
+  );
+  check(
+    "so is an unknown harness",
+    (await call(withSystems, "POST", "/custom-agents", { name: "n", harness: "gemini", system: "moonshot", model: "m" })).body?.error?.code ?? null,
+    "invalid_agent",
+  );
+
+  /* ---------------------------------------------------------------- *
+   * Clearing a key, which was driven only as a refusal
+   *
+   * ⚠ **Both halves, and the second is the one with teeth.** That the key goes is
+   * obvious; that presets naming the system are *left alone* is a decision the
+   * route's own comment makes and nothing asserted — so a change that swept them
+   * on key removal would have destroyed somebody's named agents with every driver
+   * green. This runs before the edit section below, which needs that preset.
+   * ---------------------------------------------------------------- */
+  {
+    const cleared = await call(withSystems, "DELETE", "/systems/moonshot");
+    check("clearing a key answers removed", answered(cleared), [200, null]);
+    check("and says which", [cleared.body.removed, cleared.body.system], [true, "moonshot"]);
+    check("the daemon cannot read it any more", systems.credentials.get("moonshot"), null);
+    const after = await call(withSystems, "GET", "/systems");
+    const row = after.body.systems.find((one: any) => one.id === "moonshot");
+    check("and the listing agrees", [row.keySet, row.keyUpdatedAt], [false, null]);
+    check(
+      "the preset naming that system is untouched",
+      (await call(withSystems, "GET", "/custom-agents")).body.customAgents.length,
+      1,
+    );
+    /*
+     * ⚠ **An id this build does not know is `200 {removed:false}`, not `400`.**
+     * `SqliteSystemCredentialStore.list` drops a row naming a system this version
+     * cannot resolve, so a `400` before the `remove` — which is what this route
+     * did — made a key written by a newer daemon undeletable after a downgrade:
+     * unlistable, unreadable and unremovable, in plaintext. Same argument and
+     * same shape as `DELETE /custom-agents/:id`.
+     */
+    const unknown = await call(withSystems, "DELETE", "/systems/gemini");
+    check("an id this build does not know is not refused", unknown.status, 200);
+    check("and says it removed nothing", unknown.body.removed, false);
+    // Put it back for the sections below, which assume a key is there.
+    check("and the key can be saved again", (await call(withSystems, "PUT", "/systems/moonshot", { token: "sekrit" })).status, 200);
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Editing one, which is `PATCH /custom-agents/:id`
+   *
+   * ⚠ **Every refusal below is asserted in two halves: the answer, and that the
+   * stored row is byte-identical afterwards.** A route that refuses and writes
+   * anyway answers exactly like one that refuses and does not, and the difference
+   * only shows up days later as a preset whose only button returns 502. That is
+   * the whole reason `POST`'s own refusal above carries `presets.size` beside it,
+   * and an edit needs it more than a create does: a create that half-lands leaves
+   * a row nobody had yet, while an edit that half-lands destroys one that worked.
+   *
+   * ⚠ **And the create and the edit are one predicate.** `readAssembledAgent` is
+   * a single function for exactly that reason, so the assertions here are written
+   * to fail the day somebody copies the checks back into either handler — the
+   * pairing message is compared to `POST`'s own string rather than to a literal,
+   * and the whole table of malformed bodies is driven through both routes and
+   * compared to each other.
+   * ---------------------------------------------------------------- */
+
+  const preset = good.body.customAgent.id;
+  const born = good.body.customAgent.createdAt;
+  /*
+   * The whole store as bytes, which is what "nothing changed" means here.
+   *
+   * The listing rather than the one row on purpose: a refusal that wrote a
+   * *second* row leaves the row it was sent at untouched, so a snapshot of that
+   * row alone would call it clean.
+   */
+  const frozen = (): string => JSON.stringify([...presets.values()]);
+
+  const edited = await call(withSystems, "PATCH", `/custom-agents/${preset}`, {
+    name: "Claude Code · Opus",
+    harness: "claude",
+    system: "anthropic",
+    model: "opus",
+  });
+  check("an assembled agent can be edited", edited.status, 200);
+  check(
+    "and all four fields it named moved",
+    [
+      edited.body.customAgent.name,
+      edited.body.customAgent.harness,
+      edited.body.customAgent.system,
+      edited.body.customAgent.model,
+    ],
+    ["Claude Code · Opus", "claude", "anthropic", "opus"],
+  );
+  /*
+   * ⚠ **`id` and `createdAt` are the daemon's, and an edit is the only place they
+   * could be lost.** `sessions.custom_agent` holds a *reference* rather than a
+   * copy and `ManagedSession.assembled` resolves it at every launch, so an edit
+   * that minted a new id would silently drop every session on the old one to its
+   * bare harness while a row that looks identical sat beside it — which is the
+   * outcome this route exists to prevent, reintroduced by the route itself.
+   */
+  check("while the id it was reached by is unchanged", edited.body.customAgent.id, preset);
+  check("and so is the moment it was created", edited.body.customAgent.createdAt, born);
+  check("the store holds exactly the row that was answered", presets.get(preset), edited.body.customAgent);
+  check("an edit replaces rather than adds", presets.size, 1);
+  check(
+    "and the listing carries it at once",
+    (await call(withSystems, "GET", "/custom-agents")).body.customAgents,
+    [edited.body.customAgent],
+  );
+
+  /*
+   * ⚠ **A body naming `id` or `createdAt` is answered, not refused — and it is
+   * answered with the daemon's values.** There is no field to refuse: the
+   * validator returns four fields and the route reads the other two off the
+   * stored row, so an extra key is one nothing looks at. Driven because the shape
+   * somebody reaches for instead — taking them off the body "when present" —
+   * fails with a 200 and a second row rather than with an error, and both halves
+   * of that are invisible to a status-code assertion.
+   */
+  const hijack = await call(withSystems, "PATCH", `/custom-agents/${preset}`, {
+    id: "ca_hijack",
+    createdAt: 0,
+    name: "still mine",
+    harness: "claude",
+    system: "anthropic",
+    model: "opus",
+  });
+  check("a client naming the id is answered rather than refused", hijack.status, 200);
+  check("with the id the row already had", hijack.body.customAgent.id, preset);
+  check("and the age the row already had", hijack.body.customAgent.createdAt, born);
+  check("nothing was created under the id it asked for", presets.has("ca_hijack"), false);
+  check("and there is still exactly one row", presets.size, 1);
+
+  check(
+    "editing one that is not there is a 404",
+    answered(await call(withSystems, "PATCH", "/custom-agents/ca_nope", {
+      name: "n",
+      harness: "claude",
+      system: "anthropic",
+      model: "opus",
+    })),
+    /*
+     * ⚠ **Its own code, not the bare `not_found` this asserted for a release.**
+     * `POST /sessions` answers `400 not_found` for a `cwd` that does not exist —
+     * a `PathError` — so a client branching on the code alone, which `docs/API.md`
+     * says is the only thing it may branch on, could not tell "pick a different
+     * folder" from "that preset is gone".
+     */
+    [404, "custom_agent_not_found"],
+  );
+  /*
+   * ⚠ **The 404 is decided before the body is.** Somebody holding a listing a
+   * second out of date should be told the agent is gone rather than complained at
+   * about a field, and the two answers are indistinguishable from where they are
+   * standing. Only a request that is wrong in *both* ways can see which check ran
+   * first, so that is what this sends.
+   */
+  const goneFirst = await call(withSystems, "PATCH", "/custom-agents/ca_nope", {});
+  check("and an unknown id outranks a body that is also wrong", answered(goneFirst), [404, "custom_agent_not_found"]);
+
+  /** One refusal, both halves: what was answered, and that the row did not move. */
+  const refuses = async (what: string, body: unknown, want: [number, string]): Promise<void> => {
+    const before = frozen();
+    const answer = await call(withSystems, "PATCH", `/custom-agents/${preset}`, body);
+    check(`editing: ${what}`, answered(answer), want);
+    check(`editing: ${what} — and the row is where it was`, frozen(), before);
+  };
+
+  await refuses("an unknown harness", { name: "n", harness: "gemini", system: "moonshot", model: "m" }, [400, "invalid_agent"]);
+  await refuses("an unknown system", { name: "n", harness: "claude", system: "gemini", model: "m" }, [400, "invalid_system"]);
+  await refuses("no name at all", { harness: "claude", system: "anthropic", model: "opus" }, [400, "bad_request"]);
+  await refuses("a name of nothing but space", { name: "   ", harness: "claude", system: "anthropic", model: "opus" }, [400, "bad_request"]);
+  await refuses("a name one character past the bound", { name: "x".repeat(81), harness: "claude", system: "anthropic", model: "opus" }, [400, "bad_request"]);
+  await refuses("no model at all", { name: "n", harness: "claude", system: "anthropic" }, [400, "bad_request"]);
+  await refuses("a model of nothing but space", { name: "n", harness: "claude", system: "anthropic", model: " \t " }, [400, "bad_request"]);
+  await refuses("a model id one character past the bound", { name: "n", harness: "claude", system: "anthropic", model: "x".repeat(257) }, [400, "bad_request"]);
+  await refuses("a body that is a list", [], [400, "invalid_agent"]);
+  await refuses("a body that is a bare number", 7, [400, "invalid_agent"]);
+
+  /*
+   * ⚠ **An edit is a replace, and a partial body is refused by the field it left
+   * out.** This is the failure mode with no symptom. If a subset body were
+   * accepted, `hostable` would have to be weighed against the *merge* of body and
+   * stored row — and a handler that weighs it against the body alone takes
+   * `{ "system": "moonshot" }` at a codex preset, refuses that pairing at creation
+   * and saves it at edit, with a 200 and no complaint anywhere. Requiring all four
+   * leaves nothing to merge and so nothing to get wrong; these two are what say so
+   * out loud, since a route that quietly started merging would break no other
+   * assertion in this file.
+   */
+  await refuses("a body naming only a new system", { system: "moonshot" }, [400, "invalid_agent"]);
+  await refuses("a body naming only a new name", { name: "renamed" }, [400, "invalid_agent"]);
+
+  // The positive control for the two bounds above: at the bound, not past it. A
+  // validator that refused everything would satisfy every refusal here.
+  const atBound = await call(withSystems, "PATCH", `/custom-agents/${preset}`, {
+    name: "n".repeat(80),
+    harness: "claude",
+    system: "anthropic",
+    model: "m".repeat(256),
+  });
+  check("editing: a name and a model exactly at the bound are accepted", atBound.status, 200);
+
+  /*
+   * ⚠ **The pairing is re-weighed on every edit, and it is refused in the words a
+   * create refuses it in.** An edit is the harder half of the two: a create that
+   * is refused leaves nobody worse off, while an edit can take a row that started
+   * fine yesterday and leave it unstartable. The message is compared to `POST`'s
+   * own answer rather than to a literal, which is what pins the two routes to one
+   * validator — a literal would keep passing while they drifted, as long as
+   * somebody remembered to change it here too.
+   */
+  const editPairing = await call(withSystems, "PATCH", `/custom-agents/${preset}`, {
+    name: "nope",
+    harness: "codex",
+    system: "moonshot",
+    model: "kimi-k2-thinking",
+  });
+  check("editing: an impossible pairing is refused", answered(editPairing), [400, "incompatible_pairing"]);
+  check("editing: and says which two", editPairing.body?.error?.detail ?? null, { harness: "codex", system: "moonshot" });
+  // Two halves, because the comparison alone is vacuous: two routes that had both
+  // stopped refusing would agree perfectly about `null`.
+  const pairingWords = editPairing.body?.error?.message ?? null;
+  check(
+    "editing: in the very words a create refuses it in",
+    [typeof pairingWords === "string" && pairingWords.length > 0, pairingWords === (bad.body?.error?.message ?? null)],
+    [true, true],
+  );
+  check(
+    "editing: and the row that was startable still is",
+    [presets.get(preset).harness, presets.get(preset).system],
+    ["claude", "anthropic"],
+  );
+
+  /*
+   * ⚠ **The gate is swept over the whole harness × system matrix rather than at
+   * the cell that matters today.** `hostable` is the only place the matrix exists,
+   * on each side, and a rule asserted at its interesting points is a rule the next
+   * entry in `SYSTEMS` escapes silently — which is the discipline the section
+   * above already applies to the function. It is applied here to the *route*
+   * because these are two copies of one rule and only this one is reachable from
+   * the internet, and because a gate can be right about the answer and wrong about
+   * the write: each cell records what happened to the store, so an accepted
+   * pairing must have landed and a refused one must not have.
+   *
+   * ⚠ **The sweep also says the pair is weighed as a pair.** Each cell is sent at
+   * whatever the previous cell left in the store, so `codex x openai` arrives at a
+   * row holding `kimi`/`moonshot` — and a route that weighed the body's harness
+   * against the stored system, or the stored harness against the body's system,
+   * refuses it. That is the merge this route is written to make impossible, and
+   * the fifteen cells are where it would show.
+   */
+  const editMatrix: string[] = [];
+  for (const harness of AGENT_IDS) {
+    for (const system of SYSTEM_IDS) {
+      const before = frozen();
+      const answer = await call(withSystems, "PATCH", `/custom-agents/${preset}`, {
+        name: `${harness} on ${system}`,
+        harness,
+        system,
+        model: "m",
+      });
+      const held = presets.get(preset);
+      const landed = held.harness === harness && held.system === system;
+      editMatrix.push(
+        answer.status === 200
+          ? `${harness} x ${system}: saved${landed ? "" : " BUT NOT STORED"}`
+          : `${harness} x ${system}: ${answer.body?.error?.code ?? answer.status}${frozen() === before ? "" : " BUT STORED"}`,
+      );
+    }
+  }
+  check("editing: the route's matrix is the adapters' matrix", editMatrix, [
+    "claude x anthropic: saved",
+    "claude x openai: incompatible_pairing",
+    "claude x moonshot: saved",
+    "claude x zhipu: saved",
+    "claude x minimax: saved",
+    "kimi x anthropic: incompatible_pairing",
+    "kimi x openai: incompatible_pairing",
+    "kimi x moonshot: saved",
+    "kimi x zhipu: incompatible_pairing",
+    "kimi x minimax: incompatible_pairing",
+    "codex x anthropic: incompatible_pairing",
+    "codex x openai: saved",
+    "codex x moonshot: incompatible_pairing",
+    "codex x zhipu: incompatible_pairing",
+    "codex x minimax: incompatible_pairing",
+  ]);
+
+  // Fifteen edits later, with six of them landing, the two fields the wire never
+  // named are still the ones the row was born with.
+  const restored = await call(withSystems, "PATCH", `/custom-agents/${preset}`, {
+    name: "Claude Code · K2",
+    harness: "claude",
+    system: "moonshot",
+    model: "kimi-k2-thinking",
+  });
+  check(
+    "editing: the id and the age came through all fifteen",
+    [restored.body.customAgent.id, restored.body.customAgent.createdAt],
+    [preset, born],
+  );
+  check("and there is still one row to show for it", presets.size, 1);
+
+  /*
+   * ⚠ **Editing is `write`, like creating and removing.** The one edit a
+   * read-only token must not be able to make is re-pointing somebody's preset at
+   * another system, which changes where their key is sent — so this is the
+   * destructive half of the two paths that decide the same predicate, and it
+   * carries the stronger authority rather than the weaker one.
+   */
+  const beforeScope = frozen();
+  const readOnly = await call(
+    withSystems,
+    "PATCH",
+    `/custom-agents/${preset}`,
+    { name: "n", harness: "claude", system: "anthropic", model: "opus" },
+    tokenWith("u_reader", ["session:read"]),
+  );
+  check("a read-only token may not edit an assembled agent", answered(readOnly), [403, "insufficient_scope"]);
+  check("and nothing moved", frozen(), beforeScope);
+
+  /*
+   * ⚠ **The create and the edit may not disagree about a body.** They are one
+   * function today, and this is the assertion that fails the day somebody copies
+   * the checks back into either handler. Compared as pairs rather than against a
+   * table of literals, so it stays true through a change to any of the codes and
+   * false the moment the two paths answer differently — including in the
+   * direction that matters, where the edit accepts what the create refuses.
+   */
+  const bodies: [string, unknown][] = [
+    ["nothing at all", {}],
+    ["a list", []],
+    ["a bare number", 7],
+    ["an unknown harness", { name: "n", harness: "gemini", system: "moonshot", model: "m" }],
+    ["an unknown system", { name: "n", harness: "claude", system: "gemini", model: "m" }],
+    ["no name", { harness: "claude", system: "moonshot", model: "m" }],
+    ["a blank name", { name: "  ", harness: "claude", system: "moonshot", model: "m" }],
+    ["a name past the bound", { name: "x".repeat(81), harness: "claude", system: "moonshot", model: "m" }],
+    ["no model", { name: "n", harness: "claude", system: "moonshot" }],
+    ["a blank model", { name: "n", harness: "claude", system: "moonshot", model: "  " }],
+    ["a model past the bound", { name: "n", harness: "claude", system: "moonshot", model: "x".repeat(257) }],
+    ["a pairing that cannot run", { name: "n", harness: "codex", system: "moonshot", model: "m" }],
+    ["only a name", { name: "renamed" }],
+  ];
+  const disagreed: string[] = [];
+  const swallowed: string[] = [];
+  for (const [what, body] of bodies) {
+    const created = await call(withSystems, "POST", "/custom-agents", body);
+    const patched = await call(withSystems, "PATCH", `/custom-agents/${preset}`, body);
+    if (created.status < 300 || patched.status < 300) swallowed.push(what);
+    const one = answered(created).join(" ");
+    const other = answered(patched).join(" ");
+    if (one !== other) disagreed.push(`${what}: POST ${one}, PATCH ${other}`);
+  }
+  report(
+    "a create and an edit answer a malformed body identically",
+    disagreed.length === 0,
+    disagreed.length === 0 ? `${bodies.length} bodies` : disagreed.join(" · "),
+  );
+  // The positive half: every body in that table is malformed, so "identically"
+  // must mean identically *refused*. Without this, two routes that both started
+  // accepting one of them would agree with each other all the way down.
+  check("and every one of them is a body both refuse", swallowed, []);
+  check("and not one of them wrote anything", presets.size, 1);
+
+  /*
+   * ⚠ **A preset names a harness, and `POST /sessions` fills `agent` in from it
+   * rather than making the caller keep the two in step.** Driven by sending a
+   * body whose `agent` disagrees: what must not happen is a session on the agent
+   * the body named.
+   */
+  const unknownPreset = await call(withSystems, "POST", "/sessions", {
+    customAgent: "ca_deadbeef",
+    cwd: users,
+  });
+  check("a preset that does not exist is a 404", unknownPreset.status, 404);
+  check(
+    "an empty customAgent is a bad request rather than a bare harness",
+    (await call(withSystems, "POST", "/sessions", { customAgent: "", cwd: users })).status,
+    400,
+  );
+
+  /*
+   * ⚠ **Removing one is idempotent, and this block used to pin the opposite.**
+   * It asserted `404` for an id with nothing under it, which is the answer that
+   * cannot survive the transport: `DELETE` is on `isReplayable` and deliberately
+   * **off** `slowRoute` — that table calls this route "a lookup plus a delete",
+   * which is the 15s budget `settleTransport` names as the one an LTE drop earns
+   * — so the request a dropped answer produces is the *same* delete, sent again.
+   * A 404 there puts `errorText` on the builder's screen over an act that
+   * succeeded. `DELETE /plugins/:pluginId` already answers this way and is
+   * already pinned that way further up; this is the same convention in the same
+   * daemon rather than a new one.
+   *
+   * The stated cost, which is the plugin route's too: a mistyped id is no longer
+   * refused. That is why the discriminator is pinned beside the status — a `200`
+   * on its own cannot tell a replay from a delete that found nothing, so an
+   * assertion on the status alone would pin nothing at all.
+   */
+  const missing = await call(withSystems, "DELETE", "/custom-agents/ca_nope");
+  check("removing one that is not there is a 200", missing.status, 200);
+  check("and says nothing was removed", missing.body.removed, false);
+  check("and echoes back the id it was asked about", missing.body.id, "ca_nope");
+
+  /*
+   * The replay itself, which is the request the defect was about: the same
+   * delete twice, which is what a client that never saw the first answer sends.
+   * Nothing else in this file reaches it, and before the route changed the
+   * second send was a 404 over a row that really had gone.
+   */
+  const doomed = good.body.customAgent.id;
+  const firstTry = await call(withSystems, "DELETE", `/custom-agents/${doomed}`);
+  check("removing a real one works", [firstTry.status, firstTry.body.removed, firstTry.body.id], [200, true, doomed]);
+  check("and the list is empty again", (await call(withSystems, "GET", "/custom-agents")).body.customAgents.length, 0);
+  const replay = await call(withSystems, "DELETE", `/custom-agents/${doomed}`);
+  check("sending it a second time succeeds and says so", [replay.status, replay.body.removed, replay.body.id], [200, false, doomed]);
+  check("with the list still empty rather than disturbed", (await call(withSystems, "GET", "/custom-agents")).body.customAgents.length, 0);
+
+  /**
+   * Every route this section serves, and which scope each is behind.
+   *
+   * ⚠ **One table, read by two sweeps, because a route in one and not the other
+   * is exactly the gap this closes.** The scope sweep below and the no-store
+   * sweep under it are the same seven questions asked twice, and they were not:
+   * the no-store list was written out here and the scope gate was asserted at one
+   * route, `PATCH /custom-agents/:id`, in the middle of the editing block. The
+   * other four write verbs could each be downgraded from `write` to `read` in
+   * `src/server.ts` — singly or all at once — with this whole file green. The
+   * costliest of them is `PUT /systems/:system`, which is where somebody pastes a
+   * vendor API key: a read-only grant able to reach it can replace the key every
+   * routed session on this machine signs its requests with, and `DELETE` beside it
+   * can take it away.
+   *
+   * The path shapes carry their parameters rather than a literal id, so each
+   * sweep substitutes what it needs — the no-store one an id nothing can exist
+   * under, the scope one a row that really is there, which is what makes "and
+   * nothing moved" a claim about a write that could have landed.
+   */
+  const sectionRoutes = [
+    ["GET", "/systems", "read"],
+    ["PUT", "/systems/:system", "write"],
+    ["DELETE", "/systems/:system", "write"],
+    ["GET", "/custom-agents", "read"],
+    ["POST", "/custom-agents", "write"],
+    ["PATCH", "/custom-agents/:id", "write"],
+    ["DELETE", "/custom-agents/:id", "write"],
+  ] as const;
+
+  /*
+   * ⚠ **The scope gate, swept over the whole table rather than pinned at one
+   * route.** `PATCH /custom-agents/:id` is asserted on its own further up with the
+   * argument for why an edit is destructive; this is the same predicate asked of
+   * every verb here, and it is what stops the next route added to this section
+   * arriving with no gate at all.
+   *
+   * A body that would really land on each write, so the second assertion is about
+   * a write that was refused rather than one that was malformed: `PUT` carries a
+   * token a reader must not be able to paste, and both preset writes carry the
+   * four fields the route accepts, aimed at a row that exists.
+   */
+  const gateTarget = await call(withSystems, "POST", "/custom-agents", {
+    name: "gated",
+    harness: "claude",
+    system: "moonshot",
+    model: "kimi-k2-thinking",
+  });
+  check("a row to aim the scope sweep at", gateTarget.status, 201);
+  const gateBody = (method: string): unknown =>
+    method === "PUT"
+      ? { token: "a-read-only-grant-must-not-be-able-to-paste-this" }
+      : method === "POST" || method === "PATCH"
+        ? { name: "hijacked", harness: "claude", system: "anthropic", model: "opus" }
+        : undefined;
+  const said = (one: { status: number; body: any }): string =>
+    `${one.status}${one.body?.error?.code == null ? "" : ` ${String(one.body.error.code)}`}`;
+
+  const beforeGate = [frozen(), JSON.stringify([...keys])];
+  const denied: string[] = [];
+  const allowed: string[] = [];
+  for (const [method, shape, scope] of sectionRoutes) {
+    const path = shape.replace(":system", "moonshot").replace(":id", gateTarget.body.customAgent.id);
+    const answer = await call(withSystems, method, path, gateBody(method), tokenWith("u_reader", ["session:read"]));
+    (scope === "write" ? denied : allowed).push(`${method} ${shape}: ${said(answer)}`);
+  }
+  check("a read-only grant reaches no write verb in this section", denied, [
+    "PUT /systems/:system: 403 insufficient_scope",
+    "DELETE /systems/:system: 403 insufficient_scope",
+    "POST /custom-agents: 403 insufficient_scope",
+    "PATCH /custom-agents/:id: 403 insufficient_scope",
+    "DELETE /custom-agents/:id: 403 insufficient_scope",
+  ]);
+  /*
+   * The positive half, and it is not decoration: a `write` that had drifted onto
+   * either listing would take the assembly screen away from every read-only grant
+   * on the machine while all five refusals above went on passing. The same pair
+   * the plugin section already drives.
+   */
+  check("and still reaches both listings", allowed, ["GET /systems: 200", "GET /custom-agents: 200"]);
+  check("and not one of those five moved anything", [frozen(), JSON.stringify([...keys])], beforeGate);
+  check(
+    "sweeping it away again",
+    (await call(withSystems, "DELETE", `/custom-agents/${gateTarget.body.customAgent.id}`)).body.removed,
+    true,
+  );
+
+  // Every route, against a daemon with no store. `GET /systems` is the exception
+  // and is deliberately not one: the table is compiled in, so it can answer
+  // honestly with `keySet: false` everywhere rather than refusing.
+  for (const [method, shape] of sectionRoutes) {
+    if (method === "GET" && shape === "/systems") continue;
+    // `ca_1` and `{}` are enough: with no store there is nothing to look an id up
+    // in, so the 503 is decided above both the 404 and the first field check.
+    const path = shape.replace(":system", "moonshot").replace(":id", "ca_1");
+    const answer = await call(without, method, path, method === "GET" || method === "DELETE" ? undefined : {});
+    // The code as well as the status: 503 is also what a route answers when an
+    // agent will not start, and these two are told apart nowhere else.
+    check(`${method} ${path} without a store`, [answer.status, answer.body?.error?.code ?? null], [503, "systems_unavailable"]);
+  }
+  check(
+    "but the table itself still answers",
+    (await call(without, "GET", "/systems")).status,
+    200,
+  );
+  check(
+    "and a session naming a preset refuses rather than starting a bare harness",
+    (await call(without, "POST", "/sessions", { customAgent: "ca_1", cwd: users })).status,
+    503,
+  );
 }
 
 process.stdout.write(

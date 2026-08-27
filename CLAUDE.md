@@ -57,7 +57,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 730 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 776 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -91,7 +91,13 @@ pnpm daemoncheck                     # the daemon's HTTP surface and durable sta
                                      #   restart budget — plus what an update keeps and what a failed
                                      #   one puts back, and the two surfaces a plugin draws on: every
                                      #   block and every field kind on each, always in pairs, and the
-                                     #   same bytes answered to both over HTTP
+                                     #   same bytes answered to both over HTTP. Plus editing an
+                                     #   assembled agent: every refusal on `PATCH` in two halves, one
+                                     #   malformed-body table driven through `POST` and `PATCH` and
+                                     #   compared — and, against a **real** store, that a second save
+                                     #   replaces the row and leaves its age alone, which the route
+                                     #   section cannot reach because it stands a `Map` in, and a
+                                     #   `Map` upserts
 pnpm relaycheck                      # framing, flow control, authorization, tunnel supersede,
                                      #   tunnel presence as a row and the relay's own health route,
                                      #   live-row revocation, the control plane's routes,
@@ -140,12 +146,16 @@ pnpm webcheck                        # packages/web: the cursor, rotation, repla
                                      #   machine table those machines are ticked on: what one row may
                                      #   offer and what the bar may, both swept; that the bar sits
                                      #   outside the scroller and the scroller ends no scroll chain;
-                                     #   and what N settings panes add up to when they disagree
-                                     #   And the newest: that a transcript missing its beginning
+                                     #   and what N settings panes add up to when they disagree.
+                                     #   Then: that a transcript missing its beginning
                                      #   *says so* — `transcriptNotice` as a total partition over
                                      #   720 states, its pair with `loadStop`, and the one string
                                      #   feeding both the line and the live region — plus a retry
-                                     #   schedule long enough to outlast a daemon redialling
+                                     #   schedule long enough to outlast a daemon redialling.
+                                     #   And the newest is a repair rather than a subject: **two**
+                                     #   sentences for a pairing failure where one was pinned — a
+                                     #   spelling and a protocol may not read alike, and the check
+                                     #   asserting they must is what kept the false one shipping
 pnpm pincheck                        # every place a version is written down. The agents':
                                      #   three copies each, and the adapters actually installed.
                                      #   And five of this release's six — the root and both
@@ -295,6 +305,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `web-composer.md` | `packages/web/src/ui/Composer.tsx`, `CommandMenu.tsx`, `AgentConfigBar.tsx`, `packages/web/src/keys.ts` | Which key sends · what a `/` opens · why a control never leaves the strip · what a chip may claim before the daemon has answered |
 | `plugins.md` | `src/plugins/`, `plugins/`, `packages/web/src/wire.ts` | What a plugin may add and where it may appear · the two axes of authorization, and which applies inside a hook · what an update keeps and what a failed one puts back · why `src/` now holds three `fetch` calls |
 | `plugin-ui.md` | `packages/web/src/plugins.ts`, `catalogue.ts`, `install.ts`, `ui/plugins/`, `PluginView.tsx` | What the browser draws for a plugin and what it refuses to draw · where a plugin is installed from and what somebody agreed to · the one client that fails *closed* · what a draft of a fleet is |
+| `agent-systems.md` | `src/acp/systems.ts`, `src/agentask.ts`, `packages/web/src/agents.ts`, `ui/AgentBuilder.tsx` | Why a harness is not a system · which pairs of them exist, and who answers that · how a model is named to a harness that has never heard of it · what a session records and what it resolves at every launch |
 | `deployment.md` | `deploy/`, `.github/workflows/` | Two deployments and three services · what a restart costs and what decides one · every rule about writing a value into an env file |
 | `compatibility.md` | `src/version.ts`, `src/relay/protocol.ts`, `packages/control-plane/src/store.ts`, `schema.sql`, `packages/web/src/wire.ts` | What ships with what, and why the web client riding the control plane's image decides the rest · negotiated against announced · which way an unknown value must fail · how to make a breaking change without a flag day · what is still one |
 

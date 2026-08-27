@@ -452,7 +452,21 @@ function ExitNotice({ row, machineName }: { row: SessionRow; machineName: string
       {notice.action === "sign_in" && (
         <button
           type="button"
-          onClick={() => navigate(settingsPath("machines", row.ref.machineId, row.snapshot.agent))}
+          /*
+           * ⚠ **The machine's systems *list*, not a system named from the agent
+           * id.** This passed `row.snapshot.agent` into the slot that segment used
+           * to be — an agent id — and that slot is a **system** now, so it built
+           * `/settings/machines/:id/systems/claude`, which parses (any id up to 64
+           * characters does, deliberately, so a newer daemon's system stays
+           * reachable) and then asks the daemon about a system called `claude`.
+           *
+           * Mapping the harness to its system is `SYSTEMS[…].nativeHarness`'s
+           * answer and lives on the daemon; this screen would have to fetch
+           * `GET /systems` to build a link. So it goes one level shallower, where
+           * the list names them, rather than guessing — which is the same refusal
+           * `settings.ts` makes for a stale address.
+           */
+          onClick={() => navigate(settingsPath("machines", row.ref.machineId))}
           className="tap rounded border border-edge px-2 py-0.5 text-2xs text-fg hover:bg-raised"
         >
           Sign in to {agentLabel(row.snapshot.agent)}

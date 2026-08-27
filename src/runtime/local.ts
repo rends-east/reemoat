@@ -15,6 +15,7 @@ import {
   type AgentLaunchConfig,
   type LoginStatusProbe,
 } from "../acp/agents.js";
+import type { SystemId } from "../acp/systems.js";
 import { hostGit, type GitExec } from "../git.js";
 import type {
   AgentAvailability,
@@ -307,6 +308,16 @@ export interface LocalRuntimeOptions {
    * session without a daemon restart.
    */
   secrets?: (agent: AgentId) => Record<string, string>;
+  /**
+   * This user's credential for a *system*, read the same way and for the same
+   * reasons — never held here, never captured, so replacing a key takes effect
+   * on the next session.
+   *
+   * Separate from {@link secrets} because the two never mix: an agent credential
+   * is merged into an environment, a system credential is handed to
+   * `providers/set` over stdio and must not be.
+   */
+  systemSecret?: (system: SystemId) => string | null;
   onWarning?: (detail: string) => void;
   /**
    * How a non-interactive probe is run, for the drivers only.
@@ -328,6 +339,7 @@ export interface LocalRuntimeOptions {
 
 export class LocalRuntime implements SessionRuntime {
   private readonly secrets: (agent: AgentId) => Record<string, string>;
+  private readonly systemSecretOf: (system: SystemId) => string | null;
   private readonly onWarning: (detail: string) => void;
   private readonly exec: (
     command: string,
@@ -364,6 +376,7 @@ export class LocalRuntime implements SessionRuntime {
 
   constructor(options: LocalRuntimeOptions = {}) {
     this.secrets = options.secrets ?? (() => ({}));
+    this.systemSecretOf = options.systemSecret ?? (() => null);
     this.onWarning = options.onWarning ?? (() => {});
     this.exec = options.exec ?? ((command, args, env, stream) => runProbe(command, args, env, stream));
   }
@@ -567,7 +580,11 @@ export class LocalRuntime implements SessionRuntime {
     return { ok: true, detail };
   }
 
-  async launch(agent: AgentId): Promise<AgentProcess> {
+  systemSecret(system: SystemId): string | null {
+    return this.systemSecretOf(system);
+  }
+
+  async launch(agent: AgentId, extra: NodeJS.ProcessEnv = {}): Promise<AgentProcess> {
     const config = resolveAgent(agent);
     // `detached` puts the agent in its own process group, which buys two things.
     // The agent adapters spawn their own children (claude-agent-acp runs a
@@ -579,7 +596,14 @@ export class LocalRuntime implements SessionRuntime {
     const child = spawn(config.command, config.args, {
       // Secrets last, so a pasted token beats an ambient one: the Settings screen
       // says "set", and it has to be telling the truth about what the agent reads.
-      env: { ...config.env, ...this.secrets(agent) },
+      //
+      // `extra` last of all, and it is *not* a third secret channel — see
+      // `SessionRuntime.launch`. It carries what this daemon's own tables
+      // produced, which today is the model a routed system is pinned to. It
+      // outranks an ambient `ANTHROPIC_MODEL` deliberately: a session created as
+      // "Claude Code on Kimi K2" has to run K2 whatever this host's shell
+      // profile happens to export.
+      env: { ...config.env, ...this.secrets(agent), ...extra },
       stdio: ["pipe", "pipe", "pipe"],
       detached: true,
     }) as PipedChild;

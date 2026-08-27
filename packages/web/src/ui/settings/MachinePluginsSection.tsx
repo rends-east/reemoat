@@ -9,7 +9,7 @@ import { PluginList } from "./PluginsPanel";
  * Plugins, inside the machine they run on.
  *
  * ⚠ **One depth now, and the second one left on purpose.** This was the sibling
- * of `MachineAgentsSection` down to the shape: a list, and one leaf holding that
+ * of `MachineSystemsSection` down to the shape: a list, and one leaf holding that
  * plugin's own settings. The leaf is gone. What it drew is a plugin's
  * configuration, which is a thing *about the plugin* rather than about this host,
  * and it sat four taps into a sheet behind a kebab where nobody found it — the
@@ -39,7 +39,7 @@ export function MachinePluginsSection({ state, machineId }: { state: AppState; m
 
   if (!daemonReadable(machine.reach)) {
     /*
-     * Named rather than silently empty, for `MachineAgentsSection`'s reason: an
+     * Named rather than silently empty, for `MachineSystemsSection`'s reason: an
      * unreachable machine is a common reason to be on this screen, and "nothing
      * is installed" and "we could not ask" are different sentences.
      */

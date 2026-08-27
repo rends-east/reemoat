@@ -365,6 +365,11 @@ const runtime = new LocalRuntime({
   // The user's own pasted credential, read at launch rather than captured, so
   // replacing a token takes effect on the next session without a restart.
   secrets: (agent) => stores.credentials.envFor(agent),
+  // And the key for a *system*, read the same way. Kept apart from `secrets`
+  // because the destinations are different: that one is merged into an
+  // environment, this one becomes a header on `providers/set` and must never
+  // reach one — an agent can print its own environment into a transcript.
+  systemSecret: (system) => stores.systemCredentials.get(system),
   // Nothing in src/ prints. A login that cannot be driven is the one an operator
   // most needs to hear about, because the button for it is on a screen.
   onWarning: (detail: string) => console.error(`runtime: ${detail}`),
@@ -413,6 +418,31 @@ const registry = new SessionRegistry(
   // and `agentLogins`' above, for the same reason — nothing in `src/` prints.
   (detail: string) => console.error(`session: ${detail}`),
 );
+/*
+ * How an assembled agent's id becomes a harness, a system and a model.
+ *
+ * ⚠ **Before `restore()`, and that ordering is the whole reason the registry
+ * takes a setter rather than a constructor argument.** `restore()` rebuilds every
+ * persisted session, and a session started as "Claude Code on Kimi K2" that came
+ * back before this was set would resume on a bare harness — same conversation,
+ * different vendor, nothing on screen saying so.
+ *
+ * Read at every launch rather than snapshotted, so editing a preset changes what
+ * its sessions come back as without a daemon restart.
+ *
+ * ⚠ **The whole row goes back, the harness included, and the harness is the one
+ * field nothing downstream *uses*.** `PATCH /custom-agents/:id` accepts a change
+ * of harness and weighs it against the body it was handed, which says nothing
+ * about the sessions already running on that preset; a session's own harness is
+ * immutable, because the agent process is spawned from it. So
+ * `ManagedSession.assembled` compares the two and falls back to the bare harness
+ * when they disagree, and it can only do that if this hands it the harness to
+ * compare.
+ */
+registry.setCustomAgents((id) => {
+  const one = stores.customAgents.get(id);
+  return one === null ? null : { harness: one.harness, system: one.system, model: one.model };
+});
 // Before the server serves, and only ever after openStores claimed the daemon
 // lock: the orphan reaping in here would otherwise SIGKILL a live daemon's agents.
 const restored = registry.restore({ reapOrphans: process.env["REEMOAT_REAP_ORPHANS"] !== "0" });
@@ -517,6 +547,8 @@ const { app, injectWebSocket } = createApp({
   maxChangedFiles: positiveInt(process.env["REEMOAT_CHANGES_MAX_FILES"]),
   maxDiffBytes: positiveInt(process.env["REEMOAT_DIFF_MAX_BYTES"]),
   credentials: stores.credentials,
+  systems: { credentials: stores.systemCredentials, customAgents: stores.customAgents },
+  asks: agentAsks,
   logins: agentLogins,
   uploads,
   roots,

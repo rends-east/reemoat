@@ -179,10 +179,22 @@ function RecheckButton({ onClick, busy }: { onClick: () => void; busy: boolean }
 export function AgentDetail({
   machineId,
   agentId,
+  title,
   onChanged,
 }: {
   machineId: MachineId;
   agentId: AgentId;
+  /**
+   * What to call this card, where the harness's own name is not what the reader
+   * came for.
+   *
+   * The systems screen passes the *system's* name — "Anthropic" over a card that
+   * drives `claude auth login` — because that is what somebody has an account
+   * with. Omitted, it is the harness, which is what `NewSession`'s inline
+   * sign-in wants: there the tile above it says `Claude`, and a card underneath
+   * headed `Anthropic` would read as a different subject.
+   */
+  title?: string;
   /**
    * Something here changed what another screen already read.
    *
@@ -228,7 +240,9 @@ export function AgentDetail({
       <div className="flex items-center gap-2">
         {/* `agentLabel`, so the title is "Codex" rather than "Codex (codex-acp)".
             The package name is the wall of text in miniature. */}
-        <span className="min-w-0 flex-1 truncate text-sm font-medium">{agentLabel(agent.id)}</span>
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">
+          {title ?? agentLabel(agent.id)}
+        </span>
         {/*
          * ⚠ **While a re-probe is in flight the previous listing is still on
          * screen** — this component early-returns on `loading` only while
@@ -681,7 +695,16 @@ function CredentialSlot({
             <input
               value={value}
               onChange={(event) => setValue(event.target.value)}
-              type="password"
+              /* The same three reasons `SystemsPanel` gives at length: a
+                 `type="password"` here is what makes a browser offer an account
+                 password, `autocomplete="off"` is documented not to stop it, and
+                 this box only ever holds a value somebody has just pasted. */
+              type="text"
+              name="reemoat-agent-key"
+              data-1p-ignore=""
+              data-lpignore="true"
+              autoCapitalize="off"
+              autoCorrect="off"
               autoComplete="off"
               spellCheck={false}
               placeholder={slot.set ? "paste a new key to replace it" : "paste the key"}

@@ -17,7 +17,7 @@ import {
   Spinner,
 } from "../bits";
 import { toast } from "../Toast";
-import { MachineAgentsSection } from "./MachineAgentsSection";
+import { MachineSystemsSection } from "./MachineSystemsSection";
 import { MachinePluginsSection } from "./MachinePluginsSection";
 import { OneTimeSecret } from "./OneTimeSecret";
 
@@ -105,7 +105,7 @@ export function MachineSection({
       {/* The lede, and the only thing above the first rule — `MachinesSection`'s
           intro paragraph in the same position, so `SETTINGS_SECTION` is right on
           every block below and there is no owner/grantee branch in the chrome.
-          **No id here**: it is drawn once, by the Agents block's own sentence,
+          **No id here**: it is drawn once, by the Systems block's own sentence,
           which is where it is doing work. `ambiguousNames` stays a property of
           the list — a screen has no siblings to be ambiguous against. */}
       {/*
@@ -120,7 +120,7 @@ export function MachineSection({
        * The one line that survives is not status: it explains why two sections are
        * **absent**, which is the rule that every screen must be true in the state
        * it is drawn in. Without it a grantee meets a machine screen holding only
-       * Agents, with nothing saying why.
+       * Systems, with nothing saying why.
        */}
       {!owned && (
         <p className="text-xs text-muted">This machine is not yours to rename or retire.</p>
@@ -134,7 +134,7 @@ export function MachineSection({
        * from.
        *
        * When it is absent — a machine you do not own — the note above *is* the
-       * lede, so Agents below keeps its rule and the shape holds either way.
+       * lede, so Systems below keeps its rule and the shape holds either way.
        */}
       {owned && (
         <section>
@@ -152,17 +152,17 @@ export function MachineSection({
           offline case right: its `Empty` replaces this SECTION, not the screen,
           so Retire survives for exactly the machine you came to retire. */}
       <section className={SETTINGS_SECTION}>
-        <h2 className={SETTINGS_HEADING}>Agents</h2>
-        <MachineAgentsSection state={state} machineId={machineId} agent={null} />
+        <h2 className={SETTINGS_HEADING}>Systems</h2>
+        <MachineSystemsSection state={state} machineId={machineId} system={null} />
       </section>
 
-      {/* The machine's second list, drawn here for the reason Agents is: what is
+      {/* The machine's second list, drawn here for the reason Systems is: what is
           installed lives on this host's disk and what it stores lives in this
           daemon's database, so there is nowhere else it could honestly go. Below
-          Agents rather than above, because an agent is what the machine is *for*
-          and a plugin is something added to it.
+          Systems rather than above, because a system is what the machine is
+          signed in to and a plugin is something added to it.
 
-          Outside the ownership gate for Agents' reason as well: installing a
+          Outside the ownership gate for Systems' reason as well: installing a
           plugin is an act on the daemon, reached with a grant, while renaming and
           retiring are acts on the registry the owner alone can perform. The
           daemon's own `machine:admin` scope is what actually decides, and it
@@ -184,9 +184,9 @@ export function MachineSection({
        * ⚠ **Never minted on mount.** There is one live code per machine and
        * minting burns the previous one, so a screen that mints on entry destroys
        * a code on every visit and every reload. The button is offered; the code
-       * is not. That is also why this block sits between Agents and Retire: the
+       * is not. That is also why this block sits between Systems and Retire: the
        * `!machine.enrolled` gate implies the daemon has never dialled in, which
-       * implies `reach !== "online"`, which means the Agents section above is a
+       * implies `reach !== "online"`, which means the Systems section above is a
        * one-line `Empty` with nothing tappable in it.
        */}
       {owned && !machine.enrolled && !machine.overLimit && (

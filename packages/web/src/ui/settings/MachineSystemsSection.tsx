@@ -4,12 +4,11 @@ import type { MachineId } from "../../ids";
 import { navigate } from "../../router";
 import { settingsPath } from "../../settings";
 import type { AppState } from "../../store";
-import type { AgentId } from "../../wire";
 import { Empty, reachText } from "../bits";
-import { AgentChooser, AgentDetail } from "./AgentsPanel";
+import { SystemChooser, SystemDetail } from "./SystemsPanel";
 
 /**
- * Agents, inside the machine they run on.
+ * Systems, inside the machine you sign in to them on.
  *
  * This replaces a fleet-wide **Agents** section whose first control was a
  * machine dropdown — a screen asking a question its own copy answered, since
@@ -18,17 +17,24 @@ import { AgentChooser, AgentDetail } from "./AgentsPanel";
  * two reasons: a component-state picker forgets itself on back-and-forward, and
  * a fixed close control needs somewhere real to close *to*.
  *
- * Two depths, both handled here: no agent named is the chooser, an agent named
- * is that agent's whole configuration.
+ * ⚠ **It also replaces the *word*.** These rows used to be `claude`, `kimi` and
+ * `codex`, and what a person has an account with is Anthropic, OpenAI or
+ * Moonshot. The distinction had no consequence while each harness spoke only to
+ * its own vendor; it has one now, because a single Moonshot key serves `kimi`
+ * natively and Claude Code routed, and filing it under an agent would mean two
+ * copies and two answers to "signed in?".
+ *
+ * Two depths, both handled here: no system named is the chooser, a system named
+ * is that system's whole configuration.
  */
-export function MachineAgentsSection({
+export function MachineSystemsSection({
   state,
   machineId,
-  agent,
+  system,
 }: {
   state: AppState;
   machineId: MachineId;
-  agent: AgentId | null;
+  system: string | null;
 }): ReactNode {
   const machine = state.machines.find((candidate) => candidate.id === machineId) ?? null;
 
@@ -56,37 +62,37 @@ export function MachineAgentsSection({
       {!daemonReadable(machine.reach) ? (
         /*
          * Not filtered out and not silently empty. An unreachable machine is the
-         * commonest reason somebody is on this screen — they came to sign an
-         * agent in because a session failed — so the honest thing is to name the
-         * machine and say why nothing is listed.
+         * commonest reason somebody is on this screen — they came to sign in
+         * because a session failed — so the honest thing is to name the machine
+         * and say why nothing is listed.
          */
         <Empty>
           {machine.name} is not reachable right now — {reachText(machine.reach, machine.offlineReason)}
           {/*
-           * **The agent is named here because this branch *replaces*
-           * `AgentDetail`**, which is the only other thing on the screen that says
-           * which agent you drilled into — and the head no longer says it either,
-           * now that the pane's heading names the machine rather than the URL
-           * segment. Without this, a phone deep-linked to
-           * `/settings/machines/:id/agents/claude` against an offline daemon named
-           * the agent nowhere on screen, on the screen this component's own comment
+           * **The system is named here because this branch *replaces*
+           * `SystemDetail`**, which is the only other thing on the screen that
+           * says which one you drilled into — and the head no longer says it
+           * either, now that the pane's heading names the machine rather than the
+           * URL segment. Without this, a phone deep-linked to
+           * `/settings/machines/:id/systems/anthropic` against an offline daemon
+           * named it nowhere on screen, on the screen this component's own comment
            * above calls the commonest reason anybody is here.
            */}
-          {agent === null ? "." : `, so nothing about ${agent} can be read or changed.`}
+          {system === null ? "." : `, so nothing about ${system} can be read or changed.`}
         </Empty>
-      ) : agent === null ? (
-        <AgentChooser
+      ) : system === null ? (
+        <SystemChooser
           machineId={machineId}
           onPick={(picked) => navigate(settingsPath("machines", machineId, picked))}
         />
       ) : (
         /*
-         * Keyed on both, so switching agent or machine remounts rather than
+         * Keyed on both, so switching system or machine remounts rather than
          * carrying the previous one's wizard state — `LoginWizard` holds a live
          * run id and a transcript, and adopting one across a switch would show
-         * one agent's login under another's name.
+         * one system's login under another's name.
          */
-        <AgentDetail key={`${machineId}:${agent}`} machineId={machineId} agentId={agent} />
+        <SystemDetail key={`${machineId}:${system}`} machineId={machineId} systemId={system} />
       )}
     </div>
   );

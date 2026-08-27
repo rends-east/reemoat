@@ -33,6 +33,13 @@
  * browser while working perfectly from `curl`, which is the exact failure mode a
  * literal list is supposed to prevent rather than cause.
  *
+ * `PATCH` is here for `PATCH /custom-agents/:id`, the one route that edits a row
+ * in place under the id it already has, and it arrived by the same door: the
+ * route shipped first and this list did not move, so editing an assembled agent
+ * failed its preflight in every browser and nowhere else. It is the whole reason
+ * the verb is available at all — `POST /sessions/:id/meta` says so where it
+ * explains why it did not take it.
+ *
  * "Every method any route uses" is a claim this file cannot check, so two drivers
  * check it from the two sides. `pnpm daemoncheck` mounts the real app and asserts
  * no registered route uses a verb this list withholds — that direction is the one
@@ -40,7 +47,7 @@
  * in scope. `pnpm relaycheck` asserts the relay answers a preflight with exactly
  * this set, because the relay and the daemon must not disagree about the same API.
  */
-export const CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "DELETE", "OPTIONS"] as const;
+export const CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
 
 /**
  * `authorization` is the credential. `content-type` is what makes every POST a

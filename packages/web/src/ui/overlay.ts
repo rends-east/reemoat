@@ -131,7 +131,13 @@ export function isOverlayPath(pathname: string): boolean {
   const first = pathname.split("/")[1] ?? "";
   // ⚠ `plugins` and `p` are two entries because they are two screens: the market
   // pop-up and one plugin's own screen on one machine. See `Route` in `router.ts`.
-  return first === "settings" || first === "new" || first === "p" || first === "plugins";
+  return (
+    first === "settings" ||
+    first === "new" ||
+    first === "agent" ||
+    first === "p" ||
+    first === "plugins"
+  );
 }
 
 /**

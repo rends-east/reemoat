@@ -1,4 +1,4 @@
-import { X } from "lucide-react";
+import { ChevronLeft, X } from "lucide-react";
 import { useEffect, useId, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { navigate, useUnder } from "../router";
@@ -28,15 +28,79 @@ import { LAYER, useDismissible } from "./overlay";
  */
 export function Sheet({
   title,
+  screen,
   children,
   footer,
   labelledBy,
+  up,
+  upLabel,
 }: {
-  title: ReactNode;
+  /**
+   * The head's one line — a `string` rather than a `ReactNode`, because the live
+   * region at the foot of the panel speaks it and a node cannot be spoken. The
+   * `<h1>` below already had to hold one unconditional text node for
+   * `aria-labelledby` to resolve at both widths; this is that rule in the type
+   * rather than in a comment under it.
+   */
+  title: string;
+  /**
+   * Which screen inside this pop-up is on, as a value an effect can compare.
+   *
+   * The focus effect and the live region move on **this** changing and on nothing
+   * else. Omitted by a pop-up with one screen (`ImportCode`), which then behaves
+   * exactly as this component did while every pop-up mounted its own panel:
+   * focused once, on the way in.
+   *
+   * ⚠ **Neither the route nor the title, and both were candidates.** Several
+   * screens here keep their own state in the address — `NewSession`'s folder
+   * effect replaces `/new/:machineId/:cwd` on every step *into a directory*,
+   * `PluginSettings` rewrites the machine list in its own URL from a control on
+   * the screen — so an effect keyed on the route takes focus off the picker
+   * somebody is walking through, once per tap, which is worse than the defect it
+   * fixes. The title fails the other way: `sheetTitle` answers "Settings" for
+   * every screen under `/settings` and "Plugins" for every screen under
+   * `/plugins`, because a head that spans a section rail names the pop-up and the
+   * pane names the screen (Q3.427) — so the two pop-ups with the most screens
+   * would fire on none of them. `screenOf` in `App.tsx` is the answer, and names
+   * the fields that are the screen rather than the screen's own state.
+   */
+  screen?: string;
   children: ReactNode;
   footer?: ReactNode;
   /** Overrides the generated id when the caller draws its own heading. */
   labelledBy?: string;
+  /**
+   * Where this screen goes when you leave it *without* leaving the pop-up, or
+   * omitted at the pop-up's shallowest screen.
+   *
+   * ⚠ **This is a narrowing of Q3.432 rather than a reversal of it.** That
+   * decision moved the settings chevron out of this row and into the pane, and
+   * the argument was about *width*: above `sm` the settings sheet's head spans a
+   * 224px section rail as well as the pane beside it, so a ◀ there points at
+   * something the rail already lists and the only honest string in the row is the
+   * pop-up's own name. Settings therefore still passes nothing here and still
+   * draws its own — `webcheck` pins that.
+   *
+   * The New session sheet has no rail at any width. It is one column, its head
+   * names the screen you are on rather than the pop-up, and its screens are a
+   * chain — session, agent, the choice being made. There a ◀ in the head is the
+   * only place it can be without spending a whole row on one glyph, which on a
+   * phone is the difference between the model list starting above the fold and
+   * below it. Q3.473.
+   */
+  up?: () => void;
+  /**
+   * Where the ◀ goes, for a reader who cannot see the head change.
+   *
+   * ⚠ **Required whenever `up` is passed, and it names the destination rather
+   * than saying "Back".** That is `Header`'s standing rule for this control and
+   * the whole difference between it and the history button it must never become:
+   * this thing has a fixed destination derived from the URL, and saying so is how
+   * a reader can tell. What is *drawn* is the glyph alone — the label was on
+   * screen for one release and spent a row of a phone's sheet restating what the
+   * chevron already meant.
+   */
+  upLabel?: string;
 }): ReactNode {
   const under = useUnder();
   const headingId = useId();
@@ -47,13 +111,15 @@ export function Sheet({
   useDismissible("sheet", close, true);
 
   /*
-   * Focus goes to the **panel**, not to the first control inside it.
+   * Giving focus back, and nothing else — the effect below is what takes it.
    *
-   * Two reasons and the second is the one that bites. The settings sheet's first
-   * control is a navigation row, so focusing it announces "Machines, button"
-   * rather than the dialog somebody just opened. And on iOS, focusing an
-   * interactive element can raise the soft keyboard — which for a sheet that is
-   * already `92dvh` tall means opening it eats the screen.
+   * ⚠ **Declared first, and that is the whole reason the two are separate.**
+   * React runs a component's effects in declaration order, so this records what
+   * held focus *before* the panel was handed it; the other way round it would
+   * capture the panel and restore the sheet to itself. It also has to keep `[]`
+   * while the other one does not: run per screen, its cleanup would fire on every
+   * change and restore focus to a control the outgoing screen has just unmounted,
+   * which lands on `<body>` — precisely the state this pair exists to end.
    *
    * Restoration is guarded on `isConnected` because the trigger routinely does not
    * survive: the profile row that opens settings is inside `#root`, which this
@@ -62,12 +128,35 @@ export function Sheet({
    */
   useEffect(() => {
     const previous = document.activeElement;
-    panelRef.current?.focus();
     return () => {
       if (previous instanceof HTMLElement && previous.isConnected) previous.focus();
       else document.body.focus();
     };
   }, []);
+
+  /*
+   * Focus goes to the **panel**, not to the first control inside it.
+   *
+   * Two reasons and the second is the one that bites. The settings sheet's first
+   * control is a navigation row, so focusing it announces "Machines, button"
+   * rather than the dialog somebody just opened. And on iOS, focusing an
+   * interactive element can raise the soft keyboard — which for a sheet that is
+   * already `92dvh` tall means opening it eats the screen.
+   *
+   * ⚠ **On every screen rather than once per sheet, which is the bill for
+   * `OverlaySheet`.** One `<Sheet>` element now serves `/new`, `/agent` and
+   * `/agent/:step`, so this ran once for the whole flow: tapping the Model row
+   * unmounted the button holding focus, dropped it to `<body>`, and left a
+   * keyboard user re-Tabbing from the top of the document on every screen and on
+   * every ◀ back out of one.
+   *
+   * Keyed on `screen` and not on every render, because a screen that re-renders
+   * under somebody — a poll answering, a list arriving — must not pull focus off
+   * the control they deliberately reached inside it. See the prop.
+   */
+  useEffect(() => {
+    panelRef.current?.focus();
+  }, [screen]);
 
   return createPortal(
     /*
@@ -113,6 +202,32 @@ export function Sheet({
       >
         <div className={SHEET_HEAD}>
           {/*
+           * ⚠ **Drawn only where there is somewhere to go, and never reserved.**
+           * A slot held open for a control that may not mount is what Q3.432
+           * deleted; this pop-up's head changes its *title* between screens
+           * anyway, so a left edge that moves with it costs nothing that was
+           * being kept still. `-ml-1` is the settings pane's own inset: 24px of
+           * ink reaching 44px through `IconButton`'s own growth, sitting flush
+           * with the panel's padding rather than 8px inside it.
+           */}
+          {up !== undefined && (
+            <IconButton
+              icon={ChevronLeft}
+              label={`Back to ${upLabel ?? "the previous screen"}`}
+              onClick={up}
+              /*
+               * `sm`, never the `md` default: `md` is `h-9 w-9` with no growth
+               * mechanism and is the one entry in `ICON_BUTTON_SIZE` that does not
+               * reach 44px — `webcheck` ratchets on exactly that. `sm` is 24px of
+               * ink reaching 44 through `after:-inset-2.5`, which is also the size
+               * the settings pane draws its own chevron at, so the two controls
+               * are the same object in two places rather than two objects.
+               */
+              size="sm"
+              className="-ml-1"
+            />
+          )}
+          {/*
            * **The head holds only controls that leave the pop-up.**
            *
            * The ✕ goes to `useUnder`; the waiting badge goes to `/`. The one
@@ -149,6 +264,8 @@ export function Sheet({
            * that is the whole of `aria-labelledby` working at both widths: a name
            * computed from a `display:none` subtree is no name at all. `webcheck`
            * pins exactly one element carrying this id, and that nothing hides it.
+           * `title` is typed `string` rather than `ReactNode` to keep that true by
+           * construction, and for a second reason the live region below gives.
            */}
           <h1 id={headingId} className="min-w-0 flex-1 truncate text-lg font-semibold">
             {title}
@@ -162,6 +279,39 @@ export function Sheet({
           {children}
         </div>
         {footer}
+        {/*
+         * The screen's name, spoken.
+         *
+         * **Focus moving is not an announcement.** Where somebody has not left the
+         * panel it is already the active element, so the effect above is a no-op
+         * and a screen reader is told nothing at all about a head that has just
+         * changed from "New session" to "Choose model". A repeat where the move
+         * *does* speak is the cheap side of that trade; silence is not.
+         *
+         * Mounted **unconditionally** with only its text swapping, which is the one
+         * arrangement that reliably announces: a `role="status"` inserted into the
+         * DOM in the same paint as its content is commonly not spoken at all,
+         * VoiceOver on iOS included — and this app is used from a phone. `Toast`
+         * and `EventList` both record that measurement about their own regions.
+         *
+         * ⚠ **It renders `title` live rather than a string captured when the screen
+         * changed, and that is what covers the plugin screen.** That pop-up is the
+         * one whose name is not a constant: `sheetTitle` answers `null` for it and
+         * `OverlaySheet` holds the empty string until the plugin's own fetch
+         * reports one, a network round-trip later. Fed from the effect above this
+         * region would speak that placeholder and never correct itself; rendered
+         * live it stays silent — an empty region announces nothing — and speaks the
+         * name at the moment it arrives.
+         *
+         * Inside the dialog rather than beside it, because `aria-modal="true"` lets
+         * a screen reader hide everything outside this element and a hidden live
+         * region never fires. Last child, so a reader entering the panel meets it
+         * after the contents rather than ahead of them; `sr-only` is `absolute`, so
+         * it is out of the flex flow and this panel's definite height is untouched.
+         */}
+        <p role="status" aria-live="polite" className="sr-only">
+          {title}
+        </p>
       </div>
     </div>,
     document.body,

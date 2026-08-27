@@ -532,7 +532,7 @@ const OFFLINE_TEXT: Record<NonNullable<OfflineReason>, string> = {
   cp_unreachable: "control plane unreachable",
   // Not a reachability failure but a reachability *consequence* — the tunnel is
   // refused at dial. One entry here buys the machine row's subline and
-  // `MachineAgentsSection`'s "not reachable right now — …" line with no edit to
+  // `MachineSystemsSection`'s "not reachable right now — …" line with no edit to
   // either, which is what this table is for.
   over_limit: "over the machine limit",
   owner_disabled: "its owner is disabled",
@@ -865,7 +865,8 @@ export type ButtonTone = "primary" | "plain" | "destructive" | "ghost";
  * it requires a glyph.
  */
 /**
- * ⚠ **Disabled dims the ink and keeps the box, and only on the outlined tones.**
+ * ⚠ **Disabled dims the ink and keeps the box, and on an outlined tone the box is
+ * the whole control.**
  *
  * `disabled:opacity-40` used to ride the base string for all four, and on an
  * outlined button that is not a dimming — it is a *deletion*. `--color-edge-strong`
@@ -877,21 +878,59 @@ export type ButtonTone = "primary" | "plain" | "destructive" | "ghost";
  * time. Nothing about the box ever changed: `min-h-11 px-3` in both states, and
  * `opacity` cannot move layout.
  *
+ * ⚠ **That fix replaced the opacity with `disabled:border-edge`, which is the same
+ * deletion spelled as a token.** #E3E1DD on `surface` measures 1.31:1 — the value
+ * the paragraph above calls a hairline, arrived at on purpose the second time. The
+ * button it cost the most is the agent builder's **Add agent**: it is disabled for
+ * the whole of a three-screen flow and becomes pressable on the last tap, so for
+ * that entire flow the thing the screen is aiming at had no fill, faint type and no
+ * boundary — a static caption sitting where a button goes. The boundary stays at
+ * `edge-strong` on both outlined tones now and only the *label* dims, which is what
+ * "dims the ink and keeps the box" was meant to say in the first place.
+ *
+ * `destructive` gives up its hue along with its label, and takes the same
+ * `edge-strong` box rather than keeping its own: `border-danger/45` is
+ * `--color-danger` #7e362b at 45% over `surface` #ffffff, which composites to
+ * #C5A5A0 and measures **2.27:1** — so it was never the identification either.
+ *
+ * ⚠ That number read **2.11:1** here from the day this paragraph was written, and
+ * the correction is arithmetic rather than a reversal: 2.27 is still well under the
+ * 3:1 WCAG 1.4.11 asks of a non-text control with no fill of its own, which is the
+ * whole of what the sentence above rests on. Recomputed per channel —
+ * `0.45·126 + 0.55·255 = 197`, `0.45·54 + 140.25 = 165`, `0.45·43 + 140.25 = 160`
+ * — then through the sRGB relative-luminance formula against white. What identifies
+ * that tone is {@link DangerButton}'s required glyph and the `text-danger` label,
+ * and a disabled row has stopped claiming both. A control that cannot act must not
+ * be the one red thing in a view.
+ *
+ * ⚠ **{@link ChoiceRow} and the agent tile in `NewSession.tsx` do the opposite —
+ * they hand the boundary back when disabled — and that is one rule read on two
+ * shapes rather than two rules.** A button here is a lone control: nothing beside
+ * it is pressable, so the only question its border answers is *is there a control
+ * here at all*, and the `Add agent` flow above is the measurement of answering it
+ * wrong. A row in a picker is one of a run of siblings that differ only in whether
+ * they can be taken, so its border is answering *which of these can I press* —
+ * there the strong edge on a refused row claims something false, and WCAG 1.4.11
+ * exempts an inactive component from the 3:1 that would otherwise require it. The
+ * split has a second half that points the same way: those rows carry their own
+ * refusal as a subline and a button carries none, which is why `opacity` merely
+ * erased a boundary here and would have erased a *reason* there.
+ *
  * `primary` and `ghost` keep the opacity, because neither has a boundary to lose —
  * one is a fill and the other is bare text.
  *
- * The `disabled:` variants are emitted after their unvariant counterparts in the
- * same layer, which is what lets `disabled:border-edge` beat `border-edge-strong`
- * — the same ordering `hover:bg-raised` already relies on one property over.
+ * `disabled:bg-surface` is untouched and is the one clause here that is not about
+ * the boundary: `:hover` still matches a disabled `<button>`, so the ground has to
+ * be held under a pointer that is going to get nothing.
  */
 const BUTTON_TONE: Record<ButtonTone, string> = {
   primary: "bg-fg text-ink hover:bg-fg/85 disabled:opacity-40",
   // Hover moves the *fill*, not the border. See `--color-edge-strong` in
   // `index.css`: the gap between the two line weights is now large enough that
   // swapping them on hover is a louder change than the press itself.
-  plain: "border border-edge-strong bg-surface text-fg hover:bg-raised disabled:border-edge disabled:bg-surface disabled:text-faint",
+  plain: "border border-edge-strong bg-surface text-fg hover:bg-raised disabled:bg-surface disabled:text-faint",
   destructive:
-    "border border-danger/45 bg-surface text-danger font-medium hover:bg-danger/10 disabled:border-edge disabled:bg-surface disabled:text-faint",
+    "border border-danger/45 bg-surface text-danger font-medium hover:bg-danger/10 disabled:border-edge-strong disabled:bg-surface disabled:text-faint",
   ghost: "text-muted hover:bg-raised hover:text-fg disabled:opacity-40",
 };
 
@@ -1076,6 +1115,33 @@ export const SHEET_BODY =
 /** Actions right, Cancel last — see {@link BUTTON_TONE}. */
 export const SHEET_FOOT =
   "flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-edge px-4 py-3.5 sm:px-5";
+
+/**
+ * One screen inside a sheet whose screens have their own action bars.
+ *
+ * ⚠ **The bar goes *inside* `SHEET_BODY` rather than in `Sheet`'s `footer`, and
+ * that is what stops a pop-up resizing between its own screens.** `SHEET_PANEL`
+ * is a definite height, so the panel never moves — but the body is what is left
+ * after the head *and the footer*, and a footer that only some screens carry
+ * makes the body two different heights. The body is the box the section slide
+ * animates: `view-transition-name: sheet-body` hangs off it, and a group whose
+ * old and new boxes differ morphs between them. Measured at 390px going from New
+ * session (footer) to New agent (none): the pane's top edge travelled 57px
+ * *downwards* over the 220ms slide, which reads as the screen you were on
+ * collapsing rather than leaving sideways.
+ *
+ * With the bar in here the body's box is identical on every screen of the sheet,
+ * the group has nothing to morph, and the bar slides with the screen it belongs
+ * to — which is also the truthful animation, since the action *is* part of the
+ * screen. `Sheet`'s `footer` stays for the pop-ups with one screen. Q3.472.
+ *
+ * Cancels `SHEET_BODY`'s own padding so the bar reaches both edges;
+ * {@link SHEET_SCROLL} puts it back on the part that scrolls.
+ */
+export const SHEET_SCREEN = "-mx-4 -my-5 flex min-h-0 flex-1 flex-col sm:-mx-5";
+/** The scrolling half of a {@link SHEET_SCREEN}: everything above the bar. */
+export const SHEET_SCROLL =
+  "min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 sm:px-5";
 /**
  * The small anchored popover's chrome.
  *
@@ -1376,6 +1442,175 @@ export function RailRow({
 }
 
 /**
+ * The row this app draws wherever something is chosen or opened.
+ *
+ * ⚠ **There are six of it, and three of those are byte-identical to each other.**
+ * `ChooseRow` and `PickRow` in `AgentBuilder.tsx` and the system row in
+ * `SystemsPanel.tsx` are the three this was extracted from. `AgentsPanel`'s agent
+ * row, `MachinesSection`'s machine row and `InstalledList`'s plugin row are the same
+ * `min-h-14 w-full items-center gap-3 rounded-lg border border-edge bg-surface px-3
+ * py-2.5 text-left hover:border-edge-strong` typed out again, and they are named
+ * here so the remainder is a known one rather than a grep somebody has to think to
+ * run. Two of those three put a {@link Badge} *inside* the title line, which
+ * `title: string` cannot express — so they wait for the prop that would let them,
+ * rather than this carrying a prop nothing calls yet.
+ *
+ * The three it does cover had already drifted exactly where drift shows: `gap-3`
+ * against `gap-2.5`, a subline at `text-muted` on one against `text-faint` on the
+ * other two, and one title of the three at `font-medium`. That is `SearchBox`'s
+ * argument one screen over, verbatim — a copy is a second chance to be wrong the
+ * next time a rule is applied to it — and the rule that arrived next was the
+ * disabled treatment below, which would otherwise have had to land three times and
+ * be right three times.
+ *
+ * **A live row's boundary is `edge-strong`, and it is the whole of what says the
+ * row is a control.** These sit in {@link SHEET_BODY}, which is `bg-surface`, so a
+ * live unselected row is a white control on a white ground — the job `index.css`
+ * holds that token at ≥3:1 for (4.40:1 here) and says outright that `edge` (1.31:1)
+ * may never do. It was `border-edge` with `hover:border-edge-strong` over the top,
+ * which breaks that rule twice in one class string: a hairline as the
+ * identification, and a hover that jumps #E3E1DD → #7B7873, louder than the press it
+ * accompanies. Hover moves the **fill**, and so does selection, so the box a pointer
+ * travels over is one shape from first paint to last.
+ *
+ * ⚠ **A disabled row hands that boundary back, and the sweep that put `edge-strong`
+ * on every state is what made this necessary to write down.** Reported off the
+ * harness picker in `AgentBuilder`: two refused rows were indistinguishable from the
+ * one pressable row, because the strong border *is* this app's signal "you can press
+ * this" and the sweep applied it unconditionally. What was left to tell them apart
+ * was a title one step quieter and a hover a phone does not have.
+ *
+ * WCAG 1.4.11 settles it in the same direction rather than against it. It asks 3:1
+ * of "visual information required to identify user interface components and states,
+ * **except for inactive components** or where the appearance of the component is
+ * determined by the user agent and not modified by the author" — so an inert row is
+ * exactly the case the floor exempts, and `edge-strong` on a greyed row is not
+ * merely unneeded but actively false. `edge` measures 1.31:1 against `surface` and
+ * 1.07:1 against a *selected* disabled row's own `bg-raised`; both are fine, because
+ * neither is identifying anything. The box does not move — `border` and `rounded-lg`
+ * are unconditional — so nothing reads as having grown when a row goes live, which
+ * is the failure {@link BUTTON_TONE} measured when it tried `disabled:opacity-40`
+ * on an outlined control.
+ *
+ * ⚠ **Disabled dims the ink upwards, and there is no opacity anywhere on this row.**
+ * It was `disabled:opacity-40`, which composites the whole control — the subline
+ * included, and on these rows the subline *is the refusal*: why this harness cannot
+ * run that model, or which system has no key on this machine. Measured over
+ * `surface` (#FFFFFF), `--color-faint` at 40% is #C2BFB9 = 1.83:1 and `--color-fg`
+ * at 40% is 2.51:1 — against a token whose floor exists precisely because almost
+ * every use of it is 12px. A refusal has to be **more** legible than the label it
+ * refuses, never less. So the title steps down to `muted` (7.75:1), the glyph to
+ * `faint`, and the subline stays exactly where it was (6.23:1 on `surface`, 5.09:1
+ * inside a selected row).
+ *
+ * Those two paragraphs are one treatment: a handed-back boundary, a quieter title,
+ * and a refusal left at full strength. **Three signals for one state**, which is the
+ * count `AskCard`'s `CHOSEN` argues for on the rows a person answers with and the
+ * count the rail spends on a waiting session — and it is three because with the
+ * palette monochrome there is no hue left to spend on a fourth.
+ *
+ * ⚠ **A row can be selected *and* disabled**, and `AgentBuilder`'s two pickers both
+ * reach it: a preset restored from a machine that no longer has that harness, or a
+ * model whose system has since lost its key. The fill and the check stay — those
+ * say *which one is chosen*, which is still true — and the boundary is decided by
+ * `disabled` first, so a chosen row that cannot be acted on does not claim it can.
+ *
+ * `selected` is left `undefined` where nothing is being chosen, which is
+ * {@link IconButton}'s `active` idiom and carries the same two consequences: no
+ * `aria-pressed`, and no reserved check slot. Reserving one on a list that has no
+ * selection is a column of empty space down the end of every row.
+ */
+export function ChoiceRow({
+  glyph,
+  title,
+  placeholder = false,
+  subline = null,
+  trailing,
+  selected,
+  disabled = false,
+  onClick,
+}: {
+  /** Drawn before the label — a harness's mark, and nothing that is a control. */
+  glyph?: ReactNode;
+  title: string;
+  /**
+   * The title is a prompt rather than an answer — `Choose` — so it is drawn at the
+   * same `muted` a disabled row's title takes. There is no third step to spend on
+   * telling those two apart: the subline under it is already `faint`, and a title
+   * quieter than its own subline inverts the row.
+   */
+  placeholder?: boolean;
+  subline?: string | null;
+  /**
+   * Whatever hangs off the end and is not the check: a chevron on a row that opens
+   * a screen, a {@link Badge} on one that carries a state, the harness marks on a
+   * model. It is drawn *before* the check slot, so becoming the answer never
+   * displaces it.
+   */
+  trailing?: ReactNode;
+  /** Omit where nothing is being chosen. See the docblock. */
+  selected?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}): ReactNode {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      aria-pressed={selected}
+      /*
+       * ⚠ **`:hover` still matches a disabled `<button>`**, so the hover fill is
+       * granted by state rather than taken back by a `disabled:` variant — which
+       * would also have to know what a *selected* row's ground is, and would
+       * repaint it `bg-surface` under a pointer. Three states, one expression.
+       *
+       * The border is asked `disabled` before `selected` for the reason in the
+       * docblock: a row that is both is chosen and still cannot be pressed, so the
+       * fill stays and the boundary goes.
+       *
+       * ⚠ `border` is written into **both** arms rather than hoisted out in front
+       * of them. Hoisting it reads better and costs the one property this pair is
+       * about: `webcheck` reads this file off disk — no type can hold a class
+       * string — and asks for the literal `border border-edge-strong`, which a
+       * hoisted `border` splits in two. The width never varies, so the two arms
+       * cannot disagree about it.
+       */
+      className={`tap press flex min-h-14 w-full items-center gap-2.5 rounded-lg ${
+        disabled ? "border border-edge" : "border border-edge-strong"
+      } px-3 text-left ${
+        selected === true ? "bg-raised" : `bg-surface ${disabled ? "" : "hover:bg-raised"}`
+      }`}
+    >
+      {glyph !== undefined && (
+        <span className={`shrink-0 ${disabled ? "text-faint" : "text-muted"}`}>{glyph}</span>
+      )}
+      <span className="min-w-0 flex-1">
+        <span
+          className={`block truncate text-sm ${selected === true ? "font-medium" : ""} ${
+            disabled || placeholder ? "text-muted" : ""
+          }`}
+        >
+          {title}
+        </span>
+        {subline !== null && subline.length > 0 && (
+          <span className="block truncate text-2xs text-faint">{subline}</span>
+        )}
+      </span>
+      {trailing}
+      {selected !== undefined && (
+        // Reserved rather than conditional, so a row does not move when it becomes
+        // the answer — which is the whole of why the check has a slot of its own
+        // instead of being another `trailing`.
+        <span className="inline-flex w-4 shrink-0 justify-center text-fg">
+          {selected && <Icon as={Check} size={14} />}
+        </span>
+      )}
+    </button>
+  );
+}
+
+/**
  * One act inside a settings row's kebab.
  *
  * Promoted out of `UsersSection` when `MachinesSection` grew a kebab of its own,
@@ -1668,8 +1903,18 @@ export function Menu({
 export interface DropdownItem<T> {
   value: T;
   label: string;
+  /**
+   * The second line, and on a {@link disabled} item it is **the refusal** — every
+   * caller that passes both passes the reason here. It is drawn at full
+   * `text-faint` in every state for that reason; see the row's own comment.
+   */
   description?: string | null;
   group?: string | null;
+  /**
+   * Unusable, and still listed. Filtering an item out answers "where did my laptop
+   * go" with silence, which is `MachinePicker`'s rule and `AgentStrip`'s after it —
+   * so an item that arrives `disabled` owes a {@link description} saying why.
+   */
   disabled?: boolean;
   /** Drawn before the label. For a machine's reachability dot, and the like. */
   adornment?: ReactNode;
@@ -1764,7 +2009,13 @@ export function Dropdown<T extends string>({
         // being made to cover both. In CSS and not in JavaScript, because
         // `AppShell` is explicit that this app holds no breakpoint state — a
         // media query cannot disagree with the window it is in.
-        className="tap press inline-flex min-h-8 w-full items-center gap-1.5 rounded-md border border-edge-strong bg-surface px-2.5 text-xs text-fg hover:bg-raised disabled:border-edge disabled:text-faint [@media(pointer:coarse)]:min-h-11"
+        //
+        // The disabled arm dims the label and nothing else, for the reason
+        // {@link BUTTON_TONE} argues at length: this trigger is `bg-surface` on a
+        // `bg-surface` sheet, so its border is the whole of what says a control is
+        // there, and `disabled:border-edge` took that to 1.31:1 — the third copy of
+        // that deletion, on the one control in this file that is also a value.
+        className="tap press inline-flex min-h-8 w-full items-center gap-1.5 rounded-md border border-edge-strong bg-surface px-2.5 text-xs text-fg hover:bg-raised disabled:text-faint [@media(pointer:coarse)]:min-h-11"
       >
         {trigger}
         {busy ? <Spinner /> : <Icon as={ChevronDown} size={12} className="ml-auto text-faint" />}
@@ -1785,6 +2036,7 @@ export function Dropdown<T extends string>({
             const showGroup =
               item.group !== null && item.group !== undefined && item.group !== items[index - 1]?.group;
             const selected = item.value === value;
+            const unavailable = item.disabled === true;
             return (
               <div key={`${item.group ?? ""}:${item.value}`}>
                 {showGroup && <p className="mt-1 px-2 py-0.5 text-2xs text-faint">{item.group}</p>}
@@ -1792,7 +2044,7 @@ export function Dropdown<T extends string>({
                   type="button"
                   role="option"
                   aria-selected={selected}
-                  disabled={item.disabled === true}
+                  disabled={unavailable}
                   onClick={() => {
                     setOpen(false);
                     if (!selected) onChange(item.value);
@@ -1807,15 +2059,61 @@ export function Dropdown<T extends string>({
                   // Selection is weight, not colour, and the reserved 12px `Check`
                   // slot below was already doing most of the work — the accent
                   // text was a second mark for the same fact.
-                  className={`${menuRow("start")} text-fg hover:bg-raised disabled:opacity-40 disabled:hover:bg-transparent ${
+                  //
+                  // ⚠ **No opacity, and this row was the last control in this file
+                  // still spending one.** It was `disabled:opacity-40
+                  // disabled:hover:bg-transparent`, which composites the row whole
+                  // — `item.description` with it, and on the live caller that
+                  // description *is* the refusal: `MachinePicker` in
+                  // `NewSession.tsx` passes `unusableReason(machine)` as the
+                  // description and `why !== null` as `disabled`, so an offline or
+                  // read-only machine drew its **name** at 2.51:1 (13px) and the
+                  // whole of **why it cannot be reached** at 1.83:1 (12px) over
+                  // this panel's own `bg-surface` (#ffffff), against a 4.5:1 floor
+                  // — and this menu is the only place a non-selected machine's
+                  // reason appears anywhere in the app. `BUTTON_TONE.ghost`'s
+                  // opacity exemption does not reach here: it is conditioned on a
+                  // control with no boundary to lose *and no subline to
+                  // composite*, and this row has one. So the same three steps
+                  // {@link ChoiceRow} takes — the label down to `text-muted`
+                  // (7.75:1), the description left exactly where it was at
+                  // `text-faint` (6.23:1), and nothing at all on the row itself.
+                  //
+                  // ⚠ **`:hover` still matches a disabled `<button>`**, so the fill
+                  // is granted by state rather than taken back with a `disabled:`
+                  // variant — `ChoiceRow`'s expression, for `ChoiceRow`'s reason,
+                  // and one fewer utility racing another in the sheet.
+                  //
+                  // ⚠ **`ChoiceRow`'s other half — hand the boundary back when the
+                  // row is inert — has nothing to do here, and that is checked
+                  // rather than overlooked.** `menuRow` draws no border in *either*
+                  // state: what identifies a row inside this panel is the panel's
+                  // own `MENU_PANEL` box and the 44px of hover fill, so there is no
+                  // `edge-strong` on a refused row claiming a pressability it does
+                  // not have, and adding one to the live rows would be a new
+                  // decoration rather than an identification. A future sweep that
+                  // borders menu rows owes the disabled arm the same `edge` this
+                  // file gives {@link ChoiceRow}. The three signals here are the
+                  // ones the row already has: the label down a step, the refusal
+                  // that {@link DropdownItem.disabled} obliges a caller to pass,
+                  // and the caller's own `adornment` — `MachinePicker`'s `Dot` at
+                  // `off`, which is a shape a phone can read with no pointer.
+                  className={`${menuRow("start")} text-fg ${unavailable ? "" : "hover:bg-raised"} ${
                     selected ? "font-medium" : ""
                   }`}
                 >
                   <span className="mt-0.5 w-3 shrink-0">{selected && <Icon as={Check} size={11} />}</span>
                   <span className="min-w-0 flex-1">
                     <span className="flex items-center gap-1.5">
+                      {/* The adornment is left alone deliberately. `MachinePicker`
+                          passes a `Dot`, which is a *state mark* drawn from its own
+                          tokens rather than from `currentColor` — dimming it would
+                          take the one thing on the row already saying "off" down
+                          with the label. */}
                       {item.adornment}
-                      <span className="min-w-0 truncate">{item.label}</span>
+                      <span className={`min-w-0 truncate ${unavailable ? "text-muted" : ""}`}>
+                        {item.label}
+                      </span>
                     </span>
                     {item.description !== null && item.description !== undefined && (
                       <span className="block text-2xs text-faint">{item.description}</span>

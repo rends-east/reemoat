@@ -1,6 +1,7 @@
 import type { Readable, Writable } from "node:stream";
 
 import type { AgentId, AgentLaunchConfig } from "../acp/agents.js";
+import type { SystemId } from "../acp/systems.js";
 import type { AgentHandle } from "../events.js";
 import type { GitExec } from "../git.js";
 
@@ -239,8 +240,44 @@ export interface SessionRuntime {
    */
   forgetAvailability(): void;
 
-  /** Start one. */
-  launch(agent: AgentId): Promise<AgentProcess>;
+  /**
+   * Start one.
+   *
+   * `extra` is merged over the agent's environment last, after the pasted
+   * credentials, and carries **only what this daemon's own tables produced** —
+   * today that is the model a routed system is pinned to
+   * (`routedModelEnv` in `acp/systems.ts`). No caller may pass a variable of its
+   * own choosing and no route accepts one: a request names a system id, and the
+   * table is what turns that into names and values. That is the same property
+   * `AGENT_LOGIN` claims about the program it runs.
+   *
+   * ⚠ **Never a secret.** An agent runs as this uid and can print its own
+   * environment into a transcript that is written to the log and rendered in a
+   * browser — the accident `agentEnv`'s strip exists for. A system's credential
+   * travels over stdio in `providers/set`'s headers instead; only non-secret
+   * routing comes through here.
+   *
+   * ⚠ **That buys one hop rather than secrecy, and the difference is measured.**
+   * `claude-agent-acp` 0.63.0 turns those headers back into
+   * `ANTHROPIC_CUSTOM_HEADERS` on the CLI it spawns, so the key reaches an
+   * environment one process down where nothing here can strip it. The rule this
+   * parameter keeps is still worth keeping — nothing *this daemon* spawns carries
+   * a secret it chose to put there — but see `acp/systems.ts` before writing the
+   * stronger claim anywhere.
+   */
+  launch(agent: AgentId, extra?: NodeJS.ProcessEnv): Promise<AgentProcess>;
+
+  /**
+   * The credential for one system, or `null` where none is stored.
+   *
+   * Beside `secrets(agent)` rather than folded into it: a pasted agent
+   * credential is *the name of the variable a CLI reads it from* and is merged
+   * into an environment, while a system credential is a bearer value handed to
+   * `providers/set` over stdio and never merged into one *here*. Two different
+   * lifetimes and two different destinations, so two accessors — but not two
+   * different exposures at the far end: see the note on {@link SessionRuntime.launch}.
+   */
+  systemSecret(system: SystemId): string | null;
 
   /**
    * Start that agent's own interactive login, for somebody to drive from a UI.

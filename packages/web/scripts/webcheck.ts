@@ -6,7 +6,8 @@ import type { AddressInfo } from "node:net";
 // ahead of the `window` stub below. The history cases need real `StoredEvent`s:
 // `fillWindow` filters and orders them, and a fixture cast to `never` would let
 // a shape it cannot actually accept through.
-import type { StoredEvent } from "../src/wire.js";
+import type { NavMove } from "../src/nav.js";
+import type { StoredEvent, SystemInfo } from "../src/wire.js";
 
 /**
  * The regression driver for the browser client.
@@ -3285,9 +3286,11 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
    * Only hand-rolled class strings reach the scan in this loop.
    */
   const DECISION_CARDS = ["AskCard.tsx", "PermissionCard.tsx", "ElicitationCard.tsx"];
-  // `min-h-14` is a taller row, `menuRow` and `TAP_GROW_Y` are the two shared
-  // constants that reach 44 by themselves.
-  const REACHES_44 = /min-h-11|min-h-14|\bh-11\b|menuRow|TAP_GROW_Y/;
+  // `min-h-14` and `min-h-16` are taller rows — a row carrying a subline, and the
+  // new-session tile carrying three lines — and `menuRow` and `TAP_GROW_Y` are the
+  // two shared constants that reach 44 by themselves. Anything not on this list is
+  // asked to prove its height rather than assumed to have one.
+  const REACHES_44 = /min-h-11|min-h-14|min-h-16|\bh-11\b|menuRow|TAP_GROW_Y/;
   // Both spellings of the attribute. The template-literal arm stops at the first
   // backtick, which holds because every interpolation on these cards is a ternary
   // over double-quoted strings.
@@ -3400,6 +3403,64 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
   check("the plugin sweep actually found the controls", [tapped >= 1, small >= 6], [true, true]);
   check("nothing on a plugin's own surface is under 44px", shortPlugin, []);
   check("and every small control there keeps the coarse-pointer floor", bareSmall, []);
+
+  /*
+   * ⚠ **`ChoiceRow`, which neither sweep above reaches and which nothing else
+   * held to a height at all.** `bits.tsx` is read elsewhere in this file for
+   * tokens — opacity and border — and never for a target size, and this row is
+   * not on a decision card or on the plugin surface, so it fell between the two.
+   * It is the row every model and every harness in `AgentBuilder` is chosen on and
+   * every system in `SystemsPanel` is opened from: a mis-tap picks the wrong
+   * model, which is the consequence the decision-card scan is scoped by, arriving
+   * two screens earlier. Held to the same pattern rather than to a second spelling
+   * of 44, so there is one definition of the floor in this file.
+   */
+  const bitsSrc = readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8");
+  /*
+   * Only the leading literal run of the template, up to its first `${`. That is
+   * where an unconditional utility lives, and stopping there is what keeps this
+   * off the two interpolations — one of which is itself a nested template, so a
+   * `[^`]*` reaching for the closing backtick finds the wrong one.
+   */
+  const choiceRowClasses = /className=\{`(tap press flex[^`$]*)\$\{/.exec(
+    bitsSrc.slice(bitsSrc.indexOf("export function ChoiceRow")),
+  )?.[1] ?? "";
+  check("the primitive's own class string was found", choiceRowClasses.length > 0, true);
+  check("and the row a model is chosen on clears the tap minimum", REACHES_44.test(choiceRowClasses), true);
+
+  /*
+   * ⚠ **And the screen every session starts from, where exactly one assertion
+   * existed and it was bound to one handler** (`Import code`, by its `onClick`),
+   * leaving the eight controls beside it pinned by nothing. Same pattern, same
+   * floor, swept over the file.
+   *
+   * ⚠ **One of them was genuinely under 44px, and the exception was written down
+   * as an equality rather than skipped — which is what got it fixed.**
+   * `DirectoryPicker`'s folder rows carried no height utility at all: `py-2.5` is
+   * 20px, the label is `text-sm` whose line-height `index.css` sets to 1.375rem =
+   * 22px, and `border-b` adds 1. That was **43px**, one short of the platform
+   * minimum, on the rows somebody walks a directory tree with — where a mis-tap
+   * opens the wrong folder rather than doing nothing. It was also the only tap
+   * target on this screen whose height came from type metrics rather than from a
+   * utility, so it would have moved again, silently, the next time the type scale
+   * was touched.
+   *
+   * `min-h-11` now asks for the floor directly and the list below is empty. The
+   * empty list is the assertion: an allowlist would have gone quietly green on the
+   * fix *and* on the next regression, while an equality fails on both — which is
+   * why the exception was recorded this way while it stood.
+   */
+  const startSrc = readFileSync(new URL("../src/ui/NewSession.tsx", import.meta.url), "utf8");
+  const shortStart: string[] = [];
+  let aimed = 0;
+  for (const match of startSrc.matchAll(CLASS_ATTR)) {
+    const classes = match[1] ?? match[2] ?? "";
+    if (!/\btap\b|\bpress\b/.test(classes)) continue;
+    aimed += 1;
+    if (!REACHES_44.test(classes)) shortStart.push(classes.slice(0, 60));
+  }
+  check("the new-session sweep actually found the screen's controls", aimed, 9);
+  check("and every one of them clears 44px", shortStart, []);
 
   /*
    * ⚠ **Where those four controls went, asserted off the file rather than
@@ -9231,7 +9292,21 @@ process.stdout.write("\nwhat an interrupted session says\n");
    * and the screen would draw two buttons for one problem.
    */
   const view = stripComments(readFileSync(new URL("../src/ui/SessionView.tsx", import.meta.url), "utf8"));
-  check("the view draws it as a route to that machine's agent", /settingsPath\("machines", row\.ref\.machineId, row\.snapshot\.agent\)/.test(view), true);
+  /*
+   * ⚠ **To the machine's list, and the third argument is what this now refuses to
+   * pass.** That slot used to be an agent id and is a *system* id — so
+   * `row.snapshot.agent` built `/settings/machines/:id/systems/claude`, which
+   * parses (any id up to 64 characters does, deliberately, so a newer daemon's
+   * system stays reachable from an older client) and then asks a daemon about a
+   * system nobody has. Mapping a harness to its system is `nativeHarness`'s
+   * answer and lives on the daemon; this screen holds no systems listing, so it
+   * goes one level shallower rather than guessing. Asserted as the *absence* of
+   * the guess as well as the presence of the link, because a link to the right
+   * screen with a wrong segment on the end passes any test that only greps for
+   * the screen.
+   */
+  check("the view draws it as a route to that machine", /settingsPath\("machines", row\.ref\.machineId\)/.test(view), true);
+  check("and never names a system from an agent id", /settingsPath\([^)]*row\.snapshot\.agent\)/.test(view), false);
   check("and the two buttons are mutually exclusive by construction", /notice\.retry/.test(view), false);
 
   const composer = stripComments(readFileSync(new URL("../src/ui/Composer.tsx", import.meta.url), "utf8"));
@@ -9343,6 +9418,125 @@ process.stdout.write("\nthe routes that spawn a process\n");
    * "we thought about it and said no" and "we forgot" are the same code.
    */
   check("and stopping a turn is not, because it does not wait for the agent", slowRoute("POST", "/sessions/s_1/cancel"), false);
+
+  /*
+   * ⚠ **The whole table, both directions, in one place — because the defect this
+   * assertion was written for is a route that was never in it.** `GET /agents`
+   * was matched by a *literal*, and it was a literal on the day
+   * `GET /agents/capabilities` shipped, so that route inherited nothing and got
+   * the ordinary 15s. What 15s bought there: `server.ts` starts a whole agent per
+   * harness and loops them **serially** on purpose, up to `ASK_TIMEOUT_MS` (120s)
+   * each, so on a cold cache the client's abort was not a risk but the norm — and
+   * the abort is a *transport* failure, so `forgetRoute` then `markUnreachable`
+   * drew a perfectly healthy machine as unreachable everywhere at once, including
+   * the New session sheet the builder had just been opened from.
+   *
+   * Checking only the entries somebody remembered is how a table stays a list of
+   * the things somebody thought of, which is the whole story above. So every arm
+   * is swept at once and the failure names the route rather than a boolean.
+   *
+   * ⚠ **`GET /agents/<anything>` is deliberately `true` and is asserted false
+   * nowhere.** The prefix *is* the fix: nothing but a CLI can answer what that
+   * namespace answers, so there is no cheap GET under it and there cannot be one.
+   * Pinning an unlisted member false would re-create the gap the next time a
+   * route is added there.
+   */
+  const budgets: [string, string, boolean][] = [
+    ["POST", "/sessions", true],
+    ["POST", "/sessions/s_1/prompt", true],
+    ["POST", "/sessions/s_1/resume", true],
+    ["POST", "/sessions/s_1/config", true],
+    ["POST", "/plugins/source", true],
+    ["POST", "/plugins/p_1/state", true],
+    ["GET", "/agents", true],
+    ["GET", "/agents/capabilities", true],
+    ["GET", "/agent-auth/claude", true],
+    /*
+     * The writes under `/custom-agents`, and **only** the writes. Both re-validate
+     * the pairing with `hostable` against `asks.capabilities(harness)`, so a write
+     * there spawns an agent by construction rather than by coincidence — which is
+     * why the predicate is a verb plus a prefix and not two literals that a third
+     * write route would silently miss.
+     */
+    ["POST", "/custom-agents", true],
+    ["PATCH", "/custom-agents/ca_1234abcd", true],
+    /*
+     * ⚠ **And the reads stay on the ordinary budget, which is the whole of that
+     * verb split.** `GET /custom-agents` is `customAgents.list()` and the `DELETE`
+     * is a lookup plus a delete, both synchronous SQLite, and both sit on the
+     * builder's first paint — where 90 seconds of a screen that cannot say
+     * anything is worse than 15 and a refusal. A later "simplification" to a bare
+     * prefix reads as tidying and undoes exactly this.
+     */
+    ["GET", "/custom-agents", false],
+    ["DELETE", "/custom-agents/ca_1234abcd", false],
+    ["GET", "/sessions", false],
+    ["GET", "/sessions/s_1/events", false],
+    ["POST", "/sessions/s_1/permissions/p_1", false],
+    ["POST", "/sessions/s_1/cancel", false],
+  ];
+  check(
+    "and every route in the table agrees with its budget, swept in both directions",
+    budgets.filter(([verb, path, want]) => slowRoute(verb, path) !== want).map(([verb, path]) => `${verb} ${path}`),
+    [],
+  );
+
+  /*
+   * ⚠ **And the verb the client actually sends is the verb the table was written
+   * for.** `slowRoute` is handed `init.method`, so the whole entry above is worth
+   * nothing if `updateCustomAgent` sends `PUT` — which typechecks, works from
+   * curl, and puts an agent-spawning write back on the 15s budget with every
+   * assertion in this section still green. The two methods are read off disk
+   * because a `DaemonClient` needs a live `MachineConnection` to call, and their
+   * verbs are fed back through the predicate rather than compared to a literal.
+   */
+  const client = stripComments(readFileSync(new URL("../src/daemon.ts", import.meta.url), "utf8"));
+  const writeVerb = (method: string): string =>
+    /method: "([A-Z]+)"/.exec(client.slice(client.indexOf(`  ${method}(`)))?.[1] ?? "";
+  check(
+    "the two writes that assemble an agent send the verbs the table names",
+    [writeVerb("addCustomAgent"), writeVerb("updateCustomAgent")],
+    ["POST", "PATCH"],
+  );
+  check(
+    "and each of them lands on the slow budget as sent",
+    [
+      slowRoute(writeVerb("addCustomAgent"), "/custom-agents"),
+      slowRoute(writeVerb("updateCustomAgent"), "/custom-agents/ca_1234abcd"),
+    ],
+    [true, true],
+  );
+  /*
+   * ⚠ **And the delete, which is the other half of the same split and is the
+   * premise of an argument written down in `src/server.ts`.** `DELETE` is on
+   * `isReplayable` and deliberately **off** `slowRoute`, so it runs on
+   * `REQUEST_TIMEOUT_MS` — the budget `settleTransport` names as the one an
+   * ordinary drop to LTE earns — and a lost *answer* is resent as an identical
+   * request. That is why the route answers `200 {removed: false}` for an id with
+   * nothing under it rather than `404`: the second send finds nothing because the
+   * first one worked, and a refusal there puts `errorText` on the builder's screen
+   * over an act that succeeded. If this row ever moves onto the slow budget the
+   * docblock's reasoning stops holding and the *route* should be revisited rather
+   * than this assertion updated.
+   */
+  check(
+    "and the delete is sent as DELETE and stays on the budget the idempotence argument rests on",
+    [writeVerb("removeCustomAgent"), slowRoute(writeVerb("removeCustomAgent"), "/custom-agents/ca_1234abcd")],
+    ["DELETE", false],
+  );
+  /*
+   * ⚠ **`removed: boolean`, never `removed: true`.** A literal there is a promise
+   * the wire stopped making, and the way that gets discovered is a screen quietly
+   * narrowing an answer it never checked — `AgentBuilder` navigates away on either
+   * value today, so nothing would notice until something read it. Read off disk
+   * for `writeVerb`'s own reason: a `DaemonClient` needs a live `MachineConnection`
+   * to call, so the declaration is what there is to assert.
+   */
+  check(
+    "the client promises the discriminator the daemon actually sends",
+    /removeCustomAgent\(id: string\): Promise<\{ removed: boolean; id: string \}>/.test(client),
+    true,
+  );
 
   /*
    * The control strip's early return, extracted because its third clause is the
@@ -12632,10 +12826,16 @@ process.stdout.write("\nwhat one agent's card says\n");
     multiSlotLine,
   } = await import("../src/ui/agentCard.js");
 
+  /*
+   * ⚠ **The program, not the company and not the model.** "Claude" was wrong in a
+   * way that only mattered once a harness could be pointed elsewhere: a row
+   * reading "Claude" beside a model reading "Kimi K2 Thinking" says the opposite
+   * of what is true. Each is what its own vendor calls the program it ships.
+   */
   check(
-    "an agent is named, not its package",
+    "a harness is named as the program it is, not its package or its model",
     [agentLabel("claude"), agentLabel("kimi"), agentLabel("codex")],
-    ["Claude", "Kimi", "Codex"],
+    ["Claude Code", "Kimi Code", "Codex"],
   );
   // A fourth agent from a newer daemon still renders — as its id, never blank.
   check("an unknown agent still has a name", agentLabel("newthing"), "newthing");
@@ -12793,6 +12993,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     settingsPaneTitle,
     settingsUpLabel,
   } = await import("../src/settings.js");
+  const { sheetTitle, sheetUpLabel, upFrom } = await import("../src/nav.js");
 
   check("no segment is the index", parseSettingsSection(undefined), null);
   check("a known one is itself", parseSettingsSection("machines"), "machines");
@@ -12818,7 +13019,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
    * The depths under `machines`
    *
    * Agent settings live inside a machine, and plugins do too — for the same
-   * argument, stated on `MachineAgentsSection`: what is configured belongs to
+   * argument, stated on `MachineSystemsSection`: what is configured belongs to
    * one daemon's database and one host's disk, so a fleet-wide screen would
    * open with a machine dropdown, which is a screen asking a question its own
    * copy answers. Everything about those segments is here rather than in
@@ -12837,41 +13038,71 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   // `/agents` moved out of the base and onto the agent. Q3.432.
   check("a machine path", settingsPath("machines", "m_1" as never), "/settings/machines/m_1");
   check(
-    "an agent path",
-    settingsPath("machines", "m_1" as never, "codex"),
-    "/settings/machines/m_1/agents/codex",
+    "a system path",
+    settingsPath("machines", "m_1" as never, "openai"),
+    "/settings/machines/m_1/systems/openai",
   );
   check(
     "a machine path round-trips",
     parseSettingsRoute(seg(settingsPath("machines", "m_1" as never))),
-    { section: "machines", machineId: "m_1", agent: null },
+    { section: "machines", machineId: "m_1", system: null },
   );
   check(
-    "an agent path round-trips",
-    parseSettingsRoute(seg(settingsPath("machines", "m_1" as never, "kimi"))),
-    { section: "machines", machineId: "m_1", agent: "kimi" },
+    "a system path round-trips",
+    parseSettingsRoute(seg(settingsPath("machines", "m_1" as never, "moonshot"))),
+    { section: "machines", machineId: "m_1", system: "moonshot" },
+  );
+  /*
+   * ⚠ **A system this client has never heard of still parses**, which is the one
+   * place this differs from the agent segment it replaced. Systems are a table on
+   * the daemon, so a machine on a newer build knows some this client does not, and
+   * validating here would make them unreachable from a client that is merely
+   * older. `compatibility.md` rule 2: an unknown value degrades rather than
+   * throws. The daemon is what refuses one that is genuinely wrong.
+   */
+  check(
+    "a system this build does not know still parses",
+    parseSettingsRoute(["machines", "m_1", "systems", "somethingnew"]).system,
+    "somethingnew",
+  );
+  check(
+    "but an absurd one is dropped rather than carried into a request path",
+    parseSettingsRoute(["machines", "m_1", "systems", "x".repeat(500)]).system,
+    null,
   );
   // Three refusals, each falling *up* to the nearest real screen rather than to
   // a 404 — `parseSettingsSection`'s posture, one level down.
   check(
-    "an unknown agent falls back to the chooser",
-    parseSettingsRoute(["machines", "m_1", "agents", "gemini"]).agent,
+    "an empty system segment falls back to the chooser",
+    parseSettingsRoute(["machines", "m_1", "systems", ""]).system,
     null,
   );
   check(
     "and the machine survives that",
-    parseSettingsRoute(["machines", "m_1", "agents", "gemini"]).machineId,
+    parseSettingsRoute(["machines", "m_1", "systems", ""]).machineId,
     "m_1",
   );
   check(
-    "a segment that is not `agents` drops to the machine",
+    "a segment that is not `systems` drops to the machine",
     parseSettingsRoute(["machines", "m_1", "sessions", "kimi"]),
-    { section: "machines", machineId: "m_1", agent: null },
+    { section: "machines", machineId: "m_1", system: null },
+  );
+  /*
+   * ⚠ **The address this replaced falls to the machine and is deliberately not
+   * redirected.** `/settings/agents` set that posture when the fleet-wide section
+   * was deleted; this is the same rule one level down, and a redirect would have
+   * to guess which system a harness stood for — which is exactly the conflation
+   * the rename exists to end.
+   */
+  check(
+    "the old agent address falls to the machine",
+    parseSettingsRoute(["machines", "m_1", "agents", "claude"]),
+    { section: "machines", machineId: "m_1", system: null },
   );
   check(
     "a machine id under another section is ignored",
     parseSettingsRoute(["account", "m_1", "agents", "kimi"]),
-    { section: "account", machineId: null, agent: null },
+    { section: "account", machineId: null, system: null },
   );
   /*
    * The decoder is threaded in rather than applied inside, so the one place that
@@ -12901,17 +13132,17 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "a bare plugins segment is the machine",
     parseSettingsRoute(["machines", "m_1", "plugins"]),
-    { section: "machines", machineId: "m_1", agent: null },
+    { section: "machines", machineId: "m_1", system: null },
   );
   check(
     "and so is one that still names a plugin",
     parseSettingsRoute(["machines", "m_1", "plugins", "board"]),
-    { section: "machines", machineId: "m_1", agent: null },
+    { section: "machines", machineId: "m_1", system: null },
   );
   check(
     "including one nobody has installed",
     parseSettingsRoute(["machines", "m_1", "plugins", "not-installed"]),
-    { section: "machines", machineId: "m_1", agent: null },
+    { section: "machines", machineId: "m_1", system: null },
   );
   /*
    * ⚠ **Nothing in this module builds that path any more.** `pluginSettingsPath`
@@ -12925,13 +13156,13 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     check("settings.ts builds no path to a plugin", /plugins\/\$\{/.test(source), false);
   }
   /*
-   * One agent walks up to its machine, because the list is drawn on it. It was a
+   * One system walks up to its machine, because the list is drawn on it. It was a
    * pair with a plugin's leaf; the plugin half is gone, and this is what is left
    * of the rule rather than a rule that quietly stopped covering anything.
    */
   check(
-    "an agent goes up to its machine",
-    settingsUp({ section: "machines", machineId: "m_1" as never, agent: "kimi" }),
+    "a system goes up to its machine",
+    settingsUp({ section: "machines", machineId: "m_1" as never, system: "moonshot" }),
     { path: "/settings/machines/m_1", withinNav: false },
   );
 
@@ -13024,13 +13255,13 @@ process.stdout.write("\nwhich settings screen a URL names\n");
    * agent depths are the opposite — the nav has no row for either, so the chevron
    * is the only way back at every width.
    */
-  check("a machine's agents go up to Machines, at every width", up(["machines", "m_1", "agents"]), {
+  check("a machine's systems go up to Machines, at every width", up(["machines", "m_1", "systems"]), {
     path: "/settings/machines",
     withinNav: false,
   });
-  // Up from an agent is the machine's own screen — which is where its agents are
+  // Up from a system is the machine's own screen — which is where its systems are
   // listed, so the chooser did not go anywhere, it stopped being a screen of its own.
-  check("and one agent goes up to its machine", up(["machines", "m_1", "agents", "claude"]), {
+  check("and one system goes up to its machine", up(["machines", "m_1", "systems", "anthropic"]), {
     path: "/settings/machines/m_1",
     withinNav: false,
   });
@@ -13128,7 +13359,16 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   const settingsTsxSrc = stripComments(
     readFileSync(new URL("../src/ui/settings/Settings.tsx", import.meta.url), "utf8"),
   );
-  check("the head is the pop-up's name, not the screen's", /<Sheet title="Settings"/.test(settingsTsxSrc), true);
+  /*
+   * ⚠ **The head is `sheetTitle`'s answer now, and `Settings.tsx` renders no
+   * `<Sheet>` at all.** There is one panel for every route-backed pop-up, so this
+   * moved from a class string in one screen to a pure function over every route —
+   * which is strictly better here, since it can be *driven* rather than grepped.
+   * What still has to be read off disk is that this file does not draw a second
+   * panel inside the first. Q3.484.
+   */
+  check("the head is the pop-up's name, not the screen's", sheetTitle({ name: "settings", section: "account", machineId: null, system: null } as never), "Settings");
+  check("and the pane draws no panel of its own", /<Sheet/.test(settingsTsxSrc), false);
   check(
     "and the pane's heading is withdrawn where the rail draws the row",
     /withinNav\s*\?\s*"sm:hidden"\s*:\s*""/.test(settingsTsxSrc),
@@ -13200,8 +13440,206 @@ process.stdout.write("\nwhich settings screen a URL names\n");
    * chevrons or none, with every other assertion green. Q3.432.
    * ---------------------------------------------------------------- */
   check("the pane draws the way back", /ChevronLeft/.test(settingsTsxSrc), true);
-  check("and the head no longer does", /ChevronLeft/.test(sheetSrc), false);
+  /*
+   * ⚠ **And settings gets no chevron in the head**, which is the half of Q3.432
+   * that survives Q3.473. Its head spans a 224px section rail above `sm`, so a ◀
+   * there points at something the rail is already listing; the pane draws its own.
+   * `sheetUpLabel` is what decides, so this is asserted over every pop-up rather
+   * than by grepping the one screen that must not ask.
+   */
+  check(
+    "only the one-column pop-up puts a chevron in the head",
+    [
+      sheetUpLabel({ name: "settings", section: "account", machineId: null, system: null } as never),
+      sheetUpLabel({ name: "plugins", tab: "market", entry: null, settings: [] } as never),
+      sheetUpLabel({ name: "plugin", machineId: "m_1", pluginId: "p" } as never),
+      sheetUpLabel({ name: "new", machineId: null, cwd: null } as never),
+      sheetUpLabel({ name: "agent", machineId: "m_1", cwd: null, step: null, preset: null } as never),
+      sheetUpLabel({ name: "agent", machineId: "m_1", cwd: null, step: "llm", preset: null } as never),
+    ],
+    [null, null, null, null, "New session", "Configure agent"],
+  );
+  /*
+   * ⚠ **And the caller, because a chevron is a property of the *composition*
+   * rather than of either function.** `App.tsx` draws one line —
+   * `const up = upLabel === null ? null : upFrom(route, under)` — and neither half
+   * pins it alone: `sheetUpLabel` answers `null` for every pop-up but the builder,
+   * while `upFrom` answers a **real destination** for all of them, so on its own
+   * `upFrom` says a chevron is drawn everywhere. Only the pair says whether one is.
+   *
+   * This used to be greppable and is not any more. When settings rendered its own
+   * `Sheet`, "settings passes no `up=`" was a text search over one file; the
+   * property now lives entirely in that ternary, and a text match over `App.tsx`
+   * would keep agreeing with it after somebody turned it round. So the two are
+   * driven as the pair the caller composes, with `upFrom`'s own answer beside it
+   * to show what is being suppressed — the whole point of Q3.446's argument, which
+   * was about *width* rather than about there being nowhere to go.
+   */
+  {
+    const headUp = (route: unknown): string | null =>
+      sheetUpLabel(route as never) === null ? null : upFrom(route as never, "/");
+    const popups = [
+      { name: "settings", section: "account", machineId: null, system: null },
+      { name: "settings", section: "machines", machineId: "m_1", system: "moonshot" },
+      { name: "plugins", tab: "market", entry: null, settings: [] },
+      { name: "plugin", machineId: "m_1", pluginId: "p" },
+      { name: "new", machineId: null, cwd: null },
+      { name: "agent", machineId: "m_1", cwd: null, step: "llm", preset: null },
+    ];
+    check(
+      "and every one of them has somewhere up, which is what the head declines to draw",
+      popups.map((route) => upFrom(route as never, "/")),
+      ["/settings", "/settings/machines/m_1", "/", "/", "/", "/agent/m_1"],
+    );
+    check(
+      "so the head's chevron is the builder's alone",
+      popups.map(headUp),
+      [null, null, null, null, null, "/agent/m_1"],
+    );
+  }
+  /*
+   * ⚠ **`preset: null` on those two literals is a behavioural fix, not a type
+   * nit.** `as never` lets a hand-built route omit a field the union now requires,
+   * and `undefined === null` is `false` — so the second literal answered "Edit
+   * agent" the moment editing became an address. Which is the shape of the whole
+   * hazard: this driver builds routes by hand precisely where the compiler is
+   * being told not to look, so a field added to the union is invisible here until
+   * it changes an answer. The four-way sweep of this pair lives with the rest of
+   * the builder's addresses, further down.
+   */
   check("nor reserves room for one", /inline-flex w-3 shrink-0/.test(sheetSrc), false);
+  /*
+   * The head's own chevron is conditional and never a reserved slot: a screen with
+   * nowhere to go must not draw a control that goes nowhere, and this pop-up's head
+   * changes its title between screens anyway, so a left edge moving with it costs
+   * nothing that was being held still.
+   */
+  check("the head draws one only when a caller hands it somewhere to go", /\{up !== undefined && \(/.test(sheetSrc), true);
+
+  /* ---------------------------------------------------------------- *
+   * One panel, many screens
+   *
+   * ⚠ **The bill for `OverlaySheet`, and the reason nothing typed can catch it.**
+   * One `<Sheet>` element now serves `/new`, `/agent` and `/agent/:step`, so the
+   * mount-time focus effect ran once for the whole flow: tapping the Model row
+   * unmounted the button holding focus, the browser dropped it to `<body>`, and a
+   * keyboard user re-Tabbed from the top of the document on every screen and on
+   * every ◀ back out of one. The element never unmounts, so every type in this
+   * file agrees with itself either way.
+   * ---------------------------------------------------------------- */
+  check("the panel is re-focused per screen, not per sheet", /useEffect\(\(\) => \{\s*panelRef\.current\?\.focus\(\);\s*\}, \[screen\]\);/.test(sheetSrc), true);
+  /*
+   * ⚠ **And its pair, which is the same defect wearing the other hat.** The
+   * capture/restore effect must stay at `[]`: run per screen, its *cleanup* fires
+   * on every screen change and restores focus to a control the outgoing screen has
+   * just unmounted — which lands on `<body>`, which is exactly what was being
+   * fixed. Declaration order matters with it, since React runs a component's
+   * effects in the order they are written and the capture has to record what held
+   * focus before the panel takes it.
+   */
+  check("and exactly one thing in the panel remembers where focus came from", (sheetSrc.match(/document\.activeElement/g) ?? []).length, 1);
+  check(
+    "and it is declared first, and keyed on nothing",
+    /const previous = document\.activeElement;[\s\S]*?\}, \[\]\);[\s\S]*?\}, \[screen\]\);/.test(sheetSrc),
+    true,
+  );
+  /*
+   * ⚠ **The head changing is the only thing that says the screen changed**, so it
+   * is spoken. Exactly one region, and it renders `title` **live** rather than a
+   * string captured in the focus effect: `sheetTitle` answers `null` for a
+   * plugin's own screen and `OverlaySheet` draws an empty placeholder until the
+   * plugin reports a name a round-trip later, so a region fed from the effect
+   * would speak `""` once and never correct itself. Rendered live it is silent
+   * while empty — an empty region announces nothing — and speaks the name when it
+   * arrives. Nothing typed can tell those two apart.
+   */
+  check("the panel says what screen it is on", (sheetSrc.match(/role="status"/g) ?? []).length, 1);
+  check("and says it by rendering the head rather than a copy of it", /<p role="status" aria-live="polite" className="sr-only">\s*\{title\}/.test(sheetSrc), true);
+  /*
+   * ⚠ **Inside the `aria-modal` dialog**, which is not a placement preference:
+   * `aria-modal="true"` lets a screen reader hide everything outside the dialog
+   * element, so a region beside it — or left in `#root`, which `syncInert` marks
+   * `inert` — never fires at all. Same finding `Toast` records about why it
+   * portals. Asserted by source order against both the dialog above it and the
+   * portal target below it, since a driver with no DOM has nothing else to read.
+   */
+  /*
+   * Each operand is checked against `>= 0` first, the sweep the `picksRef`
+   * ordering pin one section over is the reason for: `aria-modal` was the left
+   * side of the first comparison and nothing else in this file asserts it exists,
+   * so deleting the attribute made `indexOf` answer -1 — less than every real
+   * position — and the assertion passed while the property it names, the one thing
+   * that decides whether the region is announced at all, was gone.
+   */
+  const modalAt = sheetSrc.indexOf("aria-modal");
+  const regionAt = sheetSrc.indexOf('role="status"');
+  const portalAt = sheetSrc.indexOf("document.body,");
+  check("the panel is still a modal dialog", modalAt >= 0, true);
+  check("and still portals somewhere", portalAt >= 0, true);
+  check(
+    "and the region is inside the dialog rather than beside it",
+    [modalAt >= 0 && regionAt >= 0 && modalAt < regionAt, regionAt >= 0 && portalAt >= 0 && regionAt < portalAt],
+    [true, true],
+  );
+  /*
+   * ⚠ **A `ReactNode` title cannot be spoken**, and widening it back typechecks
+   * clean at both call sites while silently muting the region. The `<h1>`'s own
+   * docblock already asked for one unconditional text node so `aria-labelledby`
+   * resolves at both widths; the type now enforces what that comment asked for.
+   */
+  check("and the head is a string, because a node has no words", [/title: string;/.test(sheetSrc), /title: ReactNode/.test(sheetSrc)], [true, false]);
+  /*
+   * ⚠ **`screen` is optional, so a caller that stops passing it typechecks clean
+   * and reverts to the defect.** Same shape as the `upFrom(route, under, origin)`
+   * call-site pin: the property is about the caller, so it is asserted on the
+   * caller. `ImportCode` passes nothing on purpose — one screen, focused once on
+   * the way in — which is why the prop cannot simply be made required.
+   */
+  const appSrc = stripComments(readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8"));
+  check("the sheet that has many screens actually hands one over", /screen=\{screenOf\(route\)\}/.test(appSrc), true);
+  /*
+   * The one line the pair above is a fact about. Text, because a composition
+   * inside a component body is not reachable from a driver with no DOM — and
+   * narrow, because it is the *gate* that is the property: `upFrom` alone answers
+   * a destination for every pop-up, so a `Sheet` handed `upFrom(route, under)`
+   * unconditionally would grow a chevron on all five of them with the behavioural
+   * assertions above still green.
+   */
+  check("and the head's chevron is gated on the label rather than on the destination", /upLabel === null \? null : upFrom\(route, under\)/.test(appSrc), true);
+  /*
+   * ⚠ **And `screenOf` folds in what a screen *is* and leaves out what a screen's
+   * own state happens to ride the URL as** — the post-condition on a function
+   * whose whole output is a key, and the half that cannot be inferred from its
+   * type. Both mistakes are silent: keyed on the whole route, `NewSession`'s
+   * documented "the address follows the folder" rewrite fires on every step into
+   * a directory and the panel steals focus mid-interaction; keyed on the title, it
+   * never fires inside settings or plugins at all, because `sheetTitle` answers
+   * one constant for every screen under each.
+   */
+  check(
+    "a screen key holds the screen and not the screen's own state",
+    [
+      /case "new":\s*return "new";/.test(appSrc),
+      /route\.settings\.length > 0/.test(appSrc),
+      /route\.settings\.join/.test(appSrc),
+      /return `agent\/\$\{route\.step \?\? ""\}\/\$\{route\.preset \?\? ""\}`;/.test(appSrc),
+    ],
+    [true, true, false, true],
+  );
+  /*
+   * The other half of the same post-condition, and the one a text pin cannot fake:
+   * `screenOf` has no `default`, so every arm of the route union is named and a
+   * seventh route shape fails to build rather than silently sharing a key with
+   * whatever `default` returned.
+   */
+  check("and every route shape is named rather than defaulted", /function screenOf[\s\S]*?\n\}/.exec(appSrc)?.[0].includes("default:") ?? true, false);
+  /*
+   * ⚠ **`md` is the one `ICON_BUTTON_SIZE` that never reaches 44px**, and it is
+   * the default — so a chevron added without a size is a 36px target on the
+   * control a phone uses to leave every screen of this pop-up. The ratchet above
+   * catches it too; this says which size and why, next to the rule it keeps.
+   */
+  check("at the settings pane's own size, which reaches 44px", /icon=\{ChevronLeft\}[\s\S]{0,400}size="sm"/.test(sheetSrc), true);
   /*
    * The label names the destination rather than saying "Back" — `Header`'s rule,
    * and the whole difference between this control and the history button it must
@@ -13213,7 +13651,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     [
       settingsUpLabel(parseSettingsRoute(["account"])),
       settingsUpLabel(parseSettingsRoute(["machines", "m_1"])),
-      settingsUpLabel(parseSettingsRoute(["machines", "m_1", "agents", "claude"])),
+      settingsUpLabel(parseSettingsRoute(["machines", "m_1", "systems", "anthropic"])),
     ],
     ["Settings", "Machines", "Machine settings"],
   );
@@ -13527,10 +13965,16 @@ process.stdout.write("\nwho owns Escape, and what paints above what\n");
 
   check(
     "the overlay paths",
-    ["/settings", "/settings/account", "/settings/machines/m_1/agents/claude", "/new", "/new/m_1"].map(
-      isOverlayPath,
-    ),
-    [true, true, true, true, true],
+    [
+      "/settings",
+      "/settings/account",
+      "/settings/machines/m_1/systems/anthropic",
+      "/new",
+      "/new/m_1",
+      "/agent/m_1",
+      "/agent/m_1/%2Fhome%2Fme",
+    ].map(isOverlayPath),
+    [true, true, true, true, true, true, true],
   );
   check(
     "and the screens that are not overlays",
@@ -15531,11 +15975,18 @@ process.stdout.write("\nthe machine limit\n");
   {
     const src = strip(readFileSync(new URL("../src/ui/settings/MachinesSection.tsx", import.meta.url), "utf8"));
     // The form is downstream of the check that it may be offered at all — the
-    // `asksMailUsable < promisesReset` idiom one section over.
+    // `asksMailUsable < promisesReset` idiom one section over, which guards both
+    // operands with `>= 0` for the reason that idiom's neighbours record: dropping
+    // the predicate makes the left side -1, and -1 is less than every real
+    // position, so the ordering passes with the gate it is about deleted.
+    const asks = src.indexOf("mayAddMachine(");
+    const form = src.indexOf("<AddMachine");
+    check("the screen still asks whether a machine may be added", asks >= 0, true);
+    check("and still has a form to gate", form >= 0, true);
     report(
       "the add form is downstream of the check that it is offerable",
-      src.indexOf("mayAddMachine(") < src.indexOf("<AddMachine"),
-      `${src.indexOf("mayAddMachine(")} < ${src.indexOf("<AddMachine")}`,
+      asks >= 0 && form >= 0 && asks < form,
+      `${asks} < ${form}`,
     );
     /*
      * Creating and retiring a machine move `machineCount`, which is the number
@@ -15687,7 +16138,7 @@ process.stdout.write("\nthe machine limit\n");
  * the tab came back. `probeRoute` published `probing` before any I/O and `online`
  * up to 1.5s later, and everything keyed on `reach` changed twice for a question
  * whose answer never changed: every machine row's dot went hollow and back, and
- * the agents panel *unmounted and remounted*, restarting `useAgentAuth` from
+ * the systems panel *unmounted and remounted*, restarting `useAgentAuth` from
  * nothing — a spinner, a second `GET /agent-auth` that shells out to every CLI,
  * and any half-typed credential thrown away. Once per tab switch.
  *
@@ -15702,7 +16153,7 @@ process.stdout.write("\na re-probe is not the host going away\n");
   const { daemonReadable } = await import("../src/machine.js");
   const mach = stripComments(readFileSync(new URL("../src/machine.ts", import.meta.url), "utf8"));
   const panel = stripComments(
-    readFileSync(new URL("../src/ui/settings/MachineAgentsSection.tsx", import.meta.url), "utf8"),
+    readFileSync(new URL("../src/ui/settings/MachineSystemsSection.tsx", import.meta.url), "utf8"),
   );
 
   // All four, because the interesting one is `probing` and a predicate over a
@@ -15720,7 +16171,7 @@ process.stdout.write("\na re-probe is not the host going away\n");
   check("a re-probe keeps a known-online state", /if \(this\.reach !== "online"\) this\.reach = "probing";/.test(mach), true);
   check("and does not overwrite it unconditionally", /^\s*this\.reach = "probing";$/m.test(mach), false);
 
-  check("the agents panel asks the predicate", /!daemonReadable\(machine\.reach\)/.test(panel), true);
+  check("the systems panel asks the predicate", /!daemonReadable\(machine\.reach\)/.test(panel), true);
   check("rather than treating a measurement as an outage", /machine\.reach !== "online"/.test(panel), false);
 }
 
@@ -15752,7 +16203,7 @@ process.stdout.write("\na sign-in that is not offered\n");
    * every BSD, so the name comes from the daemon — a hardcoded "macOS" would tell
    * a FreeBSD operator something false in the one sentence meant to absolve them.
    */
-  check("the sentence names the system", stanceLine("claude", "signed_out", false, "darwin"), "macOS can't run Claude's own sign-in, so a saved key is the only way in.");
+  check("the sentence names the system", stanceLine("claude", "signed_out", false, "darwin"), "macOS can't run Claude Code's own sign-in, so a saved key is the only way in.");
   check("and a different BSD gets its own name", osName("freebsd"), "FreeBSD");
   check("while a daemon that does not say names nothing", osName(undefined), "This machine");
   check("a wizard that can run says nothing at all", stanceLine("claude", "signed_out", true, "darwin"), null);
@@ -16093,17 +16544,26 @@ process.stdout.write("\nwhich lists keep their delimiter\n");
 
 process.stdout.write("\nwhat a navigation moves\n");
 {
-  const { depthOf, isSheet, navMove } = await import("../src/nav.js");
+  const { depthOf, isSheet, navMove, sheetKind } = await import("../src/nav.js");
   const home = { name: "home" } as never;
   const session = { name: "session", ref: { machineId: "m", sessionId: "s" } } as never;
   const other = { name: "session", ref: { machineId: "m", sessionId: "t" } } as never;
   const gate = { name: "gate", screen: "register" } as never;
-  const index = { name: "settings", section: null, machineId: null, agent: null } as never;
-  const account = { name: "settings", section: "account", machineId: null, agent: null } as never;
-  const users = { name: "settings", section: "users", machineId: null, agent: null } as never;
-  const machines = { name: "settings", section: "machines", machineId: null, agent: null } as never;
-  const oneMachine = { name: "settings", section: "machines", machineId: "m", agent: null } as never;
-  const oneAgent = { name: "settings", section: "machines", machineId: "m", agent: "claude" } as never;
+  const index = { name: "settings", section: null, machineId: null, system: null } as never;
+  const account = { name: "settings", section: "account", machineId: null, system: null } as never;
+  const users = { name: "settings", section: "users", machineId: null, system: null } as never;
+  const machines = { name: "settings", section: "machines", machineId: null, system: null } as never;
+  const oneMachine = { name: "settings", section: "machines", machineId: "m", system: null } as never;
+  /*
+   * ⚠ **The deepest fixture carries the field the depth is decided by.** This was
+   * `agent: "claude"`, left behind when the route's leaf became a system, and `as
+   * never` let it stand: with no `system` key at all `depthOf`'s `route.system !==
+   * null` is satisfied by `undefined`, so the depth-4 arm was entered for the
+   * wrong reason and `{name:"settings",section:"machines",machineId:"m",zzz:1}`
+   * answered 4 just as readily. The literal is the only thing standing in for the
+   * type here, which is exactly why it has to name the real field.
+   */
+  const oneSystem = { name: "settings", section: "machines", machineId: "m", system: "moonshot" } as never;
 
   check("opening a conversation pushes a screen", navMove(home, session), "push");
   check("and leaving it pops one", navMove(session, home), "pop");
@@ -16117,8 +16577,8 @@ process.stdout.write("\nwhat a navigation moves\n");
   check("tapping a section pushes inside the sheet", navMove(index, account), "section-push");
   check("and Back pops inside it", navMove(account, index), "section-pop");
   check("a machine's agents are deeper still", navMove(machines, oneMachine), "section-push");
-  check("and one agent deeper again", navMove(oneMachine, oneAgent), "section-push");
-  check("walking back up pops each time", navMove(oneAgent, oneMachine), "section-pop");
+  check("and one system deeper again", navMove(oneMachine, oneSystem), "section-push");
+  check("walking back up pops each time", navMove(oneSystem, oneMachine), "section-pop");
   /*
    * ⚠ **A plugin is no longer a depth in this sheet, and the URL that used to be
    * one has to agree.** Its settings moved to the plugin's own page under
@@ -16141,7 +16601,7 @@ process.stdout.write("\nwhat a navigation moves\n");
    * transition here as well would animate one panel twice.
    */
   check("closing a sheet takes it down", navMove(account, session), "sheet-close");
-  check("from any depth", navMove(oneAgent, home), "sheet-close");
+  check("from any depth", navMove(oneSystem, home), "sheet-close");
   check("but opening one is CSS's job", navMove(session, index), null);
   check("from a session or from home", navMove(home, account), null);
 
@@ -16156,11 +16616,86 @@ process.stdout.write("\nwhat a navigation moves\n");
   check("a gate screen is beside the sign-in form, not past it", navMove(home, gate), null);
 
   // The two stacks are never compared, which is what `isSheet` is asked first for.
-  check("a sheet is a sheet whatever its depth", [isSheet(index), isSheet(oneAgent)], [true, true]);
+  check("a sheet is a sheet whatever its depth", [isSheet(index), isSheet(oneSystem)], [true, true]);
   check("and a screen is not", [isSheet(home), isSheet(session)], [false, false]);
-  check("the four sheet depths are the four screens", [depthOf(index), depthOf(account), depthOf(oneMachine), depthOf(oneAgent)], [1, 2, 3, 4]);
+  check("the four sheet depths are the four screens", [depthOf(index), depthOf(account), depthOf(oneMachine), depthOf(oneSystem)], [1, 2, 3, 4]);
+  /*
+   * ⚠ **And the same four through the parser, which is the only reading of them a
+   * stale literal cannot fake.** `as never` above suppresses exactly the check
+   * that would have caught the missing `system` key, and `depthOf`'s test is
+   * `!== null` — satisfied by `undefined`, which a hand-written object supplies
+   * for free and `parseSettingsRoute` can never produce. Driven from segments, a
+   * field renamed in the union takes both ends with it. Same idiom the stale
+   * plugin address above uses, and for the same reason.
+   */
+  {
+    const { parseSettingsRoute } = await import("../src/settings.js");
+    const parsed = (segments: readonly string[]) => ({ name: "settings", ...parseSettingsRoute(segments) }) as never;
+    check(
+      "and the same four read off real URLs rather than hand-written objects",
+      [parsed([]), parsed(["account"]), parsed(["machines", "m"]), parsed(["machines", "m", "systems", "moonshot"])].map(depthOf),
+      [1, 2, 3, 4],
+    );
+  }
   // `/new` has one screen, so nothing inside it can move.
   check("and a picker has one", depthOf({ name: "new", machineId: null, cwd: null } as never), 1);
+  /*
+   * ⚠ **The agent builder is a pop-up one depth *below* the picker**, which is
+   * what makes leaving it a `section-pop` back onto New session rather than a
+   * `sheet-close` out of the stack — and what `upFrom` has to agree with.
+   */
+  const builder = { name: "agent", machineId: "m_1", cwd: "/home/me", step: null } as never;
+  const picker = { name: "new", machineId: "m_1", cwd: "/home/me" } as never;
+  check("the builder sits under the picker", [depthOf(picker), depthOf(builder)], [1, 2]);
+  check("and is a sheet like everything else in that stack", isSheet(builder), true);
+  check("so opening it pushes", navMove(picker, builder), "section-push");
+  check("and leaving it pops rather than closing the stack", navMove(builder, picker), "section-pop");
+  /*
+   * ⚠ **A choice is a third depth, not a menu.** `Dropdown` is right for a handful
+   * of options anchored to their control; the model list is every model of every
+   * system this daemon can reach, with a search box and a provider filter over it,
+   * which is a screen. Being a route is what gives it the same slide, the same ◀
+   * and the phone's Back — and what makes the pair below expressible at all.
+   */
+  const choosing = { name: "agent", machineId: "m_1", cwd: "/home/me", step: "llm" } as never;
+  check("and a choice sits under the builder", depthOf(choosing), 3);
+  check("so opening one pushes too", navMove(builder, choosing), "section-push");
+  check("and answering it pops back", navMove(choosing, builder), "section-pop");
+  /*
+   * The two choosing screens are the *same* depth, so moving between them moves
+   * nothing — `depthOf`'s own rule that the same pane with different contents is
+   * not a direction. Nothing navigates between them today; this is the property
+   * rather than the path.
+   */
+  check(
+    "and the two choices are one depth, not two",
+    navMove(choosing, { name: "agent", machineId: "m_1", cwd: "/home/me", step: "harness" } as never),
+    null,
+  );
+  /*
+   * ⚠ **Two different pop-ups swap, and the depths must not be compared at all.**
+   * A depth is a position inside one stack: Settings → a section is 1 → 2 and a
+   * Plugins tab is 1, so settings-account → plugins compared 2 against 1 and
+   * answered `section-pop` — sliding one pop-up's pane rightwards into another's,
+   * on top of a panel that was being unmounted and replaced anyway. Reported as
+   * the pop-up vanishing for a frame. The swap arm has to come *before* the depth
+   * test, which is what these two assert together. Q3.484.
+   */
+  const plugins = { name: "plugins", tab: "market", entry: null, settings: [] } as never;
+  check("two pop-ups swap rather than sliding", navMove(account, plugins), "sheet-swap");
+  check("in both directions", navMove(plugins, account), "sheet-swap");
+  check("and a depth is never compared across them", navMove(index, plugins), "sheet-swap");
+  check("while one pop-up's own depths still slide", navMove(index, account), "section-push");
+  /*
+   * `sheetKind` is what tells them apart, and `new`/`agent` are deliberately one:
+   * that is why walking into the builder slides a pane instead of swapping.
+   */
+  check(
+    "the agent flow is the same pop-up as the session it starts",
+    [sheetKind(picker), sheetKind(builder), sheetKind(account), sheetKind(plugins)],
+    ["new", "new", "settings", "plugins"],
+  );
+  check("and a screen belongs to no pop-up", sheetKind({ name: "home" } as never), null);
 
   /*
    * **The half of the slide that is not a function, and all three of its defects
@@ -16193,6 +16728,36 @@ process.stdout.write("\nwhat a navigation moves\n");
     .flatMap((rule) => (rule[1] ?? "").split(",").map((one) => one.trim()))
     .filter((one) => one.length > 0);
   check("there are view-transition animations to check at all", animatingSelectors.length > 8, true);
+  /*
+   * ⚠ **And every movement the router can name has a rule saying what it does.**
+   * This is the half with **no symptom at all** and it is the reason it is written
+   * here: `navMove` returning a value `index.css` says nothing about is not an
+   * error anywhere — the attribute is written onto the document, no rule matches,
+   * and the browser plays its *default* cross-fade on the root pair, which looks
+   * like a movement rather than like a bug. `sheet-swap` is the case that made
+   * that concrete: its whole declaration is an `animation: none` that suppresses
+   * the default, so losing the rule loses the fix and every assertion above stays
+   * green — the animating-selector sweep asserts a property of the rules that
+   * exist and says nothing about one that stopped existing.
+   *
+   * A `Record<NavMove, true>` rather than an array, and that is the whole reason
+   * for the shape: a seventh member added to the union is a **compile** error
+   * here, so the sweep cannot quietly stop covering the thing it was widened for.
+   * An array typed `NavMove[]` accepts no wrong member and notices no missing one.
+   */
+  const movements: Record<NavMove, true> = {
+    push: true,
+    pop: true,
+    "section-push": true,
+    "section-pop": true,
+    "sheet-close": true,
+    "sheet-swap": true,
+  };
+  check(
+    "and every movement the router can name is a movement this stylesheet declares",
+    Object.keys(movements).filter((one) => !transitionCss.includes(`:root[data-nav="${one}"]`)),
+    [],
+  );
   check(
     "and every one is keyed on data-nav, so a width gate can overrule it",
     animatingSelectors.filter((one) => !one.startsWith(":root[data-nav")),
@@ -16483,11 +17048,11 @@ process.stdout.write("\nwhat Telegram's own control does\n");
   const home = { name: "home" } as never;
   const gate = { name: "gate", screen: "register" } as never;
   const session = { name: "session", ref: { machineId: "m", sessionId: "s" } } as never;
-  const index = { name: "settings", section: null, machineId: null, agent: null } as never;
-  const account = { name: "settings", section: "account", machineId: null, agent: null } as never;
-  const machines = { name: "settings", section: "machines", machineId: null, agent: null } as never;
-  const oneMachine = { name: "settings", section: "machines", machineId: "m", agent: null } as never;
-  const oneAgent = { name: "settings", section: "machines", machineId: "m", agent: "claude" } as never;
+  const index = { name: "settings", section: null, machineId: null, system: null } as never;
+  const account = { name: "settings", section: "account", machineId: null, system: null } as never;
+  const machines = { name: "settings", section: "machines", machineId: null, system: null } as never;
+  const oneMachine = { name: "settings", section: "machines", machineId: "m", system: null } as never;
+  const oneSystem = { name: "settings", section: "machines", machineId: "m", system: "moonshot" } as never;
 
   /*
    * **`null` is the answer, not the absence of one.** Telegram has one control:
@@ -16508,7 +17073,7 @@ process.stdout.write("\nwhat Telegram's own control does\n");
    * the same door the ✕ uses — one rule, so the two controls cannot disagree.
    */
   check("a section goes up to the section list", upFrom(account, "/m/m_1/s/s_1"), "/settings");
-  check("an agent goes up to its machine", upFrom(oneAgent, "/"), "/settings/machines/m");
+  check("a system goes up to its machine", upFrom(oneSystem, "/"), "/settings/machines/m");
   /*
    * ⚠ **A plugin has no depth of its own here any more**, so the address that
    * used to have one goes up wherever the machine goes — not to the machine.
@@ -16822,11 +17387,23 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
 
     const registrySrc = readFileSync(new URL("../../../src/registry.ts", import.meta.url), "utf8");
     const eventsSrc = readFileSync(new URL("../../../src/events.ts", import.meta.url), "utf8");
+    /*
+     * ⚠ **The two files the assembled-agent work put on the wire, and the sweep
+     * did not read either.** `CustomAgent` and `AgentRouting` are declared in
+     * `src/acp/systems.ts` and `AgentCapabilities` in `src/agentask.ts`; all three
+     * are hand-mirrored in `wire.ts`, and all three fell straight through the
+     * `continue` below because no source in this list declared them. The guard
+     * built to catch exactly this drift silently covered none of the feature.
+     */
+    const systemsSrc = readFileSync(new URL("../../../src/acp/systems.ts", import.meta.url), "utf8");
+    const askSrc = readFileSync(new URL("../../../src/agentask.ts", import.meta.url), "utf8");
     const mirrored = [...new Set([...clientSrc.matchAll(/export interface (\w+)/g)].map((one) => one[1] ?? ""))];
     const behind: string[] = [];
     let compared = 0;
     for (const name of mirrored) {
-      const theirs = [registrySrc, eventsSrc, daemonSrc].map((src) => fieldsOf(src, name)).find((one) => one !== null);
+      const theirs = [registrySrc, eventsSrc, daemonSrc, systemsSrc, askSrc]
+        .map((src) => fieldsOf(src, name))
+        .find((one) => one !== null);
       if (theirs === undefined || theirs === null) continue;
       compared += 1;
       const ours = fieldsOf(clientSrc, name) ?? [];
@@ -16981,7 +17558,14 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
     check("and the parent it could not follow is named rather than passed over", unresolvedParents.slice(before), [
       "Child extends Base",
     ]);
-    report("there are mirrored interfaces to compare at all", compared >= 40, `${compared} interfaces`);
+    /*
+     * ⚠ **45, raised from 40 when `systems.ts` and `agentask.ts` joined the source
+     * list.** Measured: 44 interfaces without them, 47 with — the three the
+     * assembled-agent work put on the wire. A floor of 40 would have gone on
+     * passing if either file were dropped from the list again, which is the exact
+     * silence this number exists to break.
+     */
+    report("there are mirrored interfaces to compare at all", compared >= 45, `${compared} interfaces`);
     check("and the session snapshot is one of them", fieldsOf(registrySrc, "SessionSnapshot") !== null, true);
     check("no interface this client mirrors knows less than the daemon's own", behind, []);
 
@@ -20311,7 +20895,7 @@ process.stdout.write("\nwhich routes are pop-ups, asked from both directions\n")
     [{ name: "session", ref: { machineId: "m", sessionId: "s" } }, "/m/m/s/s", false],
     [{ name: "gate", screen: "register" }, "/register", false],
     [{ name: "new", machineId: null, cwd: null }, "/new", true],
-    [{ name: "settings", section: null, machineId: null, agent: null }, "/settings", true],
+    [{ name: "settings", section: null, machineId: null, system: null }, "/settings", true],
     [{ name: "plugin", machineId: "m", pluginId: "board" }, "/p/m/board", true],
     // Both depths of the market, because they are different route shapes reaching
     // the same predicate — and `/plugins` is one segment away from `/p`, which is
@@ -20532,6 +21116,2124 @@ process.stdout.write("\nwhat several machines' settings panes add up to\n");
    * was.
    */
   check("and it never says all", [1, 2, 3, 4, 9].map((n) => scopeSummary(Array.from({ length: n }, (_, i) => `m${i}`)).includes("all")), [false, false, false, false, false]);
+}
+
+/* ------------------------------------------------------------------ *
+ * A harness, a system, and which pairs of them exist
+ *
+ * ⚠ **This is the client's half of a rule the daemon also enforces, and the two
+ * are asserted separately on purpose.** `daemoncheck` drives `hostable` in
+ * `src/acp/systems.ts`, which is the gate; this drives the copy in
+ * `packages/web/src/agents.ts`, which is the courtesy that greys a row out
+ * before anybody picks it. Both read the *agent's own answer* about which
+ * protocols it accepts, which arrives on the wire, so neither transcribes the
+ * protocol matrix.
+ *
+ * ⚠ **They do not agree arm for arm, and "neither writes a matrix down" was too
+ * strong.** The daemon holds one table the client cannot see — `ROUTED_MODEL_ENV`,
+ * how each harness is told which model to run on a foreign system — and refuses a
+ * pairing missing from it. Nothing on the wire stands for that fact, so this side
+ * has no such arm; see the docblock on the client's `hostable`. The two agree
+ * today only because every routed system is `anthropic`-shaped and the one
+ * harness missing from that table is refused an arm earlier.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nthe way out of the agent builder\n");
+{
+  const { agentBuilderPath, agentEditPath, depthOf, sheetTitle, sheetUpLabel, upFrom, newSessionPath } =
+    await import("../src/nav.js");
+  const { parsePath } = await import("../src/router.js");
+
+  /*
+   * ⚠ **The ◀ goes back to New session *with its folder*, and `under` is the
+   * wrong value for it.** `under` carries forward what the first pop-up was drawn
+   * over, so it would close the whole stack — and the folder somebody had walked
+   * three levels into would be gone. That is the trap `marketUpFrom` needed
+   * `origin` in `history.state` for; here the address holds both halves already,
+   * so nothing extra is recorded.
+   */
+  const deep = parsePath("/agent/m_1/%2FUsers%2Fme%2Fsrc");
+  check("the builder's route carries the folder", [deep.name, (deep as never as {cwd: string}).cwd], ["agent", "/Users/me/src"]);
+  check(
+    "and up is the picker it came from, folder and all",
+    upFrom(deep, "/"),
+    "/new/m_1/%2FUsers%2Fme%2Fsrc",
+  );
+  check(
+    "with no folder it is still the picker rather than the screen underneath",
+    upFrom(parsePath("/agent/m_1"), "/"),
+    "/new/m_1",
+  );
+  /*
+   * ⚠ **A choosing screen walks back to the builder, never past it to the
+   * picker.** Both are one pop-up and the ◀ moves one level at a time — the same
+   * rule `settingsUp` keeps — so answering "which model" returns you to the form
+   * the answer goes into rather than throwing the half-assembled agent away.
+   */
+  const choosing = parsePath("/agent/m_1/llm/%2FUsers%2Fme%2Fsrc");
+  check(
+    "a choosing screen is the builder's own route with a step on it",
+    [choosing.name, (choosing as never as { step: string }).step, (choosing as never as { cwd: string }).cwd],
+    ["agent", "llm", "/Users/me/src"],
+  );
+  check("and up from it is the builder, folder and all", upFrom(choosing, "/"), "/agent/m_1/%2FUsers%2Fme%2Fsrc");
+  check(
+    "the other one behaves identically",
+    upFrom(parsePath("/agent/m_1/harness"), "/"),
+    "/agent/m_1",
+  );
+  /*
+   * ⚠ **The step sits before the folder and a folder can never be read as one.**
+   * A `cwd` is an absolute POSIX path from the daemon's own listing, so it always
+   * begins with `/` and `encodeURIComponent` always writes that as `%2F`. That is
+   * what lets both tail segments be optional with no placeholder standing in for
+   * the absent one — and it is the property that would break silently if a
+   * relative path ever reached this encoder.
+   */
+  check(
+    "a folder alone is still a folder",
+    (parsePath("/agent/m_1/%2Fhome%2Fllm") as never as { step: string | null; cwd: string }),
+    { name: "agent", machineId: "m_1", cwd: "/home/llm", step: null, preset: null } as never,
+  );
+  /*
+   * ⚠ **And the marker cannot be a folder either, which is why it is a literal
+   * word rather than a recognition of the daemon's `ca_` + 8 hex id shape.** The
+   * client must not hold a copy of the daemon's id generator; what it may hold is
+   * a segment that can never collide. A `cwd` is an absolute POSIX path from the
+   * daemon's own listing, so `encodeURIComponent` always writes its leading `/` as
+   * `%2F` — a folder literally called `/edit` still arrives as `%2Fedit` and is
+   * read as a folder. That is the same property both tail segments already rest
+   * on, extended one position left rather than a new rule.
+   */
+  check(
+    "a folder that would collide with the marker is not writable",
+    [agentBuilderPath("m_1", "/edit"), (parsePath("/agent/m_1/%2Fedit") as never as { cwd: string; preset: string | null }).cwd],
+    ["/agent/m_1/%2Fedit", "/edit"],
+  );
+  check(
+    "and is a folder rather than an edit",
+    (parsePath("/agent/m_1/%2Fedit") as never as { preset: string | null }).preset,
+    null,
+  );
+  check(
+    "one encoding of the builder's address, step and all",
+    [agentBuilderPath("m_1", "/home/me"), agentBuilderPath("m_1", "/home/me", "llm"), agentBuilderPath("m_1", null, "harness")],
+    ["/agent/m_1/%2Fhome%2Fme", "/agent/m_1/llm/%2Fhome%2Fme", "/agent/m_1/harness"],
+  );
+
+  /* ---------------------------------------------------------------- *
+   * Editing one that already exists
+   *
+   * ⚠ **An edit is an address, and that is the whole of why it works.** The
+   * builder is rendered by `StartSheet` and `NewSession` unmounts for the entire
+   * flow, so there is nothing to carry a preset id in but the URL — a prop would
+   * have to survive a screen that is not on screen.
+   * ---------------------------------------------------------------- */
+  const edited = parsePath("/agent/m_1/edit/ca_1234abcd");
+  check(
+    "an edit address names the agent and nothing else",
+    edited,
+    { name: "agent", machineId: "m_1", cwd: null, step: null, preset: "ca_1234abcd" } as never,
+  );
+  check(
+    "and a choice inside one carries both the agent and the folder",
+    parsePath("/agent/m_1/edit/ca_1234abcd/llm/%2FUsers%2Fme%2Fsrc"),
+    { name: "agent", machineId: "m_1", cwd: "/Users/me/src", step: "llm", preset: "ca_1234abcd" } as never,
+  );
+  check(
+    "a step with no folder is still a step",
+    parsePath("/agent/m_1/edit/ca_1234abcd/harness"),
+    { name: "agent", machineId: "m_1", cwd: null, step: "harness", preset: "ca_1234abcd" } as never,
+  );
+  /*
+   * ⚠ **Every address written before the marker existed still parses**, and the
+   * one that fails must fail *towards the new-agent screen* — the arm holding none
+   * of somebody else's work to overwrite. `compatibility.md` rule 2 is what
+   * decides the direction; this is the sweep that says it is true of all of them
+   * rather than of the one somebody thought to check.
+   */
+  check(
+    "no old address grew a preset",
+    ["/agent/m_1", "/agent/m_1/%2Fhome%2Fme", "/agent/m_1/llm", "/agent/m_1/llm/%2Fhome%2Fme", "/agent/m_1/harness"]
+      .map((path) => (parsePath(path) as never as { preset: string | null }).preset),
+    [null, null, null, null, null],
+  );
+  /*
+   * The marker with nothing after it: the new-agent screen, and **not** a preset
+   * named nothing and not a folder called "edit". Nothing else asserts the stated
+   * failure direction, and an id is the one segment here a person can mistype.
+   */
+  check(
+    "a marker with no agent behind it degrades to the screen that holds no work",
+    parsePath("/agent/m_1/edit"),
+    { name: "agent", machineId: "m_1", cwd: null, step: null, preset: null } as never,
+  );
+  /*
+   * One encoding of the edit address, beside the builder's own above.
+   * `agentEditPath` exists as a second name rather than callers writing
+   * `agentBuilderPath(m, cwd, null, id)`: an edit is opened at the builder and
+   * never at a step, so every ordinary caller would be threading a `null` through
+   * the middle of a four-argument call — the positional hole somebody fills wrong.
+   */
+  check(
+    "one encoding of the edit address",
+    [
+      agentEditPath("m_1", "ca_1234abcd"),
+      agentEditPath("m_1", "ca_1234abcd", "/home/me"),
+      agentBuilderPath("m_1", "/home/me", "llm", "ca_1234abcd"),
+    ],
+    ["/agent/m_1/edit/ca_1234abcd", "/agent/m_1/edit/ca_1234abcd/%2Fhome%2Fme", "/agent/m_1/edit/ca_1234abcd/llm/%2Fhome%2Fme"],
+  );
+  /*
+   * ⚠ **And it round-trips**, which is the assertion neither half can pass alone:
+   * `nav.ts` writes the address and `router.ts` reads it, they are separate files
+   * on purpose (`nav.ts` may not import `router.ts`), and a marker moved in one of
+   * them leaves the other still passing its own encoding check.
+   */
+  check(
+    "and what the builder writes is what the router reads back",
+    [
+      agentEditPath("m_1", "ca_1234abcd", "/home/me"),
+      agentBuilderPath("m_1", "/home/me", "llm", "ca_1234abcd"),
+      agentBuilderPath("m_1", null, null, "ca_1234abcd"),
+      agentBuilderPath("m_1", "/home/me", "harness", null),
+    ].map((path) => {
+      const back = parsePath(path) as never as { cwd: string | null; step: string | null; preset: string | null };
+      return `${String(back.preset)}|${String(back.step)}|${String(back.cwd)}`;
+    }),
+    ["ca_1234abcd|null|/home/me", "ca_1234abcd|llm|/home/me", "ca_1234abcd|null|null", "null|harness|/home/me"],
+  );
+  /*
+   * ⚠ **The head, the ◀'s name, the depth and where up goes — over all six screens
+   * the builder has, as a total sweep rather than at the cells that matter
+   * today.** That is the discipline the `sheetUpLabel` sweep further up already
+   * uses, and it is the one that would have caught what shipped: `preset` was
+   * absent from two hand-built literals and `undefined === null` is `false`, so a
+   * *new* agent's ◀ silently became "Edit agent".
+   *
+   * Three properties are asserted together here on purpose, because they are one
+   * property split across four functions. The ◀ is named after its destination's
+   * own head, so `sheetUpLabel` at a step must equal `sheetTitle` at the step-less
+   * route it points at — a chevron named "Configure agent" pointing at a screen
+   * titled "Edit agent" is the control naming somewhere you are not going. And
+   * `upFrom` has to actually go there: dropped from that arm, the ◀ out of a
+   * picker lands on the new-agent screen and the agent being edited is gone from
+   * the address, which is the same loss the `cwd` segment exists to prevent one
+   * field over.
+   *
+   * ⚠ **`depthOf` is unmoved by a preset, and that is a decision rather than an
+   * omission.** An edit is the same screen with its rows filled in, reached from
+   * and left to the same place, so a preset changes what the screen is *about* and
+   * never where it sits — a third depth would play the deeper animation over a
+   * screen nobody went deeper into.
+   */
+  const agentScreen = (step: string | null, preset: string | null): unknown =>
+    ({ name: "agent", machineId: "m_1", cwd: null, step, preset }) as never;
+  check(
+    "the head, the ◀ and the depth over every screen the builder has",
+    [null, "llm", "harness"].flatMap((step) =>
+      [null, "ca_1234abcd"].map((preset) => {
+        const route = agentScreen(step, preset) as never;
+        return `${String(sheetTitle(route))} · ${String(sheetUpLabel(route))} · ${depthOf(route)} · ${String(upFrom(route, "/"))}`;
+      }),
+    ),
+    [
+      "Configure agent · New session · 2 · /new/m_1",
+      "Edit agent · New session · 2 · /new/m_1",
+      "Choose model · Configure agent · 3 · /agent/m_1",
+      "Choose model · Edit agent · 3 · /agent/m_1/edit/ca_1234abcd",
+      "Choose harness · Configure agent · 3 · /agent/m_1",
+      "Choose harness · Edit agent · 3 · /agent/m_1/edit/ca_1234abcd",
+    ],
+  );
+  // And with a folder in hand, which is the case the ◀ actually loses things in.
+  check(
+    "and a picker inside an edit walks back to the edit, folder and all",
+    upFrom(parsePath("/agent/m_1/edit/ca_1234abcd/llm/%2FUsers%2Fme%2Fsrc"), "/"),
+    "/agent/m_1/edit/ca_1234abcd/%2FUsers%2Fme%2Fsrc",
+  );
+  check(
+    "while the edit itself leaves to the same place a new agent does",
+    upFrom(parsePath("/agent/m_1/edit/ca_1234abcd/%2FUsers%2Fme%2Fsrc"), "/"),
+    "/new/m_1/%2FUsers%2Fme%2Fsrc",
+  );
+  /*
+   * ⚠ **The word moved and the address did not, and both halves are asserted in
+   * one check or the next rename separates them.** "Choose LLM" was pinned
+   * nowhere at all — it is the one string in this flow that used an acronym for
+   * the thing beside it, while every refusal on the same screen already said
+   * *model* — and the sweep that should have caught it is a closure over
+   * `hostable`'s return values which reads neither `.tsx` nor this file. The
+   * segment is deliberately untouched: it is an address, and a link written down
+   * last week has to keep opening this screen.
+   */
+  check(
+    "the model screen is named in words, over a segment that is still an address",
+    [sheetTitle(parsePath("/agent/m_1/llm")), agentBuilderPath("m_1", null, "llm")],
+    ["Choose model", "/agent/m_1/llm"],
+  );
+  /*
+   * And the sweep that was missing, over the returns rather than over one arm:
+   * every string `nav.ts` can put in a pop-up's head or on its ◀. `agentCard.ts`
+   * states the standing rule — a reader who has never seen an environment variable
+   * must not meet an acronym either — and until now nothing reached these values
+   * at all, which is exactly how the acronym shipped.
+   */
+  const spoken = [
+    { name: "settings", section: "account", machineId: null, system: null },
+    { name: "plugins", tab: "market", entry: null, settings: [] },
+    { name: "plugin", machineId: "m_1", pluginId: "p" },
+    { name: "new", machineId: "m_1", cwd: null },
+    { name: "home" },
+    { name: "session", id: "s_1" },
+    ...[null, "llm", "harness"].flatMap((step) =>
+      [null, "ca_1234abcd"].map((preset) => ({ name: "agent", machineId: "m_1", cwd: null, step, preset })),
+    ),
+  ].flatMap((route) => [sheetTitle(route as never), sheetUpLabel(route as never)])
+    .filter((one): one is string => one !== null);
+  check("every head and ◀ in this app has a name", spoken.length > 0, true);
+  check("and none of them says LLM", spoken.filter((one) => /\bllm\b/i.test(one)), []);
+  /*
+   * `newSessionPath` lives in `nav.ts` and `router.ts` re-exports it as
+   * `newPath`, because `upFrom` needs the rule and `nav.ts` may not import
+   * `router.ts`. Asserted as one encoding rather than two that drift.
+   */
+  check("one encoding of the picker's address", newSessionPath("m_1", "/Users/me/src"), "/new/m_1/%2FUsers%2Fme%2Fsrc");
+  check("and a machine on its own", newSessionPath("m_1"), "/new/m_1");
+  check("and neither", newSessionPath(), "/new");
+  // A bare `/agent` names no machine and every question this screen asks is one
+  // daemon's, so it is not a route at all.
+  check("a builder with no machine is not a route", parsePath("/agent").name, "home");
+}
+
+process.stdout.write("\nthe agent a pop-up handed back\n");
+{
+  const { rememberPick, rememberRemoval, takePick, takeRemoval } = await import("../src/agentPick.js");
+  const one = { id: "ca_1", name: "n", harness: "claude", system: "moonshot", model: "m", createdAt: 0 } as never;
+
+  check("nothing is waiting to begin with", takePick("m_1" as never), null);
+  rememberPick("m_1" as never, one);
+  check("what was assembled comes back once", takePick("m_1" as never), one);
+  /*
+   * ⚠ **Consumed, not read.** A hand-off left in place would re-select the same
+   * agent the *next* time somebody opened New session, long after they had chosen
+   * something else — and `NewSession` reads it from an effect, which React may
+   * run more than once.
+   */
+  check("and only once", takePick("m_1" as never), null);
+  rememberPick("m_1" as never, one);
+  check("it is per machine", takePick("m_2" as never), null);
+  check("so the other machine's is still there", takePick("m_1" as never), one);
+  /*
+   * ⚠ **Two machines holding one each at the same time, which is the property a
+   * map is here for and which none of the three checks above can see.** They only
+   * ever put one entry in, so a `pending` that kept the *newest* hand-off and
+   * dropped the rest — one `clear()` before the `set`, or a single variable
+   * carrying its own machine id — passes every one of them: the untouched machine
+   * still answers `null`, and the machine that was written to still answers what
+   * was written. That is exactly the single-value bug scoping to a machine was
+   * meant to fix, arriving one layer down. Assembling an agent on two machines
+   * before either strip is redrawn is the flow: the builder is a route away and
+   * `NewSession` is unmounted for the whole of it, so nothing consumes a hand-off
+   * until somebody comes back to that machine's strip.
+   */
+  const other = { id: "ca_2", name: "n2", harness: "codex", system: "anthropic", model: "m2", createdAt: 1 } as never;
+  rememberPick("m_1" as never, one);
+  rememberPick("m_2" as never, other);
+  check("and a second machine's hand-off does not displace the first", takePick("m_1" as never), one);
+  check("with each machine still getting its own", takePick("m_2" as never), other);
+  // The removal half of the same property, for the reason the whole removal suite
+  // exists: it is the same hand-off with the same failure modes, and it arrived
+  // with none of the pick suite's assertions.
+  rememberRemoval("m_1" as never, "ca_1");
+  rememberRemoval("m_2" as never, "ca_2");
+  check(
+    "and removals are retained per machine too, not just keyed by one",
+    [takeRemoval("m_1" as never), takeRemoval("m_2" as never)],
+    ["ca_1", "ca_2"],
+  );
+
+  /*
+   * ⚠ **The removal half, swept the same four ways**, because it is the same
+   * hand-off with the same three failure modes and it arrived without any of the
+   * assertions above. Removing the tile that is *currently* selected leaves the
+   * strip naming a row the daemon has dropped: nothing draws as chosen, the Edit
+   * control goes with it, and `Start` posts a `404` on an id that no longer
+   * exists. The builder is a route away and `NewSession` is unmounted while it is
+   * open, so there is no parent to report to — hence a module variable, and hence
+   * these.
+   */
+  check("no removal is waiting to begin with", takeRemoval("m_1" as never), null);
+  rememberRemoval("m_1" as never, "ca_1");
+  check("what was removed comes back once", takeRemoval("m_1" as never), "ca_1");
+  /*
+   * ⚠ **The one that matters, and the property the docblock argues for.** A
+   * removal left in place clears a selection on some later visit — long after the
+   * removal that produced it, and against a preset somebody has since assembled
+   * and chosen again. `NewSession` reads it from an effect, which React may run
+   * more than once, so `read` and `take` are indistinguishable on the first run
+   * and opposite on the second.
+   */
+  check("and a removal, only once as well", takeRemoval("m_1" as never), null);
+  rememberRemoval("m_1" as never, "ca_1");
+  check("removals are per machine too", takeRemoval("m_2" as never), null);
+  check("so the other machine's removal is still there", takeRemoval("m_1" as never), "ca_1");
+  /*
+   * ⚠ **And the assertion the pick suite has no equivalent of, because it is the
+   * whole justification for two maps rather than one union.** One machine can
+   * honestly be carrying both at once — remove one agent in the pop-up, assemble
+   * another, come back — and the two are answered by different things at the far
+   * end: a pick replaces what is chosen, a removal only withdraws it. A union
+   * would have made the second `remember` overwrite the first and the strip would
+   * hear about exactly one of them.
+   */
+  rememberRemoval("m_1" as never, "ca_gone");
+  rememberPick("m_1" as never, one);
+  check(
+    "a machine holding both gives up each independently",
+    [takeRemoval("m_1" as never), takePick("m_1" as never)],
+    ["ca_gone", one],
+  );
+  check(
+    "and neither is left behind by the other",
+    [takeRemoval("m_1" as never), takePick("m_1" as never)],
+    [null, null],
+  );
+}
+
+process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
+{
+  /*
+   * ⚠ **A choice on this screen is about a *machine*, and none of it is
+   * portable.** A harness is installed per machine and a preset is a row in that
+   * machine's database, so a stored choice is a *claim* to be checked against the
+   * listing that has actually answered rather than a value to restore. Every
+   * state `offeredHere` rejects below was on screen at some point: a tile drawn
+   * `aria-pressed` **and** `disabled` saying "not installed", beside a `Start`
+   * that posted it anyway for a `503 agent_unavailable` or a `404`.
+   *
+   * Swept over the combinations rather than asserted at the one cell that was
+   * wrong, because the rule is one function and three separate bugs were closed
+   * by it: a harness chosen on a machine that has it and restored on one that
+   * does not, a preset deleted in the builder, and a preset deleted on another
+   * device where no hand-off exists to be told about it.
+   */
+  const { offeredHere } = await import("../src/ui/NewSession.js");
+  const harness = (id: string, available: boolean): unknown => ({ id, available, version: null, path: null });
+  const installed = [harness("claude", true), harness("codex", false)] as never;
+  const presets = [{ id: "ca_1", name: "Kimi Code", harness: "claude", system: "moonshot", model: "m", createdAt: 0 }] as never;
+  const pickHarness = { kind: "harness", id: "claude" } as const;
+  const pickCustom = { kind: "custom", id: "ca_1" } as const;
+
+  check("a harness the machine has installed is still offered", offeredHere(pickHarness, installed, presets), pickHarness);
+  /*
+   * ⚠ **Available, not merely listed.** An uninstalled harness is drawn and
+   * labelled on purpose — filtering it out answers "where did claude go" with
+   * silence — and the tile's own `disabled` is what refuses it. A choice restored
+   * onto one is the state that drew a tile pressed and disabled at once.
+   */
+  check("one it lists but has not installed is not", offeredHere({ kind: "harness", id: "codex" }, installed, presets), null);
+  check("and one it has never heard of is not", offeredHere({ kind: "harness", id: "kimi" }, installed, presets), null);
+  check("a preset this machine holds is still offered", offeredHere(pickCustom, installed, presets), pickCustom);
+  check("one it does not hold is not", offeredHere({ kind: "custom", id: "ca_gone" }, installed, presets), null);
+  /*
+   * ⚠ **And one whose harness is gone is not either, which this arm did not ask.**
+   * It weighed existence alone, so a preset assembled on a harness since
+   * uninstalled stayed chosen with `Start` live and posted for a `503`. A preset
+   * is a harness plus two more facts; it cannot be exempt from the rule two checks
+   * up that decides whether anything can run at all. The second case is the
+   * stronger one: a harness the listing has never heard of, which is what a
+   * preset written on another machine's build looks like here.
+   */
+  const orphaned = [
+    { id: "ca_2", name: "Codex thing", harness: "codex", system: "openai", model: "m", createdAt: 0 },
+    { id: "ca_3", name: "Ghost", harness: "kimi", system: "moonshot", model: "m", createdAt: 0 },
+  ] as never;
+  check(
+    "a preset whose harness is listed but not installed is not offered",
+    offeredHere({ kind: "custom", id: "ca_2" }, installed, orphaned),
+    null,
+  );
+  check(
+    "nor one whose harness this machine has never heard of",
+    offeredHere({ kind: "custom", id: "ca_3" }, installed, orphaned),
+    null,
+  );
+  check("and nothing chosen offers nothing", offeredHere(null, installed, presets), null);
+  /*
+   * ⚠ **An unread listing offers nothing, and that is the deliberate half.**
+   * `null` is the loading state, and answering "yes, still offered" over it would
+   * be a guess about a machine that has not spoken — the guess that made `Start`
+   * live over a default nobody had checked. The cost is that `Start` is disabled
+   * for the beat before `GET /agents` answers, which is the beat the strip is a
+   * spinner for.
+   */
+  check(
+    "and a listing that has not answered offers nothing at all",
+    [offeredHere(pickHarness, null, presets), offeredHere(pickCustom, installed, null), offeredHere(pickHarness, null, null)],
+    [null, null, null],
+  );
+
+  /*
+   * ⚠ **The rest of this rule is a *placement*, and nothing typed can hold one**,
+   * so it is read off disk the way the plugin-settings and import-flow assertions
+   * already are — comments off first, since the file argues against the shapes it
+   * used to have by quoting them.
+   *
+   * ⚠ **What this proves and what it does not.** These are assertions about
+   * *where a value is read from*, not about a value, and that is forced rather
+   * than chosen: the defect below is a closure capture, which needs two renders
+   * and a promise resolving between them to observe, and this driver has no DOM
+   * and no React renderer. A source assertion cannot prove the screen behaves; it
+   * proves the one line whose rewriting is the whole fix is still written that
+   * way. `offeredHere` above is the half that *is* driven.
+   */
+  const newSessionSrc = stripComments(readFileSync(new URL("../src/ui/NewSession.tsx", import.meta.url), "utf8"));
+  const builderSrc = stripComments(readFileSync(new URL("../src/ui/AgentBuilder.tsx", import.meta.url), "utf8"));
+  const slice = (text: string, from: string, to: string): string => {
+    const start = text.indexOf(from);
+    return start === -1 ? "" : text.slice(start, text.indexOf(to, start + from.length));
+  };
+  const sheet = slice(newSessionSrc, "export function StartSheet", "\nfunction NewSession");
+  const chosenNow = slice(newSessionSrc, "const picked =", ";\n");
+  const settled = slice(newSessionSrc, ".agents()", ".catch(");
+  const adoption = slice(newSessionSrc, "const removed = takeRemoval(selected);", "}, [selected, agentsEpoch]);");
+  const footer = slice(newSessionSrc, "<div className={SHEET_FOOT}>", "</div>\n    </div>");
+  const strip = slice(newSessionSrc, "function AgentStrip(", "\nfunction agentStatusText");
+  // The same guard the section above states: a slice that came back empty is a
+  // rename, and every assertion over it would pass while asserting nothing.
+  check(
+    "every slice this section is about was actually found",
+    [sheet, chosenNow, settled, adoption, footer, strip, builderSrc].map((one) => one.length > 0),
+    [true, true, true, true, true, true, true],
+  );
+
+  /*
+   * ⚠ **A choice *per machine*, held as a map, and neither the state nor the ref
+   * is a substitute for the other.** This was one `touchedOn: MachineId | null` —
+   * a flag saying "somebody has tapped, and it was over there" — which suppresses
+   * a re-default on the machine it names and restores nothing. Two machines is
+   * all it took: tap on A, switch to B (the listing re-defaults, deliberately
+   * leaving the flag alone), come back to A — the flag still says A, so A's
+   * re-default is skipped while the single chosen value is still whatever B
+   * defaulted to. A then drew B's harness selected *and* disabled and `Start`
+   * posted it. The map restores A's own tap instead of merely silencing A's
+   * default.
+   *
+   * Both live in `StartSheet` rather than in `NewSession`, because `NewSession`
+   * unmounts for the whole of the `/agent` route: a ref created there is empty in
+   * exactly the flush the capture defect is about.
+   */
+  check(
+    "the chosen tile is a map keyed by machine, held where the builder cannot unmount it",
+    [
+      /const \[picks, setPicks\] = useState<ReadonlyMap<MachineId, Picked>>\(/.test(sheet),
+      /const picksRef = useRef<ReadonlyMap<MachineId, Picked>>\(/.test(sheet),
+      /\btouchedOn\b/.test(newSessionSrc),
+    ],
+    [true, true, false],
+  );
+  /*
+   * ⚠ **Written to the ref *before* the state, and the order is the assertion.**
+   * The listing's `.then` reads the ref at answer time, so a tap has to be true in
+   * it the moment it happens rather than one render later. A ref assigned after
+   * `setPicks` typechecks, looks identical in review, and reintroduces the defect
+   * for every tap that races an answer already in flight.
+   *
+   * ⚠ **Both operands are checked against `>= 0` first**, the same shape as the
+   * `App.tsx` ordering pins. This was a bare `indexOf(…) < indexOf(…)`, and
+   * deleting the ref write outright — the one edit that costs the most — made the
+   * left side `-1`, which is *less than* every real position: the assertion
+   * printed `ok`, `typecheck` was clean, and `picksRef` held its initial empty map
+   * for the component's whole life with the guard above silently disabled.
+   */
+  const refWrite = sheet.indexOf("picksRef.current = updated;");
+  const stateWrite = sheet.indexOf("setPicks(updated);");
+  check("a tap still writes the ref at all", refWrite >= 0, true);
+  check("and still writes the state the render reads", stateWrite >= 0, true);
+  check(
+    "and the ref is written before the render that will carry it",
+    refWrite >= 0 && stateWrite >= 0 && refWrite < stateWrite,
+    true,
+  );
+  /*
+   * ⚠ **And a tap keeps every *other* machine's choice, which is the whole reason
+   * this is a map and which nothing above it can see.** The declared shape, the
+   * write order and the single read site are all pinned, and every one of them
+   * survives a `choose` that starts from an empty map — the map is still typed
+   * `ReadonlyMap<MachineId, Picked>`, the ref is still written before the state,
+   * and `picksRef.current.get(selected)` still answers correctly for the machine
+   * that was just tapped. What it stops answering for is every other machine, and
+   * that is the single-value bug this map replaced, rebuilt inside it: tap on A,
+   * switch to B and tap there, come back to A, and A's own tap is gone.
+   *
+   * ⚠ **A source assertion because there is nothing to call.** `choose` is a
+   * closure inside `StartSheet` with no export and no seam, and the property needs
+   * two machines and a render between them, which this driver has no renderer for.
+   * So it asserts the one line whose rewriting is the whole defect: the new map is
+   * seeded from the standing one, and neither of the two ways of emptying it
+   * appears anywhere in the function.
+   */
+  const choose = slice(newSessionSrc, "const choose = (machine", "\n  };");
+  check("the tap handler was found", choose.length > 0, true);
+  check(
+    "and it copies the standing map rather than starting a new one",
+    [
+      /const updated = new Map\(picksRef\.current\);/.test(choose),
+      /new Map\(\)/.test(choose),
+      /\.clear\(\)/.test(choose),
+    ],
+    [true, false, false],
+  );
+  // And it withdraws by *deleting* the one machine's entry rather than by
+  // replacing the map, which is the same property said at the other end.
+  check(
+    "and withdraws one machine's choice without touching the rest",
+    [/updated\.delete\(machine\);/.test(choose), /updated\.set\(machine, next\);/.test(choose)],
+    [true, true],
+  );
+  /*
+   * ⚠ **The drawn selection is derived, and the machine's own default is the
+   * fallback rather than an entry in the map.** Writing a default into the map
+   * would record a choice nobody made and restore it on the next visit as though
+   * it had been tapped — the same class of lie the single value told. So: this
+   * machine's pick first, this listing's default second, and **both** weighed by
+   * `offeredHere` against the listing that answered.
+   */
+  const drawn = chosenNow.replace(/\s+/g, " ");
+  check(
+    "what is drawn is this machine's pick, then this listing's default, each weighed against the listing",
+    [
+      /offeredHere\(selected === null \? null : \(picks\.get\(selected\) \?\? null\), agents, customAgents\)/.test(drawn),
+      /\?\? offeredHere\(defaulted, agents, customAgents\)/.test(drawn),
+    ],
+    [true, true],
+  );
+  // And the default dies with the listing it is a fact about, while the choices —
+  // which are `StartSheet`'s and keyed by machine — deliberately do not.
+  check("and the default is cleared beside the listing it came from", /setAgents\(null\);\s*setDefaulted\(null\);/.test(newSessionSrc), true);
+
+  /*
+   * ⚠ **THE CLOSURE CAPTURE, which is the defect this whole section exists for.**
+   * The listing effect's deps are the daemon client and the sign-in epoch, and
+   * `store.daemonFor` answers the same object for a machine's whole life — so
+   * nothing re-runs the effect when a tile is tapped, and the `.then` created a
+   * round trip ago still holds the props of the render that created it. The
+   * adoption effect runs in the same flush and is declared *first*, so an agent
+   * assembled in the pop-up was recorded and then overwritten here a beat later
+   * by the first available harness, with nothing on screen saying so — and a
+   * dependency array could not have fixed it, because there was no dependency to
+   * add.
+   *
+   * So the assertion is about **where the value is read from**: the ref, at answer
+   * time, and not one identifier from the render that closed over it.
+   */
+  check("the listing's default reads the map as it stands at answer time", /picksRef\.current\.get\(selected\) === undefined/.test(settled), true);
+  /*
+   * ⚠ **Regex *literals*, never strings handed to `new RegExp`.** Three of these
+   * five were dead: in a double-quoted JS string `\b` is the backspace escape
+   * (U+0008) rather than a word boundary, so `new RegExp("\bpicks\b")` asked for a
+   * literal control character that no source slice can hold — and the two
+   * forbidden identifiers that matter most, the bare `picks` and `picked` a
+   * closure would capture, were unwatched. A literal is one escape layer closer to
+   * what it means, which is the whole class of bug.
+   */
+  check(
+    "and no value captured by that closure is consulted instead",
+    [/picks\.get/, /picks\.has/, /\bpicks\b/, /touched/, /\bpicked\b/].filter((one) => one.test(settled)).map(String),
+    [],
+  );
+
+  /*
+   * ⚠ **Both hand-offs are taken, from an effect, and neither is skipped because
+   * the other answered.** `agentPick.ts` holds them as two maps for exactly that
+   * reason — one machine can be carrying a removal *and* an assembly — and a
+   * hand-off read during render would be swallowed by React's second render in
+   * development and left behind to fire on some later visit. A producer with no
+   * consumer and a consumer with no producer both typecheck perfectly, which is
+   * why the far end is asserted here too.
+   */
+  check(
+    "the strip takes both hand-offs, and it takes them in an effect",
+    [/takeRemoval\(selected\)/.test(adoption), /takePick\(selected\)/.test(adoption), /useEffect\(\(\) => \{\s*if \(selected === null\) return;\s*const removed = takeRemoval/.test(newSessionSrc)],
+    [true, true, true],
+  );
+  // The removal only withdraws the pick it names, and it reads the ref for
+  // `StartSheet`'s own reason: the pick being withdrawn may have been made in this
+  // very flush.
+  check(
+    "a removal withdraws only the standing pick it names",
+    /const standing = picksRef\.current\.get\(selected\);\s*if \(standing\?\.kind === "custom" && standing\.id === removed\) onPick\(selected, null\);/.test(adoption),
+    true,
+  );
+  check("and the builder is the thing that remembers one", /rememberRemoval\(machineId, going\);/.test(builderSrc), true);
+
+  /*
+   * ⚠ **`Picked | null` is a real state, so the control that can be reached has to
+   * speak.** Nothing chosen is now reachable three ways — a machine with every
+   * harness uninstalled, a preset deleted in the builder, a preset deleted on
+   * another device — and each of them used to end at a request somebody waited on
+   * for a `503 agent_unavailable` or a `404`. `Start` is gated, `create()` keeps
+   * its own arm anyway (this file's standing rule), and the footer says which of
+   * the two things it is still waiting for.
+   */
+  check(
+    "Start is refused where nothing is chosen, in the button and again in the handler",
+    [
+      /disabled=\{busy \|\| selected === null \|\| cwd === null \|\| picked === null\}/.test(footer),
+      /if \(picked === null\) \{\s*setError\("Choose an agent first\."\);/.test(newSessionSrc),
+    ],
+    [true, true],
+  );
+  // Asked only once the listing has settled, or it asks for an agent over a row
+  // that is still loading — and asked *before* the folder, because the folder
+  // answers itself and this one needs a tap.
+  check("and the footer asks for one, once the listing has answered", /agents !== null && picked === null \? \(\s*"choose an agent"/.test(footer), true);
+  /*
+   * ⚠ **Nothing draws a tile as chosen from the *resolved* harness.** That
+   * resolution carries the sign-in door's fallback — on a machine with every
+   * harness uninstalled it is the only way to a login, since every tile in the row
+   * is disabled and none can be tapped — and drawing against it is what put a
+   * first tile on screen `aria-pressed` and `disabled` at once.
+   */
+  check(
+    "the tiles ask what was chosen, never what the sign-in door resolved to",
+    [
+      /picked: value\?\.kind === "harness" && candidate\.id === value\.id/.test(strip),
+      /picked: value\?\.kind === "custom" && one\.id === value\.id/.test(strip),
+    ],
+    [true, true],
+  );
+}
+
+process.stdout.write("\nwhat a control still looks like when it refuses\n");
+{
+  /*
+   * ⚠ **Nothing typed can hold a class string**, so these are read off disk the
+   * way the plugin-settings placement assertions already are — and the comments
+   * come off first, which is the failure this block hit on its first run rather
+   * than tidiness. `SystemsPanel`'s own docblock quotes `hover:border-edge-strong`
+   * while arguing against it and `bits.tsx`'s quotes both `disabled:opacity-40`
+   * and `border-edge` for the same reason, so every negative assertion below is
+   * false against the raw file and true against the code.
+   */
+  const source = (name: string): string =>
+    stripComments(readFileSync(new URL(`../src/${name}`, import.meta.url), "utf8"));
+  const bits = source("ui/bits.tsx");
+  const newSession = source("ui/NewSession.tsx");
+  const builder = source("ui/AgentBuilder.tsx");
+  const systems = source("ui/settings/SystemsPanel.tsx");
+  const between = (text: string, from: string, to: string): string => {
+    const start = text.indexOf(from);
+    return start === -1 ? "" : text.slice(start, text.indexOf(to, start + from.length));
+  };
+  const choiceRow = between(bits, "export function ChoiceRow", "\n}\n");
+  const tile = between(newSession, "const bound = disabled", "</button>");
+  const strip = between(newSession, "function AgentStrip(", "\nfunction agentStatusText");
+  const tones = between(bits, "const BUTTON_TONE", "\n};");
+  const trigger = between(bits, "tap press inline-flex min-h-8 w-full", '"');
+  // `Dropdown`'s option row — the fourth control, and the one this whole section
+  // was written about a screen too early. See the sweep below.
+  const option = between(bits, 'role="option"', "</button>");
+  const iconButton = between(bits, "export function IconButton", "\n}\n");
+  // A slice that came back empty is a rename, and every negative assertion below
+  // would pass over it while asserting nothing at all — which is the one failure
+  // mode a text-matching driver has that a typed one does not.
+  check(
+    "every control this section is about was actually found",
+    [choiceRow, tile, strip, tones, trigger, option, iconButton].map((one) => one.length > 0),
+    [true, true, true, true, true, true, true],
+  );
+
+  /*
+   * ⚠ **No opacity on a control that carries its own refusal, and the number is
+   * the whole argument.** `disabled:opacity-40` composites the *entire* control,
+   * subline included: over `--color-surface` (#ffffff), `--color-faint` at 40%
+   * becomes #C2BFB9 = 1.83:1 and `--color-fg` at 40% is 2.51:1. `index.css` bounds
+   * `--color-faint` by measurement at ≥4.5:1 precisely because almost every use of
+   * it is 12px — and on both of these controls the 12px subline *is* the refusal.
+   * A reason has to be more legible than the label it refuses, never less, and an
+   * opacity is the one property that cannot tell the two apart.
+   */
+  check("no opacity is spent on the row that has to say why it refuses", /opacity/.test(choiceRow), false);
+  check("nor on the tile that does", /opacity/.test(tile), false);
+  check("nor anywhere else in the strip", /opacity/.test(strip), false);
+  /*
+   * ⚠ **And on `Dropdown`'s option row, which is where this rule shipped broken
+   * one screen over while the three assertions above were green.** The row
+   * carried `disabled:opacity-40 disabled:hover:bg-transparent` while rendering
+   * `item.description`, and `MachinePicker` in `NewSession.tsx` is a live caller
+   * passing `unusableReason(machine)` as that description beside `why !== null`
+   * as `disabled` — so an offline or read-only machine drew its **name** at
+   * 2.51:1 and the whole of **why it cannot be reached** at 1.83:1 over the
+   * panel's own `bg-surface`. This menu is the only place in the app a
+   * non-selected machine's reason appears at all.
+   */
+  check("nor on the dropdown option that carries the same kind of reason", /opacity/.test(option), false);
+  check(
+    "which dims its label and leaves the reason at full strength",
+    [
+      /\$\{unavailable \? "text-muted" : ""\}/.test(option),
+      /<span className="block text-2xs text-faint">\{item\.description\}/.test(option),
+    ],
+    [true, true],
+  );
+  /*
+   * ⚠ **Granted by state rather than reclaimed by a variant, and the negative
+   * half is what makes the positive one mean anything.** `:hover` still matches a
+   * disabled `<button>`, so `disabled:hover:bg-transparent` is two utilities
+   * racing in the sheet to undo one another — the trap `FIELD` and `menuRow` both
+   * document — where `${unavailable ? "" : "hover:bg-raised"}` never emits the
+   * one it does not want. `ChoiceRow` reasons this way already.
+   */
+  check(
+    "and grants its hover fill by state instead of taking it back",
+    [/disabled:hover:/.test(option), /unavailable \? "" : "hover:bg-raised"/.test(option)],
+    [false, true],
+  );
+  /*
+   * ⚠ **The sweep is over the file now, not over a list of controls, and that
+   * change is the actual finding.** Four named slices assert the rule on the four
+   * rows it has already been applied to; the row above shipped broken *because*
+   * the sweep was written that way, and the next control here to grow a
+   * description while carrying `disabled:opacity-40` would ship the same way. So:
+   * three sanctioned sites in the whole of `bits.tsx`, and nothing anywhere else.
+   *
+   * The three share one condition — a control with **no boundary to lose and no
+   * subline to composite**. `BUTTON_TONE.primary` is a `bg-fg` fill whose children
+   * are a label; `BUTTON_TONE.ghost` is bare text, one line; `IconButton` renders
+   * a glyph and nothing else, and its `label` becomes `aria-label` and `title`,
+   * neither of which an opacity composites. A fourth appearing anywhere in this
+   * file is the defect, and the way this assertion gets "fixed" wrongly is by
+   * raising the number.
+   */
+  check("exactly three sanctioned opacities in the whole vocabulary file", (bits.match(/opacity/g) ?? []).length, 3);
+  check(
+    "and all three are on controls with no boundary to lose and no subline to composite",
+    /opacity/.test(bits.replace(tones, "").replace(iconButton, "")),
+    false,
+  );
+  /*
+   * ⚠ **Scoped to the strip and deliberately not to the file.** `DirectoryPicker`'s
+   * two ghost text buttons keep theirs, which is `BUTTON_TONE.ghost`'s stated
+   * exemption: bare text with no boundary to lose and no subline to composite. A
+   * file-wide sweep here would be wrong, and the way it would be "fixed" is by
+   * deleting a rule rather than by finding a defect.
+   */
+  check("while the two ghost buttons below it still have theirs", (newSession.match(/disabled:opacity-40/g) ?? []).length, 2);
+  /*
+   * The replacement, which is `BUTTON_TONE.plain`'s own pattern: the **title**
+   * goes to `text-muted` (7.75:1 on surface), the glyph to `text-faint`, and the
+   * subline **stays** at full `text-faint` (6.23:1) with no expression on it at
+   * all. That last one is the load-bearing half — it is the only thing on either
+   * control saying why it cannot be pressed.
+   */
+  check(
+    "the tile dims its title and its glyph and leaves the reason alone",
+    [
+      /className=\{disabled \? "text-faint" : "text-muted"\}/.test(tile),
+      /\$\{disabled \? "text-muted" : ""\}/.test(tile),
+      /<span className="w-full truncate text-2xs text-faint">\{subline\}<\/span>/.test(tile),
+    ],
+    [true, true, true],
+  );
+  check(
+    "and the row does the same three, in the same order",
+    [
+      /disabled \? "text-faint" : "text-muted"/.test(choiceRow),
+      /disabled \|\| placeholder \? "text-muted" : ""/.test(choiceRow),
+      /className="block truncate text-2xs text-faint">\{subline\}/.test(choiceRow),
+    ],
+    [true, true, true],
+  );
+
+  /* ---------------------------------------------------------------- *
+   * A control's boundary is the control
+   *
+   * `index.css` states it verbatim: `--color-edge` "is a decorative hairline and
+   * **may never be the sole identification of a control**", while
+   * `--color-edge-strong` is held at ≥3:1 on all three surfaces because WCAG
+   * 1.4.11 asks that of a non-text control with no fill — which is most controls
+   * in this app by request, since a field or a button is drawn in the colour of
+   * the thing it sits on. `SHEET_BODY` is `bg-surface` (#ffffff) and both of these
+   * were `border-edge bg-surface`: a white control on a white ground whose only
+   * boundary measured 1.31:1.
+   * ---------------------------------------------------------------- */
+  check("the row's boundary is a boundary", /border border-edge-strong/.test(choiceRow), true);
+  check("the tile's is too", /border-edge-strong/.test(tile), true);
+  check("and the + beside it, dashed or not", /border-dashed border-edge-strong/.test(strip), true);
+  /*
+   * ⚠ **And a refused one hands that boundary *back*, which the three assertions
+   * above cannot see.** They ask only that the strong edge survived somewhere in
+   * the slice, so re-applying the unconditional sweep — the sweep that put
+   * `edge-strong` on every state and made two greyed harness rows in `AgentBuilder`
+   * indistinguishable from the one pressable row — passes all three again. What
+   * has to be pinned is the *ternary*: an inert row takes the decorative hairline
+   * and a live one takes the boundary.
+   *
+   * WCAG 1.4.11 asks 3:1 of "visual information required to identify user
+   * interface components and states, **except for inactive components**", so
+   * `edge` at 1.31:1 on an inert row is the exempted case rather than a tolerated
+   * one — and `edge-strong` there is not merely unneeded but actively false, since
+   * the strong edge *is* this app's signal that a thing can be pressed.
+   */
+  check(
+    "and a refused row gives it back for the decorative hairline",
+    /disabled \? "border border-edge" : "border border-edge-strong"/.test(choiceRow),
+    true,
+  );
+  /*
+   * ⚠ **On the tile the assertion is that `disabled` is asked *first***, which is
+   * the whole of what the ladder decides. Asking `picked` first is the exact bug:
+   * a restored pick naming a harness the machine no longer has would take the
+   * strong border while being unpressable — the state that shipped once, drawn
+   * `aria-pressed` and `disabled` at the same time. The fill and the check stay on
+   * a picked-and-disabled row, because they say *which one is chosen* and that is
+   * still true; only the boundary goes.
+   */
+  check(
+    "and the tile asks whether it is refused before it asks whether it is chosen",
+    /const bound = disabled\s*\? "border-edge"\s*: picked\s*\? "border-edge-strong"/.test(tile),
+    true,
+  );
+  /*
+   * ⚠ **The order stated once as a property rather than twice as a shape**, so a
+   * ladder rewritten in some other syntax still has to answer it: on neither
+   * control does `border-edge-strong` appear in an arm guarded by `disabled ?`.
+   * That is what the screenshot was about.
+   */
+  check(
+    "and neither hands a pressable-looking edge to something that cannot be pressed",
+    [choiceRow, tile].map((one) => /\bdisabled\s*\?\s*"[^"]*edge-strong/.test(one)),
+    [false, false],
+  );
+  /*
+   * ⚠ **And the split that keeps `BUTTON_TONE` pointing the other way is a rule
+   * rather than an inconsistency**, so the next sweep does not "fix" the buttons to
+   * match the rows. A button is a **lone** control — nothing beside it is
+   * pressable — so its border answers *is there a control here at all*, which is
+   * what the `Add agent` regression measured. A picker row is one of a run of
+   * siblings differing only in whether they can be taken, so its border answers
+   * *which of these can I press*, and a strong edge on a refused one is false. The
+   * second half: a row carries its own refusal as a subline and a button carries
+   * none. The assertion for it is the `disabled:border-edge` negative below, which
+   * is currently false and must stay false.
+   */
+  /*
+   * ⚠ **`Dropdown`'s option row is the control this fix does not apply to, and
+   * that finding is pinned rather than left to be rediscovered.** `menuRow` emits
+   * no border in either state — a row inside `MENU_PANEL` is identified by the
+   * panel's own box and by 44px of hover fill — so there is no strong edge there
+   * making a false claim, and adding one to live rows would be a new decoration
+   * rather than an identification. Asserted as an absence so that a future
+   * bordered menu row is forced to answer the disabled arm rather than inheriting
+   * a strong edge in silence.
+   */
+  check("while the menu row has no boundary to hand back in either state", /border-edge/.test(option), false);
+  /*
+   * ⚠ **Hover moves a fill, never a border**, which `index.css` states as the
+   * consequence a builder has to apply: the gap is now #E3E1DD → #7B7873, a jump
+   * louder than the press itself. So the `hover:bg-raised` half is kept and the
+   * `hover:border-edge-strong` half is asserted gone — on the primitive, on the
+   * strip, and on the two screens that migrated onto the primitive.
+   */
+  check(
+    "and every one of them takes its hover as a fill",
+    [choiceRow, tile, strip].map((one) => /hover:bg-raised/.test(one)),
+    [true, true, true],
+  );
+  check(
+    "with no border moved under a pointer anywhere this run touched",
+    [choiceRow, tile, strip, builder, systems].map((one) => /hover:border-/.test(one)),
+    [false, false, false, false, false],
+  );
+  /*
+   * ⚠ **And `ChoiceRow` is the only row shape on the two screens that migrated.**
+   * The string it replaced — `min-h-14 … rounded-lg border … px-3 py-2.5 text-left
+   * hover:border-edge-strong` — existed byte-identically in six places, three of
+   * which are still typed out (`MachinesSection`, `InstalledList`, `MarketList`)
+   * and are named as a known remainder in the primitive's own docblock. This is
+   * what stops a seventh being typed on the screens it was extracted from.
+   */
+  check("and neither migrated screen writes a row of its own", [/min-h-14/.test(builder), /min-h-14/.test(systems)], [false, false]);
+
+  /*
+   * The same deletion one layer down, where it was made twice more. `plain` and
+   * `destructive` had a `disabled:border-edge` arm, which is the identical 1.31:1
+   * hand-back spelled as a token rather than as an opacity, and `Dropdown`'s
+   * trigger carried a third copy on a `bg-surface` control sitting on a
+   * `bg-surface` sheet.
+   *
+   * ⚠ **Token-exact, and the negative lookahead is required rather than
+   * defensive:** `destructive` deliberately *does* carry
+   * `disabled:border-edge-strong` — it gives up its own `border-danger/45`
+   * (2.27:1, never the identification either) along with its label — so a plain
+   * `includes("disabled:border-edge")` fails it, and the way that gets "fixed" is
+   * by deleting the boundary a third time.
+   *
+   * ⚠ **That figure read 2.11:1 in this comment and in `BUTTON_TONE`'s own
+   * docblock, in both places, and it was simply wrong** — nobody had re-run it
+   * since it was written down, and a comment asserts nothing, so nothing ever
+   * would have. The arithmetic is below rather than in prose now, because the
+   * argument the paragraph makes rests on the number being under 3:1 and a
+   * measurement that only two comments agree on is a measurement that agrees with
+   * itself. Nothing is reversed by the correction: 2.27 is still well under the
+   * 3:1 WCAG 1.4.11 asks of a non-text control with no fill, so `border-danger/45`
+   * was never the identification either — which is exactly why `destructive`
+   * hands it back for `edge-strong`.
+   */
+  check("neither outlined tone hands its boundary back when it is refused", /disabled:border-edge(?!-strong)/.test(tones), false);
+  /*
+   * The measurement itself, off `index.css`'s own tokens rather than off either
+   * comment. `/45` is Tailwind's colour alpha, so the swatch is `--color-danger`
+   * composited over the ground it sits on — `--color-surface`, since a
+   * `destructive` button is drawn on a sheet — and the ground is what a border
+   * with no fill behind it is read against.
+   */
+  const cssTokens = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
+  const token = (name: string): [number, number, number] => {
+    const hex = new RegExp(`--color-${name}: #([0-9a-f]{6});`).exec(cssTokens)?.[1] ?? "";
+    return [hex.slice(0, 2), hex.slice(2, 4), hex.slice(4, 6)].map((pair) => parseInt(pair, 16)) as [number, number, number];
+  };
+  const channel = (value: number): number => {
+    const unit = value / 255;
+    return unit <= 0.04045 ? unit / 12.92 : ((unit + 0.055) / 1.055) ** 2.4;
+  };
+  const luminance = ([r, g, b]: [number, number, number]): number =>
+    0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+  const over = (front: [number, number, number], back: [number, number, number], alpha: number): [number, number, number] =>
+    front.map((value, index) => Math.round(alpha * value + (1 - alpha) * back[index]!)) as [number, number, number];
+  const ratio = (one: number, other: number): number =>
+    (Math.max(one, other) + 0.05) / (Math.min(one, other) + 0.05);
+  const surface = token("surface");
+  const dangerEdge = over(token("danger"), surface, 0.45);
+  check("the danger border at 45% is the swatch the docblock names", `#${dangerEdge.map((value) => value.toString(16).padStart(2, "0")).join("")}`, "#c5a5a0");
+  check(
+    "and it measures 2.27:1 on surface, which is under 3:1 and is the whole argument",
+    [ratio(luminance(dangerEdge), luminance(surface)).toFixed(2), ratio(luminance(dangerEdge), luminance(surface)) < 3],
+    ["2.27", true],
+  );
+  /*
+   * ⚠ **And the docblock says the number this driver just computed.** Read from
+   * the *raw* file on purpose: the figure lives in prose, which `stripComments`
+   * removes, and a positive assertion about prose is exactly what the stripping
+   * rule permits — the hazard it guards against is a negative assertion satisfied
+   * by a comment quoting the thing it argues against. This is the pin that would
+   * have caught 2.11 the day it was written.
+   */
+  const bitsRaw = readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8");
+  check(
+    "and BUTTON_TONE's own docblock quotes it rather than remembering it",
+    bitsRaw.slice(bitsRaw.indexOf("border-danger/45"), bitsRaw.indexOf("const BUTTON_TONE")).includes("2.27:1"),
+    true,
+  );
+  check(
+    "and the two tones that keep the opacity are the two with no boundary to lose",
+    [/primary: "[^"]*disabled:opacity-40/.test(tones), /ghost: "[^"]*disabled:opacity-40/.test(tones)],
+    [true, true],
+  );
+  check(
+    "the dropdown's trigger dims its ink and keeps its box",
+    [/border border-edge-strong/.test(trigger), /disabled:text-faint/.test(trigger), /disabled:border-edge(?!-strong)/.test(trigger)],
+    [true, true, false],
+  );
+}
+
+process.stdout.write("\nno authorization on the Configure agent screen\n");
+{
+  /*
+   * ⚠ **The rule is that a thing is *not here*, and nothing typed can hold
+   * that.** A routed pairing — one harness pointed at another vendor's endpoint,
+   * Claude Code answering from Moonshot — is signed by a pasted key and nothing
+   * else, and for a release the builder mounted the settings screen's own
+   * `KeyOnly` box inline under the chosen pair so the key could be typed where it
+   * was needed. Nobody signed in there. The box is gone, and what replaces it is
+   * a standing rule: the screen whose whole subject is which model runs under
+   * which harness takes no credential, and there is no authorization on it at
+   * all. A rule of that shape is a placement, so it is read off disk — the way the
+   * plugin-settings and import-flow assertions already are.
+   *
+   * ⚠ **Read from the *raw* file, which inverts this driver's usual rule and does
+   * so deliberately.** Everywhere else the comments come off first, because a
+   * negative assertion is otherwise satisfied by a docblock quoting the thing it
+   * argues against. Here the negative *is* the subject: the file's prose was
+   * written to name neither identifier, precisely so the absence could be total.
+   * A comment reintroducing `KeyOnly` fails this check, and that is the correct
+   * outcome for a file whose rule is that the box is not on it.
+   */
+  const builderRaw = readFileSync(new URL("../src/ui/AgentBuilder.tsx", import.meta.url), "utf8");
+  const builder = stripComments(builderRaw);
+  const systemsRaw = readFileSync(new URL("../src/ui/settings/SystemsPanel.tsx", import.meta.url), "utf8");
+  const systems = stripComments(systemsRaw);
+  // The usual guard: a file that came back empty is a rename, and every negative
+  // assertion below would pass over it while asserting nothing at all.
+  check("the screen and the panel it no longer borrows from were both found", [builder.length > 0, systems.length > 0], [true, true]);
+
+  check(
+    "the builder names no credential control, in its code or in its prose",
+    [/KeyOnly/, /keyMissing/, /\.\/settings\//].filter((one) => one.test(builderRaw)).map(String),
+    [],
+  );
+  /*
+   * ⚠ **Every field on the screen, swept rather than sampled.** Naming the
+   * removed component catches the box coming back by the door it left through;
+   * this catches it arriving by any other, including a credential field typed out
+   * by hand with no import at all. The screen is entitled to exactly two inputs —
+   * the agent's name and the shared search box — and both are identified by an
+   * attribute rather than by position, so reordering the file is not a failure and
+   * a third field is.
+   */
+  const fields = builder.split("<input").slice(1).map((one) => one.slice(0, 500));
+  check("and carries exactly two fields", fields.length, 2);
+  // Written as "none is unaccounted for" rather than "two are accounted for": the
+  // second form is satisfied by a third field arriving beside the two known ones,
+  // and leans entirely on the count above to notice.
+  check(
+    "and every one of them is one of the two it is entitled to",
+    fields.filter((one) => !/aria-label="Agent name"/.test(one) && !/type="search"/.test(one)).length,
+    0,
+  );
+  /*
+   * ⚠ **And none of them is dressed as a credential**, which needs its own list
+   * because `type="password"` is not how this app writes one. `KeyOnly`'s field is
+   * `type="text"` on purpose — Chrome's password manager keys on the input type
+   * and ignores `autocomplete="off"` on it by design, so it offered to fill an
+   * account password into the Z.ai key box — and what actually marks it are the
+   * opt-outs it carries instead. Those are the strings to watch for, together with
+   * one pattern covering both client methods that put a key on the wire.
+   */
+  check(
+    "nor dressed as one by any of the marks this app's real key field carries",
+    [/type="password"/, /autoComplete/, /data-1p-ignore/, /data-lpignore/, /SystemKey\(/].filter((one) => one.test(builder)).map(String),
+    [],
+  );
+  /*
+   * ⚠ **The complement, in the same check so the pair cannot drift.** Removing one
+   * call site has to be provably a different act from deleting the component: the
+   * key is still pasted, under Settings → Machines → the system, and the box is
+   * still mounted twice there — once for a system reached natively and once,
+   * `routing={true}`, for one that is only ever routed at. A future tidy-up that
+   * deleted the component because "nothing mounts it" would take the only door in
+   * with it.
+   */
+  check(
+    "while the box itself still exists, and is still mounted twice in settings",
+    [
+      /export function KeyOnly\(/.test(systemsRaw),
+      (systems.match(/<KeyOnly\b/g) ?? []).length,
+      /<KeyOnly[^>]*routing=\{true\}/.test(systems),
+    ],
+    [true, 2, true],
+  );
+  /*
+   * ⚠ **The gate is unchanged, and this is the half a source assertion can carry.**
+   * Removing the box removed a *remedy*, never a refusal: `choiceRefusal` still
+   * folds `keyMissing` in, so a keyless routed pairing that reaches this screen
+   * anyway still disables `Add agent` and still says why beside it. Both pickers
+   * grey that pair as of this run, so what reaches the button now is a pair no
+   * picker chose: **editing a saved preset**, which seeds the harness and the model
+   * straight from `GET /custom-agents`, or a key revoked on another device since
+   * this screen read `GET /systems`. The gate guards the write, not just the row.
+   * The behavioural half is the section below, where
+   * `choiceRefusal` is driven; this is the wiring, which no type can hold.
+   */
+  check(
+    "the one button on the screen is still wired to the refusal that folds the key in",
+    [
+      /const conflict = current === null \? null : choiceRefusal\(harness, current, routingOf\(harness\)\);/.test(builder),
+      /disabled=\{busy \|\| current === null \|\| harness === null \|\| conflict !== null\}/.test(builder),
+    ],
+    [true, true],
+  );
+  /*
+   * And the line beside it draws that same value, so the button and the sentence
+   * cannot disagree about which pair is refused.
+   *
+   * ⚠ **It carries news or nothing, and the second half is asserted too.** The
+   * slot used to fall through to a nudge — "pick a model", "pick a harness" —
+   * which restated at 12px what the two rows above say at 14 with a chevron each,
+   * on the one screen where the missing half is the most visible thing on it.
+   * Reported as a caption that says nothing. What may appear here is a refusal or
+   * a failure, both of which are unreadable from the rows; a prompt to do the
+   * obvious is not, and the empty arm is what keeps it out.
+   *
+   * The span itself stays mounted unconditionally either way — a `role="status"`
+   * inserted in the same paint as its content is commonly not announced at all,
+   * which is the arrangement `Sheet`'s own region records.
+   */
+  check(
+    "and the line beside it is that same refusal, with nothing to say when there is none",
+    [
+      /role="status"[^>]*>\s*\{error \?\? conflict\}/.test(builder.replace(/\s+/g, " ")),
+      /pick a (model|harness|LLM)/i.test(builder),
+    ],
+    [true, false],
+  );
+
+  /*
+   * ⚠ **The other consumer of that refusal, which this block claimed to cover and
+   * did not.** The comment above says it pins "the wiring", and it pinned the
+   * button alone — while the model list makes its own call and feeds its own
+   * `subline` and `disabled` from it. A mutation run reintroduced the reported bug
+   * through exactly that gap: one added clause on the list's call site left
+   * Moonshot's table-spelled row pressable while Z.ai's identically-keyless row
+   * greyed, one screen apart, with `agents.ts` untouched and every assertion about
+   * it still green. A rule the screen is free to discard is not held.
+   *
+   * The fourth element is the load-bearing one and is the cheapest guard there is.
+   * `nativeHarness` is the exact field the deleted arm consulted; `keyMissing`'s
+   * docblock now says it is not consulted at all, and this screen has no
+   * legitimate use for it — so its **absence** is assertable, in the same negative
+   * style this file already applies to the credential control, and it fails on any
+   * re-introduction of the asymmetry by that door.
+   */
+  check(
+    "and every row of the model list is greyed by that same refusal, unconditioned",
+    [
+      /const why = choiceRefusal\(null, choice, null\);/.test(builder),
+      /subline=\{why \?\? \(groups\.length > 1 \? null : group\.system\.displayName\)\}/.test(builder),
+      /disabled=\{why !== null\}/.test(builder),
+      /nativeHarness/.test(builder),
+    ],
+    [true, true, true, false],
+  );
+
+  /*
+   * ⚠ **The reserved glyph slot, which is what makes the two stacked rows share a
+   * left edge — and which no assertion watched, so deleting it was invisible.**
+   * The harness row draws its mark conditionally, and drew it *only* when
+   * answered: choosing a harness moved that row's own text 28px to the right —
+   * 18px of glyph plus the row's `gap-2.5` — leaving the Model row's label and the
+   * Harness row's label on two different left edges for good. `ChoiceRow` reserves
+   * its check slot against exactly this. The slot is reserved for the **pair**
+   * rather than per row, so both `glyph` props are asserted together.
+   */
+  const stacked = builder.replace(/\s+/g, " ");
+  const pair = stacked.slice(stacked.indexOf('<Field label="Model">'), stacked.indexOf("</Field> </div>"));
+  check("the stacked pair was found and both rows ask for a glyph", [pair.length > 0, (pair.match(/glyph=/g) ?? []).length], [true, 2]);
+  check(
+    "the row that can never have one reserves the hole, and the row that can fills it",
+    [
+      /<Field label="Model"> <ChoiceRow glyph=\{emptyGlyph\}/.test(pair),
+      /<Field label="Harness"> <ChoiceRow glyph=\{harness === null \? emptyGlyph : <AgentGlyph agent=\{harness\} size=\{18\} \/>\}/.test(pair),
+    ],
+    [true, true],
+  );
+  /*
+   * ⚠ **And the two widths are asserted as equal rather than as two literals**,
+   * because equality is the property: a hole one pixel off the mark it stands in
+   * for is the same misalignment in miniature, and two `18`s typed out separately
+   * agree only until one of them is changed.
+   */
+  const slot = /const emptyGlyph = <span aria-hidden="true" className="block h-\[(\d+)px\] w-\[(\d+)px\]" \/>;/.exec(builder);
+  const mark = /<AgentGlyph agent=\{harness\} size=\{(\d+)\}/.exec(stacked);
+  check("and the hole is square and exactly as wide as the mark it holds a place for", [slot?.[1], slot?.[2], mark?.[1]], ["18", "18", "18"]);
+}
+
+process.stdout.write("\nwhich harness can be pointed at which system\n");
+{
+  const { allModels, choiceRefusal, defaultAgentName, customAgentSubline, groupModels, harnessRowRefusal, hostable, keyMissing, searchModels, supportingHarnesses } =
+    await import("../src/agents.js");
+
+  const system = (over: Partial<SystemInfo> = {}): SystemInfo => ({
+    id: "moonshot",
+    displayName: "Moonshot",
+    apiType: "anthropic",
+    routable: true,
+    nativeHarness: "kimi",
+    loginVia: "kimi",
+    models: [{ id: "kimi-k2-thinking", name: "Kimi K2 Thinking" }],
+    keySet: true,
+    keyUpdatedAt: 1,
+    ...over,
+  });
+
+  // The three answers the pinned adapters gave, measured 2026-08-25 — the same
+  // fixtures `daemoncheck` uses, because a client that disagreed with the daemon
+  // about these would grey out a pairing the machine would happily start.
+  const claude = { providerId: "main", supported: ["anthropic", "bedrock", "vertex"] };
+  const codex = { providerId: "custom-gateway", supported: ["openai"] };
+
+  check("a native pairing needs no routing at all", hostable("kimi", system(), null), null);
+  check("a routable one is allowed", hostable("claude", system(), claude), null);
+  /*
+   * ⚠ **These are sentences somebody reads on a phone, and the first set was
+   * not.** A refusal said "Codex accepts openai systems, and Moonshot is
+   * anthropic" — every noun a protocol name, three of which look like companies,
+   * none of which appears anywhere else in the app. So the assertions are on the
+   * *words* rather than on "a string came back": the harness by the name the
+   * screen calls it, the system by its display name, and no wire vocabulary at
+   * all. `apiType` and `supported` stay in the code, which is the only place they
+   * mean anything.
+   */
+  /*
+   * ⚠ **The second half is the vocabulary the *name* refusals added.** Splitting a
+   * spelling failure out of a protocol failure put `ModelChoice`'s own fields one
+   * substitution away from the screen: `modelName` is "K2", `modelId` is
+   * `kimi-k2-thinking`, and `source` is the literal `"published"` or `"table"` —
+   * three values that read as English in a template and are wire words to the
+   * person holding the phone. A refusal that named one would look entirely
+   * plausible in review. The `/` catches the other spelling of the same mistake:
+   * a published id is always `<cli>/<model>`, and no sentence in this app has a
+   * slash in it.
+   */
+  const noJargon = (why: string | null): boolean =>
+    why !== null &&
+    !/\banthropic\b|\bopenai\b|\bapiType\b|\bprovider(Id)?\b|\bsupported\b/i.test(why) &&
+    !/\bmodelId\b|\bmodelName\b|\bnativeHarness\b|\bpublished\b|\btable\b|\bsource\b|\//i.test(why);
+  /*
+   * ⚠ **The predicate's own negative controls, before anything is weighed against
+   * it.** Every consumer below hands it a sentence that already passes, so both
+   * character classes and the `null` guard were only ever exercised in the
+   * direction that succeeds: replacing both with patterns matching nothing —
+   * making `noJargon` answer `true` for every non-null string — left this whole
+   * section green, the seven-arm sweep at the bottom included. An assertion that
+   * cannot fail is not one. The daemon-side twin in `scripts/daemoncheck.ts`
+   * asserts its own negative for exactly this reason, and says at length why the
+   * two rules differ rather than being shared.
+   *
+   * The first is the string `agents.ts`'s own docblock records as having shipped,
+   * so the control is the real failure rather than an invented one.
+   */
+  check("the vocabulary rule catches the sentence that really shipped", noJargon("Codex accepts openai systems, and Moonshot is anthropic."), false);
+  /*
+   * And the second arm, which is the half the name split added: `modelId` is what
+   * the daemon is handed, a published id is always `<cli>/<model>`, and no
+   * sentence in this app has a slash in it. This one is jargon-free by the first
+   * arm's list, so it reaches the second or nothing does.
+   */
+  check("and an id where a name goes, which no arm above it would see", noJargon("Kimi Code cannot run kimi-code/k3."), false);
+  // `null` is not a sentence, which is what the leading conjunct is for — a
+  // refusal that never came must not read as a well-written one.
+  check("and a refusal that never came is not a well-written refusal", noJargon(null), false);
+  check(
+    "a protocol mismatch names the harness and the system, in words",
+    [hostable("codex", system(), codex), noJargon(hostable("codex", system(), codex))],
+    ["Codex cannot run Moonshot models.", true],
+  );
+  /*
+   * A harness that will not be re-pointed at all is kimi, and it gets its own
+   * sentence rather than the mismatch above: "cannot run Moonshot models" would be
+   * false of it in the one case that matters, since Moonshot is the system it
+   * natively reaches. What is true of it is that it runs nothing else.
+   */
+  check(
+    "a harness that answers nothing says what it does instead",
+    [
+      hostable("kimi", system({ nativeHarness: "claude" }), null),
+      noJargon(hostable("kimi", system({ nativeHarness: "claude" }), null)),
+    ],
+    ["Kimi Code only runs its own models.", true],
+  );
+  /*
+   * ⚠ **Routability is the daemon's answer, not a guess from the model list.** It
+   * was `models.length === 0`, which conflates "no endpoint to point anything at"
+   * with "nobody has written the names down yet" — and `undefined`, what an older
+   * daemon sends, has to read as *not* routable so a stale client greys a pairing
+   * rather than offering one that fails at the start.
+   */
+  /*
+   * ⚠ **This one names the harness to switch *to*, and that is why it is its own
+   * sentence rather than the shared one above.** The other two share a remedy —
+   * pick something else — while this has a remedy on the screen below it: the CLI
+   * that reaches this system natively is one of the three rows in the harness
+   * picker.
+   */
+  check(
+    "a system nothing can be pointed at names the CLI that reaches it",
+    hostable("claude", system({ routable: false }), claude),
+    "Only Kimi Code can run Moonshot models.",
+  );
+  check(
+    "and a daemon too old to say is read the same way",
+    hostable("claude", system({ routable: undefined }), claude),
+    "Only Kimi Code can run Moonshot models.",
+  );
+  check(
+    "with no CLI either, it says so rather than naming nobody",
+    hostable("claude", system({ routable: false, nativeHarness: null }), claude),
+    "Moonshot cannot be reached from this machine.",
+  );
+
+  /*
+   * ⚠ **A missing key and an impossible pairing are two different sentences, and
+   * they stay two functions for that reason.** One sends somebody to a sign-in
+   * screen and the other to a different choice; folding them would send half the
+   * readers to the wrong place. `hostable` is the pairing half and is what the
+   * checks above drive.
+   *
+   * ⚠ **The key half has moved down this file, and *why* it had to is the whole
+   * of this run's correction.** Three checks stood here, driving a predicate that
+   * took a bare system — drivable this early precisely because its subject was a
+   * provider. It is `keyMissing(choice)` now and cannot be asked anything until
+   * the two spellings exist as fixtures, which is exactly the point: **a key is a
+   * fact about a row, never about a provider.** The old predicate was deleted
+   * rather than corrected, because a corrected one would answer a question no
+   * screen in this app asks; its three properties are re-expressed below, where
+   * `published` and `tabled` are in scope.
+   *
+   * The deleted name is deliberately not written out here. `docscheck` resolves
+   * every symbol `docs/DECISIONS.md` cites against this repository's sources, and
+   * this file is one of them — so a driver that kept the identifier alive in prose
+   * would quietly satisfy the citations that are supposed to fail now.
+   */
+
+  /*
+   * The catalogue is the whole fleet's models, never one harness's — because the
+   * screen asks for the model first, and narrowing would make picking a harness
+   * silently delete choices rather than grey them.
+   */
+  const anthropic = system({
+    id: "anthropic",
+    displayName: "Anthropic",
+    nativeHarness: "claude",
+    loginVia: "claude",
+    models: [],
+  });
+  const caps = {
+    claude: {
+      models: [
+        { id: "default", name: "Default", description: null, group: null },
+        { id: "opus", name: "Opus 5", description: null, group: null },
+      ],
+      routing: claude,
+      error: null,
+    },
+    kimi: { models: [], routing: null, error: null },
+  };
+  const listed = allModels([anthropic, system()], caps as never);
+  /*
+   * ⚠ **A model id is not portable across harnesses even inside one system, and
+   * only a live render found it.** The kimi CLI publishes `kimi-code/k3` — its
+   * own name for a Moonshot model — while Moonshot's Anthropic endpoint, which is
+   * what Claude Code gets routed at, wants `kimi-k2-thinking`. Offering kimi's
+   * spellings under Claude Code produced a list that looked complete and would
+   * have failed at the provider. `source` is what tells the two apart, and
+   * `choiceRefusal` is what reads it.
+   *
+   * ⚠ It is about **names**, never about models. The two lists overlap in models
+   * and not in spellings — kimi's `kimi-code/kimi-for-coding` is named "K2.7
+   * Coding" — so nothing here may be read as "that harness has no K2".
+   */
+  const moonshot = system();
+  const published = { system: moonshot, modelId: "kimi-code/k3", modelName: "K3", source: "published" } as const;
+  const tabled = { system: moonshot, modelId: "kimi-k2-thinking", modelName: "K2", source: "table" } as const;
+  check("a routed harness may not use the CLI's own spelling", choiceRefusal("claude", published, claude) !== null, true);
+  check("but may use the endpoint's", choiceRefusal("claude", tabled, claude), null);
+  check("and the native harness is the exact mirror", [
+    choiceRefusal("kimi", published, null),
+    choiceRefusal("kimi", tabled, null) !== null,
+  ], [null, true]);
+  /*
+   * ⚠ **This says what the sentence is, and it never said anything about the
+   * order.** The comment it carried claimed one — "a missing key is the only one
+   * of the three a person can act on from this screen, so it is what a row says"
+   * — and the fixture below has no competing failure in it at all: a routable
+   * system, the spelling its endpoint answers to, so `pairFailure` is silent and
+   * the key is the only thing left to speak. The check passed under key-first and
+   * passes under settled-first, which makes it an assertion that cannot fail
+   * about the property it was named for.
+   *
+   * The claim has also stopped being true. It rested on the `KeyOnly` box being
+   * mounted under the pair on the builder — the key really was the one blocker
+   * clearable without leaving the screen — and there is no authorization on that
+   * screen any more, so every remedy is off it and the two kinds part on cost
+   * instead: a settled failure is permanent, a missing key is a trip to Settings.
+   * The ordering is asserted below, on pairs that carry **both**, where it can
+   * actually fail.
+   */
+  check(
+    "a pairing refused for nothing but a key says so",
+    choiceRefusal("claude", { ...tabled, system: system({ nativeHarness: null, keySet: false }) }, claude),
+    "No Moonshot key on this machine.",
+  );
+  /*
+   * ⚠ **A key belongs to the *row*, and both earlier readings of it shipped.**
+   * The first read it as a fact about the **system**: Moonshot has a native
+   * harness, so a system-level answer was `null` for it unconditionally — true of
+   * Kimi Code, which signs with whatever `kimi login` wrote, and false of Claude
+   * Code routed at it, which signs with the pasted key and nothing else. With none
+   * saved the whole flow was green: model offered, harness offered, `Add agent`
+   * enabled, the preset written — and `POST /sessions` then refused with "No key
+   * is saved for Moonshot on this machine", after a worktree had been made.
+   * Reported as not being able to use Kimi's models with Claude Code at all.
+   * Q3.485.
+   *
+   * ⚠ **That fix left one arm still asking the system, and it was the model
+   * screen's — the arm this driver pinned as correct.** With no harness chosen it
+   * answered: which kind of pairing this will be is undecided, so only a system
+   * *nothing* reaches natively is knowably stuck. Sound while both routes into a
+   * system offered the same ids, and false from the moment `source` recorded that
+   * they do not. Reported off a screenshot of one list, on a machine with neither
+   * key: `Kimi K2` and `Kimi K2 Turbo` pressable — refused a screen later, on the
+   * harness picker — while `GLM-4.6` and `GLM-4.5 Air` were greyed on the spot.
+   * Both were equally stuck. Moonshot *is* reached natively, just never at that
+   * spelling: Kimi Code publishes "K2.7 Coding", "K2.7 Coding Highspeed", "K3" and
+   * "K3-256k", and `kimi-k2-thinking` is not among them.
+   *
+   * ⚠ **The rule that replaced it is total, and it is asserted below as an
+   * equivalence rather than as examples for exactly that reason.** `pairFailure`
+   * refuses a native harness a table id and refuses every non-native harness a
+   * published one, so a table-spelled model can only ever run **routed** — a key,
+   * always — and a published one can only ever run **natively** — a key, never.
+   * So: **a model needs a key iff its id came from the table**, and `nativeHarness`
+   * is not consulted at all. What made the old arm wrong was that `nativeHarness`
+   * stood in for "could this be reached natively", which is right about a *system*
+   * and wrong about a *row*.
+   */
+  const unkeyed = system({ keySet: false });
+  check(
+    "a routed pairing needs the key, which is every table-spelled model there is",
+    keyMissing({ ...tabled, system: unkeyed }),
+    "No Moonshot key on this machine.",
+  );
+  check(
+    "a native one does not, which is every published one",
+    keyMissing({ ...published, system: unkeyed }),
+    null,
+  );
+  /*
+   * ⚠ **And this is the half that must not regress**, driven on the screen the
+   * regression would show on. "K2.7 Coding" is published by Kimi Code itself, so
+   * a machine with no Moonshot key still offers it — the native harness signs with
+   * its own login and needs nothing pasted. A key check written against the system
+   * greys it, which hides a working option; that is a worse failure than the bug
+   * being fixed here, because a greyed row that would have run is invisible.
+   */
+  check(
+    "a published model of a keyless system is offered on the model screen too",
+    choiceRefusal(null, { ...published, system: unkeyed }, null),
+    null,
+  );
+  /*
+   * ⚠ **The three checks the deleted system-level predicate carried, re-expressed
+   * against the rule that replaced it.** Two of them survive with the same outcome
+   * — a system no CLI reaches offers table ids and nothing else, so asking the row
+   * and asking the provider happen to agree there — and they are kept because that
+   * agreement is a coincidence of that system's shape rather than a property of
+   * the rule. The third read "a native system is never blocked by a missing key",
+   * and was argued from `GET /agent-auth` being the real sign-in answer while
+   * `keySet` knows only about a pasted key. That argument is still true and its
+   * conclusion is now only half true: it is the pair two checks up, split in two,
+   * and only the published half survives.
+   */
+  const keyOnly = (keySet: boolean): SystemInfo => system({ nativeHarness: null, keySet });
+  check("a system with no CLI and no key is blocked", keyMissing({ ...tabled, system: keyOnly(false) }) !== null, true);
+  check("with a key it is not", keyMissing({ ...tabled, system: keyOnly(true) }), null);
+  /*
+   * ⚠ **THE RULE ITSELF, as a biconditional over a generated matrix.** Two
+   * hand-picked examples are what shipped the defect: this section already
+   * asserted a native system's answer and a key-only system's answer, both
+   * passing, and the row that was wrong was a third shape nobody had typed out. So
+   * the whole space is generated — `source` × has-a-native-harness × key-saved,
+   * with **no harness chosen**, which is the model screen's own state — and each
+   * cell is compared against the rule rather than against a literal: a row is
+   * greyed for a key **iff** its id came from the table and its system has no key.
+   *
+   * `nativeHarness` is one of the three axes on purpose. It is the field the old
+   * arm consulted, so a rule that starts reading it again disagrees with the
+   * biconditional in some cell whichever direction it leans, and this fails.
+   *
+   * Driven through `choiceRefusal(null, …)` rather than through `keyMissing`
+   * directly, because that is the call the model screen makes. A rule that is
+   * right in the predicate and lost on the way to the screen is the same defect
+   * with a different address.
+   */
+  const keyCells = (["published", "table"] as const).flatMap((source) =>
+    ([true, false] as const).flatMap((native) =>
+      ([true, false] as const).map((keySet) => {
+        const host = system({ nativeHarness: native ? "kimi" : null, keySet });
+        const choice = { ...(source === "published" ? published : tabled), system: host };
+        return {
+          label: `${source}/${native ? "native" : "no CLI"}/${keySet ? "key" : "no key"}`,
+          greyed: choiceRefusal(null, choice, null) !== null,
+          rule: source === "table" && !keySet,
+        };
+      }),
+    ),
+  );
+  check(
+    "a model is greyed for a key iff its id came from the table and no key is saved",
+    keyCells.filter((cell) => cell.greyed !== cell.rule).map((cell) => cell.label),
+    [],
+  );
+  /*
+   * ⚠ **The sweep's own control, because an equivalence over a matrix where
+   * neither side moves is satisfied by a rule that answers the same thing
+   * everywhere.** Naming the greyed cells rather than counting them is what makes
+   * it one: `table/native/no key` is the row in the screenshot, and its presence
+   * beside `table/no CLI/no key` — with nothing else on the list — is the whole
+   * defect and the whole fix in one expectation.
+   */
+  check(
+    "and both sides of it move, over all eight cells",
+    [keyCells.filter((cell) => cell.greyed).map((cell) => cell.label), keyCells.length],
+    [["table/native/no key", "table/no CLI/no key"], 8],
+  );
+  /*
+   * ⚠ **The property that was actually reported, which is consistency rather than
+   * any particular value.** One list, one machine, neither key saved: `Kimi K2`
+   * pressable and `GLM-4.6` greyed. Two rows in the same situation reading
+   * differently is what this app forbids everywhere, and it is worth an assertion
+   * in exactly that shape — the two real systems, not two variations of one
+   * fixture. Moonshot is reached natively by Kimi Code and is routable; Z.ai is a
+   * system no CLI ships for. Both are asked for their **table** spelling, which is
+   * the only spelling either can offer a routed harness, and which is what the
+   * model screen draws.
+   */
+  const zai = system({
+    id: "zai",
+    displayName: "Z.ai (GLM)",
+    nativeHarness: null,
+    loginVia: null,
+    keySet: false,
+    models: [{ id: "glm-4.6", name: "GLM-4.6" }],
+  });
+  const moonshotRow = choiceRefusal(null, { system: unkeyed, modelId: "kimi-k2-thinking", modelName: "Kimi K2", source: "table" }, null);
+  const zaiRow = choiceRefusal(null, { system: zai, modelId: "glm-4.6", modelName: "GLM-4.6", source: "table" }, null);
+  check(
+    "two keyless systems' table rows are refused alike, native harness or not",
+    [moonshotRow, zaiRow],
+    ["No Moonshot key on this machine.", "No Z.ai (GLM) key on this machine."],
+  );
+  /*
+   * And the same pair as an *identity*, so a reworded sentence keeps being asserted
+   * rather than silently dropping this check to two updated literals: it is one
+   * sentence with the provider substituted, never two sentences that agree today.
+   */
+  check(
+    "and it is one sentence with the provider substituted, not two that agree",
+    moonshotRow?.replace("Moonshot", "«") === zaiRow?.replace("Z.ai (GLM)", "«"),
+    true,
+  );
+  check(
+    "and the whole pair is refused, so the button is still the gate",
+    choiceRefusal("claude", { ...tabled, system: unkeyed }, claude),
+    "No Moonshot key on this machine.",
+  );
+  /*
+   * ⚠ **The harness row is greyed for it now, and the carve-out that used to be
+   * asserted here fell with its own premise.** The paragraph this replaces read:
+   * "a missing key is the one blocker somebody can clear without changing either
+   * choice, and the box that clears it is on the builder — so greying the row that
+   * leads there would hide the only screen that can unblock it". Every clause of
+   * that was a fact about the inline `KeyOnly` box mounted under the pair, and it
+   * held for exactly as long as the box did. **The box is gone**: nobody ever
+   * signed in on that screen, and there is no authorization on it at all now — the
+   * section above this one is what holds that. Greying the row therefore hides
+   * nothing, and an option with no way in has to read as unavailable rather than
+   * as available-and-then-refused.
+   *
+   * ⚠ **This is not the bug the box was added for coming back**, and the direction
+   * is what says so. That one went green the whole way — model offered, harness
+   * offered, `Add agent` enabled, the preset written — and `POST /sessions`
+   * refused *after* a git worktree had been made, with the remedy four taps away
+   * and the trip there unmounting the builder and losing the half-assembled agent.
+   * The refusal now lands **two screens earlier**, in the picker, before anything
+   * is created: the row is greyed, the button is off, the sentence names what is
+   * missing, and there is no draft to lose because there is no draft yet. The
+   * cost, whole and stated where it is paid: the first routed pairing to a system
+   * needs its key pasted under Settings → Machines → that system, once per system
+   * per machine.
+   */
+  check(
+    "a missing key greys the harness row, because nothing on this screen can clear it",
+    harnessRowRefusal("claude", { ...tabled, system: unkeyed }, claude),
+    "No Moonshot key on this machine.",
+  );
+  /*
+   * ⚠ **And this is the ordering assertion, which is what it was all along.** The
+   * fixture is codex over an **unkeyed** system, so both facts are true of it at
+   * once — a protocol codex will never speak, and a key nobody has pasted — and a
+   * key-first row would answer "No Moonshot key on this machine." here, selling a
+   * trip to Settings that ends at the same greyed row. It was named for a
+   * fixable/unfixable split that no longer describes the two: both are refusals
+   * now, and what separates them is that one is permanent and the other is a trip.
+   */
+  check(
+    "while a settled failure outranks it, on a row a key could not rescue",
+    harnessRowRefusal("codex", { ...tabled, system: unkeyed }, codex),
+    "Cannot run K2.",
+  );
+  /*
+   * ⚠ **The same order on the builder, as a pair with the row**, so a re-order
+   * fails on both screens rather than on whichever one somebody remembered. These
+   * two are one pairing seen from two places — the greyed row in the picker, and
+   * the sentence beside the disabled button one screen later — and `choiceRefusal`
+   * used to weigh the key first while `harnessRowRefusal` weighed it last. One
+   * pair would then have carried two different reasons depending on which screen
+   * was looking at it, and {@link harnessRowRefusal}'s own docblock line — "the
+   * same refusals, in the same order, on a row already titled with the harness" —
+   * would have been false.
+   */
+  check(
+    "one pair, one reason, on the row and on the button under it",
+    [
+      harnessRowRefusal("codex", { ...tabled, system: unkeyed }, codex),
+      choiceRefusal("codex", { ...tabled, system: unkeyed }, codex),
+    ],
+    ["Cannot run K2.", "Codex cannot run K2."],
+  );
+  // The name half of the same ordering: a spelling no key can add to a list.
+  check(
+    "and a spelling outranks it too",
+    choiceRefusal("claude", { ...published, system: unkeyed }, claude),
+    "Claude Code has no model called K3.",
+  );
+  /*
+   * ⚠ **One string, three call sites**, which is what stops somebody "improving"
+   * the row's wording into a second sentence for one fact. The other two sublines
+   * drop the harness because it titles the row they are drawn on; this one never
+   * named the harness, so there is nothing to drop — it names the **system**,
+   * because its remedy is a different screen and the system is what somebody goes
+   * looking for there. Asserted as an identity rather than as three copies of the
+   * literal, so a reworded sentence has to be reworded in one place or fail here.
+   */
+  check(
+    "the row, the button and the rule itself all say the same sentence",
+    [
+      harnessRowRefusal("claude", { ...tabled, system: unkeyed }, claude) === keyMissing({ ...tabled, system: unkeyed }),
+      choiceRefusal("claude", { ...tabled, system: unkeyed }, claude) === keyMissing({ ...tabled, system: unkeyed }),
+    ],
+    [true, true],
+  );
+  /*
+   * ⚠ **A fact, and not the way there** — this app's standing rule for a refusal,
+   * and the one place it is under real pressure, because the state below is a
+   * harness screen with **every** row greyed and therefore no ungreyed row
+   * carrying the remedy. Three things decide it anyway, and they are why the
+   * pattern below forbids the instruction rather than merely not requiring it. A
+   * subline is one `truncate`d line (`ChoiceRow`, in `bits.tsx`), so a second
+   * sentence is the half that gets clipped — the half that would have been the
+   * reason for adding it. The place is four levels deep, and "in Settings" points
+   * at a screen with several sections and no indication which, which is a
+   * plausible wrong instruction rather than no instruction. And the identical
+   * string is drawn on the builder's status line, which does **not** truncate, so
+   * an instruction inside it would read two different ways in two places.
+   */
+  check(
+    "and it tells nobody where to go, on a screen where every row can be greyed",
+    /Settings|Machines|Add|Paste|Go to/.test(keyMissing({ ...tabled, system: unkeyed }) ?? ""),
+    false,
+  );
+  /*
+   * ⚠ **The arm a key check written before the native test would break.** A native
+   * pairing signs with whatever its own CLI's login wrote and needs nothing
+   * pasted, however unkeyed the system is — Kimi Code at Moonshot is the whole
+   * headline — so the row that reaches it stays live in exactly the state where
+   * the two beside it do not.
+   */
+  check(
+    "a native pairing is still not greyed, however unkeyed the system",
+    harnessRowRefusal("kimi", { ...published, system: unkeyed }, null),
+    null,
+  );
+  /*
+   * ⚠ **Every row greyed at once, which is a state this screen did not have
+   * before and now reaches through the ordinary flow**: a table-spelled model on a
+   * system nobody has pasted a key for. It is the honest answer — with no key
+   * nothing on this machine can run that spelling — and each row's reason is
+   * different and each is true: the routable one is waiting on the key, the one
+   * that cannot be pointed there says so, and the native one has never heard of
+   * that name. The actionable sentence is on the row it belongs to rather than
+   * spread over three.
+   */
+  check(
+    "all three rows can be greyed, each for its own true reason",
+    (["claude", "codex", "kimi"] as const).map((harness) =>
+      harnessRowRefusal(harness, { ...tabled, system: unkeyed }, { claude, codex, kimi: null }[harness]),
+    ),
+    ["No Moonshot key on this machine.", "Cannot run K2.", "No model called K2."],
+  );
+  /*
+   * ⚠ **The whole table rather than the cell that changed**, which is this file's
+   * standing rule for exactly this shape: three harness states (none chosen, the
+   * native one, a routed one) against a system that is either reachable natively
+   * or key-only, against a key that is either saved or not — and both functions
+   * asked at every cell. Driving only the interesting cells is how the two
+   * orderings came apart in the first place, and how "a native system with no key
+   * is still offered" — the invariant the headline feature *is* — would have been
+   * lost to a key check written one line too early.
+   *
+   * Each harness is handed the spelling that pairs with it, so the key is the only
+   * thing varying down a column: the native CLI gets its own published id and a
+   * routed one gets the id the endpoint answers to.
+   *
+   * ⚠ **`nobody` is drawn twice, and it had to be.** The column used to hand the
+   * no-harness state the table id alone, which is *a* thing the model screen draws
+   * and not the only one — so the grid could not tell a key rule that reads the
+   * row from one that greys every unkeyed provider outright, and the published
+   * column is precisely where those two differ. `nobody · published` is the
+   * headline feature as a cell: "K2.7 Coding" on a machine with no Moonshot key.
+   */
+  const grid = (): string[] =>
+    ([
+      ["reachable natively, key saved", system()],
+      ["reachable natively, no key", system({ keySet: false })],
+      ["key-only, key saved", system({ nativeHarness: null })],
+      ["key-only, no key", system({ nativeHarness: null, keySet: false })],
+    ] as const).flatMap(([where, host]) =>
+      ([
+        ["nobody", null, tabled],
+        ["nobody · published", null, published],
+        ["kimi", "kimi", published],
+        ["claude", "claude", tabled],
+      ] as const).map(([column, harness, spelling]) => {
+        const choice = { ...spelling, system: host };
+        const routing = harness === "claude" ? claude : null;
+        const row = harness === null ? "—" : harnessRowRefusal(harness, choice, routing);
+        return `${where} / ${column}: ${choiceRefusal(harness, choice, routing) ?? "—"} | ${row ?? "—"}`;
+      }),
+    );
+  check("every cell of the pairing table, on the model screen and on the harness screen", grid(), [
+    // Everything saved and everything native: nothing to say anywhere.
+    "reachable natively, key saved / nobody: — | —",
+    "reachable natively, key saved / nobody · published: — | —",
+    "reachable natively, key saved / kimi: — | —",
+    "reachable natively, key saved / claude: — | —",
+    // ⚠ The cell in the screenshot, and the pair of cells that is the whole rule.
+    // A table spelling can only ever be run routed, so with no key it is refused
+    // on the model screen however native the *provider* is — while the published
+    // spelling on that same provider stays offered, because its only route is the
+    // native CLI's own login. Reading `nativeHarness` here answers both cells the
+    // same way, and either answer is wrong about one of them.
+    "reachable natively, no key / nobody: No Moonshot key on this machine. | —",
+    "reachable natively, no key / nobody · published: — | —",
+    "reachable natively, no key / kimi: — | —",
+    "reachable natively, no key / claude: No Moonshot key on this machine. | No Moonshot key on this machine.",
+    // Nothing reaches it natively, so the native CLI is refused for the protocol
+    // and the key — which is saved — buys the routed one everything.
+    "key-only, key saved / nobody: — | —",
+    "key-only, key saved / nobody · published: — | —",
+    "key-only, key saved / kimi: Kimi Code cannot run K3. | Cannot run K3.",
+    "key-only, key saved / claude: — | —",
+    // And with the key gone the model screen speaks too, because now nothing on
+    // the machine reaches this system at all.
+    "key-only, no key / nobody: No Moonshot key on this machine. | —",
+    // ⚠ The one cell in this table that `allModels` cannot produce, kept and
+    // labelled rather than dropped: a published spelling only exists where
+    // `nativeHarness !== null`, since the published list is read off
+    // `capabilities[native].models`. It is a fixture-only state, it was one before
+    // this run too, and it is the single cell where the model screen says nothing
+    // while every harness row refuses. Deleting it would leave the grid unable to
+    // say which of its cells are reachable.
+    "key-only, no key / nobody · published: — | —",
+    "key-only, no key / kimi: Kimi Code cannot run K3. | Cannot run K3.",
+    "key-only, no key / claude: No Moonshot key on this machine. | No Moonshot key on this machine.",
+  ]);
+  /*
+   * ⚠ **A `null` harness refuses no *pairing*, and that is what un-deadlocked the
+   * two pickers.** Both screens greyed rows against the other's value: with Claude
+   * Sonnet chosen, every OpenAI row was disabled on the model screen *and* Codex
+   * was disabled on the harness screen, so neither half of the pair could be
+   * changed and the only way out was to abandon the draft. The model screen weighs
+   * with `null` now — a fact about the **row** still greys it, because its remedy
+   * is a different screen — and the harness screen is where a pairing is decided.
+   * Q3.479. The noun in that sentence used to be "the system", and correcting it
+   * to "the row" is this run's whole change: a key is asked of the spelling, which
+   * decides by itself which route the pairing will have to take.
+   */
+  /*
+   * ⚠ **And this is the line the key refusal still stops at, restated because the
+   * old statement of it was the defect.** It used to read that a key check must
+   * not reach the model screen at all, on the grounds that with no harness chosen
+   * there is no pairing to weigh — which greyed Z.ai and offered Moonshot for a
+   * difference nobody could see. What the key must never do is grey a **published**
+   * model, on either screen: that spelling runs only under the CLI that published
+   * it, which signs with its own login. The three that hold that line are the
+   * published arm of the biconditional above, the `nobody · published` column of
+   * the grid, and the glyph sweep below.
+   */
+  check(
+    "with no harness chosen, a pairing refuses nothing",
+    [choiceRefusal(null, published, null), choiceRefusal(null, tabled, null)],
+    [null, null],
+  );
+  check(
+    "but a system with no key still says so",
+    choiceRefusal(null, { ...tabled, system: system({ nativeHarness: null, keySet: false }) }, null),
+    "No Moonshot key on this machine.",
+  );
+  /*
+   * ⚠ **One heading per provider, and which harnesses a model is for is on the
+   * row.** The heading split on the *route* for a release — `Moonshot · Kimi Code
+   * only` beside `Moonshot · other harnesses` — because one system is reachable
+   * two ways with a different set of names on each, and seven undifferentiated
+   * rows of "Moonshot" hid that no harness could run more than four of them. Right
+   * problem, wrong place: a heading is where somebody looks for *whose model this
+   * is*, and a route pushed into it invents a category nobody asked about while
+   * leaving each row still silent about itself. Q3.486.
+   */
+  check(
+    "a provider is one heading however many ways it is reached",
+    groupModels([published, tabled]).map((group) => group.system.displayName),
+    ["Moonshot"],
+  );
+  check("with every row under it", groupModels([published, tabled])[0]?.choices.length, 2);
+  /*
+   * ⚠ **And the answer is per row: which harnesses can run *this* model.** More
+   * precise than a group, needs no vocabulary, and reads at a glance. Measured
+   * against the installed kimi 0.29.x — printing the **names** this time, which is
+   * what an earlier pass never did: `kimi-code/kimi-for-coding` is "K2.7 Coding"
+   * and `kimi-code/k3` is "K3", so Kimi Code runs a K2 perfectly well. What it will
+   * not take is the *string* `kimi-k2-thinking`, Moonshot's API name for a
+   * different build. The refusal is about a name and never about a model.
+   */
+  const caps3 = { claude: { models: [], routing: claude, error: null }, codex: { models: [], routing: codex, error: null }, kimi: { models: [], routing: null, error: null } };
+  check(
+    "a model published by a CLI is that CLI's alone",
+    supportingHarnesses(published, caps3 as never),
+    ["kimi"],
+  );
+  check(
+    "and one the endpoint answers to belongs to whatever can be routed there",
+    supportingHarnesses(tabled, caps3 as never),
+    ["claude"],
+  );
+  /*
+   * ⚠ **The key is not weighed here**, deliberately, and one of the two reasons
+   * that used to be given has expired. It said "a key is a box away unlike a
+   * protocol", which was true while the `KeyOnly` box sat under the pair on the
+   * builder and is not true of anything now. The reason that survives is
+   * structural and was always the stronger half: these glyphs are drawn where **no
+   * harness has been chosen**, so which kind of pairing this will be is undecided
+   * and whether a key is needed at all is unknowable. What they say is what a
+   * model is *for*.
+   *
+   * ⚠ **The glyphs and the greying now disagree on one kind of row, deliberately,
+   * and the reasoning here had to be rewritten rather than the assertion.** It
+   * used to say that folding the key in would make a row's glyphs and its greying
+   * disagree — an argument that expired the moment the key reached the model
+   * screen. A table-spelled model on an unkeyed system is greyed *and* still draws
+   * Claude Code's glyph, because the two answer different questions: the glyph
+   * says what a spelling is **for**, a settled fact about the name, and the greying
+   * says what is **missing**. Weighing the key here would delete the answer to the
+   * first question in the one state where somebody most needs it — "so which
+   * harness would this have run under, if I pasted the key?"
+   */
+  check(
+    "and a missing key changes none of it",
+    supportingHarnesses({ ...tabled, system: system({ keySet: false }) }, caps3 as never),
+    ["claude"],
+  );
+  /*
+   * The search box reads the *system's* name too. The ids people know are half
+   * the answer — "moonshot" matches nothing in `kimi-k2-thinking` — so a search
+   * over the model alone would answer "nothing here is called moonshot" over a
+   * screen with four of them on it.
+   */
+  check(
+    "a search reaches the provider's name as well as the model's",
+    searchModels([published, tabled], "moonshot", null).length,
+    2,
+  );
+  check("and narrows to one system", searchModels([published, tabled], "", "anthropic"), []);
+  check("with whitespace meaning no query at all", searchModels([published, tabled], "   ", null).length, 2);
+
+  /*
+   * ⚠ **Two sentences for a pairing failure now, and the split is a correction
+   * this driver was actively holding shut.** One string covered both for a
+   * release: "Kimi Code cannot run K2." — which this file's own comment eleven
+   * lines up already calls false, since Kimi Code runs a K2 perfectly well and
+   * `"K2.7 Coding"` is in the list its config option publishes. What it will not
+   * take is the *string* `kimi-k2-thinking`, Moonshot's API name for a different
+   * build. So the two failures a settled pairing can hit are two different facts:
+   * a protocol a harness does not speak, which `cannotRun` keeps its older
+   * sentence for, and a **name** that is not in a harness's own list, which is
+   * `noModelCalled`. Q3.483.
+   *
+   * ⚠ **The old expectation here drove two *name* collisions and called them
+   * pairings**, and the check immediately below it forbade every word the correct
+   * sentence needed. Both are rewritten rather than dropped: the properties they
+   * were protecting are unchanged and are asserted below and in the sweep — both
+   * nouns are ones the reader has already seen (the harness titles the row it is
+   * drawn on, the model was chosen one screen back), no word comes off the wire,
+   * and rows in the same situation read identically.
+   */
+  check(
+    "a name collision says which name is missing, in both directions",
+    [choiceRefusal("kimi", tabled, null), choiceRefusal("claude", published, claude)],
+    ["Kimi Code has no model called K2.", "Claude Code has no model called K3."],
+  );
+  /*
+   * ⚠ **And a genuine protocol refusal is a different string, which nothing pinned
+   * at all.** With both operands above being name collisions, `cannotRun`'s arm
+   * was reachable from `choiceRefusal` and covered by nothing — so a re-merge of
+   * the two kinds passed every assertion in this section.
+   */
+  check(
+    "while a protocol nothing can change keeps the older sentence",
+    choiceRefusal("codex", tabled, codex),
+    "Codex cannot run K2.",
+  );
+  /*
+   * ⚠ **Kept verbatim, and `another name` is the live guard rather than the
+   * obstacle.** Q3.488: Kimi Code talks to `api.kimi.com/coding/v1` and Moonshot
+   * routes at `api.moonshot.ai/anthropic` — different host, different API,
+   * different billing — and **nothing on any wire carries an equivalence between
+   * their two name lists**. Which name is *absent* is knowable from the lists;
+   * which name to use *instead* is not, so "Kimi Code calls this K2.7 Coding" is a
+   * sentence this app is not entitled to write however much it would help. The
+   * corrected wording clears all four alternates, which is the point: it names the
+   * missing name and stops.
+   */
+  check(
+    "and it mentions neither the system nor a row it did not look for",
+    /Moonshot|another name|this model|only/i.test(choiceRefusal("kimi", tabled, null) ?? ""),
+    false,
+  );
+  /*
+   * ⚠ **On a row already titled with the harness, the harness comes off.** The
+   * picker draws "Claude Code" as the title, so a subline repeating it spends two
+   * thirds of the line on the word directly above it.
+   *
+   * ⚠ **This expected `["Cannot run K2.", "Cannot run K2."]` and called the
+   * identity the point, which is exactly what pinned the wrong sentence in
+   * place.** Rows in the *same* situation reading identically was always the rule
+   * and still is — asserted two checks down, where it is actually true. These two
+   * are not in the same situation: one is a protocol Codex will never speak, the
+   * other a name that is simply not in Kimi Code's own list. Same words, two
+   * unrelated facts, and the second of them false.
+   */
+  check(
+    "a harness row drops the harness, and the two failures do not share a subline",
+    [harnessRowRefusal("kimi", tabled, null), harnessRowRefusal("codex", tabled, codex)],
+    ["No model called K2.", "Cannot run K2."],
+  );
+  /*
+   * The split itself rather than only its two outputs, so a re-merge fails here
+   * even if somebody rewrites both strings to agree with each other.
+   */
+  check(
+    "and a spelling and a protocol never read alike on the same screen",
+    harnessRowRefusal("kimi", tabled, null) === harnessRowRefusal("codex", tabled, codex),
+    false,
+  );
+  /*
+   * ⚠ **And the property the deleted expectation really carried, restated where it
+   * holds.** A codex that speaks the same protocol exists only in this fixture —
+   * the installed one answers `openai` alone — and it is here so that two rows can
+   * be in the same situation at once: both non-native, both handed the native
+   * CLI's own spelling. Two rows in one situation still get one sentence, which is
+   * what makes a pair of greyed rows read as a rule rather than as an opinion.
+   */
+  const codexToo = { providerId: "custom-gateway", supported: ["anthropic", "openai"] };
+  check(
+    "while two rows that *are* in the same situation still read identically",
+    [harnessRowRefusal("claude", published, claude), harnessRowRefusal("codex", published, codexToo)],
+    ["No model called K3.", "No model called K3."],
+  );
+  check("and says nothing at all where it can", harnessRowRefusal("claude", tabled, claude), null);
+  check("nor before a model has been chosen", harnessRowRefusal("claude", null, claude), null);
+  /*
+   * ⚠ **Every sentence this module can put on a row, against one vocabulary and
+   * one shape.** Two of these seven arms were driven before and the rest were
+   * covered by nothing, which is how a wire word reaches a phone with the drivers
+   * green — and splitting one refusal into two is precisely the change that adds
+   * arms nobody sweeps. `noJargon` above carries the forbidden list, including the
+   * three fields this split put one substitution away from the screen.
+   */
+  const everyRefusal: (string | null)[] = [
+    hostable("codex", system(), codex),
+    hostable("kimi", system({ nativeHarness: "claude" }), null),
+    hostable("claude", system({ routable: false }), claude),
+    hostable("claude", system({ routable: false, nativeHarness: null }), claude),
+    choiceRefusal("kimi", tabled, null),
+    choiceRefusal("claude", published, claude),
+    choiceRefusal("codex", tabled, codex),
+    choiceRefusal("claude", { ...tabled, system: unkeyed }, claude),
+    choiceRefusal(null, { ...tabled, system: system({ nativeHarness: null, keySet: false }) }, null),
+    harnessRowRefusal("kimi", tabled, null),
+    harnessRowRefusal("codex", tabled, codex),
+    // ⚠ The eighth arm, added with the sentence itself. The sweep's own comment
+    // claims every sentence this module can put on a row, and the key one reached
+    // a row this run while being covered here only through `keyMissing` — a
+    // different call site with the same string today and no rule saying so
+    // tomorrow. This is what holds it to `noJargon`, to the full stop, and to
+    // never printing an id where a name goes.
+    harnessRowRefusal("claude", { ...tabled, system: unkeyed }, claude),
+    keyMissing({ ...tabled, system: unkeyed }),
+  ];
+  // Each arm answers something, and the sweep below is worth nothing if one of
+  // them quietly became `null` — a greyed row with no reason is the state this
+  // whole section exists to prevent.
+  check("every refusal this screen can draw is a sentence", everyRefusal.filter((why) => why === null || !why.endsWith(".")), []);
+  check("and none of them is written for a developer", everyRefusal.filter((why) => !noJargon(why)), []);
+  /*
+   * ⚠ **The specific leak the split created.** `modelName` is what a refusal may
+   * name and `modelId` is what the daemon is handed; they differ in exactly the
+   * two fixtures above, so a sentence built from the wrong field reads perfectly
+   * in review and says `kimi-code/k3` on a phone.
+   */
+  check(
+    "and none of them prints an id where a name goes",
+    everyRefusal.filter((why) => (why ?? "").includes(published.modelId) || (why ?? "").includes(tabled.modelId)),
+    [],
+  );
+  /*
+   * The search box reads the *system's* name too. The ids people know are half
+   * the answer — "moonshot" matches nothing in `kimi-k2-thinking` — so a search
+   * over the model alone would answer "nothing here is called moonshot" over a
+   * screen with four of them on it. Nothing is dropped for being unusable, here
+   * or anywhere: the filter takes what was asked for and the refusal is drawn on
+   * what is left.
+   */
+  check(
+    "a search reaches the provider's name as well as the model's",
+    searchModels([published, tabled], "moonshot", null).length,
+    2,
+  );
+  check("and narrows to one system", searchModels([published, tabled], "", "anthropic"), []);
+  check("with whitespace meaning no query at all", searchModels([published, tabled], "   ", null).length, 2);
+  check(
+    "a native system's models come from its own harness",
+    listed.filter((one) => one.system.id === "anthropic").map((one) => `${one.modelId}:${one.source}`),
+    ["opus:published"],
+  );
+  check(
+    "and a routed one's from the table",
+    listed.filter((one) => one.system.id === "moonshot").map((one) => `${one.modelId}:${one.source}`),
+    ["kimi-k2-thinking:table"],
+  );
+  /*
+   * ⚠ **Moonshot is both native and routable, so its model can arrive twice.**
+   * Deduplicated on the id rather than the name, which is what is stored.
+   */
+  const both = allModels(
+    [system()],
+    { kimi: { models: [{ id: "kimi-k2-thinking", name: "K2", description: null, group: null }], routing: null, error: null } } as never,
+  );
+  check("a system that is both does not list its model twice", both.length, 1);
+
+  /*
+   * ⚠ **A tile shows three things and none may say the same thing twice.** The
+   * glyph is the harness, the title is the model, the subline is the system. The
+   * default name read `Claude · Kimi K2 Thinking` for one release and truncated to
+   * `Claude · Ki…` on a 96px tile — the whole line spent on what the glyph beside
+   * it already said, cutting the one it did not. Found by rendering it.
+   */
+  check("a default name does not repeat the glyph", defaultAgentName("Kimi K2 Thinking"), "Kimi K2 Thinking");
+  check(
+    "a tile's subline is the system",
+    customAgentSubline(
+      { id: "ca_1", name: "n", harness: "claude", system: "moonshot", model: "kimi-k2-thinking", createdAt: 0 },
+      [system()],
+    ),
+    "Moonshot",
+  );
+  /*
+   * A system the daemon no longer lists falls back to its id rather than to
+   * nothing: a tile with a blank second line says less than one showing the raw
+   * string, and the raw string is what a person would search for.
+   */
+  check(
+    "and falls back to the id when the daemon has forgotten it",
+    customAgentSubline(
+      { id: "ca_1", name: "n", harness: "claude", system: "gone", model: "m", createdAt: 0 },
+      [system()],
+    ),
+    "gone",
+  );
 }
 
 process.stdout.write(failures === 0 ? "\nall green\n\n" : `\n${failures} FAILED\n\n`);

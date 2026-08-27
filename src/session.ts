@@ -9,6 +9,14 @@ import {
 } from "./acp/client.js";
 import { MAX_PARENT_ID_CHARS, toolCallLineage } from "./acp/subagents.js";
 import { sessionMetaFor } from "./acp/agents.js";
+import type { AgentRouting } from "./acp/systems.js";
+import {
+  hostable,
+  routedModelEnv,
+  routingHeaders,
+  SYSTEMS,
+  type SystemId,
+} from "./acp/systems.js";
 import type { AgentId } from "./acp/agents.js";
 import { clip, jsonBytes } from "./events.js";
 import type {
@@ -448,6 +456,32 @@ export interface SessionOptions {
    * Ignored by every agent but claude, and unset it asks for nothing at all.
    */
   ultracode?: boolean;
+  /**
+   * Which system this session's traffic reaches, or omitted for the harness's
+   * own default.
+   *
+   * ⚠ **A {@link SystemId}, never a URL or a header** — the same shape and the
+   * same argument as {@link ultracode} being a boolean: what a caller may ask
+   * for is an entry in a table this daemon measured, and `acp/systems.ts` is the
+   * only thing that decides what it turns into on the wire. Passing routing
+   * through would make every call site a place a base URL can be invented, over
+   * a daemon reachable from the internet.
+   *
+   * Omitted, or naming the harness's native system, nothing is configured at
+   * all — see `applySystem`.
+   */
+  system?: SystemId | null;
+  /**
+   * Which model to run, or omitted for the agent's own default.
+   *
+   * ⚠ **Applied two different ways and it is not a choice this file makes.** A
+   * *native* pairing selects it over ACP, after `session/new`, because that is
+   * where the agent publishes its own list. A *routed* one cannot: claude does
+   * not publish `kimi-k2-thinking` and never will, so the id is named at spawn
+   * from `routedModelEnv` and the agent publishes it back. Which door applies is
+   * decided by the table, not here.
+   */
+  model?: string | null;
 }
 
 export interface ResumeOptions extends SessionOptions {
@@ -474,6 +508,33 @@ export class SessionForgottenError extends Error {
         "is intact, but the agent cannot be put back on it.",
     );
     this.name = "SessionForgottenError";
+  }
+}
+
+/**
+ * This agent cannot be pointed at the system it was asked for.
+ *
+ * ⚠ **Its existence is the point: there is no fallback arm.** An agent that
+ * answers `providers/set` with `methodNotFound`, or that has no credential
+ * stored for the system, must not quietly run on its own default — that is a
+ * session billed to the wrong account, running a model nobody chose, with the
+ * chip on screen naming the one they did.
+ *
+ * ⚠ **It does *not* fail before a worktree exists**, and an earlier draft of this
+ * comment claimed it did. Measured 2026-08-25: `registry.create` resolves the
+ * workspace and writes the session row before `managed.start()` is called at all,
+ * so a refusal here leaves a session carrying its own exit — exactly what
+ * `agent_auth_required` has always left, and the reason `AgentAvailability`
+ * exists to catch the commoner case earlier. Moving the *key* half up into
+ * `create` would be cheap and is not done here: the routing half needs a spawned
+ * agent to answer, so only one of the two could move, and a check that fires
+ * early for some refusals and late for others is worse to reason about than one
+ * that always fires in the same place.
+ */
+export class SystemRoutingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SystemRoutingError";
   }
 }
 
@@ -731,6 +792,31 @@ export class Session {
   }
 
   /**
+   * What this agent will let us do about which system its traffic reaches.
+   *
+   * Exposed so `agentask.ts` can read it off a spawn it was already paying for:
+   * a handshake plus `session/new` is the expensive part, and asking a second
+   * process the second question would double the only cost that matters here.
+   */
+  routing(): Promise<AgentRouting | null> {
+    return this.client.routing();
+  }
+
+  /**
+   * The agent's model control, or `null` where it publishes none (kimi).
+   *
+   * ⚠ **Found by `category`, never by `id`** — this fleet's standing rule about
+   * every agent control. Exposed here rather than re-derived by each caller
+   * because there are two with different vocabularies: `agentask.ts` refuses a
+   * bad model to a plugin by name, and `Session.start` refuses one by failing
+   * the start. What they share is the lookup; what differs is the refusal, so
+   * only the lookup is shared.
+   */
+  get modelOption(): AgentConfigOption | null {
+    return this.config.options.find((one) => one.category === "model") ?? null;
+  }
+
+  /**
    * Fires whenever the agent's own configuration changes.
    *
    * Both directions land here: a change this daemon asked for, and one the agent
@@ -829,13 +915,20 @@ export class Session {
 
     const runtime = options.runtime ?? new LocalRuntime();
     const config = runtime.describe(options.agent);
-    const client = await AcpClient.launch(config, await runtime.launch(options.agent), {
+    const client = await AcpClient.launch(config, await runtime.launch(options.agent, spawnEnvOf(options)), {
       fileIo: runtime.clientFileIo,
       // Derived rather than configured: a question with nobody to answer it has
       // no default, so "no resolver" and "do not tell the agent it can ask" are
       // one fact. See `SessionOptions.elicitations`.
       elicitation: options.elicitations != null,
     });
+
+    try {
+      await applySystem(client, options, runtime);
+    } catch (error) {
+      await client.close();
+      throw error;
+    }
 
     let response: acp.NewSessionResponse;
     try {
@@ -858,7 +951,20 @@ export class Session {
       throw error;
     }
 
-    return Session.adopt(options, client, response.sessionId, response);
+    const session = Session.adopt(options, client, response.sessionId, response);
+    try {
+      // A model this agent does not offer fails the start, and there is nothing
+      // here to strand: no conversation exists yet, so the only cost of refusing
+      // is a session that was never created. `openResumed` weighs the identical
+      // sentence differently, which is why `pinNativeModel` answers one rather
+      // than throwing it.
+      const unpinned = await pinNativeModel(session, options);
+      if (unpinned !== null) throw new SystemRoutingError(unpinned);
+    } catch (error) {
+      await session.dispose();
+      throw error;
+    }
+    return session;
   }
 
   /**
@@ -911,10 +1017,20 @@ export class Session {
 
     const runtime = options.runtime ?? new LocalRuntime();
     const config = runtime.describe(options.agent);
-    const client = await AcpClient.launch(config, await runtime.launch(options.agent), {
+    const client = await AcpClient.launch(config, await runtime.launch(options.agent, spawnEnvOf(options)), {
       fileIo,
       elicitation: options.elicitations != null,
     });
+
+    // Re-applied on every resume, and it has to be: routing lives in the agent
+    // *process*, and a resume is a new one. A session that came back unrouted
+    // would carry on in the same conversation against a different vendor.
+    try {
+      await applySystem(client, options, runtime);
+    } catch (error) {
+      await client.close();
+      throw error;
+    }
 
     if (!client.supportsSessionResume()) {
       await client.close();
@@ -950,7 +1066,68 @@ export class Session {
       throw error;
     }
 
-    return Session.adopt(options, client, options.agentSessionId, response);
+    const session = Session.adopt(options, client, options.agentSessionId, response);
+
+    /*
+     * The model is named to the agent here too, and for a **native** pairing this
+     * is the only mechanism there is.
+     *
+     * ⚠ **This was missing and the loss was total and silent.** `spawnEnvOf`
+     * answers `{}` for a native system because `routedModelEnv` fires only for a
+     * routed one, and `applySystem` returns at its first line for the same
+     * reason — so with no pin nothing named the model to the agent at all, and
+     * `SystemRoutingError` cannot fire on a launch that configured nothing.
+     * Measured against a peer publishing a `category: "model"` select whose
+     * current value is sonnet, with a preset naming opus: started, the session
+     * ran opus; resumed, it ran sonnet, with the chip on screen naming opus
+     * either way. Q2.215's shape one door further in — the guard is bypassed
+     * rather than defeated — and `session/resume` answers with the same
+     * `configOptions` `session/new` does, so the list to weigh the model against
+     * is already on `modelOption` by the time `adopt` returns.
+     *
+     * ⚠ **And it does not refuse, which is the whole difference from `start`.**
+     * The conversation already exists. A model the CLI has since retired would
+     * make every resume of this session fail for ever, and that permanent
+     * refusal is exactly the stranding Q2.216 designed away when it chose a
+     * demotion over a 502 that never expires. Demoting *quietly* is the other
+     * half of the trap and is the defect above, so the answer is neither: pin it
+     * when the agent still offers it, and put a sentence in the transcript when
+     * it does not. `restoreConfig` skips a choice the new conversation no longer
+     * offers for the same reason and swallows the failure; what is new here is
+     * that this one is said out loud, because a model is not a knob — it is what
+     * the session is billed for.
+     */
+    let unpinned: string | null;
+    try {
+      unpinned = await pinNativeModel(session, options);
+    } catch (error) {
+      // The agent offered the model and then refused the call. Same three
+      // choices and the same answer: a live conversation is not torn down over a
+      // config option, and a resume that failed here would fail here again.
+      unpinned =
+        `${options.agent} would not put this conversation back on ` +
+        `${JSON.stringify(options.model ?? "")} (${describeError(error)}).`;
+    }
+    if (unpinned !== null) {
+      /*
+       * Said in the transcript rather than through `onWarning`, and the two are
+       * not interchangeable: a warning reaches whoever is reading the daemon's
+       * stdout, and the person this concerns is holding a phone. `error` is the
+       * event this daemon already writes about itself when it carries on after
+       * something it could not do — `abandonResume` is the same shape — and it is
+       * the loud row on purpose, since the alternative considered was refusing
+       * the resume outright.
+       */
+      const current = session.modelOption?.value;
+      const running =
+        typeof current === "string" && current !== "" ? `running ${current}` : "running this agent's own default";
+      session.queue.push({
+        type: "error",
+        message: `${unpinned} The conversation was resumed anyway, ${running}.`,
+        data: { code: "model_not_pinned", model: options.model ?? null },
+      });
+    }
+    return session;
   }
 
   /**
@@ -2311,6 +2488,158 @@ function boundToolCallId(id: string): string {
 /** What this daemon asks the agent for at the door, from what the caller asked for. */
 function sessionMetaOf(options: SessionOptions): Record<string, unknown> | undefined {
   return sessionMetaFor(options.agent, { ultracode: options.ultracode === true });
+}
+
+/**
+ * Select the model on a pairing that reaches its system natively.
+ *
+ * ⚠ **Native only, and the asymmetry is the design rather than an omission.** A
+ * routed pairing was pointed at its model at spawn (`routedModelEnv`) and the
+ * agent has already published it back as its current value; asking again would
+ * be a second mechanism racing the first. A native one has to ask, because the
+ * list is the agent's and only exists once the agent has answered the call that
+ * opens a conversation — either of them.
+ *
+ * ⚠ **Validated against what this agent just published, never against a cache.**
+ * `agentask.ts` makes the same argument for the same reason: a list can be ten
+ * minutes old and a CLI update retires a model in between, so the check that
+ * counts is against the agent standing in front of us.
+ *
+ * ⚠ **Both launch paths, and for a long time only one.** `session/resume`
+ * publishes the same `configOptions` `session/new` does, and a native pairing is
+ * pointed at its model by nothing else — no `ROUTED_MODEL_ENV`, no
+ * `providers/set` — so a resume that skipped this ran the agent's own default
+ * with nothing anywhere saying so. The pin belongs to the *process*, and a
+ * resume is a new one, exactly as `applySystem` already says of routing.
+ *
+ * ⚠ **It answers a sentence rather than throwing one, because its two callers
+ * disagree about what an un-pinnable model means.** `Session.start` refuses:
+ * nothing exists yet to strand, and carrying on with the default is a session
+ * running a model nobody chose while the chip on screen names the one they did.
+ * `Session.openResumed` cannot refuse — the conversation is already there, and a
+ * model the CLI has since retired would make every resume of it fail for ever,
+ * which is the permanent refusal Q2.216 chose a demotion over. So the decision
+ * is the caller's and the wording is not: one sentence, said two ways.
+ *
+ * `null` means the model is the agent's current one, and it is also the answer
+ * when there was nothing to pin at all.
+ */
+async function pinNativeModel(session: Session, options: SessionOptions): Promise<string | null> {
+  const model = options.model ?? null;
+  const system = options.system ?? null;
+  if (model === null || model === "") return null;
+  if (system !== null && SYSTEMS[system].nativeHarness !== options.agent) return null;
+
+  const option = session.modelOption;
+  if (option === null) return `${options.agent} offers no choice of model on this machine.`;
+  if (!option.choices.some((one) => one.value === model)) {
+    const names = option.choices.map((one) => one.value);
+    const shown = names.slice(0, MODEL_NAMES_IN_PIN_REFUSAL).join(", ");
+    const rest =
+      names.length > MODEL_NAMES_IN_PIN_REFUSAL ? `, and ${names.length - MODEL_NAMES_IN_PIN_REFUSAL} more` : "";
+    // The full stop is the documented form of this sentence — `agents.ts` draws
+    // it with one and `.claude/rules/agent-systems.md` writes it with one — and
+    // it is load-bearing here for a second reason: the resume notice appends a
+    // clause saying what the session came back on, and two sentences need a
+    // boundary between them.
+    return (
+      `${options.agent} has no model called ${JSON.stringify(model)}` +
+      `${names.length === 0 ? "" : ` — it offers ${shown}${rest}`}.`
+    );
+  }
+  await session.setConfigOption(option.id, model);
+  return null;
+}
+
+/** How many model names a pin refusal lists before it stops counting. */
+const MODEL_NAMES_IN_PIN_REFUSAL = 8;
+
+/**
+ * What the agent process is started with beyond its own environment.
+ *
+ * Empty for every native pairing, which is every session this daemon has ever
+ * started until now.
+ */
+function spawnEnvOf(options: SessionOptions): NodeJS.ProcessEnv {
+  const system = options.system ?? null;
+  const model = options.model ?? null;
+  if (system === null || model === null || model === "") return {};
+  return routedModelEnv(options.agent, system, model);
+}
+
+/**
+ * Point this agent at the system it was asked for, before any session exists.
+ *
+ * ⚠ **Between the handshake and `session/new`, and that window is the whole
+ * mechanism.** Both adapters that implement this say the configuration is
+ * process-scoped and applies to sessions created *after* the call — which is
+ * exactly the lifetime this daemon has, since it spawns one adapter per session.
+ * Nothing has to be undone and nothing leaks into a neighbouring conversation,
+ * because there are no neighbours.
+ *
+ * ⚠ **`providerId` comes off the agent's own answer.** Measured 2026-08-25:
+ * claude calls it `main`, codex calls it `custom-gateway`. Written down, this
+ * would configure one agent and hand the other an `invalid_params` about a
+ * provider it has never heard of.
+ *
+ * ⚠ **The credential goes here rather than into the environment this daemon
+ * spawns — which is one hop, and not the secrecy an earlier draft claimed.** An
+ * agent runs as this uid and can print its own environment into a transcript that
+ * is appended to the log and rendered in a browser. Measured against the pinned
+ * adapter: `claude-agent-acp` 0.63.0 folds these headers back into
+ * `ANTHROPIC_CUSTOM_HEADERS` on the CLI it spawns, so the key does touch a process
+ * table, one below this one, where `agentEnv` cannot reach it. See
+ * `acp/systems.ts` for the measurement and for what would actually close it.
+ */
+async function applySystem(
+  client: AcpClient,
+  options: SessionOptions,
+  runtime: SessionRuntime,
+): Promise<void> {
+  const system = options.system ?? null;
+  if (system === null) return;
+  const spec = SYSTEMS[system];
+  // Native needs no configuring — the agent already reaches it, and replacing
+  // its own routing with a copy would swap an OAuth token for a pasted key.
+  if (spec.nativeHarness === options.agent) return;
+
+  const routing = await client.routing();
+  const refusal = hostable(options.agent, system, routing);
+  if (refusal !== null) throw new SystemRoutingError(refusal);
+  // `hostable` returning null with a null routing is unreachable for a
+  // non-native system — it refuses on `routing === null` — but the compiler
+  // cannot see that, and an assertion here would be a second place the rule
+  // lives. Re-reading it is one branch.
+  if (routing === null || spec.baseUrl === null) {
+    throw new SystemRoutingError(`${spec.displayName} cannot be reached from this agent.`);
+  }
+
+  const secret = runtime.systemSecret(system);
+  if (secret === null) {
+    throw new SystemRoutingError(
+      `No key is saved for ${spec.displayName} on this machine, so nothing can sign these requests.`,
+    );
+  }
+
+  try {
+    await withDeadline(
+      client.setProvider({
+        providerId: routing.providerId,
+        apiType: spec.apiType,
+        baseUrl: spec.baseUrl,
+        headers: routingHeaders(system, secret),
+      }),
+      SET_CONFIG_TIMEOUT_MS,
+      "providers/set",
+    );
+  } catch (error) {
+    // Rewritten rather than rethrown, because what reaches a screen otherwise is
+    // a JSON-RPC code about a method nobody on the far side has heard of.
+    throw new SystemRoutingError(
+      `${client.config.displayName} refused to route to ${spec.displayName}: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 /**
