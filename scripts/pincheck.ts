@@ -120,8 +120,18 @@ interface Adapter {
   name: string;
   /** Which agent it adapts. Output only. */
   agent: string;
-  /** The CLI it vendors, and which of the two shapes reading its version takes. */
-  cli: { name: string; via: "manifest-beside-entry" | "own-package-json" };
+  /**
+   * The CLI it vendors and which of the two shapes reading its version takes, or
+   * `null` where the package **is** the CLI.
+   *
+   * ⚠ **`null` is a third state and not an omission.** opencode ships no adapter:
+   * `opencode acp` is a subcommand of the same binary a login drives, so there is
+   * no second hop to resolve. Inventing one — pointing this at `opencode-ai`
+   * itself — would be a check that resolves a package to itself and passes by
+   * construction, which this file's own header calls the only outcome worse than
+   * no check at all.
+   */
+  cli: { name: string; via: "manifest-beside-entry" | "own-package-json" } | null;
 }
 
 const ADAPTERS: readonly Adapter[] = [
@@ -134,6 +144,16 @@ const ADAPTERS: readonly Adapter[] = [
     name: "@agentclientprotocol/codex-acp",
     agent: "codex",
     cli: { name: "@openai/codex", via: "own-package-json" },
+  },
+  {
+    // Not an adapter, and pinned here anyway — which is the point. `pincheck`'s
+    // header calls kimi's PATH resolution "the real loss", because nothing records
+    // which build this repository's measurements were taken against. For opencode
+    // there *is* a mechanism, so declining it would be electing that loss rather
+    // than inheriting it.
+    name: "opencode-ai",
+    agent: "opencode",
+    cli: null,
   },
 ];
 
@@ -160,7 +180,7 @@ const ADAPTERS: readonly Adapter[] = [
  * dependency of its adapter rather than an optional platform variant, which is what
  * makes one resolve enough where claude's needs a candidate list at runtime.
  */
-function readCliVersion(adapterPkgPath: string, cli: Adapter["cli"]): string | null {
+function readCliVersion(adapterPkgPath: string, cli: NonNullable<Adapter["cli"]>): string | null {
   const fromAdapter = createRequire(adapterPkgPath);
   let parsed: unknown;
   switch (cli.via) {
@@ -254,7 +274,7 @@ if (!installed) {
       const adapterPkg: unknown = JSON.parse(readFileSync(adapterPkgPath, "utf8"));
       const adapterVersion = (adapterPkg as { version?: unknown }).version;
       installedAdapter = typeof adapterVersion === "string" ? adapterVersion : null;
-      cliVersion = readCliVersion(adapterPkgPath, adapter.cli);
+      cliVersion = adapter.cli === null ? null : readCliVersion(adapterPkgPath, adapter.cli);
     } catch {
       // Left null and asserted on below. Inside the `installed` branch a broken
       // chain is a failure, not a tolerance — that is the whole point of the
@@ -268,7 +288,14 @@ if (!installed) {
     // The CLI hop is kept even with nothing to compare its version *to*, because a
     // broken resolution chain is exactly what an adapter or CLI bump breaks — and
     // `LocalRuntime.resolveLoginBinary` drives the binary it names.
-    check(`the ${adapter.agent} CLI the adapter loads is still resolvable`, cliVersion !== null, true);
+    //
+    // Skipped, loudly, where the package is the CLI: there is no hop, and a line
+    // reporting one would be describing a resolution that never happened.
+    if (adapter.cli === null) {
+      process.stdout.write(`  note  ${adapter.agent} ships no adapter, so there is no CLI hop to resolve\n`);
+    } else {
+      check(`the ${adapter.agent} CLI the adapter loads is still resolvable`, cliVersion !== null, true);
+    }
   }
 }
 

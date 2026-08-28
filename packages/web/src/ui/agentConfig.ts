@@ -1,5 +1,12 @@
 import { hasLiveAgent } from "../wire";
-import type { AgentConfig, AgentConfigOption, AgentId, SessionSnapshot, StoredEvent } from "../wire";
+import type {
+  AgentConfig,
+  AgentConfigChoice,
+  AgentConfigOption,
+  AgentId,
+  SessionSnapshot,
+  StoredEvent,
+} from "../wire";
 
 /**
  * The rules the composer's control strip is built on, as pure functions.
@@ -94,15 +101,25 @@ export function slotFor(option: Pick<AgentConfigOption, "category">): Slot {
  * command is the one with the stronger claim — a name typed by a person has to be
  * portable, which is why it is ours there rather than the agent's.
  *
- * **Only where the agents disagree.** `model` is `Model` on both, `mode` is
- * `Mode`, and an unknown category has no second opinion to reconcile — those keep
- * the agent's own word, because overriding a name we have no better version of is
- * how a client starts inventing vocabulary. Keyed on `category` like everything
- * else here, never on an id: the ids are `effort` and `thinking`, which is the
- * whole problem.
+ * **Only where the agents disagree**, and `mode` joined the table when a fourth
+ * agent disagreed. Measured 2026-08-27: claude and kimi both call it `Mode`,
+ * opencode calls the identical control `Session Mode`. Three against one is still
+ * a disagreement — but the majority is not the argument, since the whole point of
+ * this table is that counting agents is not how a name is chosen. The argument is
+ * that a session is the only thing a mode could belong to here, so the extra word
+ * distinguishes this control from nothing, on the narrowest strip in the app,
+ * where `showsCaption` makes it the one category that spends width on its name
+ * *and* its value at once.
+ *
+ * `model` is `Model` on all four, and an unknown category has no second opinion to
+ * reconcile — those keep the agent's own word, because overriding a name we have
+ * no better version of is how a client starts inventing vocabulary. Keyed on
+ * `category` like everything else here, never on an id: the ids are `effort` and
+ * `thinking`, which is the whole problem.
  */
 const CATEGORY_LABEL: Record<string, string> = {
   thought_level: "Effort",
+  mode: "Mode",
 };
 
 export function labelFor(option: Pick<AgentConfigOption, "category" | "name">): string {
@@ -136,14 +153,76 @@ export interface DrawnControls {
    * nothing about where it went. The slot stays, drawn as unavailable, and the
    * one row in its menu says there is nothing to choose.
    *
-   * Empty whenever there is no live agent: "the agent is not offering this" and
-   * "there is no agent" are different sentences, and `stale` is already the
-   * second one.
+   * **Never a *remembered* control**, which is the distinction this field exists
+   * for: "the agent is not offering this" and "there is no agent" are different
+   * sentences and `stale` is already the second one. What it does hold beside a
+   * withdrawn control is a select the agent published with nothing in it, and the
+   * one slot this client keeps for itself — see {@link NO_LEVELS}. Both are the
+   * same fact as a withdrawal, arriving by a different door, and a strip drawn
+   * from memory keeps the slot for exactly the reason it keeps every other one.
    */
   unavailable: ReadonlySet<string>;
 }
 
 const NOTHING: ReadonlySet<string> = new Set();
+
+/**
+ * The effort control an agent never published, drawn as one it has withdrawn.
+ *
+ * ⚠ **One fact, two shapes, and the strip drew only one of them.** claude and kimi
+ * publish a `thought_level` control and *drop* it when the model has no levels —
+ * which `unavailable` already keeps the slot for, with {@link unavailableHint}'s
+ * sentence inside it. opencode never publishes one for such a model in the first
+ * place, so the identical fact arrived as an absence and the chip simply was not
+ * there: two controls in the right-hand cluster on one session and three on the
+ * next, which is the shape change every other rule in this file exists to prevent.
+ *
+ * **Measured 2026-08-27 against opencode 1.18.23**, which is what makes the
+ * sentence that gets drawn a description rather than a guess. One
+ * `OPENROUTER_API_KEY`, one catalogue of 362 models: `session/set_config_option`
+ * on the model answers *with* a `thought_level` for `openai/gpt-5`
+ * (Minimal/Low/Medium/High) and for `~anthropic/claude-sonnet-latest` (five
+ * levels), and *without* one for `minimax/minimax-m3`, `deepseek/deepseek-r1` and
+ * opencode's own default `opencode/big-pickle`. "The model in use offers no levels
+ * here. Another model may." is that measurement, one model apart.
+ *
+ * ⚠ **And the inference the whole slot rests on was measured rather than
+ * assumed: `session/new` is a complete snapshot.** It had been written down that
+ * opencode's `thought_level` "appears only in the answer to a
+ * `set_config_option`" — which would make this slot a claim about a model at the
+ * one moment nothing had been said about it. Two probes settle it. Every answer is
+ * a full option list, not a delta about the option that was set: setting the
+ * *mode* on a session running `openai/gpt-5` returns `thought_level` untouched
+ * beside it. And with a project `opencode.json` naming that model,
+ * **`session/new` itself carries the control**. So the absence is the model's
+ * answer at wave one exactly as it is at wave two.
+ *
+ * **`thought_level` alone.** A synthesized `mode` would be found by
+ * {@link splitOptions} as the {@link NESTED_HOST} and `Absent` draws no nested
+ * sections, so codex's `collaboration_mode` would nest inside a placeholder and
+ * silently cease to exist — the exact failure that slot partition is asserted
+ * against. `model` is left out for a weaker reason and it is worth being honest
+ * about which: no agent has been seen without one, and nothing was asked for. The
+ * argument here is not symmetric anyway, since what earns this slot is a
+ * measurement saying the absence *means* something.
+ *
+ * **It buys a chip and not a command.** `buildCommands` skips a select with
+ * nothing in it, and `Composer` hands it the raw `agentConfig` rather than this —
+ * so there is no `/effort` row that opens onto zero choices, which is the dead end
+ * `commands.ts` refuses on purpose. The chip exists to say why; a menu entry that
+ * only ate what you typed would not.
+ */
+const NO_LEVELS: AgentConfigOption = {
+  // Namespaced, because `unavailable` is keyed on ids and this is the one row here
+  // that no agent said: a collision would draw a live control as an absent one.
+  id: "reemoat:thought_level",
+  name: "Effort",
+  description: null,
+  category: "thought_level",
+  kind: "select",
+  value: "",
+  choices: [],
+};
 
 export function drawnControls(
   session: Pick<SessionSnapshot, "status" | "agentConfig">,
@@ -163,15 +242,57 @@ export function drawnControls(
      */
     const liveIds = new Set(live.map((option) => option.id));
     const dropped = (held?.options ?? []).filter((option) => !liveIds.has(option.id));
-    if (dropped.length === 0) return { options: live, stale: false, unavailable: NOTHING };
-    return {
-      options: [...live, ...dropped],
-      stale: false,
-      unavailable: new Set(dropped.map((option) => option.id)),
-    };
+    return withUnusable(dropped.length === 0 ? live : [...live, ...dropped], dropped, false);
   }
   if (hasLiveAgent(session.status)) return { options: [], stale: false, unavailable: NOTHING };
-  return { options: held?.options ?? [], stale: held !== undefined, unavailable: NOTHING };
+  const remembered = held?.options ?? [];
+  /*
+   * ⚠ **The memory gets the slot too, and leaving it out re-created the bug one
+   * transition further along.** A restart drops `agentConfig`, the strip falls to
+   * `held`, and `held` can only ever contain what a daemon published — so a
+   * synthesized slot that existed only on the live branch disappeared for the
+   * length of every restart, on the one agent it was built for, moving every
+   * button beside it. That is Q3.418's complaint with a different trigger.
+   */
+  if (remembered.length === 0) return { options: remembered, stale: held !== undefined, unavailable: NOTHING };
+  return withUnusable(remembered, [], held !== undefined);
+}
+
+/**
+ * The drawn set, plus every slot on it that cannot be chosen from.
+ *
+ * Three sources of one state, deliberately answered in one place so the strip
+ * cannot draw a working control over any of them:
+ *
+ *   - a control the agent **withdrew**, which is the caller's `dropped`;
+ *   - a select the agent published with **nothing in it**, which is the same
+ *     absence with a chip in front of it — `Select` would open onto a heading with
+ *     no rows under it and close again on the next tap, and `commands.ts` already
+ *     refuses to make a command out of one for that exact reason;
+ *   - the effort slot **nobody published at all**, {@link NO_LEVELS}.
+ *
+ * The last is tested against the drawn set rather than the live one, so an agent
+ * that withdrew its effort control keeps that row — with the levels it used to
+ * offer still behind it — instead of gaining a second one beside it saying there
+ * are none.
+ */
+function withUnusable(
+  options: readonly AgentConfigOption[],
+  dropped: readonly AgentConfigOption[],
+  stale: boolean,
+): DrawnControls {
+  const unavailable = new Set(dropped.map((option) => option.id));
+  for (const option of options) {
+    if (option.kind === "select" && option.choices.length === 0) unavailable.add(option.id);
+  }
+  const has = options.some(
+    (option) => option.category === NO_LEVELS.category || option.id === NO_LEVELS.id,
+  );
+  if (has) {
+    return { options, stale, unavailable: unavailable.size === 0 ? NOTHING : unavailable };
+  }
+  unavailable.add(NO_LEVELS.id);
+  return { options: [...options, NO_LEVELS], stale, unavailable };
 }
 
 /**
@@ -180,9 +301,12 @@ export function drawnControls(
  * Keyed on `category` like everything else here, never on an agent id — but the
  * effort case earns a sentence of its own for `contextHint`'s reason: "why is
  * this empty" has a specific answer there and a vague one everywhere else. The
- * specific answer is measured rather than guessed: all three agents build this
- * list from the currently selected model's own levels, and all three drop the
- * control when there are none.
+ * specific answer is measured rather than guessed: **all four agents build this
+ * list from the currently selected model's own levels.** claude, kimi and codex
+ * express that by publishing the control and dropping it when there are none;
+ * opencode expresses it by not publishing one, at `session/new` and in every
+ * answer after it. Same sentence, which is why {@link NO_LEVELS} can reuse it
+ * rather than inventing a second.
  */
 export function unavailableHint(option: Pick<AgentConfigOption, "category">): string {
   return option.category === "thought_level"
@@ -593,11 +717,21 @@ export function pieTone(percent: number | null): PieLevel {
  * claude's effort control both give — so nothing here can invent a value.
  */
 export function chipValue(option: AgentConfigOption, prose?: ConfigProse): string {
-  const choice = option.choices.find((candidate) => candidate.value === option.value);
-  const name = choice?.name ?? String(option.value);
-
-  const override = choiceOverride(option, option.value)?.label ?? null;
-  if (override !== null) return override;
+  /*
+   * ⚠ **{@link drawnChoices} and not `option.choices`**, so the chip is named from
+   * the same list its own menu draws. Without it the chip read `OpenRouter…` —
+   * eleven characters spent on the provider — while the row one tap below read
+   * `Claude Opus 4.7 Fast`.
+   */
+  const choice = drawnChoices(option).find((candidate) => candidate.value === option.value);
+  /*
+   * Through {@link choiceLabel}, which is the one place a choice is named — and
+   * the fallback goes through it too. A value the agent no longer lists has no
+   * choice to name, and naming it here instead would have printed `build` on the
+   * chip while every menu row printed `Build`: one frame of that exists whenever
+   * an agent clamps a mode a model switch made impossible.
+   */
+  const name = choiceLabel(option, choice ?? { value: String(option.value), name: String(option.value) });
   if (option.category !== "model") return name;
 
   const description = choice?.description ?? prose?.choices.get(String(option.value)) ?? null;
@@ -701,7 +835,10 @@ export interface ChoiceOverride {
  * ours, so the row says what the mode is on both. For effort the distinction is
  * invisible, since there is never one to prefer.
  */
-export function choiceOverride(option: AgentConfigOption, selected: string | boolean): ChoiceOverride | null {
+export function choiceOverride(
+  option: Pick<AgentConfigOption, "category">,
+  selected: string | boolean,
+): ChoiceOverride | null {
   if (selected !== "default") return null;
   if (option.category === "thought_level") {
     return { label: "Adaptive", description: "The model decides how much to think, per turn" };
@@ -710,6 +847,210 @@ export function choiceOverride(option: AgentConfigOption, selected: string | boo
     return { label: null, description: "The agent asks before running each tool" };
   }
   return null;
+}
+
+/**
+ * What one *choice* is called on screen.
+ *
+ * **Four surfaces name a choice**, and `choiceOverride`'s docblock counted three
+ * for as long as there were three copies of `override?.label ?? choice.name` — the
+ * chip, the control's own menu row, and the `/` menu's second stage. The fourth is
+ * the `/` menu's *first* stage, where a mode is lifted to a row of its own and the
+ * choice's name is the floor under its description. That docblock already says a
+ * rule copied into any of them will disagree with the others; this is the one
+ * function, and the two things in it are the whole of what this client may say
+ * about a value an agent named.
+ *
+ * The second of them is **case, on `mode` only, and only the first letter.**
+ * Measured 2026-08-27 against the live agents: claude publishes `Auto`, `Manual`,
+ * `Accept Edits`; kimi publishes `Default`, `Plan`, `Auto`, `YOLO`; opencode
+ * publishes `build` and `plan`. One list, Title Case on three agents and lower
+ * case on the fourth, on the strip whose entire argument is that it looks the same
+ * whichever session you are in.
+ *
+ * **Not a rename, which is why it is allowed beside a function that refuses to
+ * be one.** {@link choiceOverride} sets a deliberately high bar — the agent's own
+ * name must convey *nothing* — and this clears it by not being a renaming at all:
+ * no word changes, so there is nothing here that can be wrong about what the value
+ * means. Only the first character, and only when it is not already upper case, so
+ * `YOLO` and `K3` are untouched by construction and a hypothetical `accept edits`
+ * becomes `Accept edits` rather than a guess about where its words begin.
+ *
+ * **Narrowed to `mode` for the reason {@link chipValue} narrows its own rule to
+ * `model`.** A model's name is a proper noun somebody else owns and is not
+ * improved by a capital; effort is already `Minimal`, `Low`, `High` on every agent
+ * that publishes it, opencode included. `mode` is the one category a measurement
+ * says the agents disagree about.
+ *
+ * ⚠ **The name, never the value.** `choice.value` is what is sent to the daemon,
+ * what `typeableName` builds `/build` and `/plan` out of, and what
+ * `typedConfigCommand` matches a typed message against. None of the three comes
+ * through here.
+ */
+export function choiceLabel(
+  option: Pick<AgentConfigOption, "category">,
+  choice: Pick<AgentConfigChoice, "value" | "name">,
+): string {
+  const override = choiceOverride(option, choice.value)?.label ?? null;
+  if (override !== null) return override;
+  return option.category === "mode" ? capitalised(choice.name) : choice.name;
+}
+
+/**
+ * The first character in upper case, or the string exactly as it came.
+ *
+ * `toUpperCase` and not `toLocaleUpperCase`, which is the one decision in here:
+ * the locale-aware form maps `i` to `İ` under a Turkish locale, and the string
+ * being cased is an identifier an agent published rather than anything belonging
+ * to the person reading it — so the reader's locale must not change what the agent
+ * is called.
+ *
+ * A name that is empty, already upper case, or starts with a digit, a bracket or
+ * an emoji comes back untouched, and by one branch rather than three: the test is
+ * against the character itself, so "there is no upper case of this" and "this is
+ * already upper case" are the same answer.
+ */
+function capitalised(name: string): string {
+  const first = name.slice(0, 1);
+  const upper = first.toUpperCase();
+  return upper === first ? name : `${upper}${name.slice(1)}`;
+}
+
+/**
+ * The agent's choices as they are drawn: a prefix every single row repeats, taken
+ * out of all of them.
+ *
+ * ⚠ **Reported from the app: "opencode models are added to the openrouter models
+ * at the bottom".** Measured 2026-08-27, opencode publishes **one** model control
+ * holding two providers' catalogues — 356 choices named `OpenRouter/<model>` and
+ * then six named `OpenCode Zen/<model>` — with `group: null` on every one of the
+ * 362. So the menu ran the two accounts together with nothing between them, the
+ * word `OpenRouter` was printed 356 times, and the chip, which has room for about
+ * eleven characters, spent all of them saying which provider it was and none
+ * saying which model.
+ *
+ * ⚠ **That prefix became a heading, and the heading is now gone.** Reported next,
+ * of the menu it produced: "take out the *OpenCode Zen* line and the others — the
+ * reader can see what these models are." The reason it is right arrived in the
+ * same release as the heading did: `narrowToSystem` cuts a session's model list
+ * down to the system that session actually routes through, so what reaches this
+ * menu is one provider's catalogue and a heading over the whole of it distinguishes
+ * no row from any other. A heading that every row sits under is the same redundancy
+ * as a prefix every row carries, one line higher up.
+ *
+ * **This is the agent's own vocabulary shortened, not a client inventing
+ * structure.** opencode wrote the provider on every row; all that happens here is
+ * that a string identical on *every* row comes out of all of them. Nothing is
+ * renamed, reordered or dropped, and the `value` — what is stored, sent and pinned
+ * — is never touched.
+ *
+ * ⚠ **The condition tightened when the heading went, and it had to.** With a
+ * heading, a prefix agreed across one *namespace* could be cut, because the heading
+ * put it back. With nowhere to put it back, the text removed has to be text that
+ * told the reader nothing: **every row of the control carries the same one.** A
+ * control where two providers disagree is left exactly as the agent sent it — long
+ * names, and no two rows that could be read for each other. That state is the one
+ * `narrowToSystem` makes unreachable inside a session, and this function refuses to
+ * depend on it having done so.
+ *
+ * ⚠ **Two things this must not become, and the key is what keeps it from becoming
+ * either.** Q3.503 built a split of *one* provider's catalogue into 38 vendor
+ * groups and took it back out. Q3.507 rejected, in the builder, the obvious way to
+ * shorten these names — *"a strip that cut at the first `/` would survive the
+ * rename and go on cutting, including a slash that belonged to the model"* — and
+ * keyed on a known constant instead, the system's own `displayName`. **That key is
+ * not available here**: this is the composer strip, which holds an
+ * `AgentConfigOption` off the snapshot and knows nothing about systems; fetching
+ * them would put a request and a blank first paint on the session screen. So the
+ * key is the *list's own structure*, in two parts:
+ *
+ *   1. **Only a routed list is touched at all.** Every `value` has to carry a
+ *      namespace — `openrouter/…`, the agent routing on it — which is what tells a
+ *      provider apart from a name that happens to hold a slash. A list of bare ids
+ *      is left alone however its names read.
+ *   2. **And every row has to agree on the prefix.** A vendor split cannot come out
+ *      of this: `qwen/Qwen3 Coder` and `openai/GPT-5` disagree at the second row
+ *      and the whole control is left alone. Neither can a list divide into "the
+ *      prefixed ones and the rest".
+ *
+ * **It fails open, which is the property Q3.507 asked for.** Let opencode rename
+ * its labels, or spell one row differently, and this simply stops firing: the list
+ * reads exactly as it did before this function existed. It can produce an untidied
+ * name; it cannot produce a wrong one.
+ *
+ * Measured against the live agents, no other list is touched: claude publishes
+ * `Opus (1M context)` and `Default (recommended)`, kimi `K3`, codex `GPT-5.6-Sol`,
+ * and every mode and effort choice on all four is a single word — none of them
+ * carries a separator in the value *or* the name. A choice that already carries a
+ * `group` is the agent having grouped its own list: it is left alone here, and that
+ * grouping is still drawn, because it is the agent's own and not one this client
+ * derived.
+ */
+export function drawnChoices(
+  option: Pick<AgentConfigOption, "choices">,
+): readonly AgentConfigChoice[] {
+  const cached = DRAWN.get(option.choices);
+  if (cached !== undefined) return cached;
+  const drawn = stripProvider(option.choices);
+  DRAWN.set(option.choices, drawn);
+  return drawn;
+}
+
+/**
+ * Memoised on the choices array's identity, for the reason {@link configProse}
+ * gives about the transcript.
+ *
+ * `chipValue` asks this on every render of the composer, which re-renders on every
+ * keystroke, and opencode's answer is 362 rows — so building it fresh each time is
+ * a 362-object allocation per character typed. The array is replaced rather than
+ * mutated whenever a snapshot lands, so its identity is a sound key, and
+ * `withChoice`'s `{...option, value}` keeps the same `choices` reference, which is
+ * what makes the chip and its menu share one entry.
+ */
+const DRAWN = new WeakMap<readonly AgentConfigChoice[], readonly AgentConfigChoice[]>();
+
+function stripProvider(choices: readonly AgentConfigChoice[]): readonly AgentConfigChoice[] {
+  if (choices.length === 0) return choices;
+  // The one prefix the whole control agrees on. The moment two rows disagree — or
+  // one row has no prefix, or no namespace to have routed on — the prefix is part
+  // of a name rather than a provider, and nothing is cut anywhere.
+  let head: string | null = null;
+  for (const choice of choices) {
+    if (choice.group !== null || !namespaced(choice.value)) return choices;
+    const part = providerSplit(choice.name);
+    if (part === null || (head !== null && part.head !== head)) return choices;
+    head = part.head;
+  }
+  return choices.map((choice) => {
+    const part = providerSplit(choice.name);
+    return part === null ? choice : { ...choice, name: part.tail };
+  });
+}
+
+/** Whether the agent routes on this value: `openrouter/x/y` does, `sonnet` does not. */
+function namespaced(value: string): boolean {
+  const at = value.indexOf("/");
+  return at > 0 && at !== value.length - 1;
+}
+
+/**
+ * `OpenCode Zen/Big Pickle` → `Big Pickle`, where the whole control agrees that
+ * `OpenCode Zen` is the head.
+ *
+ * The **first** separator, so a name carrying two keeps the second: the head is the
+ * provider and everything after it is what that provider calls the model. Measured,
+ * no name in opencode's 362 has a second one — but splitting on the last would make
+ * that a silent difference rather than a decision.
+ *
+ * Both halves are trimmed and both must survive it, so `Provider / Model` works and
+ * `/leading`, `trailing/` and a bare `/` do not.
+ */
+function providerSplit(name: string): { head: string; tail: string } | null {
+  const at = name.indexOf("/");
+  if (at < 0) return null;
+  const head = name.slice(0, at).trim();
+  const tail = name.slice(at + 1).trim();
+  return head.length === 0 || tail.length === 0 ? null : { head, tail };
 }
 
 /**

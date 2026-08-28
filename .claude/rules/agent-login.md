@@ -111,6 +111,70 @@ vendor may reword. `transcriptIsTheAnswer` is the predicate, exported so
 daemon says the flow reads one, and pasting a token sits behind "Paste a token
 instead".
 
+**opencode has no row to speak of, and that is the finding.** Measured
+2026-08-27 against an empty `XDG_DATA_HOME` with no provider variables of any
+kind: `session/new` succeeds, publishes six OpenCode Zen models, and
+`session/prompt` completes with `end_turn`. Its own gateway has an anonymous free
+tier, and the other 200-odd providers it knows are ones you hand a key to. There
+is nothing to sign in to.
+
+So `args` is **`null`** — a fourth state beside the three argument lists, and the
+same shape `logoutArgs` already had for kimi. `loginBlockedReason` reads it
+**first** and answers `no_flow`, which is the one reason here that is not a
+limitation: the other three say a wizard could not be run *on this host* and each
+has a remedy, while this one says none is wanted. Ordering it after them would
+tell a machine with no `script` that it cannot run a wizard that should not exist.
+
+| Field | Value |
+|---|---|
+| `args` | `null`. `auth login` exists and is an arrow-key provider picker this wizard could not drive anyway — but that is not the reason. A wizard here would be a control that fixes nothing in front of an agent that already runs |
+| `interactiveStdin` | `false`. No flow, so no stdin and no pty |
+| `logoutArgs` | `null`, and **not** for kimi's reason: `auth logout <provider>` exists and is non-interactive. A sign-out button beside no sign-in button is a control whose whole meaning is the pair, and what it would remove is a key this daemon did not put there. The paste box has its own clear |
+| `status` | `null`, though `auth list` works and all four of its states were read — `0 credentials`, `1 credentials`, and a *separate* `1 environment variable` section. Using it would let this agent report `false`, and `AgentAskRuns.admit` refuses on exactly that: the model list would be unreadable on any machine without a key, for an agent that runs fine |
+| `credentialPath` | `.local/share/opencode/auth.json`. Presence proves a provider was configured; absence proves nothing. ⚠ It moves with `XDG_DATA_HOME` — measured — which is survivable here and not for codex: a relocated directory reads as a missing file and falls to `pasted ? true : null`, never a false "signed out" |
+| `envNames` | **two**, and they are two *providers* rather than two forms of one credential: `OPENROUTER_API_KEY` and `OPENCODE_API_KEY` |
+
+**And the screen has to say so — by saying nothing.** `AgentStance` gained a fifth
+member, `no_login`, which outranks the credential axis entirely: a stored key
+changes what such an agent can *reach* and never whether it runs. `agentBadge`
+moved into `agentCard.ts` to make that assertable — it decided four states inside
+the panel, where `webcheck` drives nothing, and the fifth would have fallen into
+`cannot check`, a sentence about a probe that failed under an agent that had just
+completed a turn.
+
+⚠ **The fifth badge then read `no sign-in needed` and that was still wrong.** Every
+other badge here names a state somebody may have to act on; this one named the
+absence of one, and under a tile beside three agents that were each reporting
+something it answered a question nobody had asked. `agentBadge` returns **`null`**
+for it — no badge, not a quieter one — and it is the only stance that does, which
+`webcheck` pins so that "say nothing" cannot spread to `unchecked`, where the gap is
+real. Whether the state *could* have been probed is deliberately not distinguished.
+The sentence stayed: `stanceLine` still says, where there is room for one, that
+nothing is missing and what the key box is for. Q3.509.
+
+⚠ **Two screens draw it, and for a release only one of them did.** `NewSession.tsx`
+kept a private four-state ladder of its own — no fifth member, and `state unknown`
+where this card said `cannot check` — so the tile that *picks* an agent said the
+one thing this stance exists to stop being said. It is gone; the tile calls
+`agentStance` with `login?.blocked` exactly as the panel does, and `webcheck`
+asserts that as source text because a placement is not a value. What made it
+possible is that `login` now rides `GET /agents` as well as `GET /agent-auth`,
+built once in `loginSupportOf` — and folding the two together turned up a live
+inversion, a handler that overwrote `no_flow` with `no_script` on any daemon with
+no login-run store. Q3.508.
+
+The key box stays. It is the one state where that box is **not** a remedy, and the
+one sentence above it says what it is for instead: this agent needs no sign-in, and
+a key adds the models it can reach.
+
+⚠ **One sentence, and the card was three.** It carried a stance line, a divider
+reading `Sign in with a key instead` — over an agent with no first option for a key
+to be instead *of* — and a per-slot caveat repeating the stance line under each of
+two keys. `dividerWord` answers `null` for this stance, the caveat is deleted, and
+a card mounted for a **system** (`keyEnv`) draws that system's key and nothing
+else: opencode reads two variables, so the screen headed `OpenRouter` was offering
+a box for somebody's OpenCode Zen account. Q3.513.
+
 ## Layout
 
 | File | Holds |

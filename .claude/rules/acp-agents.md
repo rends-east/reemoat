@@ -357,7 +357,45 @@ handed the tool. Q2.28.
   can lag what the agent accepts. Q6.19.
 - **ACP has `session/authenticate` and this daemon never calls it.** Gemini offers
   four `authMethods` and expects the client to pick one; any future agent support
-  has to decide whether to drive it. Q6.20.
+  has to decide whether to drive it. Q6.20. opencode advertises one too
+  (`opencode-login`, described as "Run `opencode auth login` in the terminal"),
+  and ⚠ **is not signed in at all** — `AGENT_LOGIN.opencode.args` is `null` and no
+  pty is ever allocated for it, which this line claimed the opposite of for two
+  releases. Q6.105 is the measurement: it completes a turn with no credential.
+- **`session/set_config` and `session/set_config_option` are different methods,
+  and only the second is this daemon's.** opencode answers `-32601` to the first
+  and implements the second — so an upstream issue closing "per-session model
+  selection" as *not planned* describes a door nothing here uses. Reading it
+  instead of running the binary would have bought a whole new environment-based
+  model door that is not needed. Q6.105.
+- **⚠ opencode's options do *not* arrive in two waves, and the note that said so
+  was an inference from one model.** `thought_level` is published for a model that
+  has levels and omitted for one that does not — at `session/new` exactly as in
+  every answer after it. Re-measured 2026-08-27 on 1.18.23 with one OpenRouter key,
+  three probes: `set_config_option` on the **mode** of a session running
+  `openai/gpt-5` returns `thought_level` untouched beside it, so an answer is a
+  full option list rather than a delta about the option that was set; with a
+  project `opencode.json` naming that model, **`session/new` itself carries the
+  control**; and `openai/gpt-5` answers `Minimal/Low/Medium/High` while
+  `minimax/minimax-m3`, `deepseek/deepseek-r1` and opencode's own default
+  `opencode/big-pickle` answer with no effort control at all. So the model decides,
+  exactly as it does on claude — the only difference is that opencode never
+  publishes the control rather than withdrawing it. **The old wording matters
+  because a client cannot tell "wave one is incomplete" from "this model has no
+  levels", and it would have to refuse to say anything if the first were true.**
+  Q3.518 is what the strip does with the answer. Q6.105.
+- **opencode is the one agent whose control vocabulary needs reconciling twice.**
+  It calls the mode control `Session Mode` where the other three call it `Mode`,
+  and it publishes its mode *choices* in lower case (`build`, `plan`) where the
+  others publish `Plan Mode`, `Accept Edits`, `YOLO`. Its effort levels are already
+  `Minimal`/`Low`/`High` like everyone's, which is why `choiceLabel` cases `mode`
+  and nothing else. Q3.516, Q3.517.
+- **opencode's model list is its provider keys.** Signed out it publishes six
+  OpenCode Zen models; with an `OPENROUTER_API_KEY` in its environment, 362, of
+  which 356 are `openrouter/…`. A *bogus* key is enough, because the catalogue is
+  enumerated before it is authenticated. Q6.105.
+- **`/undo` and `/redo` are unsupported over opencode's ACP**, by its own
+  documentation, while working in its terminal. Nothing here drives them.
 - **`claude-agent-acp` resolves a `claude` that is not on PATH** — it ships inside a
   platform-specific SDK package with no `bin` entry, so the adapter can work
   perfectly while `claude` is absent. `CLAUDE_CODE_EXECUTABLE` survives `agentEnv`'s

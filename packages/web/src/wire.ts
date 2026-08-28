@@ -40,8 +40,8 @@
  * rather than a screen that breaks, which is the whole hazard this file's header
  * describes. Adding an agent means editing here and in `AGENT_IDS`.
  */
-export const AGENT_IDS: readonly AgentId[] = ["claude", "kimi", "codex"];
-export type AgentId = "claude" | "kimi" | "codex";
+export const AGENT_IDS: readonly AgentId[] = ["claude", "kimi", "codex", "opencode"];
+export type AgentId = "claude" | "kimi" | "codex" | "opencode";
 
 /**
  * Whether a string off a URL names an agent.
@@ -497,6 +497,16 @@ export interface WorkspaceEvent {
 
 export interface TurnEndEvent {
   type: "turn_end";
+  /**
+   * ACP's own reason, or the daemon's `agent_error` for a turn that ended in an
+   * `error` — see `TurnStopReason` in `src/events.ts`.
+   *
+   * `string` rather than the union on purpose, and this is the field the rule was
+   * written for: a daemon newer than this client sends a member nobody here has
+   * heard of, and `stopReasonText` answers the identifier with its underscores
+   * taken out rather than nothing. Widening the daemon's union is therefore not a
+   * breaking change in this direction.
+   */
   stopReason: string;
   usage: unknown;
 }
@@ -1366,6 +1376,21 @@ export interface AgentInfo {
    * whose agent works. Absent on an older daemon, which is the same as `null`.
    */
   loggedIn?: boolean | null;
+  /**
+   * Whether a sign-in can be driven here, and why not when it cannot.
+   *
+   * ⚠ **On `GET /agents` as well as `GET /agent-auth`, because it answers a
+   * question the two fields above cannot.** An agent that has no sign-in at all
+   * reports `loggedIn: null` — there is nothing to probe — which is
+   * indistinguishable from a probe that failed, and every screen that picks an
+   * agent reads this cheap route. `blocked === "no_flow"` is the one member that
+   * is a fact about the *agent*; the other three are the host's.
+   *
+   * Absent on an older daemon, and its absence must read as "an ordinary agent":
+   * fall back to `AgentAuthListing.loginSupported`, which is exactly what this
+   * client did before the field existed.
+   */
+  login?: AgentLoginSupport;
 }
 
 /** One environment variable an agent reads a pasted credential from. */
@@ -1399,7 +1424,7 @@ export interface AgentLoginSupport {
    * whether the button is drawn. An unknown value degrades to "no specific advice"
    * rather than throwing, which is this file's whole contract.
    */
-  blocked?: "no_script" | "no_cli" | "interactive_pty" | null;
+  blocked?: "no_flow" | "no_script" | "no_cli" | "interactive_pty" | null;
   needsInput: boolean;
   /** Whether the agent's CLI has a sign-out verb. kimi has none. */
   canSignOut?: boolean;
@@ -1407,8 +1432,6 @@ export interface AgentLoginSupport {
 
 export interface AgentAuthInfo extends AgentInfo {
   credentials: AgentCredentialSlot[];
-  /** Absent on an older daemon; fall back to the listing's `loginSupported`. */
-  login?: AgentLoginSupport;
 }
 
 export interface AgentAuthListing {
@@ -1465,6 +1488,26 @@ export interface SystemInfo {
    * which is not a gap. See `AgentCapabilities.models`.
    */
   models: { id: string; name: string }[];
+  /**
+   * What the native harness prefixes a model id with, or `null`/absent where it
+   * spells them the way the endpoint does.
+   *
+   * Optional for this file's usual reason — an older daemon does not send it —
+   * and the fallback is `null`, which is today's behaviour for every system that
+   * existed before this field: no respelling, so the two lists a system can carry
+   * are compared exactly as they always were.
+   */
+  nativeModelPrefix?: string | null;
+  /**
+   * Which of the native harness's variables holds *this* system's key, or `null`
+   * where it reads only one and there is nothing to narrow.
+   *
+   * Read by the settings screen that mounts a harness's card under a system's
+   * name: opencode takes a key for OpenRouter and a key for OpenCode Zen, and
+   * without this both boxes were drawn under whichever heading you opened.
+   * Absent on an older daemon, which draws them all — today's behaviour.
+   */
+  keyEnv?: string | null;
   keySet: boolean;
   keyUpdatedAt: number | null;
 }

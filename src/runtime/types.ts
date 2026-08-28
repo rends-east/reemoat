@@ -136,7 +136,7 @@ export interface AgentLoginSupport {
    * a way forward on the same screen — paste a token instead. See
    * `loginBlockedReason`.
    */
-  blocked: "no_script" | "no_cli" | "interactive_pty" | null;
+  blocked: "no_flow" | "no_script" | "no_cli" | "interactive_pty" | null;
   /** Whether to draw an input box. See `AGENT_LOGIN[agent].interactiveStdin`. */
   needsInput: boolean;
   /** Whether this agent's CLI has a sign-out verb at all. kimi does not. */

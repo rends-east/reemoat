@@ -6,6 +6,7 @@ import { basename, join } from "node:path";
 import { createInterface, type Interface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { WebSocket } from "ws";
+import { hasLoginFlow } from "../src/acp/agents.js";
 import type { ChangeSet, DiffResult } from "../src/changes.js";
 import { endedWithDaemon, type SessionEvent, type StoredEvent } from "../src/events.js";
 import type { PendingPermissionSnapshot, SessionSnapshot } from "../src/registry.js";
@@ -477,7 +478,9 @@ interface AgentAuthListing {
   loginSupported: boolean;
   agents: (AgentAvailability & {
     credentials: { envName: string; set: boolean; updatedAt: number | null }[];
-    login?: { supported: boolean; needsInput: boolean };
+    // Narrower than `AgentLoginSupport` on purpose — this file reads two of its
+    // fields and a widening import would make it look like it read all four.
+    login?: { supported: boolean; needsInput: boolean; blocked?: string | null };
   })[];
 }
 
@@ -499,11 +502,25 @@ interface AgentAuthListing {
 function describeAgent(agent: AgentAvailability): string {
   const [mark, state] = !agent.available
     ? ["✗", "not installed"]
-    : agent.loggedIn === true
-      ? ["✓", "signed in"]
-      : agent.loggedIn === false
-        ? ["⚠", "not signed in"]
-        : ["?", "status unknown"];
+    : // ⚠ **Before the credential axis, exactly as the browser's `agentStance`
+      // orders it.** An agent with nothing to sign in to is not "signed out" when
+      // it holds no key and not "status unknown" when nothing can probe it — both
+      // of those describe a gap, and there is none. Read from the table rather
+      // than from the response, because `scripts/` may import `src/` and a fourth
+      // hand-rolled copy of this ladder is what put the wrong word on the browser's
+      // agent tiles for a release.
+      // ⚠ **And here the words stay, where the browser's badge is `null`.** Q3.509
+      // deletes that badge because a chip beside a name is not where a sentence
+      // belongs and the settings card has one. This column *is* the sentence — it
+      // is the whole of what the line says — so a blank one would read as a row
+      // that failed to print rather than as an agent with nothing to report.
+      !hasLoginFlow(agent.id)
+      ? ["✓", "no sign-in needed"]
+      : agent.loggedIn === true
+        ? ["✓", "signed in"]
+        : agent.loggedIn === false
+          ? ["⚠", "not signed in"]
+          : ["?", "cannot check"];
   return `${mark} ${agent.id.padEnd(8)} ${agent.displayName.padEnd(18)} ${state}`;
 }
 
@@ -1160,7 +1177,16 @@ async function main(): Promise<void> {
             // Per agent, and the daemon-wide line above cannot say this: an
             // agent whose own CLI does not resolve used to get a button and then
             // a 503.
-            out(`    ${"login".padEnd(26)} not available here`);
+            //
+            // ⚠ **And `no_flow` is not that.** It printed "not available here" for
+            // every reason alike, which blames *this host* for an agent that has no
+            // sign-in anywhere — the same inversion `loginBlockedReason` puts
+            // `no_flow` first to prevent.
+            out(
+              `    ${"login".padEnd(26)} ${
+                entry.login.blocked === "no_flow" ? "none needed" : "not available here"
+              }`,
+            );
           }
         }
         return;

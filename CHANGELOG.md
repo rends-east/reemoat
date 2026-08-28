@@ -25,6 +25,158 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+### Added
+
+- **opencode is a fourth agent, and it needs no signing in.** `opencode acp`,
+  vendored and pinned like the other adapters, and it needs no new machinery
+  either: it publishes a model control under `category: "model"` and answers
+  `session/set_config_option`, which is exactly the call an assembled agent was
+  already pinned with.
+
+  Measured: with nothing configured at all it runs on **OpenCode Zen's free
+  models**. So there is no sign-in wizard, no sign-out button, and no status under
+  it either — an agent with nothing to report shows nothing, rather than a
+  `cannot check` that reads as a fault. The settings card still carries one
+  sentence saying nothing is missing and what a key buys.
+
+  It has **no tile of its own** on the new-session screen, and that is the same
+  fact from the other side: the other three harnesses *are* the model they run,
+  and this one is a router. Started bare it picks `opencode/big-pickle` off that
+  free tier — a model nobody chose, under a tile that names none — and a saved
+  OpenRouter key widens its catalogue to 362 without moving that default one row.
+  It is a harness everywhere else: build an agent with it, pick a model, and it
+  behaves like any other.
+
+- **Assembling an agent refuses a pairing before you can make one.** Choosing a
+  harness first now collapses every provider it cannot be pointed at to a single
+  greyed line in the model list — so `opencode` no longer offers Claude's models
+  and then refuses to save. Each of the two fields has a `Clear` beside it, and
+  the reason a pair is refused is drawn on the row it is about rather than only at
+  the foot of the sheet.
+
+- **OpenCode Zen is a provider in its own right**, beside OpenRouter — both
+  reached by opencode, which publishes them in one list that the picker now
+  divides by provider. Its free models are the six you get with no key; an
+  `OPENCODE_API_KEY` opens the rest, 93 in all. Rows are named as the provider
+  names them — the `OpenCode Zen/` the CLI puts on the front is dropped, since the
+  heading over the row already says it.
+
+- **OpenRouter is a sixth provider, with its whole catalogue in the picker.**
+  Reached two ways at once, like Moonshot: opencode runs it natively, and Claude
+  Code can be pointed at it. The catalogue is read **by the browser** from
+  OpenRouter's own host rather than written down here or proxied by the daemon —
+  289 models under one heading. Two things are left out and for one reason —
+  each would only fail confusingly at somebody else's endpoint: a model that
+  cannot call tools, and the `:batch` rows, which are the pricing tier of an
+  asynchronous API with a 24-hour completion window that nothing here can submit
+  to or poll. A model both opencode and the catalogue name is one row, runnable by
+  either harness.
+
+  ⚠ **If you serve the UI yourself, `connect-src` now has to name
+  `https://openrouter.ai`.** Without it the picker's OpenRouter section never
+  fills. See `packages/control-plane/.env.example`.
+
+### Fixed
+
+- **A fourth harness would have drawn a blank tile.** `AgentGlyph`'s comment had
+  claimed for four releases that a missing arm was a compile error; it was not —
+  the function answers `ReactNode` and `undefined` inhabits it, so a `switch`
+  falling off the end returned exactly that. It ends in a `never` arm now, and a
+  missing glyph really is a compile error.
+- **The composer strip said three different things about a fourth agent.** The
+  mode control read `Session Mode` where the other three read `Mode`; its modes
+  read `build` and `plan` where the others read `Plan Mode` and `YOLO`; and the
+  effort control was simply not there. `labelFor` reconciles the first, a new
+  `choiceLabel` — the one place a choice is named, capitalising a mode's first
+  letter and nothing else — reconciles the second, and `drawnControls` now keeps
+  the effort slot even for an agent that never published one, so it opens and says
+  the model offers no levels rather than being absent.
+- **A control the agent published with nothing to choose from** drew as a working
+  chip that opened onto an empty panel. It is drawn as unavailable now, like one
+  that was withdrawn.
+- **A turn that ended in an error never said it had ended.** Four prompts, three
+  `turn_end`s, in a log anybody could read: a rejected `session/prompt` became an
+  `error` event and the turn was simply over. The daemon writes the end now, with
+  a stop reason of its own (`agent_error`) because none of ACP's five means
+  "failed". Nothing was stuck — what was broken is quieter: a turn that failed
+  mid-delegation left "waiting for 1 task" under the transcript for the rest of
+  the session, the `turn.ended` plugin hook never fired, and the turn's origin
+  claim was never spent, so a plugin that started it had the *next* turn's hook
+  suppressed instead. Nothing new is drawn: the agent's own error is already the
+  row above it.
+- **The assemble-an-agent screen was a spinner for five seconds.** It waited for
+  `GET /agents/capabilities`, which starts an agent per harness — measured at
+  5286 ms cold — although only the model list needs the answer. The screen now
+  draws as soon as the cheap table read lands and one row says what it is waiting
+  for; nothing on it can claim a pairing is possible, or refused, before the
+  answer arrives.
+
+  The read itself went from **5286 ms to 2159 ms**, in two steps. It asks every
+  harness at once rather than one at a time — the daemon's concurrency bound is
+  untouched, because the cap now queues instead of refusing, and a plugin's own
+  model request is still refused rather than parked. And it no longer holds the
+  answer while it tears the agent down: codex's model list is ready at 383 ms and
+  its teardown took 2011 ms more, because it does not answer `session/close` and
+  the close waits its full budget. The daemon still cleans up, and still counts the
+  process against its own limit while it does — the caller just stopped waiting
+  for it.
+- **The agent builder asked the slow question first.** Its two rows are Harness
+  and Model, and only the model list waits on the machine — the read that starts an
+  agent per harness to find out what each can run. It was on top, so the first
+  thing on the screen was a row saying *Reading models…* that could not be opened,
+  above a row that was ready immediately. They are swapped: choose the harness,
+  which costs nothing, and the catalogue lands while you do. It is also the order
+  the model list is built for — with a harness chosen, every provider it cannot be
+  pointed at collapses to one greyed line, so a refusal now arrives before the
+  choice it is about rather than after it. Neither field is required first and
+  either can still be cleared.
+- **A model that cannot call a tool was offered as an agent.** The catalogue
+  filter that drops those had only ever been applied to the list this browser
+  fetches — and opencode publishes its own copy of OpenRouter's, unfiltered, image
+  models and all, which got merged straight past it. Assembling one produced a
+  session that failed on its first turn with OpenRouter's own accurate sentence.
+  A refusal the catalogue has already made now outranks whatever the harness
+  lists, and a catalogue that could not be read refuses nothing.
+- **The agent strip is a row you can actually move, and the `+` is in it.** The
+  layout always scrolled; a mouse simply has no gesture for a horizontal box, and
+  this strip hid the one bar that says so. A wheel scrolls it now, handing the
+  gesture back to the page at either end. The `+` is the row's last item — an
+  ordinary one you scroll to, not a button pinned to the right edge in front of the
+  last tile.
+
+  The bar under it is the app's own, not the browser's: it appears with the first
+  notch and fades a second after you stop, the way an overlay bar does. It had to
+  be drawn by hand, because a real scrollbar in this app cannot be animated at all
+  — Chrome ignores every `::-webkit-scrollbar` rule on an element that sets
+  `scrollbar-width`, which this app sets on everything, and what is left switches
+  between two frames.
+- **The new-session picker offers the agents you can start, and nothing else.**
+  A harness that is not installed, or is installed and signed out, had a tile of
+  its own explaining why — so a machine with one working agent showed three tiles,
+  two of which were labels. Those are gone, and with them the `signed in` line
+  under the ones that remain: it was a fact true of every tile in the row. An agent
+  that cannot say whether it is signed in still has a tile, because that is kimi's
+  permanent answer and a probe that timed out is not a sign-out. Signing in is
+  still on this screen — on a machine with nothing to start, it is what the screen
+  offers instead of an empty row — and the settings card is unchanged.
+- **A session pinned to one provider was offered another one's models.** opencode
+  publishes one model control holding both its catalogues, so an OpenRouter
+  session's own picker carried six OpenCode Zen rows — and choosing one left the
+  session running a model its preset does not name, with nothing on screen saying
+  so. The snapshot's model list is now the session's own system's; the transcript
+  still records everything the agent published, and the model the session is
+  actually on is never filtered out of its own picker.
+- **opencode's model names were mostly the provider's.** It publishes one model
+  control holding 356 `OpenRouter/…` rows and six `OpenCode Zen/…`, so the chip —
+  which has room for about eleven characters — spent all of them saying
+  `OpenRouter…` instead of which model. A word every row repeats is taken out of
+  every row, in the chip, in its menu and in the `/model` list, and the values sent
+  to the agent are untouched. No heading replaces it: with a session's list now
+  narrowed to the provider it actually routes through, a heading would sit over
+  every row and tell you nothing. Where a control really does hold two providers
+  nothing is shortened at all, so no two rows can be read for each other. The
+  tooltip over a truncated chip said "Model"; it says the model.
+
 ## [0.3.0] - 2026-08-22
 
 ### Added

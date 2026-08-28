@@ -24,11 +24,13 @@ import {
   isSystemId,
   SYSTEM_IDS,
   SYSTEMS,
+  systemSecretFor,
   type CustomAgent,
   type SystemId,
   type SystemStores,
 } from "./acp/systems.js";
 import { AgentAskError, type AgentCapabilityReader } from "./agentask.js";
+import type { AgentLoginSupport } from "./runtime/types.js";
 import { SystemRoutingError } from "./session.js";
 import { type AgentCredentialStore, type AgentLoginRuns } from "./agentauth.js";
 import { AUTH_LEEWAY_MS, hasScope, type Principal, type Scope, type TokenVerifier } from "./auth.js";
@@ -827,8 +829,50 @@ export function createApp(options: ServerOptions): AppBundle {
    * else can — whether the agent is signed *in*, which used to be discovered at
    * the first prompt with a `502` after a worktree had already been made.
    */
+  /**
+   * Whether *this* agent's login can be driven here, in one place for both routes.
+   *
+   * ⚠ **It is on `GET /agents` as well as `GET /agent-auth`, and that is the whole
+   * of what an agent needing no sign-in cost.** The screens that pick an agent read
+   * the cheap route; the one that configures a credential reads the expensive one.
+   * With the fact on only the second of them, the New Session tile had nothing to
+   * say about opencode but "state unknown" — a sentence about a probe that failed,
+   * under an agent that runs perfectly — and so it grew its own four-state
+   * vocabulary and said the wrong thing in it for a release. The cost is four
+   * `findOnPath` calls on a route that already spawns a CLI per agent.
+   *
+   * ⚠ **`supported` and `blocked` are one answer written twice and must not drift**
+   * — `AgentLoginSupport.supported` is documented as `blocked === null` and nothing
+   * else. The daemon-wide half (`logins === null`: there is nowhere to record a
+   * run, which is a fact about this process rather than about the agent or the
+   * platform) is folded in as `no_script`, the closest of the existing reasons,
+   * rather than by inventing a fourth code the client would have to be taught.
+   *
+   * ⚠ **It is folded in *underneath* the agent's own reason, and the order is
+   * load-bearing.** This read `logins === null ? "no_script" : support.blocked`,
+   * which overwrote `no_flow` — the one reason that is not a limitation — with an
+   * apology about the host, on a daemon with no login store. That is precisely the
+   * inversion `loginBlockedReason` puts `no_flow` first to prevent, reintroduced
+   * one layer up, where nothing was looking.
+   */
+  const loginSupportOf = (agent: AgentId): AgentLoginSupport => {
+    const support = registry.sessionRuntime.loginSupport(agent);
+    const blocked = support.blocked ?? (logins === null ? "no_script" : null);
+    return {
+      supported: blocked === null,
+      blocked,
+      needsInput: support.needsInput,
+      canSignOut: support.canSignOut,
+    };
+  };
+
   app.get("/agents", read, async (c) =>
-    c.json({ agents: await registry.sessionRuntime.availability() }),
+    c.json({
+      agents: (await registry.sessionRuntime.availability()).map((agent) => ({
+        ...agent,
+        login: loginSupportOf(agent.id),
+      })),
+    }),
   );
 
   /* ---------------------------------------------------------------- *
@@ -884,7 +928,33 @@ export function createApp(options: ServerOptions): AppBundle {
           // Empty for a natively-reached system, where the *agent* publishes the
           // list. Not a gap — see `SystemConfig.models`.
           models: spec.models,
-          keySet: held !== undefined,
+          /*
+           * The prefix the native harness puts on a model id, or `null`. Sent
+           * because the client reads *two* lists for this system — the endpoint's
+           * own catalogue and whatever the native harness published — and without
+           * it the same model appears twice under one heading, once per spelling.
+           * A prefix is not an endpoint, a header name or a variable name, so the
+           * rule this section opens with is untouched.
+           */
+          nativeModelPrefix: spec.nativeModelPrefix,
+          keyEnv: spec.keyEnv,
+          /*
+           * ⚠ **The *effective* answer, off the same function the start reads.**
+           * A system whose native harness already holds its key needs no second
+           * one — `systemSecretFor` says so, and this asking the store directly is
+           * how the picker came to offer a routed pairing that `applySystem` then
+           * refused, over a machine that plainly had a key saved.
+           */
+          keySet:
+            systemSecretFor(id, systems?.credentials.get(id) ?? null, (agent: AgentId) =>
+              credentials?.envFor(agent) ?? {},
+            ) !== null,
+          /*
+           * Only ever the *system* row's own timestamp, so `null` beside a
+           * `keySet` of `true` is the client's way of reading "this one is
+           * borrowed" — which is what stops the screen offering a Clear for a
+           * secret that is not stored here.
+           */
           keyUpdatedAt: held?.updatedAt ?? null,
         };
       }),
@@ -971,43 +1041,61 @@ export function createApp(options: ServerOptions): AppBundle {
       return jsonError(c, 503, "model_unavailable", "this daemon cannot read agent capabilities");
     }
     /*
-     * ⚠ **One at a time, and a `Promise.all` here was measured wrong.**
+     * ⚠ **Asked all at once, and the bound is kept by the queue rather than by
+     * the order.**
      *
-     * `MAX_CONCURRENT_ASKS` is 2 for the whole daemon, because each of these is a
-     * subprocess plus an ACP handshake. Fanned out, the *third* harness always
-     * lost the race — `GET /agents/capabilities` on a cold cache answered
-     * "codex: this machine is already running 2 model requests" every single
-     * time, so codex was permanently greyed out in the builder with a sentence
-     * about load that had nothing to do with it. Driven live 2026-08-25.
+     * This was a serial loop, and a `Promise.all` before that. The `Promise.all`
+     * was measured wrong: `MAX_CONCURRENT_ASKS` is 2 for the whole daemon and
+     * `admit` **threw** when full, so the *third* harness always lost the race and
+     * `GET /agents/capabilities` on a cold cache answered "codex: this machine is
+     * already running 2 model requests" every time — codex permanently greyed out
+     * in the builder with a sentence about load that had nothing to do with it.
+     * Serial was the workaround, and it could not trip the bound because it never
+     * approached it.
      *
-     * Serial cannot trip the bound at all, which is the property worth having
-     * over the second or two it costs: this is behind a spinner on a screen
-     * somebody opened on purpose, and the answers are cached for ten minutes, so
-     * only the first open pays.
+     * ⚠ **What it cost was measured too, and it is not "a second or two".** Driven
+     * against the real harnesses with the real saved credentials, 2026-08-28:
+     * claude 1162 ms, kimi 627 ms, codex 2260 ms, opencode 1237 ms — **5286 ms**
+     * serially, against **2531 ms** with all four overlapped, which is codex's own
+     * start-up and nothing else. Per-harness cost is the same either way; there is
+     * no contention to pay for.
+     *
+     * The fix is in `admit`, not here: the capability path **queues** for a slot
+     * instead of being refused one, so the sweep cannot lose a race against a
+     * bound it is itself holding. The cap is unchanged and still 2 — this is four
+     * requests metered through it rather than four spawns at once.
      */
-    const entries: (readonly [string, unknown])[] = [];
-    for (const id of AGENT_IDS) {
+    const entries = await Promise.all(
+      AGENT_IDS.map(async (id): Promise<readonly [string, unknown]> => {
       try {
         /*
-         * ⚠ **The caller's signal, because this route spawns.** `capabilities`
-         * takes one and its docblock states the obligation: "a caller that has
-         * gone may still have the cached list; it must not be able to leave a
-         * subprocess behind." Dropped, a phone that gave up at its own 90s budget
-         * left this loop spawning the harnesses it had not reached yet — and the
-         * transport replays a `GET`, so the retry then contended with the run
-         * nobody was waiting for against a bound of two.
+         * ⚠ **The caller's signal, and it protects less than it did — said here
+         * rather than left reading as though it still did.** When this was a
+         * serial loop the signal stopped the harnesses the loop had not reached
+         * yet. Fanned out, all four run their one `stopIfGone` in the same tick,
+         * so what it can still refuse is only a spawn that has not begun *at
+         * that instant*; a sweep abandoned a moment later runs its handshakes to
+         * completion.
+         *
+         * That is bounded and it is not a leak: no prompt is sent and no quota is
+         * spent, `SLOT_WAIT_MS` bounds any queued member, and the answers land in
+         * the ten-minute cache — so the `GET` the transport replays is served from
+         * it rather than paying for the spawn a second time, which is strictly
+         * better than the serial loop, whose abandoned tail was neither spawned
+         * nor cached.
          */
-        const answer = await asks.capabilities(id, c.req.raw.signal);
-        entries.push([id, { models: answer.models, routing: answer.routing, error: null }] as const);
+        const answer = await asks.capabilities(id, c.req.raw.signal, true);
+        return [id, { models: answer.models, routing: answer.routing, error: null }] as const;
       } catch (error) {
         // Per agent, never thrown: one harness that is not installed must not
-        // take down a picker that could still offer the other two.
-        entries.push([
+        // take down a picker that could still offer the other three.
+        return [
           id,
           { models: [], routing: null, error: error instanceof Error ? error.message : String(error) },
-        ] as const);
+        ] as const;
       }
-    }
+      }),
+    );
     return c.json({ agents: Object.fromEntries(entries) });
   });
 
@@ -1344,7 +1432,6 @@ export function createApp(options: ServerOptions): AppBundle {
        */
       os: process.platform,
       agents: availability.map((agent) => {
-        const support = registry.sessionRuntime.loginSupport(agent.id);
         return {
           ...agent,
           credentials: credentialEnvNames(agent.id).map((envName) => {
@@ -1364,28 +1451,11 @@ export function createApp(options: ServerOptions): AppBundle {
            * facts that field cannot carry: an agent whose CLI does not resolve
            * used to get an enabled button and a `503` after the tap, and every
            * agent got an input box whether or not anything reads one.
+           *
+           * The same object `GET /agents` carries — see `loginSupportOf`, which is
+           * where both of them are decided.
            */
-          login: {
-            supported: logins !== null && support.supported,
-            /*
-             * **`supported` carries one condition this reason does not**, and the
-             * two must not be allowed to drift apart silently: `logins === null`
-             * means there is nowhere to record a run, which is a fact about the
-             * daemon rather than about the agent or the platform. It is reported
-             * as `no_script` — the closest of the three and, like it, "this host
-             * cannot drive a login at all" — rather than by inventing a fourth
-             * code the client would have to be taught.
-             *
-             * Forwarded at all because it was not, at first: the field existed on
-             * the runtime and stopped here, so the client saw `supported: false`
-             * with `blocked: null` and drew neither a button nor a reason. That is
-             * the exact disagreement `supported = blocked === null` exists to make
-             * impossible, reintroduced one layer up.
-             */
-            blocked: logins === null ? "no_script" : support.blocked,
-            needsInput: support.needsInput,
-            canSignOut: support.canSignOut,
-          },
+          login: loginSupportOf(agent.id),
         };
       }),
     });

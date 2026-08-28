@@ -8,6 +8,10 @@ packages:
 allowBuilds:
   # esbuild's install script links its prebuilt platform binary; tsx needs it.
   esbuild: true
+  # opencode-ai's install script links the platform binary its `bin` shim
+  # re-execs; without it `opencode --version` exits non-zero and every session
+  # on this harness fails at spawn with a message about a missing target.
+  opencode-ai: true
 # **`minimumReleaseAge` is not set, so this exclusion currently excludes nothing.**
 #
 # Said here rather than left to be discovered, because the shape reads like a policy
@@ -34,3 +38,4 @@ allowBuilds:
 minimumReleaseAgeExclude:
   - '@agentclientprotocol/claude-agent-acp@0.63.0'
   - '@agentclientprotocol/codex-acp@1.1.9'
+  - 'opencode-ai@1.18.23'

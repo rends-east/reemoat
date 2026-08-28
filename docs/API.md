@@ -59,7 +59,7 @@ Runs on your machine, reachable through the relay. `pnpm client` drives all of i
 
 | | |
 |---|---|
-| `GET /agents` | What is installed, and which are signed in |
+| `GET /agents` | What is installed, which are signed in, and which have a sign-in at all |
 | `GET /agent-auth` | Where each agent's credentials go |
 | `PUT /agent-auth/:agent` · `DELETE /agent-auth/:agent` | Set or clear a pasted credential |
 | `POST /agent-auth/:agent/login` | Start a device-code login on a pty |

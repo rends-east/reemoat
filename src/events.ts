@@ -609,9 +609,26 @@ export interface StatusEvent {
   exit: SessionExit | null;
 }
 
+/**
+ * ACP's five reasons, plus one of this daemon's own.
+ *
+ * ⚠ **`agent_error` is the turn that ended in an {@link ErrorEvent}**, which ACP
+ * has no reason for because ACP never got that far: `session/prompt` rejected, so
+ * the agent never said why its turn stopped. Nothing existing could stand in —
+ * `refusal` is the *model* declining and `cancelled` is something a person did,
+ * and both would be a lie in the one row a reader trusts about what happened.
+ *
+ * The argument is Q2.103's, which is already written down for the cancel path and
+ * applies here word for word: the daemon writes the `turn_end` itself because the
+ * agent never gets to send one, and **a prompt with no turn end at all is the
+ * shape this codebase calls a message that reached no model**. What it cost while
+ * it was missing is Q2.218.
+ */
+export type TurnStopReason = StopReason | "agent_error";
+
 export interface TurnEndEvent {
   type: "turn_end";
-  stopReason: StopReason;
+  stopReason: TurnStopReason;
   usage: Usage | null;
 }
 

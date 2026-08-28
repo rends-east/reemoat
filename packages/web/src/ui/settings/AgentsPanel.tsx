@@ -17,6 +17,7 @@ import { copyText } from "../clipboard";
 import { loginOutcome, rawTranscriptIsOpen, readLoginTranscript, type LoginOutcome } from "../login";
 import {
   agentLabel,
+  agentBadge,
   agentStance,
   credentialCaveat,
   credentialLabel,
@@ -80,33 +81,15 @@ function useAgentAuth(machineId: MachineId): {
 }
 
 /**
- * The four states an agent can be in, as a badge.
+ * The badge, off the shared decision.
  *
- * Three of them are not two: `null` is "this agent has no non-interactive way to
- * say", which is kimi, and drawing that as "logged out" would nag somebody whose
- * agent works perfectly.
+ * ⚠ **This used to decide four states inline, where `webcheck` could not reach
+ * it.** The rules it carries — that "cannot check" is not an alarm, and now that
+ * an agent needing no sign-in says so rather than falling into that arm — live in
+ * `agentCard.ts` with everything else this panel decides. See {@link agentBadge}.
  */
-/**
- * Four states, two weights.
- *
- * The two that need something done about them are emphasised; the two that do not
- * are quiet. Note which side "status unknown" falls on and why it is not an
- * alarm: `loggedIn: null` means the CLI's own probe could not tell, which for kimi
- * is the *ordinary* answer rather than a fault — it is emphatically not the same
- * fact as `false`, and drawing it as one would put a warning on every kimi
- * installation in the fleet.
- */
-function statusOf(agent: AgentAuthInfo): {
-  tone: "plain" | "strong";
-  text: string;
-} {
-  if (!agent.available) return { tone: "strong", text: "not installed" };
-  if (agent.loggedIn === true) return { tone: "plain", text: "signed in" };
-  if (agent.loggedIn === false) return { tone: "strong", text: "not signed in" };
-  // "cannot check" and not "status unknown": for kimi this is the permanent,
-  // correct answer — `AGENT_LOGIN.kimi.status` is null — and naming it a fault
-  // would put a warning on every kimi in the fleet.
-  return { tone: "plain", text: "cannot check" };
+function statusOf(agent: AgentAuthInfo): { tone: "plain" | "strong"; text: string } | null {
+  return agentBadge(agentStance(agent.available, agent.loggedIn, agent.login?.blocked));
 }
 
 /**
@@ -149,7 +132,10 @@ export function AgentChooser({
               <div className="truncate text-sm font-medium">{agent.displayName}</div>
               <div className="truncate text-2xs text-muted">{agent.id}</div>
             </div>
-            <Badge tone={status.tone}>{status.text}</Badge>
+            {/* `null` is a state with nothing to report rather than a state that
+                failed to load — see `agentBadge`. Nothing is drawn, and the row's
+                own name is then the whole of it. */}
+            {status !== null && <Badge tone={status.tone}>{status.text}</Badge>}
           </button>
         );
       })}
@@ -180,6 +166,7 @@ export function AgentDetail({
   machineId,
   agentId,
   title,
+  keyEnv,
   onChanged,
 }: {
   machineId: MachineId;
@@ -195,6 +182,19 @@ export function AgentDetail({
    * headed `Anthropic` would read as a different subject.
    */
   title?: string;
+  /**
+   * The one credential this card is about, where it is mounted for a **system**.
+   *
+   * ⚠ **A harness's card holds every key that harness reads, and under a system's
+   * name that is somebody else's account.** opencode takes one for OpenRouter and
+   * one for OpenCode Zen, so the screen headed `OpenRouter` drew both boxes, each
+   * under the same repeated sentence about Zen's free models. Given, this card is
+   * about that one variable and says nothing else: no stance sentence, no caveat,
+   * no divider, no "either one will do" — those are all facts about the *harness*,
+   * and the reader is here about an account. `null` keeps the whole card, which is
+   * what the agents screen and `NewSession`'s inline door both want.
+   */
+  keyEnv?: string | null;
   /**
    * Something here changed what another screen already read.
    *
@@ -250,7 +250,11 @@ export function AgentDetail({
          * in" *by construction*, since it is what put the button there, so the
          * badge contradicted the wizard for the whole window. It now says nothing.
          */}
-        {loading ? <Badge tone="plain">checking…</Badge> : <Badge tone={status.tone}>{status.text}</Badge>}
+        {loading ? (
+          <Badge tone="plain">checking…</Badge>
+        ) : (
+          status !== null && <Badge tone={status.tone}>{status.text}</Badge>
+        )}
       </div>
 
       {/*
@@ -275,6 +279,7 @@ export function AgentDetail({
         machineId={machineId}
         agent={agent}
         login={login}
+        keyEnv={keyEnv ?? null}
         os={listing.os}
         checking={loading}
         checkFailed={error !== null}
@@ -315,6 +320,7 @@ function SignIn({
   machineId,
   agent,
   login,
+  keyEnv,
   os,
   checking,
   checkFailed,
@@ -323,6 +329,8 @@ function SignIn({
   machineId: MachineId;
   agent: AgentAuthInfo;
   login: AgentLoginSupport;
+  /** The one credential this card is about, or `null` for the whole harness. */
+  keyEnv: string | null;
   /** The daemon's own platform, for the one sentence that has to name it. */
   os: string | undefined;
   /** A re-probe is in flight, so no verdict may be claimed yet. */
@@ -351,9 +359,20 @@ function SignIn({
 
   // The wire type says `credentials` is required, but a daemon predating the
   // field would take this whole panel down on a `.filter` of undefined.
-  const slots = agent.credentials ?? [];
+  const all = agent.credentials ?? [];
+  /*
+   * Narrowed to the system's own key where this card is mounted for one — and
+   * never on an empty result: a daemon too old to send `keyEnv`, or one that
+   * renames a variable, must leave the boxes drawn rather than leave a screen with
+   * no way to paste anything at all.
+   */
+  const scoped = keyEnv === null ? all : all.filter((slot) => slot.envName === keyEnv);
+  const slots = scoped.length > 0 ? scoped : all;
+  const wholeAgent = slots.length === all.length;
   const stored = slots.filter((slot) => slot.set).length;
-  const stance = agentStance(agent.available, agent.loggedIn);
+  // The blocked reason is read here too, so the sentence and the badge cannot
+  // come to disagree about whether this agent has a sign-in at all.
+  const stance = agentStance(agent.available, agent.loggedIn, login.blocked);
   /*
    * Two axes, not one. `available` is the *adapter*; `login.supported` is
    * `script` plus the agent's own CLI, a different binary — so "adapter missing
@@ -362,13 +381,16 @@ function SignIn({
    */
   const canSignIn = login.supported && agent.available;
   const block = tokenBlockFor(stance, stored);
-  const line = stanceLine(agent.id, stance, canSignIn, os);
+  // Every one of these is a sentence about the *harness*, so a card scoped to one
+  // of its keys draws none of them: the box's own label and note say what the key
+  // is for, and that is the whole of what somebody opened this screen to read.
+  const line = wholeAgent ? stanceLine(agent.id, stance, canSignIn, os) : null;
   // Stays true while the wizard runs, or the divider would flip to "Sign in with
   // a key instead" beside a live sign-in.
   const signInAbove = canSignIn && stance !== "signed_in";
-  const divider = dividerWord(signInAbove, block);
-  const caveat = credentialCaveat(agent.id, canSignIn);
-  const choice = multiSlotLine(agent.id, slots.length);
+  const divider = wholeAgent ? dividerWord(stance, signInAbove, block) : null;
+  const caveat = wholeAgent ? credentialCaveat(agent.id, canSignIn) : null;
+  const choice = wholeAgent ? multiSlotLine(agent.id, slots.length) : null;
 
   return (
     /*

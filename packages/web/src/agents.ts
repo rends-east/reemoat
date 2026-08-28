@@ -192,9 +192,94 @@ export interface ModelChoice {
  * because the identical string is drawn on the harness picker and beside the
  * builder's button, where nothing above it carries the name at all.
  */
-export function keyMissing(choice: ModelChoice): HostRefusal {
+export function keyMissing(choice: ModelChoice, harness: AgentId | null): HostRefusal {
+  const absent = `No ${choice.system.displayName} key on this machine.`;
+  /*
+   * ⚠ **With a harness chosen the question is the *pairing*, and the source is no
+   * longer a proxy for it.** A routed pairing is signed by the system credential
+   * and by nothing else, whichever list the id came from — so a published id can
+   * need a key, which the biconditional above says it never does.
+   *
+   * That is not a contradiction of the rule so much as its precondition
+   * expiring. The published arm rested on "every *other* harness is refused this
+   * id for the **name**", which was true of every system until one related its two
+   * spellings: `nativeModelPrefix` makes `pairFailure` drop both name arms, so on
+   * OpenRouter a published id really is runnable by a routed harness. Measured —
+   * with an `OPENROUTER_API_KEY` saved for opencode and no system key, opencode
+   * published all 356 rows, `keyMissing` read `published`, Claude Code was offered
+   * against one of them, and `applySystem` refused the start with *"No key is
+   * saved for OpenRouter on this machine, so nothing can sign these requests."*
+   * Two keys, two stores, and the screen had asked for neither.
+   */
+  if (harness !== null && choice.system.nativeHarness !== harness) {
+    return choice.system.keySet ? null : absent;
+  }
+  /*
+   * Native, or nothing chosen yet. A **published** id is proof the native harness
+   * holds whatever it signs with — the list came back — and that credential is its
+   * own, never this one. A **table** id it did *not* publish means the opposite on
+   * a system that relates its spellings, and on every other system this line is
+   * unreachable because `pairFailure` has already refused it for the name.
+   */
   if (choice.source === "published") return null;
-  return choice.system.keySet ? null : `No ${choice.system.displayName} key on this machine.`;
+  return choice.system.keySet ? null : absent;
+}
+
+/**
+ * A published name with the provider's own label taken off the front of it.
+ *
+ * ⚠ **This is not the surgery `openrouter.ts` refuses, and the difference is the
+ * key rather than the act.** That file refuses a *pattern* — `"<Vendor>: "` over
+ * an unknown, inconsistent vendor half, absent on 19 of its names and spelled two
+ * ways by four vendors — because it infers structure from somebody else's prose.
+ * This removes **one known constant**: the system's own `displayName`, which is
+ * the exact string `AgentBuilder` paints in the heading directly over the row. The
+ * justification is redundancy with that heading, so the heading's own string is
+ * the only correct key.
+ *
+ * ⚠ **`nativeModelPrefix` is the wrong key and looks like the right one.** That
+ * field is the provider **key** in the *id* namespace (`opencode/`,
+ * `openrouter/`); a published name carries the provider **label**
+ * (`OpenCode Zen/`, `OpenRouter/`). They coincide for OpenRouter and do **not**
+ * for Zen — which is the system this exists for, so keying on it would do nothing
+ * at all for the one case that motivated it while appearing to work. Two strings,
+ * two sources; they must not be unified.
+ *
+ * ⚠ **It fails open, and that is what keying on a constant buys.** Let opencode
+ * rename its label — `opencode Zen/`, `Zen/`, none at all — and this simply stops
+ * firing: the row reads exactly as it did before this function existed. It can
+ * never produce a *wrong* name, only an untidied one. A strip that cut at the
+ * first `/` instead would survive the rename and go on cutting, including a slash
+ * that belonged to the model.
+ *
+ * ⚠ **Case is folded and nothing else is.** A label differing only in case still
+ * repeats the heading, which is the whole claim being made; it asserts nothing
+ * about two models being one, which is the equivalence Q3.488 forbids. No fuzzy
+ * match, no normalised punctuation, and no separator but `/` — a space *before*
+ * the slash is a format nobody measured. The comparison slices the original string
+ * at the original marker's length, so a fold that changes length (`İ`) makes the
+ * match fail rather than mis-slice. Never a `RegExp`: `Z.ai (GLM)` is a live
+ * `displayName` and every character in it but one is a metacharacter.
+ *
+ * ⚠ **The remainder is a *stored* value and not only a label.**
+ * `defaultAgentName(modelName)` seeds a new preset's name, which is written to
+ * `custom_agents.name` — so it is trimmed, and an empty remainder keeps the
+ * original rather than handing the builder a blank title and the daemon a name it
+ * answers 400 to. Presets already saved are untouched: the edit path freezes a
+ * loaded name, so one assembled before this reads `OpenCode Zen/Big Pickle` for
+ * ever, which is a name somebody owns and not a migration to run.
+ *
+ * It does **not** make a model name safe for `noJargon`. The catalogue's names
+ * still carry `anthropic` and `openai` as words, and that rule is unchanged.
+ */
+function withoutProviderLabel(displayName: string, name: string): string {
+  // A daemon that sent no display name would make the marker a bare "/" and strip
+  // any name that began with one.
+  if (displayName.length === 0) return name;
+  const marker = `${displayName}/`;
+  if (name.slice(0, marker.length).toLowerCase() !== marker.toLowerCase()) return name;
+  const rest = name.slice(marker.length).trim();
+  return rest.length === 0 ? name : rest;
 }
 
 /**
@@ -215,23 +300,108 @@ export function keyMissing(choice: ModelChoice): HostRefusal {
 export function allModels(
   systems: readonly SystemInfo[],
   capabilities: Readonly<Record<string, AgentCapabilities>>,
+  /**
+   * Model ids a catalogue this browser read has refused for having no tool
+   * support — see `OpenRouterRead.toolless`.
+   *
+   * ⚠ **The filter existed and only one of the two lists went through it.** The
+   * table half of a system's models is the catalogue, already filtered; the
+   * published half is whatever the native harness says, and opencode says all 362
+   * of OpenRouter's — image models included. So a model the catalogue had already
+   * refused came back through the published door, was offered, was assembled, and
+   * failed on its first turn with OpenRouter's own accurate sentence: *"No
+   * endpoints found that support tool use. Try disabling `bash`."* — `bash` being
+   * opencode's own shell tool. Measured on the report:
+   * `nousresearch/hermes-3-llama-3.1-405b`, whose `supported_parameters` carries
+   * no `tools` at all.
+   *
+   * **Fails open**, which is why it is a list of the *refused* rather than a list
+   * of the allowed: a catalogue that could not be read refuses nothing and every
+   * published row is offered exactly as before. Optional for the same reason —
+   * a caller with no catalogue in hand passes nothing and loses nothing.
+   */
+  toolless: Iterable<string> = [],
 ): ModelChoice[] {
+  const refused = new Set(toolless);
   const out: ModelChoice[] = [];
   for (const system of systems) {
     const native = system.nativeHarness;
     const published = native === null ? [] : (capabilities[native]?.models ?? []);
+    /*
+     * ⚠ **What the native harness prefixes its ids with, stripped here so the two
+     * lists can meet.** Everything stored, sent and pinned is the endpoint's own
+     * spelling — see `SystemConfig.nativeModelPrefix` — so a published id is
+     * carried back to it here rather than at save time, which is what lets a
+     * preset be re-pointed at another harness without rewriting its model.
+     *
+     * `""` for every system that has no prefix, which makes the two lines below
+     * identity and leaves those systems exactly as they were.
+     */
+    const prefix = system.nativeModelPrefix ?? "";
     for (const model of published) {
       // `default` is the agent's own "whatever it picks", which is what a session
       // with no preset already does. Offering it as an assembled agent would be a
       // named preset that promises nothing.
       if (model.id === "default") continue;
-      out.push({ system, modelId: model.id, modelName: model.name, source: "published" });
+      /*
+       * ⚠ **One harness can be the native side of more than one system, and the
+       * prefix is what says which model belongs to which.** opencode is native to
+       * both OpenRouter and OpenCode Zen and publishes a single list holding both
+       * — `openrouter/qwen/qwen3-coder` beside `opencode/big-pickle`. Without this
+       * test each of those systems takes the whole list: 362 rows under OpenRouter
+       * including six that are not its models, and 362 under Zen including 356
+       * that are not, every one of them unrunnable and none of them saying so.
+       *
+       * A system with no prefix takes everything, which is every other row here
+       * and is exactly what they did before this line existed — those harnesses
+       * serve one system each, so there is nothing to divide.
+       */
+      if (prefix !== "" && !model.id.startsWith(prefix)) continue;
+      const id = prefix === "" ? model.id : model.id.slice(prefix.length);
+      // The catalogue's answer outranks the harness's list. An agent is tools, so
+      // a model that cannot call one is not a row that should be greyed — it is a
+      // row with nothing to say.
+      if (refused.has(id)) continue;
+      out.push({
+        system,
+        modelId: id,
+        modelName: withoutProviderLabel(system.displayName, model.name),
+        source: "published",
+      });
     }
     for (const model of system.models) {
-      // A system can be both native and routable — Moonshot is — so an id may
-      // already have arrived from the published list above. Deduplicated on the
-      // id, which is what is stored; the two lists spell the *names* differently.
-      if (out.some((one) => one.system.id === system.id && one.modelId === model.id)) continue;
+      // A system can be both native and routable — Moonshot is, and OpenRouter is
+      // — so an id may already have arrived from the published list above.
+      // Deduplicated on the id, which is what is stored; the two lists spell the
+      // *names* differently. For a system with a prefix this is the load-bearing
+      // line rather than a tidy-up: without it OpenRouter draws every model twice,
+      // once per spelling, each greyed for the harness that did not supply it.
+      //
+      // Published wins the **row**, and that is the right way round: its presence
+      // *proves* the native harness is keyed, so `keyMissing` reads `published`
+      // and asks for no key — while the same model arriving only from the table
+      // means nothing here can run it without one.
+      const already = out.find((one) => one.system.id === system.id && one.modelId === model.id);
+      if (already !== undefined) {
+        /*
+         * ⚠ **…and the table wins the *name*, which is the opposite way round and
+         * is not a contradiction.** `source` answers "which harnesses may use this
+         * id", and the published row is the one that answers it correctly. The
+         * name is a label, and where the same model is spelled twice the
+         * endpoint's own name for it beats a harness's rendering of it: opencode
+         * publishes `OpenRouter/Claude Opus 5` for what OpenRouter itself calls
+         * `Anthropic: Claude Sonnet 5`, so under a heading that already reads
+         * `OpenRouter · anthropic` the published form says the provider twice and
+         * carries a `/` into every refusal built from it.
+         *
+         * Taking the name rather than stripping the prefix off it is the whole
+         * point: `openrouter.ts` refuses to do surgery on somebody else's label
+         * for reasons that apply here word for word, and this needs none — the
+         * better name is already in hand.
+         */
+        already.modelName = model.name;
+        continue;
+      }
       out.push({ system, modelId: model.id, modelName: model.name, source: "table" });
     }
   }
@@ -276,7 +446,7 @@ export function searchModels(
 /**
  * The same list, gathered under the provider each model belongs to.
  *
- * ⚠ **One heading per provider, and the route is *not* in it.** It split on
+ * ⚠ **One heading per provider, and nothing else is ever in it.** It split on
  * `(system, source)` for a release — `Moonshot · Kimi Code only` beside
  * `Moonshot · other harnesses` — because one system can be reached two ways with
  * a different set of names on each, and seven undifferentiated rows of "Moonshot"
@@ -285,9 +455,19 @@ export function searchModels(
  * *whose model this is*, and a route pushed into it invents a category nobody
  * asked about while still leaving each row silent about itself.
  *
- * {@link supportingHarnesses} answers it per row instead, as the glyphs of the
- * harnesses that can run that one model — which is more precise (a row, not a
- * group), needs no vocabulary, and reads at a glance.
+ * ⚠ **A vendor sub-heading was the second thing tried in that slot, and it is out
+ * for the same reason the route was.** OpenRouter's ids carry a `vendor/` half, so
+ * a provider past a dozen prefixed rows drew `OpenRouter · qwen`, `OpenRouter ·
+ * google`, 38 of them. It answers "whose model is this" honestly enough — the
+ * objection above does not catch it — and it was still wrong on the screen: the
+ * one list somebody scrolls became 38 lists to scroll past, the same model's
+ * variants sat under a heading that made them look like different products, and
+ * the search this picker is actually used through already cuts the list far below
+ * the size that motivated the split. Q3.503 is the reversal.
+ *
+ * {@link supportingHarnesses} answers "what will run this" per row instead, as
+ * the glyphs of the harnesses that can run that one model — more precise (a row,
+ * not a group), no vocabulary, read at a glance.
  *
  * In first-appearance order rather than sorted, so the groups follow `GET
  * /systems` — the daemon's table order, which puts the natively-reachable ones
@@ -437,7 +617,7 @@ export function choiceRefusal(
       return failure === "name" ? noModelCalled(harness, choice) : cannotRun(harness, choice);
     }
   }
-  return keyMissing(choice);
+  return keyMissing(choice, harness);
 }
 
 /** Which of the two settled failures a pairing hits. See {@link pairFailure}. */
@@ -509,9 +689,25 @@ function pairFailure(
    * is how "Codex cannot run Moonshot models" ended up under a model called K3.
    */
   if (hostable(harness, choice.system, routing) !== null) return "host";
+  /*
+   * ⚠ **One system relates its two spellings, and there the name arms below are
+   * simply false.** Everything this field's docblock says about kimi and Moonshot
+   * holds — two lists, overlapping in models and not in names, with nothing
+   * carrying one to the other. OpenRouter is the case that does carry: opencode
+   * publishes `openrouter/qwen/qwen3-coder` for exactly what the endpoint claude
+   * gets routed at calls `qwen/qwen3-coder`, one catalogue behind one account, and
+   * the relation is a constant prefix rather than a guess. Where the daemon says
+   * so — `SystemConfig.nativeModelPrefix`, which `pinNativeModel` reads to put the
+   * prefix back — a name is never the reason a pairing fails, and claiming
+   * otherwise would grey every row of the larger provider in the picker for
+   * whichever harness did not happen to supply it.
+   *
+   * Absent or empty on every other system, so this reads as it always did.
+   */
+  const relates = (choice.system.nativeModelPrefix ?? "") !== "";
   const native = choice.system.nativeHarness === harness;
-  if (native && choice.source === "table") return "name";
-  if (!native && choice.source === "published") return "name";
+  if (!relates && native && choice.source === "table") return "name";
+  if (!relates && !native && choice.source === "published") return "name";
   return null;
 }
 
@@ -647,7 +843,7 @@ export function harnessRowRefusal(
       ? `No model called ${choice.modelName}.`
       : `Cannot run ${choice.modelName}.`;
   }
-  return keyMissing(choice);
+  return keyMissing(choice, harness);
 }
 
 /**

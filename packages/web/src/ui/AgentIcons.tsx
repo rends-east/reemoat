@@ -11,9 +11,9 @@ import type { AgentId } from "../wire";
  * the opposite reason: those bytes are somebody else's, and an SVG loaded as an
  * image runs no script.)
  *
- * ⚠ **Not vendor logos.** These are shapes of ours standing for three programs —
- * an asterisk, a chevron pair, a crescent — drawn in one weight so they read as
- * one family at 20px on a strip. A real mark would be somebody's trademark
+ * ⚠ **Not vendor logos.** These are shapes of ours standing for four programs —
+ * an asterisk, a chevron pair, a crescent, a bracket pair — drawn in one weight
+ * so they read as one family at 20px on a strip. A real mark would be somebody's trademark
  * rendered in this app's monochrome palette at a size where it stops being
  * recognisable, which is worse than a shape that was never claiming to be one.
  *
@@ -61,6 +61,25 @@ function KimiGlyph({ size }: { size: number }): ReactNode {
 }
 
 /**
+ * opencode. A bracket pair — a delimiter, at the one weight the others use.
+ *
+ * Chosen against the three already here rather than for itself: the asterisk is
+ * radial, the chevron points, the crescent is a closed curve, and two upright
+ * brackets are none of those at 20px. Not `{}`, which reads as the chevron's
+ * cousin at this size and is a shape half the strip could claim.
+ */
+function OpencodeGlyph({ size }: { size: number }): ReactNode {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden={true}>
+      <g stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M10 5H6v14h4" />
+        <path d="M14 5h4v14h-4" />
+      </g>
+    </svg>
+  );
+}
+
+/**
  * The harness's glyph.
  *
  * ⚠ **Exhaustive over `AgentId` with no `default` arm**, which is the rule every
@@ -77,5 +96,26 @@ export function AgentGlyph({ agent, size = 20 }: { agent: AgentId; size?: number
       return <CodexGlyph size={size} />;
     case "kimi":
       return <KimiGlyph size={size} />;
+    case "opencode":
+      return <OpencodeGlyph size={size} />;
+    default:
+      return unglyphed(agent);
   }
+}
+
+/**
+ * The arm that makes the exhaustiveness above real.
+ *
+ * ⚠ **The docblock claimed a missing arm was a compile error and it was not**,
+ * for four releases: this function answers `ReactNode`, `undefined` inhabits
+ * `ReactNode`, and a `switch` that falls off the end returns exactly that. So a
+ * fourth harness would have drawn a blank tile and compiled clean — the failure
+ * the comment was written to prevent, undetectable by the thing it named.
+ *
+ * `never` is what actually holds it. A fifth harness fails here, in this file,
+ * naming the union it was added to.
+ */
+function unglyphed(agent: never): ReactNode {
+  void agent;
+  return null;
 }

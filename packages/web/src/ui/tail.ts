@@ -2128,6 +2128,14 @@ export const TRANSCRIPT_SILENT: ReadonlySet<string> = new Set([
  *                did *not* complete — `max_tokens`, `refusal`, `cancelled` — and
  *                each of those is worth a line, because without it the agent
  *                simply stops mid-thought.
+ *
+ *                ⚠ `agent_error` is the **second** reason with no row, and it is
+ *                silent for the opposite argument: the row immediately above it is
+ *                the agent's own error, in the agent's own words. A line under it
+ *                saying the turn ended would be one fact stated twice, the second
+ *                time worse. It is still emitted, and it still cuts `taskFloor` —
+ *                which runs before this gate — because "nothing is drawn for it"
+ *                and "nothing happened" are different sentences.
  *   `text`     — a **thought is not drawn at all.** It arrived as a collapsed
  *                `thinking …` card, which is a box you have to open to find out
  *                whether it was worth opening, and several of them accumulate
@@ -2143,7 +2151,7 @@ export const TRANSCRIPT_SILENT: ReadonlySet<string> = new Set([
  */
 export function showsInTranscript(event: SessionEvent): boolean {
   if (TRANSCRIPT_SILENT.has(event.type)) return false;
-  if (event.type === "turn_end") return event.stopReason !== "end_turn";
+  if (event.type === "turn_end") return event.stopReason !== "end_turn" && event.stopReason !== "agent_error";
   if (event.type === "text") return !event.thought;
   return true;
 }

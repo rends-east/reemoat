@@ -12,6 +12,8 @@ import {
   enrollmentIgnored,
   type TokenVerifier,
 } from "../src/auth.js";
+import type { AgentId } from "../src/acp/agents.js";
+import { systemSecretFor } from "../src/acp/systems.js";
 import { AgentAskRuns } from "../src/agentask.js";
 import { AgentLoginRuns } from "../src/agentauth.js";
 import { LocalRuntime } from "../src/runtime/local.js";
@@ -369,7 +371,14 @@ const runtime = new LocalRuntime({
   // because the destinations are different: that one is merged into an
   // environment, this one becomes a header on `providers/set` and must never
   // reach one — an agent can print its own environment into a transcript.
-  systemSecret: (system) => stores.systemCredentials.get(system),
+  // Through `systemSecretFor` rather than off the store, so this and the
+  // `keySet` on `GET /systems` cannot come to disagree about whether a key
+  // exists — the disagreement being a pairing the picker offers and the start
+  // refuses.
+  systemSecret: (system) =>
+    systemSecretFor(system, stores.systemCredentials.get(system), (agent: AgentId) =>
+      stores.credentials.envFor(agent),
+    ),
   // Nothing in src/ prints. A login that cannot be driven is the one an operator
   // most needs to hear about, because the button for it is on a screen.
   onWarning: (detail: string) => console.error(`runtime: ${detail}`),

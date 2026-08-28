@@ -32,7 +32,9 @@ import {
   AGENT_LOGIN,
   agentEnv,
   credentialEnvNames,
+  hasLoginFlow,
   resolveAgent,
+  vendoredOpencode,
   type AgentId,
   type AgentLaunchConfig,
 } from "../src/acp/agents.js";
@@ -108,6 +110,7 @@ import {
   awaitingHuman,
   dedupeAliasChoices,
   deriveSessionTitle,
+  narrowToSystem,
   normalizeTitle,
   resumeBackoffMs,
   sameCommands,
@@ -1442,7 +1445,9 @@ process.stdout.write("\nthe login pty, on both platforms\n");
   check(
     "which agents that leaves without an input box, per platform",
     AGENT_IDS.filter((id) => loginStdio("darwin", AGENT_LOGIN[id].interactiveStdin) === "ignore"),
-    ["kimi", "codex"],
+    // opencode joins them by having no sign-in flow at all rather than a
+    // non-interactive one — a different reason for the same absence of a box.
+    ["kimi", "codex", "opencode"],
   );
   check(
     "claude is the one it cannot rescue, because its flow reads a code back",
@@ -1471,7 +1476,62 @@ process.stdout.write("\nthe login pty, on both platforms\n");
       ["codex", ["logout"]],
     ],
   );
-  check("and kimi is the one without", AGENT_LOGIN.kimi.logoutArgs, null);
+  /*
+   * Two without, and for different reasons: kimi's CLI has no such verb, while
+   * opencode's has one and is not offered it — a sign-out button beside no
+   * sign-in button is a control whose whole meaning is the pair, and what it
+   * would remove is a key this daemon did not put there.
+   */
+  check(
+    "and the two without one",
+    AGENT_IDS.filter((id) => AGENT_LOGIN[id].logoutArgs === null),
+    ["kimi", "opencode"],
+  );
+
+  /*
+   * ⚠ **How each agent answers "are you signed in", as a table — because one of
+   * them may not answer at all and that is a decision rather than a gap.**
+   *
+   * opencode has a working status command: `auth list`, on stdout, with all four
+   * of its states measured. It is deliberately **not used**. Measured
+   * 2026-08-27 against an empty `XDG_DATA_HOME` and no provider variables of any
+   * kind, opencode runs anyway — `session/new` publishes six OpenCode Zen models
+   * and `session/prompt` completes with `end_turn`, because their free tier is
+   * anonymous. So a probe reporting `false` would be manufacturing a "no" about
+   * an agent that had just answered a prompt, and `AgentAskRuns.admit` refuses on
+   * exactly that value: the model list would have been unreadable on any machine
+   * without a key. Q7.99's mistake from the other side.
+   *
+   * Pinned as a table so that adding the probe back is a failure that arrives
+   * next to the reason, rather than a plausible-looking improvement.
+   */
+  check(
+    "how each agent answers whether it is signed in",
+    AGENT_IDS.map((id) => {
+      const spec = AGENT_LOGIN[id];
+      return `${id}: ${spec.status === null ? "no command" : `${spec.status.args.join(" ")} on ${spec.status.stream}`}` +
+        ` / ${spec.credentialPath ?? "no file"}`;
+    }),
+    [
+      "claude: auth status on stdout / no file",
+      "kimi: no command / .kimi-code/credentials",
+      "codex: login status on stderr / no file",
+      // Both halves deliberate: no command because `false` would be a lie, and a
+      // file because presence still proves somebody configured a provider.
+      "opencode: no command / .local/share/opencode/auth.json",
+    ],
+  );
+  /*
+   * And the property that made the choice: `admit` refuses on `=== false`, so an
+   * agent that runs without credentials must never be able to produce one. With
+   * no status command and no file, `readLoginState` can only answer `true` (a
+   * pasted credential) or `null` (cannot tell) — never `false`.
+   */
+  check(
+    "and the one that runs without credentials cannot report itself signed out",
+    AGENT_LOGIN.opencode.status,
+    null,
+  );
 }
 
 /*
@@ -1503,9 +1563,38 @@ process.stdout.write("\neach agent's login, as it is written down\n");
    * from a network problem.
    */
   check("codex logs in by device code, not by browser", AGENT_LOGIN.codex.args, ["login", "--device-auth"]);
+  /*
+   * ⚠ **And one agent has no flow at all, which is a fourth state rather than an
+   * empty argument list.** Measured on opencode 1.18.23 against an empty
+   * `XDG_DATA_HOME` with no provider variables: `session/new` succeeds and
+   * `session/prompt` completes, because its own gateway has an anonymous free
+   * tier. `null` is what makes `loginBlockedReason` answer `no_flow` — the one
+   * reason that is not a limitation — instead of the screen apologising for a
+   * wizard that should not exist.
+   */
+  check(
+    "which agents have a sign-in to run at all",
+    AGENT_IDS.filter(hasLoginFlow),
+    ["claude", "kimi", "codex"],
+  );
+  check(
+    "and the one that does not is refused before anything is spawned",
+    loginBlockedReason("linux", false, true, true, false),
+    "no_flow",
+  );
+  /*
+   * Ordered first on purpose: a host with no `script` and an agent with no flow
+   * must hear the second, not the first. Otherwise a machine that cannot run a
+   * wizard is told so about an agent that never needed one.
+   */
+  check(
+    "and it outranks every reason that is about the host",
+    loginBlockedReason("darwin", true, false, false, false),
+    "no_flow",
+  );
   check(
     "and its pty spawn carries that flag through",
-    hostLoginArgs("darwin", "/usr/bin/codex", AGENT_LOGIN.codex.args, "script").args,
+    hostLoginArgs("darwin", "/usr/bin/codex", AGENT_LOGIN.codex.args ?? [], "script").args,
     ["-q", "/dev/null", "/usr/bin/codex", "login", "--device-auth"],
   );
 
@@ -1688,6 +1777,31 @@ process.stdout.write("\nhow each agent is launched\n");
       }
       continue;
     }
+    if (id === "opencode") {
+      /*
+       * **Vendored, so no skip** — `opencode-ai` is a dependency of this repo and
+       * an absent one is a real failure, unlike kimi above. What it does not have
+       * is an adapter: `opencode acp` is a subcommand of the same binary a login
+       * drives, which is why the argument list is kimi's shape and the resolution
+       * is claude's.
+       */
+      check("opencode is launched as an ACP subcommand of the CLI itself", config?.args, ["acp"]);
+      check("and opencode says which binary it is", (config?.displayName ?? "").length > 0, true);
+      /*
+       * ⚠ **The property vendoring buys, and the one this agent alone can be held
+       * to.** For claude and codex the program a session runs and the program a
+       * login drives are honestly different files — an adapter and the CLI under
+       * it — so nothing can compare them. Here they are one file, and resolving
+       * them apart is exactly the "a login that appears to work and changes
+       * nothing" failure `vendoredCli` exists to prevent.
+       */
+      check(
+        "and the binary a session runs is the one a login drives",
+        config?.command ?? "(unresolved)",
+        vendoredOpencode() ?? "(unresolved)",
+      );
+      continue;
+    }
     // Both vendored adapters speak ACP on stdio with no arguments at all. An
     // argument appearing here would mean the adapter changed how it is started.
     check(`${id}'s adapter is resolvable and takes no arguments`, config?.args, []);
@@ -1729,6 +1843,76 @@ process.stdout.write("\nwhether a login can be driven\n");
   // The half that was missing. A run registry exists in both cases, so this is
   // false only if the route asks the runtime.
   check("a host without one says so too, rather than 503ing on tap", await listing(false), false);
+
+  /*
+   * ⚠ **And the per-agent half rides `GET /agents` too, which is the cheap route
+   * every screen that *picks* an agent reads.** It did not, and the cost was a
+   * tile that could only say `available` and `loggedIn` — so an agent with no
+   * sign-in, whose `loggedIn` is permanently `null` because there is nothing to
+   * probe, was drawn as a probe that failed. Nothing in this file had ever fetched
+   * this route, so the field's arrival on the wire is asserted here rather than
+   * inferred from the handler.
+   *
+   * Both routes are compared to each other rather than to a literal: they are one
+   * object built in one place (`loginSupportOf`), and what must hold is that they
+   * cannot come to disagree.
+   */
+  const loginRows = async (path: string): Promise<Record<string, string | null>> => {
+    const response = await appFor(true).fetch(
+      new Request(`http://d${path}`, { headers: { authorization: `Bearer ${tokenFor("u_a")}` } }),
+    );
+    const body = JSON.parse(await response.text()) as {
+      agents: { id: AgentId; login?: { blocked?: string | null } }[];
+    };
+    return Object.fromEntries(body.agents.map((one) => [one.id, one.login?.blocked ?? null]));
+  };
+  const cheap = await loginRows("/agents");
+  check("every agent carries its blocked reason on the cheap route as well", [
+    AGENT_IDS.every((id) => id in cheap),
+    cheap["opencode"],
+  ], [true, "no_flow"]);
+  check("and the two routes cannot disagree about it", cheap, await loginRows("/agent-auth"));
+  /*
+   * ⚠ **`no_flow` outranks the daemon's own missing login store, and it did not.**
+   * The handler read `logins === null ? "no_script" : support.blocked`, which
+   * replaced the one reason that is not a limitation with an apology about the
+   * host — `loginBlockedReason`'s ordering, inverted one layer up. Driven against
+   * an app built without `logins` at all, which is the state that triggered it.
+   */
+  const noStore = createApp({
+    registry: new SessionRegistry(new MemoryEventStore(), null, undefined, new LocalRuntime()),
+    verifier,
+    instanceId: "i_nostore",
+    startedAt: now,
+    credentials,
+    roots: [users],
+  }).app;
+  const bare = JSON.parse(
+    await (
+      await noStore.fetch(
+        new Request("http://d/agents", { headers: { authorization: `Bearer ${tokenFor("u_a")}` } }),
+      )
+    ).text(),
+  ) as { agents: { id: AgentId; login?: { blocked?: string | null; supported?: boolean } }[] };
+  const opencode = bare.agents.find((one) => one.id === "opencode");
+  check(
+    "with no login store at all, the agent's own reason still wins over the host's",
+    [
+      opencode?.login?.blocked,
+      // Nobody may sign in — there is nowhere to record a run — and `supported` is
+      // `blocked === null` and nothing else, so every row must carry a reason.
+      bare.agents.every((one) => one.login?.supported === false),
+      bare.agents.every((one) => (one.login?.blocked ?? null) !== null),
+    ],
+    ["no_flow", true, true],
+  );
+  /*
+   * The *other* three reasons are the host's and this machine is one host, so
+   * which of them a given agent gets is not assertable here — a BSD answers
+   * `interactive_pty` for claude where Linux answers `no_script`. The ordering
+   * itself is pinned on the pure function instead, over every platform, beside
+   * `AGENT_LOGIN`.
+   */
 }
 
 process.stdout.write("\ntwo tabs, and the shutdown that follows\n");
@@ -3531,6 +3715,71 @@ process.stdout.write("\nan agent's own placeholder choices\n");
     ],
   };
   check("blank descriptions do not make two choices aliases", dedupeAliasChoices(blank).choices.length, 2);
+
+  /* ---------------------------------------------------------------- *
+   * A session pinned to one system is offered that system's models
+   *
+   * ⭐ Reported twice, the second time after a fix that only *grouped* them.
+   * opencode is the native side of two systems and publishes ONE model control
+   * holding both — 356 `openrouter/…` and six `opencode/…`. A session assembled
+   * as OpenRouter offered six OpenCode Zen models at the bottom of its own
+   * picker, and choosing one leaves the session running a model from a system its
+   * preset does not name, with the chip, the tile and the glyph all still saying
+   * OpenRouter. Q2.216's dishonesty, reached through the model menu.
+   * ---------------------------------------------------------------- */
+  const mixed = {
+    id: "model",
+    name: "Model",
+    description: null,
+    category: "model",
+    kind: "select" as const,
+    value: "openrouter/aion-labs/aion-3.0-mini",
+    choices: [
+      { value: "openrouter/aion-labs/aion-3.0-mini", name: "OpenRouter/Aion-3.0-Mini", description: null, group: null },
+      { value: "openrouter/z-ai/glm-5.3-flash", name: "OpenRouter/GLM 5.3 Flash", description: null, group: null },
+      { value: "opencode/big-pickle", name: "OpenCode Zen/Big Pickle", description: null, group: null },
+    ],
+  };
+  check(
+    "an OpenRouter session is offered OpenRouter models and nothing else",
+    narrowToSystem(mixed, "openrouter/").choices.map((choice) => choice.value),
+    ["openrouter/aion-labs/aion-3.0-mini", "openrouter/z-ai/glm-5.3-flash"],
+  );
+  check(
+    "and a Zen session is offered the other six",
+    narrowToSystem({ ...mixed, value: "opencode/big-pickle" }, "opencode/").choices.map((c) => c.value),
+    ["opencode/big-pickle"],
+  );
+  /*
+   * ⚠ The one exemption, and it is what keeps a fix from stranding somebody. A
+   * session switched by hand before any of this must keep the row it is *on*: a
+   * list missing the selected value makes the chip fall back to a raw id and makes
+   * `pinNativeModel` refuse the next resume with "has no model called …".
+   */
+  check(
+    "a session already switched to the other system keeps a way back to itself",
+    narrowToSystem({ ...mixed, value: "opencode/big-pickle" }, "openrouter/").choices.map((c) => c.value),
+    ["openrouter/aion-labs/aion-3.0-mini", "openrouter/z-ai/glm-5.3-flash", "opencode/big-pickle"],
+  );
+  /*
+   * Narrow twice over, and both by identity: no other control's values are
+   * namespaced, and a bare harness or a routed pairing has no namespace at all.
+   */
+  check(
+    "a bare session is offered everything the agent published",
+    narrowToSystem(mixed, null) === mixed,
+    true,
+  );
+  check(
+    "and no other control is touched, whatever its values look like",
+    narrowToSystem({ ...mixed, category: "thought_level" }, "openrouter/").choices.length,
+    3,
+  );
+  check(
+    "a list already inside one system is returned as it came",
+    narrowToSystem({ ...mixed, choices: mixed.choices.slice(0, 2) }, "openrouter/").choices.length,
+    2,
+  );
 }
 
 process.stdout.write("\ncontext usage is fanned out on what a client can see\n");
@@ -3973,7 +4222,9 @@ process.stdout.write("\na credential saved while an agent is already running\n")
 
 process.stdout.write("\na login that cannot be offered\n");
 {
-  const ok = (p: NodeJS.Platform, interactive: boolean) => loginBlockedReason(p, interactive, true, true);
+  // The fifth argument says the agent *has* a sign-in; `loginBlockedReason` lost
+  // its default for it, so every call here states which agent it is standing in for.
+  const ok = (p: NodeJS.Platform, interactive: boolean) => loginBlockedReason(p, interactive, true, true, true);
 
   check("claude on macOS cannot be offered a wizard", ok("darwin", true), "interactive_pty");
   check("nor on the other BSDs", [ok("freebsd", true), ok("openbsd", true), ok("netbsd", true)], [
@@ -3991,9 +4242,9 @@ process.stdout.write("\na login that cannot be offered\n");
 
   // The two older reasons still answer first, and in this order: a host with no
   // `script` cannot run any login, whatever the flow.
-  check("no script outranks the platform", loginBlockedReason("darwin", true, false, true), "no_script");
-  check("and a missing CLI outranks the flow", loginBlockedReason("darwin", true, true, false), "no_cli");
-  check("with a present CLI and script on Linux clearing it", loginBlockedReason("linux", true, true, true), null);
+  check("no script outranks the platform", loginBlockedReason("darwin", true, false, true, true), "no_script");
+  check("and a missing CLI outranks the flow", loginBlockedReason("darwin", true, true, false, true), "no_cli");
+  check("with a present CLI and script on Linux clearing it", loginBlockedReason("linux", true, true, true, true), null);
 
   /*
    * `supported` is `blocked === null` and nothing else, asserted against the
@@ -10020,6 +10271,26 @@ process.stdout.write("\nstopping the turn without stopping the session\n");
           }
           case acp.methods.agent.session.prompt: {
             const text = JSON.stringify(message["params"]?.["prompt"] ?? "");
+            /*
+             * A **rejected** prompt, which is the shape a provider failure takes
+             * and is not a shape any other arm here produces. Measured from the
+             * live log: `-32603` carrying the upstream's own prose and **no**
+             * `errorKind` — which is why `isAuthFailure` correctly ignores it and
+             * why matching the text was never an option.
+             */
+            if (text.includes("fail me")) {
+              send({
+                jsonrpc: "2.0",
+                id,
+                error: {
+                  code: -32603,
+                  message:
+                    "Internal error: [Anthropic] 'claude-opus-4-7' does not support the `speed` parameter.",
+                },
+              });
+              heldPromptId = null;
+              break;
+            }
             cancelled = false;
             stubborn = text.includes("ignore me");
             heldPromptId = id;
@@ -10208,6 +10479,53 @@ process.stdout.write("\nstopping the turn without stopping the session\n");
     sweptBy?.type === "permission_resolved" ? sweptBy.by : null,
     "turn_cancelled",
   );
+
+  /* ---- a turn that ends in an error ---- */
+
+  /*
+   * ⭐ **Four prompts, three `turn_end`s** — found in a live log, not here, because
+   * nothing here asked. `Session.prompt` turns a rejected `session/prompt` into an
+   * `error` event and returns on it exactly as it returns on a `turn_end`, so the
+   * turn was over and nothing marked the boundary. Q2.103 had already made the
+   * argument for the cancel path in the same file: the daemon writes the end
+   * itself because the agent never gets to, and a prompt with no turn end at all
+   * is the shape this codebase calls a message that reached no model.
+   */
+  const endsBefore = eventsOf("turn_end").length;
+  live.prompt("fail me");
+  await quiesce();
+  check("a turn the agent rejected is over rather than running", live.status, "idle");
+  check(
+    "the agent's own error, and then an end — in that order",
+    live.log
+      .read(0, 1000, 1 << 20)
+      .map((stored) => stored.event.type)
+      .slice(-2),
+    ["error", "turn_end"],
+  );
+  /*
+   * `agent_error` and not one of ACP's five: `refusal` is the *model* declining
+   * and `cancelled` is something a person did, and either would be a lie in the
+   * one row a reader trusts about what happened. The client draws no row for it —
+   * the error above it is the same fact in the agent's own words — but it still
+   * cuts `Tail.taskFloor`, which is what stops a turn that failed mid-delegation
+   * counting its pending calls for ever.
+   */
+  check(
+    "carrying the reason ACP has no word for, because ACP never got that far",
+    eventsOf("turn_end")
+      .slice(endsBefore)
+      .map((event) => (event.type === "turn_end" ? event.stopReason : null)),
+    ["agent_error"],
+  );
+  check("exactly one end for one prompt, which is the whole property", eventsOf("turn_end").length - endsBefore, 1);
+  /*
+   * And the agent is **not** replaced. `failed` means `session.prompt()` rejected
+   * — the message was never taken — and a provider error arrives *through* the
+   * generator, so `onAgentUnusable` must not fire on an ordinary bad turn. The
+   * proof is the next block: it prompts this same session and gets a turn.
+   */
+  check("with no exit recorded, because a bad turn is not a dead agent", live.snapshot().exit, null);
 
   /* ---- an agent that ignores it ---- */
 
@@ -15402,6 +15720,92 @@ process.stdout.write("\nasking an agent one question, and every way that is refu
   check("one more than the machine will run at once", await codeOfAsk(slow, "claude"), "model_busy");
   check("and the cap counted the ones still starting", slow.inFlight, MAX_CONCURRENT_ASKS);
 
+  /* ---------------------------------------------------------------- *
+   * ⭐ The capability sweep queues for a slot; an ask is still refused one
+   *
+   * `GET /agents/capabilities` reads every harness. With four harnesses against a
+   * cap of two and an `admit` that **threw**, a `Promise.all` there meant the
+   * third and fourth always came back "this machine is already running 2 model
+   * requests" — codex permanently greyed out in the builder with a sentence about
+   * load. The route was made serial to dodge it, and serial is 5286 ms of cold
+   * spawns (claude 1162, kimi 627, codex 2260, opencode 1237) where four metered
+   * through the same cap of two is 3061 ms. Measured 2026-08-28 against the real
+   * harnesses.
+   *
+   * ⚠ **The asymmetry is the design.** `ask` is a plugin's question with a screen
+   * behind it, and `model_busy` is a refusal it can report — parking it would turn
+   * a load message into a hang. The sweep has no per-harness meaning to refuse.
+   * ---------------------------------------------------------------- */
+  {
+    const everyone = ["claude", "kimi", "codex", "opencode"];
+    const stuck = new AgentAskRuns({
+      runtime: {
+        availability: () =>
+          Promise.resolve(
+            everyone.map((id) => ({ id, displayName: id, available: true, hint: null, loggedIn: true })),
+          ),
+        describe: () => ({ displayName: "stub", authHint: "" }),
+        clientFileIo: false,
+        // Never resolves, so whatever is admitted stays in `starting` for ever and
+        // the cap is genuinely full for the length of this case.
+        launch: () => new Promise(() => {}),
+      } as never,
+      cwd: tmp("caps-"),
+    });
+    const held = [
+      stuck.capabilities("claude" as never, undefined, true).catch(() => "parked"),
+      stuck.capabilities("kimi" as never, undefined, true).catch(() => "parked"),
+    ];
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    check("two capability reads fill the machine", stuck.inFlight, MAX_CONCURRENT_ASKS);
+
+    /*
+     * The property, and it has to be asserted as *not settling*: a queued caller
+     * has no answer yet, which is the whole difference from a refusal. Raced
+     * against a timer rather than awaited, because awaiting it is the hang this is
+     * about.
+     */
+    const third = stuck
+      .capabilities("codex" as never, undefined, true)
+      .then(() => "answered")
+      .catch((error: unknown) => (error instanceof AgentAskError ? error.code : "other"));
+    const settled = await Promise.race([
+      third,
+      new Promise((resolve) => setTimeout(() => resolve("still waiting"), 40)),
+    ]);
+    check("a third one waits for a slot rather than being told the machine is busy", settled, "still waiting");
+
+    // And the other entry point is untouched: same full machine, immediate refusal.
+    check("while an ask on the same full machine is refused at once", await codeOfAsk(stuck, "opencode"), "model_busy");
+    /*
+     * ⚠ **And the queue is opt-in per *call*, not per method.** A plugin's
+     * `model.list` reaches the same reader, and `MAX_CONCURRENT_ASKS` is a bound
+     * `docs/PLUGINS.md` publishes to plugin authors — parking one inside its own
+     * ten-second invocation would make a documented refusal unobservable and turn
+     * a load message into a timeout. Only the sweep asks to wait.
+     */
+    const listed = await stuck
+      .models("opencode" as never)
+      .then(() => "answered")
+      .catch((error: unknown) => (error instanceof AgentAskError ? error.code : "other"));
+    check("and a plugin's model list is refused rather than parked", listed, "model_busy");
+
+    /*
+     * ⚠ **A shutdown drains the queue rather than leaving it parked.** Without a
+     * wake there, a caller waiting on a slot that will never be handed out waits
+     * for the life of the process — a hang with no output.
+     *
+     * Not awaited, for the reason the block above this one gives about its own
+     * `closing`: `shutdown` waits on what was still being born, and these starts
+     * never resolve. The wake happens synchronously before that await, which is
+     * exactly what this asserts.
+     */
+    const closingCaps = stuck.shutdown();
+    check("and a shutdown wakes what was waiting, with a reason", await third, "model_unavailable");
+    void held;
+    void closingCaps;
+  }
+
   /*
    * ⚠ **Shutdown waits for what was still being born.** An ask accepted moments
    * before SIGTERM is inside `Session.start` when the drain runs; without
@@ -17843,17 +18247,25 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     routingHeaders,
     SYSTEM_IDS,
     SYSTEMS,
+    systemSecretFor,
     isSystemId,
     ROUTED_MODEL_ENV,
   } = await import("../src/acp/systems.js");
 
-  // The three answers the pinned adapters actually gave, measured 2026-08-25.
-  // Written out here so the matrix below is driven against reality rather than
-  // against whatever the table would like to be true.
+  // The four answers the pinned adapters actually gave — claude, codex and kimi
+  // measured 2026-08-25, opencode 2026-08-27. Written out here so the matrix below
+  // is driven against reality rather than against whatever the table would like to
+  // be true.
   const routings = {
     claude: { providerId: "main", supported: ["anthropic", "bedrock", "vertex"] },
     codex: { providerId: "custom-gateway", supported: ["openai"] },
     kimi: null,
+    // `agent/providers/list` answers `-32601 Method not found` on opencode
+    // 1.18.23, and `agentCapabilities` carries no `providers` marker — so
+    // `AcpClient.routing()` answers `null` and opencode can reach nothing it does
+    // not reach by itself. That is the whole reason `openrouter` names it as a
+    // `nativeHarness` rather than leaving it to the routed path.
+    opencode: null,
   } as const;
 
   /*
@@ -17883,16 +18295,40 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     "claude x moonshot: yes",
     "claude x zhipu: yes",
     "claude x minimax: yes",
+    // Routed, on the strength of OpenRouter serving an Anthropic-shaped endpoint
+    // beside its OpenAI-shaped one — probed 2026-08-27, both answer 401 in their
+    // own envelope. This is `moonshot`'s cell one column over.
+    "claude x openrouter: yes",
+    // Its endpoint is real and this row names none, so claude is refused by the
+    // same arm that refuses it Anthropic's: nothing here has an OpenAI-shaped
+    // door to route through.
+    "claude x zen: no",
     "kimi x anthropic: no",
     "kimi x openai: no",
     "kimi x moonshot: yes",
     "kimi x zhipu: no",
     "kimi x minimax: no",
+    "kimi x openrouter: no",
+    "kimi x zen: no",
     "codex x anthropic: no",
     "codex x openai: yes",
     "codex x moonshot: no",
     "codex x zhipu: no",
     "codex x minimax: no",
+    "codex x openrouter: no",
+    "codex x zen: no",
+    // opencode answers `null` to routing, so every cell but its own is the
+    // "only runs its own models" refusal — and its own is native, which needs no
+    // routing at all. Both halves of the row are the point: a fourth harness that
+    // reached a fifth system would mean `hostable` had stopped reading `supported`.
+    "opencode x anthropic: no",
+    "opencode x openai: no",
+    "opencode x moonshot: no",
+    "opencode x zhipu: no",
+    "opencode x minimax: no",
+    "opencode x openrouter: yes",
+    // The one it reaches with no credential at all.
+    "opencode x zen: yes",
   ]);
 
   /*
@@ -17941,6 +18377,142 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     authorization: "Bearer sekrit",
   });
   check("and a native system has none to send", routingHeaders("anthropic", "sekrit"), {});
+
+  /*
+   * ⚠ **The sixth row, and the two facts about it that only a probe could give.**
+   * Both were measured 2026-08-27 against the live endpoint and neither is
+   * derivable from anything else in this repository.
+   *
+   * The base URL is the one that fails *quietly* if it is wrong. The SDK appends
+   * `/v1/messages`, so a base carrying its own `/v1` reaches
+   * `openrouter.ai/api/v1/v1/messages`, which answers an **HTML 404 page** rather
+   * than a JSON error — a shape no error reader here recognises, arriving only
+   * once somebody has pasted a real key and started a real session.
+   */
+  check("the routed base for the sixth system carries no version segment", SYSTEMS.openrouter.baseUrl, "https://openrouter.ai/api");
+  check("and its key travels as a header like every other routed row", routingHeaders("openrouter", "sekrit"), {
+    authorization: "Bearer sekrit",
+  });
+
+  /*
+   * ⚠ **The prefix, both ways, because it is the one place a stored id is
+   * respelled.** opencode publishes `openrouter/qwen/qwen3-coder` for what the
+   * endpoint claude is routed at calls `qwen/qwen3-coder` — measured, 356 of the
+   * 362 models a keyed opencode publishes carry it. Everything stored and sent is
+   * the unprefixed spelling; `pinNativeModel` is what puts it back.
+   *
+   * The `null` half is the guard rather than the trivia: a system that grew a
+   * prefix it did not have would respell every id in the fleet at once.
+   */
+  check(
+    "which systems respell a native model id",
+    SYSTEM_IDS.filter((id) => SYSTEMS[id].nativeModelPrefix !== null).map(
+      (id) => `${id}: ${SYSTEMS[id].nativeModelPrefix ?? ""}`,
+    ),
+    // Both belong to opencode, which is the whole reason `allModels` divides a
+    // published list by prefix: one harness, two systems, one list holding both.
+    ["openrouter: openrouter/", "zen: opencode/"],
+  );
+  /*
+   * ⚠ **The two spellings are relatable and every other pair in this table is
+   * not.** Moonshot's two lists are different products on different endpoints
+   * with different billing — Q3.488 — and the refusal there is correct. Asserting
+   * the *absence* is what stops a later reader "tidying" a prefix onto that row
+   * and quietly claiming an equivalence nothing carries.
+   */
+  /*
+   * ⚠ **A system that is not routable must name the harness its credentials live
+   * on**, because the absent arm of that field draws a *system* key box — and a
+   * system credential is only ever spent in `providers/set` headers. On a row with
+   * no `baseUrl` it would be stored and never read: a control that accepts a
+   * secret and does nothing with it, which is worse than no control.
+   *
+   * Driven over the whole table rather than at the row that was wrong, because
+   * the next row added is the one that will get it wrong.
+   */
+  check(
+    "no system offers a key box it could never spend",
+    SYSTEM_IDS.filter((id) => SYSTEMS[id].baseUrl === null && SYSTEMS[id].loginVia === null),
+    [],
+  );
+  check(
+    "and no natively-reached system claims one it cannot honour",
+    SYSTEM_IDS.filter((id) => SYSTEMS[id].nativeModelPrefix !== null && SYSTEMS[id].nativeHarness === null),
+    [],
+  );
+  /*
+   * ⚠ **Which of a harness's variables belongs to *this* system, and it is only
+   * ever set where the harness reads more than one.** opencode takes a key for
+   * OpenRouter and a key for OpenCode Zen, so the settings screen for a system —
+   * which mounts that harness's card under the system's own name — drew **both**
+   * boxes under whichever heading you opened, one of them for an account that has
+   * nothing to do with the page. Every other harness reads exactly one variable,
+   * where `null` is the honest answer rather than a value: there is nothing to
+   * narrow, and a value there would be a second place for the same fact.
+   */
+  check(
+    "which systems name a key of their own",
+    SYSTEM_IDS.filter((id) => SYSTEMS[id].keyEnv !== null).map((id) => `${id}: ${SYSTEMS[id].keyEnv ?? ""}`),
+    ["openrouter: OPENROUTER_API_KEY", "zen: OPENCODE_API_KEY"],
+  );
+  /*
+   * ⚠ **And every one it names is a variable that harness actually reads.** A
+   * name matching nothing narrows the card to an empty list, and the client falls
+   * back to drawing them all — so the symptom of a typo here is the bug this
+   * field was added to fix, silently restored.
+   */
+  check(
+    "and each one is a variable its own harness reads",
+    SYSTEM_IDS.filter((id) => {
+      const named = SYSTEMS[id].keyEnv;
+      if (named === null) return false;
+      const harness = SYSTEMS[id].nativeHarness;
+      return harness === null || !credentialEnvNames(harness).includes(named);
+    }),
+    [],
+  );
+  /*
+   * ⚠ **And that name is what lets one key answer for two boxes.** Both secrets
+   * are the same string from the same account spent at the same host — the system
+   * row travels in `providers/set` headers, the agent row is merged into the
+   * native harness's environment — so a machine with one and not the other refused
+   * a start over a key it plainly had. `systemSecretFor` is the single answer to
+   * "is there a key for this system", read by `applySystem` **and** by
+   * `GET /systems`'s `keySet`: two readers of that question is how the picker came
+   * to offer a pairing the start then refused.
+   */
+  const held = (agent: string, envName: string, secret: string) => (a: AgentId) =>
+    a === agent ? { [envName]: secret } : {};
+  check(
+    "a stored system key wins, and its harness's key answers when there is none",
+    [
+      systemSecretFor("openrouter", "stored", held("opencode", "OPENROUTER_API_KEY", "borrowed")),
+      systemSecretFor("openrouter", null, held("opencode", "OPENROUTER_API_KEY", "borrowed")),
+      systemSecretFor("openrouter", null, () => ({})),
+    ],
+    ["stored", "borrowed", null],
+  );
+  /*
+   * ⚠ **And Moonshot may never borrow, which is the whole reason this is gated on
+   * `keyEnv` rather than on "the native harness has a key".** `KIMI_API_KEY` is a
+   * Kimi Code *subscription* at `api.kimi.com/coding`; `system_credentials.moonshot`
+   * is a pay-as-you-go key at `api.moonshot.ai`. Different product, different host,
+   * different billing — Q3.488 — so lending one to the other sends the wrong secret
+   * to the wrong endpoint and answers 401 with nothing on screen to explain it.
+   *
+   * Swept over the whole table rather than asserted at that row, because the next
+   * system added is the one that will get it wrong.
+   */
+  check(
+    "no system with a key of its own borrows one it was never offered",
+    SYSTEM_IDS.filter(
+      (id) =>
+        SYSTEMS[id].keyEnv === null &&
+        SYSTEMS[id].nativeHarness !== null &&
+        systemSecretFor(id, null, () => ({ KIMI_API_KEY: "x", ANTHROPIC_API_KEY: "x", CODEX_API_KEY: "x" })) !== null,
+    ),
+    [],
+  );
 
   /*
    * ⚠ **What a refusal *says*, which this driver pinned nowhere.** Everything
@@ -18063,9 +18635,20 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
         found.push(`names ${other}`);
       }
     }
-    // The harness half. Nothing this function returns names one today, and the
-    // assertion is what keeps the client's copy the only place that does.
-    for (const harness of harnesses) if (lower.includes(harness)) found.push(`names ${harness}`);
+    /*
+     * The harness half. Nothing this function returns names one, and the
+     * assertion is what keeps the client's copy the only place that does.
+     *
+     * ⚠ **Scanned with the subject's own display name taken out first**, because
+     * one vendor named its gateway after its CLI: `SYSTEMS.zen` is "OpenCode Zen"
+     * and every refusal about it necessarily contains "opencode". That is the
+     * provider's name, which a refusal is entitled to say — the rule is that a
+     * sentence must not reach for a *harness* to explain a *system*, and a name
+     * the vendor chose is not that. Removing only the subject keeps the rule
+     * whole: a sentence about Moonshot that said "opencode" still fails.
+     */
+    const scanned = lower.split(SYSTEMS[about].displayName.toLowerCase()).join(" ");
+    for (const harness of harnesses) if (scanned.includes(harness)) found.push(`names ${harness}`);
     return found;
   };
   check(
@@ -18082,6 +18665,43 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     "while the sentence that really shipped is caught, and by what",
     jargonIn("This agent accepts openai systems, and Moonshot is anthropic", "moonshot"),
     ["no full stop", "names anthropic", "names openai"],
+  );
+  /*
+   * ⚠ **The sixth id shares a four-character prefix with the second, and the test
+   * above is a plain `includes` rather than a word boundary.** So "OpenRouter can
+   * only be reached by the CLI it ships with." is one letter from being reported
+   * as naming OpenAI, and the OpenAI sentence is one letter from naming
+   * OpenRouter. Both directions, because a containment bug is directional and
+   * asserting one of them would leave the other.
+   *
+   * The display name is also a hair from `\bprovider(Id)?\b` — it is not the
+   * word, and it carries no slash, but neither fact is obvious enough to leave to
+   * a reader.
+   */
+  /*
+   * ⚠ **The carve-out is narrow, and this is what holds it there.** Taking the
+   * subject's name out must not become "harness names are allowed": a refusal
+   * about Moonshot that reached for a harness is still the failure the rule was
+   * written for, and a refusal about OpenCode Zen that named a *different*
+   * harness is too.
+   */
+  check(
+    "a harness name is still caught wherever it is not the provider's own",
+    [
+      jargonIn("Only opencode can run Moonshot models.", "moonshot"),
+      jargonIn("OpenCode Zen cannot be run by claude.", "zen"),
+      jargonIn("OpenCode Zen can only be reached by the CLI it ships with.", "zen"),
+    ],
+    [["names opencode"], ["names claude"], []],
+  );
+  check(
+    "and the two ids that share a prefix are not read as naming each other",
+    [
+      jargonIn("OpenRouter can only be reached by the CLI it ships with.", "openrouter"),
+      jargonIn("OpenAI can only be reached by the CLI it ships with.", "openai"),
+      jargonIn("This agent cannot run OpenRouter models.", "openrouter"),
+    ],
+    [[], [], []],
   );
 
   check("an id this daemon knows", isSystemId("moonshot"), true);
@@ -18715,6 +19335,51 @@ process.stdout.write("\nwhat an assembled session is launched as\n");
   ]);
   check("and says nothing in the transcript about a model it never asked the agent for", notices(routed.id), []);
 
+  /*
+   * `{opencode, openrouter, qwen/qwen3-coder}` — native, like the first column,
+   * and the only pairing in the fleet where the id that was **stored** is not the
+   * id that is **sent**.
+   *
+   * ⚠ **The published list here is spelled the way a real agent spells it.**
+   * Measured 2026-08-27: a keyed opencode publishes 356 ids under
+   * `openrouter/…`, while everything upstream of this — the picker, the route,
+   * the `custom_agents` row — carries the endpoint's own `qwen/qwen3-coder`. So
+   * the fixture offers only the prefixed spelling and the preset names only the
+   * bare one, which means the pin can only succeed by respelling and the cell
+   * would be green for the wrong reason if either half were written the same way.
+   *
+   * The "gone" cells are the other direction: a list that carries the *bare*
+   * spelling is a list this pairing must refuse, because that is not a name
+   * opencode answers to. Without it a respelling that quietly fell back to the
+   * unprefixed id would pass every cell above.
+   */
+  const prefixed = await column(
+    { harness: "opencode", system: "openrouter", model: "qwen/qwen3-coder" },
+    ["openrouter/qwen/qwen3-coder", "openrouter/z-ai/glm-5.3"],
+    ["qwen/qwen3-coder", "openrouter/z-ai/glm-5.3"],
+  );
+  check("a native pairing whose ids the harness respells", prefixed.lines, [
+    "start, offered:  opened config=[model-picker=openrouter/qwen/qwen3-coder] env=- routed=-",
+    "resume, offered: resumed config=[model-picker=openrouter/qwen/qwen3-coder] env=- routed=- notices=0",
+    "resume, gone:    (resumed) resumed config=[] env=- routed=- notices=1",
+    "start, gone:     SystemRoutingError opened config=[] env=- routed=- disposed=true",
+  ]);
+  /*
+   * ⚠ **The refusal names the spelling that was actually looked for.** Saying
+   * `"qwen/qwen3-coder"` here would be true of the store and useless on screen:
+   * the list beside it is prefixed, so a reader comparing the two would be looking
+   * for a string that was never going to be in it.
+   */
+  check("and its refusal names the id it asked for, not the one it was given", notices(prefixed.id).slice(-1), [
+    {
+      message:
+        'opencode has no model called "openrouter/qwen/qwen3-coder" — ' +
+        "it offers qwen/qwen3-coder, openrouter/z-ai/glm-5.3. " +
+        "The conversation was resumed anyway, running sonnet.",
+      model: "qwen/qwen3-coder",
+    },
+  ]);
+
   // Back to the state the block was left in, so nothing below inherits a fixture.
   published = { choices: [], current: "" };
 
@@ -18837,7 +19502,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
   ];
 
   const listed = await call(withSystems, "GET", "/systems");
-  check("every system is listed", listed.body.systems.length, 5);
+  check("every system is listed", listed.body.systems.length, 7);
   /*
    * ⚠ **The secret sweep is *below*, on the listing taken after a key is saved,
    * and it stood here for a release where it could not fail.** Nothing has been
@@ -19174,7 +19839,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
    * row holding `kimi`/`moonshot` — and a route that weighed the body's harness
    * against the stored system, or the stored harness against the body's system,
    * refuses it. That is the merge this route is written to make impossible, and
-   * the fifteen cells are where it would show.
+   * the twenty-eight cells are where it would show.
    */
   const editMatrix: string[] = [];
   for (const harness of AGENT_IDS) {
@@ -19201,19 +19866,36 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     "claude x moonshot: saved",
     "claude x zhipu: saved",
     "claude x minimax: saved",
+    "claude x openrouter: saved",
+    "claude x zen: incompatible_pairing",
     "kimi x anthropic: incompatible_pairing",
     "kimi x openai: incompatible_pairing",
     "kimi x moonshot: saved",
     "kimi x zhipu: incompatible_pairing",
     "kimi x minimax: incompatible_pairing",
+    "kimi x openrouter: incompatible_pairing",
+    "kimi x zen: incompatible_pairing",
     "codex x anthropic: incompatible_pairing",
     "codex x openai: saved",
     "codex x moonshot: incompatible_pairing",
     "codex x zhipu: incompatible_pairing",
     "codex x minimax: incompatible_pairing",
+    "codex x openrouter: incompatible_pairing",
+    "codex x zen: incompatible_pairing",
+    "opencode x anthropic: incompatible_pairing",
+    "opencode x openai: incompatible_pairing",
+    "opencode x moonshot: incompatible_pairing",
+    "opencode x zhipu: incompatible_pairing",
+    "opencode x minimax: incompatible_pairing",
+    // The route's own copy of the cell above, and the reason this sweep exists
+    // beside the pure one: `readAssembledAgent` reaches for `asks.capabilities`
+    // before it weighs the pairing, and opencode's honest answer there is
+    // `routing: null` — which the native arm never consults.
+    "opencode x openrouter: saved",
+    "opencode x zen: saved",
   ]);
 
-  // Fifteen edits later, with six of them landing, the two fields the wire never
+  // Twenty-eight edits later, with nine of them landing, the two fields the wire never
   // named are still the ones the row was born with.
   const restored = await call(withSystems, "PATCH", `/custom-agents/${preset}`, {
     name: "Claude Code · K2",
@@ -19222,7 +19904,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     model: "kimi-k2-thinking",
   });
   check(
-    "editing: the id and the age came through all fifteen",
+    "editing: the id and the age came through all twenty-eight",
     [restored.body.customAgent.id, restored.body.customAgent.createdAt],
     [preset, born],
   );

@@ -281,9 +281,18 @@ const store = docker(["run", "--rm", "--entrypoint", "sh", IMAGE, "-c", "ls /app
  * daemon-only. Anchoring `zod@` to stop `diff` matching `diff-sequences` narrowed
  * this one at the same time, which is the shape of regression a tightened pattern
  * makes: it fails by going *greener*.
+ *
+ * **`opencode` is the heaviest of the lot and is a family rather than a name.**
+ * `opencode-ai` is a shim whose postinstall unpacks one platform executable —
+ * measured, 144 MB — chosen from twelve optional dependencies named
+ * `opencode-<os>-<arch>[-musl][-baseline]`. On this machine the store holds
+ * `opencode-ai@1.18.23` and `opencode-darwin-arm64@1.18.23`; in the image it
+ * would be a linux pair. The optional group is why the arm is a pattern: naming
+ * only `opencode-ai@` would pass while a quarter-gigabyte of agent rode in beside
+ * it, which is `@openai`'s lesson one paragraph up.
  */
 const daemonOnly = store.filter((k) =>
-  /^(@agentclientprotocol|@anthropic-ai|@modelcontextprotocol|@openai)|^(zod|zod-to-json-schema|diff|open|vscode-jsonrpc)@/.test(
+  /^(@agentclientprotocol|@anthropic-ai|@modelcontextprotocol|@openai)|^(zod|zod-to-json-schema|diff|open|vscode-jsonrpc)@|^opencode(-[a-z0-9-]+)?@/.test(
     k,
   ),
 );

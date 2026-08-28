@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type * as acp from "@agentclientprotocol/sdk";
 import { AgentUnavailableError, type AgentId } from "./acp/agents.js";
-import type { SystemId } from "./acp/systems.js";
+import { SYSTEMS, type SystemId } from "./acp/systems.js";
 import { resolveCwd } from "./browse.js";
 import {
   MemoryEventStore,
@@ -38,6 +38,7 @@ import { probeExists } from "./stall.js";
 import type { SessionRuntime } from "./runtime/types.js";
 import {
   isAuthRequiredMessage,
+  isSessionClosed,
   ResumeUnsupportedError,
   Session,
   SessionForgottenError,
@@ -604,7 +605,7 @@ export function withUltracode(config: AgentConfig, agent: AgentId, on: boolean):
  * which collapses a placeholder onto the concrete row it duplicates and moves the
  * selection with it. Nothing an agent offers uniquely is ever dropped.
  */
-function snapshotConfig(config: AgentConfig): AgentConfig {
+function snapshotConfig(config: AgentConfig, namespace: string | null): AgentConfig {
   return {
     modes:
       config.modes === null
@@ -617,7 +618,10 @@ function snapshotConfig(config: AgentConfig): AgentConfig {
               description: null,
             })),
           },
-    options: config.options.map(dedupeAliasChoices).map((option) => ({
+    options: config.options
+      .map(dedupeAliasChoices)
+      .map((option) => narrowToSystem(option, namespace))
+      .map((option) => ({
       ...option,
       // The option's own description is kept too, and it is short — "AI model to
       // use", "Available effort levels for this model", one per control rather
@@ -651,6 +655,42 @@ function snapshotConfig(config: AgentConfig): AgentConfig {
       })),
     })),
   };
+}
+
+/**
+ * A session pinned to one system is offered that system's models and no others.
+ *
+ * ⚠ **Reported twice from the app, the second time after a fix that only grouped
+ * them.** opencode is the native side of *two* systems and publishes **one** model
+ * control holding both catalogues — 356 `openrouter/…` and six `opencode/…`. A
+ * session assembled as OpenRouter therefore offered six OpenCode Zen models at the
+ * bottom of its own picker, and choosing one left the session running a model from
+ * a system its preset does not name: the chip, the tile and the glyph all go on
+ * saying OpenRouter. That is Q2.216's dishonesty reached through the model menu
+ * rather than through a preset edit.
+ *
+ * **The namespace is the pairing's, not the current value's**, which is the whole
+ * reason this is on the daemon. The browser holds an `AgentConfigOption` off a
+ * snapshot and knows nothing about systems; deriving the namespace from whatever
+ * model is selected right now would trap a session that had already been switched
+ * to the wrong one — it would then be offered only the wrong one, for ever.
+ *
+ * ⚠ **The selected choice is never removed**, whatever namespace it is in. A model
+ * list missing the value the control is set to makes `chipValue` fall back to a raw
+ * id, and makes `pinNativeModel` refuse the next resume with "has no model called
+ * …" — so a session already switched by hand keeps a way back to itself rather than
+ * being cut adrift by a fix.
+ *
+ * Narrow twice: `category === "model"` only, since no other control's values are
+ * namespaced; and only where `nativeModelPrefix` is set, which is opencode's two
+ * systems and nothing else. Every other agent's list is returned by identity.
+ */
+export function narrowToSystem(option: AgentConfigOption, namespace: string | null): AgentConfigOption {
+  if (namespace === null || option.category !== "model") return option;
+  const kept = option.choices.filter(
+    (choice) => choice.value === option.value || choice.value.startsWith(namespace),
+  );
+  return kept.length === option.choices.length ? option : { ...option, choices: kept };
 }
 
 /** Bounded, because it now rides a record `GET /sessions` returns sixty of. */
@@ -2049,7 +2089,10 @@ export class ManagedSession {
         this.contextUsageState === null
           ? null
           : { ...this.contextUsageState, cost: this.contextUsageState.cost && { ...this.contextUsageState.cost } },
-      agentConfig: snapshotConfig(withUltracode(this.snapshotConfigSource, this.agent, this.ultracodeWanted)),
+      agentConfig: snapshotConfig(
+        withUltracode(this.snapshotConfigSource, this.agent, this.ultracodeWanted),
+        this.modelNamespace,
+      ),
       commandsRevision: this.commandsRevisionValue,
       // The derived floor rather than the raw `firstSeq`. A client reads this as
       // "the lowest seq this daemon still has", and the raw value is 0 when the
@@ -2242,6 +2285,22 @@ export class ManagedSession {
      */
     if (one.harness !== this.agent) return {};
     return { system: one.system, model: one.model };
+  }
+
+  /**
+   * The model-id prefix this session's own system spells, or `null`.
+   *
+   * `null` for a bare harness, for a routed pairing — where the agent's list is
+   * the harness's own and nothing namespaces it — and for every system that sets
+   * no `nativeModelPrefix`, which is all of them but opencode's two. Read through
+   * {@link assembled}, so a preset re-pointed at another harness answers `null`
+   * here for the same reason it answers no system there.
+   */
+  private get modelNamespace(): string | null {
+    const system = this.assembled.system;
+    if (system === undefined) return null;
+    const spec = SYSTEMS[system];
+    return spec.nativeHarness === this.agent ? spec.nativeModelPrefix : null;
   }
 
   /**
@@ -3497,7 +3556,16 @@ export class ManagedSession {
         this.record({ type: "turn_end", stopReason: "cancelled", usage: null });
         return;
       }
+      let errored = false;
       for await (const event of session.prompt(text, extra)) {
+        /*
+         * Read before the record, so a store that throws cannot also lose the fact
+         * that this turn is ending in a failure — and **not every error is one.**
+         * The turn generator yields `CLOSED` when the queue closes under it, which
+         * is this daemon disposing the agent rather than the agent failing; writing
+         * `agent_error` there would blame the agent for a teardown we performed.
+         */
+        errored = event.type === "error" && !isSessionClosed(event);
         // A recording fault must not unwind this loop. Doing so would call
         // gen.return(), aborting the agent's turn — and force-cancelling a
         // permission a human may be walking to their phone to approve, then
@@ -3507,6 +3575,32 @@ export class ManagedSession {
         } catch {
           // Already degraded inside the store; nothing useful to do here.
         }
+      }
+      /*
+       * ⚠ **A turn that ended in an error still ended, and for four releases it
+       * did not say so.**
+       *
+       * `Session.prompt` converts a rejected `session/prompt` into an `error`
+       * event and returns on it, exactly as it returns on a `turn_end` — so the
+       * turn was over and nothing on the wire marked the boundary. Four prompts,
+       * three `turn_end`s, in a log anybody could read.
+       *
+       * The argument is Q2.103's, already made for the cancel path a hundred lines
+       * up: the daemon writes the end itself because the agent never gets to, and
+       * a prompt with no turn end at all is the shape this codebase calls a message
+       * that reached no model. What it actually cost: `Tail.taskFloor` keys on this
+       * event, so a turn that failed mid-delegation left its pending calls counted
+       * for ever under a permanent "waiting for 1 task"; the `turn.ended` plugin
+       * hook never fanned; and the turn's origin claim was never spent, so the
+       * plugin that started it had the *next* turn's hook suppressed instead.
+       *
+       * Not recorded while stopping, and for `record`'s own reason: the generator's
+       * synthetic "session closed" error is dropped there as a deliberate shutdown
+       * rather than a failure, and an end for an error nobody was told about would
+       * be the same misreport arriving one event later.
+       */
+      if (errored && !this.stopRequested) {
+        this.record({ type: "turn_end", stopReason: "agent_error", usage: null });
       }
     } catch (error) {
       failed = true;

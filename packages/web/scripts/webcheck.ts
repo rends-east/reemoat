@@ -139,7 +139,9 @@ const {
   chipParts,
   chipReserve,
   chipValue,
+  choiceLabel,
   configProse,
+  drawnChoices,
   contextHint,
   contextPercent,
   drawnControls,
@@ -2684,10 +2686,17 @@ process.stdout.write("\nthe agent config bar reads categories, not ids\n");
    * synthesizes this control as `/effort` on both agents, off the same category —
    * said another, one tap apart.
    *
-   * Narrow on purpose. `model` and `mode` are the same word on both agents, so
-   * there is nothing to reconcile and the agent's own name stands; an unknown
-   * category has no second opinion at all. Overriding a name we have no better
-   * version of is how a client starts inventing vocabulary.
+   * Narrow on purpose, and the table has exactly the entries a measurement put
+   * there. `model` is `Model` on all four agents, so there is nothing to reconcile
+   * and the agent's own name stands; an unknown category has no second opinion at
+   * all. Overriding a name we have no better version of is how a client starts
+   * inventing vocabulary.
+   *
+   * `mode` is the second entry and it arrived with the fourth agent. Measured
+   * 2026-08-27: claude and kimi publish `Mode` and opencode publishes
+   * `Session Mode` for the identical control — a second word on the one chip that
+   * spends width on its name *and* its value, on a phone, for a control reached
+   * for several times an hour.
    */
   const effortOf = (options: typeof claude) =>
     labelFor(options.find((o) => o.category === "thought_level") as never);
@@ -2695,15 +2704,322 @@ process.stdout.write("\nthe agent config bar reads categories, not ids\n");
     "Effort",
     "Effort",
   ]);
-  check("a control the agents already agree about keeps its own name", [
+  check(
+    "a control every agent already agrees about keeps its own name",
     labelFor(claude[1] as never),
+    "Model",
+  );
+  check("and the mode control is one word on all four", [
+    labelFor(claude[0] as never),
     labelFor(kimi[2] as never),
-  ], ["Model", "Mode"]);
+    labelFor({ category: "mode", name: "Session Mode" }),
+  ], ["Mode", "Mode", "Mode"]);
   check(
     "and so does one nobody has a second word for",
     labelFor({ category: "unheard_of", name: "Whatever" }),
     "Whatever",
   );
+  /*
+   * The negative control that makes the one above mean something: this table is
+   * keyed on the *category* and never on the string, so the same words under a
+   * category nobody has reconciled are left exactly as the agent said them.
+   */
+  check(
+    "and the reconciliation is by category, not by recognising the words",
+    labelFor({ category: "unheard_of", name: "Session Mode" }),
+    "Session Mode",
+  );
+
+  /* ---------------------------------------------------------------- *
+   * What one choice is called
+   *
+   * ⭐ Three surfaces name a choice — the chip, the control's menu row and the
+   * `/` menu's second stage — and each held its own copy of
+   * `override?.label ?? choice.name`. `choiceLabel` is the one place now, and it
+   * carries the second half too: measured 2026-08-27, claude publishes `Auto`,
+   * `Manual`, `Accept Edits`; kimi publishes `Default`, `Plan`, `Auto`, `YOLO`;
+   * opencode publishes `build` and `plan`. One list, Title Case on three agents
+   * and lower case on the fourth.
+   * ---------------------------------------------------------------- */
+  const modeChoice = (value: string, name: string) => ({ value, name, description: null, group: null });
+  check(
+    "a mode an agent published in lower case is drawn with a capital",
+    [
+      choiceLabel({ category: "mode" }, modeChoice("build", "build")),
+      choiceLabel({ category: "mode" }, modeChoice("plan", "plan")),
+    ],
+    ["Build", "Plan"],
+  );
+  check(
+    "and one that already has one is untouched, letter for letter",
+    [
+      choiceLabel({ category: "mode" }, modeChoice("yolo", "YOLO")),
+      choiceLabel({ category: "mode" }, modeChoice("acceptEdits", "Accept Edits")),
+      choiceLabel({ category: "mode" }, modeChoice("plan", "Plan Mode")),
+    ],
+    ["YOLO", "Accept Edits", "Plan Mode"],
+  );
+  /*
+   * The cases where there is no upper case to reach for. All one branch, because
+   * the test is against the character itself rather than a category of character:
+   * "there is no upper case of this" and "this is already upper case" are the same
+   * answer, so a digit, a bracket and an emoji need no arm of their own.
+   */
+  check(
+    "and a name with no capital to give is returned as it came",
+    [
+      choiceLabel({ category: "mode" }, modeChoice("a", "")),
+      choiceLabel({ category: "mode" }, modeChoice("b", "3.5-turbo")),
+      choiceLabel({ category: "mode" }, modeChoice("c", "(default)")),
+      choiceLabel({ category: "mode" }, modeChoice("d", "\u{1f680} launch")),
+    ],
+    ["", "3.5-turbo", "(default)", "\u{1f680} launch"],
+  );
+  /*
+   * ⚠ **Only `mode`.** A model's name is a proper noun somebody else owns —
+   * `gpt-5.6-sol` is not improved by a capital — and every agent that publishes an
+   * effort control, opencode included, already capitalises its levels. Narrowing
+   * this the way `chipValue` narrows its own rule to `model` is what keeps one
+   * measured disagreement from becoming a client that cases everything it is told.
+   */
+  check(
+    "and no other category is cased at all",
+    [
+      choiceLabel({ category: "model" }, modeChoice("gpt-5.6-sol", "gpt-5.6-sol")),
+      choiceLabel({ category: "thought_level" }, modeChoice("low", "low")),
+      choiceLabel({ category: "unheard_of" }, modeChoice("x", "whatever")),
+      choiceLabel({ category: null }, modeChoice("y", "whatever")),
+    ],
+    ["gpt-5.6-sol", "low", "whatever", "whatever"],
+  );
+  /*
+   * And the one rename outranks the casing, so `default` keeps the answer
+   * `choiceOverride` measured for it rather than being capitalised into a word
+   * that still says nothing.
+   */
+  check(
+    "a value this client does rename is renamed, not merely capitalised",
+    [
+      choiceLabel({ category: "thought_level" }, modeChoice("default", "Default")),
+      choiceLabel({ category: "mode" }, modeChoice("default", "default")),
+    ],
+    ["Adaptive", "Default"],
+  );
+
+  /* ---------------------------------------------------------------- *
+   * A prefix every row repeats is no prefix at all
+   *
+   * ⭐ Reported from the app: "opencode models are added to the openrouter models
+   * at the bottom". Measured 2026-08-27 off the live log — opencode publishes ONE
+   * model control with 362 choices, `group: null` on every one: 356 named
+   * `OpenRouter/<model>` and then six named `OpenCode Zen/<model>`. Two accounts,
+   * two keys, one undivided list, and the word `OpenRouter` printed 356 times in
+   * front of the only part of each row that differs.
+   *
+   * ⭐ Reported next, of the menu that produced: "take out the *OpenCode Zen* line
+   * and the others". The heading is gone and the shortening stayed — and the
+   * condition had to tighten with it, which is what most of this section is about.
+   * With a heading, a prefix agreed across one namespace could be cut because the
+   * heading put it back; with nowhere to put it back, only a prefix **every row of
+   * the control** carries may be removed, since that is the only text whose removal
+   * cannot make two rows read alike.
+   *
+   * ⚠ This is NOT the per-vendor split that was built and removed by name
+   * (Q3.507). That divided one provider's catalogue into 38 groups by parsing
+   * vendors out of ids; this removes a word the agent itself repeated on every row.
+   * ---------------------------------------------------------------- */
+  const choice = (value: string, name: string, group: string | null = null) => ({
+    value,
+    name,
+    description: null,
+    group,
+  });
+  /*
+   * One provider's catalogue, which is what a session's model control actually
+   * holds: `narrowToSystem` on the daemon cuts the list down to the system that
+   * session routes through before it is ever published.
+   */
+  const openrouterModels = [
+    choice("openrouter/aion-labs/aion-2.0", "OpenRouter/Aion-2.0"),
+    choice("openrouter/anthropic/claude-opus-4.7-fast", "OpenRouter/Claude Opus 4.7 Fast"),
+    choice("openrouter/qwen/qwen3-coder", "OpenRouter/Qwen3 Coder"),
+  ];
+  check(
+    "a provider every row repeats comes out of every row",
+    drawnChoices({ choices: openrouterModels } as never).map((one: { name: string }) => one.name),
+    ["Aion-2.0", "Claude Opus 4.7 Fast", "Qwen3 Coder"],
+  );
+  check(
+    "and the value — what is stored, sent and pinned — is untouched",
+    drawnChoices({ choices: openrouterModels } as never).map((one: { value: string }) => one.value),
+    openrouterModels.map((one) => one.value),
+  );
+  /*
+   * ⚠ **Nothing here derives a heading, and this is the assertion that says so.**
+   * The provider was lifted into `group` for one release. It is not any more: what
+   * this function may do to a control is make its names shorter, and a `group` that
+   * did not arrive from the agent is a heading this client invented.
+   */
+  check(
+    "and no heading is derived from it",
+    drawnChoices({ choices: openrouterModels } as never).map((one: { group: string | null }) => one.group),
+    [null, null, null],
+  );
+  /*
+   * ⭐ The tightening, and the reason the heading could not simply be dropped from
+   * the old rule. opencode's raw 362 hold two providers; cutting each of them
+   * against its own namespace and drawing no heading would run `Big Pickle` in with
+   * 356 OpenRouter models under nothing at all — which is the report this whole
+   * section started from, arriving back by the other door.
+   */
+  const bothProviders = [...openrouterModels, choice("opencode/big-pickle", "OpenCode Zen/Big Pickle")];
+  check(
+    "two providers in one control leave every name exactly as the agent wrote it",
+    drawnChoices({ choices: bothProviders } as never).map((one: { group: string | null; name: string }) => [
+      one.group,
+      one.name,
+    ]),
+    [
+      [null, "OpenRouter/Aion-2.0"],
+      [null, "OpenRouter/Claude Opus 4.7 Fast"],
+      [null, "OpenRouter/Qwen3 Coder"],
+      [null, "OpenCode Zen/Big Pickle"],
+    ],
+  );
+  /*
+   * The `every` guard, which is the whole of the safety: one row that does not
+   * split turns the rule off for the control, so a list can never divide into
+   * "the prefixed ones and the rest".
+   */
+  check(
+    "one row without a provider turns the rule off for the whole control",
+    drawnChoices({ choices: [...openrouterModels, choice("other/bare", "Bare")] } as never).map(
+      (one: { name: string }) => one.name,
+    ),
+    ["OpenRouter/Aion-2.0", "OpenRouter/Claude Opus 4.7 Fast", "OpenRouter/Qwen3 Coder", "Bare"],
+  );
+  check(
+    "and an agent that grouped its own list keeps its grouping, and its names",
+    drawnChoices({
+      choices: [choice("a", "OpenRouter/A", "Theirs"), choice("b", "OpenRouter/B", "Theirs")],
+    } as never).map((one: { group: string | null; name: string }) => [one.group, one.name]),
+    [
+      ["Theirs", "OpenRouter/A"],
+      ["Theirs", "OpenRouter/B"],
+    ],
+  );
+  /*
+   * Measured against the live agents: no model, mode or effort name on claude,
+   * kimi or codex carries a separator, so none of their lists is touched. Asserted
+   * by **identity**, which is also what makes the memo on the array sound — a rule
+   * that is off must hand back the array it was given.
+   */
+  {
+    const ordinary = [
+      choice("opus[1m]", "Opus (1M context)"),
+      choice("sonnet", "Sonnet"),
+      choice("gpt-5.6-sol", "GPT-5.6-Sol"),
+    ];
+    check("no other agent's list is touched, by identity", drawnChoices({ choices: ordinary } as never) === ordinary, true);
+    check(
+      "and neither is a list with nothing in it",
+      drawnChoices({ choices: [] } as never).length,
+      0,
+    );
+  }
+  /*
+   * The separator's edges. A head or a tail that is empty after trimming is not a
+   * provider and a name, it is a name with a slash in it.
+   */
+  check(
+    "a name that only looks split is left whole",
+    [
+      drawnChoices({ choices: [choice("p/a", "/leading")] } as never)[0]?.name,
+      drawnChoices({ choices: [choice("p/b", "trailing/")] } as never)[0]?.name,
+      drawnChoices({ choices: [choice("p/c", "/")] } as never)[0]?.name,
+      drawnChoices({ choices: [choice("p/d", " / ")] } as never)[0]?.name,
+    ],
+    ["/leading", "trailing/", "/", " / "],
+  );
+  check(
+    "spaces around the separator are the writer's, not the reader's",
+    drawnChoices({ choices: [choice("opencode/big-pickle", "OpenCode Zen / Big Pickle")] } as never).map(
+      (one: { group: string | null; name: string }) => [one.group, one.name],
+    ),
+    [[null, "Big Pickle"]],
+  );
+  /*
+   * The **first** separator, so a provider that writes one into its own model
+   * names keeps it. Nothing in opencode's 362 does — checked — but splitting on
+   * the last would make that a silent difference rather than a decision.
+   */
+  check(
+    "the first separator is the provider and everything after it is the model",
+    drawnChoices({
+      choices: [choice("openrouter/qwen/qwen3-coder", "OpenRouter/qwen/Qwen3 Coder")],
+    } as never).map((one: { group: string | null; name: string }) => [one.group, one.name]),
+    [[null, "qwen/Qwen3 Coder"]],
+  );
+
+  /* ---------------------------------------------------------------- *
+   * ⭐ The two things this must not become
+   *
+   * Q3.503 built a per-vendor split of one provider's catalogue and took it back
+   * out; Q3.507 rejected cutting at the first `/` by name, because such a cut
+   * "would survive the rename and go on cutting, including a slash that belonged
+   * to the model". Both are prevented by the same pair of tests rather than by a
+   * threshold: only a list the agent *routes* on is touched at all, and then only
+   * where every row of it agrees on the prefix.
+   * ---------------------------------------------------------------- */
+  check(
+    "a vendor-shaped list inside ONE provider is one provider, not thirty-eight groups",
+    drawnChoices({
+      choices: [
+        choice("openrouter/qwen/qwen3-coder", "qwen/Qwen3 Coder"),
+        choice("openrouter/openai/gpt-5", "openai/GPT-5"),
+        choice("openrouter/anthropic/claude-opus-5", "anthropic/Claude Opus 5"),
+      ],
+    } as never).map((one: { group: string | null; name: string }) => [one.group, one.name]),
+    [
+      [null, "qwen/Qwen3 Coder"],
+      [null, "openai/GPT-5"],
+      [null, "anthropic/Claude Opus 5"],
+    ],
+  );
+  check(
+    "and one row of a provider spelling its label differently leaves the whole control alone",
+    drawnChoices({
+      choices: [
+        choice("openrouter/a/one", "OpenRouter/One"),
+        choice("openrouter/b/two", "Open Router/Two"),
+      ],
+    } as never).map((one: { group: string | null; name: string }) => [one.group, one.name]),
+    [
+      [null, "OpenRouter/One"],
+      [null, "Open Router/Two"],
+    ],
+  );
+  check(
+    "a value with no namespace to route on is left alone however its name reads",
+    drawnChoices({ choices: [choice("big-pickle", "OpenCode Zen/Big Pickle")] } as never).map(
+      (one: { group: string | null; name: string }) => [one.group, one.name],
+    ),
+    [[null, "OpenCode Zen/Big Pickle"]],
+  );
+  /*
+   * ⚠ **A value that is a namespace and nothing else is not one.** `openrouter/`
+   * and `/model` are the two ends of `namespaced`, and both are the shape a value
+   * takes when something upstream has half-written it.
+   */
+  check(
+    "a value that is all namespace and no model does not count as routed",
+    [
+      drawnChoices({ choices: [choice("openrouter/", "OpenRouter/One")] } as never)[0]?.name,
+      drawnChoices({ choices: [choice("/gpt-5", "OpenRouter/Two")] } as never)[0]?.name,
+    ],
+    ["OpenRouter/One", "OpenRouter/Two"],
+  );
+
 
   /*
    * Which chips say their own name, and which are identified without it.
@@ -4062,7 +4378,7 @@ process.stdout.write("\nwhat a call site may append to a shared class string\n")
 
 process.stdout.write("\nthe composer's command menu\n");
 {
-  const { slashQuery, buildCommands, filterCommands, completion, configChoices, typeableName, commandScope, typedConfigCommand } =
+  const { slashQuery, buildCommands, filterCommands, completion, configChoices, choiceRuns, typeableName, commandScope, typedConfigCommand } =
     await import("../src/ui/commands.js");
 
   /*
@@ -4678,6 +4994,91 @@ process.stdout.write("\nthe composer's command menu\n");
     } as never),
     [],
   );
+
+  /* ---------------------------------------------------------------- *
+   * The second stage names what the chip names, and adds no heading
+   *
+   * ⭐ One control drawn two ways a keystroke apart. `ChoiceSection` has drawn a
+   * heading whenever `choice.group` changed since it existed; this list had no
+   * `group` field at all, so opencode's 356 `OpenRouter/…` rows and six
+   * `OpenCode Zen/…` ones ran together here while the chip's menu separated them.
+   * Both draw one thing now, and the thing they draw carries no heading of this
+   * client's: the repeated provider comes out of the names and nothing puts it
+   * back, which is what was asked for a release after the headings shipped.
+   *
+   * The fixture holds one provider because a session's control does —
+   * `narrowToSystem` cuts the published list down to the system that session
+   * routes through before this ever sees it.
+   * ---------------------------------------------------------------- */
+  {
+    const models = option("model", "model", {
+      value: "openrouter/z-ai/glm-5.3-flash",
+      choices: [
+        { value: "openrouter/aion-labs/aion-2.0", name: "OpenRouter/Aion-2.0", description: null, group: null },
+        { value: "openrouter/z-ai/glm-5.3-flash", name: "OpenRouter/GLM 5.3 Flash", description: null, group: null },
+        { value: "openrouter/qwen/qwen3-coder", name: "OpenRouter/Qwen3 Coder", description: null, group: null },
+      ],
+    });
+    const rows = configChoices(models as never);
+    check(
+      "the typed menu names the model and never the provider every row came from",
+      rows.map((row) => [row.group, row.label]),
+      [
+        [null, "Aion-2.0"],
+        [null, "GLM 5.3 Flash"],
+        [null, "Qwen3 Coder"],
+      ],
+    );
+    check(
+      "and the values it would send are the agent's own, untouched",
+      rows.map((row) => row.value),
+      ["openrouter/aion-labs/aion-2.0", "openrouter/z-ai/glm-5.3-flash", "openrouter/qwen/qwen3-coder"],
+    );
+    /*
+     * ⚠ The runs are markup only: a `listbox` may hold `option`s and `group`s and
+     * nothing else, so a heading between rows has to be a wrapper. What must not
+     * move is the **flat** index — the arrow keys, `aria-activedescendant` and the
+     * scroll effect all count in the unwrapped list, so a row's position is its
+     * position in `choices` and never in its run.
+     */
+    check(
+      "a model list with no heading of the agent's own is one run, renumbering nothing",
+      choiceRuns(rows).map((run) => [run.group, run.items.map((item) => item.index)]),
+      [[null, [0, 1, 2]]],
+    );
+    check(
+      "an ungrouped list is one run, so the markup is what it always was",
+      choiceRuns(configChoices(option("mode", "mode") as never)).map((run) => [
+        run.group,
+        run.items.length,
+      ]),
+      [[null, 1]],
+    );
+    check(
+      "and nothing at all is no runs rather than one empty one",
+      choiceRuns([]).length,
+      0,
+    );
+    /*
+     * Consecutive, never gathered. A heading that reappeared after another one
+     * would be a second run — the list's own order decides, because reordering an
+     * agent's list to tidy the headings is this client deciding what order the
+     * agent meant.
+     */
+    check(
+      "a heading that comes back after another one is a second run",
+      choiceRuns([
+        { value: "a", label: "A", description: null, group: "One" },
+        { value: "b", label: "B", description: null, group: "Two" },
+        { value: "c", label: "C", description: null, group: "One" },
+      ]).map((run) => [run.group, run.items.map((item) => item.index)]),
+      [
+        ["One", [0]],
+        ["Two", [1]],
+        ["One", [2]],
+      ],
+    );
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -5431,6 +5832,54 @@ process.stdout.write("\nchip labels\n");
     choices: [{ value: "sonnet", name: "Sonnet", description: "Sonnet 5 · Efficient for routine tasks", group: null }],
   });
   check("and a picked one names it too", chipValue(modelPicked), "Sonnet 5");
+
+  /*
+   * ⭐ The chip reads the **drawn** list, so it says what its own menu row says.
+   * opencode writes the provider into every one of 362 model names; the chip has
+   * room for about eleven characters, and it spent all of them on `OpenRouter…`
+   * while the row one tap below said which model it was.
+   */
+  const opencodeChip = opt({
+    category: "model",
+    value: "openrouter/anthropic/claude-opus-4.7-fast",
+    choices: [
+      { value: "openrouter/aion-labs/aion-2.0", name: "OpenRouter/Aion-2.0", description: null, group: null },
+      {
+        value: "openrouter/anthropic/claude-opus-4.7-fast",
+        name: "OpenRouter/Claude Opus 4.7 Fast",
+        description: null,
+        group: null,
+      },
+      { value: "openrouter/qwen/qwen3-coder", name: "OpenRouter/Qwen3 Coder", description: null, group: null },
+    ],
+  });
+  check("a chip names the model rather than the provider it came from", chipValue(opencodeChip), "Claude Opus 4.7 Fast");
+  /*
+   * ⚠ **And the shortening is off where two providers are in one list**, which the
+   * chip is the loudest place to see: with nothing to put the removed word back
+   * into, a chip reading `Big Pickle` beside 356 OpenRouter models would name a row
+   * from a catalogue nobody chose. `narrowToSystem` keeps a session out of this
+   * state; the chip does not rely on it having.
+   */
+  check(
+    "and it carries the whole name where the list holds two of them",
+    chipValue(
+      opt({
+        category: "model",
+        value: "openrouter/anthropic/claude-opus-4.7-fast",
+        choices: [
+          {
+            value: "openrouter/anthropic/claude-opus-4.7-fast",
+            name: "OpenRouter/Claude Opus 4.7 Fast",
+            description: null,
+            group: null,
+          },
+          { value: "opencode/big-pickle", name: "OpenCode Zen/Big Pickle", description: null, group: null },
+        ],
+      }),
+    ),
+    "OpenRouter/Claude Opus 4.7 Fast",
+  );
   check(
     "a qualifier like \"with 1M context\" is left to the menu",
     chipValue(opt({
@@ -6385,6 +6834,22 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
     seq = 0;
     const unknown = buildTail([...spawn(), ended("max_tokens")], []);
     check("and a reason this client has never heard of cuts", unknown.taskFloor > 0, true);
+    /*
+     * ⚠ **Drawn nowhere and counted here**, which is the pair worth pinning
+     * together: `taskFloor` runs before the `showsInTranscript` gate, so the end
+     * the daemon writes for a failed turn cuts the delegations that turn started
+     * even though nothing about it reaches the screen. Without the floor a turn
+     * that died mid-delegation left "waiting for 1 task" under the transcript for
+     * the rest of the session.
+     */
+    seq = 0;
+    const failed = buildTail([...spawn(), ended("agent_error")], []);
+    check("a turn that ended in an error abandons what it started too", failed.taskFloor > 0, true);
+    check(
+      "so nothing is left waiting on work that stopped when the turn did",
+      outstandingTasks(failed.rows, failed.taskFloor).length,
+      0,
+    );
   }
 
   {
@@ -7573,6 +8038,19 @@ process.stdout.write("\nwhat the transcript refuses to draw\n");
     "but a turn that did not finish is",
     ["max_tokens", "refusal", "cancelled"].map((reason) => drawn({ type: "turn_end", stopReason: reason })),
     [true, true, true],
+  );
+  /*
+   * ⭐ The **second** reason with no row, and silent for the opposite argument to
+   * `end_turn`'s. The daemon writes `agent_error` for a turn that ended in an
+   * `error` — it had written nothing at all, so four prompts produced three ends —
+   * and the row immediately above it is that error, in the agent's own words. A
+   * line under it saying the turn ended states one fact twice, the second time
+   * worse. What it must still do is cut `taskFloor`, asserted beside it.
+   */
+  check(
+    "and a turn the agent rejected is not, because the error above it already said so",
+    drawn({ type: "turn_end", stopReason: "agent_error" }),
+    false,
   );
   // Handled by their own node kinds long before this is reached; answered honestly
   // anyway, so this reads as a statement about the union rather than the leftovers.
@@ -9566,7 +10044,15 @@ process.stdout.write("\nthe routes that spawn a process\n");
       id,
       name: id,
       description: null,
-      category: id,
+      /*
+       * The id doubles as the category, which is fine for `mode` and `model` and
+       * was wrong for the one that matters: the agents call this control `effort`
+       * and `thinking` and ACP calls the category `thought_level`, so a fixture
+       * keyed on the id alone described a control `drawnControls` has never heard
+       * of — and the test named "a control the model dropped keeps its slot" was
+       * therefore not about the effort control at all.
+       */
+      category: id === "effort" ? "thought_level" : id,
       kind: "select" as const,
       value: "a",
       choices: [{ value: "a", name: "A", description: null, group: null }],
@@ -9621,6 +10107,16 @@ process.stdout.write("\nthe routes that spawn a process\n");
    * **iff** what is on screen did not come from the daemon's current answer — so
    * a bar that is not marked stale is never drawing a memory.
    */
+  /*
+   * The id of the slot `drawnControls` synthesizes for an effort control that was
+   * never published — see `NO_LEVELS`. Not exported from the module, and pinned
+   * here against the function's own answer rather than restated from memory: the
+   * string itself is a contract with nobody, but *that it is namespaced* is one,
+   * since `unavailable` is keyed on ids and a collision would draw a live control
+   * as an absent one.
+   */
+  const ABSENT_EFFORT = "reemoat:thought_level";
+
   const drawnFrom = (status: string, options: string[] | null, held: string[] | null) =>
     drawnControls(
       { status, agentConfig: options === null ? undefined : config(options) } as never,
@@ -9638,7 +10134,7 @@ process.stdout.write("\nthe routes that spawn a process\n");
       drawnFrom("idle", ["mode"], ["mode"]).options.map((o: { id: string }) => o.id),
       drawnFrom("idle", ["mode"], ["mode"]).stale,
     ],
-    [["mode"], false],
+    [["mode", ABSENT_EFFORT], false],
   );
   check(
     "and one it has dropped is added after them, marked",
@@ -9646,7 +10142,7 @@ process.stdout.write("\nthe routes that spawn a process\n");
       drawnFrom("idle", ["mode"], ["old"]).options.map((o: { id: string }) => o.id),
       [...drawnFrom("idle", ["mode"], ["old"]).unavailable],
     ],
-    [["mode", "old"], ["old"]],
+    [["mode", "old", ABSENT_EFFORT], ["old", ABSENT_EFFORT]],
   );
   check(
     "a live agent with nothing to offer draws nothing, and is not stale",
@@ -9659,7 +10155,7 @@ process.stdout.write("\nthe routes that spawn a process\n");
       drawnFrom("interrupted", [], ["mode", "model"]).options.map((o: { id: string }) => o.id),
       drawnFrom("interrupted", [], ["mode", "model"]).stale,
     ],
-    [["mode", "model"], true],
+    [["mode", "model", ABSENT_EFFORT], true],
   );
   check(
     "an absent agent with nothing remembered draws nothing rather than claiming staleness",
@@ -9688,10 +10184,17 @@ process.stdout.write("\nthe routes that spawn a process\n");
         shows: configBarShows(step.options.length, null, true),
       });
     }
+    /*
+     * ⭐ **The synthesized slot is on every frame, and the first draft had it on
+     * only one.** It cannot reach `held` — `holdConfig` merges what the *daemon*
+     * published — so a slot invented on the live branch alone vanished for the
+     * length of every restart and took its neighbours' positions with it, which is
+     * this very sequence's complaint arriving through the fix for another one.
+     */
     check("across a whole restart the same controls stay on screen", drawn, [
-      { ids: ["mode", "model"], stale: true, shows: true },
-      { ids: ["mode", "model"], stale: true, shows: true },
-      { ids: ["mode", "model"], stale: false, shows: true },
+      { ids: ["mode", "model", ABSENT_EFFORT], stale: true, shows: true },
+      { ids: ["mode", "model", ABSENT_EFFORT], stale: true, shows: true },
+      { ids: ["mode", "model", ABSENT_EFFORT], stale: false, shows: true },
     ]);
   }
 
@@ -9737,6 +10240,127 @@ process.stdout.write("\nthe routes that spawn a process\n");
       kept,
     );
     check("a session with no agent reports nothing unavailable", [away.stale, [...away.unavailable]], [true, []]);
+
+
+    /* ---------------------------------------------------------------- *
+     * And the same fact in the other shape: never published at all
+     *
+     * ⭐ claude and kimi *withdraw* the effort control when the model has no
+     * levels, which is the block above. opencode never publishes one for such a
+     * model in the first place — so the identical fact arrived as an absence, and
+     * the right-hand cluster had three chips on one session and two on the next.
+     *
+     * Measured 2026-08-27 against opencode 1.18.23 with one OpenRouter key and
+     * 362 models: `session/set_config_option` on the model answers with a
+     * `thought_level` for `openai/gpt-5.6` and `~anthropic/claude-sonnet-latest`,
+     * and without one for `minimax/minimax-m3` and `deepseek/deepseek-r1`. So the
+     * sentence this draws is a description of the agent, one model apart, rather
+     * than a client guessing about a control it has never seen.
+     * ---------------------------------------------------------------- */
+    const opencode = drawnControls(
+      { status: "idle", agentConfig: config(["mode", "model"]) } as never,
+      undefined,
+    );
+    check(
+      "an agent that never published an effort control gets the slot anyway",
+      [opencode.options.map((option) => option.id), [...opencode.unavailable], opencode.stale],
+      [["mode", "model", ABSENT_EFFORT], [ABSENT_EFFORT], false],
+    );
+    check(
+      "the synthesized slot is namespaced, so no agent could have published it",
+      [ABSENT_EFFORT.startsWith("reemoat:"), opencode.options.at(-1)?.category],
+      [true, "thought_level"],
+    );
+    check(
+      "and it says the one thing that is true about it",
+      unavailableHint(opencode.options.at(-1) as never),
+      "The model in use offers no levels here. Another model may.",
+    );
+    /*
+     * It has to be *empty*, and that is what keeps it out of the `/` menu:
+     * `buildCommands` skips a select with nothing in it — asserted in the command
+     * section — so there is no `/effort` row that opens onto zero choices and eats
+     * what somebody typed. `Composer` passes the raw `agentConfig` there rather
+     * than this, so the placeholder never reaches it at all; both halves hold.
+     */
+    check(
+      "it carries nothing to choose, so it can neither be tapped nor typed",
+      [opencode.options.at(-1)?.kind, opencode.options.at(-1)?.choices.length],
+      ["select", 0],
+    );
+    check(
+      "it sits in the right-hand cluster after the model, where a real one sits",
+      splitOptions(opencode.options).right.map((option) => option.id),
+      ["model", ABSENT_EFFORT],
+    );
+    /*
+     * The width invariant `ChipParts` exists for, applied to the row this client
+     * invents: a chip that reserves a different width from a real effort control
+     * would move every button beside it on exactly the sessions this fix is for.
+     */
+    check(
+      "and reserves the same width as an effort control the agent did publish",
+      chipParts(opencode.options.at(-1) as never, false),
+      chipParts(config(["effort"]).options[0] as never, false),
+    );
+    /*
+     * The one refusal that stands: an agent that published nothing at all is
+     * already the sentence "this agent has no controls", and a strip that is not
+     * drawn cannot have a slot missing from it. A *memory*, by contrast, keeps the
+     * slot — asserted in the restart sequence above, where leaving it out is what
+     * moved the buttons.
+     */
+    check(
+      "a live agent offering nothing still offers nothing",
+      drawnFrom("idle", [], ["mode"]).options.length,
+      0,
+    );
+    check(
+      "and neither does a session with no agent and nothing remembered",
+      [drawnFrom("exited", [], null).options.length, drawnFrom("exited", [], null).stale],
+      [0, false],
+    );
+    /*
+     * A select the agent published with nothing in it is the same absence with a
+     * chip in front of it. Left out of `unavailable` it drew as a live `Select`
+     * onto a heading with no rows under it — a control that opens, says nothing and
+     * closes, which is the dead end `commands.ts` refuses to make a command of.
+     * It also has to be counted here for the effort slot's own test to be sound:
+     * an empty `thought_level` would otherwise suppress the placeholder and put
+     * that dead menu in its place.
+     */
+    {
+      const hollow = {
+        modes: null,
+        options: [
+          { id: "mode", name: "Mode", description: null, category: "mode", kind: "select" as const, value: "a", choices: [{ value: "a", name: "A", description: null, group: null }] },
+          { id: "effort", name: "Effort", description: null, category: "thought_level", kind: "select" as const, value: "", choices: [] },
+        ],
+      };
+      const empty = drawnControls({ status: "idle", agentConfig: hollow } as never, undefined);
+      check(
+        "a select published with nothing in it is drawn as having nothing to choose",
+        [empty.options.map((option) => option.id), [...empty.unavailable]],
+        [["mode", "effort"], ["effort"]],
+      );
+    }
+    /*
+     * And it must never double up. The withdrawn control above already occupies
+     * the category, so the test is on the *drawn* set rather than the live one —
+     * written the other way round, an agent that dropped its effort control would
+     * have shown two Effort chips side by side, one with the levels it used to
+     * offer and one saying there are none.
+     */
+    check(
+      "a withdrawn effort control is not joined by a synthesized one",
+      drawn.options.filter((option) => option.category === "thought_level").map((option) => option.id),
+      ["effort"],
+    );
+    check(
+      "and neither is a live one",
+      after.options.filter((option) => option.category === "thought_level").map((option) => option.id),
+      ["effort"],
+    );
 
     check(
       "the hint names the kind of control it is about",
@@ -12813,6 +13437,7 @@ process.stdout.write("\na login transcript, read as steps\n");
 process.stdout.write("\nwhat one agent's card says\n");
 {
   const {
+    agentBadge,
     agentLabel,
     agentStance,
     tokenBlockFor,
@@ -12825,6 +13450,8 @@ process.stdout.write("\nwhat one agent's card says\n");
     dividerWord,
     multiSlotLine,
   } = await import("../src/ui/agentCard.js");
+  const { AGENT_IDS } = await import("../src/wire.js");
+  const agentCardRaw = readFileSync(new URL("../src/ui/agentCard.ts", import.meta.url), "utf8");
 
   /*
    * ⚠ **The program, not the company and not the model.** "Claude" was wrong in a
@@ -12834,11 +13461,177 @@ process.stdout.write("\nwhat one agent's card says\n");
    */
   check(
     "a harness is named as the program it is, not its package or its model",
-    [agentLabel("claude"), agentLabel("kimi"), agentLabel("codex")],
-    ["Claude Code", "Kimi Code", "Codex"],
+    AGENT_IDS.map((id) => agentLabel(id)),
+    // Swept over the union rather than listed, so a fifth harness is a failure
+    // here rather than a row this file forgot to name.
+    //
+    // ⚠ **`Opencode` is capitalised and its binary is not**, which is the split
+    // this table exists to make: the vendor writes it lowercase everywhere it is a
+    // name for a machine — the executable, the package, the `agentInfo.name` it
+    // answers `initialize` with, every id stored and sent — and none of those is
+    // touched. Here it is read as a word, at the start of sentences and in a row
+    // beside three product names, and it was the only entry that looked like an
+    // unformatted id.
+    ["Claude Code", "Kimi Code", "Codex", "Opencode"],
+  );
+  /*
+   * ⚠ **And none of them falls through to the id.** `AGENT_LABEL` is a
+   * `Record<string, string>` with a `?? id` fallback, so a harness nobody added a
+   * label for renders as its own id and reads *almost* right — `opencode` did
+   * exactly that, and would have passed the check above with no entry at all,
+   * because for a release the chosen label and the fallback were the same six
+   * letters. Capitalising it removed that particular coincidence; this check is
+   * what covers the next one, since it asks the table rather than the output.
+   */
+  check(
+    "and every one of them was named on purpose rather than falling through",
+    AGENT_IDS.filter((id) => !/\bAGENT_LABEL[\s\S]*?\}/.test(agentCardRaw) || !agentCardRaw.includes(`  ${id}: `)),
+    [],
   );
   // A fourth agent from a newer daemon still renders — as its id, never blank.
   check("an unknown agent still has a name", agentLabel("newthing"), "newthing");
+
+  /*
+   * ⚠ **An agent with nothing to sign in to says so, and says it as good news.**
+   * Measured: opencode runs against an empty `XDG_DATA_HOME` with no provider
+   * variables at all, so `loggedIn` is `null` and every other reading of that
+   * value is wrong here — "cannot check" describes a probe that failed, "not
+   * signed in" describes a gap, and there is neither. The whole point is that
+   * somebody stops looking for a sign-in button that should not exist.
+   *
+   * Driven over both credential states, because a key changes what such an agent
+   * can *reach* and never whether it runs — so the answer must not move.
+   */
+  check(
+    "an agent with no sign-in is a state of its own, whatever it holds",
+    [
+      agentStance(true, null, "no_flow"),
+      agentStance(true, true, "no_flow"),
+      agentBadge(agentStance(true, null, "no_flow")),
+    ],
+    // `null`, not a quieter badge: every other one reports a state somebody may
+    // have to act on, and this reports the absence of one. Under a tile in a row of
+    // three agents that *are* reporting something, it read as an answer to a
+    // question nobody asked. Whether the state could have been probed is
+    // deliberately not distinguished — that is `unchecked`'s job and it is a real
+    // gap, which this is not.
+    ["no_login", "no_login", null],
+  );
+  /*
+   * And the reading it replaces, unchanged for everyone else: `null` from an
+   * agent that *does* have a sign-in is still "cannot check", which is kimi's
+   * permanent and correct answer. The blocked reasons that are about the **host**
+   * must not trip it — those agents would sign in if they could.
+   */
+  check(
+    "while the three reasons that are about the host leave the state alone",
+    (["no_script", "no_cli", "interactive_pty", null, undefined] as const).map((b) =>
+      agentStance(true, null, b),
+    ),
+    ["unchecked", "unchecked", "unchecked", "unchecked", "unchecked"],
+  );
+  check(
+    "and every state draws exactly one badge, or none where there is nothing to report",
+    (["not_installed", "no_login", "signed_in", "signed_out", "unchecked"] as const).map((one) => {
+      const badge = agentBadge(one);
+      return badge === null ? `${one}: none` : `${one}: ${badge.tone}/${badge.text}`;
+    }),
+    [
+      "not_installed: strong/not installed",
+      "no_login: none",
+      "signed_in: plain/signed in",
+      "signed_out: strong/not signed in",
+      "unchecked: plain/cannot check",
+    ],
+  );
+  /*
+   * ⚠ **And it is the *only* one that draws none**, which is what stops "say
+   * nothing" spreading to the state it is one word away from. `unchecked` is an
+   * agent that has a sign-in and could not be asked about it — a real gap, and a
+   * badge. `no_login` is an agent with nothing to ask about.
+   */
+  check(
+    "and it is the only state that draws none",
+    (["not_installed", "no_login", "signed_in", "signed_out", "unchecked"] as const).filter(
+      (one) => agentBadge(one) === null,
+    ),
+    ["no_login"],
+  );
+  /*
+   * ⚠ **The sentence is the other half, and it must not read as an apology.** The
+   * screen's own rule is that a refusal names a remedy; here there is nothing to
+   * remedy, so what it owes instead is what the control below it is *for* — the
+   * key box stays drawn, and a box with no stated purpose is the furniture this
+   * screen keeps deleting.
+   */
+  const noLoginLine = stanceLine("opencode", "no_login", false, "darwin");
+  check(
+    "and its sentence says nothing is missing, and what the box below is for",
+    [
+      noLoginLine !== null,
+      /can't|cannot|couldn't|only way in|isn't installed/i.test(noLoginLine ?? ""),
+      /key/i.test(noLoginLine ?? ""),
+    ],
+    [true, false, true],
+  );
+  /*
+   * The key box stays. `no_login` is the one state where it is not a remedy —
+   * nothing is broken — and hiding it would hide the only control this agent has.
+   */
+  check("and the key box is still offered", tokenBlockFor("no_login", 0), "editable");
+
+  /*
+   * ⚠ **And *two* screens draw this now, off the same call, because for a release
+   * they did not.** `NewSession.tsx` kept a private four-state ladder of its own —
+   * `available`, then `loggedIn`, then a word this file has never seen — so an
+   * agent that needs no sign-in was labelled with a probe that failed, and kimi
+   * was told two different things two taps apart on the same machine. Nothing
+   * caught it: `agentCard.ts` is driven exhaustively and the copy was in a `.tsx`
+   * no driver read for its vocabulary.
+   *
+   * Asserted as source text, and there is no other way to assert it: a placement
+   * is not a value, which is `plugin-ui.md`'s standing reason for reading a file
+   * off disk. Three claims — that the private ladder is gone, that the shared call
+   * is what replaced it, and that the daemon's own reason is what feeds it rather
+   * than a boolean re-derived here.
+   */
+  const newSessionRaw = readFileSync(new URL("../src/ui/NewSession.tsx", import.meta.url), "utf8");
+  check(
+    "the New session tiles hold no vocabulary of their own",
+    [
+      /function agentStatusText/.test(newSessionRaw),
+      /return "state unknown"/.test(newSessionRaw),
+      newSessionRaw.includes(
+        "agentStance(candidate.available, candidate.loggedIn, candidate.login?.blocked)",
+      ),
+    ],
+    [false, false, true],
+  );
+  /*
+   * ⚠ **And the sign-in door on that screen is shut for an agent that has none.**
+   * Read off `blocked` rather than off the stance, and the difference is not
+   * cosmetic: `agentStance` tests `!available` *first*, so a not-installed
+   * opencode is `not_installed` and never `no_login` — which is the one state that
+   * reaches this button at all. Gating on the stance would have been a no-op that
+   * looked like a fix.
+   *
+   * ⚠ **It is one named function now, and both halves are pinned.** The test was
+   * written out at the button and something subtly different decided *which* agent
+   * the button was about — which stopped being survivable the moment a signed-out
+   * harness lost its tile, because the fallback naming the agent and the gate
+   * drawing the wizard are then the only way onto that screen's sign-in at all. A
+   * fallback that names an agent the gate declines to draw for is an empty row, no
+   * door, and nothing saying why.
+   */
+  check(
+    "and it offers no sign-in to an agent that has none",
+    [
+      /candidate\.login\?\.blocked !== "no_flow"/.test(newSessionRaw),
+      newSessionRaw.includes("{harness !== null && signInOffered(harness) && machineId !== null && ("),
+      newSessionRaw.includes("(agents.find(signInOffered) ?? agents[0] ?? null)"),
+    ],
+    [true, true, true],
+  );
 
   /*
    * The two axes are **not** one boolean. `available` is the adapter;
@@ -12863,16 +13656,26 @@ process.stdout.write("\nwhat one agent's card says\n");
    * in, and the block that hid then contained the only caller of
    * `clearCredential` in this package.
    */
-  const stances = ["not_installed", "signed_in", "signed_out", "unchecked"] as const;
+  /*
+   * ⚠ **All five, and `no_login` was missing from this list while it was pinned
+   * pointwise three lines further down.** A member added to a union and not to the
+   * fixture that sweeps it is a member every one of these sweeps is silent about —
+   * which is the shape of the defect that put a private four-state ladder on the
+   * New session tiles in the first place.
+   */
+  const stances = ["not_installed", "no_login", "signed_in", "signed_out", "unchecked"] as const;
   check(
     "a saved key is never hidden, whatever the stance",
     stances.map((stance) => tokenBlockFor(stance, 1) === "hidden"),
-    [false, false, false, false],
+    [false, false, false, false, false],
   );
   check(
     "and nothing is typeable where nothing could help",
     stances.map((stance) => tokenBlockFor(stance, 0)),
-    ["hidden", "hidden", "editable", "editable"],
+    // `no_login` is editable and it is the one state where the box is not a
+    // remedy: nothing is broken, and a key buys *more models* rather than
+    // admission. Hiding it would hide the only control that agent has.
+    ["hidden", "editable", "hidden", "editable", "editable"],
   );
 
   /* The two commonest states say nothing at all: the badge says it and the
@@ -12903,7 +13706,13 @@ process.stdout.write("\nwhat one agent's card says\n");
   const JARGON =
     /\bPATH\b|_KEY|_TOKEN|session\/new|-32000|~\/|\.json\b|daemon|adapter|CLI\b|stdin|env\b|API key from the|npm |pnpm /;
   const sentences: string[] = [];
-  for (const id of ["claude", "kimi", "codex"]) {
+  /*
+   * Every agent, not the three that existed when this was written: the newest
+   * member of both unions is the one no pointwise assertion has yet been written
+   * for, so a sweep that names its subjects by hand goes quiet exactly where it is
+   * needed. `AGENT_IDS` is the union itself.
+   */
+  for (const id of AGENT_IDS) {
     for (const stance of stances) {
       for (const can of [true, false]) {
         const line = stanceLine(id, stance, can);
@@ -12963,10 +13772,46 @@ process.stdout.write("\nwhat one agent's card says\n");
   /* An "or" is only drawn when there is something on both sides of it. */
   check(
     "the divider says what it separates",
-    [dividerWord(true, "editable"), dividerWord(false, "editable"), dividerWord(true, "stored_only"), dividerWord(true, "hidden")],
+    [
+      dividerWord("signed_out", true, "editable"),
+      dividerWord("signed_out", false, "editable"),
+      dividerWord("signed_out", true, "stored_only"),
+      dividerWord("signed_out", true, "hidden"),
+    ],
     ["or", "Sign in with a key instead", "Saved keys", null],
   );
+  /*
+   * ⚠ **And "instead" needs a first option**, which one agent has none of. It
+   * drew `Sign in with a key instead` over an agent with no sign-in at all, with
+   * nothing above the line for the key to be instead *of* — the same defect the
+   * `or` arm is guarded against, in the arm that had never needed guarding because
+   * until there was a fourth agent there was always a sign-in above it.
+   *
+   * Swept over the whole block table rather than asserted at the one value, so
+   * "there is nothing to divide" cannot come back through `stored_only`.
+   */
+  check(
+    "and an agent with nothing to sign in to gets no divider at all",
+    (["editable", "stored_only", "hidden"] as const).flatMap((block) => [
+      dividerWord("no_login", true, block),
+      dividerWord("no_login", false, block),
+    ]),
+    [null, null, null, null, null, null],
+  );
   check("claude is the only agent told it has a choice", multiSlotLine("claude", 1), null);
+  /*
+   * ⚠ **And the caveat that duplicated the sentence above it is gone.** opencode's
+   * said a key was not needed to get started — true, measured, and exactly what
+   * `stanceLine` says one line higher on the same card. This one is drawn **per
+   * slot**, so on the one agent that has two it appeared twice, under two
+   * different keys, saying the same thing about neither. Asserted as an absence
+   * because the string is what came back twice.
+   */
+  check(
+    "an agent that needs no key at all carries no caveat, and the one that does still warns",
+    [credentialCaveat("opencode", false), credentialCaveat("claude", true), credentialCaveat("codex", true) !== null],
+    [null, null, true],
+  );
 }
 
 /* ------------------------------------------------------------------ *
@@ -21519,6 +22364,8 @@ process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
    * device where no hand-off exists to be told about it.
    */
   const { offeredHere } = await import("../src/ui/NewSession.js");
+  const { startsBare } = await import("../src/ui/agentCard.js");
+  const { AGENT_IDS } = await import("../src/wire.js");
   const harness = (id: string, available: boolean): unknown => ({ id, available, version: null, path: null });
   const installed = [harness("claude", true), harness("codex", false)] as never;
   const presets = [{ id: "ca_1", name: "Kimi Code", harness: "claude", system: "moonshot", model: "m", createdAt: 0 }] as never;
@@ -21560,6 +22407,58 @@ process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
     null,
   );
   check("and nothing chosen offers nothing", offeredHere(null, installed, presets), null);
+
+  /* ---------------------------------------------------------------- *
+   * ⭐ A harness that is not a whole answer on its own
+   *
+   * Reported: "remove opencode from the defaults — it is not a standalone agent,
+   * you have to pick a model for it." Three of the four harnesses *are* the model
+   * — Claude Code runs Claude, Kimi Code runs Kimi, Codex runs GPT — and tapping
+   * one is a complete decision. opencode is a router: started bare it picks
+   * `opencode/big-pickle` off its own free tier, which is a model nobody chose
+   * under a tile that names none.
+   *
+   * ⚠ This is **not** the "an unavailable harness stays, disabled, saying why"
+   * rule two checks up. That one is about an agent the machine cannot run. This
+   * one runs perfectly and has no answer for *which model* — and the control that
+   * does is the `+` in the same row.
+   * ---------------------------------------------------------------- */
+  const withOpencode = [harness("claude", true), harness("opencode", true)] as never;
+  /*
+   * ⚠ **Swept over the union rather than listed**, for the reason this file gives
+   * everywhere else it sweeps: a fifth harness has to arrive as a decision here
+   * rather than as a silent `true`. What is pinned is the *count* and the member,
+   * so adding one that is also a router is a green sweep and a red member check.
+   */
+  check(
+    "exactly one harness is not a starting point on its own",
+    AGENT_IDS.filter((id: string) => !startsBare(id)),
+    ["opencode"],
+  );
+  check(
+    "and every other one is",
+    AGENT_IDS.filter((id: string) => startsBare(id)).length,
+    AGENT_IDS.length - 1,
+  );
+  check(
+    "so a bare pick of it is not offered, however installed and available it is",
+    offeredHere({ kind: "harness", id: "opencode" }, withOpencode, presets),
+    null,
+  );
+  /*
+   * ⚠ **Paired with a model it is offered like anything else**, which is the whole
+   * distinction: what is refused is the *bare* harness, never the harness. A
+   * preset assembled on it is a complete answer and this must not touch it.
+   */
+  check(
+    "while a preset assembled on it is offered exactly as any other is",
+    offeredHere(
+      { kind: "custom", id: "ca_oc" },
+      withOpencode,
+      [{ id: "ca_oc", name: "Big Pickle", harness: "opencode", system: "zen", model: "big-pickle", createdAt: 0 }] as never,
+    ),
+    { kind: "custom", id: "ca_oc" },
+  );
   /*
    * ⚠ **An unread listing offers nothing, and that is the deliberate half.**
    * `null` is the loading state, and answering "yes, still offered" over it would
@@ -21572,6 +22471,99 @@ process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
     "and a listing that has not answered offers nothing at all",
     [offeredHere(pickHarness, null, presets), offeredHere(pickCustom, installed, null), offeredHere(pickHarness, null, null)],
     [null, null, null],
+  );
+
+  /* ---------------------------------------------------------------- *
+   * ⭐ A row of agents you can start, rather than a row of status reports
+   *
+   * Reported: "take *signed in* off Claude Code, Kimi Code and the rest — and they
+   * should not be in the picker on the new session screen at all if they are not
+   * signed in." Two halves of one rule, and the second is what makes the first
+   * obvious: with every tile in the row startable, `signed in` is a fact true of
+   * everything visible, and a fact true of everything identifies nothing.
+   *
+   * ⚠ This is **not** the "an unavailable harness stays, disabled, saying why"
+   * rule, which this replaces on this screen and nowhere else: the settings card
+   * still draws all five states with all five badges, because that screen is *about*
+   * the states. What moved is which of them belongs in a picker.
+   * ---------------------------------------------------------------- */
+  const { offersTile, agentStance: stanceOf } = await import("../src/ui/agentCard.js");
+  /*
+   * ⚠ **Swept over all five states, and the three that stay are the point.**
+   * `unchecked` is the load-bearing one: it is kimi's **permanent** answer —
+   * `AGENT_LOGIN.kimi.status` is null, so `loggedIn` is never anything else — and
+   * it is what claude answers when a probe times out. Hiding on it would delete
+   * kimi from this screen on every machine in the fleet and make a slow probe look
+   * like an uninstall. A sixth state has to arrive here as a decision.
+   */
+  check(
+    "two states of five keep an agent out of the picker, and they are the two that cannot start",
+    (["not_installed", "no_login", "signed_in", "signed_out", "unchecked"] as const).map((one) => [
+      one,
+      offersTile(one),
+    ]),
+    [
+      ["not_installed", false],
+      ["no_login", true],
+      ["signed_in", true],
+      ["signed_out", false],
+      ["unchecked", true],
+    ],
+  );
+  /*
+   * ⚠ **And a stored pick is weighed the same way**, which is the half that has
+   * gone wrong every time this screen has changed what it draws: a pick of a
+   * harness the row no longer draws leaves `Start` live over a row with nothing
+   * selected in it. Signing out on the machine is a new way into exactly that
+   * state, and it needs no second device to reach — the agent goes stale under a
+   * tab that is already open.
+   */
+  const signedIn = (id: string, loggedIn: boolean | null) => ({
+    id,
+    available: true,
+    version: null,
+    path: null,
+    loggedIn,
+  });
+  const fleet = [signedIn("claude", true), signedIn("kimi", null), signedIn("codex", false)] as never;
+  check(
+    "a signed-in harness is offered, one that cannot say is offered, one that is signed out is not",
+    [
+      offeredHere({ kind: "harness", id: "claude" }, fleet, presets),
+      offeredHere({ kind: "harness", id: "kimi" }, fleet, presets),
+      offeredHere({ kind: "harness", id: "codex" }, fleet, presets),
+    ],
+    [{ kind: "harness", id: "claude" }, { kind: "harness", id: "kimi" }, null],
+  );
+  /*
+   * ⚠ **A preset is exempt, and deliberately.** An assembled agent is a harness
+   * plus a system plus a model, and it starts on the *system's* saved key — a
+   * different credential in a different table, and the one the daemon actually
+   * checks. Hiding it because its CLI is signed out would hide the agents that
+   * need a CLI sign-in least.
+   */
+  check(
+    "while a preset on a signed-out harness is offered exactly as before",
+    offeredHere(
+      { kind: "custom", id: "ca_ok" },
+      fleet,
+      [{ id: "ca_ok", name: "GPT", harness: "codex", system: "openai", model: "m", createdAt: 0 }] as never,
+    ),
+    { kind: "custom", id: "ca_ok" },
+  );
+  /*
+   * The two rules are independent and both are needed: opencode is perfectly
+   * signed in and still has no tile, claude is a whole answer and still has none
+   * while it is signed out. Neither implies the other, which is why the row asks
+   * both through one function.
+   */
+  check(
+    "and the two rules do not stand in for each other",
+    [
+      startsBare("opencode") && offersTile(stanceOf(true, null, "no_flow")),
+      startsBare("claude") && offersTile(stanceOf(true, false)),
+    ],
+    [false, false],
   );
 
   /*
@@ -21592,20 +22584,257 @@ process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
   const builderSrc = stripComments(readFileSync(new URL("../src/ui/AgentBuilder.tsx", import.meta.url), "utf8"));
   const slice = (text: string, from: string, to: string): string => {
     const start = text.indexOf(from);
-    return start === -1 ? "" : text.slice(start, text.indexOf(to, start + from.length));
+    if (start === -1) return "";
+    /*
+     * ⚠ **A missing *terminator* is the failure this line exists for.** Without
+     * it `indexOf` answers `-1`, `slice(start, -1)` returns the whole rest of the
+     * file bar one character, and the found-guard below — which tests `length > 0`
+     * — goes green over a slice that has quietly stopped being about anything.
+     * Every negative assertion made over it then reports a hit from somewhere else
+     * entirely. Measured: renaming the anchor this section ends at swallowed
+     * `DirectoryPicker`'s two `disabled:opacity-40` buttons, 300 lines below, and
+     * the failure named the agent strip.
+     */
+    const end = text.indexOf(to, start + from.length);
+    return end === -1 ? "" : text.slice(start, end);
   };
   const sheet = slice(newSessionSrc, "export function StartSheet", "\nfunction NewSession");
   const chosenNow = slice(newSessionSrc, "const picked =", ";\n");
   const settled = slice(newSessionSrc, ".agents()", ".catch(");
   const adoption = slice(newSessionSrc, "const removed = takeRemoval(selected);", "}, [selected, agentsEpoch]);");
   const footer = slice(newSessionSrc, "<div className={SHEET_FOOT}>", "</div>\n    </div>");
-  const strip = slice(newSessionSrc, "function AgentStrip(", "\nfunction agentStatusText");
+  const strip = slice(newSessionSrc, "function AgentStrip(", "\nfunction MachineLine");
   // The same guard the section above states: a slice that came back empty is a
   // rename, and every assertion over it would pass while asserting nothing.
+  const stripRow = slice(strip, 'className="flex w-max gap-2"', "</div>\n        </div>");
+  const stripRail = slice(strip, '<div aria-hidden className="pointer-events-none', "</div>");
   check(
     "every slice this section is about was actually found",
-    [sheet, chosenNow, settled, adoption, footer, strip, builderSrc].map((one) => one.length > 0),
-    [true, true, true, true, true, true, true],
+    [sheet, chosenNow, settled, adoption, footer, strip, stripRow, stripRail, builderSrc].map(
+      (one) => one.length > 0,
+    ),
+    [true, true, true, true, true, true, true, true, true],
+  );
+
+  /* ---------------------------------------------------------------- *
+   * ⭐ The `+` is the row's last item, not a thing pinned beside the row
+   *
+   * Reported twice. It sat outside the scroller and overlapped the last tile;
+   * asked for as an item in the row, refused once on arithmetic, and asked for
+   * again — so it is inside now, and the docblock carries the cost rather than
+   * the refusal. A source assertion because a placement has no type: what it
+   * pins is that the one control this app has for opening the builder is a
+   * child of the scrolling row and not a sibling of it.
+   * ---------------------------------------------------------------- */
+  check("the add-an-agent control is inside the row that scrolls", stripRow.includes("onAssemble"), true);
+  /*
+   * ⚠ **Not sticky, and that is an assertion rather than an omission.** It was
+   * `sticky right-0` for one revision — inside the track, and painted at the
+   * scrollport's right edge at every scroll position, so it still *looked* pinned.
+   * That was the complaint, stated a third time. The row's last item is a row's
+   * last item: you scroll to it.
+   */
+  check("and it is an ordinary item you scroll to, not one painted at the edge", stripRow.includes("sticky"), false);
+  /*
+   * ⚠ **The wheel handler is the half that makes any of this reachable with a
+   * mouse**, and both details in it are the kind that fail silently. `passive:
+   * false` is why it cannot be a JSX `onWheel` — React attaches that one passive,
+   * so `preventDefault` is swallowed and the page scrolls instead — and the
+   * non-trapping guard is what keeps a cursor resting over a 64px strip from
+   * eating the page's own scroll at either end of the row.
+   */
+  check(
+    "a wheel moves the row, non-passively, and hands the gesture back at the ends",
+    [
+      strip.includes('addEventListener("wheel"'),
+      strip.includes("{ passive: false }"),
+      strip.includes("if (next === box.scrollLeft) return;"),
+    ],
+    [true, true, true],
+  );
+  /*
+   * ⚠ **The two widths the docblock's whole arithmetic rests on, and neither was
+   * pinned.** `w-11` is where every recovered pixel of the third tile comes from
+   * (Q3.510 took the `+` from 112px to 44), and `w-28` is the tile the row is
+   * measured in. Both are load-bearing numbers written in a class string, which is
+   * the one place a compiler cannot reach them.
+   */
+  check(
+    "the button is a 44px pill and the tiles are 112px, which is what the arithmetic is about",
+    [stripRow.includes("w-11"), strip.includes("w-28")],
+    [true, true],
+  );
+  /*
+   * ⚠ **The row is built from the filtered list, and the tile prints no status.**
+   * Both halves read off disk for this section's stated reason — a placement and an
+   * empty string are not values a driver can be handed — and both are the shape of
+   * the report rather than its wording: one list, filtered once, and a line that is
+   * blank rather than a line that is conditional. `agentBadge` is gone from this
+   * file entirely, which is the assertion that says the words were removed rather
+   * than hidden behind a flag.
+   */
+  check(
+    "the strip draws the agents it filtered, and their tiles carry no status line",
+    [
+      strip.includes("const shown = agents.filter(shownHere);"),
+      stripRow.includes("{shown.map((candidate) =>"),
+      stripRow.includes('subline: "",'),
+      strip.includes("agentBadge"),
+    ],
+    [true, true, true, false],
+  );
+  /*
+   * ⚠ **And an empty row says which kind of empty it is.** It had one sentence,
+   * because it had one cause: the daemon listed nothing. A machine can now list
+   * three agents and draw none of them, and "this machine reports no agents" over a
+   * machine that reported three is the false line that sends somebody to the wrong
+   * screen. What is deliberately *not* here is which agent or why — the sign-in
+   * door below is drawn in exactly this state and says both.
+   */
+  check(
+    "an empty row distinguishes a machine with no agents from one with none ready",
+    [
+      strip.includes('"This machine reports no agents."'),
+      strip.includes('"No agent on this machine is ready to start."'),
+      strip.includes("const nothingAtAll = shown.length === 0"),
+    ],
+    [true, true, true],
+  );
+  /*
+   * ⚠ **Four answers to one question, and this pins the fourth.** `.no-scrollbar`
+   * hid the bar outright — a phone idiom that left a desktop with no cue and no
+   * gesture. Taking it off gave the permanent classic bar the app draws on a fine
+   * pointer, a dark rule under a row of tiles, reported the moment it shipped. The
+   * third reserved that bar's thickness and animated the thumb's colour — and it
+   * did **not** fade, which was the next report and is the measurement below.
+   *
+   * So the strip hides the browser's bar and draws its own: a `div` under the row,
+   * sized and moved from the scrollport's own metrics, shown while the row is
+   * moving and faded when it is not. `is-scrolling` decides when, and it is put on
+   * by the element rather than by a render, because this fires on every frame of a
+   * flick.
+   */
+  check(
+    "the row hides the browser's bar and draws one of its own",
+    [
+      strip.includes("no-scrollbar"),
+      strip.includes("fade-scrollbar"),
+      strip.includes("fade-thumb"),
+      strip.includes('bar.classList.add("is-scrolling")'),
+      strip.includes("SCROLLBAR_FADE_MS"),
+      strip.includes("MIN_THUMB_PX"),
+      strip.includes("bar.style.width"),
+    ],
+    [false, true, true, true, true, true, true],
+  );
+  /*
+   * ⚠ **And it is taken off again, which is the whole of the report.** The check
+   * above pins that the class goes *on*; turning the timeout's `remove` into an
+   * `add` left it green while the bar never faded — the exact behaviour this rule
+   * replaced. The three states this feature exists to distinguish are always-on,
+   * never-on and on-then-fading, so all three have to be reachable by a failing
+   * assertion. The whole statement is pinned rather than the call, because it is
+   * the pairing of *this* timeout with *this* removal that is the fade.
+   */
+  check(
+    "and the class comes off a moment after the last scroll, which is the fade",
+    strip.includes('idle = setTimeout(() => bar.classList.remove("is-scrolling"), SCROLLBAR_FADE_MS);'),
+    true,
+  );
+  /*
+   * ⚠ **Both boxes are observed, and the row is the one that is easy to forget.**
+   * The scrollport's width is the window's; the row's is however many agents the
+   * machine reported, which lands a round trip after the effect runs. Observing
+   * only the scrollport leaves a thumb sized for an empty row with nothing to
+   * re-measure it — a bar that is permanently full width over a row that scrolls.
+   */
+  check(
+    "and it re-measures when either box changes size",
+    [strip.includes("new ResizeObserver(layout)"), strip.includes("sizes.observe(row)")],
+    [true, true],
+  );
+  /*
+   * ⚠ **It reports a position and does not offer one.** A native scrollbar can be
+   * dragged and this cannot, so it must not take a press: `pointer-events-none` is
+   * what keeps a tap from landing on a control that would do nothing, and
+   * `aria-hidden` keeps it out of a reading of the row it is about.
+   *
+   * ⚠ **Those two attributes are the slice's own anchor**, so what asserts them is
+   * the found-check above and nothing here. Said out loud because a check that
+   * tests its own anchor reads as proving something and proves nothing — it is the
+   * shape this file already warns about one section up, arriving from the other
+   * side. What is asserted here is the half an anchor cannot reach: that the thing
+   * inside it takes no input of any kind.
+   */
+  check(
+    "the bar is inert — no handler, no tab stop, no role",
+    [/onClick|onPointer|onMouse|onKey|tabIndex|role=/.test(stripRail), stripRail.includes("ref={thumb}")],
+    [false, true],
+  );
+  /*
+   * ⚠ **And the fade is an opacity, which is the whole reason it fades at all.**
+   * Since Chrome 121 the standard properties override the pseudo-elements:
+   * `scrollbar-width` or `scrollbar-color` at anything but `auto` and every
+   * `::-webkit-scrollbar-*` rule on that element is ignored — and this app's
+   * `@media (pointer: fine)` rule sets **both, on `*`**, so the
+   * `transition: background-color` written on a thumb pseudo-element was dead on
+   * arrival everywhere, and what was left switching was `scrollbar-color`, which no
+   * engine interpolates. The bar vanished between two frames, which is what was
+   * reported.
+   *
+   * The three claims: the browser's bar is hidden rather than styled, the app's own
+   * transitions `opacity` and nothing that takes layout, and the global reduced-
+   * motion rule still reaches it — a fade is motion, and this file's own block at
+   * the foot zeroes every transition rather than naming them.
+   */
+  {
+    const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
+    const box = css.slice(css.indexOf(".fade-scrollbar {"), css.indexOf(".fade-thumb {"));
+    const bar = css.slice(css.indexOf(".fade-thumb {"), css.indexOf("}", css.indexOf(".fade-thumb.is-scrolling")));
+    check(
+      "the browser's bar is hidden and the app's own fades on opacity alone",
+      [
+        /scrollbar-width: none/.test(box),
+        /::-webkit-scrollbar \{\n  display: none;/.test(box),
+        /transition: opacity \d+ms/.test(bar),
+        /(width|height|scrollbar-width):/.test(bar),
+        /transition-duration: 0\.01ms !important/.test(css),
+      ],
+      [true, true, true, false, true],
+    );
+    /*
+     * ⚠ **The two endpoints, because a transition between one value and itself is
+     * not a fade and this block could not tell.** Proved by mutation against a copy
+     * of the tree: delete `opacity: 0` and the bar is the permanent dark rule the
+     * third answer was reported for; delete `opacity: 1` and it never appears at
+     * all, which is the first answer, a strip with no cue. Both left this driver
+     * green. A rule that animates a property is not the same claim as a rule that
+     * has two values to animate it between.
+     */
+    check(
+      "and it has two values to fade between: nothing at rest, the edge while moving",
+      [/^\s*opacity: 0;$/m.test(bar), /is-scrolling \{\n  opacity: 1;/.test(css)],
+      [true, true],
+    );
+    /*
+     * Out slowly, in at once, and one declaration does both — `is-scrolling` brings
+     * the shorter duration with it. A single duration in both directions reads as
+     * lag on the way in: the bar arriving after the row has already moved.
+     */
+    const held = /transition: opacity (\d+)ms/.exec(bar)?.[1] ?? "";
+    const shown = /transition-duration: (\d+)ms/.exec(bar)?.[1] ?? "";
+    check(
+      "and it appears faster than it goes",
+      [held.length > 0, shown.length > 0, Number(shown) < Number(held)],
+      [true, true, true],
+    );
+  }
+  check(
+    "while the strip it was borrowed from keeps it",
+    stripComments(readFileSync(new URL("../src/ui/SessionBrowser.tsx", import.meta.url), "utf8")).includes(
+      "no-scrollbar",
+    ),
+    true,
   );
 
   /*
@@ -21825,11 +23054,23 @@ process.stdout.write("\nwhat a control still looks like when it refuses\n");
   const systems = source("ui/settings/SystemsPanel.tsx");
   const between = (text: string, from: string, to: string): string => {
     const start = text.indexOf(from);
-    return start === -1 ? "" : text.slice(start, text.indexOf(to, start + from.length));
+    if (start === -1) return "";
+    /*
+     * ⚠ **A missing *terminator* is the failure this line exists for.** Without
+     * it `indexOf` answers `-1`, `slice(start, -1)` returns the whole rest of the
+     * file bar one character, and the found-guard below — which tests `length > 0`
+     * — goes green over a slice that has quietly stopped being about anything.
+     * Every negative assertion made over it then reports a hit from somewhere else
+     * entirely. Measured: renaming the anchor this section ends at swallowed
+     * `DirectoryPicker`'s two `disabled:opacity-40` buttons, 300 lines below, and
+     * the failure named the agent strip.
+     */
+    const end = text.indexOf(to, start + from.length);
+    return end === -1 ? "" : text.slice(start, end);
   };
   const choiceRow = between(bits, "export function ChoiceRow", "\n}\n");
   const tile = between(newSession, "const bound = disabled", "</button>");
-  const strip = between(newSession, "function AgentStrip(", "\nfunction agentStatusText");
+  const strip = between(newSession, "function AgentStrip(", "\nfunction MachineLine");
   const tones = between(bits, "const BUTTON_TONE", "\n};");
   const trigger = between(bits, "tap press inline-flex min-h-8 w-full", '"');
   // `Dropdown`'s option row — the fourth control, and the one this whole section
@@ -21933,9 +23174,35 @@ process.stdout.write("\nwhat a control still looks like when it refuses\n");
     [
       /className=\{disabled \? "text-faint" : "text-muted"\}/.test(tile),
       /\$\{disabled \? "text-muted" : ""\}/.test(tile),
-      /<span className="w-full truncate text-2xs text-faint">\{subline\}<\/span>/.test(tile),
+      /className="[^"]*w-full truncate text-2xs text-faint">\s*\{subline\}/.test(tile),
     ],
     [true, true, true],
+  );
+  /*
+   * ⚠ **And that line is *reserved*, which rendering an empty span does not do.**
+   * A harness tile has nothing to say on it and a preset always has something, so
+   * the two kinds stand in one row with a different number of lines — and the row
+   * is `items-stretch` while each tile is `justify-center`, so the shorter content
+   * column is centred inside the taller box.
+   *
+   * Measured against the built stylesheet in headless Chrome: an empty `<span>`
+   * generates no line box and is **0px** tall, and the harness tile's glyph and
+   * name each landed **9px** below the preset's beside it. The comment claiming an
+   * empty string held the slot was wrong, and a zero-height third child buys back
+   * only the 4px `gap-1`. After: both tiles 84px, both sublines 18px, both glyphs
+   * at 11px and both names at 33px.
+   *
+   * Keyed to the same custom property `text-2xs` sets its own line-height from, so
+   * the reserved height and the text that would fill it cannot drift apart — a
+   * hard-coded `1.125rem` here would be the second copy this file exists to catch.
+   */
+  check(
+    "the subline holds its line even when it is empty, at the height its own text would take",
+    [
+      /min-h-\[var\(--text-2xs--line-height\)\][^"]*">\s*\{subline\}/.test(tile),
+      /--text-2xs--line-height: /.test(readFileSync(new URL("../src/index.css", import.meta.url), "utf8")),
+    ],
+    [true, true],
   );
   check(
     "and the row does the same three, in the same order",
@@ -22287,15 +23554,61 @@ process.stdout.write("\nno authorization on the Configure agent screen\n");
    * style this file already applies to the credential control, and it fails on any
    * re-introduction of the asymmetry by that door.
    */
+  const builderFlat = builder.replace(/\s+/g, " ");
   check(
     "and every row of the model list is greyed by that same refusal, unconditioned",
     [
       /const why = choiceRefusal\(null, choice, null\);/.test(builder),
-      /subline=\{why \?\? \(groups\.length > 1 \? null : group\.system\.displayName\)\}/.test(builder),
+      /subline=\{ shared !== null \? null : \(why \?\? \(groups\.length > 1 \? null : group\.system\.displayName\)\) \}/.test(
+        builderFlat,
+      ),
       /disabled=\{why !== null\}/.test(builder),
       /nativeHarness/.test(builder),
     ],
     [true, true, true, false],
+  );
+  /*
+   * ⚠ **A pairing *is* refused on this screen now — on the provider, never on the
+   * row — and the difference between those two is why the older rule could stand
+   * for three releases and this can replace it.** Q3.479 refused to weigh the
+   * harness here at all, because greying both screens against each other leaves
+   * neither half of a bad pair changeable. Two things answer that: each field can
+   * be emptied on the screen above (pinned in the stacked-pair section), and the
+   * refusal lands on a **heading** rather than on 463 rows.
+   *
+   * The arithmetic is the argument, so it is driven rather than described — see
+   * the `agents.ts` section. Here: the group question is `hostable`'s, with
+   * `hostable`'s own sentence, and it may never be `choiceRefusal`'s, whose prose
+   * deliberately drops the system's name because it is wrong over a row.
+   */
+  check(
+    "a provider the harness cannot be pointed at is one heading, asked of hostable and no one else",
+    [
+      /const wholeProvider = harness === null \? null : hostable\(harness, group\.system, routing\);/.test(builder),
+      /if \(wholeProvider !== null\)/.test(builder),
+      // With no harness answered it may not fire, so the flow's own order — the
+      // model first — reaches exactly the screen it always did.
+      /harness === null \? null :/.test(builder),
+    ],
+    [true, true, true],
+  );
+  /*
+   * ⚠ **The hoist is the same call, and that is the whole of why it is allowed.**
+   * A subline identical on every row of a large group is drawn once under the
+   * heading — otherwise OpenRouter's 356 keyless rows are one sentence repeated
+   * 356 times. It would be a hole in the rule above if the hoisted sentence came
+   * from anywhere else, so its own call site is pinned to `choiceRefusal(null, …)`
+   * too, and the group is required to be *unanimous* before one row's answer is
+   * allowed to stand for the rest.
+   */
+  check(
+    "and the sentence hoisted off a large group is that same refusal, unanimous",
+    [
+      /const sublines = group\.choices\.map\(\(one\) => choiceRefusal\(null, one, null\)\);/.test(builder),
+      /sublines\.every\(\(one\) => one === first\)/.test(builder),
+      /group\.choices\.length > 3/.test(builder),
+    ],
+    [true, true, true],
   );
 
   /*
@@ -22309,15 +23622,102 @@ process.stdout.write("\nno authorization on the Configure agent screen\n");
    * rather than per row, so both `glyph` props are asserted together.
    */
   const stacked = builder.replace(/\s+/g, " ");
-  const pair = stacked.slice(stacked.indexOf('<Field label="Model">'), stacked.indexOf("</Field> </div>"));
+  const pair = stacked.slice(stacked.indexOf('<Field label="Harness"'), stacked.indexOf("</Field> </div>"));
   check("the stacked pair was found and both rows ask for a glyph", [pair.length > 0, (pair.match(/glyph=/g) ?? []).length], [true, 2]);
+  /*
+   * ⚠ **Harness first, and the order is the assertion.** Asked for by name: *"swap
+   * the harness and the agent on the agent configuration screen, so the agents
+   * finish loading while the harness is being chosen."* The model row is the one
+   * control here that waits — `GET /agents/capabilities` starts an agent per
+   * harness, 2159 ms measured after Q3.524 — and on top it was the first thing
+   * anybody met, a row reading *Reading models…* that could not be opened. The
+   * harness list is `AGENT_IDS` and needs no read at all.
+   *
+   * Pinned rather than left to the file, because an order is exactly the kind of
+   * thing a later edit restores without noticing: this is two sibling JSX blocks
+   * and nothing in the types, the props or the router says which comes first. It
+   * is also the order the model list is *built* for — with a harness chosen,
+   * `ModelPicker` collapses every provider it cannot be pointed at — so the two
+   * halves of this screen's refusal story now arrive in the order they explain.
+   * Q3.528.
+   */
+  check(
+    "the row that costs nothing to answer is above the row that waits",
+    stacked.indexOf('<Field label="Harness"') < stacked.indexOf('<Field label="Model"'),
+    true,
+  );
+  /*
+   * `[^<]*` between the two tags rather than nothing: `Field` takes a second prop
+   * now and its value carries a `>` of its own, from an arrow. What the anchor has
+   * to keep is that no other **element** sits between the field and its row, which
+   * is what a bare `>` could not say and this can.
+   */
   check(
     "the row that can never have one reserves the hole, and the row that can fills it",
     [
-      /<Field label="Model"> <ChoiceRow glyph=\{emptyGlyph\}/.test(pair),
-      /<Field label="Harness"> <ChoiceRow glyph=\{harness === null \? emptyGlyph : <AgentGlyph agent=\{harness\} size=\{18\} \/>\}/.test(pair),
+      /<Field label="Model"[^<]*> <ChoiceRow glyph=\{emptyGlyph\}/.test(pair),
+      /<Field label="Harness"[^<]*> <ChoiceRow glyph=\{harness === null \? emptyGlyph : <AgentGlyph agent=\{harness\} size=\{18\} \/>\}/.test(pair),
     ],
     [true, true],
+  );
+  /*
+   * ⚠ **Both fields can be emptied, and each empties only itself.** A pairing is
+   * refused on both screens now — the model list collapses a provider the chosen
+   * harness cannot be pointed at — and that is only safe because a bad pair can be
+   * taken apart a field at a time. Q3.479 rejected the *implicit* form of this
+   * twice, a disabled row that clears the other choice when tapped; a labelled
+   * control on the row whose value it empties deletes nothing unasked.
+   *
+   * The second element is the load-bearing one: one press may never empty two
+   * fields, or it is implicit again for whichever field the reader did not aim at.
+   */
+  check(
+    "each field can be emptied, and a clear reaches no further than its own",
+    [
+      (pair.match(/clear=\{/g) ?? []).length,
+      /clear=\{current === null \|\| busy \? null : \(\) => setPicked\(null\)\}/.test(pair),
+      /clear=\{harness === null \|\| busy \? null : \(\) => setHarness\(null\)\}/.test(pair),
+      /setPicked\(null\)[^}]*setHarness/.test(pair),
+      /setHarness\(null\)[^}]*setPicked/.test(pair),
+    ],
+    [2, true, true, false, false],
+  );
+  /*
+   * ⚠ **And the refusal is on the row it is about**, which is the harness row —
+   * every sentence `choiceRefusal` can produce here names the harness or the
+   * system, and the model row's one line is spent on which provider the model came
+   * from. It is *also* still at the foot, which the check above pins: this slot is
+   * `truncate` and that one is `wrap-anywhere`, and Q3.497 required both.
+   */
+  check(
+    "the pair's refusal is drawn on the harness row, and the model row still names its provider",
+    [
+      /<Field label="Harness"[^<]*>.*?subline=\{conflict\}/.test(pair),
+      /subline=\{reading \? [^:]*: \(current\?\.system\.displayName \?\? null\)\}/.test(pair),
+    ],
+    [true, true],
+  );
+  /*
+   * ⚠ **And the one arm in front of it is the pending one, which is the whole of
+   * what this screen still waits for.** `GET /agents/capabilities` starts an agent
+   * per harness — 5.3 seconds measured — and used to hold the entire screen behind
+   * a spinner although only this row needs it. The row says what it is waiting for
+   * and cannot be opened while it waits; nothing else on the screen can lie in the
+   * meantime, because with no model chosen `harnessRowRefusal` answers `null` for
+   * every row and Save is already disabled on `current === null`.
+   */
+  check(
+    "and the model row is the only thing that waits for the expensive read",
+    [
+      /disabled=\{busy \|\| reading\}/.test(pair),
+      /const reading = capabilities === null;/.test(builder),
+      // The gate the screen is drawn behind names the cheap read and not this one.
+      /if \(systems === null \|\| \(preset !== null && stored === null\)\) \{/.test(builder),
+      // …and the sub-screen that has nothing to list draws a spinner rather than
+      // an empty picker, since it is reachable by address as well as by a tap.
+      /if \(step === "llm" && reading\) \{/.test(builder),
+    ],
+    [true, true, true, true],
   );
   /*
    * ⚠ **And the two widths are asserted as equal rather than as two literals**,
@@ -22584,12 +23984,12 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
   const unkeyed = system({ keySet: false });
   check(
     "a routed pairing needs the key, which is every table-spelled model there is",
-    keyMissing({ ...tabled, system: unkeyed }),
+    keyMissing({ ...tabled, system: unkeyed }, null),
     "No Moonshot key on this machine.",
   );
   check(
     "a native one does not, which is every published one",
-    keyMissing({ ...published, system: unkeyed }),
+    keyMissing({ ...published, system: unkeyed }, null),
     null,
   );
   /*
@@ -22618,8 +24018,8 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
    * and only the published half survives.
    */
   const keyOnly = (keySet: boolean): SystemInfo => system({ nativeHarness: null, keySet });
-  check("a system with no CLI and no key is blocked", keyMissing({ ...tabled, system: keyOnly(false) }) !== null, true);
-  check("with a key it is not", keyMissing({ ...tabled, system: keyOnly(true) }), null);
+  check("a system with no CLI and no key is blocked", keyMissing({ ...tabled, system: keyOnly(false) }, null) !== null, true);
+  check("with a key it is not", keyMissing({ ...tabled, system: keyOnly(true) }, null), null);
   /*
    * ⚠ **THE RULE ITSELF, as a biconditional over a generated matrix.** Two
    * hand-picked examples are what shipped the defect: this section already
@@ -22669,6 +24069,56 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     "and both sides of it move, over all eight cells",
     [keyCells.filter((cell) => cell.greyed).map((cell) => cell.label), keyCells.length],
     [["table/native/no key", "table/no CLI/no key"], 8],
+  );
+  /*
+   * ⚠ **And once a harness *is* chosen the biconditional above stops being the
+   * rule — the pairing is — which is a precondition expiring rather than a rule
+   * being broken.** The published arm rested on "every other harness is refused
+   * this id for the **name**", true of every system until one related its two
+   * spellings. `nativeModelPrefix` makes `pairFailure` drop both name arms, so on
+   * OpenRouter a *published* id really is runnable routed, and a routed pairing is
+   * signed by the system credential and by nothing else.
+   *
+   * Measured, and this is the report: an `OPENROUTER_API_KEY` saved for opencode
+   * and **no** system key. opencode published all 356 rows, so they arrived
+   * `published`, `keyMissing` answered `null`, Claude Code was offered against one
+   * of them, `POST /custom-agents` took it — and `applySystem` refused the start
+   * with *"No key is saved for OpenRouter on this machine, so nothing can sign
+   * these requests."* Two credentials, two stores, and neither screen had asked
+   * for the one that signs.
+   *
+   * Driven over the pairing rather than at the one cell: what must hold is that
+   * *routed* answers the key question from `keySet` whatever the source, and that
+   * *native* still never does.
+   */
+  const orPrefixed = system({
+    id: "openrouter",
+    displayName: "OpenRouter",
+    nativeHarness: "opencode",
+    nativeModelPrefix: "openrouter/",
+    keySet: false,
+  });
+  const orPub = { system: orPrefixed, modelId: "qwen/q3", modelName: "Qwen: Q3", source: "published" as const };
+  check(
+    "a routed pairing needs the key even where the id came from the native harness",
+    [
+      keyMissing(orPub, "claude"),
+      keyMissing(orPub, "opencode"),
+      keyMissing(orPub, null),
+      keyMissing({ ...orPub, system: { ...orPrefixed, keySet: true } }, "claude"),
+    ],
+    ["No OpenRouter key on this machine.", null, null, null],
+  );
+  /*
+   * And the row says so, on the screen where the pairing is chosen — which is the
+   * one that offered it. `harnessRowRefusal` reaches `keyMissing` only after
+   * `pairFailure` has cleared, which on this system it does precisely because the
+   * two spellings relate.
+   */
+  check(
+    "so the harness row greys rather than the start failing",
+    harnessRowRefusal("claude", orPub, { providerId: "main", supported: ["anthropic"] }),
+    "No OpenRouter key on this machine.",
   );
   /*
    * ⚠ **The property that was actually reported, which is consistency rather than
@@ -22792,8 +24242,8 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
   check(
     "the row, the button and the rule itself all say the same sentence",
     [
-      harnessRowRefusal("claude", { ...tabled, system: unkeyed }, claude) === keyMissing({ ...tabled, system: unkeyed }),
-      choiceRefusal("claude", { ...tabled, system: unkeyed }, claude) === keyMissing({ ...tabled, system: unkeyed }),
+      harnessRowRefusal("claude", { ...tabled, system: unkeyed }, claude) === keyMissing({ ...tabled, system: unkeyed }, "claude"),
+      choiceRefusal("claude", { ...tabled, system: unkeyed }, claude) === keyMissing({ ...tabled, system: unkeyed }, "claude"),
     ],
     [true, true],
   );
@@ -22813,7 +24263,7 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
    */
   check(
     "and it tells nobody where to go, on a screen where every row can be greyed",
-    /Settings|Machines|Add|Paste|Go to/.test(keyMissing({ ...tabled, system: unkeyed }) ?? ""),
+    /Settings|Machines|Add|Paste|Go to/.test(keyMissing({ ...tabled, system: unkeyed }, "claude") ?? ""),
     false,
   );
   /*
@@ -22970,6 +24420,327 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     ["Moonshot"],
   );
   check("with every row under it", groupModels([published, tabled])[0]?.choices.length, 2);
+  /*
+   * ⚠ **And it stays one heading however many rows arrive — which is the *second*
+   * thing taken out of this slot, and the reason it is driven at the size that
+   * motivated it.** A vendor sub-heading shipped here for a day: OpenRouter's ids
+   * carry a `vendor/` half, so a provider past a dozen prefixed rows drew
+   * `OpenRouter · qwen`, `OpenRouter · google`, 38 of them. It answers *whose model
+   * is this* honestly enough that the objection above does not catch it, and it was
+   * still wrong on the screen — one list to scroll became 38 to scroll past, a
+   * model's variants read as different products under a heading that separated
+   * them, and the search this picker is actually used through already cuts the list
+   * far below the size that argued for the split. Q3.503.
+   *
+   * The fixture is OpenRouter's real shape rather than Moonshot's, because
+   * Moonshot could never have split: it is mixed, and the old rule needed *every*
+   * id prefixed. A reintroduction has to fail on the provider it would be built
+   * for, so that is the one asserted.
+   */
+  const or = (id: string, name: string) => ({
+    system: system({ id: "openrouter", displayName: "OpenRouter", nativeHarness: "opencode", nativeModelPrefix: "openrouter/" }),
+    modelId: id,
+    modelName: name,
+    source: "table" as const,
+  });
+  const many = (n: number, vendor: string) =>
+    Array.from({ length: n }, (_, i) => or(`${vendor}/m${i}`, `M${i}`));
+  check(
+    "a provider past a dozen rows, every one of them prefixed, is still one heading",
+    groupModels([...many(8, "qwen"), ...many(5, "google")]).map(
+      (group) => `${group.system.displayName}: ${group.choices.length}`,
+    ),
+    ["OpenRouter: 13"],
+  );
+  check(
+    "and so is one carrying the whole live catalogue",
+    [groupModels(many(289, "qwen")).length, groupModels(many(289, "qwen"))[0]?.choices.length],
+    [1, 289],
+  );
+  check(
+    "a bare id among them changes nothing either way",
+    groupModels([...many(12, "qwen"), or("plain", "Plain")]).map((group) => group.system.displayName),
+    ["OpenRouter"],
+  );
+  /*
+   * ⚠ **And this is the shape the model picker refuses a pairing in: one heading,
+   * never N rows.** The arithmetic is the whole argument, so it is driven.
+   *
+   * Measured against the live catalogue and the four real harnesses, 463 rows:
+   * greying row by row greys **461 of 463** with codex chosen and 462 with kimi —
+   * a picker somebody scrolls 463 disabled lines through to reach two. Asking
+   * `hostable` about the *provider* instead collapses six headings and leaves
+   * those two rows drawn. The fixture below is that shape in miniature, and it
+   * asserts the ratio rather than the wording: what must hold is that the count of
+   * things drawn as refused does not scale with the size of the provider.
+   */
+  const openRouterRows = many(40, "qwen");
+  const orGroup = groupModels(openRouterRows)[0];
+  const codexRouting = { providerId: "custom-gateway", supported: ["openai"] } as never;
+  check(
+    "a whole provider refuses in one line, however many rows it has",
+    [
+      hostable("codex", orGroup?.system as never, codexRouting),
+      openRouterRows.filter((one) => choiceRefusal("codex", one, codexRouting) !== null).length,
+      openRouterRows.length,
+    ],
+    ["Codex cannot run OpenRouter models.", 40, 40],
+  );
+  /*
+   * ⚠ **And the harness that *can* be pointed there collapses nothing**, which is
+   * the other half: the collapse must be a fact about a pairing that cannot work,
+   * never a filter that hides a provider from whoever is looking.
+   */
+  check(
+    "while the harness it is native to hides none of it",
+    hostable("opencode", orGroup?.system as never, null),
+    null,
+  );
+  /*
+   * ⚠ **One system relates its two spellings, and there a name is never the
+   * reason a pairing fails.** Everything `ModelChoice.source` says about kimi and
+   * Moonshot holds — two lists, overlapping in models and not in names, nothing
+   * carrying one to the other. OpenRouter is the case that *does* carry: opencode
+   * publishes `openrouter/qwen/qwen3-coder` for exactly what the endpoint claude
+   * is routed at calls `qwen/qwen3-coder`, one catalogue behind one account.
+   * Without this, a table row would be refused for the native harness and a
+   * published one for every other — which is every row of the largest provider
+   * greyed for whichever harness did not happen to supply it.
+   *
+   * The Moonshot half is the control: same shape, no prefix, still refused.
+   */
+  const orTable = or("qwen/qwen3-coder", "Qwen3 Coder");
+  const orPublished = { ...orTable, source: "published" as const };
+  check(
+    "a system that relates its spellings refuses neither harness for the name",
+    [
+      choiceRefusal("opencode", orTable, null),
+      choiceRefusal("claude", { ...orTable, system: { ...orTable.system, routable: true } }, claude),
+      choiceRefusal("opencode", orPublished, null),
+    ],
+    [null, null, null],
+  );
+  check(
+    "while a system that does not still refuses, on the same shape",
+    [choiceRefusal("kimi", tabled, null), choiceRefusal("claude", published, claude)],
+    ["Kimi Code has no model called K2.", "Claude Code has no model called K3."],
+  );
+  /*
+   * ⚠ **Published wins the row and the table wins the name**, which is the
+   * opposite way round and is not a contradiction. `source` answers "which
+   * harnesses may use this id" and the published row answers it correctly; the
+   * name is a label, and where one model is spelled twice the endpoint's own name
+   * for it beats a harness's rendering of it.
+   *
+   * Measured against a live opencode: it publishes `OpenRouter/Claude Opus 5` for
+   * what the catalogue calls `Claude Opus 5`, so without this every row under a
+   * heading already reading `OpenRouter · anthropic` said the provider twice and
+   * carried a `/` into every refusal built from it.
+   */
+  const orSystem = system({ id: "openrouter", displayName: "OpenRouter", nativeHarness: "opencode", nativeModelPrefix: "openrouter/", models: [{ id: "qwen/q3", name: "Qwen: Q3" }] });
+  const merged = allModels([orSystem], {
+    opencode: { models: [{ id: "openrouter/qwen/q3", name: "OpenRouter/Q3", description: null, group: null }], routing: null, error: null },
+  } as never);
+  check(
+    "one model published and tabled is one row, keyed the published way and named the table's",
+    merged.map((one) => `${one.modelId} | ${one.modelName} | ${one.source}`),
+    ["qwen/q3 | Qwen: Q3 | published"],
+  );
+
+  /* ---------------------------------------------------------------- *
+   * ⭐ A catalogue's refusal outranks a harness's list
+   *
+   * The tools filter existed and only ONE of the two lists went through it.
+   * `readOpenRouterModels` drops a model that cannot call a tool; opencode
+   * publishes all 362 of OpenRouter's, image models included, and this function
+   * merged them in as `published` rows — so a model already refused came back
+   * through the other door. Reported: an agent assembled on
+   * `nousresearch/hermes-3-llama-3.1-405b`, whose `supported_parameters` carries
+   * no `tools` at all, failed on its first turn with OpenRouter's own accurate
+   * sentence — "No endpoints found that support tool use. Try disabling `bash`",
+   * `bash` being opencode's own shell tool. Q3.520.
+   * ---------------------------------------------------------------- */
+  {
+    const published = {
+      opencode: {
+        models: [
+          { id: "openrouter/qwen/q3", name: "OpenRouter/Q3", description: null, group: null },
+          { id: "openrouter/nous/hermes", name: "OpenRouter/Hermes", description: null, group: null },
+        ],
+        routing: null,
+        error: null,
+      },
+    } as never;
+    check(
+      "a published model the catalogue refused for having no tools is not offered",
+      allModels([{ ...orSystem, models: [] }], published, ["nous/hermes"]).map((one) => one.modelId),
+      ["qwen/q3"],
+    );
+    /*
+     * ⚠ **Fails open**, which is why the argument is a list of the *refused*
+     * rather than a list of the allowed: a catalogue that could not be read
+     * refuses nothing, and every published row is offered exactly as it was before
+     * this existed. The default is what an old caller passes.
+     */
+    check(
+      "and with no catalogue read at all, nothing is dropped",
+      allModels([{ ...orSystem, models: [] }], published).map((one) => one.modelId),
+      ["qwen/q3", "nous/hermes"],
+    );
+    /*
+     * The refusal is keyed on the **endpoint's** spelling, which is what is stored
+     * and what the catalogue publishes — not on the harness's prefixed one. Keyed
+     * the other way this would match nothing and go quietly back to offering it.
+     */
+    check(
+      "keyed on the id the catalogue uses, not the one the harness prefixes",
+      allModels([{ ...orSystem, models: [] }], published, ["openrouter/nous/hermes"]).map((one) => one.modelId),
+      ["qwen/q3", "nous/hermes"],
+    );
+  }
+  /*
+   * ⚠ **…and where the table has never heard of the model, the provider's own
+   * label comes off the front of the harness's name.** That is a *third* rule
+   * rather than an exception to either, and the reason the two can live in one
+   * function is that they never both apply: the dedupe branch has a better name in
+   * hand and cuts nothing, and this branch has none.
+   *
+   * ⚠ **It is not the surgery `openrouter.ts` refuses, and the difference is the
+   * key.** That file refuses a *pattern* — `"<Vendor>: "` over a vendor half that
+   * is unknown, absent on 19 names and spelled two ways by four vendors — because
+   * it infers structure from somebody else's prose. This removes **one known
+   * constant**, the system's own `displayName`, which is the exact string
+   * `AgentBuilder` paints in the heading directly over the row: the justification
+   * is redundancy with that heading, so the heading's own string is the only
+   * correct key.
+   *
+   * Zen is the system it exists for and the one no other rule reaches: its table
+   * list is empty, so "the table wins the name" has nothing to win with, and
+   * opencode renders every row as `OpenCode Zen/<name>` under a heading that
+   * already says `OpenCode Zen`. Ninety-three of them once a key is pasted.
+   */
+  const zenSystem = system({ id: "zen", displayName: "OpenCode Zen", routable: false, nativeHarness: "opencode", nativeModelPrefix: "opencode/", models: [] });
+  const zenNamed = (displayName: string, name: string) =>
+    allModels([{ ...zenSystem, displayName }], {
+      opencode: { models: [{ id: "opencode/big-pickle", name, description: null, group: null }], routing: null, error: null },
+    } as never).map((one) => `${one.modelId} | ${one.modelName}`);
+  check(
+    "a published model the table has never heard of loses the provider's label",
+    zenNamed("OpenCode Zen", "OpenCode Zen/Big Pickle"),
+    // Stored unprefixed, like every other id — `pinNativeModel` puts `opencode/`
+    // back at the one moment the agent is asked.
+    ["big-pickle | Big Pickle"],
+  );
+  check(
+    "and so does an OpenRouter row the tools filter dropped",
+    allModels([system({ id: "openrouter", displayName: "OpenRouter", nativeHarness: "opencode", nativeModelPrefix: "openrouter/", models: [] })], {
+      opencode: { models: [{ id: "openrouter/qwen/q3", name: "OpenRouter/Q3", description: null, group: null }], routing: null, error: null },
+    } as never).map((one) => `${one.modelId} | ${one.modelName}`),
+    ["qwen/q3 | Q3"],
+  );
+  /*
+   * ⚠ **Keying on the constant is what buys the fail-open, and every way it can
+   * miss leaves the row exactly as it was before the rule existed.** A strip that
+   * cut at the first `/` instead would *survive* a rename and go on cutting,
+   * including a slash that belonged to the model. Case is folded because a label
+   * differing only in case still repeats the heading — and nothing else is: no
+   * fuzzy match, no normalised punctuation, and no separator but `/`, since a
+   * space before it is a format nobody measured.
+   */
+  check(
+    "it fails open on every rename, and folds case and nothing else",
+    [
+      zenNamed("Zen", "OpenCode Zen/Big Pickle"),
+      zenNamed("OpenCode Zen", "opencode zen/Big Pickle"),
+      zenNamed("OpenCode Zen", "OpenCode Zen /Big Pickle"),
+      zenNamed("OpenCode Zen", "Big Pickle"),
+      zenNamed("", "/Big Pickle"),
+    ],
+    [
+      ["big-pickle | OpenCode Zen/Big Pickle"],
+      ["big-pickle | Big Pickle"],
+      ["big-pickle | OpenCode Zen /Big Pickle"],
+      ["big-pickle | Big Pickle"],
+      ["big-pickle | /Big Pickle"],
+    ],
+  );
+  /*
+   * ⚠ **An empty remainder keeps the original, because a name here is a *stored*
+   * value.** `defaultAgentName(modelName)` seeds a new preset's name, which is
+   * written to `custom_agents.name`; the save button does not weigh the name, so a
+   * blank one reaches the daemon and comes back `400`. Trimmed for the same
+   * reason, and only in the branch that fired.
+   */
+  check(
+    "an empty remainder keeps the name, and a live one is trimmed",
+    [zenNamed("OpenCode Zen", "OpenCode Zen/"), zenNamed("OpenCode Zen", "OpenCode Zen/   "), zenNamed("OpenCode Zen", "OpenCode Zen/  Big Pickle ")],
+    [
+      ["big-pickle | OpenCode Zen/"],
+      ["big-pickle | OpenCode Zen/   "],
+      ["big-pickle | Big Pickle"],
+    ],
+  );
+  /*
+   * The regression arm, and the one that would have caught a strip written as a
+   * pattern: no other system's harness prefixes its names at all, so every one of
+   * them must come through untouched. kimi's are the measured case — `K2.7
+   * Coding` under a system called `Moonshot`.
+   */
+  check(
+    "a harness that does not prefix its names is untouched",
+    allModels([system({ displayName: "Moonshot", nativeHarness: "kimi", models: [] })], {
+      kimi: { models: [{ id: "kimi-code/k3", name: "K3", description: null, group: null }], routing: null, error: null },
+    } as never).map((one) => `${one.modelId} | ${one.modelName}`),
+    ["kimi-code/k3 | K3"],
+  );
+  /*
+   * And the name a *new preset* defaults to is the stripped one, which is the half
+   * of this that is not a label: it is what gets written down.
+   */
+  check(
+    "and the preset a stripped row would be called is the short name",
+    defaultAgentName(zenNamed("OpenCode Zen", "OpenCode Zen/Big Pickle")[0]?.split(" | ")[1] ?? ""),
+    defaultAgentName("Big Pickle"),
+  );
+  /*
+   * ⚠ **One harness, two systems, one published list — and the prefix is what
+   * divides it.** opencode is the native side of both OpenRouter and OpenCode Zen
+   * and publishes them together. Without the division each system takes the whole
+   * list: 362 rows under OpenRouter including six that are not its models, and 362
+   * under Zen including 356 that are not, every one unrunnable and none saying so.
+   *
+   * Driven over both systems at once, because either one alone passes by luck.
+   */
+  const bothPublished = {
+    opencode: {
+      models: [
+        { id: "openrouter/qwen/q3", name: "OpenRouter/Q3", description: null, group: null },
+        { id: "opencode/big-pickle", name: "OpenCode Zen/Big Pickle", description: null, group: null },
+      ],
+      routing: null,
+      error: null,
+    },
+  } as never;
+  check(
+    "a published list is divided between the systems that share its harness",
+    allModels([{ ...orSystem, models: [] }, zenSystem], bothPublished).map(
+      (one) => `${one.system.id}: ${one.modelId}`,
+    ),
+    ["openrouter: qwen/q3", "zen: big-pickle"],
+  );
+  /*
+   * And a system with no prefix still takes everything, which is every other row
+   * in the daemon's table and is exactly what they did before the division
+   * existed — those harnesses serve one system each, so there is nothing to
+   * divide and nothing may be dropped.
+   */
+  check(
+    "while a system that claims no prefix still takes the whole list",
+    allModels([system({ models: [] })], {
+      kimi: { models: [{ id: "kimi-code/k3", name: "K3", description: null, group: null }, { id: "plain", name: "P", description: null, group: null }], routing: null, error: null },
+    } as never).map((one) => one.modelId),
+    ["kimi-code/k3", "plain"],
+  );
   /*
    * ⚠ **And the answer is per row: which harnesses can run *this* model.** More
    * precise than a group, needs no vocabulary, and reads at a glance. Measured
@@ -23152,7 +24923,7 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     // tomorrow. This is what holds it to `noJargon`, to the full stop, and to
     // never printing an id where a name goes.
     harnessRowRefusal("claude", { ...tabled, system: unkeyed }, claude),
-    keyMissing({ ...tabled, system: unkeyed }),
+    keyMissing({ ...tabled, system: unkeyed }, "claude"),
   ];
   // Each arm answers something, and the sweep below is worth nothing if one of
   // them quietly became `null` — a greyed row with no reason is the state this
@@ -23233,6 +25004,231 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
       [system()],
     ),
     "gone",
+  );
+}
+
+process.stdout.write("\nthe one model list this app reads for itself\n");
+{
+  const { readOpenRouterModels, openRouterNotice, BATCH_VARIANT, OPENROUTER_MODELS_URL, OPENROUTER_SYSTEM_ID } = await import(
+    "../src/openrouter.js"
+  );
+
+  const model = (over: Record<string, unknown> = {}) => ({
+    id: "qwen/qwen3-coder",
+    name: "Qwen: Qwen3 Coder",
+    supported_parameters: ["tools", "temperature"],
+    ...over,
+  });
+
+  /*
+   * ⚠ **Two filters, and they are one rule stated twice.** Each drops a row whose
+   * only possible outcome is a confusing failure at somebody else's endpoint, so
+   * neither is a preference. Measured 2026-08-27, and the catalogue moves — it
+   * grew by one model between two reads an hour apart, so nothing here pins a
+   * count: of 417 models 348 can call tools, 59 of those carry `:batch`, 289 are
+   * kept.
+   */
+  check(
+    "only the models that can call tools are offered",
+    readOpenRouterModels({
+      data: [
+        model(),
+        model({ id: "a/chat-only", supported_parameters: ["temperature"] }),
+        model({ id: "b/no-field" , supported_parameters: undefined }),
+      ],
+    }),
+    /*
+     * ⚠ **And the two it refused are *named*, which is the half that was missing.**
+     * This filter was only ever applied to the list this browser fetches — and the
+     * catalogue is not the only list. opencode publishes its own 362 unfiltered,
+     * `allModels` merged them in as `published` rows, and a model refused here came
+     * straight back through the other door: `nousresearch/hermes-3-llama-3.1-405b`
+     * was offered, assembled and failed on its first turn with OpenRouter's own
+     * accurate sentence. Q3.520.
+     */
+    { kind: "ok", models: [{ id: "qwen/qwen3-coder", name: "Qwen: Qwen3 Coder" }], toolless: ["a/chat-only", "b/no-field"] },
+  );
+  /*
+   * ⚠ **`:batch` is not a routing variant, which is why it is dropped rather than
+   * greyed.** OpenRouter documents seven of those — `:free`, `:extended`,
+   * `:exacto`, `:thinking`, `:online`, `:nitro`, `:floor` — and publishes no page
+   * for this one, because it belongs to a different API: `POST /api/beta/batches`,
+   * whose only supported completion window is **24 hours** and whose submission
+   * answers `202 Accepted` with `status: "validating"`. Both doors this app has
+   * are synchronous, nothing here can poll a batch, and a turn ending in a day has
+   * no representation in the event union at all. The row is priced at half, which
+   * makes `anthropic/claude-opus-5:batch` the most attractive-looking line in the
+   * picker and the one that cannot complete a turn.
+   *
+   * ⚠ **`endsWith` and not an allow-list of understood variants.** Measured over
+   * the whole live list: an id carries at most one colon and never one before the
+   * `/`, and `batch` and `free` are the only two suffixes in existence — so a
+   * model genuinely *called* batch survives, having no colon at all. An allow-list
+   * would drop `:free` unless enumerated and would go dark on the next
+   * *synchronous* variant; this goes dark only on the next asynchronous one, which
+   * is the rarer event and is accepted.
+   *
+   * Driven through the exported constant rather than a second copy of the string,
+   * and the third row is the guard: it is what fails if this is ever loosened to a
+   * substring test.
+   */
+  check(
+    "and neither is the batch tier of one, which no door here can reach",
+    readOpenRouterModels({
+      data: [
+        model(),
+        model({ id: `qwen/qwen3-coder${BATCH_VARIANT}`, name: "Qwen: Qwen3 Coder (batch)" }),
+        model({ id: "deepseek/batch", name: "DeepSeek: Batch" }),
+      ],
+    }),
+    /*
+     * ⚠ **`toolless` stays empty here, and that is the point of it being one
+     * statement rather than "everything left out".** A `:batch` id is refused for a
+     * reason that says nothing about tool support — it can call them perfectly, in
+     * a day — so naming it would make `allModels` drop a published row over a
+     * pricing tier that a stored preset is deliberately still allowed to use.
+     */
+    {
+      kind: "ok",
+      models: [
+        { id: "qwen/qwen3-coder", name: "Qwen: Qwen3 Coder" },
+        { id: "deepseek/batch", name: "DeepSeek: Batch" },
+      ],
+      toolless: [],
+    },
+  );
+  /*
+   * ⚠ **The daemon is taught neither filter, and that is deliberate.**
+   * `MAX_MODEL_CHARS` stays its only model validation, so a `:batch` id already
+   * stored in an assembled agent goes on being sent rather than being retroactively
+   * broken — the tolerance the tools filter has always granted, asserted here so
+   * that a later "tidy-up" into `src/` has to argue with something.
+   */
+  check(
+    "the suffix is the browser's rule and no daemon source knows it",
+    [BATCH_VARIANT, readFileSync(new URL("../../../src/acp/systems.ts", import.meta.url), "utf8").includes(BATCH_VARIANT)],
+    [":batch", false],
+  );
+  /*
+   * ⚠ **Fails *open*, which is the opposite of `catalogue.ts` and the difference
+   * is what is being read.** A half-read entry there is a half-read *permission*
+   * list — somebody granting a plugin access to their sessions — and that one may
+   * not guess. This is a list of names: a bad entry costs one row nobody can see
+   * is missing, and refusing the other 355 over it is the failure this app avoids
+   * everywhere else.
+   */
+  check(
+    "one unreadable entry costs one row and not the list",
+    readOpenRouterModels({ data: [7, null, { id: 5, name: "x" }, model({ id: "keep/me" }), { name: "no id" }] }),
+    // Nor is an unreadable row named: "the catalogue refused this for having no
+    // tools" is a claim, and a row that could not be read supports no claim at all.
+    { kind: "ok", models: [{ id: "keep/me", name: "Qwen: Qwen3 Coder" }], toolless: [] },
+  );
+  /*
+   * ⚠ **Unknown fields are ignored and always will be.** The live object carries
+   * eighteen keys — `pricing`, `architecture`, `top_provider` and more — none of
+   * which this app has a screen for, and a reader that refused a key it had not
+   * heard of would go dark on the next thing OpenRouter adds.
+   */
+  check(
+    "and a field this app has never heard of is not a reason to refuse a row",
+    readOpenRouterModels({ data: [model({ pricing: { prompt: "0.1" }, architecture: { modality: "text" } })] }).kind,
+    "ok",
+  );
+  check("a duplicate id is carried once", readOpenRouterModels({ data: [model(), model()] }), {
+    kind: "ok",
+    models: [{ id: "qwen/qwen3-coder", name: "Qwen: Qwen3 Coder" }],
+    toolless: [],
+  });
+  /*
+   * The two shapes that are not a list of models at all. Separate from `ok` with
+   * nothing in it, which is a provider that really has nothing — see the notice.
+   */
+  check(
+    "an answer that is not a model list says so, and is not an empty one",
+    [readOpenRouterModels({ data: {} }).kind, readOpenRouterModels([]).kind, readOpenRouterModels(null).kind],
+    ["malformed", "malformed", "malformed"],
+  );
+  /*
+   * ⚠ **The name is carried verbatim and never rebuilt from the id.** Stripping a
+   * `"<Vendor>: "` prefix looks tidy and is a rule with a hole: measured, 19 of
+   * the 348 carry no prefix at all and four vendors disagree with themselves —
+   * `anthropic/claude-opus-5` is `Claude Opus 5` while `anthropic/claude-sonnet-5`
+   * is `Anthropic: Claude Sonnet 5`. Stripping would draw those two as products of
+   * two different companies under one heading.
+   */
+  check(
+    "a name is whatever the catalogue called it, prefix or no prefix",
+    (readOpenRouterModels({
+      data: [model({ id: "anthropic/claude-opus-5", name: "Claude Opus 5" }), model({ id: "anthropic/claude-sonnet-5", name: "Anthropic: Claude Sonnet 5" })],
+    }) as { models: { name: string }[] }).models.map((one) => one.name),
+    ["Claude Opus 5", "Anthropic: Claude Sonnet 5"],
+  );
+  /*
+   * ⚠ **An unread list and an empty one are different facts.** The arms are
+   * separate for that reason alone: a provider that genuinely lists nothing usable
+   * and a provider this device could not reach are two different things to be
+   * told, and one sentence for both would make the second read as the first.
+   *
+   * None of them names a remedy, which is this app's standing rule for a refusal
+   * and is not a slip here: nobody in this product configures that address.
+   */
+  check(
+    "each state of the read draws its own sentence, and none of them a remedy",
+    [
+      openRouterNotice(null, "OpenRouter"),
+      openRouterNotice({ kind: "ok", models: [], toolless: [] }, "OpenRouter"),
+      openRouterNotice({ kind: "ok", models: [{ id: "a/b", name: "n" }], toolless: [] }, "OpenRouter"),
+      openRouterNotice({ kind: "unreachable", reason: "Failed to fetch" }, "OpenRouter"),
+      openRouterNotice({ kind: "malformed", reason: "no data" }, "OpenRouter"),
+    ],
+    [
+      "Reading OpenRouter's model list…",
+      "OpenRouter lists no models that can use tools.",
+      null,
+      "OpenRouter's model list could not be read on this device.",
+      "OpenRouter's model list could not be read on this device.",
+    ],
+  );
+  /*
+   * ⚠ **The reason is deliberately not in the sentence.** A refused `connect-src`
+   * arrives as a bare `TypeError` with no status, so the text a browser happens to
+   * put on it is not something a person can act on — and this one has no remedy to
+   * offer anyway.
+   */
+  check(
+    "and the sentence never carries the browser's own words for the failure",
+    /Failed to fetch|TypeError|no data/.test(
+      [openRouterNotice({ kind: "unreachable", reason: "Failed to fetch" }, "OpenRouter"), openRouterNotice({ kind: "malformed", reason: "no data" }, "OpenRouter")].join(" "),
+    ),
+    false,
+  );
+  /*
+   * ⚠ **The address is this app's, and the daemon's `baseUrl` is not it.** Two
+   * different things that share a host: the daemon's is where a *routed session's*
+   * traffic goes and is deliberately spelled without the `/v1` the SDK appends,
+   * while this one is a catalogue read by the browser. Pinned because deriving one
+   * from the other is the obvious tidy-up and it is wrong in both directions.
+   */
+  check(
+    "the catalogue address is the versioned one, and the system id matches the daemon's",
+    [OPENROUTER_MODELS_URL, OPENROUTER_SYSTEM_ID],
+    ["https://openrouter.ai/api/v1/models", "openrouter"],
+  );
+  /*
+   * ⚠ **And it is reached with no credential, ever.** This app has none to offer a
+   * third party — `cp.ts`'s standing "only ever to this origin" rule — and the
+   * endpoint wants none. Read off the module rather than asserted about a call,
+   * because what must not exist is a header, and a call that never happens in a
+   * driver would prove nothing about one that does.
+   */
+  const openRouterRaw = readFileSync(new URL("../src/openrouter.ts", import.meta.url), "utf8");
+  check(
+    "and nothing on that request carries a credential",
+    [/headers/i, /authorization/i, /credential/i, /\bcp\.|credentialOf|bearer/i].filter((one) =>
+      one.test(openRouterRaw.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "")),
+    ).map(String),
+    [],
   );
 }
 

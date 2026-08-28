@@ -16,7 +16,15 @@ import type { AgentId } from "./agents.js";
  * from the wire would be handing somebody's key to a host of the caller's
  * choosing, over a daemon that is reachable from the internet through the relay.
  */
-export const SYSTEM_IDS = ["anthropic", "openai", "moonshot", "zhipu", "minimax"] as const;
+export const SYSTEM_IDS = [
+  "anthropic",
+  "openai",
+  "moonshot",
+  "zhipu",
+  "minimax",
+  "openrouter",
+  "zen",
+] as const;
 
 export type SystemId = (typeof SYSTEM_IDS)[number];
 
@@ -70,13 +78,25 @@ export interface SystemConfig {
    */
   nativeHarness: AgentId | null;
   /**
-   * Whose CLI drives this system's interactive sign-in, or `null` where nothing
-   * can.
+   * Whose CLI owns this system's credentials, or `null` where no CLI ships for it.
    *
    * A capability that may be absent, living in the table rather than in either
    * reader — the shape `AGENT_LOGIN.logoutArgs` already has for kimi. The client
-   * draws a wizard from this and a bare key box from its absence, so a system
-   * with no CLI never offers a button that answers 503.
+   * draws that harness's own card from this and a bare **system** key box from its
+   * absence, so a system with no CLI never offers a button that answers 503.
+   *
+   * ⚠ **"Owns the credentials", not "drives a sign-in" — and the two came apart.**
+   * They coincide for the first three rows, whose CLIs all have logins. opencode
+   * has none: it runs with no credential at all, and what its card offers is a
+   * paste box rather than a wizard. Reading this field as "there is a sign-in
+   * here" is what the card is now responsible for saying, per `AgentStance`'s
+   * `no_login`; reading it as "these credentials live on that agent" is what it
+   * has always meant and is what decides which control this screen draws.
+   *
+   * ⚠ **`null` on a row that is not routable is a dead control.** The absent arm
+   * draws a *system* key box, and a system credential is only ever spent in
+   * `providers/set` headers — so on a row with no `baseUrl` it would be stored and
+   * never read. `zen` is exactly that row, which is why it names its harness.
    */
   loginVia: AgentId | null;
   /**
@@ -92,6 +112,48 @@ export interface SystemConfig {
    * `Session.applySystem`.
    */
   models: readonly SystemModel[];
+  /**
+   * What this system's native harness prefixes a model id with, or `null` where
+   * it spells them the same way the endpoint does.
+   *
+   * ⚠ **It exists because one system is reachable *both* ways by two different
+   * harnesses that disagree about the name.** claude routed at OpenRouter sends
+   * the catalogue's own slug, `qwen/qwen3-coder`; opencode publishes the same
+   * model as `openrouter/qwen/qwen3-coder`, because its ids are
+   * `provider/model` across every provider it knows. Measured 2026-08-27: 356 of
+   * the 362 models a keyed opencode publishes carry that prefix.
+   *
+   * Everything stored and everything sent on the wire is the **unprefixed**
+   * spelling, so `custom_agents.model` says one thing whichever harness ends up
+   * running it. `pinNativeModel` puts the prefix back at the one moment it is
+   * needed, and the client strips it where a published list is read.
+   *
+   * ⚠ **Not a general "model names may differ" mechanism.** Moonshot's two lists
+   * are genuinely different products on different endpoints with different
+   * billing — Q3.488 — and no prefix relates them, which is why that row leaves
+   * this `null` and why a refusal is still the right answer there.
+   */
+  nativeModelPrefix: string | null;
+  /**
+   * The variable this system's key is stored in, where its CLI reads a *per
+   * system* one — otherwise `null`.
+   *
+   * ⚠ **It exists because one CLI reads two, and nothing said which was which.**
+   * opencode is the native side of both OpenRouter and OpenCode Zen and takes a
+   * key for each, so the settings screen for a system — which mounts that CLI's
+   * card under the system's own name — drew *both* boxes under the heading
+   * `OpenRouter`, one of them for somebody else's account entirely. Every other
+   * system's harness reads exactly one, which is why `null` is the honest answer
+   * there rather than a value: there is nothing to narrow.
+   *
+   * ⚠ **Naming a variable in a *response* is not what `SYSTEMS` is fixed for.**
+   * That rule is about a caller naming one — a request that could point somebody's
+   * key at a host of its own. This is the daemon saying which of two boxes it
+   * already draws is which, and `GET /agent-auth` has carried `envName` per slot
+   * since the first release.
+   */
+  keyEnv: string | null;
+
 }
 
 /**
@@ -118,6 +180,8 @@ export const SYSTEMS: Record<SystemId, SystemConfig> = {
     nativeHarness: "claude",
     loginVia: "claude",
     models: [],
+    nativeModelPrefix: null,
+    keyEnv: null,
   },
   openai: {
     displayName: "OpenAI",
@@ -127,6 +191,8 @@ export const SYSTEMS: Record<SystemId, SystemConfig> = {
     nativeHarness: "codex",
     loginVia: "codex",
     models: [],
+    nativeModelPrefix: null,
+    keyEnv: null,
   },
   moonshot: {
     displayName: "Moonshot",
@@ -147,6 +213,10 @@ export const SYSTEMS: Record<SystemId, SystemConfig> = {
       { id: "kimi-k2-0905-preview", name: "Kimi K2" },
       { id: "kimi-k2-turbo-preview", name: "Kimi K2 Turbo" },
     ],
+    // Kimi's own list and Moonshot's are different products on different
+    // endpoints — Q3.488 — so no prefix relates them and none is claimed.
+    nativeModelPrefix: null,
+    keyEnv: null,
   },
   zhipu: {
     displayName: "Z.ai (GLM)",
@@ -161,6 +231,8 @@ export const SYSTEMS: Record<SystemId, SystemConfig> = {
       { id: "glm-4.6", name: "GLM-4.6" },
       { id: "glm-4.5-air", name: "GLM-4.5 Air" },
     ],
+    nativeModelPrefix: null,
+    keyEnv: null,
   },
   minimax: {
     displayName: "MiniMax",
@@ -184,6 +256,102 @@ export const SYSTEMS: Record<SystemId, SystemConfig> = {
     nativeHarness: null,
     loginVia: null,
     models: [{ id: "MiniMax-M2", name: "MiniMax M2" }],
+    nativeModelPrefix: null,
+    keyEnv: null,
+  },
+  openrouter: {
+    displayName: "OpenRouter",
+    /*
+     * ⚠ **Singular, and this endpoint serves both shapes — the narrowing is the
+     * decision rather than a shortcut.** Probed 2026-08-27 with no credential:
+     * `POST /api/v1/messages` answers 401 in Anthropic's envelope
+     * (`{"type":"error","error":{"type":"authentication_error",…}}`) while
+     * `POST /api/v1/chat/completions` answers 401 in OpenAI's
+     * (`{"error":{"message":…,"code":401}}`). Both are live.
+     *
+     * `anthropic` is what makes the routed half of this row work; `openai` would
+     * make it work for nobody. {@link hostable} weighs `supported` and then
+     * {@link ROUTED_MODEL_ENV}, and the only harness in that second table is
+     * claude, which accepts `anthropic`. Declaring `openai` would take codex past
+     * the protocol arm and land it on the pinning arm — which the client's mirror
+     * cannot express at all, so the picker would offer a pairing
+     * `POST /custom-agents` refuses after somebody had assembled it.
+     */
+    apiType: "anthropic",
+    /*
+     * ⚠ **`/api`, and never `/api/v1`** — the SDK appends `/v1/messages`, so the
+     * `/v1` is already coming. Path-pinned 2026-08-27:
+     * `openrouter.ai/api/v1/messages` answers a JSON 401, while
+     * `openrouter.ai/api/messages` and `openrouter.ai/api/v1/v1/messages` both
+     * answer an **HTML 404 page** — which is what a wrong base looks like here,
+     * and a shape no error reader in this repository would recognise.
+     */
+    baseUrl: "https://openrouter.ai/api",
+    /*
+     * Probed with a bogus key: `x-api-key` and `authorization: Bearer` are *both*
+     * answered `401 "User not found."`, against `"No cookie auth credentials
+     * found"` with no header at all — so both conventions are read, and unlike
+     * the `minimax` row above there is no prose here naming one over the other.
+     * `authorization` is what OpenRouter documents and what the other three
+     * routed rows already send.
+     */
+    authHeader: { name: "authorization", prefix: "Bearer " },
+    // Both at once, as `moonshot` is: opencode reaches OpenRouter by itself,
+    // claude reaches it through the base URL above.
+    nativeHarness: "opencode",
+    loginVia: "opencode",
+    /*
+     * ⚠ **Empty for a *third* reason, which neither of the two above covers.**
+     * For `anthropic`/`openai` empty means "the native CLI publishes the list";
+     * for a routed row it has meant "the names are written down here because
+     * there is nowhere to read them". This is the one system that publishes its
+     * own: `GET https://openrouter.ai/api/v1/models` needs no credential and
+     * answers `access-control-allow-origin: *`, so **the browser reads it** —
+     * `packages/web/src/openrouter.ts`. 417 models, 687 KiB. Baking that here
+     * would put somebody else's weekly catalogue into this daemon's source and
+     * onto `GET /systems`, and nothing in `src/` fetches it, because the count of
+     * `fetch` calls in this package is the property `compatibility.md` states.
+     */
+    models: [],
+    // opencode publishes `openrouter/qwen/qwen3-coder` for what the endpoint
+    // calls `qwen/qwen3-coder`. See {@link SystemConfig.nativeModelPrefix}.
+    nativeModelPrefix: "openrouter/",
+    keyEnv: "OPENROUTER_API_KEY",
+  },
+  zen: {
+    displayName: "OpenCode Zen",
+    // `@ai-sdk/openai-compatible` in its own registry entry, and inert here for
+    // the reason `anthropic` and `openai` are: nothing is ever routed at it.
+    apiType: "openai",
+    /*
+     * ⚠ **`null`, and this is the row where that matters most.** Its endpoint
+     * exists — `https://opencode.ai/zen/v1` — and naming it would make
+     * {@link hostable} offer the routed arm to claude, which cannot work:
+     * `ROUTED_MODEL_ENV` has no OpenAI-shaped door, so the pairing would pass the
+     * protocol test and die on the pinning one. `anthropic` and `openai` are the
+     * same shape for the same reason. What reaches this system is the CLI it
+     * belongs to, and that CLI reaches it by itself.
+     */
+    baseUrl: null,
+    authHeader: null,
+    nativeHarness: "opencode",
+    /*
+     * ⚠ **Named, though this CLI has no sign-in — because the field is about
+     * *credentials* and not about a wizard.** `OPENCODE_API_KEY` is an agent
+     * credential on opencode, so opencode's card is the control this system has;
+     * `null` here would draw a **system** key box instead, and this row is not
+     * routable, so that key would be stored and never sent anywhere. The card
+     * itself says `no sign-in needed` — measured 2026-08-27, opencode publishes
+     * six models here and completes a turn against an empty `XDG_DATA_HOME`. A key
+     * buys the rest of the catalogue rather than admission to it.
+     */
+    loginVia: "opencode",
+    // The agent publishes them, and how many depends on whether a key is set.
+    models: [],
+    // opencode spells them `opencode/big-pickle`; the vendor's own registry calls
+    // that model `big-pickle`. Same rule as the row above.
+    nativeModelPrefix: "opencode/",
+    keyEnv: "OPENCODE_API_KEY",
   },
 };
 
@@ -272,6 +440,51 @@ export const ROUTED_MODEL_ENV: Partial<Record<AgentId, (model: string) => NodeJS
 
 /** Why a harness cannot host a system, or `null` when it can. */
 export type HostRefusal = string | null;
+
+/**
+ * The key that signs a routed request to this system — the system's own, or the
+ * one its native harness already holds.
+ *
+ * ⚠ **One account, two boxes, and only one of them was ever filled.** Both
+ * secrets here are *the same string from the same OpenRouter account*, spent at
+ * the same host: `system_credentials.openrouter` travels in `providers/set`
+ * headers when a harness is routed there, and `agent_credentials(opencode,
+ * OPENROUTER_API_KEY)` is merged into opencode's environment when it runs the same
+ * catalogue natively. Somebody who has pasted "my OpenRouter key" once has
+ * answered the question, and a second empty box under a second name is a trap the
+ * daemon can simply not fall into: measured, a key saved for opencode and none for
+ * the system refused the start of a Claude-Code-at-OpenRouter session with *"No
+ * key is saved for OpenRouter…"*, over a machine that plainly had one.
+ *
+ * ⚠ **`keyEnv` is the gate and it is not a convenience — it is what makes this
+ * true of exactly the rows it is true of.** Moonshot is the counter-example the
+ * table already documents at length: `KIMI_API_KEY` is a Kimi Code *subscription*
+ * at `api.kimi.com/coding`, while `system_credentials.moonshot` is a
+ * pay-as-you-go key at `api.moonshot.ai` — different product, different host,
+ * different billing. Borrowing one for the other would send the wrong secret to
+ * the wrong endpoint and answer 401 with nothing on screen explaining it. Its
+ * `keyEnv` is `null`, so this returns at the second line and that row is untouched.
+ *
+ * ⚠ **One direction only.** The stored system key wins where there is one, and
+ * nothing here ever puts a *system* secret into a spawn environment: that is the
+ * boundary `agentEnv` and the "credential travels in headers" rule are about, and
+ * it is not what this crosses. What it does is fill one store's gap from another,
+ * both of which this daemon already reads on this uid.
+ *
+ * Pure, and the *only* answer to "is there a key for this system" — `GET /systems`
+ * reports `keySet` from it too. Two readers of one question is how the picker came
+ * to offer a pairing the start then refused.
+ */
+export function systemSecretFor(
+  system: SystemId,
+  stored: string | null,
+  agentEnv: (agent: AgentId) => Record<string, string>,
+): string | null {
+  if (stored !== null) return stored;
+  const spec = SYSTEMS[system];
+  if (spec.keyEnv === null || spec.nativeHarness === null) return null;
+  return agentEnv(spec.nativeHarness)[spec.keyEnv] ?? null;
+}
 
 /**
  * Whether this harness can be pointed at this system, and if not, what to say.

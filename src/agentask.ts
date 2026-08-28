@@ -93,6 +93,23 @@ export const ASK_TIMEOUT_MS = 120_000;
 export const MAX_CONCURRENT_ASKS = 2;
 
 /**
+ * How long a queued caller waits for a slot before being refused one.
+ *
+ * ⚠ **The daemon's own budget and never the caller's signal**, because the run a
+ * waiter is about to start is shared: `capsInFlight` hands it to everyone who asks
+ * for the same harness, so cancelling on one caller's abort would take an answer
+ * away from callers that are still waiting for it. What a deadline can honestly do
+ * is bound the *park*, and past it the answer is the refusal that was always there.
+ *
+ * Sized against what it queues behind: `Session.start` is bounded at 45 s and a
+ * capability read disposes immediately after `session/new`, so two slots ahead of
+ * you is at most ~90 s of honest work. This is longer than that on purpose — a
+ * deadline that fires while the machine is genuinely making progress converts a
+ * wait into the refusal it was added to remove.
+ */
+export const SLOT_WAIT_MS = 120_000;
+
+/**
  * How long a model list is believed before it is read again.
  *
  * ⚠ **A ceiling on *staleness*, not a cache for speed.** Reading the list costs
@@ -208,7 +225,16 @@ export interface AgentCapabilities {
  * where standing in for the class would mean a subprocess.
  */
 export interface AgentCapabilityReader {
-  capabilities(agent: AgentId, signal?: AbortSignal): Promise<AgentCapabilities>;
+  /**
+   * `queue` asks to **wait** for a slot rather than be refused one.
+   *
+   * Opt-in per call rather than per method, because both kinds of caller reach
+   * this: the capability sweep, which is one operation over every harness and has
+   * no per-harness meaning to refuse, and a plugin's `model.list`, for which
+   * `model_busy` is a published refusal it can report and a park would be a
+   * timeout. See `admit`.
+   */
+  capabilities(agent: AgentId, signal?: AbortSignal, queue?: boolean): Promise<AgentCapabilities>;
 }
 
 export interface AgentAskAnswer {
@@ -301,6 +327,30 @@ export class AgentAskRuns {
   }
 
   /**
+   * Callers parked on a slot rather than refused one — see {@link admit}.
+   *
+   * Woken by {@link freed}, which every path that lets {@link inFlight} fall must
+   * call. A waiter that is woken **re-tests** the cap rather than assuming it, so
+   * two of them waking on one release cannot both take the same slot.
+   */
+  private readonly waiting = new Set<() => void>();
+
+  /**
+   * A slot may have come free. Wakes everyone; the cap is what sorts them out.
+   *
+   * Called from the three places {@link inFlight} shrinks, and it has to be all
+   * three: `reserved` falling in {@link claim}'s first `finally`, `starting`
+   * losing a promise in its second, and `live` losing a session in
+   * {@link release}. A missed one is a queue that never drains.
+   */
+  private freed(): void {
+    if (this.waiting.size === 0) return;
+    const woken = [...this.waiting];
+    this.waiting.clear();
+    for (const wake of woken) wake();
+  }
+
+  /**
    * One question, one answer, and nothing left behind.
    *
    * Throws {@link AgentAskError} for everything a caller can act on, because the
@@ -389,7 +439,8 @@ export class AgentAskRuns {
    * that makes its number true was two hand-kept copies — the very shape the
    * paragraph above refuses. {@link claim} is where both halves live now.
    */
-  private async admit(agent: AgentId): Promise<void> {
+  private async admit(agent: AgentId, queue: boolean): Promise<void> {
+    const until = Date.now() + SLOT_WAIT_MS;
     if (this.stopped) {
       throw new AgentAskError("model_unavailable", "this daemon is shutting down");
     }
@@ -431,14 +482,54 @@ export class AgentAskRuns {
      * between them.** Everything above this point may park; from here to the
      * caller's `finally` nothing does, which is the whole of what makes this a
      * cap rather than a reading of one. See {@link reserved}.
+     *
+     * ⚠ **A queued caller keeps that invariant by *re-testing*, not by holding a
+     * place.** The `await` below is outside the pair: control returns to the top
+     * of the loop and the test happens again in the same tick as the increment it
+     * guards, so a release that wakes three waiters admits one of them and parks
+     * the other two again. A queue that reserved on being woken would be the
+     * over-admission this whole comment exists to prevent.
      */
-    if (this.inFlight >= MAX_CONCURRENT_ASKS) {
-      throw new AgentAskError(
-        "model_busy",
-        `this machine is already running ${MAX_CONCURRENT_ASKS} model requests`,
-      );
+    for (;;) {
+      if (this.inFlight < MAX_CONCURRENT_ASKS) {
+        this.reserved += 1;
+        return;
+      }
+      /*
+       * ⚠ **`queue` is opt-in, and `ask` deliberately does not take it.** That
+       * one is a plugin's question with a screen behind it, and `model_busy` is a
+       * refusal it can report; parking it would turn a load message into a hang.
+       * The capability sweep is the opposite: it is one operation over every
+       * harness, it has no per-harness meaning, and a `model_busy` there greyed
+       * out a whole harness in the builder with a sentence about load — see the
+       * route.
+       */
+      if (!queue || Date.now() >= until) {
+        throw new AgentAskError(
+          "model_busy",
+          `this machine is already running ${MAX_CONCURRENT_ASKS} model requests`,
+        );
+      }
+      /*
+       * Woken by a release or by {@link SLOT_WAIT_MS}, whichever comes first. The
+       * timer is cleared on the wake so a parked caller cannot hold the event loop
+       * open past its own answer.
+       */
+      await new Promise<void>((resolve) => {
+        const wake = (): void => {
+          clearTimeout(timer);
+          this.waiting.delete(wake);
+          resolve();
+        };
+        const timer = setTimeout(wake, Math.max(0, until - Date.now()));
+        // The daemon must not be held alive by somebody waiting for a slot.
+        timer.unref?.();
+        this.waiting.add(wake);
+      });
+      if (this.stopped) {
+        throw new AgentAskError("model_unavailable", "this daemon is shutting down");
+      }
     }
-    this.reserved += 1;
   }
 
   /**
@@ -466,8 +557,8 @@ export class AgentAskRuns {
    * resolves; `live` covers the window after; the two must not have a gap
    * between them, and here they cannot.
    */
-  private async claim(agent: AgentId): Promise<Session> {
-    await this.admit(agent);
+  private async claim(agent: AgentId, queue = false): Promise<Session> {
+    await this.admit(agent, queue);
 
     // The slot `admit` reserved, handed to `starting` without an `await` in
     // between — the two count the same run and must never both be absent.
@@ -477,12 +568,17 @@ export class AgentAskRuns {
       this.starting.add(started);
     } finally {
       this.reserved -= 1;
+      // `starting` took the slot in the same tick, so this frees nothing on the
+      // success path — but a `start` that threw synchronously does, and a waiter
+      // parked behind it would otherwise never be woken.
+      this.freed();
     }
     let session: Session;
     try {
       session = await started;
     } finally {
       this.starting.delete(started);
+      this.freed();
     }
     this.live.add(session);
     return session;
@@ -497,6 +593,7 @@ export class AgentAskRuns {
    */
   private async release(session: Session): Promise<void> {
     this.live.delete(session);
+    this.freed();
     await session.dispose().catch(() => {
       // Nothing left to release, or the child died with the turn. Either way
       // there is no second way to say it from here and nobody waiting to hear.
@@ -542,7 +639,7 @@ export class AgentAskRuns {
    * {@link models}, plus what this agent will let us do about *which system* it
    * talks to — off the same spawn, under the same cache and the same slot.
    */
-  async capabilities(agent: AgentId, signal?: AbortSignal): Promise<AgentCapabilities> {
+  async capabilities(agent: AgentId, signal?: AbortSignal, queue = false): Promise<AgentCapabilities> {
     const held = this.models_.get(agent);
     if (held !== undefined && Date.now() - held.at < MODELS_TTL_MS) return held.answer;
 
@@ -567,7 +664,7 @@ export class AgentAskRuns {
      */
     stopIfGone(signal);
 
-    const run = this.readCapabilities(agent);
+    const run = this.readCapabilities(agent, queue);
     this.capsInFlight.set(agent, run);
     try {
       return await run;
@@ -577,8 +674,20 @@ export class AgentAskRuns {
   }
 
   /** {@link capabilities} with the cache and the in-flight collapse taken off. */
-  private async readCapabilities(agent: AgentId): Promise<AgentCapabilities> {
-    const session = await this.claim(agent);
+  private async readCapabilities(agent: AgentId, queue: boolean): Promise<AgentCapabilities> {
+    /*
+     * ⚠ **Queued only where the *caller* asked for it, and a plugin does not.**
+     * `model.list` reaches this method too, and `MAX_CONCURRENT_ASKS` is a bound
+     * `docs/PLUGINS.md` publishes to plugin authors: parking one inside its own
+     * ten-second invocation would make a documented refusal unobservable and turn
+     * a load message into a timeout. The capability *sweep* opts in, because it is
+     * one operation over every harness with no per-harness meaning to refuse.
+     *
+     * A plugin call that *joins* a sweep already in flight does wait — but that is
+     * `capsInFlight` handing it an answer somebody else is fetching, which is the
+     * behaviour it always had.
+     */
+    const session = await this.claim(agent, queue);
     try {
       const option = modelOptionOf(session);
       /*
@@ -610,7 +719,39 @@ export class AgentAskRuns {
       this.models_.set(agent, { at: Date.now(), answer });
       return answer;
     } finally {
-      await this.release(session);
+      /*
+       * ⚠ **Not awaited, and this is where the time was going.** Measured
+       * 2026-08-28, per harness, from `Session.start` to the answer being in hand
+       * and then to this returning:
+       *
+       *   claude    start  916 ms · dispose   18 ms
+       *   kimi      start  549 ms · dispose   28 ms
+       *   codex     start  383 ms · dispose **2011 ms**
+       *   opencode  start 1001 ms · dispose   24 ms
+       *
+       * codex's list is complete at 383 ms and the caller was made to wait 2394 —
+       * 84% of it spent tearing down a process whose answer was already read. It
+       * is the `session/close` deadline almost exactly: codex does not answer that
+       * call, so the close waits its full budget before the kill. The other three
+       * disappear in tens of milliseconds, which is what makes this one harness
+       * the critical path of the whole sweep.
+       *
+       * ⚠ **The slot is still held until the teardown finishes**, because that is
+       * the number the cap is about — `release` deletes from `live` and calls
+       * `freed` when the child is actually gone, so nothing here can put more
+       * processes on the machine than `MAX_CONCURRENT_ASKS` allows. What changed
+       * is only who waits: the caller has its answer, and the daemon keeps its own
+       * obligation not to leave a subprocess behind.
+       *
+       * ⚠ **`shutdown` is unaffected.** The session is in `live` until this
+       * settles, so a drain arriving mid-teardown finds it and calls `dispose`
+       * again — which is memoised, and settles rather than killing a child twice.
+       *
+       * `ask` still waits for its own teardown, deliberately: its caller is a
+       * plugin holding a budget, and returning early there would hand back a slot
+       * that is still occupied to a caller that measures its own concurrency.
+       */
+      void this.release(session);
     }
   }
 
@@ -756,6 +897,10 @@ export class AgentAskRuns {
    */
   async shutdown(): Promise<void> {
     this.stopped = true;
+    // Parked callers re-test after being woken and find `stopped`, so this is
+    // what turns a queue into a refusal rather than into a wait for a slot that
+    // will never be handed out.
+    this.freed();
     await Promise.allSettled([...this.starting]);
     const running = [...this.live];
     this.live.clear();

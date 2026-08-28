@@ -27,8 +27,8 @@ server and run what it just wrote. Multi-user moved to the control plane: severa
 people, each with their own machine and a grant on it. The daemon accepts any
 token whose `aud` is its own machine id and stops asking who the subject is.
 
-It spawns `claude`, `kimi` or `codex` over ACP (Agent Client Protocol), normalizes
-all three into one event union, and puts that behind a network layer built on the
+It spawns `claude`, `kimi`, `codex` or `opencode` over ACP (Agent Client
+Protocol), normalizes all four into one event union, and puts that behind a network layer built on the
 assumption that **clients are unreliable**: a laptop lid closes, a phone drops to
 LTE, a tab is discarded. The daemon is the source of truth and the agent must
 never notice a client leaving.
@@ -57,7 +57,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 776 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 808 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -306,6 +306,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `plugins.md` | `src/plugins/`, `plugins/`, `packages/web/src/wire.ts` | What a plugin may add and where it may appear · the two axes of authorization, and which applies inside a hook · what an update keeps and what a failed one puts back · why `src/` now holds three `fetch` calls |
 | `plugin-ui.md` | `packages/web/src/plugins.ts`, `catalogue.ts`, `install.ts`, `ui/plugins/`, `PluginView.tsx` | What the browser draws for a plugin and what it refuses to draw · where a plugin is installed from and what somebody agreed to · the one client that fails *closed* · what a draft of a fleet is |
 | `agent-systems.md` | `src/acp/systems.ts`, `src/agentask.ts`, `packages/web/src/agents.ts`, `ui/AgentBuilder.tsx` | Why a harness is not a system · which pairs of them exist, and who answers that · how a model is named to a harness that has never heard of it · what a session records and what it resolves at every launch |
+| `agent-catalogue.md` | `packages/web/src/openrouter.ts`, `agents.ts`, `ui/AgentBuilder.tsx`, `src/acp/systems.ts` | The three places a model's name can come from, and which one the browser fetches · the one system whose two spellings are the same models · what the reader drops and why greying it would be worse · what has been tried in a heading and taken back out, twice |
 | `deployment.md` | `deploy/`, `.github/workflows/` | Two deployments and three services · what a restart costs and what decides one · every rule about writing a value into an env file |
 | `compatibility.md` | `src/version.ts`, `src/relay/protocol.ts`, `packages/control-plane/src/store.ts`, `schema.sql`, `packages/web/src/wire.ts` | What ships with what, and why the web client riding the control plane's image decides the rest · negotiated against announced · which way an unknown value must fail · how to make a breaking change without a flag day · what is still one |
 
@@ -388,15 +389,23 @@ exists and reads stdin, closes the gap recorded at `AGENT_LOGIN.codex`, where a
 pasted `CODEX_API_KEY` reaches the model's API and still leaves `session/new`
 answering -32000 (Q7.65).
 
-Agents are a **three**-member union now, and adding the third answered the
-question Q7.31 was holding open — not by refactoring the type, but by finding that
-the work is per-agent measurement rather than per-agent code. Codex cost one arm in
-`resolveAgent`, one row in `AGENT_LOGIN`, one arm in `vendoredCli`, one literal in
-`wire.ts`'s hand-mirrored union, and a second entry in `pincheck`'s adapter list;
-everything else — questions, permissions, commands, config, resume, context usage
-— arrived through capabilities that were already read by `category` and by shape
-rather than by name. What each new agent *does* cost is the measuring: the two
-fields that were wrong on the first attempt (`OPENAI_API_KEY`, and reading a status
-command's stdout) were both facts about a CLI that no amount of type work would
-have surfaced. A registry is still not built, and the reason is now weaker than it
-was: what would justify one is a fourth agent, not a cleaner second.
+Agents are a **four**-member union now, and the fourth met the precondition Q7.31
+set for itself — *"a fourth agent, to show the pattern is a pattern rather than two
+coincidences"* — and left the answer unchanged. opencode cost the five edits codex
+cost (`resolveAgent`, `AGENT_LOGIN`, `vendoredCli`, `wire.ts`'s hand-mirrored
+union, `pincheck`'s list) plus one the compiler was *claiming* to force and was
+not: `AgentGlyph` answers `ReactNode`, `undefined` inhabits it, and a `switch`
+falling off the end returns exactly that — so a blank tile would have compiled
+clean for four releases. It ends in a `never` arm now. Everything else — questions,
+permissions, commands, config, resume, context usage — arrived through capabilities
+already read by `category` and by shape rather than by name.
+
+What each new agent *does* cost is the measuring, and opencode is the sharpest case
+yet (Q6.105): the upstream issue closing "per-session model selection" as **not
+planned** is about `session/set_config`, a method this daemon has never sent, while
+`session/set_config_option` — the one `pinNativeModel` does send — works. Reading
+the tracker instead of running the binary would have bought a whole new environment
+door, a new arm in `hostable`, and a system credential in a spawn environment, none
+of which is needed. A registry is still not built; what would justify one is now an
+agent this repository cannot vendor and cannot measure, which is a different
+feature from a tidier union (Q7.125).

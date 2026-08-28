@@ -54,8 +54,8 @@ stays off, because it is untrusted text quoting an untrusted repository.
   last event. Every other reason stays a centred line. **Every table falls through
   to the identifier for a value it does not know**, which is the rule everywhere
   else on this wire: legible, and never a guess. What is drawn changed and nothing
-  else did — `showsInTranscript` and `taskFloor` still key on `stopReason !==
-  "end_turn"`.
+  else did — `taskFloor` still keys on `stopReason !== "end_turn"` alone, and
+  `showsInTranscript` on that plus the `agent_error` exception one bullet down.
 
 - **A link is drawn only where there is somewhere to go.** `openableHref` in
   `ui/links.ts` allows `http`, `https` and `mailto`, answers `null` for everything
@@ -96,8 +96,13 @@ stays off, because it is untrusted text quoting an untrusted repository.
   the top row.
 - **The daemon's bookkeeping is not part of the conversation.**
   `showsInTranscript` refuses status lines, workspace rows and
-  `turn_end: end_turn`. Every *other* stop reason is kept: `max_tokens`, `refusal`
-  and `cancelled` are turns that did not finish.
+  `turn_end: end_turn`. Every *other* stop reason is kept — `max_tokens`,
+  `refusal` and `cancelled` are turns that did not finish — with **one exception
+  that is silent for the opposite reason**: `agent_error`, the end the daemon
+  writes for a turn the agent rejected, is not drawn because the row immediately
+  above it is that rejection in the agent's own words. It still raises
+  `taskFloor`, which runs before the gate: "nothing is drawn for it" and "nothing
+  happened" are different sentences, and `webcheck` pins the pair. Q2.218.
 - **A thought is not drawn.** The suppression is in `tail.ts`, not the JSX, so a
   refused node spends no render budget — and a dropped thought still *flushes* the
   run, since parts join with no separator.

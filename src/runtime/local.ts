@@ -10,7 +10,9 @@ import {
   AGENT_LOGIN,
   agentEnv,
   findOnPath,
+  hasLoginFlow,
   resolveAgent,
+  vendoredOpencode,
   type AgentId,
   type AgentLaunchConfig,
   type LoginStatusProbe,
@@ -271,7 +273,26 @@ export function loginBlockedReason(
   interactiveStdin: boolean,
   hasScript: boolean,
   hasCli: boolean,
-): "no_script" | "no_cli" | "interactive_pty" | null {
+  /**
+   * Whether this agent has a sign-in at all — {@link hasLoginFlow}.
+   *
+   * ⚠ **No default, deliberately.** It had one, `true`, and a defaulted "this agent
+   * has a sign-in" is a wrong answer that arrives silently at the next caller: the
+   * only agent it is false for is the only one that would never be noticed, since
+   * everything about it looks like an ordinary agent that simply has not been
+   * signed in yet. Every call site says which it means.
+   */
+  hasFlow: boolean,
+): "no_flow" | "no_script" | "no_cli" | "interactive_pty" | null {
+  /*
+   * ⚠ **First, because it is the only one that is not a limitation.** The other
+   * three say a sign-in could not be run *here* — a missing `script`, a missing
+   * CLI, a pty this OS will not give a background service — and each has a remedy.
+   * This one says the agent needs no sign-in at all, which is good news and must
+   * not be ordered after a sentence apologising for the host: a machine with no
+   * `script` would otherwise be told it cannot run a wizard that does not exist.
+   */
+  if (!hasFlow) return "no_flow";
   if (!hasScript) return "no_script";
   if (!hasCli) return "no_cli";
   if (interactiveStdin && loginStdio(platform, interactiveStdin) === "pipe") {
@@ -493,6 +514,10 @@ export class LocalRuntime implements SessionRuntime {
    * somebody walked away from.
    */
   async login(agent: AgentId): Promise<LoginProcess | null> {
+    // Nothing to run. `loginSupport` already says so, and the route refuses before
+    // reaching here — this is the same answer said where the spawn would be.
+    const flow = AGENT_LOGIN[agent].args;
+    if (flow === null) return null;
     const script = this.scriptPath();
     if (script === null) return null;
     const command = this.resolveLoginBinary(agent);
@@ -500,7 +525,7 @@ export class LocalRuntime implements SessionRuntime {
       this.onWarning(`cannot log ${agent} in: ${AGENT_LOGIN[agent].command} is not on PATH`);
       return null;
     }
-    const spec = hostLoginArgs(process.platform, command, AGENT_LOGIN[agent].args, script);
+    const spec = hostLoginArgs(process.platform, command, flow, script);
     const stdin = loginStdio(process.platform, AGENT_LOGIN[agent].interactiveStdin);
     const child = spawn(spec.command, spec.args, {
       // The same environment `launch` gives an agent, and for the same reason:
@@ -539,6 +564,7 @@ export class LocalRuntime implements SessionRuntime {
       AGENT_LOGIN[agent].interactiveStdin,
       this.scriptPath() !== null,
       this.resolveLoginBinary(agent) !== null,
+      hasLoginFlow(agent),
     );
     return {
       supported: blocked === null,
@@ -689,6 +715,12 @@ export class LocalRuntime implements SessionRuntime {
       case "kimi":
         // Installed globally and nowhere else; there is no copy to prefer.
         resolved = null;
+        break;
+      case "opencode":
+        // The one file `resolveAgent` also picks — see {@link vendoredOpencode}.
+        // No wrapper here on purpose: a second name for it is a second thing to
+        // keep in step, which is the failure this arm exists to prevent.
+        resolved = vendoredOpencode() ?? null;
         break;
     }
     this.vendored.set(agent, resolved);

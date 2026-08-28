@@ -29,15 +29,17 @@ Three facts bound what that means here:
   is "no import anywhere" would reasonably read it as a contradiction.
 - The **published container image contains none of it**, and that is asserted
   rather than intended: `scripts/imagecheck.ts` fails if any
-  `@agentclientprotocol`, `@anthropic-ai`, `@modelcontextprotocol` or `@openai`
-  package reaches the image. The control plane and the relay are the only things
-  this project publishes as an artifact, and neither spawns an agent.
-- It is only needed to run `claude`. A deployment using `kimi` or `codex`, or one
-  that only runs the control plane, does not need it.
+  `@agentclientprotocol`, `@anthropic-ai`, `@modelcontextprotocol`, `@openai` or
+  `opencode-*` package reaches the image — the last of those being the heaviest,
+  since `opencode-ai`'s install unpacks one ~144 MB platform executable. The
+  control plane and the relay are the only things this project publishes as an
+  artifact, and neither spawns an agent.
+- It is only needed to run `claude`. A deployment using `kimi`, `codex` or
+  `opencode`, or one that only runs the control plane, does not need it.
 
 If a fully-permissive dependency tree is a requirement for you, drop
 `@agentclientprotocol/claude-agent-acp` from the root `package.json`; the other
-two agents keep working, and `pnpm pincheck` will tell you which adapters are
+three agents keep working, and `pnpm pincheck` will tell you which adapters are
 actually installed.
 
 Using the agents themselves is subject to each vendor's own terms, which this

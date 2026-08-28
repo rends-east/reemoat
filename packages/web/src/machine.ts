@@ -76,12 +76,14 @@ const REQUEST_TIMEOUT_MS = 15_000;
  * guessing low is a healthy machine reported unreachable.
  *
  * ⚠ **One member is not fully covered by this number, and saying so is better
- * than implying otherwise.** `GET /agents/capabilities` runs the three harnesses
- * one at a time on the daemon — see the entry in {@link slowRoute} for why serial
- * is deliberate — each bounded by `agentask.ts`'s `ASK_TIMEOUT_MS` at 120s, so
- * that route's own worst case is 360s, four times this. Ninety seconds covers
- * what it actually costs (three spawns and a handshake each, then ten minutes of
- * cache), and a harness hung to its full budget still lands on the failure this
+ * than implying otherwise.** `GET /agents/capabilities` starts an agent for each
+ * of the **four** harnesses — asked all at once now and metered through
+ * `MAX_CONCURRENT_ASKS` by a queue rather than run one at a time; see the entry in
+ * {@link slowRoute}. Each is bounded by `agentask.ts`'s `ASK_TIMEOUT_MS` at 120s
+ * and the queue by `SLOT_WAIT_MS`, so the worst case is rounds of two rather than
+ * a sum of four. Ninety seconds covers what it actually costs — measured
+ * 2026-08-28, **3061 ms** on a cold cache against 5286 ms when it was serial —
+ * and a harness hung to its full budget still lands on the failure this
  * table exists to prevent, only three minutes later instead of fifteen seconds
  * later. Raising the constant for one route would raise it for the eight that do
  * not need it, and a per-route budget means this predicate stops being a boolean
@@ -1177,18 +1179,25 @@ export function slowRoute(method: string | undefined, path: string): boolean {
      * which is exactly how that route ended up on the ordinary 15s.
      *
      * ⚠ **What 15s bought there.** `/agents` merely runs the login probe;
-     * `/agents/capabilities` starts a whole agent per harness, and `server.ts`
-     * loops them **serially** on purpose — a `Promise.all` was measured making
-     * the third harness lose the race against `MAX_CONCURRENT_ASKS` (2) every
-     * single time, so codex was permanently greyed out of the builder with a
-     * sentence about load. Three harnesses at `ASK_TIMEOUT_MS` (120s) each, one
-     * at a time, is up to 360s of daemon budget behind a client that gave up at
-     * 15, so on a cold cache the abort was not a risk but the norm. And the
-     * abort is a *transport* failure: `forgetRoute`, then `markUnreachable`, and
-     * a perfectly healthy machine is drawn as unreachable everywhere at once —
-     * including the New session sheet the builder was opened from. Then, because
-     * a `GET` is replayable, the retry fires a second `/agents/capabilities`,
-     * which either spawns three more processes or trips `model_busy`.
+     * `/agents/capabilities` starts a whole agent per harness. It used to loop
+     * them **serially**, because a `Promise.all` was measured making the third
+     * harness lose the race against `MAX_CONCURRENT_ASKS` (2) every single time —
+     * codex permanently greyed out of the builder with a sentence about load.
+     * Four harnesses at `ASK_TIMEOUT_MS` (120s) each, one at a time, is up to 480s
+     * of daemon budget behind a client that gave up at 15, so on a cold cache the
+     * abort was not a risk but the norm. And the abort is a *transport* failure:
+     * `forgetRoute`, then `markUnreachable`, and a perfectly healthy machine is
+     * drawn as unreachable everywhere at once — including the New session sheet
+     * the builder was opened from. Then, because a `GET` is replayable, the retry
+     * fires a second `/agents/capabilities`.
+     *
+     * ⚠ **The serial loop is gone and this number is not.** The route asks all
+     * four at once and `admit` **queues** for a slot instead of refusing one, so
+     * the sweep can no longer lose a race against a bound it is itself holding:
+     * measured 2026-08-28, 5286 ms serial against 3061 ms queued. The worst case
+     * is rounds of two rather than a sum of four, and the replayed `GET` is now
+     * served from the ten-minute cache the first attempt filled. 90s still covers
+     * it with room, which is the point of the entry rather than of the arithmetic.
      *
      * There is no cheap `GET` under `/agents` and there cannot be one: the only
      * thing that namespace answers is what the installed CLIs say about

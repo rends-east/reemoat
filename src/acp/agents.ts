@@ -1,8 +1,9 @@
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const AGENT_IDS = ["claude", "kimi", "codex"] as const;
+export const AGENT_IDS = ["claude", "kimi", "codex", "opencode"] as const;
 export type AgentId = (typeof AGENT_IDS)[number];
 
 export function isAgentId(value: string): value is AgentId {
@@ -254,7 +255,21 @@ export const AGENT_LOGIN: Record<
   AgentId,
   {
     command: string;
-    args: string[];
+    /**
+     * How this CLI is signed *in*, or `null` where there is nothing to sign in to.
+     *
+     * ⚠ **Nullable for {@link logoutArgs}'s reason and one stronger.** That field
+     * is `null` where a CLI offers no sign-out verb; this is `null` where an agent
+     * needs no sign-in at all. Measured on opencode 1.18.23 against an empty
+     * `XDG_DATA_HOME` with no provider variables of any kind: `session/new`
+     * succeeds and `session/prompt` completes, because its own gateway has an
+     * anonymous free tier. A wizard there would be a button that fixes nothing,
+     * in front of an agent that already works.
+     *
+     * `loginBlockedReason` reads it first, so the client is told *why* rather
+     * than being left to infer it from a disabled control.
+     */
+    args: string[] | null;
     /**
      * Whether this login flow ever reads stdin.
      *
@@ -403,7 +418,94 @@ export const AGENT_LOGIN: Record<
     // the status command above asks the CLI, which knows where its own home is.
     credentialPath: null,
   },
+  opencode: {
+    command: "opencode",
+    /*
+     * ⚠ **`null`: there is nothing to sign in to.** opencode reaches its own
+     * gateway anonymously — measured — and every other provider it knows is one
+     * you hand a key to, which is what `envNames` below is. `auth login` exists
+     * and is an arrow-key provider picker this wizard could not drive anyway, but
+     * that is not why it is absent: a wizard here would be a control that fixes
+     * nothing in front of an agent that already runs.
+     */
+    args: null,
+    // No flow, so nothing reads stdin and no pty is allocated.
+    interactiveStdin: false,
+    /*
+     * `null`, and not for kimi's reason. `auth logout <provider>` exists and is
+     * non-interactive. It is not offered because a *sign-out* button next to no
+     * sign-in button is a control whose whole meaning is the pair — and what it
+     * would remove is a key this daemon did not put there. The paste box has its
+     * own clear, which is the one this product is entitled to offer.
+     */
+    logoutArgs: null,
+    // Two, like claude — and they are two *providers* rather than two forms of one
+    // credential. `OPENCODE_API_KEY` is opencode's own gateway, whose free tier
+    // needs nothing at all; `OPENROUTER_API_KEY` is somebody else's catalogue.
+    // Measured: with the second set, the published list goes from six to 362.
+    envNames: ["OPENROUTER_API_KEY", "OPENCODE_API_KEY"],
+    /*
+     * ⚠ **`null`, and the measurement that argued for a probe is the same one
+     * that rules it out.** `opencode auth list` works and its output was read in
+     * full — stdout, and all four states driven: `0 credentials` with nothing
+     * configured, `1 credentials` for a written `auth.json`, and a separate
+     * `1 environment variable` section for a key in the environment, which is why
+     * a naive `0 credentials` pattern reported a working machine as signed out.
+     *
+     * None of that matters, because **opencode runs with no credential at all.**
+     * Measured 2026-08-27 against an empty `XDG_DATA_HOME` and no provider
+     * variables of any kind: `session/new` succeeds, publishes six OpenCode Zen
+     * models, and `session/prompt` completes with `stopReason: "end_turn"`. Their
+     * free tier is anonymous.
+     *
+     * So `false` is not a fact this probe can produce honestly. `admit` refuses on
+     * `loggedIn === false`, so a probe answering it would have put "not signed in"
+     * in front of an agent that had just answered a prompt, and refused to read
+     * its model list at all — Q7.99's mistake, arriving from the opposite side:
+     * that one read `null` as "no", this one would have manufactured the "no".
+     *
+     * `credentialPath` below answers the half that *is* honest — somebody
+     * configured a provider — and everything else falls to "cannot tell", which is
+     * what `readLoginState` does with a missing file. The 389 ms this saves on
+     * every `GET /agents` is a consequence rather than the reason.
+     */
+    status: null,
+    // No adapter, so no second binary and nothing for a variable to override.
+    // `resolveAgent` and `resolveLoginBinary` resolve the *same* file here, which
+    // `vendoredCli`'s opencode arm is what guarantees.
+    executableEnv: null,
+    /*
+     * Presence proves a provider was configured; absence proves nothing, which is
+     * kimi's shape and is the whole of what is claimed.
+     *
+     * ⚠ **It moves with `XDG_DATA_HOME` — measured, by redirecting it — and that
+     * is survivable here where it would not be for codex.** codex has a status
+     * command to prefer, so a HOME-relative path there would be the *worse* of two
+     * answers; here there is nothing behind it, and a relocated directory reads as
+     * a missing file and falls to `pasted ? true : null`. Never a false "signed
+     * out", which is the only answer that would cost anything.
+     */
+    credentialPath: ".local/share/opencode/auth.json",
+  },
 };
+
+/**
+ * Whether this agent has a sign-in to run at all.
+ *
+ * ⚠ **`args === null` is the whole of the fact and this is the only place it is
+ * read as one.** opencode authenticates nowhere — it runs on OpenCode Zen's free
+ * models the moment it is installed, and a key only widens what it can reach — so
+ * there is no wizard, no sign-out and nothing for a status probe to answer. That
+ * is a property of the *program*, unlike the other three reasons a sign-in cannot
+ * be run here, which are all the host's.
+ *
+ * Extracted because it had been written out inline in three places — the runtime,
+ * the daemon's own driver and `pnpm client` — and a predicate spelled three times
+ * is how one of them comes to disagree.
+ */
+export function hasLoginFlow(agent: AgentId): boolean {
+  return AGENT_LOGIN[agent].args !== null;
+}
 
 /** Which environment variables carry a pasted credential for this agent. */
 export function credentialEnvNames(agent: AgentId): readonly string[] {
@@ -489,6 +591,40 @@ export function findOnPath(name: string): string | null {
   }
   PATH_MISSES.set(name, Date.now());
   return null;
+}
+
+/**
+ * The `opencode` binary this repository vendors, or `null`.
+ *
+ * ⚠ **Exported because two callers must agree on it and nothing else could make
+ * them.** `resolveAgent` picks the program a *session* runs; `LocalRuntime`'s
+ * `vendoredCli` picks the one a *login* drives. For claude and codex those are
+ * honestly different files — an adapter and the CLI underneath it — so each side
+ * resolves its own. opencode ships no adapter: `opencode acp` and
+ * `opencode auth login` are subcommands of one binary, and two independent
+ * lookups that happened to disagree would write credentials for a build no
+ * session runs, reporting success the whole way.
+ *
+ * Resolved through the manifest rather than `node_modules/.bin`, which is
+ * `vendoredCodex`'s shape and is the sturdier of the two: `bin.opencode` points
+ * at a platform executable the package's own postinstall puts there (measured on
+ * 1.18.23 — a 144 MB Mach-O, not a script), so this answers with the real file
+ * rather than a shim whose layout is the package manager's business.
+ */
+export function vendoredOpencode(): string | null {
+  try {
+    const manifestPath = createRequire(import.meta.url).resolve("opencode-ai/package.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+      bin?: string | Record<string, string>;
+    };
+    const entry = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.["opencode"];
+    if (entry === undefined) return null;
+    const resolved = join(dirname(manifestPath), entry);
+    return isExecutable(resolved) ? resolved : null;
+  } catch {
+    // Not installed, or a layout that moved. `findOnPath` is the fallback.
+    return null;
+  }
 }
 
 /**
@@ -602,6 +738,38 @@ export function resolveAgent(id: AgentId): AgentLaunchConfig {
           "~/.codex/auth.json (or under CODEX_HOME). Note that a pasted CODEX_API_KEY is read by " +
           "codex for its API calls but does NOT on its own satisfy the adapter, which still " +
           "refuses session/new with -32000 until a real login has been written to disk.",
+      };
+    }
+    case "opencode": {
+      // No adapter package: `opencode acp` is a subcommand of the same binary a
+      // login drives, so there is one file here where claude and codex have two —
+      // and {@link vendoredOpencode} is that one file, shared with `vendoredCli`.
+      const command = vendoredOpencode() ?? findOnPath("opencode");
+      if (!command) {
+        throw new AgentUnavailableError(
+          "opencode not found. It is a dependency of this repo — run `pnpm install` " +
+            "in the project root (or install it globally with `npm i -g opencode-ai`).",
+        );
+      }
+      return {
+        id,
+        // Capitalised, like `Kimi Code CLI` beside it: this string is drawn as a
+        // row title in the settings agent list, so it is a word rather than the
+        // name of a binary. The binary, the package and the id stay lowercase.
+        displayName: "Opencode CLI",
+        command,
+        args: ["acp"],
+        env: agentEnv(),
+        // ⚠ **This one may not offer a sign-in, because there is none.** opencode
+        // runs with no credential at all — its own gateway has an anonymous free
+        // tier — so a refusal here is never "you are signed out"; it is a model
+        // whose provider wants a key. The remedy is the key box, and naming a
+        // wizard the screen does not draw would send somebody looking for it.
+        authHint:
+          "opencode refused this session. It needs no signing in — with nothing configured it " +
+          "runs on OpenCode Zen's free models — so this is a model whose provider wants a key. " +
+          "Add one under Settings → Machines → this machine (OPENROUTER_API_KEY for OpenRouter's " +
+          "catalogue, OPENCODE_API_KEY for the rest of Zen's), or pick one of the free models.",
       };
     }
   }

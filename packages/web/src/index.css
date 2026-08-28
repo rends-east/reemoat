@@ -715,6 +715,62 @@ kbd {
 }
 
 /*
+ * A bar that is there while you are moving and fades once you stop.
+ *
+ * ⚠ **The fourth answer, and the first one that is this app's own pixels.**
+ * `.no-scrollbar` hid it outright — a phone idiom, and on a desktop that left a
+ * horizontal strip with no way to move it and nothing saying it could be moved.
+ * Taking the class off gave the permanent classic bar the `pointer: fine` rule
+ * draws, a dark rule under a row of tiles, reported the moment it shipped. The
+ * third reserved that bar's thickness and animated only the thumb's colour — and
+ * it **did not fade**, which is the report this rule answers.
+ *
+ * ⚠ **Why a styled native bar cannot fade here.** Since Chrome 121 the standard
+ * properties **override** the pseudo-elements: `scrollbar-width` or
+ * `scrollbar-color` at anything but `auto` and every `::-webkit-scrollbar-*` rule
+ * on that element is ignored. The `pointer: fine` rule above sets **both, on `*`**,
+ * at `thin` and a colour — so a `transition` written on a thumb pseudo-element is
+ * dead on arrival everywhere in this app, not only here. What is left switching is
+ * `scrollbar-color`, and no engine interpolates it: the bar vanished between one
+ * frame and the next.
+ *
+ * So the native bar is hidden and the app draws its own — an ordinary `div` with
+ * an `opacity` transition, which every engine animates and which the
+ * `prefers-reduced-motion` block at the foot of this file already zeroes.
+ * `AgentStrip` sets its width and offset from the box's own scroll metrics; this
+ * file owns only when it is visible.
+ *
+ * ⚠ **Out slowly, in at once, and one declaration does both.** `is-scrolling`
+ * carries the shorter duration with it, so the bar is there with the first notch
+ * and takes half a second to go. A single duration in both directions reads as
+ * lag: the bar arriving after the row has already moved.
+ *
+ * It costs no layout in either state, which is the property the third answer had
+ * and this one keeps. The rail is a sibling **below** the row with a height of its
+ * own, so nothing moves when the thumb appears — the jolt `.scroll-stable` exists
+ * against, avoided here by not putting the bar inside the box at all.
+ */
+.fade-scrollbar {
+  scrollbar-width: none;
+  /* Dragged past its end, this strip does not hand the gesture to the page.
+     `.no-scrollbar` above states the same thing at length, and for the same
+     reason: with no bar of the browser's, the strip's own bounce is the only
+     thing that says you have reached the end. */
+  overscroll-behavior-x: contain;
+}
+.fade-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.fade-thumb {
+  opacity: 0;
+  transition: opacity 500ms ease;
+}
+.fade-thumb.is-scrolling {
+  opacity: 1;
+  transition-duration: 100ms;
+}
+
+/*
  * A scroll box whose content width does not depend on whether it is scrolling.
  *
  * `scrollbar-width: thin` above is a *classic* scrollbar: it takes layout width

@@ -33,6 +33,10 @@ home.
 | `claude-agent-acp` 0.63.0 | `{}` | **`main`** | `anthropic`, `bedrock`, `vertex` |
 | `codex-acp` 1.1.9 | `{}` | **`custom-gateway`** | `openai` |
 | `kimi` 0.29.x (`kimi acp`) | absent | — | `-32601` |
+| `opencode` 1.18.23 (`opencode acp`) | absent | — | `-32601` |
+
+opencode is the native side of **two** rows, publishes them in one list, and has
+no sign-in at all; `agent-catalogue.md` owns both consequences.
 
 **And what each publishes is a second, independent question.** Re-measured
 2026-08-26 through this daemon's own `AgentAskRuns.capabilities`, **ids and names
@@ -55,14 +59,14 @@ such a sentence *may* say is that a **name** is absent from a list, which is the
 whole of what these two columns support and is what `pairFailure` answers.
 Q3.486.
 
-**And the same column decides the key**: *which harnesses can run this id* and *does
-this id need a pasted key* are one question asked twice. A **table** spelling is
-refused by the native harness for the name, so only a routed pairing can run it, and
-a routed one signs with the pasted key and nothing else — **always** needed. A
-**published** one is refused by every *other* harness, so only the native pairing can
-run it, signing with whatever its own login wrote — **never**. Total, no third case,
-which is why `keyMissing` takes the model and consults neither the harness nor
-`nativeHarness`. Q3.499.
+**And the same column decides the key, until a harness is chosen**: with none, a
+**table** spelling runs only routed and routed signs with the pasted key — always; a
+**published** one proves its native harness keyed — never (Q3.499). ⚠ **With one,
+the pairing decides.** That rule rested on "every other harness is refused a
+published id for the **name**", true until `nativeModelPrefix` related a system's two
+spellings and dropped both name arms — so a row opencode published runs routed too,
+needing the system key after all. Measured: key saved for opencode, none for the
+system, Claude Code offered, start refused. Q3.514.
 
 **And the refusal is the CLI's own, driven rather than inferred.** Against a live
 `kimi acp` session, `session/set_config_option` with `kimi-k2-thinking` and with
@@ -97,11 +101,9 @@ instead.** `<harness> has no model called <model>.` stops exactly where the evid
 stops; *"Kimi Code calls this K2.7 Coding"* would be this file writing the merge it
 has just refused, into a sentence somebody acts on.
 
-**`providerId` differs between agents and is therefore read off the agent's own
-answer, never written down.** That is `acp-agents.md`'s "found by `category`,
-never by `id`" rule in a second place. Hardcoding either name configures one
-agent and hands the other an `invalid_params` about a provider it has never heard
-of.
+**`providerId` is read off the agent's answer, never written down** — the table
+above is why, and `acp-agents.md`'s "by `category`, never by `id`" is the same
+rule one layer up.
 
 **The capability marker and the call are read separately, and both are needed.**
 `agentCapabilities.providers` is an empty-object marker — `sessionCapabilities.
@@ -330,20 +332,20 @@ daemon's listing — it can never decode to `llm` or `harness`. Q3.475.
   somebody asked for; the refusal is drawn on what is left, as the row's subline.
 - **The harness opens unchosen.** A default reads as an answer already given, and
   picking the harness you are already on is not a choice anybody makes. Q3.478.
-- ⚠ **The model screen refuses nothing about a pairing.** Both screens greyed rows
-  against the other's value, which is a trap: pick Claude Sonnet, want GPT-5, and
-  neither half can be changed. The model screen weighs only a fact about the
-  *model* — a table-spelled id on a system with no key — and the harness screen is
-  where a pairing is decided, with the button as the gate. It can never grey all
-  three for a *pairing* reason — every model offered comes from a harness's own list
-  or from a routable endpoint — but a missing key is not one, and does: that same
-  row greys every harness, each for a different true reason. Q3.479, Q3.497, Q3.499.
+- ⚠ **The model screen refuses a pairing on the *provider*, never on a row.** It
+  refused nothing at all for three releases, because greying both screens against
+  each other is a trap: neither half of a bad pair can be changed. Two things
+  answer that — each field can now be emptied on the screen above, and the refusal
+  lands on a heading. Row by row it greys **461 of 463** with codex chosen; asking
+  `hostable` about the provider draws six greyed headings and leaves the two rows
+  that work. A row still says only what is about the row: a spelling belonging to
+  the other route in, or a system with no key. Q3.479, Q3.497, Q3.499, Q3.512.
 - ⚠ **A harness that could not be *asked* is not one that refuses.**
   `routing: null` means both; `capabilities[id].error` is set only in the second
   case and is read first, or "Kimi Code only runs its own models" gets drawn over
   a missing binary. Q3.482.
 - ⚠ **A pasted key belongs to the *pairing*, and there is no authorization on the
-  build screen at all.** `keyMissing` asks the **model** — the iff-rule above — and
+  build screen at all.** `keyMissing` asks the **pairing** — the rule above — and
   **both screens grey from that one call**, so they cannot disagree about a row.
   Asked about the *system* it answered `null` for Moonshot unconditionally — true of
   Kimi Code, false of Claude Code routed at it — so the flow went green and `POST
@@ -453,11 +455,8 @@ one — four endpoints, four conventions, no classifier possible:
 
 A bogus key changes none of it: MiniMax returns the **same** canned string for
 `authorization: Bearer` and for `x-api-key`, so even "which header" is not
-answerable without a real one. What *is* already automatic is the part that would
-be an N×M table: the harness half. `providers/list` is the agent's own answer and
-`hostable` computes the matrix from it, so the hand-written surface is **M
-endpoints of four fields**, never a matrix — and the model list for every native
-pairing comes from the agent too.
+answerable without a real one. OpenRouter is the exception: a keyless probe
+answered, and both header conventions are read.
 
 ## Layout
 
@@ -469,6 +468,7 @@ pairing comes from the agent too.
 | `packages/web/src/ui/AgentBuilder.tsx` | The flow: the draft, its reads, and the three screens it dispatches between. Over a stored preset it is the **edit** screen, and the preset is a third read — deliberately not a third leg of the `Promise.all`, since a daemon too old for `GET /custom-agents` would then take down the new-agent flow it runs perfectly well |
 | `packages/web/src/agentPick.ts` | The agent a pop-up assembled, held until the strip can draw it. Taken, never read twice |
 | `packages/web/src/ui/AgentIcons.tsx` | One glyph per harness. Shapes of ours, not vendor marks — exhaustive over `AgentId` with no `default` arm |
+| `packages/web/src/openrouter.ts` | One provider's list, read by the browser. **`agent-catalogue.md` is that subject whole**: where a name comes from, and which spellings relate |
 | `packages/web/src/ui/settings/SystemsPanel.tsx` | A system's whole configuration, and `KeyOnly` — exported, and mounted twice **here**, routed and not. The builder mounted it too and no longer does: authorization is a property of the machine, so it lives where a machine is configured. Q3.497 |
 
 ## Bounds

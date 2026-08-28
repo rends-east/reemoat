@@ -2236,6 +2236,24 @@ const CLOSED: SessionEvent = Object.freeze({
 });
 
 /**
+ * Whether this is the sentence above rather than something an agent said.
+ *
+ * ⚠ **By identity, and exported because the turn generator yields it.**
+ * `drainBetweenTurns` recognises it and stops; the turn loop does not, so a
+ * session disposed mid-turn hands its pump an `error` event that looks exactly
+ * like a provider failure and is in fact this daemon taking the agent away. The
+ * pump has to tell them apart before it writes anything about *why* the turn
+ * ended — `agent_error` on a deliberate teardown would be the daemon blaming the
+ * agent for its own act.
+ *
+ * Identity and never the message: the string is prose, and matching it would make
+ * an agent that happens to say "session closed" indistinguishable from this.
+ */
+export function isSessionClosed(event: SessionEvent): boolean {
+  return event === CLOSED;
+}
+
+/**
  * A single-consumer async queue of events, whose consumer may change hands.
  *
  * **Ownership is checked rather than assumed, and that is the whole of this
@@ -2530,9 +2548,26 @@ async function pinNativeModel(session: Session, options: SessionOptions): Promis
   if (model === null || model === "") return null;
   if (system !== null && SYSTEMS[system].nativeHarness !== options.agent) return null;
 
+  /*
+   * ⚠ **The one place a stored model id is respelled, and it is the last moment
+   * before the agent is asked.** Everything upstream — the route, the row in
+   * `custom_agents`, the wire — carries the endpoint's own slug, so a preset says
+   * one thing whichever harness runs it. opencode is the only harness today that
+   * spells a native id differently, prefixing `openrouter/`, and putting that
+   * back here rather than at save time is what keeps a preset re-pointable: an
+   * edit that swaps the harness must not have to rewrite the model.
+   *
+   * Idempotent on purpose. An id that already carries the prefix is left alone,
+   * so a value that reached the store the long way round — a hand-written row, an
+   * older client that stored what the agent published — pins instead of failing
+   * with the prefix doubled.
+   */
+  const prefix = system === null ? null : SYSTEMS[system].nativeModelPrefix;
+  const wanted = prefix === null || model.startsWith(prefix) ? model : `${prefix}${model}`;
+
   const option = session.modelOption;
   if (option === null) return `${options.agent} offers no choice of model on this machine.`;
-  if (!option.choices.some((one) => one.value === model)) {
+  if (!option.choices.some((one) => one.value === wanted)) {
     const names = option.choices.map((one) => one.value);
     const shown = names.slice(0, MODEL_NAMES_IN_PIN_REFUSAL).join(", ");
     const rest =
@@ -2543,11 +2578,11 @@ async function pinNativeModel(session: Session, options: SessionOptions): Promis
     // clause saying what the session came back on, and two sentences need a
     // boundary between them.
     return (
-      `${options.agent} has no model called ${JSON.stringify(model)}` +
+      `${options.agent} has no model called ${JSON.stringify(wanted)}` +
       `${names.length === 0 ? "" : ` — it offers ${shown}${rest}`}.`
     );
   }
-  await session.setConfigOption(option.id, model);
+  await session.setConfigOption(option.id, wanted);
   return null;
 }
 

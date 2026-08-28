@@ -186,6 +186,7 @@ export function SystemDetail({
           machineId={machineId}
           agentId={system.loginVia}
           title={system.displayName}
+          keyEnv={system.keyEnv ?? null}
         />
       ) : (
         <KeyOnly machineId={machineId} system={system} onChanged={refresh} />
@@ -294,6 +295,23 @@ export function KeyOnly({
       .finally(() => setBusy(false));
   };
 
+  /*
+   * ⚠ **Borrowed rather than stored, which is a third state and not a shade of
+   * "saved".** The daemon answers `keySet` from `systemSecretFor`, which falls
+   * back to the key this system's own harness already holds — one OpenRouter
+   * account, one secret, and a second empty box under a second name was a trap
+   * that refused a session start over a machine that plainly had a key. So
+   * `keySet` is true here while `keyUpdatedAt` is `null`, which is the only pair
+   * that can mean it: a *stored* key always has a timestamp.
+   *
+   * What it must not do is offer a Save and a Clear over a secret that is not
+   * here — a Clear that removes nothing is worse than no Clear. One sentence
+   * instead, naming where it comes from, and the box comes back the moment
+   * somebody wants to override it, which is what the button under it is for.
+   */
+  const borrowed = routing && system.keySet && system.keyUpdatedAt === null;
+  const [overriding, setOverriding] = useState(false);
+
   return (
     <div className="mt-4 space-y-3">
       <div className="flex items-center gap-2">
@@ -315,10 +333,25 @@ export function KeyOnly({
            * refusal strings one file over were rewritten for. What is true in both
            * places is the fact, not its position.
            */
-          ? `Signs the requests when another agent is pointed at ${system.displayName}. Signing in to ${system.displayName}'s own CLI does not cover it.`
+          ? borrowed
+            ? `Signs the requests when another agent is pointed at ${system.displayName}. The key saved above covers this too, so there is nothing to add.`
+            : `Signs the requests when another agent is pointed at ${system.displayName}. Signing in to ${system.displayName}'s own CLI does not cover it.`
           : `${system.displayName} has no sign-in program on this machine, so a key is the only way in.`}
       </p>
 
+      {borrowed && !overriding ? (
+        /* The door out, for the one case the sentence above does not cover: a
+           different account for the routed path than for the CLI. Drawn as the
+           quiet text button this file already uses, never as a second key box
+           standing open. */
+        <button
+          type="button"
+          onClick={() => setOverriding(true)}
+          className="tap press -my-1.5 inline-flex min-h-11 items-center rounded-sm px-2 text-xs text-muted hover:bg-raised hover:text-fg"
+        >
+          Use a different key here
+        </button>
+      ) : (
       <div className="flex gap-2">
         <input
           value={value}
@@ -364,8 +397,11 @@ export function KeyOnly({
           {busy ? <Spinner /> : "Save"}
         </Button>
       </div>
+      )}
 
-      {system.keySet && (
+      {/* Never over a borrowed key: it removes a row that is not there, and the
+          screen would then report the same `key saved` back, from the fallback. */}
+      {system.keySet && !borrowed && (
         <Button tone="ghost" size="sm" onClick={remove} disabled={busy}>
           Remove
         </Button>

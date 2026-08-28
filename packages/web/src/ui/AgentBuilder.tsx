@@ -16,11 +16,18 @@ import {
   defaultAgentName,
   groupModels,
   harnessRowRefusal,
+  hostable,
   searchModels,
   supportingHarnesses,
   type ModelChoice,
 } from "../agents";
 import { errorText } from "../http";
+import {
+  OPENROUTER_SYSTEM_ID,
+  fetchOpenRouterModels,
+  openRouterNotice,
+  type OpenRouterRead,
+} from "../openrouter";
 import type { MachineId } from "../ids";
 import { daemonReadable } from "../machine";
 import { store } from "../store";
@@ -62,12 +69,22 @@ import { AGENT_IDS } from "../wire";
  * starts an agent per harness on the daemon's host; doing it inside a picker would
  * pay for it again every time somebody walked in and out of one.
  *
- * ⚠ **A choice is greyed, never removed, and neither picker ever clears the
- * other's value.** Picking Codex greys out Kimi K2; it does not silently drop it.
- * A conflicting pair stays on screen, says why beside the button, and the button
- * is what refuses — because a choice somebody made being deleted by a later one is
- * the failure this app avoids everywhere else, and here it would look like the
- * form forgetting.
+ * ⚠ **A choice is greyed, never removed, and no *picker* ever clears the other's
+ * value.** Picking Codex greys out Kimi K2; it does not silently drop it. A
+ * conflicting pair stays on screen, says why on the row it is about and again
+ * beside the button, and the button is what refuses — because a choice somebody
+ * made being deleted by a later one is the failure this app avoids everywhere
+ * else, and there it would look like the form forgetting.
+ *
+ * ⚠ **A field can be emptied, and that is the opposite of the rule above rather
+ * than an exception to it.** Each row carries a `Clear` beside its label, which
+ * empties that field and no other. What the rule forbids is *implicit* deletion —
+ * a tap aimed at picking one thing silently dropping another — and a labelled
+ * control on the row whose value it empties is the ordinary form affordance. It is
+ * also the precondition for the model list refusing a pairing at all: with both
+ * screens weighing the other's value, taking the pair apart a field at a time is
+ * the only way out of a pair no picker chose. Never inside a picker, which would
+ * be a control that exists only to undo a constraint that screen invented.
  *
  * ⚠ **Editing is this same screen with a stored row loaded into it**, which is why
  * `preset` is one more prop rather than a component of its own: the three fields,
@@ -190,27 +207,63 @@ export function AgentBuilder({
     if (daemon === undefined) return;
     let cancelled = false;
     /*
-     * Both reads together, and only the second one is expensive.
+     * Two reads, and only the second one is expensive.
      *
      * `GET /systems` is a table. `GET /agents/capabilities` starts an agent per
      * harness on the daemon's host to read what each publishes and what each
      * accepts — which is why it is here, on a screen somebody opened on purpose,
      * and not on the New session sheet that draws the strip.
+     *
+     * ⚠ **They were one `Promise.all`, and that made the *third* read arrive
+     * last, always.** The OpenRouter effect below is gated on `openRouterListed`,
+     * which is derived from `systems` — and with both legs awaited together,
+     * `systems` was not set until the expensive one landed. So a 672 KiB read of
+     * somebody else's catalogue did not begin until the render in which the
+     * spinner left: it was queued behind four cold agent spawns on a route whose
+     * own budget is `SLOW_ROUTE_TIMEOUT_MS`, and was then necessarily the last
+     * thing on screen. What somebody saw was the model list filling in under
+     * them, twice — once by the notice's height and once by 289 inserted rows.
+     *
+     * Split, the table read lands in milliseconds, the third read runs
+     * *concurrently* with the agent spawns, and in every realistic case its rows
+     * are in `catalogue` before this screen draws at all. No new request — the
+     * fetch already dedupes on a module-level promise — and no new state.
+     *
+     * ⚠ **Waiting for it instead was the other candidate and it is refused**, for
+     * the rule written on the effect below: a host neither this daemon nor this
+     * control plane owns may not hold up the two reads that they do. Gating the
+     * render on it buys a 15-second spinner wherever `openrouter.ai` is
+     * blackholed — every open, since a failed read is deliberately not cached —
+     * over a screen whose harness, name and buttons have nothing to do with that
+     * provider. And `openRouterListed` is false on a daemon too old to list the
+     * system *and* on the failure path below, where nothing ever sets the read:
+     * gating on it there is a spinner that never stops, three lines under a
+     * comment that exists to prevent one.
+     *
+     * ⚠ **Both catches still set both values.** Either read failing leaves an
+     * empty picker beside a stated reason, which is what keeps the spinner from
+     * outliving the failure — the property the single `catch` used to hold.
      */
-    void Promise.all([daemon.systems(), daemon.agentCapabilities()])
-      .then(([listing, caps]) => {
+    const failed = (cause: unknown): void => {
+      if (cancelled) return;
+      setError(errorText(cause));
+      setSystems([]);
+      setCapabilities({});
+    };
+    void daemon
+      .systems()
+      .then((listing) => {
         if (cancelled) return;
         setSystems(listing.systems);
+      })
+      .catch(failed);
+    void daemon
+      .agentCapabilities()
+      .then((caps) => {
+        if (cancelled) return;
         setCapabilities(caps.agents);
       })
-      .catch((cause: unknown) => {
-        if (cancelled) return;
-        setError(errorText(cause));
-        // Both set, so the spinner leaves even on failure. An empty picker beside
-        // a stated reason is honest; a spinner that never stops is not.
-        setSystems([]);
-        setCapabilities({});
-      });
+      .catch(failed);
     return () => {
       cancelled = true;
     };
@@ -262,10 +315,72 @@ export function AgentBuilder({
     };
   }, [daemon, preset]);
 
+  /*
+   * A third read, and deliberately not a leg of the `Promise.all` above — the
+   * same argument the stored preset makes one effect down, one step stronger:
+   * this one reaches a host neither this daemon nor this control plane owns, so
+   * its latency and its failure must not be able to hold up the two that do.
+   *
+   * ⚠ **Gated on the daemon having listed the system, which is the whole reason
+   * `SystemInfo.id` is `string`.** A daemon too old to know this row means five
+   * providers on screen and **no request to a third party at all** — this client
+   * degrades by asking nobody, rather than by asking anyway.
+   */
+  const openRouterListed = systems?.some((one) => one.id === OPENROUTER_SYSTEM_ID) === true;
+  const [orModels, setOrModels] = useState<OpenRouterRead | null>(null);
+  useEffect(() => {
+    if (!openRouterListed) return;
+    let cancelled = false;
+    void fetchOpenRouterModels().then((read) => {
+      if (!cancelled) setOrModels(read);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [openRouterListed]);
+
+  /*
+   * ⚠ **The fetched list is substituted into the *listing*, before `allModels`
+   * sees it — not carried beside the choices and not given a `source` of its
+   * own.** A fetched row is a **table** spelling in every sense that matters: it
+   * is what the endpoint answers to when a harness is routed at it, which is
+   * exactly what the daemon's own `models` holds for every other routed system.
+   * So the key rule in `agents.ts` stays true of it word for word, and that
+   * module learns nothing about where this app got the names.
+   */
+  const listed = useMemo(() => {
+    if (systems === null) return null;
+    if (orModels === null || orModels.kind !== "ok") return systems;
+    return systems.map((one) =>
+      one.id === OPENROUTER_SYSTEM_ID ? { ...one, models: orModels.models } : one,
+    );
+  }, [systems, orModels]);
+
   const catalogue = useMemo(
-    () => (systems === null || capabilities === null ? [] : allModels(systems, capabilities)),
-    [systems, capabilities],
+    () =>
+      listed === null || capabilities === null
+        ? []
+        : // The third argument is the *other* half of the same filter the
+          // substitution above applies: `listed` carries the catalogue's accepted
+          // rows, and this carries the ids it refused, so a published row cannot
+          // walk past a judgement already made about it. See `allModels`.
+          allModels(listed, capabilities, orModels?.kind === "ok" ? orModels.toolless : []),
+    [listed, capabilities, orModels],
   );
+
+  /**
+   * What to say where the OpenRouter rows would have been, or `null`.
+   *
+   * Drawn only while that provider is listed at all, so an older daemon's five
+   * providers carry no sentence about a sixth.
+   */
+  const openRouterLine =
+    !openRouterListed
+      ? null
+      : openRouterNotice(
+          orModels,
+          systems?.find((one) => one.id === OPENROUTER_SYSTEM_ID)?.displayName ?? "OpenRouter",
+        );
   const current: ModelChoice | null =
     picked === null
       ? null
@@ -275,6 +390,17 @@ export function AgentBuilder({
 
   const routingOf = (id: AgentId | null): AgentCapabilities["routing"] =>
     id === null ? null : (capabilities?.[id]?.routing ?? null);
+
+  /**
+   * The expensive read has not landed yet.
+   *
+   * Distinct from "it landed and this machine offers nothing", which is `{}` and
+   * draws a refusal. `caps` is the empty answer for the two readers that are typed
+   * against a non-null map; every sentence either of them can build from it is
+   * unreachable while the catalogue is empty, which is the argument at the gate.
+   */
+  const reading = capabilities === null;
+  const caps = capabilities ?? {};
 
   /** Why the chosen pair cannot be saved, or `null`. */
   const conflict = current === null ? null : choiceRefusal(harness, current, routingOf(harness));
@@ -355,7 +481,26 @@ export function AgentBuilder({
     );
   }
 
-  if (systems === null || capabilities === null || (preset !== null && stored === null)) {
+  /*
+   * ⚠ **The expensive read is no longer one of the things this screen waits for,
+   * and that is worth more than making it faster.** `GET /agents/capabilities`
+   * starts an agent per harness and took **5.3 seconds** measured on a real
+   * machine — and the harness picker, the name field, the buttons and the whole
+   * layout were behind it although not one of them needs the answer. `GET
+   * /systems` is a table and lands in milliseconds; that is what a screen may
+   * wait for.
+   *
+   * **What makes it safe is that nothing on the half-read screen can lie.** The
+   * catalogue is empty until the answer lands, so `current` is `null`; with no
+   * model chosen `harnessRowRefusal` returns `null` for every row, `choiceRefusal`
+   * is never asked, and Save is already disabled on `current === null`. There is
+   * no state in which this draws a pairing as possible, or as refused, on evidence
+   * it does not have.
+   *
+   * The one control that does need it says so and cannot be opened onto nothing —
+   * see `reading` below.
+   */
+  if (systems === null || (preset !== null && stored === null)) {
     return (
       <div className={SHEET_SCREEN}>
         {/* Not `SHEET_SCROLL` with a `flex` bolted on: that string decides
@@ -377,12 +522,32 @@ export function AgentBuilder({
    */
   const back = (): void => navigate(agentPath(machineId, cwd, null, preset), true);
 
+  /*
+   * ⚠ **The one sub-screen that genuinely has nothing to draw yet.** Reached by
+   * address as well as by a tap, so the row's `disabled` below is not the whole
+   * guard: an empty picker beside no reason reads as "this machine offers no
+   * models", which is the sentence `ModelPicker` reserves for a machine that
+   * really does.
+   */
+  if (step === "llm" && reading) {
+    return (
+      <div className={SHEET_SCREEN}>
+        <div className="flex min-h-0 flex-1 items-center justify-center">
+          <Spinner />
+        </div>
+      </div>
+    );
+  }
+
   if (step === "llm") {
     return (
       <ModelPicker
         choices={catalogue}
-        capabilities={capabilities}
+        capabilities={caps}
+        harness={harness}
+        routing={routingOf(harness)}
         failure={error}
+        notice={openRouterLine}
         value={picked}
         onPick={(choice) => {
           setPicked({ system: choice.system.id, model: choice.modelId });
@@ -396,7 +561,7 @@ export function AgentBuilder({
   if (step === "harness") {
     return (
       <HarnessPicker
-        capabilities={capabilities}
+        capabilities={caps}
         current={current}
         value={harness}
         onPick={(next) => {
@@ -541,26 +706,90 @@ export function AgentBuilder({
            * whose label starts 28px left of the harness row's reads as a
            * misalignment rather than as a row with no icon.
            */}
-          <Field label="Model">
-            <ChoiceRow
-              glyph={emptyGlyph}
-              title={current?.modelName ?? "Choose"}
-              placeholder={current === null}
-              subline={current?.system.displayName ?? null}
-              trailing={<Icon as={ChevronRight} size={16} className="shrink-0 text-faint" />}
-              disabled={busy}
-              onClick={() => navigate(agentPath(machineId, cwd, "llm", preset))}
-            />
-          </Field>
-
-          <Field label="Harness">
+          {/*
+            * ⚠ **Harness first, and the order is the answer to a wait rather than
+            * a preference.** The model row is the one control on this screen that
+            * waits — `GET /agents/capabilities` starts an agent per harness, 2.2
+            * seconds measured after Q3.524 — and with it on top the first thing
+            * anybody met was a row saying *Reading models…* that could not be
+            * opened. The harness list is `AGENT_IDS` and needs no read at all, so
+            * answering it is free and it is what the wait now runs under: by the
+            * time the picker has been opened, tapped and left, the catalogue is in.
+            *
+            * ⚠ **And it is the order the model list is built for.** With a harness
+            * chosen, `ModelPicker` collapses every provider that harness cannot be
+            * pointed at into one greyed line, so the refusals arrive *before* the
+            * choice they are about rather than after it. The other order works and
+            * always did — neither field is required first, both can be emptied, and
+            * `harnessRowRefusal` answers `null` for every row while no model is
+            * chosen — but it spends the wait and then explains the pairing
+            * backwards. Q3.528.
+            */}
+          <Field label="Harness" clear={harness === null || busy ? null : () => setHarness(null)}>
             <ChoiceRow
               glyph={harness === null ? emptyGlyph : <AgentGlyph agent={harness} size={18} />}
               title={harness === null ? "Choose" : agentLabel(harness)}
               placeholder={harness === null}
+              /*
+               * ⚠ **The refusal, on the row it is about.** It was only at the foot
+               * of the screen, which is where a reason for a *failed request*
+               * belongs and not where a reason for a pair belongs — this app's own
+               * rule is that it sits beside the control it refuses. It is the
+               * harness row because every sentence `choiceRefusal` can produce here
+               * names the harness or the system, and the model row's one line is
+               * already spent saying which provider the model is from.
+               *
+               * ⚠ **It is still drawn at the foot as well, and that is not a
+               * duplicate.** This slot is `truncate` — one clipped line — and the
+               * bar's is `wrap-anywhere`. Q3.497 already required both renderings
+               * for exactly that, and the pickers cannot reach most of the states
+               * that produce one: a stored preset opened for edit, a key revoked on
+               * another device since this screen was read, a harness uninstalled
+               * under it.
+               */
+              subline={conflict}
               trailing={<Icon as={ChevronRight} size={16} className="shrink-0 text-faint" />}
               disabled={busy}
               onClick={() => navigate(agentPath(machineId, cwd, "harness", preset))}
+            />
+          </Field>
+
+          {/*
+            * ⚠ **Clearing the model clears a name it derived, and only that.** The
+            * heading falls back to `current.modelName` until somebody types one,
+            * so a derived name following its source out is the value behaving as
+            * it is defined rather than the form forgetting. A name that was typed
+            * has `named`, and it stays.
+            */}
+          {/*
+            * ⚠ **The one control that waits, saying what it is waiting for.**
+            * Everything else on this screen drew behind the same read for no
+            * reason — see the gate above. A model list is what
+            * `GET /agents/capabilities` is *for*, so this row is honestly pending
+            * rather than a door onto an empty picker; and it is a sentence rather
+            * than a spinner because the wait is seconds, and a spinner on one row
+            * of a form reads as that row having failed.
+            */}
+          <Field
+            label="Model"
+            clear={current === null || busy ? null : () => setPicked(null)}
+          >
+            <ChoiceRow
+              glyph={emptyGlyph}
+              /*
+               * ⚠ **"Choose" is a claim, and while the catalogue is out it is a
+               * false one on the edit path.** `current` is looked up *in* the
+               * catalogue, so a stored preset's model is absent until the read
+               * lands — and a filled field drawn as empty invites somebody to
+               * pick again, on the one screen where doing so silently rewrites
+               * what they came to edit.
+               */
+              title={reading ? "Reading models…" : (current?.modelName ?? "Choose")}
+              placeholder={current === null}
+              subline={reading ? "Reading this machine's models…" : (current?.system.displayName ?? null)}
+              trailing={<Icon as={ChevronRight} size={16} className="shrink-0 text-faint" />}
+              disabled={busy || reading}
+              onClick={() => navigate(agentPath(machineId, cwd, "llm", preset))}
             />
           </Field>
         </div>
@@ -874,10 +1103,50 @@ function NameLine({ value, onChange }: { value: string; onChange: (next: string)
 }
 
 /** A label over the control it names — the New session sheet's own field shape. */
-function Field({ label, children }: { label: string; children: ReactNode }): ReactNode {
+function Field({
+  label,
+  clear,
+  children,
+}: {
+  label: string;
+  /**
+   * What empties this field, or `null` where it is already empty.
+   *
+   * ⚠ **Beside the row and never inside it.** `ChoiceRow` renders a `<button>` and
+   * draws `trailing` within it, so a control there would be a button inside a
+   * button — invalid, and resolved by browsers by breaking the outer one, which is
+   * the measurement `SessionBrowser`, `MachinesSection` and this file's own
+   * `Supports` have each recorded separately. `SessionRow` is the one shape in
+   * this app that puts two targets on one line and it pays for it with a wrapper,
+   * a reduced inner target and a measured margin; a field's heading line is
+   * already outside the row and costs none of that.
+   *
+   * ⚠ **The slot is reserved on both fields whether or not either is filled.**
+   * These two rows are one group of two and the last time their geometry differed
+   * it left their labels on two different left edges for good — the defect
+   * `ChoiceRow` reserves its own check slot to prevent, one level out.
+   */
+  clear: (() => void) | null;
+  children: ReactNode;
+}): ReactNode {
   return (
     <div>
-      <h3 className={`${SETTINGS_HEADING} pb-1.5`}>{label}</h3>
+      <div className="flex min-h-6 items-center justify-between gap-2 pb-1.5">
+        <h3 className={SETTINGS_HEADING}>{label}</h3>
+        {clear !== null && (
+          <button
+            type="button"
+            onClick={clear}
+            /* Words rather than a glyph, and the field's own name in them: two
+               clears twelve pixels apart, both drawn as an ✕, are two controls a
+               reader has to tell apart by position. `SystemsPanel` draws a bare
+               text button under a stack of these same rows in this exact idiom. */
+            className="tap press -my-1.5 shrink-0 rounded-sm px-1.5 py-1.5 text-2xs text-muted hover:bg-raised hover:text-fg"
+          >
+            Clear
+          </button>
+        )}
+      </div>
       {children}
     </div>
   );
@@ -914,15 +1183,34 @@ function Field({ label, children }: { label: string; children: ReactNode }): Rea
 function ModelPicker({
   choices,
   capabilities,
+  harness,
+  routing,
   failure,
+  notice,
   value,
   onPick,
 }: {
   choices: readonly ModelChoice[];
   /** Read only to say which harnesses each row is for. See {@link Supports}. */
   capabilities: Readonly<Record<string, AgentCapabilities>>;
+  /**
+   * The harness already chosen, if one is — and it weighs **providers**, never
+   * rows. See the section render for the whole of what it may do.
+   */
+  harness: AgentId | null;
+  /** That harness's own answer about what it can be pointed at. */
+  routing: AgentCapabilities["routing"];
   /** Why the catalogue is empty, when it is empty because something failed. */
   failure: string | null;
+  /**
+   * What is missing from an otherwise working list, or `null`.
+   *
+   * Separate from `failure`, which is why the whole screen is empty. This one is
+   * drawn *above* a list that has rows: one provider's names are read from that
+   * provider's own host, and it being unreachable subtracts a section from a
+   * screen the other five still fill.
+   */
+  notice: string | null;
   value: { system: string; model: string } | null;
   onPick: (choice: ModelChoice) => void;
 }): ReactNode {
@@ -1013,6 +1301,9 @@ function ModelPicker({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-5 sm:px-5">
+        {/* Where the missing rows would have been, and in the faint size a
+            subline uses: it is a fact about the list, not a failure of it. */}
+        {notice !== null && <p className="mt-2 text-2xs text-faint">{notice}</p>}
         {groups.length === 0 ? (
           // Says what was looked for rather than "no results": over a list this
           // short, the useful answer is that this word matched none of them.
@@ -1025,15 +1316,91 @@ function ModelPicker({
               : (failure ?? "This machine reports no models.")}
           </Empty>
         ) : (
-          groups.map((group) => (
+          groups.map((group) => {
+            /*
+             * ⚠ **A provider the chosen harness cannot be pointed at is one greyed
+             * line, and its rows are not drawn at all.** This screen refused
+             * nothing about a pairing for three releases (Q3.479) and the reason
+             * was a deadlock: grey the rows here as well as on the harness screen
+             * and neither half of a bad pair can be changed. Two things make it
+             * safe now — the pair can be emptied a field at a time on the screen
+             * above, and the refusal lands on the **provider** rather than on the
+             * row.
+             *
+             * That second half is not a detail, it is the whole difference, and it
+             * is arithmetic. Greying row by row was measured against the live
+             * catalogue: with codex chosen it greys **461 of 463 rows**, and with
+             * kimi 462 — a picker you scroll through 463 disabled lines to find
+             * two. Collapsing the provider instead draws six greyed headings and
+             * leaves the two that work, which is a shorter and more honest screen
+             * than the one this replaces.
+             *
+             * ⚠ **`hostable` and never `choiceRefusal`, and the sentence is
+             * `hostable`'s own.** This is the one question that is genuinely about
+             * the provider — *can this harness be pointed at it at all* — so its
+             * prose ("Codex cannot run OpenRouter models.") is right over a
+             * heading, where `choiceRefusal` deliberately drops those words
+             * because they are wrong over a row. Nothing here re-derives the
+             * matrix; `agents.ts` holds it, once, for both screens.
+             *
+             * ⚠ **With no harness chosen it does not fire at all**, so the screen
+             * is exactly what it always was until somebody has answered the other
+             * half. Picking the model first — the order this flow is built in — is
+             * untouched.
+             */
+            const wholeProvider = harness === null ? null : hostable(harness, group.system, routing);
+            if (wholeProvider !== null) {
+              return (
+                <section key={group.system.id} className="mt-4 first:mt-2">
+                  {groups.length > 1 && (
+                    <h3 className={`${SETTINGS_HEADING} mb-1.5 text-faint`}>{group.system.displayName}</h3>
+                  )}
+                  {/* The count, because the rows are gone and their absence would
+                      otherwise read as a provider with nothing in it — which is the
+                      same distinction `Empty` above draws between a failed read and
+                      an empty machine. */}
+                  <p className="text-2xs text-faint">
+                    {wholeProvider}{" "}
+                    {group.choices.length === 1 ? "1 model" : `${group.choices.length} models`} hidden.
+                  </p>
+                </section>
+              );
+            }
+            /*
+             * ⚠ **One sentence for the group where every row would say the same
+             * one.** `choiceRefusal(null, …)` here can only be the no-key refusal,
+             * which is a fact about the *provider* — so on OpenRouter's 356 rows it
+             * drew 356 identical sublines, a screen of one sentence repeated. Above
+             * a handful the row keeps it, so Z.ai and MiniMax are untouched.
+             *
+             * ⚠ **Still `null` for the harness, and that is not an oversight now
+             * that one is in scope.** Everything the harness settles has already
+             * been settled one level up, on the heading; what is left to a row is
+             * the two facts that are about the row — a spelling that belongs to the
+             * other route in, and a system with no key — and both of those are the
+             * same whoever is chosen. Folding the harness in here is what produced
+             * the 461-of-463 measurement above, and it would take the hoist with
+             * it: `cannotRun` names the *model*, so a large group's sublines would
+             * all differ and 356 of them would draw individually.
+             */
+            const sublines = group.choices.map((one) => choiceRefusal(null, one, null));
+            const first = sublines[0] ?? null;
+            const shared =
+              first !== null && group.choices.length > 3 && sublines.every((one) => one === first)
+                ? first
+                : null;
+            return (
             <section key={group.system.id} className="mt-4 first:mt-2">
               {/* Drawn only where there is more than one — a heading over the whole
                   list names nothing, which is `MarketList`'s rule verbatim. It says
-                  the **provider** and nothing else: which harnesses a model is for
-                  is the row's own business, drawn as glyphs on the right of it. */}
+                  the **provider** and nothing else; which harnesses a model is for
+                  is the row's own business, drawn as glyphs on the right of it, and
+                  a vendor sub-heading was tried in this slot and taken out — see
+                  `groupModels`. */}
               {groups.length > 1 && (
                 <h3 className={`${SETTINGS_HEADING} mb-1.5`}>{group.system.displayName}</h3>
               )}
+              {shared !== null && <p className="mb-1.5 text-2xs text-faint">{shared}</p>}
               <ul className="flex flex-col gap-2">
                 {group.choices.map((choice) => {
                   /*
@@ -1067,7 +1434,11 @@ function ModelPicker({
                          * slot and becoming the answer never displaces it.
                          */
                         trailing={<Supports choice={choice} capabilities={capabilities} />}
-                        subline={why ?? (groups.length > 1 ? null : group.system.displayName)}
+                        subline={
+                          shared !== null
+                            ? null
+                            : (why ?? (groups.length > 1 ? null : group.system.displayName))
+                        }
                         /* Passed on every row of this list including the false
                            ones, which is what reserves the check slot: omitting it
                            is `ChoiceRow`'s way of saying a list has no selection at
@@ -1085,7 +1456,8 @@ function ModelPicker({
                 })}
               </ul>
             </section>
-          ))
+            );
+          })
         )}
       </div>
     </div>
