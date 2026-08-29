@@ -328,6 +328,16 @@ export function allModels(
    * a caller with no catalogue in hand passes nothing and loses nothing.
    */
   toolless: Iterable<string> = [],
+  /**
+   * The harness already chosen, if one has been — so the order can answer the
+   * question this screen will actually draw.
+   *
+   * ⚠ **Optional, and the default is the behaviour every caller had before it
+   * existed**, which is what keeps the fixtures that pass three arguments meaning
+   * exactly what they meant. It is not optional in order to keep the new sort out
+   * of the assertions: `readyFirst` is driven directly with a harness below it.
+   */
+  harness: AgentId | null = null,
 ): ModelChoice[] {
   const refused = new Set(toolless);
   const out: ModelChoice[] = [];
@@ -412,7 +422,7 @@ export function allModels(
       out.push({ system, modelId: model.id, modelName: model.name, source: "table" });
     }
   }
-  return readyFirst(out);
+  return readyFirst(out, harness, harness === null ? null : (capabilities[harness]?.routing ?? null));
 }
 
 /**
@@ -470,11 +480,49 @@ export function allModels(
  * providers down. That is a group appearing rather than a group moving, which is
  * what this screen already does whenever a listing fills in.
  */
-export function readyFirst(choices: readonly ModelChoice[]): ModelChoice[] {
+export function readyFirst(
+  choices: readonly ModelChoice[],
+  /**
+   * The chosen harness, or `null` while the model is being picked first.
+   *
+   * ⚠ **`keyMissing` alone was the wrong question once a harness could be chosen
+   * first, and the screen said so out loud.** The rule this function is built on
+   * is that the order and what is drawn cannot disagree — *what is at the top is
+   * what is not struck through* — and it was written when the only thing that
+   * struck a row through was a missing key. `ModelPicker` later grew a second and
+   * stronger refusal: with a harness chosen it replaces a whole provider with
+   * `hostable`'s sentence and a count, and that block's own docblock records that
+   * it does not fire at all with no harness, i.e. it was built for a flow this
+   * sort never learned about.
+   *
+   * The two then disagreed in the ordinary case. Anthropic and OpenAI are
+   * `routable !== true`, so no other harness can be pointed at them *ever* — but
+   * both pass the key test, because a published id proves the native harness holds
+   * its own credential. So with `opencode` chosen they floated to rank 0 and 1 and
+   * were immediately collapsed to *"Only Claude Code can run Anthropic models. 4
+   * models hidden."* — two dead one-line sections above the only provider with
+   * rows in it.
+   *
+   * So a provider that will be collapsed sinks. It does **not** disappear: this
+   * app draws what it cannot offer and labels it, because filtering answers
+   * "where did Anthropic go" with silence.
+   */
+  harness: AgentId | null = null,
+  routing: AgentCapabilities["routing"] = null,
+): ModelChoice[] {
   const rank = new Map<string, number>();
   const ready = new Set<string>();
+  const collapsed = new Set<string>();
   for (const choice of choices) {
-    if (!rank.has(choice.system.id)) rank.set(choice.system.id, rank.size);
+    if (!rank.has(choice.system.id)) {
+      rank.set(choice.system.id, rank.size);
+      // Asked once per provider rather than once per row: `hostable` is a fact
+      // about the pairing, and on OpenRouter's 289 rows the per-row form would be
+      // the same call 289 times for one answer.
+      if (harness !== null && hostable(harness, choice.system, routing) !== null) {
+        collapsed.add(choice.system.id);
+      }
+    }
     if (keyMissing(choice, null) === null) ready.add(choice.system.id);
   }
   // Named rather than `rank.size` inline, which reads as though it could still be
@@ -483,7 +531,8 @@ export function readyFirst(choices: readonly ModelChoice[]): ModelChoice[] {
   // `0..total-1` and an unready one `total..2*total-1`.
   const total = rank.size;
   const place = (choice: ModelChoice): number =>
-    (ready.has(choice.system.id) ? 0 : total) + (rank.get(choice.system.id) ?? 0);
+    (ready.has(choice.system.id) && !collapsed.has(choice.system.id) ? 0 : total) +
+    (rank.get(choice.system.id) ?? 0);
   return [...choices].sort((a, b) => place(a) - place(b));
 }
 

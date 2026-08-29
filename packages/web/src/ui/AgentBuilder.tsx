@@ -29,7 +29,7 @@ import {
   type OpenRouterRead,
 } from "../openrouter";
 import type { MachineId } from "../ids";
-import { daemonReadable } from "../machine";
+import { daemonRead } from "../machine";
 import { store } from "../store";
 import { isAgentId, type AgentCapabilities, type AgentId, type CustomAgent, type SystemInfo } from "../wire";
 import { AgentGlyph } from "./AgentIcons";
@@ -83,8 +83,21 @@ import { AGENT_IDS } from "../wire";
  * control on the row whose value it empties is the ordinary form affordance. It is
  * also the precondition for the model list refusing a pairing at all: with both
  * screens weighing the other's value, taking the pair apart a field at a time is
- * the only way out of a pair no picker chose. Never inside a picker, which would
- * be a control that exists only to undo a constraint that screen invented.
+ * the only way out of a pair no picker chose.
+ *
+ * ⚠ **There is one such control inside a picker, and the sentence that used to
+ * end the paragraph above — "never inside a picker" — was written before the
+ * state that needs it existed.** The rule's reason is that a `Clear` beside a
+ * value on a choosing screen exists only to undo a constraint that screen
+ * invented, so it is a second way to answer a question that already has one. The
+ * exception is the state where the screen has nothing to answer *with*: with a
+ * harness chosen, the model list collapses every provider it cannot be pointed at,
+ * and it can collapse all of them — a full list with no row in it, and the remedy
+ * one screen back behind a control this one never mentioned. There the act is the
+ * whole of what the screen has to offer rather than a control beside a value, it
+ * can delete nothing from under anybody because there is nothing on screen to aim
+ * at, and it **returns**, so the field it emptied is on the screen it lands on.
+ * See `ModelPicker`'s `onClearHarness`.
  *
  * ⚠ **Editing is this same screen with a stored row loaded into it**, which is why
  * `preset` is one more prop rather than a component of its own: the three fields,
@@ -174,7 +187,45 @@ export function AgentBuilder({
   /** Frozen the moment somebody types, so their name is not overwritten by a pick. */
   const [named, setNamed] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  /**
+   * What the write on this screen answered, or `null`.
+   *
+   * ⚠ **Kept apart from {@link readFailure}, because only one of the two has a
+   * remedy that is not already on screen.** A save or a remove is re-run by
+   * pressing the control that ran it — it is still there, and still says what it
+   * does. A read is re-run by nothing at all: the effect's dependencies are
+   * stable, so a `GET /agents/capabilities` that timed out stayed timed out until
+   * the pop-up was closed. Folded into one slot the two are indistinguishable, so
+   * a `Try again` offering to re-read the catalogue sat beside a failed `DELETE`,
+   * and a read that failed was reported under a button that would not re-run it.
+   * They meet again in `error` below, which is the one line that draws either.
+   */
+  const [writeFailure, setWriteFailure] = useState<string | null>(null);
+  /** What a catalogue read answered, or `null` while it is pending and once it has landed. */
+  const [readFailure, setReadFailure] = useState<string | null>(null);
+  /**
+   * Bumped by `Try again`, and in the reads' dependency list so that it re-runs
+   * them.
+   *
+   * ⚠ **A counter rather than a function that re-requests**, because the request
+   * is written once, in the effect, together with the cancellation that belongs to
+   * it: a second copy on a button is a second place for `cancelled` to be forgotten
+   * and for a stale answer to overwrite a newer one.
+   */
+  const [attempt, setAttempt] = useState(0);
+  /**
+   * The same for the stored row, and it is a **second** counter on purpose.
+   *
+   * ⚠ **That read *seeds the fields*, so re-running it after the first paint puts
+   * the stored harness and model back over whatever has been changed since** —
+   * the hazard the seed's own comment is written against, arriving by the retry
+   * door. A single counter would have done exactly that: the model picker's
+   * `Try again` is reachable on the edit path with the row already loaded, and it
+   * has nothing to do with this read. The one state that bumps this one is the
+   * preset failure, which is a whole screen with nothing seeded on it — that is
+   * what the branch *is* — so it can never land on top of anybody's changes.
+   */
+  const [presetAttempt, setPresetAttempt] = useState(0);
   /** Whether Remove has been pressed once. See the two-step below. */
   const [confirming, setConfirming] = useState(false);
   /**
@@ -196,8 +247,9 @@ export function AgentBuilder({
    * failed read is not an empty machine. `presetGone` is a read that **worked**
    * and found no such row — deleted on another device, or an address somebody
    * kept — and it earns its own sentence; `presetFailure` is the read itself
-   * failing and says what the daemon said, which is the only honest thing to say
-   * about a request that never landed.
+   * failing, and carries what came back under a subject sentence of this app's
+   * own, because a fetch rejection's words are not a thing anybody can act on and
+   * on their own do not even say what was being asked for.
    */
   const [presetGone, setPresetGone] = useState(false);
   const [presetFailure, setPresetFailure] = useState<string | null>(null);
@@ -286,34 +338,57 @@ export function AgentBuilder({
      * gating on it there is a spinner that never stops, three lines under a
      * comment that exists to prevent one.
      *
-     * ⚠ **Both catches still set both values.** Either read failing leaves an
-     * empty picker beside a stated reason, which is what keeps the spinner from
-     * outliving the failure — the property the single `catch` used to hold.
+     * ⚠ **Each catch clears its own read and nothing else, and the shared one was
+     * a real defect rather than a tidy-up.** One `catch` served both and answered
+     * `setSystems([])` *and* `setCapabilities({})`, so the read that fails —
+     * always the expensive one, since `GET /systems` is a table that lands in
+     * milliseconds while a harness spawn was measured at 2159 ms and up to 5.3s —
+     * emptied a provider list the cheap request had already filled. It also
+     * flipped `openRouterListed` false, which cancels the third-party catalogue
+     * this screen fetched *concurrently* three lines down: one slow spawn took out
+     * all three reads. Split, a failed capabilities read costs the published half
+     * of the catalogue and leaves every table row on screen.
+     *
+     * ⚠ **Both of them still leave a stated reason rather than a spinner**, which
+     * is the property the shared `catch` did hold: the arm each one writes is the
+     * *empty* answer for its own read, never `null`, so nothing downstream is
+     * still waiting.
+     *
+     * ⚠ **And the reads go back to pending on a retry.** Left at `[]` and `{}`
+     * while the second attempt is in the air, the picker draws "This machine
+     * reports no models." over a request that has not answered yet — a settled
+     * sentence about a question still being asked. Setting them on the way in is
+     * free on the first run, where they are already `null` and React bails out.
      */
-    const failed = (cause: unknown): void => {
-      if (cancelled) return;
-      setError(errorText(cause));
-      setSystems([]);
-      setCapabilities({});
-    };
+    setReadFailure(null);
+    setSystems(null);
+    setCapabilities(null);
     void daemon
       .systems()
       .then((listing) => {
         if (cancelled) return;
         setSystems(listing.systems);
       })
-      .catch(failed);
+      .catch((cause: unknown) => {
+        if (cancelled) return;
+        setReadFailure(errorText(cause));
+        setSystems([]);
+      });
     void daemon
       .agentCapabilities()
       .then((caps) => {
         if (cancelled) return;
         setCapabilities(caps.agents);
       })
-      .catch(failed);
+      .catch((cause: unknown) => {
+        if (cancelled) return;
+        setReadFailure(errorText(cause));
+        setCapabilities({});
+      });
     return () => {
       cancelled = true;
     };
-  }, [daemon]);
+  }, [daemon, attempt]);
 
   useEffect(() => {
     if (daemon === undefined || preset === null) return;
@@ -333,8 +408,15 @@ export function AgentBuilder({
      * ⚠ **The seed happens here, in the answer, rather than in an effect watching
      * it.** Anything that re-applied a stored row after the first paint would
      * fight the person: they change the harness, the row arrives a beat later, and
-     * the screen puts the old one back with nothing on it saying why.
+     * the screen puts the old one back with nothing on it saying why. That is also
+     * the whole reason `presetAttempt` is its own counter and not the one the
+     * catalogue reads use — see it.
+     *
+     * Both answers are cleared on the way in, so a second attempt is not drawn
+     * under the first one's refusal.
      */
+    setPresetGone(false);
+    setPresetFailure(null);
     void daemon
       .customAgents()
       .then(({ customAgents }) => {
@@ -359,7 +441,7 @@ export function AgentBuilder({
     return () => {
       cancelled = true;
     };
-  }, [daemon, preset]);
+  }, [daemon, preset, presetAttempt]);
 
   /*
    * A third read, and deliberately not a leg of the `Promise.all` above — the
@@ -410,8 +492,18 @@ export function AgentBuilder({
           // substitution above applies: `listed` carries the catalogue's accepted
           // rows, and this carries the ids it refused, so a published row cannot
           // walk past a judgement already made about it. See `allModels`.
-          allModels(listed, capabilities, orModels?.kind === "ok" ? orModels.toolless : []),
-    [listed, capabilities, orModels],
+          // The fourth is the harness, so the ORDER answers the question this
+          // screen draws. Without it Anthropic and OpenAI floated to the top on a
+          // key test and were then collapsed by `hostable` to a one-line "N models
+          // hidden" — the two least useful sections, first. `readyFirst`'s docblock
+          // is the argument; this is only where the harness reaches it.
+          //
+          // It is in the deps for the same reason, and re-sorting on a harness
+          // change costs nothing under a thumb: the harness row is a screen *above*
+          // this one and is answered before this list is opened, which is the order
+          // `webcheck` pins.
+          allModels(listed, capabilities, orModels?.kind === "ok" ? orModels.toolless : [], harness),
+    [listed, capabilities, orModels, harness],
   );
 
   /**
@@ -447,6 +539,40 @@ export function AgentBuilder({
    */
   const reading = capabilities === null;
   const caps = capabilities ?? {};
+
+  /** Ask the catalogue again. See {@link attempt}. */
+  const retryReads = (): void => setAttempt((one) => one + 1);
+  /**
+   * The one sentence the bar at the foot draws, whichever half produced it.
+   *
+   * ⚠ **The write outranks the read**, for the reason that bar already gives about
+   * outranking a pairing refusal: a request that was made and failed is newer than
+   * one this screen has stopped trying. The `Try again` beside it is drawn only
+   * when this *is* the read — a control offering to re-read the catalogue under a
+   * sentence about a failed removal points at nothing on screen.
+   *
+   * ⚠ **And the read is framed rather than forwarded.** `errorText` answers the
+   * daemon's own sentence or, for a dead network, one about the connection — both
+   * of which are the second half of an answer, and neither of which says what was
+   * being asked. Put in this slot bare, the whole of what the screen said about a
+   * failed read was `the connection failed…`, with nothing naming the thing that
+   * did not arrive. {@link MODELS_UNREAD} is the subject; `readFailure` is what
+   * came back. `NewSession` frames its own two read failures the same way, one
+   * screen up.
+   *
+   * ⚠ **Which of the two subjects it takes is decided by what is on screen, not
+   * by which request failed.** There are two reads and one slot, so with the
+   * expensive one failing and the table one landing there really are models here —
+   * the published half is what is missing — and "could not be read" over a list of
+   * 289 rows is a sentence contradicted by the thing directly above it. The
+   * catalogue is the honest witness: empty means nothing arrived, and anything
+   * else means some of it did.
+   */
+  const error =
+    writeFailure ??
+    (readFailure === null
+      ? null
+      : `${catalogue.length === 0 ? MODELS_UNREAD : SOME_MODELS_UNREAD} ${readFailure}`);
 
   /** Why the chosen pair cannot be saved, or `null`. */
   const conflict = current === null ? null : choiceRefusal(harness, current, routingOf(harness));
@@ -492,12 +618,46 @@ export function AgentBuilder({
    * failed-read case, and is never a screen somebody has assembled anything on.
    * Once the models are in hand a machine going quiet is the *button's* to refuse,
    * with the draft still on screen behind the sentence.
+   *
+   * ⚠ **Three states rather than two, because "nobody has asked yet" is not a
+   * failure.** `daemonReadable` answers `false` for `unknown` as well as for
+   * `offline`, and `unknown` is the value for the two or three seconds before the
+   * first `/health` lands — longer over a relay from a phone. For that whole
+   * window this asserted a failure that had not happened, and `reachText`'s own
+   * arm for it was a bare ellipsis, so the screen read *"laptop is not reachable
+   * right now — …."* `daemonRead` is the partition; `probing` stays on the
+   * readable side, deliberately, for the flicker reason above.
    */
-  if (!daemonReadable(machine.reach) && catalogue.length === 0) {
+  const daemonReach = daemonRead(machine.reach);
+  if (catalogue.length === 0 && daemonReach === "asking") {
     return (
       <div className={SHEET_SCREEN}>
         <div className={SHEET_SCROLL}>
-          <Empty>
+          {/* No `failed`, and no `role="status"`: nothing has been measured, so
+              there is nothing to report. This is a wait, and the only honest
+              thing it can say is what it is waiting on. */}
+          <Empty>Checking whether {machine.name} is reachable…</Empty>
+        </div>
+      </div>
+    );
+  }
+  if (catalogue.length === 0 && daemonReach === "unreachable") {
+    return (
+      <div className={SHEET_SCREEN}>
+        <div className={SHEET_SCROLL}>
+          <Empty
+            failed
+            /* The reads run whatever this client believes about reachability —
+               they are gated on the daemon client existing and on nothing else —
+               so asking again is a real remedy rather than a button that redraws
+               the same sentence: a machine that has come back answers, the
+               catalogue fills, and this branch stops firing on its own gate. */
+            action={
+              <Button size="sm" onClick={retryReads}>
+                Try again
+              </Button>
+            }
+          >
             {machine.name} is not reachable right now —{" "}
             {reachText(machine.reach, machine.offlineReason)}
             {preset === null
@@ -515,13 +675,52 @@ export function AgentBuilder({
    * one was asleep. It is the `daemon === undefined` branch's shape one level in:
    * a sentence about the thing that is missing, and the ◀ in the head as the way
    * out. The read *failing* says what failed instead — the two are told apart
-   * where they are set, not here.
+   * where they are set, and now where they are drawn too: an absence is a settled
+   * answer with nothing to press, and a failure is an event with a way out of it.
+   *
+   * ⚠ **And the failing arm is framed rather than forwarded.** It rendered
+   * `errorText`'s output as the screen's entire answer, so a dead network put the
+   * literal words of a fetch rejection where a sentence about this agent belongs —
+   * the thing this flow's own {@link COULD_NOT_ASK} refuses two taps away. The
+   * subject is ours and the remainder is demoted under it, which is what
+   * `NewSession` does with the identical value.
    */
-  if (preset !== null && (presetGone || presetFailure !== null)) {
+  if (preset !== null && presetGone) {
     return (
       <div className={SHEET_SCREEN}>
         <div className={SHEET_SCROLL}>
-          <Empty>{presetFailure ?? "That agent is not on this machine any more."}</Empty>
+          <Empty>That agent is not on this machine any more.</Empty>
+        </div>
+      </div>
+    );
+  }
+  if (preset !== null && presetFailure !== null) {
+    return (
+      <div className={SHEET_SCREEN}>
+        <div className={SHEET_SCROLL}>
+          <Empty
+            failed
+            /* Both counters, and this is the one place it is safe to bump the
+               second: nothing has been seeded here — that is what this branch
+               *is* — so the answer cannot land on top of somebody's changes. */
+            action={
+              <Button
+                size="sm"
+                onClick={() => {
+                  setPresetAttempt((one) => one + 1);
+                  retryReads();
+                }}
+              >
+                Try again
+              </Button>
+            }
+          >
+            That agent could not be read.
+            {/* `block` under the sentence rather than appended to it: the wire's
+                words are the *second* half of the answer and are the half nobody
+                can act on, so they sit below at the size a subline uses. */}
+            <span className="mt-1 block text-2xs text-muted">{presetFailure}</span>
+          </Empty>
         </div>
       </div>
     );
@@ -545,6 +744,13 @@ export function AgentBuilder({
    *
    * The one control that does need it says so and cannot be opened onto nothing —
    * see `reading` below.
+   *
+   * ⚠ **And what is left says what it is waiting for.** It was a bare `Spinner`,
+   * which is `aria-hidden` and carries no words at all — so a screen reader got
+   * silence and everybody else got a 12px ring over an empty panel. This file
+   * already argues the point about the *model row*: a spinner with nothing beside
+   * it reads as the thing having failed. Two reads can hold this screen and they
+   * are different waits, so the sentence names whichever one it is.
    */
   if (systems === null || (preset !== null && stored === null)) {
     return (
@@ -553,7 +759,11 @@ export function AgentBuilder({
             `display`, and a call site appending its own is the shape `bits.tsx`
             refuses. There is nothing to scroll here anyway. */}
         <div className="flex min-h-0 flex-1 items-center justify-center">
-          <Spinner />
+          <Waiting>
+            {preset !== null && stored === null
+              ? "Opening this agent…"
+              : "Reading this machine's providers…"}
+          </Waiting>
         </div>
       </div>
     );
@@ -565,6 +775,25 @@ export function AgentBuilder({
    * would land on the *new* agent screen with all three fields filled in and a
    * button that adds rather than saves. The ◀ carries it for the same reason and
    * by the same argument — that half is `upFrom`'s, in `nav.ts`.
+   *
+   * ⚠ **`replace`, and the two rows that open a picker now replace as well — a
+   * pass through this flow is one history entry rather than two identical ones.**
+   * The rows pushed, so a pick replaced the picker's entry with an address
+   * byte-identical to the one already beneath it, and `router.ts` deduplicates
+   * nothing: pressing the phone's Back then re-ran the same address and the screen
+   * did not move — once per pick, and again for every ◀, since `App` returns from
+   * a sheet the same way. Nothing *inside* this component depended on the push:
+   * every way out of a picker is explicit, `onPick` calling this and the head's ◀
+   * going through `upFrom`.
+   *
+   * ⚠ **What it costs is that Back inside a picker now leaves the pop-up rather
+   * than stepping up to the builder**, which is the trade rather than an oversight
+   * and is the one place this flow reads differently from the market's list →
+   * entry stack. The draft goes with it — at most a name, a harness and a model,
+   * three taps, against the two dead gestures per pass that were the report. The
+   * ◀ is 44px away in the head and is the control that steps up; Back, ✕ and
+   * Escape are then one answer rather than three, which is what somebody who
+   * presses the system control to get *out* of a dialog is asking for.
    */
   const back = (): void => navigate(agentPath(machineId, cwd, null, preset), true);
 
@@ -579,7 +808,11 @@ export function AgentBuilder({
     return (
       <div className={SHEET_SCREEN}>
         <div className="flex min-h-0 flex-1 items-center justify-center">
-          <Spinner />
+          {/* The row that leads here says the same thing while it waits, and this
+              is the same wait: `GET /agents/capabilities` starts an agent per
+              harness, 2159 ms measured and up to 5.3s. A ring on its own would be
+              the whole of what the screen said for that long. */}
+          <Waiting>Reading this machine&rsquo;s models…</Waiting>
         </div>
       </div>
     );
@@ -592,7 +825,12 @@ export function AgentBuilder({
         capabilities={caps}
         harness={harness}
         routing={routingOf(harness)}
-        failure={error}
+        failure={readFailure}
+        onRetry={retryReads}
+        onClearHarness={() => {
+          setHarness(null);
+          back();
+        }}
         notice={openRouterLine}
         value={picked}
         onPick={(choice) => {
@@ -601,6 +839,30 @@ export function AgentBuilder({
           back();
         }}
       />
+    );
+  }
+
+  /*
+   * ⚠ **And the harness picker waits too, but only over a stored preset.** It has
+   * rows either way — the list is `AGENT_IDS` and needs no read — so what it draws
+   * without the catalogue is worse than an empty screen: on the **edit** path
+   * `picked` is already seeded while `current` is a lookup in a catalogue that has
+   * not arrived, so `harnessRowRefusal` answers `null` for every row and the screen
+   * offers pairings it will refuse the moment the read lands. The row that leads
+   * here is disabled for the same window; this is the door the row cannot guard,
+   * which is the argument the `llm` gate above already makes about addresses.
+   *
+   * On the **new** path it does not fire, and must not: with no model chosen there
+   * is nothing for the catalogue to change about this list, and answering the free
+   * question is exactly what the expensive read is meant to run under.
+   */
+  if (step === "harness" && reading && preset !== null) {
+    return (
+      <div className={SHEET_SCREEN}>
+        <div className="flex min-h-0 flex-1 items-center justify-center">
+          <Waiting>Reading this machine&rsquo;s models…</Waiting>
+        </div>
+      </div>
     );
   }
 
@@ -632,7 +894,7 @@ export function AgentBuilder({
   const save = (): void => {
     if (current === null || harness === null || busy) return;
     setBusy(true);
-    setError(null);
+    setWriteFailure(null);
     const controller = new AbortController();
     inflight.current = controller;
     const body = {
@@ -678,7 +940,7 @@ export function AgentBuilder({
         navigate(out, true);
       })
       .catch((cause: unknown) => {
-        if (alive.current) setError(errorText(cause));
+        if (alive.current) setWriteFailure(errorText(cause));
       })
       .finally(() => {
         if (alive.current) setBusy(false);
@@ -699,7 +961,7 @@ export function AgentBuilder({
     // narrowing on a parameter does not survive into one.
     const going = preset;
     setBusy(true);
-    setError(null);
+    setWriteFailure(null);
     void daemon
       .removeCustomAgent(going)
       .then(() => {
@@ -742,7 +1004,7 @@ export function AgentBuilder({
       })
       .catch((cause: unknown) => {
         if (!alive.current) return;
-        setError(errorText(cause));
+        setWriteFailure(errorText(cause));
         // Back to one control: a confirmation still open under a refusal invites a
         // second tap at the same pixels, which is the pair `DangerButton` orders
         // its buttons to prevent.
@@ -791,6 +1053,9 @@ export function AgentBuilder({
             * opened. The harness list is `AGENT_IDS` and needs no read at all, so
             * answering it is free and it is what the wait now runs under: by the
             * time the picker has been opened, tapped and left, the catalogue is in.
+            * ⚠ Free **on the new-agent path only** — an edit arrives with a model
+            * already in hand, so the pairing is live and the row waits with the
+            * other one. See its `disabled` below.
             *
             * ⚠ **And it is the order the model list is built for.** With a harness
             * chosen, `ModelPicker` collapses every provider that harness cannot be
@@ -825,8 +1090,44 @@ export function AgentBuilder({
                */
               subline={conflict}
               trailing={<Icon as={ChevronRight} size={16} className="shrink-0 text-faint" />}
-              disabled={busy}
-              onClick={() => navigate(agentPath(machineId, cwd, "harness", preset))}
+              /*
+               * ⚠ **Outside the `reading` gate on the new-agent path and inside it
+               * on the edit path, and the asymmetry is the whole point of the row
+               * being first.** With nothing chosen there is nothing the capabilities
+               * read could change about this list — `harnessRowRefusal` answers
+               * `null` for every row while `current` is `null` — so answering the
+               * free question is exactly what the expensive wait runs under.
+               *
+               * An **edit** is the state where that argument does not hold.
+               * `picked` is seeded from the stored preset the moment the row lands,
+               * while `current` is a lookup *in the catalogue* and stays `null` for
+               * the 2.2–5.3s the capabilities read takes — so for that whole window
+               * every harness weighed against a model this screen already holds
+               * came back unrefused. The picker accepted a pairing and the screen
+               * refused it two seconds later, with Save going dead and the reason
+               * appearing under a row nobody had touched since.
+               *
+               * ⚠ **The wait is stated once, on the row below.** This row's one
+               * subline is spent on the refusal — that is the rule directly above
+               * — so the pair says what it is waiting for where the slot is free,
+               * 16px away.
+               *
+               * ⚠ **"and both rows dim together" stood here, and it was false on
+               * the path this screen opens at.** It describes the *edit* path
+               * only: `preset !== null` puts this row inside the same `reading`
+               * gate the model row is unconditionally in, so there the two do dim
+               * as one. On the new-agent path this row stays live under the read
+               * by construction — which is the asymmetry argued three paragraphs
+               * up and the whole reason the harness question is first. So the
+               * sentence contradicted the argument it was attached to, and named
+               * the arm nobody starts in. What is true at both is that exactly
+               * one row says what the wait is for.
+               *
+               * The address door is a separate guard, at the
+               * `step === "harness"` gate above.
+               */
+              disabled={busy || (preset !== null && reading)}
+              onClick={() => navigate(agentPath(machineId, cwd, "harness", preset), true)}
             />
           </Field>
 
@@ -865,7 +1166,7 @@ export function AgentBuilder({
               subline={reading ? "Reading this machine's models…" : (current?.system.displayName ?? null)}
               trailing={<Icon as={ChevronRight} size={16} className="shrink-0 text-faint" />}
               disabled={busy || reading}
-              onClick={() => navigate(agentPath(machineId, cwd, "llm", preset))}
+              onClick={() => navigate(agentPath(machineId, cwd, "llm", preset), true)}
             />
           </Field>
         </div>
@@ -902,15 +1203,28 @@ export function AgentBuilder({
          * to the ordering: the consequence as prose *above* the control rather than
          * crammed into the confirmation, the answer that undoes the question
          * **last** so a second tap aimed at a control that looked like it did
-         * nothing lands on Cancel, and `md`/44px at both steps because
-         * `BUTTON_SIZE` reserves `sm` for a confirmation that has replaced a row's
-         * controls, which is the opposite of a section on a screen.
+         * nothing lands on Cancel, and `md`/44px at both steps.
+         *
+         * ⚠ **The reason under that last clause expired, and the answer outlived
+         * it.** It read *"because `BUTTON_SIZE` reserves `sm` for a confirmation
+         * that has replaced a row's controls, which is the opposite of a section on
+         * a screen"* — and that reservation is gone: `sm` had reached 46 call
+         * sites, fifteen of them the exact shape it excluded, so the primitive took
+         * a coarse-pointer floor instead of a rule nothing enforced. What survives
+         * is narrower and stronger. With the floor, `sm` is 44px **under a finger
+         * only** and stays 36px on a fine pointer; this is a destructive two-step in
+         * the middle of a scrolling screen rather than a row that has cleared its
+         * own neighbours, and a mis-aimed trackpad click removes the agent exactly
+         * as irreversibly as a mis-aimed thumb. `md` is the size that is 44px at
+         * both pointers, which is what this pair actually needs.
          *
          * Cancel is `plain` rather than the filled tone `BUTTON_TONE`'s rule names,
-         * and that is this screen rather than a divergence: `bg-fg` is the one
-         * affirmative action per view and this view spends it on nothing at all —
-         * see the button below — so a filled Cancel here would be the only filled
-         * control on the screen, sitting on the answer that does nothing.
+         * and the reason has flipped without changing the answer. It used to be
+         * that this view spent `bg-fg` on nothing at all, so a filled Cancel would
+         * have been the only filled control on the screen, sitting on the answer
+         * that does nothing. The view spends it now — Save, at the foot — and one
+         * per view is the whole rule, so a second fill here would be this screen
+         * claiming two affirmative actions, one of which is a refusal.
          */}
         {stored !== null && (
           /* No heading over it. `Field`'s labels are the two above and a third one
@@ -1009,8 +1323,30 @@ export function AgentBuilder({
           {error ?? conflict}
         </span>
         {/*
-         * Not `primary`. `bg-fg` is the affirmative action inside a decision, one
-         * per view — and `Start`, on the screen this one returns to, is that.
+         * ⚠ **The one remedy that is not already on this bar.** A write is re-run
+         * by pressing the control beside this, which is still there and still says
+         * what it does; a read is re-run by nothing — the reads' dependencies are
+         * stable, so a `GET /agents/capabilities` that timed out stayed timed out
+         * and the only way back was closing the pop-up. Drawn only while the
+         * sentence to its left *is* that read: `error` prefers the write, so a
+         * `Try again` under a failed removal would offer to re-read the catalogue
+         * about something that has nothing to do with it.
+         */}
+        {writeFailure === null && readFailure !== null && (
+          <Button size="sm" onClick={retryReads}>
+            Try again
+          </Button>
+        )}
+        {/*
+         * ⚠ **`primary`, and the budget it spends is this route's own.** It was
+         * `plain`, on the argument that `bg-fg` is the affirmative action inside a
+         * decision, one per view — and that the view was New session, whose
+         * `Start` had already spent it. That stopped being true when assembling
+         * became `/agent`: this is its own route with its own action bar, its own
+         * head and its own ◀, and `Start` is not on it. So the budget was unspent
+         * and the loudest thing on the screen was **Remove agent** — `text-danger`
+         * with a glyph, the only coloured control here — sitting under a bare
+         * outlined button that is the whole reason anybody opened this.
          *
          * ⚠ **The word is the act.** The head says "Edit agent" and a button under
          * it reading "Add agent" is the screen disagreeing with itself about what
@@ -1019,6 +1355,7 @@ export function AgentBuilder({
          */}
         <Button
           onClick={save}
+          tone="primary"
           disabled={busy || current === null || harness === null || conflict !== null}
         >
           {busy
@@ -1042,6 +1379,83 @@ export function AgentBuilder({
  * which is the defect it exists to remove. See the pair of rows above.
  */
 const emptyGlyph = <span aria-hidden="true" className="block h-[18px] w-[18px]" />;
+
+/**
+ * The subject sentence over whatever the wire said about a failed catalogue read.
+ *
+ * ⚠ **A constant because it is drawn twice and the two must be the same claim.**
+ * The bar at the foot of the builder frames the failure on one line, and the model
+ * picker frames the same value as an empty state with the remainder demoted under
+ * it; a screen where those two disagree about *what* could not be read is a screen
+ * saying two things about one request.
+ *
+ * ⚠ **It names the thing that is missing rather than the request that failed.**
+ * "models" rather than a route, a verb or a status: the two reads behind it are
+ * `GET /systems` and `GET /agents/capabilities`, and what a person on this screen
+ * has lost either way is the list they came to choose from. `errorText`'s answer
+ * is the second half — the daemon's own sentence, or one about the connection —
+ * and on its own it does not even say what was being asked for.
+ */
+const MODELS_UNREAD = "This machine's models could not be read.";
+
+/**
+ * The same subject where one of the two reads did land.
+ *
+ * ⚠ **A second sentence rather than a second failure slot.** The two reads fail
+ * independently now, and the one that usually fails is the expensive one — so the
+ * common shape is a full list of the table's models with the harnesses' own
+ * published rows missing from it. {@link MODELS_UNREAD} over that list is
+ * contradicted by the list. Which of the two is drawn is decided by whether the
+ * catalogue came out empty, because that is the thing the reader can see, and it
+ * cannot disagree with the screen the way a flag remembered at the catch could.
+ */
+const SOME_MODELS_UNREAD = "Some of this machine's models could not be read.";
+
+/**
+ * The longest name the daemon stores for an assembled agent; it answers 400 above
+ * this.
+ *
+ * ⚠ **Enforced on the field rather than only on the answer, because the answer is
+ * expensive.** `POST /custom-agents` and its `PATCH` both re-weigh the pairing
+ * against a live harness, so they *spawn an agent* on the host before anything
+ * validates the name — which made an over-long one cost seconds and come back as
+ * the daemon's raw `name exceeds 80 characters`, a sentence built for an API
+ * client. `maxLength` is the browser's own stop, applies to typing and to a paste
+ * alike, and needs no round trip.
+ *
+ * Written out rather than imported: `src/` is the daemon and nothing in
+ * `packages/web` may import from it. It is the one number here that can drift, so
+ * it names where the real one lives.
+ */
+const MAX_AGENT_NAME_CHARS = 80;
+
+/**
+ * A wait with words, for the two screens that have nothing else on them.
+ *
+ * ⚠ **`Spinner` is `aria-hidden` and says nothing**, so a screen that is only a
+ * spinner is a blank panel to a screen reader and a bare 12px ring to everybody
+ * else. This file already makes the argument one row down, about the model row: a
+ * spinner with no words beside it reads as the thing having *failed*, which is the
+ * opposite of what it means. The two waits it is drawn for are seconds rather than
+ * frames — `GET /agents/capabilities` starts an agent per harness, 2159 ms measured
+ * and up to 5.3s — which is long enough for that reading to be the one somebody
+ * takes.
+ *
+ * ⚠ **`role="status"` here is best effort and is worth having anyway.** The
+ * arrangement `Sheet` records as the reliable one is a region mounted
+ * unconditionally with only its text swapping, and this screen is an early return
+ * — it *is* the mount. What it can still do is carry the words for anything that
+ * reads the panel after it has arrived, which is the whole of what a blank
+ * container could not.
+ */
+function Waiting({ children }: { children: ReactNode }): ReactNode {
+  return (
+    <p role="status" className="flex items-center gap-2 text-sm text-muted">
+      <Spinner />
+      <span>{children}</span>
+    </p>
+  );
+}
 
 /**
  * The agent's name, as a name rather than as a form field.
@@ -1117,6 +1531,9 @@ function NameLine({ value, onChange }: { value: string; onChange: (next: string)
           }
         }}
         aria-label="Agent name"
+        /* The daemon's bound, held here so it is not discovered by a round trip
+           that starts an agent to find out. See {@link MAX_AGENT_NAME_CHARS}. */
+        maxLength={MAX_AGENT_NAME_CHARS}
         placeholder="New agent"
         /*
          * ⚠ **No box: the name stays the same text in the same place, and only a
@@ -1216,8 +1633,22 @@ function Field({
             /* Words rather than a glyph, and the field's own name in them: two
                clears twelve pixels apart, both drawn as an ✕, are two controls a
                reader has to tell apart by position. `SystemsPanel` draws a bare
-               text button under a stack of these same rows in this exact idiom. */
-            className="tap press -my-1.5 shrink-0 rounded-sm px-1.5 py-1.5 text-2xs text-muted hover:bg-raised hover:text-fg"
+               text button under a stack of these same rows in this exact idiom —
+               and this is now that string, `text-2xs` apart, rather than a second
+               spelling of it.
+
+               ⚠ **`min-h-11`, because `-my-1.5` is a *margin* and a margin moves
+               layout without moving the target.** At `text-2xs` (1.125rem of line
+               height) plus `py-1.5` this was 18 + 12 = **30px**, on the two
+               controls that undo a harness or a model choice — the only way to
+               take a refused pair apart, and therefore the precondition for the
+               model list being allowed to refuse one at all. `.tap` adds
+               no hit area of its own; it is `touch-action`. The negative margin
+               stays and is what keeps the cost at 8px: 44px of ink pulled 6px at
+               each end contributes 32 to a row whose floor is 24, and the overhang
+               lands in the 16px gap above and in this row's own `pb-1.5` below, so
+               it never reaches the face of the row beneath. */
+            className="tap press -my-1.5 inline-flex min-h-11 shrink-0 items-center rounded-sm px-2 text-2xs text-muted hover:bg-raised hover:text-fg"
           >
             Clear
           </button>
@@ -1262,6 +1693,8 @@ function ModelPicker({
   harness,
   routing,
   failure,
+  onRetry,
+  onClearHarness,
   notice,
   value,
   onPick,
@@ -1276,8 +1709,34 @@ function ModelPicker({
   harness: AgentId | null;
   /** That harness's own answer about what it can be pointed at. */
   routing: AgentCapabilities["routing"];
-  /** Why the catalogue is empty, when it is empty because something failed. */
+  /**
+   * What came back when the catalogue could not be read, or `null`.
+   *
+   * ⚠ **The wire's half of the answer, never the whole of it.** This is
+   * `errorText`'s output — the daemon's own sentence, or one about the connection
+   * — and it is drawn *under* {@link MODELS_UNREAD} rather than as the screen's
+   * answer. It used to be the answer: a dead network put `TypeError: Failed to
+   * fetch` on screen as the entire reply to somebody who had tapped Model.
+   */
   failure: string | null;
+  /** Ask for the catalogue again. Drawn beside {@link failure} and nowhere else. */
+  onRetry: () => void;
+  /**
+   * Empty the harness and go back to the screen that field is on.
+   *
+   * ⚠ **The one control on a picker that touches the *other* field, and it exists
+   * because this screen can talk itself into a dead end.** The standing rule is
+   * that no picker clears the other's value — a `Clear` inside a picker is a
+   * control that exists only to undo a constraint that screen invented. What makes
+   * this the exception rather than a hole in it: with every provider collapsed
+   * there is no row here to take at all, so there is nothing for the reader to aim
+   * at and nothing that can be deleted from under them, and the act is the whole of
+   * what the screen has to offer rather than a second control beside a value. It
+   * **returns**, which is the other half — the field it emptied is on the screen it
+   * lands on, so the change is visible where it happened instead of being made
+   * invisibly two screens away.
+   */
+  onClearHarness: () => void;
   /**
    * What is missing from an otherwise working list, or `null`.
    *
@@ -1315,11 +1774,126 @@ function ModelPicker({
     return out;
   }, [choices]);
   const narrowed = systems.find((one) => one.id === system) ?? null;
+  /**
+   * How many rows on this screen can actually be taken.
+   *
+   * ⚠ **`groups.length === 0` was the only emptiness this screen knew about, and
+   * it is not the one that strands somebody.** With a harness chosen, every
+   * provider it cannot be pointed at collapses to a heading and *"…N models
+   * hidden."* — so `groups` is full, the list draws, and there is not one row to
+   * press. Nothing said so and the remedy was on the previous screen, behind a
+   * text button this one never mentioned.
+   *
+   * ⚠ **Asked with the same call the sections below make.** `hostable` is where the
+   * matrix lives, once, for both screens; counting off what the `map` drew would be
+   * a second answer to the same question, arrived at one render late. It is two
+   * lookups per provider rather than per row, which is the whole reason the refusal
+   * was moved onto the heading in the first place.
+   *
+   * It is also what the live region announces, and it has to be: "289 models"
+   * spoken over a screen where none of them can be chosen is the same lie in
+   * another modality.
+   */
+  const pickable = useMemo(
+    () =>
+      groups.reduce(
+        (count, group) =>
+          count +
+          (harness === null || hostable(harness, group.system, routing) === null
+            ? group.choices.length
+            : 0),
+        0,
+      ),
+    [groups, harness, routing],
+  );
+  const wanted = query.trim();
+
+  /**
+   * What stands where the rows would be, and the one act that would bring some
+   * back.
+   *
+   * ⚠ **Total over the four ways this list can be empty, rather than one sentence
+   * with a fall-through.** An empty box where a list should be is the state with
+   * nothing else on screen to explain it — `noRowsText` in `install.ts` states the
+   * rule and this is the same shape.
+   *
+   * ⚠ **The provider filter is named whenever it is set, and that is the reported
+   * defect.** Its only mark is `bg-raised` on a 32px icon in the strip above, so
+   * narrowing to Moonshot, forgetting, and typing "opus" produced *"Nothing here is
+   * called “opus”."* over a catalogue holding four models called Opus. The sentence
+   * names the narrowing it is about, and the act undoes that one.
+   *
+   * ⚠ **Curly quotes and never `JSON.stringify`.** That serialiser shows somebody
+   * their own input escaped the moment it holds a quote or a backslash — the defect
+   * `noRowsText` names and refuses to copy, and this is where it was copied from.
+   *
+   * The narrowed-with-no-query arm is the partition being total rather than a
+   * state anybody has reached: the filter menu is built from the catalogue itself,
+   * so a provider can only be ticked while it has rows. It is written out because
+   * the alternative is a fall-through that would answer it with a sentence about a
+   * search nobody made.
+   */
+  const nothingHere = (): ReactNode => {
+    if (narrowed !== null) {
+      return (
+        <Empty
+          action={
+            <Button size="sm" onClick={() => setSystem(null)}>
+              Show every provider
+            </Button>
+          }
+        >
+          {wanted.length > 0
+            ? `No ${narrowed.displayName} model here is called “${wanted}”.`
+            : `${narrowed.displayName} has no models on this machine.`}
+        </Empty>
+      );
+    }
+    if (wanted.length > 0) {
+      return (
+        <Empty
+          action={
+            <Button size="sm" onClick={() => setQuery("")}>
+              Clear the search
+            </Button>
+          }
+        >
+          {`Nothing here is called “${wanted}”.`}
+        </Empty>
+      );
+    }
+    // ⚠ **A failed read is not an empty machine.** "This machine reports no
+    // models" was drawn over a 503 with the real reason only on the screen
+    // behind — the one state where somebody most needs it and cannot see it.
+    if (failure !== null) {
+      return (
+        <Empty
+          failed
+          action={
+            <Button size="sm" onClick={onRetry}>
+              Try again
+            </Button>
+          }
+        >
+          {MODELS_UNREAD}
+          {/* Below the sentence and at a subline's size: the wire's words are the
+              half nobody can act on, and above the fold they read as the answer. */}
+          <span className="mt-1 block text-2xs text-muted">{failure}</span>
+        </Empty>
+      );
+    }
+    return <Empty>This machine reports no models.</Empty>;
+  };
 
   return (
     <div className={SHEET_SCREEN}>
       <div className="flex shrink-0 items-center gap-2 px-4 pt-4 pb-2 sm:px-5">
-        <SearchBox value={query} onChange={setQuery} label="Search models" />
+        <SearchBox
+          value={query}
+          onChange={setQuery}
+          label="Search models"
+          status={countText(pickable, "model", "models")}
+        />
         <Menu
           align="right"
           panelClassName="w-48"
@@ -1328,9 +1902,11 @@ function ModelPicker({
             <IconButton
               icon={ListFilter}
               label={`Showing ${narrowed?.displayName ?? "every provider"}`}
-              /* `chip` and never the `md` default: `md` is the one size in
-                 `ICON_BUTTON_SIZE` that never reaches 44px, and `chip` grows
-                 vertically only, so its target cannot cover the search box. */
+              /* `chip`, which grows vertically only, so its target cannot cover
+                 the search box it sits `gap-2` from. `ICON_BUTTON_SIZE` has no
+                 middle size any more — it had one that never reached 44px, and it
+                 was the default, which is why `size` is required rather than
+                 defaulted. */
               size="chip"
               expanded={open}
               onClick={toggle}
@@ -1381,15 +1957,49 @@ function ModelPicker({
             subline uses: it is a fact about the list, not a failure of it. */}
         {notice !== null && <p className="mt-2 text-2xs text-faint">{notice}</p>}
         {groups.length === 0 ? (
-          // Says what was looked for rather than "no results": over a list this
-          // short, the useful answer is that this word matched none of them.
-          // ⚠ **And a failed read is not an empty machine.** "This machine reports
-          // no models" was drawn over a 503 with the real reason only on the screen
-          // behind — the one state where somebody most needs it and cannot see it.
-          <Empty>
-            {query.trim().length > 0
-              ? `Nothing here is called ${JSON.stringify(query.trim())}.`
-              : (failure ?? "This machine reports no models.")}
+          // Says what was looked for rather than "no results", and which of the two
+          // narrowings it was looked for under. See {@link nothingHere}.
+          nothingHere()
+        ) : harness !== null && pickable === 0 ? (
+          /*
+           * ⚠ **Every provider collapsed, which is a full list with nothing in it
+           * to take.** The arm above cannot see this state — there *are* groups,
+           * one greyed heading each — so the screen drew six refusals, no rows and
+           * no way forward, with the remedy on the screen behind it and never
+           * named. It is the one dead end this flow can reach, because it is the
+           * only place where answering one question empties the other's whole
+           * list.
+           *
+           * ⚠ **It replaces the collapsed headings rather than sitting under
+           * them, and their counts go with them.** *"OpenRouter — 289 models
+           * hidden"* is worth reading beside a provider that did survive; with
+           * every provider hidden the only fact left is that the harness hides all
+           * of them, and six lines of arithmetic in front of it is the screen
+           * taking six goes at saying so.
+           *
+           * ⚠ **And the act is emptying the *harness*, even where a search or a
+           * provider filter is also narrowing.** It is the only one of the three
+           * that is guaranteed to bring rows back: `groups` is non-empty here, so
+           * whatever else is set has matched something, and nothing collapses once
+           * the harness is gone. Clearing the filter might reveal a provider this
+           * harness also cannot be pointed at, which is the same screen again.
+           *
+           * ⚠ **The `harness !== null` half of the test is the narrowing rather
+           * than a second condition.** Nothing collapses while it is `null`, so
+           * with groups on screen and no row in them it cannot be anything else —
+           * the clause is there so the sentence can name it without an assertion.
+           * It names the harness because that is the word the collapsed headings
+           * were already saying, which keeps both of this sentence's nouns on the
+           * screen it is drawn on — the rule every refusal in this flow is held to.
+           */
+          <Empty
+            action={
+              <Button size="sm" onClick={onClearHarness}>
+                Clear the harness
+              </Button>
+            }
+          >
+            Nothing here runs under {agentLabel(harness)}.
           </Empty>
         ) : (
           groups.map((group) => {
@@ -1428,8 +2038,14 @@ function ModelPicker({
             if (wholeProvider !== null) {
               return (
                 <section key={group.system.id} className="mt-4 first:mt-2">
+                  {/* `h2`, and its twin below is the same fix: `Sheet` draws the
+                      pop-up's name as the `h1` precisely so a pane's headings have
+                      a rank to sit under, and these two were `h3` — one level
+                      skipped, on the only headings either picker has. The builder
+                      itself does not skip (the name is an `h2` and a field's label
+                      an `h3`), which is what made this one look deliberate. */}
                   {groups.length > 1 && (
-                    <h3 className={`${SETTINGS_HEADING} mb-1.5 text-faint`}>{group.system.displayName}</h3>
+                    <h2 className={`${SETTINGS_HEADING} mb-1.5 text-faint`}>{group.system.displayName}</h2>
                   )}
                   {/* The count, because the rows are gone and their absence would
                       otherwise read as a provider with nothing in it — which is the
@@ -1474,7 +2090,7 @@ function ModelPicker({
                   a vendor sub-heading was tried in this slot and taken out — see
                   `groupModels`. */}
               {groups.length > 1 && (
-                <h3 className={`${SETTINGS_HEADING} mb-1.5`}>{group.system.displayName}</h3>
+                <h2 className={`${SETTINGS_HEADING} mb-1.5`}>{group.system.displayName}</h2>
               )}
               {shared !== null && <p className="mb-1.5 text-2xs text-faint">{shared}</p>}
               <ul className="flex flex-col gap-2">
@@ -1594,11 +2210,35 @@ function HarnessPicker({
   return (
     <div className={SHEET_SCREEN}>
       <div className="flex shrink-0 items-center px-4 pt-4 pb-2 sm:px-5">
-        <SearchBox value={query} onChange={setQuery} label="Search harnesses" />
+        <SearchBox
+          value={query}
+          onChange={setQuery}
+          label="Search harnesses"
+          status={countText(shown.length, "harness", "harnesses")}
+        />
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-2 pb-5 sm:px-5">
         {shown.length === 0 ? (
-          <Empty>Nothing here is called {JSON.stringify(query.trim())}.</Empty>
+          /*
+           * ⚠ **`AGENT_IDS` has four members and no way to be empty, so the query
+           * is the only thing that can produce this** — which is what makes the act
+           * unambiguous, unlike the model screen where three narrowings can each
+           * empty the list. The way back is one control and it undoes the one
+           * narrowing there is.
+           *
+           * ⚠ **Curly quotes, never `JSON.stringify`**, which shows somebody their
+           * own input escaped as soon as it holds a quote or a backslash —
+           * `noRowsText` names that as a defect and refuses to copy it.
+           */
+          <Empty
+            action={
+              <Button size="sm" onClick={() => setQuery("")}>
+                Show all
+              </Button>
+            }
+          >
+            {`Nothing here is called “${query.trim()}”.`}
+          </Empty>
         ) : (
           <ul className="flex flex-col gap-2">
             {shown.map((id) => {
@@ -1692,7 +2332,9 @@ const COULD_NOT_ASK = "This machine couldn't check what it can run.";
  * bottom, behind a press whose label says whose words these are and which harness
  * said them, so nobody meets a `-32601` without being told who is talking.
  *
- * ⚠ **Not a `<details>`**, though it is exactly that shape: this app has none, and
+ * ⚠ **Not a `<details>`**, though it is exactly that shape. The claim here used to
+ * be that this app has none, and that was already false when it was written —
+ * `AgentsPanel` has two. The argument does not need it:
  * `<summary>` arrives as a `list-item` with a marker and no tap target, which is
  * three overrides before it matches anything else here. A `<button>` with
  * `aria-expanded` is what a disclosure is; `Button` has no prop for that attribute,
@@ -1766,10 +2408,22 @@ function SearchBox({
   value,
   onChange,
   label,
+  status,
 }: {
   value: string;
   onChange: (next: string) => void;
   label: string;
+  /**
+   * How much is left, in words — see {@link countText}.
+   *
+   * ⚠ **Required rather than optional, because the screen that forgot it is the
+   * screen that needs it.** Typing into a box that narrows 463 rows to 4 changes
+   * nothing a screen reader is told: the rows are below the box and out of the
+   * reading position, so the only feedback was the caret. The two pickers count
+   * different things, so the sentence is the caller's; that it exists at all is
+   * this component's.
+   */
+  status: string;
 }): ReactNode {
   return (
     <div className="relative min-w-0 flex-1">
@@ -1784,8 +2438,39 @@ function SearchBox({
         placeholder={label}
         className={SEARCH_FIELD}
       />
+      {/*
+       * Mounted **unconditionally** with only its text swapping, which is the one
+       * arrangement that reliably announces — a `role="status"` inserted in the
+       * same paint as its content is commonly not spoken at all, VoiceOver on iOS
+       * included. `Sheet`, `EventList` and the builder's own action bar all record
+       * that measurement about their regions; this is the fourth.
+       *
+       * `sr-only` is `absolute`, so it takes no layout inside this relative box and
+       * the field's own geometry is untouched. Silent for a sighted reader, who has
+       * the rows themselves.
+       */}
+      <p role="status" aria-live="polite" className="sr-only">
+        {status}
+      </p>
     </div>
   );
+}
+
+/**
+ * How many rows are left, for the region beside a search box.
+ *
+ * ⚠ **Two words and no sentence around them.** It is spoken while somebody is
+ * still typing, and every keystroke that changes the count interrupts the last
+ * announcement — so anything longer is a phrase nobody hears the end of. It is
+ * also why there is no mention of the query in it: the query is what they are
+ * typing, and reading it back is the one thing they already know.
+ *
+ * The plural is a parameter rather than an `s`, because one of the two callers
+ * counts harnesses.
+ */
+function countText(count: number, one: string, many: string): string {
+  if (count === 0) return `No ${many}`;
+  return count === 1 ? `1 ${one}` : `${count} ${many}`;
 }
 
 /**
@@ -1834,6 +2519,24 @@ function SearchBox({
  * anyway. The label has to be *already on screen* for a finger, which is what the
  * words are.
  *
+ * ⚠ **A keyboard on a fine pointer gets the words too, and it is the same swap
+ * rather than a third behaviour.** Touch was served by the media query and a
+ * screen reader by the `aria-label`; somebody tabbing down this list with a mouse
+ * plugged in got neither — a hover reveal answers a pointer that has arrived, and
+ * a keyboard never arrives. `group-focus-within` is the obvious fix and it is the
+ * wrong one: focus lands on `ChoiceRow`'s `<button>`, which is an **ancestor** of
+ * this element, and `:focus-within` only ever looks *downwards*. So the selector
+ * has to name that ancestor, which is what `[button:focus-visible_&]` is.
+ *
+ * ⚠ **And it swaps rather than revealing the plates.** Adding the focus state to
+ * the tooltip's own rule looks smaller and is worse: a row supporting two
+ * harnesses would open two absolutely-positioned plates at once, each `right-full`
+ * of its own 13px glyph and 17px apart, so the wider one covers the other bar a
+ * sliver. The words are one line that already has a width budget and a
+ * `truncate`, and they are what this component has decided twice is the answer
+ * wherever a hover cannot be waited for. It costs the same reflow touch already
+ * pays, on the focused row only.
+ *
  * Weighed with {@link supportingHarnesses}, which ignores the key deliberately:
  * this is what a model is *for*. Whether a harness is *ready* to run it is the
  * harness row's answer one screen later, and clearing that one is a trip to
@@ -1861,7 +2564,7 @@ function Supports({
           which is the widest one the matrix actually produces. */}
       <span
         aria-hidden="true"
-        className="hidden max-w-32 truncate text-2xs [@media(pointer:coarse)]:block"
+        className="hidden max-w-32 truncate text-2xs [button:focus-visible_&]:block [@media(pointer:coarse)]:block"
       >
         {able.map((id) => agentLabel(id)).join(" · ")}
       </span>
@@ -1869,7 +2572,7 @@ function Supports({
         <span
           key={id}
           aria-hidden="true"
-          className="group/mark relative inline-flex [@media(pointer:coarse)]:hidden"
+          className="group/mark relative inline-flex [button:focus-visible_&]:hidden [@media(pointer:coarse)]:hidden"
         >
           <AgentGlyph agent={id} size={13} />
           <span className="pointer-events-none absolute top-1/2 right-full mr-2 hidden -translate-y-1/2 rounded-md border border-edge bg-surface px-2 py-1 text-2xs whitespace-nowrap text-fg shadow-lg group-hover/mark:block">

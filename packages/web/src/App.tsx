@@ -2,7 +2,7 @@ import { Suspense, lazy, useEffect, useState, useSyncExternalStore, type ReactNo
 import { isSheet, sheetTitle, sheetUpLabel, upFrom } from "./nav";
 import { navigate, parsePath, useOrigin, useRoute, useUnder, type Route } from "./router";
 import { setTelegramBack } from "./telegram";
-import { store } from "./store";
+import { sessionLists, store } from "./store";
 import { AppShell, NothingSelected } from "./ui/AppShell";
 import { ForcedPasswordChange } from "./ui/ForcedPasswordChange";
 import { Gate } from "./ui/gate/Gate";
@@ -49,6 +49,17 @@ const PluginScreen = lazy(async () => ({ default: (await import("./ui/PluginScre
  * catalogue reader and the machine picker, and most sessions never open it.
  */
 const PluginsSheet = lazy(async () => ({ default: (await import("./ui/plugins/PluginsSheet")).PluginsSheet }));
+
+/**
+ * What the tab is called with nothing waiting, and the string every badge is
+ * prefixed onto.
+ *
+ * The same words `index.html` ships in its own `<title>`, deliberately restated
+ * rather than read back out of `document.title`: the first thing this app does to
+ * that property is overwrite it, so a value recovered from it at any later moment
+ * is whatever the last render put there, badge and all.
+ */
+const PAGE_TITLE = "Reemoat";
 
 /**
  * Three phases, and — new here — two routes at once.
@@ -99,6 +110,51 @@ export function App(): ReactNode {
     // screen that wanted it.
   }, [up]);
 
+  /*
+   * **The tab says how many sessions are waiting, and it is the only thing this
+   * app can say to somebody who is not looking at it.**
+   *
+   * Every other cross-screen signal — the bell, `WaitingElsewhere`, the count on a
+   * machine tab, the count on a folder header — is drawn in the rail, which is to
+   * say inside a tab that already has the reader's attention. The question this
+   * product is shaped around is *does anything anywhere need me*, and a
+   * backgrounded tab could not answer it at all: there was no `document.title`
+   * write anywhere in this package.
+   *
+   * ⚠ **This is outside Q3.1's "no Electron, no service worker and no push"
+   * non-goal rather than a quiet reversal of it.** A title write is none of those
+   * three: it asks for no permission, installs nothing, reaches nothing once the
+   * tab is closed, and is visible only where the reader has already chosen to keep
+   * this app open. That is exactly the reach the non-goal declines to exceed — and
+   * "with no push notification and no service worker to say otherwise" is the
+   * sentence Q3.94 wrote while arguing the same property one surface down.
+   *
+   * **The count is `sessionLists(...).blocked`, which is the predicate every other
+   * consumer already reads** — through `sessionGroups` for the folder counts,
+   * directly for the bell — so there is one answer to "how many need me" and this
+   * cannot become a second opinion that disagrees with the bell three inches away.
+   * That is Q3.94's own rule about its own badge, applied to the one reader who
+   * cannot see any of them.
+   *
+   * Restored to the plain name at zero *and* on unmount. The cleanup fires on every
+   * change as well as on the last one, which writes `PAGE_TITLE` and then
+   * immediately the new badge: harmless, one extra assignment, and it is what makes
+   * "the badge never outlives the state that put it there" true by construction
+   * rather than by remembering to clear it in the zero arm.
+   *
+   * Above every early return, for the reason the effect above it gives at length:
+   * a render that takes the gate, the signed-out or the forced-password arm must
+   * run the same hooks as the render before it. On those arms `state.sessions` is
+   * empty and the tab is plain, which is correct — a sign-in screen claiming two
+   * sessions are waiting would be claiming to know something it has not been told.
+   */
+  const blocked = sessionLists(state).blocked.length;
+  useEffect(() => {
+    document.title = blocked === 0 ? PAGE_TITLE : `(${blocked}) ${PAGE_TITLE}`;
+    return () => {
+      document.title = PAGE_TITLE;
+    };
+  }, [blocked]);
 
   /*
    * **A URL somebody was mailed, above every phase.**
@@ -197,8 +253,14 @@ export function App(): ReactNode {
  * head never, while each step unmounted the control holding focus and dropped it
  * to `<body>`. `Sheet` keys both on this string; `screenOf` says what a screen is.
  *
- * `ImportCode` and `ForcedPasswordChange` keep their own `Sheet` and must: one is
- * a sheet drawn *over* this one, the other is not a route.
+ * `ImportCode` keeps its own `Sheet` and must: it is a sheet drawn *over* this
+ * one. **`ForcedPasswordChange` is not a `Sheet` at all** — this line said it was,
+ * and it never has been: a sheet carries a ✕ and registers `useDismissible`, so
+ * Escape would take down a wall the control plane is still enforcing, which is the
+ * argument in that file's own docblock. It is a `GateCard`, returned above
+ * `<AppShell>` rather than beside it. The correction matters here rather than
+ * merely being tidy: `Sheet`'s `WaitingHere` reads the fleet's blocked count for
+ * every element that draws one, and this comment is the list of them.
  */
 function OverlaySheet({
   state,

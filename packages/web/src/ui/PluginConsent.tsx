@@ -1,7 +1,6 @@
-import { ChevronRight } from "lucide-react";
-import { useId, useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import type { ManifestPreview } from "../pluginArchive";
-import { Icon } from "./bits";
+import { Disclosure } from "./bits";
 import { PLUGIN_SCOPE_TEXT } from "../wire";
 
 /**
@@ -51,9 +50,17 @@ export function PluginConsent({
    */
   names?: boolean;
 }): ReactNode {
-  const rows: { title: string; items: string[] }[] = [
+  /*
+   * ⚠ **Each row says whether it is an *ask*, and that flag is what
+   * {@link asksNothing} is derived from.** Three of the four are capabilities the
+   * machine grants; the fourth is what this app draws on the plugin's behalf, and
+   * conflating them is what produced a card that contradicted itself one line
+   * apart. See the sentence below the list.
+   */
+  const rows: { title: string; items: string[]; asks: boolean }[] = [
     {
       title: "It may",
+      asks: true,
       // Read through `Record<string, string>` deliberately: the table is exhaustive
       // over `PluginScope` so that adding a scope is a compile error, but what
       // arrives here is whatever a manifest wrote. A scope this client has not
@@ -63,6 +70,7 @@ export function PluginConsent({
     },
     {
       title: "It is told when",
+      asks: true,
       items: manifest.hooks.map(
         (hook) =>
           ({
@@ -77,9 +85,16 @@ export function PluginConsent({
           })[hook] ?? hook,
       ),
     },
-    { title: "It reaches", items: manifest.net },
+    { title: "It reaches", asks: true, items: manifest.net },
     {
       title: "It adds",
+      /*
+       * ⚠ **The one row that is not an ask.** A screen, a settings pane and a menu
+       * row are things *this app* draws for the plugin — nothing is granted, and a
+       * plugin whose only entry here is a screen genuinely asks for nothing and is
+       * genuinely told nothing.
+       */
+      asks: false,
       items: [
         ...(manifest.screen === null ? [] : [`a screen, ${manifest.screen}`]),
         ...(manifest.settings ? ["settings of its own"] : []),
@@ -95,7 +110,21 @@ export function PluginConsent({
   ];
 
   const shown = rows.filter((row) => row.items.length > 0);
-  const asksNothing = manifest.scopes.length === 0 && manifest.hooks.length === 0;
+  /*
+   * ⚠ **`net` was missing from this and the card contradicted itself.** It tested
+   * `scopes` and `hooks` only, while the row above it — *It reaches
+   * evil.example* — is drawn from `manifest.net`. So a manifest declaring hosts
+   * and nothing else rendered the reach row and *"It asks for nothing"* one line
+   * apart, on the screen whose entire job is to be believed. Nothing downstream
+   * covers it either: `pluginArchive.ts` fails **open** on `net` and does no
+   * cross-check against the scopes, unlike the daemon.
+   *
+   * ⚠ **Derived from the rows rather than from three named fields**, so a fourth
+   * ask added above joins this sentence by existing rather than by somebody
+   * remembering to come back here — which is exactly what did not happen when
+   * `net` was added.
+   */
+  const asksNothing = rows.every((row) => !row.asks || row.items.length === 0);
 
   return (
     /*
@@ -104,19 +133,13 @@ export function PluginConsent({
      * The file picker has no other copy of the name — an archive was chosen off a
      * filesystem and nothing on screen says what it is until this reads it — so
      * there the border and the padding are what make one object out of a name, a
-     * version, a description and a fold, and they stay.
+     * version, a description, the caveat and the list under them, and they stay.
      *
-     * The market's entry page already opened with all three, and there the card was
-     * 24px of padding and a line around a single 44px row reading `Permissions`,
-     * sitting between the plugin's own description and the machines it goes on. A
-     * box drawn around one collapsed control reads as a region with something in
-     * it; what is in it is one word. Bare, it is a disclosure in the flow of the
-     * page — which is what it is, and what `Earlier versions` two sections down
-     * already looks like.
-     *
-     * ⚠ **The fold keeps `min-h-11`.** What was spent here is the chrome, never the
-     * target: this is the control that opens a list of capabilities somebody is
-     * about to grant a stranger's code, on a phone.
+     * The market's entry page already opened with the name, the version and the
+     * description as its own heading, so a second box around a second copy of them
+     * read as two objects about two different plugins. Bare, this is a disclosure
+     * in the flow of the page — which is what it is, and what `Earlier versions`
+     * two sections down already looks like, both of them being the same fold now.
      */
     <div className={names ? "mt-3 rounded-lg border border-edge p-3" : "mt-3"}>
       {names && (
@@ -128,7 +151,49 @@ export function PluginConsent({
           {manifest.description !== null && <p className="mt-0.5 text-xs text-muted">{manifest.description}</p>}
         </>
       )}
-      <Disclosure first={!names}>
+      {/*
+       * ⚠ **Out of the fold, above the list, and drawn on every path — which
+       * reverses what this file argued one release ago.** It was the fold's *last
+       * child*, on the reasoning that it is the conclusion of the list and outside
+       * it was a conclusion to nothing. What that reasoning produced is why it is
+       * out: the fold mounted closed, so the **default** render of every install
+       * path — the market entry, a machine's own picker, the fleet-wide import —
+       * was a collapsed 13px row reading `Permissions`, with live install controls
+       * under it and nothing on screen saying what a plugin *is*. On the market
+       * entry that collapsed row was the entire consent block. The one sentence
+       * naming the blast radius sat behind the same tap as the list it qualifies,
+       * and nothing has ever gated Install on that tap being taken.
+       *
+       * It is not the conclusion of the list, then: it is the frame around it. A
+       * plugin runs as you whatever the list says, which is precisely why it has
+       * to be readable without opening anything. The list itself opens by default
+       * now for the same decision — see `defaultOpen` below.
+       *
+       * ⚠ **And it is not the quietest thing in the block any more.** It was
+       * `text-2xs text-muted`, a step below both the description above it and the
+       * capability lines below it — the weight this app gives a footnote, on the
+       * one sentence that is true of every plugin whatever its manifest says.
+       * `text-xs text-fg` puts it level with the capabilities it is a statement
+       * about.
+       */}
+      <p className={names ? "mt-2 text-xs text-fg" : "text-xs text-fg"}>
+        A plugin runs on this machine as you, with your files. This is what it declared, not a limit on it.
+      </p>
+      {/*
+       * ⚠ **`defaultOpen` on all three paths: the fold is kept so the list can be
+       * put *away*, never so it starts out of sight.** {@link Disclosure} seeds its
+       * state once at mount, so this is a default rather than a control — a fold
+       * somebody closes stays closed for as long as the screen lives.
+       *
+       * ⚠ **`first` is `false` unconditionally.** It was `!names`, because on the
+       * market path the fold was this block's first child; the caveat above is now
+       * always there, so it never is.
+       *
+       * The 44px target and the grid animation moved to `bits.tsx` with the
+       * component: this was the app's only hand-built fold while `MarketEntry`
+       * drew a native `<details>` 200px further down the same screen.
+       */}
+      <Disclosure first={false} label="Permissions" defaultOpen>
         {shown.map((row) => (
           <div key={row.title} className="mt-2.5 first:mt-0">
             <p className="text-xs text-muted">{row.title}</p>
@@ -141,26 +206,15 @@ export function PluginConsent({
             </ul>
           </div>
         ))}
-        {asksNothing && <p className="text-xs text-muted">It asks for nothing and is told nothing.</p>}
         {/*
-         * ⚠ **Inside the fold now, and last, so it is the sentence the list ends
-         * on.** It stood outside on the argument that a person who never opens the
-         * permissions still has to meet it — and what that produced was a card
-         * whose closed state was a collapsed row with a paragraph hanging under it,
-         * which reads as a caption for a control rather than as a caveat about a
-         * list nobody has opened yet. It is the *conclusion* of the list above it,
-         * and outside the fold it was a conclusion to nothing.
-         *
-         * What is lost is real and small: somebody who never opens this does not
-         * read it. What is left in its place is the rule this whole subsystem is
-         * built on and states everywhere else — `SECURITY.md`, `docs/PLUGINS.md`,
-         * the machine's own plugins screen — that a plugin runs as you. This card
-         * is where the *specific* claim is made, and the specific claim is behind
-         * one tap along with the sentence that qualifies it.
+         * ⚠ **Every ask, including the reach.** The condition is derived from the
+         * rows rather than from the two fields it used to name, so this sentence
+         * can no longer be drawn under a list of hosts the plugin reaches — see
+         * {@link asksNothing}.
          */}
-        <p className="mt-2.5 text-2xs text-muted">
-          A plugin runs on this machine as you, with your files. This is what it declared, not a limit on it.
-        </p>
+        {asksNothing && (
+          <p className="text-xs text-muted">It asks for nothing, is told nothing and reaches nowhere.</p>
+        )}
       </Disclosure>
     </div>
   );
@@ -203,6 +257,39 @@ export function PluginArchiveNote(): ReactNode {
 }
 
 /**
+ * A doubt about what is on screen, drawn at the weight the decision below it
+ * deserves.
+ *
+ * ⚠ **A shared shell because the *weight* is the property, and stating it twice
+ * is how one of them quietly loses it.** Two screens hand somebody an install
+ * control while admitting they could not check something: the file picker, which
+ * could not read the archive at all, and the market's entry page, whose pinned
+ * `plugin.json` did not come back so the permissions below it are the catalogue's
+ * unverified summary. The second was a `text-2xs text-muted` paragraph — quieter
+ * than the plugin's own description directly above it — beside an ordinary
+ * Install button, while the first was this box and a named `DangerButton`. Same
+ * doubt, one of them a footnote.
+ *
+ * The **words** are deliberately not shared, unlike {@link PluginArchiveNote}:
+ * the two states are genuinely different — one has no disclosure at all, the
+ * other has one it cannot attribute to the pin — and a single sentence covering
+ * both would have to be false about one of them. What must not diverge is how
+ * loud they are, and that is exactly what lives here.
+ *
+ * `children` is the way through, where the screen offers one. It is inside the
+ * box on purpose: the sentence somebody is buying past should be the thing
+ * directly above the press that buys it.
+ */
+export function ConsentDoubt({ title, children }: { title: string; children: ReactNode }): ReactNode {
+  return (
+    <div className="mt-3 rounded-lg border border-edge p-3">
+      <p className="text-sm text-fg">{title}</p>
+      {children}
+    </div>
+  );
+}
+
+/**
  * An archive this browser could not describe, and what that costs.
  *
  * ⚠ **This is the same consent sentence as {@link PluginConsent} in its failed
@@ -212,6 +299,10 @@ export function PluginArchiveNote(): ReactNode {
  * two paths disclosing the same capability differently. That is not a prediction
  * any more: the copies had already come apart on the one word that matters here,
  * and only one of them was right about which machines were being spoken for.
+ *
+ * The box is {@link ConsentDoubt}, shared with the market's own unverified-pin
+ * card so the two cannot come apart in weight; only the words below are this
+ * screen's.
  *
  * ⚠ **Not a refusal.** The daemon is what decides whether an archive is a plugin,
  * and it accepts shapes this reader may not — so refusing here would make the
@@ -249,69 +340,12 @@ export function PluginUnreadable({
   children?: ReactNode;
 }): ReactNode {
   return (
-    <div className="mt-3 rounded-lg border border-edge p-3">
-      <p className="text-sm text-fg">This file cannot be read here</p>
+    <ConsentDoubt title="This file cannot be read here">
       <p className="mt-1 text-xs text-muted">
         {reason}. Nothing has been sent. {checker} will still check it properly — but until it does, nobody can tell you
         what this plugin asks for.
       </p>
       {children}
-    </div>
-  );
-}
-
-/**
- * The permissions, folded.
- *
- * ⚠ **The closed line says "Permissions" and nothing else, and the permissions
- * themselves are behind it.** It carried a summary of them — `read sessions,
- * control sessions, store d…` — on the argument that names on the closed line
- * are what make agreeing-without-expanding still agreeing to something. That
- * argument was answered by what it produced: the line truncated mid-word in the
- * width it actually has, so the closed state disclosed two capabilities out of
- * four and hid the rest behind an ellipsis, while the control's own label had to
- * share the row with them. A truncated permission list is worse than no list,
- * because it looks complete.
- *
- * What makes closing this acceptable is now the *fold* rather than a summary: it
- * is one tap, it is the first control in the card, and what is inside is six
- * short lines rather than the six sentences that used to be there.
- * `SECURITY.md`'s claim — that a plugin's blast radius is named before somebody
- * consents — is kept by the list being complete and one tap away, and by the
- * sentence below the fold that no plugin can move.
- *
- * A `<button>` rather than `<details>` for `MachineInstalls`' reason — the state
- * has to survive a re-render this screen drives itself — and the same grid
- * animation, so a fold in this app opens one way.
- */
-function Disclosure({ first, children }: { first: boolean; children: ReactNode }): ReactNode {
-  const [open, setOpen] = useState(false);
-  const id = useId();
-  return (
-    <div className={first ? "" : "mt-2"}>
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        aria-expanded={open}
-        aria-controls={id}
-        className="tap flex min-h-11 w-full items-center gap-1.5 text-left text-xs text-muted hover:text-fg"
-      >
-        <Icon
-          as={ChevronRight}
-          size={13}
-          className={`shrink-0 text-faint transition-transform ${open ? "rotate-90" : ""}`}
-        />
-        <span className="text-fg">Permissions</span>
-      </button>
-      <div
-        id={id}
-        inert={!open}
-        className={`grid transition-[grid-template-rows] duration-200 ease-out ${open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"}`}
-      >
-        <div className="overflow-hidden">
-          <div className="pb-1">{children}</div>
-        </div>
-      </div>
-    </div>
+    </ConsentDoubt>
   );
 }

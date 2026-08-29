@@ -1,6 +1,6 @@
 import { useRef, useState, useEffect, type ReactNode } from "react";
-import { ChevronRight, MoreHorizontal, Upload } from "lucide-react";
-import { consentBroken, pluginFailure, pluginPath, pluginStateText } from "../../plugins";
+import { AlertTriangle, ChevronRight, MoreHorizontal, Upload } from "lucide-react";
+import { consentBroken, MACHINE_GONE, pluginFailure, pluginPath, pluginStateText } from "../../plugins";
 import { peekPluginArchive, type ArchivePeek, type ManifestPreview } from "../../pluginArchive";
 import { PLUGIN_ARCHIVE_ACCEPT, PluginArchiveNote, PluginConsent, PluginUnreadable } from "../PluginConsent";
 import type { MachineId } from "../../ids";
@@ -17,7 +17,6 @@ import {
   Menu,
   RowAction,
   SETTINGS_HEADING,
-  SETTINGS_SECTION,
   Spinner,
 } from "../bits";
 import { toast } from "../Toast";
@@ -42,17 +41,43 @@ import { toast } from "../Toast";
 function usePlugins(machineId: MachineId): {
   plugins: PluginSummary[] | null;
   error: string | null;
+  loading: boolean;
   refresh: () => void;
 } {
   const [plugins, setPlugins] = useState<PluginSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /*
+   * ⚠ **A re-read in flight, which nothing tracked at all.** Every toggle and
+   * every removal on this screen calls `refresh`, and until the answer landed
+   * there was nothing on screen saying one had been asked for — so a "Check
+   * again" beside a failure could be pressed twice with no evidence the first
+   * press had done anything, which is the shape of the defect this whole section
+   * exists to remove.
+   */
+  const [loading, setLoading] = useState(true);
 
   const refresh = (): void => {
     const daemon = store.daemonFor(machineId);
     if (daemon === undefined) {
-      setError("That machine is not reachable right now.");
+      /*
+       * ⚠ **Not "not reachable right now", which is what both guards on this
+       * screen said.** `store.daemonFor` answers `undefined` only where the
+       * machine is absent from the listing — `daemons` and `connections` are
+       * written and dropped together — so this is a grant revoked in another tab
+       * or a machine retired, and waking the host does not touch it. An
+       * *unreachable* machine keeps its client and says so through `machine.reach`.
+       * {@link MACHINE_GONE} is the argument in full, and the reason this is a
+       * constant rather than the string that used to be typed here.
+       */
+      setError(MACHINE_GONE);
+      // Nothing was sent, so nothing is in flight: without this the initial
+      // `true` never comes down and the control that would ask again is disabled
+      // for as long as the screen is open, on the one path where asking again is
+      // the whole remedy.
+      setLoading(false);
       return;
     }
+    setLoading(true);
     void daemon
       .plugins()
       .then((listing) => {
@@ -64,18 +89,40 @@ function usePlugins(machineId: MachineId): {
         // than becoming a machine that silently has no plugins.
         store.refreshPlugins(machineId);
       })
-      .catch((cause: unknown) => setError(pluginFailure(cause)));
+      .catch((cause: unknown) => setError(pluginFailure(cause)))
+      .finally(() => setLoading(false));
   };
 
   useEffect(refresh, [machineId]);
-  return { plugins, error, refresh };
+  return { plugins, error, loading, refresh };
 }
 
 export function PluginList({ machineId }: { machineId: MachineId }): ReactNode {
-  const { plugins, error, refresh } = usePlugins(machineId);
+  const { plugins, error, loading, refresh } = usePlugins(machineId);
 
-  if (error !== null) return <Empty>{error}</Empty>;
+  /*
+   * "Check again" and not "Try again": what failed is a **read**, so pressing
+   * this asks the same question rather than repeating something that had an
+   * effect — which matters here more than most, because the commonest way to see
+   * this failure is the refresh fired by a switch or a removal that already
+   * landed.
+   */
+  const again = (
+    <Button onClick={refresh} disabled={loading}>
+      {loading ? "Checking…" : "Check again"}
+    </Button>
+  );
+
   if (plugins === null) {
+    // Nothing has ever been read, so there is no list to keep: the failure is the
+    // whole screen, and it takes the triangle, the live region and the way out.
+    if (error !== null) {
+      return (
+        <Empty failed action={again}>
+          {error}
+        </Empty>
+      );
+    }
     return (
       <div className="flex justify-center py-6">
         <Spinner />
@@ -85,6 +132,29 @@ export function PluginList({ machineId }: { machineId: MachineId }): ReactNode {
 
   return (
     <div>
+      {/*
+       * ⚠ **A failed re-read sits above the list; it does not replace it.** This
+       * was `if (error !== null) return <Empty>{error}</Empty>` — and `refresh`
+       * runs after *every* toggle and *every* removal, so switching a plugin off
+       * on a machine that then went unreachable toasted "Switched off" and
+       * replaced the whole section, rows and file picker together, with one
+       * centred grey sentence. There was no way back to it but leaving the screen
+       * and returning.
+       *
+       * What is on screen is still the last thing this daemon actually said, so
+       * it stays and this line says how much to trust it. `role="status"` for
+       * {@link Empty}'s reason: the rows did not change, so this line is the only
+       * thing on screen that knows anything happened.
+       */}
+      {error !== null && (
+        <div role="status" className="mb-3 flex flex-wrap items-center gap-2 px-1">
+          <p className="flex min-w-0 flex-1 items-start gap-1.5 text-xs text-fg">
+            <Icon as={AlertTriangle} size={14} className="mt-0.5 shrink-0 text-muted" />
+            <span>{error}</span>
+          </p>
+          {again}
+        </div>
+      )}
       {plugins.length === 0 ? (
         <Empty>Nothing installed on this machine.</Empty>
       ) : (
@@ -94,10 +164,21 @@ export function PluginList({ machineId }: { machineId: MachineId }): ReactNode {
           ))}
         </ul>
       )}
-      <section className={SETTINGS_SECTION}>
-        <h2 className={SETTINGS_HEADING}>Install</h2>
+      {/*
+       * ⚠ **A heading *inside* this component, not a section beside its parent's.**
+       * This was `<section className={SETTINGS_SECTION}><h2>Install</h2>`, which is
+       * the machine screen's own section idiom — the full-width rule and the same
+       * `<h2>` — drawn from inside that screen's `Plugins` section. So the picker
+       * for this list read as a sibling of `Systems`, `Agents` and `Retire this
+       * machine` rather than as a control belonging to the plugins above it, and
+       * two `<h2>`s nested with no change of level. `<h3>` under the pane's own
+       * `<h2>`, the same type at the same weight with no rule — `ServerSection`'s
+       * "Send a test" is the same subordinate group, one level in.
+       */}
+      <div className="mt-6">
+        <h3 className={SETTINGS_HEADING}>Install</h3>
         <InstallPlugin machineId={machineId} onInstalled={refresh} />
-      </section>
+      </div>
     </div>
   );
 }
@@ -111,21 +192,69 @@ function PluginRow({
   plugin: PluginSummary;
   onChanged: () => void;
 }): ReactNode {
-  const [busy, setBusy] = useState(false);
+  /**
+   * What this row is in the middle of doing, as the words it puts on its own
+   * subline — `null` when it is doing nothing.
+   *
+   * ⚠ **A boolean was not enough, because nothing on the row changed.** The
+   * switch is a menu row: `RowAction` closes the menu and `run` set a flag that
+   * only greyed the kebab, so for the width of the 90s slow-route budget the row
+   * still read `Running` under a plugin that was being switched off, with the
+   * menu gone and no evidence anywhere that a request existed. The toast arrives
+   * at the *end* of that window, which is the half that was already right.
+   */
+  const [pending, setPending] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
+  const busy = pending !== null;
 
-  const run = (work: Promise<unknown>, done: string): void => {
-    setBusy(true);
+  const run = (work: Promise<unknown>, doing: string, done: string): void => {
+    setPending(doing);
     void work
       .then(() => {
         toast("ok", done);
         onChanged();
       })
       .catch((cause: unknown) => toast("error", pluginFailure(cause)))
-      .finally(() => setBusy(false));
+      .finally(() => setPending(null));
   };
 
   const daemon = store.daemonFor(machineId);
+
+  /**
+   * The one way past "will not be tried again", which nothing on screen named.
+   *
+   * `MAX_PLUGIN_STARTS` is three **launches**, and a plugin that spends them is
+   * left alone permanently: `resetBudget` is called from exactly one place a
+   * client can reach, `PluginHost.setEnabled` with `enabled: true`. So the escape
+   * hatch existed and was spelled *switch it off, then switch it on* — two taps
+   * through a kebab, in an order nobody would guess from a row that says the
+   * plugin will not be tried again. The route is idempotent by construction (the
+   * body is the state a caller wants, not the transition it thinks it is making),
+   * so sending `true` for a plugin that is already on is the whole of it: the
+   * budget comes back and a supervised start is awaited before the answer.
+   *
+   * ⚠ **Not `run`, because its report is not a fixed string.** `setEnabled`
+   * awaits the start, so the summary that comes back already says whether the
+   * plugin came up — and "Restarted" over a plugin that has just failed for the
+   * fourth time is the same lie the row is here to stop telling. The answer
+   * decides both the tone and the sentence.
+   */
+  const restart = (): void => {
+    if (daemon === undefined || busy) return;
+    setPending("Starting…");
+    void daemon
+      .setPluginEnabled(plugin.id, true)
+      .then((answer) => {
+        const up = answer.plugin.state === "running";
+        toast(
+          up ? "ok" : "error",
+          up ? `${plugin.name} is running again.` : `${plugin.name} did not start. Its row says what it printed.`,
+        );
+        onChanged();
+      })
+      .catch((cause: unknown) => toast("error", pluginFailure(cause)))
+      .finally(() => setPending(null));
+  };
 
   return (
     <li className="border-b border-edge last:border-b-0">
@@ -156,7 +285,14 @@ function PluginRow({
               <span className="truncate text-sm font-medium">{plugin.name}</span>
               <span className="shrink-0 text-xs text-muted">{plugin.version}</span>
             </span>
-            <span className="block truncate text-2xs text-muted">{pluginStateText(plugin)}</span>
+            {/* The act's own words while one is in flight, and the plugin's state
+                otherwise — one line, never both, because they answer the same
+                question and the newer answer is the true one. The spinner is what
+                says it is *this row* rather than the screen. */}
+            <span className="flex min-w-0 items-center gap-1.5 text-2xs text-muted">
+              {pending !== null && <Spinner />}
+              <span className="truncate">{pending ?? pluginStateText(plugin)}</span>
+            </span>
           </span>
           <Icon as={ChevronRight} size={16} className="shrink-0 text-faint" />
         </button>
@@ -164,10 +300,21 @@ function PluginRow({
           align="right"
           panelClassName="w-56"
           trigger={(open, toggle) => (
+            /*
+             * ⚠ **`size="lg"` and never `size="sm"`**, which is `MachineInstalls`'
+             * decision one directory over and it applies here for the same
+             * arithmetic. `sm` is 24px of ink reaching 44px through
+             * `after:-inset-2.5` — 10px on every side — and this sits `gap-1` from
+             * a full-width row button. So its grown target overlapped that
+             * button's right-hand 10px, and being later in the DOM it won the hit
+             * test: a tap aimed at the end of the plugin's name opened this menu
+             * instead of the plugin. `lg` is a real 44px box, and the row is
+             * `min-h-14`, so it costs no height.
+             */
             <IconButton
               icon={MoreHorizontal}
               label={`Actions for ${plugin.name}`}
-              size="sm"
+              size="lg"
               active={open}
               disabled={busy}
               onClick={toggle}
@@ -202,6 +349,7 @@ function PluginRow({
                   if (daemon === undefined) return;
                   run(
                     daemon.setPluginEnabled(plugin.id, !plugin.enabled),
+                    plugin.enabled ? "Switching off…" : "Switching on…",
                     plugin.enabled ? "Switched off" : "Switched on",
                   );
                 }}
@@ -220,9 +368,16 @@ function PluginRow({
       </div>
 
       {plugin.failure !== null && (
-        <p className="mb-2 max-h-56 overflow-auto px-1 text-xs whitespace-pre-wrap wrap-anywhere text-fg">
-          {plugin.failure}
-        </p>
+        <PluginFailure
+          failure={plugin.failure}
+          /* Only where a start is the act. A plugin somebody switched off keeps
+             whatever it last said — `stop()` does not clear the sentence, only
+             `resetBudget` does — so its failure is history, and the way back is
+             `Switch on` in the menu above, which resets the same budget. */
+          restartable={plugin.enabled}
+          onRestart={restart}
+          busy={busy}
+        />
       )}
 
       {/*
@@ -248,7 +403,7 @@ function PluginRow({
             disabled={busy || daemon === undefined}
             onClick={() => {
               setConfirming(false);
-              if (daemon !== undefined) run(daemon.removePlugin(plugin.id), "Removed");
+              if (daemon !== undefined) run(daemon.removePlugin(plugin.id), "Removing…", "Removed");
             }}
           >
             Remove
@@ -264,6 +419,112 @@ function PluginRow({
         </div>
       ) : null}
     </li>
+  );
+}
+
+/**
+ * The daemon's sentence, and the child's own output under it.
+ *
+ * ⚠ **One string, joined by the daemon, and this is the only reader that can
+ * take it apart.** `withLogs` in `src/plugins/host.ts` writes
+ * `` `${detail}\n${logs.join("\n")}` `` — the sentence *it* composed, then
+ * whatever the child printed on stdout and stderr — so the first line is the
+ * claim and the rest is evidence. Drawn as one blob they were the same 12px ink
+ * as the plugin's own name two rows up, which is how a `SyntaxError` from
+ * somebody else's `server.js` came to look like something this app was saying.
+ *
+ * Where `detail` is itself multi-line — a child that failed with a stack — the
+ * split still lands correctly enough: the first line is that error's headline and
+ * the rest still reads as output, which is what the two halves are drawn as.
+ */
+function failureParts(failure: string): { said: string; log: string | null } {
+  const cut = failure.indexOf("\n");
+  return cut === -1
+    ? { said: failure, log: null }
+    : { said: failure.slice(0, cut), log: failure.slice(cut + 1) };
+}
+
+/**
+ * What a plugin said when it stopped working, and the one thing to do about it.
+ *
+ * ⚠ **It was ~500 unlabelled characters at `text-fg` with no control beside it**,
+ * inside a `max-h-56 overflow-auto` of its own — a nested scroller inside the
+ * settings sheet's own scroller, which on a touch screen is a trap: a drag that
+ * starts on the log scrolls the log to its end and then stops, and the sheet does
+ * not move. Three things follow, and each is a separate rule:
+ *
+ * **The log is bounded by the daemon, so it needs no scroller here.**
+ * `MAX_FAILURE_CHARS` clips the whole string — sentence and output together — at
+ * 500 characters before it is ever put on a row, so the worst case is about a
+ * dozen lines. `MachineInstalls` argues the other half beside its own failure
+ * subline: a failure is never clipped by the client, because `truncate` throws
+ * away the half that identifies what went wrong.
+ *
+ * **The evidence is drawn as evidence.** Monospace, `text-2xs`, `text-muted`,
+ * under a label — against the sentence above it at `text-fg`, which is the one
+ * line this daemon wrote itself. Both halves at `text-fg` in one paragraph is
+ * what made it impossible to tell whose problem this was. The two are told apart
+ * by type and ink rather than by a second box: the whole thing is already the
+ * `bg-raised/50` well this app uses for a tool call's captured output, and a
+ * bordered box inside a bordered row inside a sheet is three frames for one
+ * paragraph.
+ *
+ * **And the responses are part of the object.** The only controls adjacent to
+ * this were Switch off and Remove, behind a kebab, so a person reading "will not
+ * be tried again" had a dead end on screen and a working remedy nowhere near it.
+ */
+function PluginFailure({
+  failure,
+  restartable,
+  onRestart,
+  busy,
+}: {
+  failure: string;
+  /** Whether starting it again is an act here at all. See the call site. */
+  restartable: boolean;
+  onRestart: () => void;
+  busy: boolean;
+}): ReactNode {
+  const { said, log } = failureParts(failure);
+  return (
+    <div className="mb-2 rounded-md bg-raised/50 px-2.5 py-2">
+      <p className="text-xs text-fg">{said}</p>
+      {log !== null && (
+        <>
+          {/*
+           * Labelled, because an unheaded wall of somebody else's stack trace
+           * under a sentence this app wrote reads as one thing said by one
+           * author.
+           *
+           * A `<p>` wearing the heading's type rather than an `<h3>`: this labels
+           * a block inside a list row, and every failed plugin on the machine
+           * would otherwise put another identical entry into the document's
+           * outline, between the pane's own headings.
+           */}
+          <p className={`${SETTINGS_HEADING} mt-2`}>What it printed</p>
+          <pre className="mt-1 font-mono text-2xs leading-snug whitespace-pre-wrap wrap-anywhere text-muted">
+            {log}
+          </pre>
+        </>
+      )}
+      {restartable && (
+        <div className="mt-2.5 flex flex-wrap items-center gap-2">
+          {/* `sm` with the coarse-pointer floor put back, which is `BUTTON_SIZE`'s
+              documented escape: this keeps the desktop density of a control that
+              sits inside a list row, and a finger still gets 44px. */}
+          <Button size="sm" className="[@media(pointer:coarse)]:min-h-11" disabled={busy} onClick={onRestart}>
+            {busy ? <Spinner /> : "Start it again"}
+          </Button>
+          {/* The other two answers, named rather than drawn: both are one tap away
+              in the menu on the row above, and a Remove 44px from a start button
+              is the adjacency `MachineInstalls` refuses on its own rows — there
+              the destructive one wins the overlap. */}
+          <span className="text-2xs text-muted">
+            or switch it off, or remove it — both in the menu on the row above.
+          </span>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -297,7 +558,9 @@ function InstallPlugin({ machineId, onInstalled }: { machineId: MachineId; onIns
   const send = (file: File, shown: ManifestPreview | null): void => {
     const daemon = store.daemonFor(machineId);
     if (daemon === undefined) {
-      setPhase({ kind: "failed", message: "That machine is not reachable right now." });
+      // Same fact and therefore the same sentence as the read guard above: the
+      // machine left the listing between opening this screen and pressing send.
+      setPhase({ kind: "failed", message: MACHINE_GONE });
       return;
     }
     setPhase({ kind: "sending", fraction: 0 });

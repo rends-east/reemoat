@@ -13,8 +13,9 @@ import { customAgentSubline, harnessSubline, startableHere } from "../../agents"
 import { rememberRemoval } from "../../agentPick";
 import { ApiError, errorText } from "../../http";
 import type { MachineId } from "../../ids";
-import { daemonReadable } from "../../machine";
+import { daemonRead } from "../../machine";
 import { agentEditPath, agentFromHarnessPath, agentPath, navigate } from "../../router";
+import { settingsPath } from "../../settings";
 import { store, type AppState } from "../../store";
 import type { AgentId, AgentInfo, AgentStripEntry, CustomAgent, SystemInfo } from "../../wire";
 import { agentBadge, agentLabel, agentStance, startsBare } from "../agentCard";
@@ -63,6 +64,77 @@ interface Drag {
   height: number;
 }
 
+/**
+ * How close to a scroller's edge the pointer has to get before the list follows
+ * it.
+ *
+ * ⚠ **Without this the drag was a control a phone could not finish.** `dropIndex`
+ * clamps the target to the rows that exist and `move()` writes a transform —
+ * nothing scrolled the pane the list is inside. Rows are 61px and the sheet's body
+ * is 92dvh less a head, this screen's prose and its status line, so with ten
+ * agents on a 390px phone the bottom row's journey to the top is a drag into a
+ * region the finger cannot reach: the row travels, the list does not. The keyboard
+ * path worked and was the only one that did, which is backwards for an app whose
+ * whole shape is a phone.
+ *
+ * 60px is roughly a finger's width inside the edge, so the zone is reachable
+ * without being somewhere a normal drag lands by accident: the rows are 61px, so
+ * it is about one row deep at each end.
+ */
+const SCROLL_EDGE = 60;
+
+/**
+ * The fastest the list travels under a held finger, in pixels per frame.
+ *
+ * 14 is ~840px/s at 60Hz — a little over one phone screen per second, which is
+ * fast enough to cross a twenty-row list without being a scroll nobody can stop
+ * inside. It is a *ceiling*: {@link driftFor} ramps from nothing at the edge of the
+ * zone to this at the boundary itself, so how fast the list moves is how far in
+ * the finger has pushed, which is the only control there is over it.
+ */
+const SCROLL_MAX = 14;
+
+/**
+ * How fast the list should travel, given where the pointer is over it.
+ *
+ * Signed: negative walks the list towards its start. Zero everywhere but the two
+ * bands, so a drag in the middle of the pane costs nothing at all.
+ *
+ * ⚠ **Clamped at the boundary rather than falling off it.** A finger dragged
+ * *past* the top of the scroller reports a negative depth, which without the
+ * `Math.max` would accelerate without limit — and past the pane's edge is exactly
+ * where somebody puts their thumb when the row will not go any further.
+ */
+function driftFor(box: DOMRect, y: number): number {
+  const above = y - box.top;
+  const below = box.bottom - y;
+  if (above < SCROLL_EDGE) return -Math.ceil(((SCROLL_EDGE - Math.max(above, 0)) / SCROLL_EDGE) * SCROLL_MAX);
+  if (below < SCROLL_EDGE) return Math.ceil(((SCROLL_EDGE - Math.max(below, 0)) / SCROLL_EDGE) * SCROLL_MAX);
+  return 0;
+}
+
+/**
+ * The box this list actually scrolls inside, or `null` if nothing does.
+ *
+ * ⚠ **Walked at `pointerdown` rather than named**, because this component is drawn
+ * in two places that scroll differently: the settings sheet's own body
+ * (`overflow-y-auto overscroll-contain`) and, at `sm` and above, the same body
+ * beside a rail. A selector or a ref threaded down from `Settings.tsx` would be
+ * this file knowing the shape of a screen two components up, and it would be wrong
+ * the first time this list is drawn anywhere else.
+ *
+ * The `scrollHeight > clientHeight` test is what stops it settling on an ancestor
+ * that is *declared* scrollable and has nothing to scroll — which is every one of
+ * `SHEET_BODY`'s wrappers on a list short enough to fit.
+ */
+function nearestScroller(from: HTMLElement): HTMLElement | null {
+  for (let box = from.parentElement; box !== null; box = box.parentElement) {
+    const flow = getComputedStyle(box).overflowY;
+    if ((flow === "auto" || flow === "scroll") && box.scrollHeight > box.clientHeight) return box;
+  }
+  return null;
+}
+
 export function MachineAgentsSection({
   state,
   machineId,
@@ -73,19 +145,73 @@ export function MachineAgentsSection({
   const machine = state.machines.find((one) => one.id === machineId) ?? null;
 
   if (machine === null) {
-    // A stale link, or a machine revoked in another tab. Not an error screen: the
-    // list two levels up is the answer and the pane's chevron walks there one step
-    // at a time — `MachineSystemsSection`'s rule, and not the ✕, which leaves
-    // settings entirely.
-    return <Empty>That machine is not in your list any more.</Empty>;
+    /*
+     * A stale link, or a machine revoked in another tab.
+     *
+     * ⚠ **The chevron does not walk you out of this, and the comment here used to
+     * say it did.** `settingsUp` sends this screen's ◀ to
+     * `/settings/machines/<id>` — the machine's own screen — which for a machine
+     * that is gone draws this same sentence again: two identical dead ends in a
+     * row, the second reached by taking the only visible way back. So the way out
+     * is here, and it is the list, the first address on this path that still
+     * resolves. `replace`, because it is shallower and because the address it
+     * leaves names nothing. (Still not the ✕ — that is `useUnder` and leaves
+     * settings entirely.)
+     *
+     * ⚠ **Not `failed`.** A machine that is not in your list is a settled answer,
+     * not a read that did not come back; `Empty` reserves the triangle and the
+     * live region for the second.
+     */
+    return (
+      <Empty
+        action={
+          <Button size="sm" onClick={() => navigate(settingsPath("machines"), true)}>
+            All machines
+          </Button>
+        }
+      >
+        That machine is not in your list any more.
+      </Empty>
+    );
   }
 
-  if (!daemonReadable(machine.reach)) {
+  /*
+   * ⚠ **Three answers rather than two, and the one that was missing is the one
+   * this screen is usually drawn in.** `daemonReadable` answers `false` for
+   * `unknown` — never asked — so a cold load or a deep link to
+   * `/settings/machines/:id/agents` claimed the host had failed to answer for the
+   * two or three seconds before the first probe returned, and `reachText`'s
+   * `unknown` arm put a bare ellipsis where the reason goes. `daemonRead` is the
+   * partition; `probing` stays readable, for the reason `daemonReadable`'s own
+   * docblock gives.
+   */
+  const read = daemonRead(machine.reach);
+
+  if (read === "asking") {
+    /*
+     * A wait, drawn as one: no `failed`, no `role="status"`, no remedy. Nothing has
+     * been measured yet, so there is nothing to claim and nothing to retry — and
+     * announcing "not reachable" here would be a live region contradicted by the
+     * list a second later. The spinner is `SystemChooser`'s "Asking that machine…"
+     * shape, so the two reads of one daemon look like the same wait.
+     */
+    return (
+      <Empty>
+        <span className="inline-flex items-center gap-2">
+          <Spinner /> Checking whether {machine.name} is reachable…
+        </span>
+      </Empty>
+    );
+  }
+
+  if (read === "unreachable") {
     // Named rather than silently empty, for `MachineSystemsSection`'s reason: an
     // unreachable machine is one of the commonest reasons to be on a settings
     // screen, so the honest thing is to say which machine and why it is blank.
+    // `failed`, because this arm really is the absence of an answer — the probe
+    // was made and nothing came back.
     return (
-      <Empty>
+      <Empty failed>
         {machine.name} is not reachable right now —{" "}
         {reachText(machine.reach, machine.offlineReason)}, so what it offers cannot be read or
         reordered.
@@ -93,7 +219,34 @@ export function MachineAgentsSection({
     );
   }
 
-  return <StripEditor key={machineId} machineId={machineId} />;
+  return (
+    <div>
+      {/*
+       * ⚠ **The machine is named here, and it was named nowhere on this screen
+       * that was not a failure.** The pane's heading is the constant "Agents" and
+       * the chevron says "Back to Machine settings" — both deliberately, since a
+       * heading restating the row you came through is the chrome saying what the
+       * body says — so the only place the host appeared was inside the two guard
+       * branches above, which is to say only when something was wrong. This app
+       * supports two machines with the same name on purpose (`ambiguousNames`) and
+       * `web-shell.md` requires a row to carry its id for exactly that reason, so
+       * the sentence carries both: the name is what somebody recognises and the id
+       * is what tells two of them apart.
+       *
+       * Drawn here rather than inside `StripEditor` because this is the component
+       * that has the machine — and because the guards above it are the states in
+       * which it would be a promise about a list that is not there.
+       */}
+      <p className="text-xs text-muted">
+        What the New session screen offers on {machine.name} (
+        <code className="text-muted/80">{machine.id}</code>), in the order it draws them — the first
+        one that can start is the <em>default</em> a new session opens on. Removing one takes its
+        tile off that screen and signs nothing out — a built-in agent can be added back here, and
+        one you assembled is built again from <em>Add an agent</em>.
+      </p>
+      <StripEditor key={machineId} machineId={machineId} />
+    </div>
+  );
 }
 
 /**
@@ -106,7 +259,60 @@ export function MachineAgentsSection({
 function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
   const [listing, setListing] = useState<Listing | null>(null);
   const [rows, setRows] = useState<StripRow[]>([]);
-  const [failure, setFailure] = useState<string | null>(null);
+  /**
+   * What a write on this screen answered, or `null`.
+   *
+   * ⚠ **Kept apart from {@link readFailure}, because only one of the two has a
+   * remedy that is not already on screen** — `AgentBuilder`'s split, for its
+   * reason. A refused reorder is re-run by doing it again, and the list is right
+   * there; a refused *read* is re-run by nothing at all, since the effect's only
+   * dependency is the machine, so a `GET /agents` that timed out stayed timed out
+   * until the pop-up was closed. Folded into one slot the two are
+   * indistinguishable, and a `Try again` under a failed `PUT` would offer to
+   * re-read the listing about something that has nothing to do with it. They meet
+   * again in `failure` below, which is the one line that draws either.
+   */
+  const [writeFailure, setWriteFailure] = useState<string | null>(null);
+  /** What the listing read answered, or `null` while it is pending and once it has landed. */
+  const [readFailure, setReadFailure] = useState<string | null>(null);
+  /**
+   * Bumped by `Try again`, and in the read effect's dependency list so that it
+   * re-runs it.
+   *
+   * A counter rather than a function that re-requests, which is `AgentBuilder`'s
+   * argument verbatim: the request is written once, in the effect, together with
+   * the `cancelled` flag that belongs to it, and a second copy on a button is a
+   * second place to forget it and let a stale answer overwrite a newer one.
+   */
+  const [attempt, setAttempt] = useState(0);
+  /**
+   * The row a write is in flight about, as a {@link stripKey}, or `null`.
+   *
+   * ⚠ **A drag used to settle and then silently jump back.** `write` repaints
+   * optimistically and restores `saved` when the daemon refuses, and the refusal
+   * landed in the reserved line below in `text-2xs text-muted` — the same ink and
+   * the same size as the informational "this daemon is older than this screen"
+   * notice sharing that element. So on a phone over a relay the row moved, and
+   * 800ms later it moved back, with the only account of why sitting in the
+   * quietest type on the screen. This is the other half of that fix: the row that
+   * is not settled yet says so while the `PUT` is out.
+   *
+   * One key rather than a set: several writes can be in flight — the keyboard
+   * emits one per key — and the one worth marking is the newest, which is the only
+   * one that still describes what somebody just did.
+   */
+  const [pending, setPending] = useState<string | null>(null);
+  /**
+   * What a keyboard move just did, for a reader who cannot see the list.
+   *
+   * ⚠ **Its own region, and not the visible line below.** That one is reserved
+   * for failures and for the old-daemon notice, and a position announcement is
+   * neither: it is true for a moment, it is already on screen for anybody who can
+   * see the rows, and putting it there would leave "moved to position 3 of 7"
+   * sitting under the list until the next event. A pointer drag needs none of
+   * this — the row is under the finger — so only the keyboard path writes here.
+   */
+  const [moved, setMoved] = useState("");
   /**
    * Whether this daemon has the routes at all.
    *
@@ -164,7 +370,7 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
   useEffect(() => {
     const daemon = store.daemonFor(machineId);
     if (daemon === undefined) {
-      setFailure("That machine is not reachable right now.");
+      setReadFailure("That machine is not reachable right now.");
       setListing({ agents: [], presets: [], systems: [], stored: [] });
       return;
     }
@@ -190,7 +396,7 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
           systems: systems.systems,
           stored: strip.entries,
         });
-        setFailure(null);
+        setReadFailure(null);
         setSupported(true);
       })
       .catch((cause: unknown) => {
@@ -201,12 +407,12 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
           cause.code === `http_${cause.status}`;
         setSupported(!absent);
         setListing({ agents: [], presets: [], systems: [], stored: [] });
-        setFailure(absent ? null : errorText(cause));
+        setReadFailure(absent ? null : errorText(cause));
       });
     return () => {
       cancelled = true;
     };
-  }, [machineId]);
+  }, [machineId, attempt]);
 
   /*
    * The merge, once per listing.
@@ -239,20 +445,34 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
    * about, and the sequence guard is what stops an early failure erasing a later
    * success.
    */
-  const write = (next: readonly StripRow[]): void => {
+  const write = (
+    next: readonly StripRow[],
+    /**
+     * The row this write is *about*, as a {@link stripKey}, or `null` where no one
+     * row is — a removal takes its row with it, so there is nothing left to mark.
+     */
+    about: string | null = null,
+  ): void => {
     const daemon = store.daemonFor(machineId);
     setRows([...next]);
     if (daemon === undefined) {
-      setFailure("That machine is not reachable right now.");
+      setWriteFailure("That machine is not reachable right now.");
       setRows([...saved.current]);
       return;
     }
+    setPending(about);
     writes.current += 1;
     const mine = writes.current;
     queue.current = queue.current
       .catch(() => undefined)
       .then(() => daemon.saveAgentStrip(stripEntries(next)))
       .then(() => {
+        // The mark comes off on the newest *issued* write settling, which is the
+        // same question `setRows` below asks and a different one from the
+        // `confirmed` guard under it: an older answer landing must not un-mark a
+        // row a newer write is still out for. Before the guard, because that one
+        // returns early.
+        if (mine === writes.current) setPending(null);
         // Any answer that is newer than the newest *confirmed* one advances the
         // restore target, even where a newer write is already in flight: the
         // daemon really does hold this list, and a later failure has to fall back
@@ -260,21 +480,25 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
         if (mine <= confirmed.current) return;
         confirmed.current = mine;
         saved.current = [...next];
-        setFailure(null);
+        setWriteFailure(null);
       })
       .catch((cause: unknown) => {
         // Only the newest issued write may repaint, so an early refusal cannot
         // undo a later success that is already drawn.
         if (mine !== writes.current) return;
-        setFailure(errorText(cause));
+        setPending(null);
+        setWriteFailure(errorText(cause));
         setRows([...saved.current]);
       });
   };
 
+  /** Ask the daemon for the listing again. See {@link attempt}. */
+  const retryReads = (): void => setAttempt((one) => one + 1);
+
   const remove = (id: string): void => {
     const daemon = store.daemonFor(machineId);
     if (daemon === undefined) {
-      setFailure("That machine is not reachable right now.");
+      setWriteFailure("That machine is not reachable right now.");
       return;
     }
     /*
@@ -309,10 +533,21 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
         // landed while the DELETE was in flight is somebody's work.
         write(latest.current.filter((row) => !(row.kind === "custom" && row.id === id)));
       })
-      .catch((cause: unknown) => setFailure(errorText(cause)));
+      .catch((cause: unknown) => setWriteFailure(errorText(cause)));
   };
 
   if (listing === null) return <Spinner />;
+
+  /**
+   * The one sentence the reserved line draws, whichever half produced it.
+   *
+   * ⚠ **The write outranks the read**, `AgentBuilder`'s rule for the same pair: a
+   * request that was made and failed is newer than one this screen has stopped
+   * trying. Spelled as one value so the `rows.length === 0` arm below keeps asking
+   * a single question — "did anything fail?" — rather than growing a second
+   * operand somebody has to remember to add to.
+   */
+  const failure = writeFailure ?? readFailure;
 
   /**
    * Where a row sits while another one is being dragged over it.
@@ -365,25 +600,76 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
 
   return (
     <div>
-      <p className="text-xs text-muted">
-        What the New session screen offers on this machine, in the order it draws them — the first
-        one that can start is the <em>default</em> a new session opens on. Removing one takes its
-        tile off that screen and signs nothing out — a built-in agent can be added back here, and
-        one you assembled is built again from <em>Add an agent</em>.
-      </p>
-
       {/*
        * ⚠ **One line, always in the layout, never a row that appears.** It carries
        * a read that failed, a write that was refused, or nothing — and reserving
        * the space is what stops the list jumping down the screen the first time a
        * save is refused, at the moment somebody is least able to afford the thing
        * they were aiming at moving.
+       *
+       * ⚠ **Two lines of reserve, where it was `min-h-4`.** 16px against a
+       * `text-2xs` line box of 1.125rem is 2px short of *one* line and 20px short
+       * of two — and every string this can hold wraps at this size on a 390px
+       * phone, the old-daemon notice included. So the invariant the paragraph
+       * above states was false in exactly the state it exists for. Expressed as
+       * the token rather than as `min-h-9`, so it stays two lines if the type
+       * scale moves.
+       *
+       * ⚠ **`text-danger` when it is a failure, and it used to be `text-muted`
+       * either way.** A refused save and an informational notice about an old
+       * daemon shared one element, one size and one colour — so a drag that
+       * settled and then jumped back 800ms later was accounted for in the quietest
+       * ink on the screen, indistinguishable from a caption. `index.css` allows a
+       * non-control use of this token where a second look does not repair the
+       * thing, and this is the narrower case that has always been allowed: it is
+       * the only report a write gets, and the list has already moved back under it.
        */}
-      <p role="status" aria-live="polite" className="mt-2 min-h-4 text-2xs text-muted wrap-anywhere">
+      <p
+        role="status"
+        aria-live="polite"
+        className={`mt-2 min-h-[calc(var(--text-2xs--line-height)*2)] text-2xs wrap-anywhere ${
+          failure === null ? "text-muted" : "text-danger"
+        }`}
+      >
         {failure ??
           (supported
             ? ""
             : "This machine's daemon is older than this screen. Update it to reorder its agents.")}
+      </p>
+      {/*
+       * ⚠ **The one remedy that is not already on screen** — `AgentBuilder`'s
+       * argument, one pop-up over. A refused write is re-run by doing the thing
+       * again, and the list it was about is right there; a refused *read* is re-run
+       * by nothing, because the effect's dependencies are the machine and this
+       * counter. Drawn only while the sentence above it **is** that read: `failure`
+       * prefers the write, so a `Try again` under a refused reorder would offer to
+       * re-list the agents about something else entirely.
+       *
+       * ⚠ **It may appear without breaking the reserve above it**, which is the one
+       * thing this screen's layout rule forbids. Every arm that sets `readFailure`
+       * also sets an empty listing, so the only thing under this button in the
+       * state that draws it is the `Add an agent` bar — there is no list here to
+       * push down.
+       */}
+      {writeFailure === null && readFailure !== null && (
+        <Button size="sm" className="mt-1" onClick={retryReads}>
+          Try again
+        </Button>
+      )}
+      {/*
+       * ⚠ **What a keyboard move did, and it was announced nowhere.** The handle
+       * answers `ArrowUp`/`ArrowDown`/`Home`/`End` precisely so a reorder is not a
+       * gesture only a pointer can make — and the reordering then happened in
+       * total silence, since the only live region on this screen reports failures.
+       * A pointer drag needs nothing here: the row is under the finger.
+       *
+       * Mounted with the screen and only its text swapping, which is the one
+       * arrangement that reliably announces — `Sheet`, `EventList` and the
+       * builder's search box all record the same measurement. `sr-only` is
+       * `absolute`, so it takes no layout and the reserve above is untouched.
+       */}
+      <p role="status" aria-live="polite" className="sr-only">
+        {moved}
       </p>
 
       {/*
@@ -408,15 +694,20 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
               listing={listing}
               machineId={machineId}
               opensOn={opensOnKey === stripKey(row.kind, row.id)}
+              pending={pending === stripKey(row.kind, row.id)}
               frozen={!supported}
               lifted={drag?.from === index}
               sliding={drag !== null}
               shift={shiftFor(index)}
               onDrag={setDrag}
-              onMove={(from, to) => write(moveRow(rows, from, to))}
+              onMove={(from, to) => write(moveRow(rows, from, to), stripKey(row.kind, row.id))}
               onToggle={() =>
-                write(rows.map((one, at) => (at === index ? { ...one, hidden: !one.hidden } : one)))
+                write(
+                  rows.map((one, at) => (at === index ? { ...one, hidden: !one.hidden } : one)),
+                  stripKey(row.kind, row.id),
+                )
               }
+              onAnnounce={setMoved}
               onRemove={() => remove(row.id)}
             />
           ))}
@@ -478,6 +769,7 @@ function StripRowView({
   listing,
   machineId,
   opensOn,
+  pending,
   frozen,
   lifted,
   sliding,
@@ -485,6 +777,7 @@ function StripRowView({
   onDrag,
   onMove,
   onToggle,
+  onAnnounce,
   onRemove,
 }: {
   row: StripRow;
@@ -503,6 +796,15 @@ function StripRowView({
    * and a signed-out first harness.
    */
   opensOn: boolean;
+  /**
+   * A write about this row is out and the daemon has not answered.
+   *
+   * ⚠ **The list is drawn optimistically and has to say so.** `write` repaints
+   * before the `PUT` and puts the last confirmed order back if it is refused, so
+   * without this a drag settles and then jumps back a round trip later with
+   * nothing on the row that moved having ever looked unsettled.
+   */
+  pending: boolean;
   /** The daemon cannot store an order, so nothing here may pretend to change one. */
   frozen: boolean;
   /** This is the row under the pointer. */
@@ -514,6 +816,16 @@ function StripRowView({
   onDrag: (drag: Drag | null) => void;
   onMove: (from: number, to: number) => void;
   onToggle: () => void;
+  /**
+   * Say out loud what a keyboard move just did.
+   *
+   * ⚠ **Its own prop rather than a flag on {@link onMove}, because it is not about
+   * the same thing.** `onMove` is a write; this is a report of where the row
+   * landed, and only the keyboard needs one — a finger is already on the row it
+   * moved. A boolean parameter on the write would name the *input device* inside a
+   * function about the list.
+   */
+  onAnnounce: (line: string) => void;
   onRemove: () => void;
 }): ReactNode {
   const node = useRef<HTMLLIElement | null>(null);
@@ -531,6 +843,28 @@ function StripRowView({
     null,
   );
   const grip = useRef<HTMLButtonElement | null>(null);
+  /**
+   * The box this list scrolls inside, found once at `pointerdown`.
+   *
+   * A ref rather than a lookup per frame: `getComputedStyle` walks the ancestors
+   * and this is read on every animation frame of a drag that can last seconds.
+   * Cleared at the end of the gesture, so a list re-parented between drags is
+   * measured again.
+   */
+  const scroller = useRef<HTMLElement | null>(null);
+  /** Pixels per frame the scroller should travel, signed. `0` is "not at an edge". */
+  const drift = useRef(0);
+  /** The live auto-scroll frame, or `null` when nothing is scrolling. */
+  const rolling = useRef<number | null>(null);
+  /**
+   * The pointer's last viewport y.
+   *
+   * ⚠ **Held rather than passed, because the auto-scroll runs on frames the
+   * pointer does not.** A finger parked in the hot zone emits no `pointermove` at
+   * all, and that is exactly the state the list has to keep travelling in — so the
+   * frame needs the last known position to re-derive the row's offset from.
+   */
+  const at = useRef(0);
 
   /*
    * ⚠ **A second, independent reason the browser may not take this gesture for a
@@ -564,6 +898,22 @@ function StripRowView({
     handle.addEventListener("touchmove", hold, { passive: false });
     return () => handle.removeEventListener("touchmove", hold);
   }, []);
+
+  /*
+   * ⚠ **A drag can end by this row ceasing to exist**, which no pointer event
+   * reports. `StripEditor` is keyed on the machine and the `<li>`s are keyed on
+   * the agent, so a removal, a machine switch or the sheet closing mid-gesture
+   * unmounts this while an animation frame is queued — and a callback holding refs
+   * on a dead component would go on scrolling a pane that is no longer under it.
+   * Separate from the listener effect above because that one returns early when
+   * the handle is absent, and this obligation is not conditional.
+   */
+  useEffect(
+    () => () => {
+      if (rolling.current !== null) cancelAnimationFrame(rolling.current);
+    },
+    [],
+  );
 
   const harness = row.kind === "harness";
   const preset = harness ? null : (listing.presets.find((one) => one.id === row.id) ?? null);
@@ -606,6 +956,71 @@ function StripRowView({
       ? ""
       : customAgentSubline(preset, listing.systems);
 
+  /**
+   * Put the row where the pointer is, and work out which slot it is over.
+   *
+   * ⚠ **Shared by the pointer handler and the auto-scroll frame**, because the two
+   * change the same two numbers and a second copy is two answers to "where is this
+   * row". A frame that scrolls the pane moves the row *under* a finger that has
+   * not moved, so the offset and the target index are as much its business as the
+   * pointer's.
+   *
+   * Reads {@link at} rather than an event, for that reason: the frame has no event.
+   */
+  const place = (): void => {
+    const going = live.current;
+    const box = node.current;
+    if (going === null || box === null) return;
+    const offset = at.current - going.startY;
+    box.style.transform = `translateY(${offset}px)`;
+    const next = dropIndex(index, offset, going.height, count);
+    if (next === going.to) return;
+    going.to = next;
+    onDrag({ from: index, to: next, height: going.height });
+  };
+
+  /**
+   * One frame of the list travelling under a held finger.
+   *
+   * ⚠ **The gesture's origin moves with the scroll, and that is the whole of the
+   * arithmetic.** `offset` is a displacement *within the list*, which is what
+   * `dropIndex` is written against — but `clientY` is a viewport number and the
+   * row's own layout position slides by whatever the pane scrolled. Subtracting
+   * the travel from `startY` keeps the difference measuring the same thing, so the
+   * row stays under the finger and the target index goes on counting rows rather
+   * than pixels of scroll.
+   *
+   * ⚠ **It stops itself at the end of the scroller** rather than queueing a frame
+   * per frame for the rest of the drag: `scrollTop` clamps silently, so "asked to
+   * move and did not" is the only signal there is that there is nothing left.
+   */
+  const roll = (): void => {
+    const box = scroller.current;
+    const going = live.current;
+    if (box === null || going === null || drift.current === 0) {
+      rolling.current = null;
+      return;
+    }
+    const before = box.scrollTop;
+    box.scrollTop = before + drift.current;
+    const travelled = box.scrollTop - before;
+    if (travelled === 0) {
+      rolling.current = null;
+      drift.current = 0;
+      return;
+    }
+    going.startY -= travelled;
+    place();
+    rolling.current = requestAnimationFrame(roll);
+  };
+
+  /** Start, keep or stop the list travelling, from where the pointer now is. */
+  const chase = (y: number): void => {
+    const box = scroller.current;
+    drift.current = box === null ? 0 : driftFor(box.getBoundingClientRect(), y);
+    if (drift.current !== 0 && rolling.current === null) rolling.current = requestAnimationFrame(roll);
+  };
+
   const start = (event: PointerEvent<HTMLButtonElement>): void => {
     const box = node.current;
     if (box === null || frozen) return;
@@ -614,6 +1029,8 @@ function StripRowView({
     // the capture survives the pointer leaving the row — which it does at once,
     // since the row is what is moving.
     event.currentTarget.setPointerCapture(event.pointerId);
+    at.current = event.clientY;
+    scroller.current = nearestScroller(box);
     live.current = {
       startY: event.clientY,
       height: box.offsetHeight,
@@ -625,20 +1042,20 @@ function StripRowView({
 
   const move = (event: PointerEvent<HTMLButtonElement>): void => {
     const going = live.current;
-    const box = node.current;
-    if (going === null || box === null || going.pointerId !== event.pointerId) return;
-    const offset = event.clientY - going.startY;
-    box.style.transform = `translateY(${offset}px)`;
-    const next = dropIndex(index, offset, going.height, count);
-    if (next === going.to) return;
-    going.to = next;
-    onDrag({ from: index, to: next, height: going.height });
+    if (going === null || going.pointerId !== event.pointerId) return;
+    at.current = event.clientY;
+    place();
+    chase(event.clientY);
   };
 
   const end = (event: PointerEvent<HTMLButtonElement>): void => {
     const going = live.current;
     if (going === null || going.pointerId !== event.pointerId) return;
     live.current = null;
+    if (rolling.current !== null) cancelAnimationFrame(rolling.current);
+    rolling.current = null;
+    drift.current = 0;
+    scroller.current = null;
     if (node.current !== null) node.current.style.transform = "";
     onDrag(null);
     if (going.to !== index) onMove(index, going.to);
@@ -746,7 +1163,22 @@ function StripRowView({
             // Before the bounds test, so the page never scrolls under an arrow key
             // aimed at a row that is already at the end of the list.
             event.preventDefault();
-            if (to !== index && to >= 0 && to < count) onMove(index, to);
+            if (to === index || to < 0 || to >= count) return;
+            onMove(index, to);
+            /*
+             * ⚠ **Said out loud, because nothing else on this path is.** The
+             * pointer drag has the row under the finger; a key press moves a row
+             * that may be off screen, on a screen whose only live region reports
+             * failures — so the reorder happened in silence. Positions are
+             * one-based here and zero-based everywhere else in this file, because
+             * this is the one number a person reads rather than indexes with.
+             *
+             * The whole sentence changes whenever the position does, which is what
+             * makes a region re-announce: two presses in a row can only produce two
+             * different positions, since a move to where the row already is was
+             * refused one line up.
+             */
+            onAnnounce(`${name} moved to position ${to + 1} of ${count}.`);
           }}
           /*
            * ⚠ **44px square, and `press` is gone from it.** At `w-8` this was a
@@ -849,6 +1281,30 @@ function StripRowView({
           <span className="block min-h-[var(--text-2xs--line-height)] truncate text-2xs text-faint">
             {under}
           </span>
+        </span>
+
+        {/*
+         * ⚠ **A reserved slot, not a spinner that appears.** `web-shell.md`'s rule
+         * for a row is that nothing mounts sideways into another control — the
+         * remedies being delete it, reserve its slot, or move it off the row — and
+         * this is the second: 16px is always here, so a write in flight never
+         * shortens the name beside it or shifts the kebab under a thumb that is
+         * already on its way to it.
+         *
+         * ⚠ **Outside the name's flex line rather than in it**, which is the other
+         * half of the same rule. That line is height-pinned to the name's own line
+         * box so the `default` badge cannot grow the row — a drag measures **one**
+         * row and applies that number to every neighbour's shift — and a third
+         * thing sharing it would be a third thing to keep inside 22px. Here it is a
+         * fixed column between the name and the menu, like the glyph's on the other
+         * side, and `items-center` on the row means a 12px mark cannot reach the
+         * 60px content box.
+         *
+         * The spinner is `aria-hidden` on its own; what a reader gets instead is
+         * the position announcement, which is the half a keyboard move needs.
+         */}
+        <span className="inline-flex w-4 shrink-0 justify-center">
+          {pending && <Spinner />}
         </span>
 
         {/*

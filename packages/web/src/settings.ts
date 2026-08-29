@@ -429,10 +429,30 @@ export function settingsUp(
  * way back. *Where* it is drawn is `withinNav`'s job and stays a class string in
  * the caller, because that is the half no pure function can see.
  *
- * **Both agent depths answer with the machine, on purpose.** The agent is named
- * one rank below by `AgentDetail`, which has its display name; the head used to
- * draw the raw URL segment, so `claude` sat in `text-lg font-semibold` directly
- * above a row reading `Claude (claude-agent-acp)`. Q3.427.
+ * **Every depth under a machine is titled by what its screen *is*, and no two of
+ * them may share a string.** The second half was missing and it cost the chrome
+ * both of its facts at once. A system had no arm here, so
+ * `…/machines/:id/systems/anthropic` fell through to the machine's own "Machine
+ * settings" — while {@link settingsUpLabel} answers with the *parent's* title,
+ * which is also "Machine settings". The pane therefore drew "◀ Back to Machine
+ * settings" immediately beside `<h2>Machine settings</h2>`: one string claiming
+ * to be both where you are and where you are going, with the system you had
+ * drilled into named nowhere in the chrome. Non-injective across a parent and its
+ * child is the general form of that defect, and the system arm below is what
+ * closes it.
+ *
+ * ⚠ **"System settings" rather than the system, and the URL segment is exactly
+ * what it may not be.** `SystemInfo.displayName` is read off the daemon, per
+ * machine; this function is pure and holds a route, so the only string within
+ * reach is the id — lower case, because that is what an id is. Drawing it is the
+ * defect Q3.427 reverted, verbatim: `claude` in `font-semibold` directly above a
+ * row reading `Claude (claude-agent-acp)`, which is precisely what `SystemDetail`
+ * draws one rank below as `title={system.displayName}`. Casing it here would be a
+ * guess, and `openai` guesses to `Openai` above a card reading `OpenAI`. So the
+ * chrome says which *kind* of screen this is and the body says which system —
+ * the division the strip's "Agents" already keeps, and the one
+ * `MachineSystemsSection` falls back on when the daemon cannot be read and there
+ * is no card left to say it. Q3.427, Q3.433.
  */
 export function settingsPaneTitle(route: SettingsRoute): string | null {
   if (route.section === null) return null;
@@ -447,6 +467,15 @@ export function settingsPaneTitle(route: SettingsRoute): string | null {
    */
   if (route.section === "machines" && route.machineId !== null && route.agents) {
     return "Agents";
+  }
+  /*
+   * **The system's own depth, and above the machine arm for the strip's reason:
+   * a system route carries a machine too.** What it may never be is the segment
+   * — see the ⚠ in this function's docblock, which also records what a title
+   * shared with its own parent cost.
+   */
+  if (route.section === "machines" && route.machineId !== null && route.system !== null) {
+    return "System settings";
   }
   if (route.section === "machines" && route.machineId !== null) {
     /*
@@ -493,6 +522,13 @@ export function settingsPaneTitle(route: SettingsRoute): string | null {
  *
  * A sibling function rather than a field on {@link settingsUp}'s return, so the
  * six pinned answers that assert where a chevron goes stay pinned. Q3.432.
+ *
+ * ⚠ **It is only as good as {@link settingsPaneTitle} being injective**, and it
+ * was not: a system depth with no arm of its own answered "Machine settings",
+ * which is its parent's answer too, so this drew "Back to Machine settings"
+ * beside a heading reading "Machine settings". Nothing here can detect that —
+ * the label is *correct*, it is the pair that is useless — which is why the rule
+ * is stated and kept over there rather than guarded here.
  */
 export function settingsUpLabel(route: SettingsRoute, origin: string | null = null): string | null {
   const parent = settingsUp(route, origin);
@@ -524,6 +560,49 @@ export function visibleSections(me: Me | null): readonly SectionSpec[] {
 /** Whether a typed URL may render this section. Separate from the list: a URL is not a tap. */
 export function sectionAllowed(section: SettingsSection, me: Me | null): boolean {
   return visibleSections(me).some((spec) => spec.id === section);
+}
+
+/**
+ * Why the pane is not the section the address bar names, or `null` when it is.
+ *
+ * ⚠ **The fallback was silent, and silence is what made it a defect rather than
+ * a policy.** `Settings.tsx` collapses a section {@link sectionAllowed} refuses
+ * to `null` — which at `sm` and above draws {@link DEFAULT_SECTION} and
+ * highlights that same row in the rail, with the URL still reading
+ * `/settings/users`. So an admin whose flag was taken away in another tab
+ * reloads and lands on Account with nothing on screen saying why, and a
+ * bookmarked address is a different screen depending on who is signed in. This
+ * is the sentence that stops that being a guess.
+ *
+ * **The address is left alone rather than corrected, which is this sheet's
+ * standing posture for one it cannot honour.** {@link parseSettingsSection}
+ * lands an unknown segment on the index and {@link parseSettingsRoute} falls
+ * *up* at three depths, neither redirecting, for the reason written there: a
+ * redirect has to guess. Rewriting it here would also make the bookmark
+ * unrecoverable — regain the flag, reload, and the address it was saved at is
+ * already gone — and it would put a `navigate` inside a render, which is the one
+ * place `router.ts` may not be called from.
+ *
+ * ⚠ **It names admins because {@link visibleSections} filters on nothing else.**
+ * A refusal here is an `adminOnly` refusal by construction, so the word is
+ * derived rather than assumed; a second criterion added to that filter owes this
+ * function a second arm, or it will explain a refusal by naming the wrong one.
+ *
+ * ⚠ **It says nothing about what is drawn instead, because that is a
+ * breakpoint.** The pane draws {@link DEFAULT_SECTION} at `sm` and above and the
+ * section *list* below it, and `AppShell`'s standing rule is that no width is
+ * answered in JavaScript — so a sentence ending "…so this is Account" would be
+ * false on the phone it was read on.
+ */
+export function refusedSectionText(section: SettingsSection | null, me: Me | null): string | null {
+  if (section === null || sectionAllowed(section, me)) return null;
+  /*
+   * `?.title ?? null` is {@link settingsPaneTitle}'s own idiom for this lookup,
+   * and the `null` arm is `find`'s return type rather than a state anything
+   * reaches: `section` is a member of the union {@link SECTION_SPECS} enumerates.
+   */
+  const title = SECTION_SPECS.find((spec) => spec.id === section)?.title ?? null;
+  return title === null ? null : `${title} is for admins, and this account is not one.`;
 }
 
 /**

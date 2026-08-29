@@ -857,7 +857,24 @@ function NewSession({
 
         <div className="shrink-0">
           <FieldLabel>Agent</FieldLabel>
-          {agents === null ? (
+          {/*
+           * ⚠ **Three states here, and the third one was a spinner that never
+           * stopped.** The listing effect returns before its request when there is
+           * no machine to send it to, and nothing re-runs an effect that returned
+           * early — so `agents` stayed `null` for the life of the mount and this
+           * ternary spun for a read that had never been started. It is not a rare
+           * state: `/new` from the rail's **All** tab names no machine, and
+           * `reachable[0]` is `null` on a fleet where nothing is online, which is
+           * precisely when somebody needs to be told what the screen is waiting for.
+           *
+           * The sentence is the Directory field's own, word for word. Both are
+           * gated on `selected` and a screen that answers one question two ways —
+           * one field asking for a machine while the other claims to be reading
+           * from one — sends somebody looking for a fault that is not there.
+           */}
+          {selected === null ? (
+            <p className="text-sm text-muted">Pick a machine first.</p>
+          ) : agents === null ? (
             <Spinner />
           ) : (
             <AgentStrip
@@ -865,7 +882,13 @@ function NewSession({
               /* Nullable rather than `?? []`, because "still reading" and "there
                  are none" are the two states the empty sentence has to tell
                  apart: flattened here, a slow second read drew "This machine
-                 reports no agents" over a listing that was on its way. */
+                 reports no agents" over a listing that was on its way.
+
+                 The third state — nobody has named a machine, so neither read was
+                 ever sent — never reaches this component. It is answered by the
+                 arm above, because with no daemon to ask both lists stay `null` for
+                 ever, and "still reading" is a claim about a request that does not
+                 exist. */
               customAgents={customAgents}
               systems={systems}
               stored={stored}
@@ -938,13 +961,12 @@ function NewSession({
             />
           )}
         </div>
-
-        {error !== null && <p className="shrink-0 text-sm text-danger wrap-anywhere">{error}</p>}
       </div>
 
-      {/* Says what Start is about to do. The picker has no confirming tap — the
-          folder you are in is the one you get — so this is where that choice is
-          stated plainly rather than inferred from a breadcrumb.
+      {/* Says what Start is about to do, or what it just did. The picker has no
+          confirming tap — the folder you are in is the one you get — so this is
+          where that choice is stated plainly rather than inferred from a
+          breadcrumb.
 
           **One arm per thing this screen is still waiting for, and the number of
           them is deliberately not written down here — it was three.** With no
@@ -955,10 +977,35 @@ function NewSession({
           are all uninstalled, or a preset deleted out from under the strip, leaves
           nothing chosen — and it is asked **before** the folder because the folder
           answers itself and this one needs a tap. It waits for the listing, or it
-          would ask for an agent over a row that is still loading. */}
+          would ask for an agent over a row that is still loading.
+
+          ⚠ **And the refusal is one of the arms now, where it used to be the last
+          paragraph of the scroller — which is a place nobody was looking.** That
+          column ends in a `flex-1` directory picker with a `min-h-32` floor, so
+          the failure was a `shrink-0` line *below* a box that has already taken
+          every pixel the fixed rows left: on a 390×667 phone it rendered under
+          the fold, nothing scrolled it into view, and pressing `Start` to have the
+          daemon refuse looked exactly like pressing it and having nothing happen.
+          It outranks every arm under it because a request that was made and failed
+          is newer than anything this screen is still waiting for, and it is
+          `text-danger` for the same reason the arms below it are not.
+
+          ⚠ **Mounted unconditionally with only its text swapping**, which is the
+          one arrangement that is reliably spoken: a `role="status"` inserted in
+          the same paint as its content is commonly not announced at all,
+          VoiceOver on iOS included. `Sheet`'s own region records that, and
+          `AgentBuilder`'s footer — the same bar, one screen deeper — is this
+          arrangement already, down to the tone swap. So the failure joins the
+          ternary rather than arriving as a `<p>` of its own. */}
       <div className={SHEET_FOOT}>
-        <span className="min-w-0 flex-1 text-2xs text-muted wrap-anywhere">
-          {busy ? (
+        <span
+          role="status"
+          aria-live="polite"
+          className={`min-w-0 flex-1 text-2xs wrap-anywhere ${error === null ? "text-muted" : "text-danger"}`}
+        >
+          {error !== null ? (
+            error
+          ) : busy ? (
             "this can take up to 45 seconds"
           ) : agents !== null && picked === null ? (
             "choose an agent"
@@ -1231,7 +1278,17 @@ function AgentStrip({
   /** Opens the machine's Agents screen — where this row is ordered, hidden from and added to. */
   onConfigure: () => void;
   machineId: MachineId | null;
-  /** Re-reads the agent listing once a sign-in has changed something. */
+  /**
+   * Re-drives every read this row is drawn from — the harness listing, the
+   * assembled agents, the systems table and the stored order. They are one
+   * effect in `NewSession` and therefore one door.
+   *
+   * ⚠ **It was the inline sign-in's alone, and the retries below press the same
+   * thing.** Nothing else on this screen re-sends a read: that effect depends on
+   * the daemon client, which `store.daemonFor` keeps stable for the machine's
+   * whole life, so a refusal stands for the life of the mount unless somebody
+   * asks again through here.
+   */
   onChanged: () => void;
 }): ReactNode {
   const [signingIn, setSigningIn] = useState<string | null>(null);
@@ -1866,18 +1923,53 @@ function AgentStrip({
        * rather than a screen — the control is at the end of the row directly
        * above.
        *
-       * What is *not* said in the other two is which agent or why: the sign-in
-       * door below is drawn in exactly that state and says both, and repeating it
-       * here would be two answers to one question.
+       * What is *not* said in the second — a machine that listed agents and can
+       * draw none of them — is which agent or why: the sign-in door below is drawn
+       * in exactly that state and says both, and repeating it here would be two
+       * answers to one question.
+       *
+       * ⚠ **The first has no such door, which is why it is the one that ended up
+       * carrying a control.** That door hangs off a harness
+       * (`agents.find(signInOffered) ?? agents[0]`), and the whole of what "reports
+       * no agents" says is that there were none to resolve it from — so it is
+       * `null`, the block below draws nothing, and for as long as that sentence
+       * stood alone it was a screen stating a fact with nowhere to go from it.
        */}
       {drawn.length === 0 && rows.length > 0 && (
         <Empty>Every agent on this machine is hidden. The gear above is where to bring one back.</Empty>
       )}
       {nothingAtAll && failure === null && (
-        <Empty>
-          {agents.length === 0
-            ? "This machine reports no agents."
-            : "No agent on this machine is ready to start."}
+        <Empty
+          /*
+           * ⚠ **The door belongs to the empty-listing arm only.** The other one is
+           * drawn in exactly the state the sign-in block below is drawn in, and that
+           * block names the agent and says why — so a control here would be the
+           * two-answers-to-one-question the paragraph above already refuses.
+           *
+           * **"Check again" and not "Try again": nothing failed.** The daemon
+           * answered, and what it answered was nothing — this is a re-ask, and the
+           * thing that makes it worth pressing happens on the host rather than
+           * here. No `failed`, for the same reason: an empty listing is a settled
+           * answer, and dressing it as an event would send somebody hunting for a
+           * fault this screen has no evidence of.
+           */
+          action={agents.length === 0 ? <Button onClick={onChanged}>Check again</Button> : undefined}
+        >
+          {/* ⚠ **Both sentences stay string literals rather than becoming JSX
+              text**, for the reason the fade above writes `aria-hidden="true"` in
+              full: `webcheck` tells these two states apart by the quoted strings
+              and by nothing else — neither is a value any function on this screen
+              returns — so a rewrite that drops the quotes takes the assertion with
+              it and says nothing while doing so. */}
+          {agents.length === 0 ? (
+            <>
+              {"This machine reports no agents."} That list is the host's, and every
+              harness on it is a CLI installed there — so this is a machine to go
+              and look at rather than a screen to fix.
+            </>
+          ) : (
+            "No agent on this machine is ready to start."
+          )}
         </Empty>
       )}
       {/*
@@ -1887,16 +1979,36 @@ function AgentStrip({
         * simply lost its harness tiles. "A failed read is not an empty machine" is
         * the rule, and the sibling row below has always been drawn this way — the
         * two reads are separate, so their failures are separate rows.
+        *
+        * ⚠ **And each says what to do about it, which for a whole release it did
+        * not.** A sentence naming a read that failed, with no control beside it, is
+        * a dead end on this screen in the strongest sense: the effect that sent the
+        * request depends on the daemon client and nothing else, and that client
+        * lives as long as the machine does — so the strip stayed empty, and said
+        * why, until somebody closed the pop-up and opened it again.
+        *
+        * ⚠ **One epoch drives all four reads, so either button re-sends both
+        * rows' requests.** That is honest rather than lazy: the failures are two
+        * rows because the reads are two requests, but they are sent by one effect
+        * and there is nothing finer to aim a retry at. The cost is one extra `GET`
+        * in the case where only one of them failed; the alternative is a button
+        * whose promise is narrower than what it does.
         */}
       {failure !== null && (
-        <p className="text-2xs text-muted wrap-anywhere">
-          The agents installed on this machine could not be read. {failure}
-        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="min-w-0 flex-1 text-2xs text-muted wrap-anywhere">
+            The agents installed on this machine could not be read. {failure}
+          </p>
+          <Button onClick={onChanged}>Try again</Button>
+        </div>
       )}
       {presetsFailure !== null && (
-        <p className="text-2xs text-muted wrap-anywhere">
-          The agents assembled on this machine could not be read. {presetsFailure}
-        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="min-w-0 flex-1 text-2xs text-muted wrap-anywhere">
+            The agents assembled on this machine could not be read. {presetsFailure}
+          </p>
+          <Button onClick={onChanged}>Try again</Button>
+        </div>
       )}
 
       {/*
@@ -2121,6 +2233,21 @@ function DirectoryPicker({
   const [importing, setImporting] = useState(false);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
+  /**
+   * Bumped by the retry beside the failure below, and it is the only thing in
+   * this component that re-requests anything.
+   *
+   * ⚠ **Neither read is re-sent by anything that a refusal changes.** The roots
+   * effect depends on the daemon client alone — stable for the machine's whole
+   * life, by `store.daemonFor` — and the listing effect adds `path`, which a
+   * failed listing does not move. So one refused `GET /fs/roots` was the end of
+   * this picker for the life of the mount: no root, therefore no crumbs,
+   * therefore no way to walk anywhere and nothing that would ask again.
+   *
+   * A counter in both dependency lists is the same shape `NewSession` uses one
+   * component up, where `agentsEpoch` re-drives its listing.
+   */
+  const [attempt, setAttempt] = useState(0);
   // The dependency rather than a lookup inside each effect, for the reason given
   // where `NewSession` resolves its own: an effect that returns before its
   // request has nothing to bring it back.
@@ -2128,9 +2255,21 @@ function DirectoryPicker({
 
   useEffect(() => {
     if (daemon === undefined) return;
+    /*
+     * ⚠ **A cancel flag and a cleared error, neither of which this effect needed
+     * while it could only run once.** With `attempt` in the dependencies it can
+     * run again over a request that is still out, and the two costs are separate:
+     * an older answer landing last restores the failure a retry has just cleared,
+     * and an error left on screen for the length of the retry says the thing being
+     * retried has already failed again. The two sibling effects in this file
+     * carry the flag for the first reason and are the precedent for it.
+     */
+    let cancelled = false;
+    setError(null);
     void daemon
       .roots()
       .then((result) => {
+        if (cancelled) return;
         const first = result.roots[0] ?? null;
         setRoot(first);
         // `result.recent` is read by nothing now — see the note where the strip
@@ -2140,8 +2279,14 @@ function DirectoryPicker({
         // would be a list of one.
         setPath((current) => current ?? first);
       })
-      .catch((cause: unknown) => setError(errorText(cause)));
-  }, [daemon]);
+      .catch((cause: unknown) => {
+        if (cancelled) return;
+        setError(errorText(cause));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [daemon, attempt]);
 
   /*
    * The current folder *is* the selection, so the parent form is told on every
@@ -2174,7 +2319,10 @@ function DirectoryPicker({
     return () => {
       cancelled = true;
     };
-  }, [daemon, path]);
+    // `attempt` for the roots read's reason, and it costs nothing here: this
+    // effect already re-runs whenever `path` moves, so the counter only adds the
+    // one case `path` cannot express — the same folder, asked for again.
+  }, [daemon, path, attempt]);
 
   const create = (): void => {
     if (daemon === undefined || path === null || name.trim().length === 0 || busy) return;
@@ -2217,7 +2365,28 @@ function DirectoryPicker({
           <Icon as={Folder} size={12} />
         </span>
         {crumbs.length === 0 ? (
-          <span className="font-mono text-2xs text-muted">loading…</span>
+          /*
+           * ⚠ **A read that failed used to sit here reading `loading…` for ever.**
+           * `crumbs` is empty until `root` lands, `root` is written only in the
+           * roots read's `.then`, and nothing re-requested — so a refusal left this
+           * bar making a claim about a request that had already ended, on the one
+           * control this screen exists to drive. Every state below it agrees
+           * already: the folder list draws its own "Loading…" only while `error` is
+           * null.
+           *
+           * What this arm owes is only that it stops saying "loading". The reason
+           * itself is one row down, beside the retry that can change it, because a
+           * sentence and the button that acts on it are one object.
+           *
+           * No `font-mono` on it, unlike the arm beside it and every crumb below:
+           * that family is here because those are paths, and this is a sentence
+           * about one there is no path for.
+           */
+          error === null ? (
+            <span className="font-mono text-2xs text-muted">loading…</span>
+          ) : (
+            <span className="text-2xs text-muted">could not be read</span>
+          )
         ) : (
           crumbs.map((crumb, index) => (
             <span key={crumb.path} className="flex items-center gap-1">
@@ -2253,7 +2422,27 @@ function DirectoryPicker({
        *
        * `RootListing.recent` still arrives on the wire and now has no reader.
        */}
-      {error !== null && <p className="px-3 py-2 text-xs text-danger wrap-anywhere">{error}</p>}
+      {/*
+       * ⚠ **The reason and the way out are one object**, which is the whole of
+       * this row: a failure with nothing beside it is where this picker dead-ended,
+       * since neither read is re-sent by anything a refusal moves — see `attempt`.
+       *
+       * ⚠ **One button for both reads, and it is drawn for either failure.** This
+       * line is the roots read's and the listing read's alike, because two error
+       * lines is the row that appears and disappears inside a control that has to
+       * hold still — the objection the "recent" strip above was deleted for. So
+       * the retry re-drives both, which is exactly what it says it does.
+       *
+       * Not `tone="primary"`: `bg-fg` is the affirmative action inside a decision
+       * and on this screen that is `Start`, one box down — the same rule the two
+       * controls at the foot of this panel already keep.
+       */}
+      {error !== null && (
+        <div className="flex flex-wrap items-center gap-2 px-3 py-2">
+          <p className="min-w-0 flex-1 text-xs text-danger wrap-anywhere">{error}</p>
+          <Button onClick={() => setAttempt((n) => n + 1)}>Try again</Button>
+        </div>
+      )}
 
       <div className="min-h-32 flex-1 overflow-auto overscroll-contain">
         {entries === null && error === null && (

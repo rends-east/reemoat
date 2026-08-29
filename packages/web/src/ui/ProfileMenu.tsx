@@ -6,7 +6,7 @@ import { pluginPath, screenPlugins } from "../plugins";
 import { navigate } from "../router";
 import { settingsPath } from "../settings";
 import { store, type AppState } from "../store";
-import { Icon, MENU_HEADING, Menu, menuRow } from "./bits";
+import { Icon, IconButton, MENU_HEADING, Menu, menuRow } from "./bits";
 
 /**
  * Who you are signed in as, and the three things you can do about it.
@@ -247,19 +247,47 @@ export function HelpButton(): ReactNode {
       align="right"
       panelClassName="w-64"
       trigger={(open, toggle) => (
-        <button
-          type="button"
+        <IconButton
+          icon={CircleQuestionMark}
+          label="Help"
+          /*
+           * ⚠ **`chip`, and this was a hand-rolled `h-9 w-9`** — one more copy
+           * of the class string `IconButton` exists to retire. The primitive's
+           * docblock counts four and this file is not among the ones it names,
+           * which is the point: 36px with no growth mechanism at all is what a
+           * copy reproduces, and it is the one size `ICON_BUTTON_SIZE` deleted
+           * rather than resized.
+           *
+           * Not `sm`: this sits `gap-1` — four pixels — from the account row,
+           * which is a 44px target running the whole width of the rail. A
+           * symmetric `after:-inset-2.5` is ten pixels a side, so six of them
+           * would land on that row's *face*, and a thumb aimed here would open
+           * the account menu instead. `chip` grows vertically only, and the 4px
+           * up plus 8px down lands in the footer's own padding: the New session
+           * button is 8px above, and below is the bottom of the rail.
+           */
+          size="chip"
+          /* `expanded`, not `active`: `aria-pressed` is a toggle that stays
+             pressed, and this is a control that reveals a region.
+
+             `haspopup` is the other half: what kind of thing opens, against
+             `expanded`'s whether it is open. Both were on the hand-rolled button
+             this replaced, `haspopup` was briefly dropped in the move, and both
+             call sites recorded the loss instead of quietly taking it — which is
+             the only reason it was cheap to put back. */
+          expanded={open}
+          haspopup="menu"
           onClick={toggle}
-          aria-haspopup="menu"
-          aria-expanded={open}
-          aria-label="Help"
-          title="Help"
-          className={`tap inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted hover:bg-raised hover:text-fg ${
-            open ? "bg-raised text-fg" : ""
-          }`}
-        >
-          <Icon as={CircleQuestionMark} size={16} />
-        </button>
+          /*
+           * ⚠ **`bg-raised` alone, where this wrote `bg-raised text-fg`.** The
+           * second half was already dead and nobody could see it: Tailwind v4
+           * emits utilities alphabetically, so `.text-fg` is printed before the
+           * tone's own `.text-muted` and loses to it whichever way the class
+           * attribute reads — the `menuRow` defect, one file over. The fill is
+           * what this app spends on state in any case.
+           */
+          className={open ? "bg-raised" : ""}
+        />
       )}
     >
       {() => (

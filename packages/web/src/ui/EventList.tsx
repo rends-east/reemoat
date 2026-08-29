@@ -98,7 +98,8 @@ export function EventList({
   files,
   working,
   reporting,
-  turnStartedAt,
+  turnElapsedMs,
+  stale,
   echo,
 }: {
   transcript: Transcript;
@@ -129,13 +130,40 @@ export function EventList({
    */
   reporting: boolean;
   /**
-   * `snapshot.turnStartedAt` — when the running turn began, or `null`.
+   * How long the running turn has been going, in milliseconds — or `null` for no
+   * turn.
    *
-   * A number and not the snapshot, for `working`'s reason: the store replaces the
-   * snapshot object wholesale every four seconds, so a reference here would be a
-   * new prop identity on a timer. A primitive is stable when the value is.
+   * ⚠ **It was `snapshot.turnStartedAt`, and what this file did with it was
+   * `Date.now() - turnStartedAt`: two clocks that have no reason to agree.** That
+   * field is the *daemon's*, which is why `SessionRow` carries `daemonNow` and
+   * `fetchedAt` beside every snapshot and writes down what happens without them —
+   * a phone that has been asleep comes back with a drifted clock, and "blocked for
+   * −2 minutes" is both wrong and alarming. `elapsedSince` in `store.ts` is that
+   * arithmetic and the rail already ages every row with it; the caller resolves it
+   * here so this file holds no second copy of a formula whose whole point is that
+   * the naive form looks right.
+   *
+   * A number and not the row, for `working`'s reason.
    */
-  turnStartedAt: number | null;
+  turnElapsedMs: number | null;
+  /**
+   * Nothing is streaming this session — no socket at all, or one whose phase is not
+   * `live` — resolved by the caller.
+   *
+   * **`working` cannot answer this and never could.** It is `showsWorking` over
+   * the newest snapshot that *arrived*, so when the socket dies the foot goes on
+   * blinking `working…` about an agent nobody has heard from since — with an
+   * elapsed time still climbing, our own clock being the only half of that
+   * subtraction still moving. The transcript is what the daemon last said; that
+   * nothing is still saying it is a fact about the stream, and only the stream
+   * has it.
+   *
+   * ⚠ **It was `stream.phase === "waiting"`, which is the *banner's* question and
+   * left this one with a hole on every retry** — the phase is `connecting` for the
+   * whole of each attempt, and a handshake into a dead network is bounded by
+   * nothing. `SessionView` computes both and carries the measurement.
+   */
+  stale: boolean;
   /**
    * The message that has been sent and has not come back yet, or `null`.
    *
@@ -239,7 +267,7 @@ export function EventList({
     () => (reporting ? outstandingTasks(rows, taskFloor) : []),
     [reporting, rows, taskFloor],
   );
-  const foot = footSays(working, tasks.length, elapsedSays(turnStartedAt));
+  const foot = footSays(working, tasks.length, elapsedSays(turnElapsedMs), stale);
 
   return (
     /*
@@ -283,7 +311,11 @@ export function EventList({
         <button
           onClick={onReveal}
           disabled={fetchingEarlier}
-          className="tap mb-2 flex w-full items-center gap-1.5 rounded-md border border-edge-strong px-3 py-2 text-left text-xs text-muted hover:bg-raised hover:text-fg disabled:opacity-50"
+          /* `min-h-11` rather than a grown target: this is a bordered box, so a
+             `::after` reaching past its own edge would put the target outside the
+             thing a reader can see, and it has the room — it is alone at the head of
+             the column with `mb-2` under it and nothing above. 32px before. */
+          className="tap mb-2 flex min-h-11 w-full items-center gap-1.5 rounded-md border border-edge-strong px-3 py-2 text-left text-xs text-muted hover:bg-raised hover:text-fg disabled:opacity-50"
         >
           <Icon as={ChevronUp} size={12} />
           {/* Kept mounted through the fetch, because pressing it *stops* cutting
@@ -465,10 +497,18 @@ export function EventList({
            * follows it.
            *
            * This replaces a caption under the composer that mounted and unmounted
-           * on every turn, moving the box somebody was typing in. Fixed height and
-           * a fixed string, so it cannot become that again indoors. No elapsed
-           * time, for the reason `tail.ts` refuses one on a tool card: a ticking
-           * number re-renders the whole transcript once a second.
+           * on every turn, moving the box somebody was typing in. **Fixed height**,
+           * so it cannot become that again indoors.
+           *
+           * ⚠ It went on to say *"and a fixed string. No elapsed time, for the
+           * reason `tail.ts` refuses one on a tool card: a ticking number re-renders
+           * the whole transcript once a second"* — and neither half has been true
+           * since `ELAPSED_FLOOR_MS` arrived. The objection it quotes survives whole
+           * and is answered at `elapsedSays`: what is drawn is `shortDuration`, on
+           * turns past two minutes only, changing at most once a minute, with
+           * nothing scheduling a render for it. The string moves — it carries that
+           * duration, and `stale` changes its tense — while the height, which
+           * is what this paragraph is actually about, does not.
            */}
           {/*
            * The live region is mounted **unconditionally** and only its text
@@ -507,7 +547,9 @@ export function EventList({
            * is happening in the conversation, and the other end says why the
            * conversation does not start at its beginning.
            */}
-          {foot !== null && <WaitingFoot line={foot.line} working={working} tasks={tasks} />}
+          {foot !== null && (
+            <WaitingFoot line={foot.line} working={working} stale={stale} tasks={tasks} />
+          )}
         </div>
       </ResizedContext.Provider>
     </div>
@@ -600,8 +642,12 @@ function noticeText(notice: TranscriptNotice): string {
  * disagree.
  *
  * The spoken form differs from the line only where prose differs from a label —
- * `agent is working` reads aloud as a sentence and `working…` does not. `null` is
- * "nothing to say", and the region falls back to the transcript notice.
+ * `agent is working` reads aloud as a sentence and `working…` does not — with
+ * **one** exception, and it is named at the arm rather than left to be found: a
+ * dropped socket puts the reason into the spoken form only, because the visible
+ * copy of it is the banner above the conversation and a screen reader is not told
+ * that appeared. `null` is "nothing to say", and the region falls back to the
+ * transcript notice.
  *
  * `·` is the separator this app already uses between two facts on one line.
  */
@@ -621,6 +667,17 @@ const ELAPSED_FLOOR_MS = 120_000;
  * uses — or `null`, which is both "no turn" and "not long enough to be worth
  * saying", so a caller cannot draw a number this rule says not to draw.
  *
+ * ⚠ **The milliseconds arrive measured, and this function is why that had to
+ * change.** It read `Date.now() - turnStartedAt`, where `turnStartedAt` is the
+ * daemon's clock off the snapshot — the one subtraction `store.ts` names as wrong
+ * on the case that matters, a phone whose clock drifted while it was asleep.
+ * `elapsedSince` is the correct form and there is exactly one copy of it, out
+ * there where `webcheck` can pin it against two clocks that disagree; the caller
+ * threads the row it needs. The floor below then doubles as the guard on what that
+ * arithmetic can still produce when our own clock moves backwards between two
+ * renders — a negative is under two minutes, so it says nothing at all rather than
+ * `−2m`.
+ *
  * **`shortDuration` and not a clock**, which is what makes this affordable at all.
  * `tail.ts` refuses an elapsed time on a tool card because "a ticking number
  * re-renders the whole transcript once a second", and that objection is about a
@@ -630,26 +687,71 @@ const ELAPSED_FLOOR_MS = 120_000;
  * has to: the transcript already re-renders on every streamed token and on the 4s
  * snapshot push, so the number is at most one poll stale.
  */
-function elapsedSays(turnStartedAt: number | null): string | null {
-  if (turnStartedAt === null) return null;
-  const elapsed = Date.now() - turnStartedAt;
-  return elapsed < ELAPSED_FLOOR_MS ? null : shortDuration(elapsed);
+function elapsedSays(turnElapsedMs: number | null): string | null {
+  if (turnElapsedMs === null) return null;
+  return turnElapsedMs < ELAPSED_FLOOR_MS ? null : shortDuration(turnElapsedMs);
 }
 
 export function footSays(
   working: boolean,
   tasks: number,
   /**
-   * `elapsedSays(turnStartedAt)`, resolved by the caller. Optional, so the existing
+   * `elapsedSays(turnElapsedMs)`, resolved by the caller. Optional, so the existing
    * call sites — and every assertion about them — keep their meaning unchanged.
+   *
+   * ⚠ **Both defaults are right for the call sites and were also how this
+   * function's two newest rules shipped with nothing behind them**: `webcheck`
+   * called it with two arguments, so neither the elapsed time nor the frozen tense
+   * was exercised anywhere. A default keeps an old assertion meaning what it meant;
+   * it is not a reason to leave the four-argument form unasserted.
    */
   elapsed: string | null = null,
+  /**
+   * Nothing is streaming this session: no socket at all, or one whose phase is not
+   * `live`. Optional for `elapsed`'s reason, and `false` is the state every
+   * existing assertion is about: a live stream.
+   *
+   * ⚠ **It was `reconnecting`, and it took `phase === "waiting"`** — true only in
+   * the gaps *between* attempts, so on a dead network the tense flipped back to the
+   * present for the whole of every retry. The caller's own docblock holds the
+   * measurement and the reason the banner keeps the narrower question.
+   */
+  stale: boolean = false,
 ): { line: string; spoken: string } | null {
+  /*
+   * **`working` is a claim about now, and with nothing streaming this has no way
+   * to know what now is.** It is `showsWorking` over the last snapshot that
+   * arrived, so a dead stream left three bars blinking beside `working…` for as
+   * long as the tab stayed open — and the elapsed time beside it was the half a
+   * reader could watch going wrong, since `turnStartedAt` is frozen at whatever
+   * that snapshot said while `Date.now()` carries on. So the tense changes and the
+   * number goes: what is true is that the agent was working when we last heard.
+   */
+  const frozen = working && stale;
   // Only ever beside `working…`. An elapsed time next to "waiting for 2 tasks"
   // would be the *turn's* duration attached to a sentence about delegations that
   // outlived it — a different quantity wearing the same words.
-  const runs = elapsed === null || !working ? "working…" : `working… · ${elapsed}`;
-  const said = elapsed === null || !working ? "agent is working" : `agent is working, ${elapsed}`;
+  const shown = frozen ? null : elapsed;
+  const runs = frozen ? "last seen working" : shown === null || !working ? "working…" : `working… · ${shown}`;
+  /*
+   * The spoken form carries the reason and the line does not, which is the one
+   * place the pair is deliberately unequal. The visible copy has the reconnect
+   * banner directly above the conversation whenever there is a reconnection to
+   * announce, saying it with the error the socket gave; a screen reader is told
+   * nothing at all by a `<p>` appearing, so this region is where that fact has to
+   * travel.
+   *
+   * ⚠ **It said `reconnecting`, and that word belongs to the banner's narrower
+   * predicate rather than to this one.** This arm is also reached with no socket at
+   * all and with one still opening for the first time, where nothing is
+   * reconnecting to anything — so it says the thing that is true in every arm,
+   * which is that there is no live connection to check the claim against.
+   */
+  const said = frozen
+    ? "last seen working, not connected"
+    : shown === null || !working
+      ? "agent is working"
+      : `agent is working, ${shown}`;
   if (tasks === 0) return working ? { line: runs, spoken: said } : null;
   const many = `${tasks} task${tasks === 1 ? "" : "s"}`;
   if (!working) return { line: `waiting for ${many}`, spoken: `waiting for ${many}` };
@@ -678,6 +780,17 @@ export function footSays(
  * else's work. Nothing is added to `TONE_DOT`, and the mark is deliberately the
  * same width as the dot it replaced so the line does not shift when a turn starts.
  *
+ * **A third state, and it is the same mark rather than a fourth object: `stale`
+ * freezes it.** Three bars breathing is an assertion that work is happening *now*,
+ * and with nothing streaming this row is drawing the last snapshot that arrived —
+ * so the blink was the loudest lie on the screen, and it outlived the daemon it was
+ * about. `WorkingMark still` is the idiom the cancelled-turn row already invented
+ * for exactly this shape of thing: the same object, not animating, beside a line
+ * whose tense has changed. ⚠ It has two callers now, and `Mark.tsx`'s docblock
+ * names this row as the second one — a note here said that docblock "still says
+ * one", which was true when this shipped and stopped being true when it was
+ * rewritten.
+ *
  * Not a `button` when there is nothing to open: with no tasks this is the old
  * paragraph, `aria-hidden` and inert, because a disclosure whose body is empty is a
  * control that lies about having something behind it.
@@ -685,10 +798,13 @@ export function footSays(
 function WaitingFoot({
   line,
   working,
+  stale,
   tasks,
 }: {
   line: string;
   working: boolean;
+  /** Nothing is streaming this session — see the note above on why the mark stops. */
+  stale: boolean;
   tasks: readonly OutstandingTask[];
 }): ReactNode {
   const [open, setOpen] = useState(false);
@@ -696,7 +812,7 @@ function WaitingFoot({
   if (tasks.length === 0) {
     return (
       <p aria-hidden={true} className="flex h-5 items-center gap-2 text-2xs text-faint">
-        <WorkingMark />
+        <WorkingMark still={stale} />
         {line}
       </p>
     );
@@ -709,9 +825,20 @@ function WaitingFoot({
           onResized();
         }}
         aria-expanded={open}
-        className="tap -mx-1 flex h-5 w-full items-center gap-2 rounded-md px-1 text-left text-2xs text-faint hover:bg-raised hover:text-fg"
+        /* 20px of ink, 44px of target, and the growth is **downward only** — which
+           is free here and nowhere else in this file. This is the last row in the
+           transcript's column, and that column ends in `pb-12`: 48 pixels that hold
+           nothing pressable and exist so the conversation never sits flush against
+           the composer. So 24px of `::after` lands entirely in padding, overlaps no
+           neighbour's face, and adds nothing to `scrollHeight`. `TAP_GROW_Y` is the
+           wrong constant rather than the wrong idea — it is calibrated for a 32px
+           box and reaches 32px from this one — and growing symmetrically would put
+           this target 12px into a `space-y-1.5` gap and onto the card above, which
+           is itself a disclosure somebody aims at. The box stays `h-5`, so the row
+           is the same height whether or not a task is outstanding. */
+        className="tap relative -mx-1 flex h-5 w-full items-center gap-2 rounded-md px-1 text-left text-2xs text-faint after:absolute after:inset-x-0 after:top-0 after:-bottom-6 after:content-[''] hover:bg-raised hover:text-fg"
       >
-        {working ? <WorkingMark /> : <Dot tone="pending" />}
+        {working ? <WorkingMark still={stale} /> : <Dot tone="pending" />}
         <span className="min-w-0 flex-1 truncate">{line}</span>
         <span className="shrink-0">
           <Icon as={open ? ChevronDown : ChevronRight} size={11} />
@@ -836,30 +963,53 @@ function PermissionResolvedRow({
   const denied = refused(kind) || event.outcome === "cancelled";
   return (
     /*
-     * **Aligned with a tool row, glyph for glyph.** This sits inside a folded run now,
-     * so its check mark is one of five in a column — and it had one icon where a tool
-     * row has two and no horizontal padding where a tool row has `px-1`, so it stood
-     * four pixels left of everything else and its text a whole glyph left of theirs.
-     * Reported off a screenshot, which is the only way that gets noticed.
+     * **It hangs off the nesting rule, and that is the only axis this row had left.**
+     *
+     * Five things in this transcript draw `[status glyph][kind glyph][clipped
+     * text][trailing badge]` — a tool call, a folded run, this, a file change and the
+     * foot — and they all draw it at one ink value, because "machinery is
+     * `text-fg/85`, one value for every machinery row" is the rule and the rule is
+     * right: a tone here would say *this one is louder* about a settled fact, and a
+     * box would be the twenty-bordered-rectangles transcript `ToolCall` already
+     * reversed once. So the difference is spent where this app already spends one —
+     * `border-l-2 border-edge`, the single nesting idiom, which everywhere else says
+     * *this belongs to the row above it*. That is exactly what an answer to a
+     * permission is: not a call the agent made, but something that happened to one.
+     * `ChangeRow` takes the same rule for the same reason.
+     *
+     * ⚠ **This narrows an alignment that was deliberate**, so the old note is kept
+     * rather than deleted: inside a folded run this check mark was one of five in a
+     * column, and it had one icon where a tool row has two and no horizontal padding
+     * where a tool row has `px-1`, so it stood four pixels left of everything else
+     * and its text a whole glyph left of theirs — reported off a screenshot, which is
+     * the only way that gets noticed. The glyph columns still line up; what moved is
+     * the whole row, by one indent, on purpose. Which is why the padding below stays
+     * on the `<p>` and the rule goes on a wrapper: `pl-2` and `px-1` are the same
+     * property, and Tailwind v4 emits utilities alphabetically, so `px-1` would win
+     * wherever the two met and the geometry would silently be neither.
      *
      * The second slot is **reserved and empty**, which is this app's stated remedy for
      * a row that is missing the only copy of something: a permission has no ACP kind
      * of its own to draw there, and borrowing the tool's would be decoration standing
      * in for alignment.
      */
-    <p className={`flex items-center gap-2 px-1 py-1 text-xs ${denied ? "text-fg font-medium" : "text-fg/85"}`}>
-      <span className="shrink-0">
-        <Icon as={denied ? CircleSlash : kind === undefined ? Minus : Check} size={12} />
-      </span>
-      <span className="inline-flex w-3 shrink-0" aria-hidden={true} />
-      {/* Truncated, which it did not need to be while every title was a tool's name:
-          a codex heading is the command it ran, and those are unbounded. */}
-      <span className="min-w-0 flex-1 truncate">{heading ?? event.title}</span>
-      {denied && <span className="shrink-0 font-medium">denied</span>}
-      {event.by !== "client" && (
-        <span className="shrink-0 text-faint">{resolvedByText(event.by)}</span>
-      )}
-    </p>
+    <div className="ml-3 border-l-2 border-edge pl-2">
+      <p
+        className={`flex items-center gap-2 px-1 py-1 text-xs ${denied ? "text-fg font-medium" : "text-fg/85"}`}
+      >
+        <span className="shrink-0">
+          <Icon as={denied ? CircleSlash : kind === undefined ? Minus : Check} size={12} />
+        </span>
+        <span className="inline-flex w-3 shrink-0" aria-hidden={true} />
+        {/* Truncated, which it did not need to be while every title was a tool's name:
+            a codex heading is the command it ran, and those are unbounded. */}
+        <span className="min-w-0 flex-1 truncate">{heading ?? event.title}</span>
+        {denied && <span className="shrink-0 font-medium">denied</span>}
+        {event.by !== "client" && (
+          <span className="shrink-0 text-faint">{resolvedByText(event.by)}</span>
+        )}
+      </p>
+    </div>
   );
 }
 
@@ -1281,10 +1431,27 @@ function GroupRow({ node, files }: { node: GroupNode; files: FileAccess | null }
        * sits against the text the way a folder's does in the rail rather than at the
        * far edge like a card's chevron.
        */}
+      {/*
+        **44px, and the box grows rather than a target — which is the opposite of
+        what the composer's strip does, for a reason that is about neighbours.**
+
+        A run starts collapsed now, so this row is the *only* way to see what the
+        agent did, and it was 26px: `text-xs` on `py-1`. The alternative is
+        `TAP_GROW_Y`, and it is wrong here in the way `ICON_BUTTON_SIZE.sm`'s note
+        describes — these rows are full-width and stacked `space-y-1.5` apart, so a
+        target grown 9px each way covers 6px of the row above's *face*, and the row
+        above is another disclosure. There is no free direction: a taller box is the
+        honest form, and it is what `ChangeRow` reached for one component down.
+
+        The cost is real and is the trade: 18px a row, so an open run of eight calls
+        is a screen-and-a-bit rather than two thirds of one. What buys it back is
+        that those eight rows are the only record of what the agent did, and until
+        this they were 26px of machinery nobody could reliably hit.
+      */}
       <button
         onClick={() => setOverride(!open)}
         aria-expanded={open}
-        className="tap flex w-full items-center gap-1.5 rounded-md px-1 py-1 text-left text-xs text-fg/85 hover:bg-raised hover:text-fg"
+        className="tap flex min-h-11 w-full items-center gap-1.5 rounded-md px-1 py-1 text-left text-xs text-fg/85 hover:bg-raised hover:text-fg"
       >
         <span className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`}>
           <Icon as={ChevronRight} size={13} />
@@ -1375,7 +1542,12 @@ function ChangeRow({ node, files }: { node: ChangeNode; files: FileAccess | null
   const rel = files?.relFor(event.path) ?? null;
 
   return (
-    <div>
+    /* The same `border-l-2 border-edge` a permission's answer takes, and the whole
+       argument is written there: a file change is not a call the agent made, it is
+       something that happened to a file, and the nesting rule is the axis left once
+       a tone and a box are both refused. The diff below sits inside the rule too,
+       which is right — it is the same fact, opened. */
+    <div className="ml-3 border-l-2 border-edge pl-2">
       <div className="flex items-center gap-1.5 font-mono text-2xs text-muted">
         <button
           onClick={() => {
@@ -1555,6 +1727,21 @@ function ToolCall({ node, files }: { node: ToolNode; files: FileAccess | null })
      * detail all read as "this belongs to the row above it".
      */
     <div>
+      {/*
+        44px for `GroupRow`'s reason, and **unconditionally**, which is the part
+        that is not obvious.
+
+        Hanging it off `expandable` the way the hover fill above already hangs off
+        it is the tempting shape — a row that cannot be pressed is not a tap target
+        and could stay 26px. It is wrong because `expandable` *changes while the
+        reader is looking at it*: a `tool_call` with no output yet is not
+        expandable, and the `tool_call_update` carrying the output makes it so. That
+        would grow the row 18px mid-turn and push everything below it down — the same
+        complaint the automatic fold above was removed for, which is a row choosing
+        its own height while somebody is reading past it. A row that cannot be
+        pressed costs 18px of ground; a row that resizes under a travelling thumb
+        costs the reader their place.
+      */}
       <button
         onClick={() => {
           setOpen(!open);
@@ -1562,7 +1749,7 @@ function ToolCall({ node, files }: { node: ToolNode; files: FileAccess | null })
         }}
         disabled={!expandable}
         aria-expanded={expandable ? open : undefined}
-        className={`tap flex w-full items-center gap-2 rounded-md px-1 py-1 text-left text-fg/85 disabled:cursor-default ${
+        className={`tap flex min-h-11 w-full items-center gap-2 rounded-md px-1 py-1 text-left text-fg/85 disabled:cursor-default ${
           expandable ? "hover:bg-raised hover:text-fg" : ""
         }`}
       >

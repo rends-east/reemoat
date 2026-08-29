@@ -1,10 +1,10 @@
 import type { ReactNode } from "react";
-import { daemonReadable } from "../../machine";
+import { daemonRead } from "../../machine";
 import type { MachineId } from "../../ids";
 import { navigate } from "../../router";
 import { settingsPath } from "../../settings";
 import type { AppState } from "../../store";
-import { Empty, reachText } from "../bits";
+import { Button, Empty, reachText, Spinner } from "../bits";
 import { SystemChooser, SystemDetail } from "./SystemsPanel";
 
 /**
@@ -31,42 +31,118 @@ export function MachineSystemsSection({
   state,
   machineId,
   system,
+  lede = true,
 }: {
   state: AppState;
   machineId: MachineId;
   system: string | null;
+  /**
+   * Draw the paragraph saying where this machine's credentials live.
+   *
+   * ⚠ **`false` where `MachineSection` has already said it, which is the whole of
+   * why this prop exists.** That screen drew this block and the plugins block
+   * about 200px apart and each ended its own paragraph with the identical clause
+   * *"Nothing here is shared with your other machines."* — two sentences written
+   * in isolation, each defensible on its own, neither aware of the other. The
+   * per-machine fact is stated once at the top of that screen now and these two
+   * sections say nothing about it.
+   *
+   * Defaulted rather than required because the leaf — `/settings/machines/:id/
+   * systems/:system`, rendered straight from `Settings.tsx` — has no screen above
+   * it to have said anything, and that is the arm that must not have to remember.
+   */
+  lede?: boolean;
 }): ReactNode {
   const machine = state.machines.find((candidate) => candidate.id === machineId) ?? null;
 
   if (machine === null) {
-    // A stale link, or a machine revoked in another tab. Not an error screen: the
-    // list two levels up is the answer, and the pane's chevron walks there one step
-    // at a time. (Not the ✕ — that is `useUnder` and leaves settings entirely,
-    // which is a different destination. Q3.415.)
-    return <Empty>That machine is not in your list any more.</Empty>;
+    /*
+     * A stale link, or a machine revoked in another tab.
+     *
+     * ⚠ **The chevron does not walk you out of this, and the comment here used to
+     * claim it did.** `settingsUp` sends a system's ◀ to `/settings/machines/<id>`
+     * — the machine's own screen — which for a machine that is gone draws this
+     * exact sentence again: two identical dead ends in a row, the second of them
+     * reached by taking the only visible way back. So the way out is drawn here,
+     * and it is the list, which is the first address on this path that still
+     * resolves. (Still not the ✕ — that is `useUnder` and leaves settings
+     * entirely, which is a different destination. Q3.415.)
+     *
+     * ⚠ **Not `failed`.** This is a settled answer rather than an absent one:
+     * nothing was asked and nothing failed to come back. `Empty`'s partition
+     * reserves the triangle and the live region for a read that did not return.
+     *
+     * `replace`, because the list is shallower — `web-shell.md`'s rule for
+     * anything that moves you up inside an overlay — and because the address it
+     * replaces names a machine that no longer exists, so Back must not return to
+     * it.
+     */
+    return (
+      <Empty
+        action={
+          <Button size="sm" onClick={() => navigate(settingsPath("machines"), true)}>
+            All machines
+          </Button>
+        }
+      >
+        That machine is not in your list any more.
+      </Empty>
+    );
   }
+
+  /*
+   * ⚠ **Three answers, not two, and the missing one was the ordinary path.**
+   * `daemonReadable` answers `false` for `unknown` — a machine nobody has asked
+   * yet — so a cold load or a deep link drew *"laptop is not reachable right now
+   * — …."* for the two or three seconds before the first probe landed, with
+   * `reachText`'s `unknown` arm supplying the bare ellipsis. `daemonRead` is the
+   * partition `missingRowReason` already proved out for `SessionView`: the
+   * never-asked state is a wait, and only `offline` has earned the sentence.
+   */
+  const read = daemonRead(machine.reach);
 
   return (
     <div>
-      <p className="text-xs text-muted">
-        {/* The name is gone from this sentence because the pane's heading is
-            directly above it now, at every width — it was the machine named twice
-            within 40px. The id stays: it is the half a heading cannot carry, this
-            screen is reached from a row that may have a twin, and everything below
-            writes to one daemon's database. */}
-        Credentials and settings live on <code className="text-muted/80">{machine.id}</code>, in
-        that daemon's database and that host's home. Nothing here is shared with your other
-        machines.
-      </p>
+      {lede && (
+        <p className="text-xs text-muted">
+          {/* The name is gone from this sentence because the pane's heading is
+              directly above it now, at every width — it was the machine named twice
+              within 40px. The id stays: it is the half a heading cannot carry, this
+              screen is reached from a row that may have a twin, and everything below
+              writes to one daemon's database. */}
+          Credentials and settings live on <code className="text-muted/80">{machine.id}</code>, in
+          that daemon's database and that host's home. Nothing here is shared with your other
+          machines.
+        </p>
+      )}
 
-      {!daemonReadable(machine.reach) ? (
+      {read === "asking" ? (
+        /*
+         * ⚠ **No failure claim, because nothing has been measured.** No `failed`,
+         * no `role="status"`: this is a wait rather than an event, and announcing
+         * it would put "not reachable" in the live region of a machine that turns
+         * out to be online a second later. The ellipsis is the truthful
+         * trailing-off of a question in flight, which is the one place `reachText`
+         * keeps one too.
+         *
+         * The spinner is `SystemChooser`'s own "Asking that machine…" shape one
+         * component down, so a wait for the *route* and a wait for the *systems*
+         * look like the same wait rather than two unrelated blanks.
+         */
+        <Empty>
+          <span className="inline-flex items-center gap-2">
+            <Spinner /> Checking whether {machine.name} is reachable…
+          </span>
+        </Empty>
+      ) : read === "unreachable" ? (
         /*
          * Not filtered out and not silently empty. An unreachable machine is the
          * commonest reason somebody is on this screen — they came to sign in
          * because a session failed — so the honest thing is to name the machine
-         * and say why nothing is listed.
+         * and say why nothing is listed. `failed`, because this one *is* the
+         * absence of an answer: the probe was made and did not come back.
          */
-        <Empty>
+        <Empty failed>
           {machine.name} is not reachable right now — {reachText(machine.reach, machine.offlineReason)}
           {/*
            * **The system is named here because this branch *replaces*
@@ -81,6 +157,10 @@ export function MachineSystemsSection({
           {system === null ? "." : `, so nothing about ${system} can be read or changed.`}
         </Empty>
       ) : system === null ? (
+        /* "readable" — and `probing` lands here deliberately. A re-probe is this
+           client re-checking a route it forgot on waking, on a machine it already
+           believed in; taking the panel away for it is the regression
+           `daemonReadable`'s docblock is entirely about. */
         <SystemChooser
           machineId={machineId}
           onPick={(picked) => navigate(settingsPath("machines", machineId, picked))}

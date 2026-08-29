@@ -5,7 +5,16 @@
     <!-- `viewport-fit=cover` plus the safe-area padding in index.css: without both,
          the bottom action bar sits under the iPhone home indicator, which is
          exactly where the approve buttons are. -->
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!-- `interactive-widget=resizes-content` because the default,
+         `resizes-visual`, does not move the layout viewport when the software
+         keyboard opens: `AppShell`'s `h-dvh` and the composer's sticky
+         `bottom-0` stay where they were, so on Chrome/Android the box you are
+         typing in is behind the keyboard — and on a plan card, whose whole
+         point is typing an answer, so are Send and the approvals. Nothing
+         repositions them; `Composer` compensates for its own height cap alone,
+         and that cap reads `visualViewport` and is unaffected either way.
+         Browsers that do not know the key ignore it. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="color-scheme" content="light" />
     <!-- One tag, because there is one palette. It is `--color-ink` from
          `index.css`, duplicated here because a `<meta>` cannot read a CSS

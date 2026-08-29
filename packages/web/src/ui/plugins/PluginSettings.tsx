@@ -2,13 +2,13 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { MachineId } from "../../ids";
 import { scopeSummary } from "../../install";
 import type { MachineState } from "../../machine";
-import { marketSettingsPath } from "../../market";
+import { marketEntryPath, marketSettingsPath } from "../../market";
 import { paneAgreement, type PaneAgreement, type PaneReading } from "../../pane";
 import { pluginFailure, readView } from "../../plugins";
 import { navigate } from "../../router";
 import { store, type AppState } from "../../store";
 import { ambiguousNames } from "../../wire";
-import { Empty, LINK, Spinner } from "../bits";
+import { Button, Empty, LINK, Spinner } from "../bits";
 import { PluginBlockView } from "../PluginView";
 
 /**
@@ -75,7 +75,33 @@ export function PluginSettingsScreen({
   }, [onIdentified, pluginId, name, version]);
 
   if (here.length === 0) {
-    return <Empty>None of those machines is in your list any more, so there is nothing to configure.</Empty>;
+    /*
+     * ⚠ **A settled answer rather than a failure, so no `failed` and no live
+     * region.** Nothing was asked and nothing failed to come back: the address
+     * names machines this account does not have, which is a fact about the fleet
+     * and stays true until somebody changes it. {@link Empty}'s partition is an
+     * absence against the absence of an *answer*, and a triangle here would send
+     * somebody looking for a network problem that is not there.
+     *
+     * ⚠ **It takes a way out, because otherwise this screen is a dead end.** A
+     * stale bookmark and a machine revoked in another tab both land here, one push
+     * deep, with the scope in the URL — and the only other control on screen is a
+     * 24px chevron in the panel's head, which is the way out for somebody who
+     * already knows it is there. `replace`, because the entry page is shallower by
+     * construction: a push would leave Back walking into the dead scope it just
+     * left.
+     */
+    return (
+      <Empty
+        action={
+          <Button size="sm" onClick={() => navigate(marketEntryPath(pluginId), true)}>
+            Back to the plugin
+          </Button>
+        }
+      >
+        None of those machines is in your list any more, so there is nothing to configure.
+      </Empty>
+    );
   }
   return (
     <Pane
@@ -274,7 +300,27 @@ function Pane({
           </ul>
         </div>
       ) : agreement.form.kind === "none" ? (
-        <Empty>{name} has no settings on those machines.</Empty>
+        /*
+         * ⚠ **Also a settled answer: every machine in scope was asked and no form
+         * came back.** Still no `failed`, and the one host this could be wrong
+         * about is already covered — a machine that could not be *read* is
+         * `excluded` with its own reason and named by {@link Excluded} directly
+         * above this line, so "no settings" is never the only thing on screen about
+         * a daemon nobody heard from.
+         *
+         * The same way out, because the remedy is the same one: what somebody does
+         * about a plugin with no pane on these machines is on the plugin's own page,
+         * where the version, the machines it is on and Remove all are.
+         */
+        <Empty
+          action={
+            <Button size="sm" onClick={() => navigate(marketEntryPath(pluginId), true)}>
+              Back to the plugin
+            </Button>
+          }
+        >
+          {name} has no settings on those machines.
+        </Empty>
       ) : (
         <>
           {agreement.form.kind === "mixed" && (

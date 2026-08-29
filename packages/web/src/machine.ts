@@ -252,9 +252,71 @@ export function missingRowReason(reach: Reach | null, listed: boolean): MissingR
  *
  * Pure, and beside {@link missingRowReason} rather than inside a component, so
  * `webcheck` walks all four values instead of asserting JSX.
+ *
+ * **Derived from {@link daemonRead} rather than stated a second time.** The two
+ * are one question asked at different resolutions, and a screen branching on this
+ * one while another branches on that one must never be able to disagree about the
+ * same machine.
  */
 export function daemonReadable(reach: Reach): boolean {
-  return reach === "online" || reach === "probing";
+  return daemonRead(reach) === "readable";
+}
+
+/** What a screen may draw about a machine's daemon. See {@link daemonRead}. */
+export type DaemonRead = "readable" | "asking" | "unreachable";
+
+/**
+ * The same question as {@link daemonReadable}, with the "not yet" told apart from
+ * the "no".
+ *
+ * ⚠ **`daemonReadable` answers `false` for `unknown`, and four screens read that
+ * as *offline*.** `MachineSystemsSection`, `MachineAgentsSection`,
+ * `MachineSection` and `AgentBuilder` each draw `` `${machine.name} is not
+ * reachable right now — ${reachText(reach, reason)}` `` on the false branch — and
+ * `unknown` is not a machine that failed to answer, it is a machine nobody has
+ * asked yet.
+ * `bootstrap` promotes to `phase: "ready"` on the *machine list*, and
+ * `resumeMachine` calls `forgetRoute()` on every wake, so `unknown` is the value
+ * for the two or three seconds before the first `/health` lands — over a relay
+ * from a phone, longer. For that whole window those screens asserted a failure
+ * that had not happened, and `reachText`'s `unknown` arm was the bare string
+ * `"…"`, so the sentence rendered as **"laptop is not reachable right now — …."**
+ *
+ * ⚠ **That set said `MachineSystemsSection`, `MachinePluginsSection` and
+ * `MachineAgentsSection`, and it had gone stale in both directions.**
+ * `MachinePluginsSection` draws no reachability line any more — its one caller,
+ * `MachineSection`, states it once for all three of its lists, and `webcheck` pins
+ * that section as saying neither half — while `MachineSection` itself and
+ * `AgentBuilder` had joined the set with nothing naming them. Four, and
+ * `webcheck`'s `REACH_SCREENS` is the list this has to agree with, along with the
+ * copy of this sentence at `reachText` in `ui/bits.tsx`.
+ *
+ * This is {@link missingRowReason}'s fix in the shape that function already
+ * proved out for `SessionView`, one screen over: the arm that was missing is
+ * "still finding out", and it is a value in a partition rather than a fourth
+ * boolean at each call site.
+ *
+ * **`probing` is `readable`, and that is the half that looks wrong.** It is not
+ * a measurement in progress *from nothing* — it is this client re-checking a
+ * route it deliberately forgot, on a machine it already believed in, publishing
+ * twice on every tab switch. `daemonReadable`'s docblock above is entirely about
+ * why taking the screen away for that is a regression, and this partition keeps
+ * that answer rather than reopening it: `unknown` is the never-asked state and is
+ * the only one that gets the new arm. The invariant is exact — `daemonReadable`
+ * is `daemonRead(reach) === "readable"` for all four values, because it is
+ * literally implemented as that.
+ *
+ * Pure, and beside `daemonReadable` for that function's reason: `webcheck` walks
+ * all four `Reach` values here instead of asserting JSX on four screens.
+ */
+export function daemonRead(reach: Reach): DaemonRead {
+  // Never asked. Not an answer, and above all not a failure — the sentence a
+  // screen draws here is about this client, not about the host.
+  if (reach === "unknown") return "asking";
+  // Asked, and did not get one. The only arm that has earned the word "not
+  // reachable", and the only one `reachText`'s `OFFLINE_TEXT` half describes.
+  if (reach === "offline") return "unreachable";
+  return "readable";
 }
 
 export interface MachineState {

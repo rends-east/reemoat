@@ -1,4 +1,4 @@
-import { Paperclip, Send, Square, X } from "lucide-react";
+import { Paperclip, RefreshCw, Send, Square, X } from "lucide-react";
 import {
   useEffect,
   useLayoutEffect,
@@ -23,7 +23,9 @@ import {
   sendableAttachments,
   subscribeAttachments,
   updateAttachment,
+  type PendingAttachment,
 } from "../attach";
+import type { DaemonClient } from "../daemon";
 import { clearEcho, setEcho } from "../echo";
 import { errorText } from "../http";
 import { keyOf, type SessionRef } from "../ids";
@@ -141,6 +143,47 @@ const EMPTY_EVENTS: readonly StoredEvent[] = [];
 /** Same reason, for the two lists the command menu is derived from. */
 const EMPTY_COMMANDS: AgentCommandList = { commands: [], dropped: 0 };
 
+/**
+ * A chip that will not finish on its own.
+ *
+ * `uploading` clears itself and `ready` is already done; `failed` is the one state
+ * whose way out is a decision somebody has to make, which is why it is the one
+ * that holds Send.
+ */
+function stalled(list: readonly PendingAttachment[]): boolean {
+  return list.some((item) => item.state === "failed");
+}
+
+/**
+ * `canSend`, and the one refusal it does not make.
+ *
+ * ⚠ **A failed attachment holds Send now, and it deliberately did not before.**
+ * The old argument was sound while its premise held: a failed chip is never going
+ * to finish by itself, so gating Send on it left removing the file as the only way
+ * out — a message you cannot send until you throw away the screenshot it is about.
+ * The premise was that there is no retry. There was not one: `attach`'s failure
+ * arm claimed in a comment that the chip stayed "with a retry" while the chip drew
+ * Remove and nothing else. There is a real one now, so there are two ways out and
+ * Send may be held by the one that keeps the file.
+ *
+ * And it has to be held, because the alternative is the failure this gate already
+ * exists to prevent, arriving one state later. Sending past a failed chip
+ * delivered "here is the screenshot" with no screenshot:
+ * `sendableAttachments` names only `ready` ids, `forgetAttachments` then cleared
+ * the chip, and neither the message, the echo nor a toast said a file had gone. An
+ * upload still *in flight* has always blocked for exactly that reason; the only
+ * difference between the two is which one clears itself, and that difference is
+ * about how long somebody waits rather than about what gets sent.
+ *
+ * Here rather than inside `canSend` because this is the screen that can see the
+ * chip and draws the Retry on it — a refusal belongs with its remedy.
+ * ⚠ `canSend`'s own docblock still argues the old rule for `failed`; that is a
+ * statement about `canSend` alone now, not about what this composer will send.
+ */
+function sendable(text: string, list: readonly PendingAttachment[], refused: boolean): boolean {
+  return canSend(text, list, refused) && !stalled(list);
+}
+
 /** Distinguishes chips within one session. Never leaves the client. */
 let uploadSeq = 0;
 
@@ -244,9 +287,108 @@ export function Composer({
    * component already refuses to put there.
    */
   useSyncExternalStore(subscribeAttachments, attachmentsVersion);
-  // For drawing the chips and for `canSend`. The ids that actually go on the wire
+  // For drawing the chips and for `sendable`. The ids that actually go on the wire
   // are resolved inside `send`, from the live list — see the note there.
   const attachments = attachmentsFor(key);
+  /**
+   * No room for an eleventh file.
+   *
+   * `admitFiles`'s rule, read the way that function states it: an `uploading` chip
+   * holds a slot and a `failed` one does not, because a failed chip is not going to
+   * be sent. Named once because two controls ask it now — the paperclip, and a
+   * failed chip's Retry, which turns a chip holding no slot into one that does.
+   * `admitFiles` says in as many words that this is the rule that would otherwise
+   * be decided differently in two places, and the second place is here.
+   */
+  const slotsFull =
+    attachments.filter((item) => item.state !== "failed").length >= MAX_PROMPT_ATTACHMENTS;
+
+  /**
+   * Stream one staged file to the daemon and settle its chip, whichever way it
+   * goes.
+   *
+   * Split out of {@link attach} because a failed chip can be retried now, and a
+   * retry is this same upload against the same `File` — which `PendingAttachment`
+   * holds for exactly that reason. Written twice it would be two places deciding
+   * what a failure leaves on screen, and the failure arm is the half somebody has
+   * to act on.
+   *
+   * The `AbortController` is the caller's rather than this function's: it is what
+   * the chip's own `cancel` closes over, so `removeAttachment` and
+   * `forgetAttachments` can abort an upload they can only reach through the chip.
+   */
+  const upload = async (
+    daemon: DaemonClient,
+    item: { localId: string; file: File; name: string },
+    controller: AbortController,
+  ): Promise<void> => {
+    try {
+      const answer = await daemon.uploadFile(
+        sessionRef.sessionId,
+        item.file,
+        item.name,
+        // Resolves `(key, localId)` and no-ops if the entry is gone, which is
+        // what lets a session switch mid-upload simply not matter.
+        (fraction) => updateAttachment(key, item.localId, { progress: fraction }),
+        controller.signal,
+      );
+      updateAttachment(key, item.localId, {
+        state: "ready",
+        progress: 1,
+        uploadId: answer.upload.uploadId,
+        // The daemon may have shortened it. Show what it will actually be.
+        name: answer.upload.name,
+        cancel: null,
+      });
+    } catch (cause) {
+      // An abort is `removeAttachment` or `forgetAttachments` doing what was asked
+      // of them, and there is no chip left to write a failure onto.
+      if (controller.signal.aborted) return;
+      // The chip stays, carrying the daemon's own message, beside a Retry that
+      // reaches this function again with the same `File`. A toast and a vanished
+      // chip is the "nothing to retype from" failure this file already names for
+      // the config path — and until `retry` existed, this comment was the only
+      // place that retry existed at all.
+      updateAttachment(key, item.localId, {
+        state: "failed",
+        error: errorText(cause),
+        cancel: null,
+      });
+    }
+  };
+
+  /**
+   * Send a failed chip's file again.
+   *
+   * **The remedy two docblocks already claimed was here.** The failure arm above
+   * said the chip stayed "with a retry" and `PendingAttachment.file` is documented
+   * as held "so a failed chip can be retried" — while the chip drew Remove and
+   * nothing else, so the only way past a failed upload was to throw the file away
+   * and pick it again, which for a pasted screenshot means taking it again.
+   *
+   * A fresh `AbortController`, not the dead one: the failed chip's `cancel` is
+   * `null` by then, and reusing an already-aborted signal would make this fail
+   * instantly and silently.
+   *
+   * **It does not join the batch's queue, and that is deliberate.** {@link attach}
+   * uploads sequentially so ten files cannot each take a share of one tunnel
+   * window; a retry is one file and one gesture, and holding it behind a queue
+   * nobody can see would make the button look dead exactly where somebody is
+   * already looking at something that failed. One extra stream is not the ten that
+   * rule exists for.
+   */
+  const retry = (item: PendingAttachment): void => {
+    const daemon = store.daemonFor(sessionRef.machineId);
+    if (daemon === undefined || item.state !== "failed") return;
+    const controller = new AbortController();
+    updateAttachment(key, item.localId, {
+      state: "uploading",
+      progress: 0,
+      error: null,
+      cancel: () => controller.abort(),
+    });
+    void upload(daemon, item, controller);
+  };
 
   /**
    * Take files from the picker and start uploading them.
@@ -311,37 +453,10 @@ export function Composer({
     );
 
     void (async () => {
-      for (const item of staged) {
-        try {
-          const answer = await daemon.uploadFile(
-            sessionRef.sessionId,
-            item.file,
-            item.name,
-            // Resolves `(key, localId)` and no-ops if the entry is gone, which is
-            // what lets a session switch mid-upload simply not matter.
-            (fraction) => updateAttachment(key, item.localId, { progress: fraction }),
-            item.controller.signal,
-          );
-          updateAttachment(key, item.localId, {
-            state: "ready",
-            progress: 1,
-            uploadId: answer.upload.uploadId,
-            // The daemon may have shortened it. Show what it will actually be.
-            name: answer.upload.name,
-            cancel: null,
-          });
-        } catch (cause) {
-          if (item.controller.signal.aborted) continue;
-          // The chip stays, carrying the daemon's own message, with a retry. A
-          // toast and a vanished chip is the "nothing to retype from" failure
-          // this file already names for the config path.
-          updateAttachment(key, item.localId, {
-            state: "failed",
-            error: errorText(cause),
-            cancel: null,
-          });
-        }
-      }
+      // One at a time, for the reason this function's docblock gives. `upload`
+      // settles each chip itself and never rejects, so nothing here can strand the
+      // files behind it.
+      for (const item of staged) await upload(daemon, item, item.controller);
     })();
   };
 
@@ -685,7 +800,7 @@ export function Composer({
    * somebody stopped by hand: sending into one starts it again, which is the
    * same promise every other row on this screen already makes.
    *
-   * **What is gated is Send, never the box.** `canSend` and the placeholder say
+   * **What is gated is Send, never the box.** `sendable` and the placeholder say
    * what will happen; the daemon answers with a real refusal when it must, and
    * that refusal is drawn in the conversation. Nothing about the *sending* path
    * changed here — only that there is always something to send from.
@@ -877,10 +992,10 @@ export function Composer({
     const daemon = store.daemonFor(sessionRef.machineId);
     if (busy || daemon === undefined) return;
     // Text **or** files. A message that is only a screenshot is legitimate, and
-    // `canSend` is where that rule lives so the button and this guard cannot
-    // disagree — it also refuses while an upload is in flight, because sending
-    // then would deliver a files-only message with no files in it.
-    if (!canSend(text, attachments, sendRefused)) return;
+    // `sendable` is where that rule lives so the button and this guard cannot
+    // disagree — it also refuses while an upload is in flight or has failed,
+    // because sending then would deliver a files-only message with no files in it.
+    if (!sendable(text, attachments, sendRefused)) return;
 
     /*
      * A typed control is a control, not a message.
@@ -936,12 +1051,14 @@ export function Composer({
         else if (rest.length === 0) drafts.delete(key);
         else drafts.set(key, rest);
         // Nothing after the name is the ordinary case — `/plan` on its own is a
-        // whole gesture. `canSend` decides for the rest, so a files-only message
-        // still goes and an empty one does not.
+        // whole gesture. `sendable` decides for the rest, so a files-only message
+        // still goes, an empty one does not, and one whose upload failed waits in
+        // the box for the Retry on its own chip rather than going without it.
         //
         // Against the **live** set and not this render's copy: a round trip has
-        // happened since, and nothing stops a file being attached during it.
-        if (canSend(rest, attachmentsFor(key), sendRefused)) send(rest, true);
+        // happened since, and nothing stops a file being attached — or failing —
+        // during it.
+        if (sendable(rest, attachmentsFor(key), sendRefused)) send(rest, true);
       });
       return;
     }
@@ -1225,9 +1342,18 @@ export function Composer({
       <div className={COLUMN}>
       {/* Its own full-width row rather than a place in the control strip: chips
           wrap to two lines and need the width a phone has, and the strip is a
-          single line of controls that must not reflow under them. */}
+          single line of controls that must not reflow under them.
+
+          The row gap is twice the column gap, and the 12px is arithmetic rather
+          than taste. A chip's controls are `IconButton size="sm"`, 24px of ink
+          centred in a 34px chip inside a symmetric `after:-inset-2.5`, so each
+          target reaches 5px past the chip's own top and bottom edge. At `gap-1.5`
+          two wrapped rows sit 6px apart, so those targets overlapped across 4px of
+          that 6px gap and the lower row painted last and won — aim below one
+          file's Remove and remove the file under it instead. 12px leaves 2px of
+          clearance. It costs 6px, and only once there are enough files to wrap. */}
       {attachments.length > 0 && (
-        <ul className="flex flex-wrap gap-1.5 px-3 pb-2">
+        <ul className="flex flex-wrap gap-x-1.5 gap-y-3 px-3 pb-2">
           {attachments.map((item) => (
             <li
               key={item.localId}
@@ -1235,8 +1361,46 @@ export function Composer({
                 item.state === "failed" ? "border-danger/50 bg-danger/5" : "border-edge bg-surface"
               }`}
             >
+              {/*
+               * The leading slot says what is happening to this file, so on the one
+               * state that needs a decision it is the control that makes it:
+               * spinner while it is going up, paperclip once it is staged, and the
+               * way out when it failed.
+               *
+               * **It is here rather than beside Remove because of the arithmetic,
+               * not the semantics.** `size="sm"` is 24px of ink inside a symmetric
+               * `after:-inset-2.5`, so two of them need 20px between their boxes
+               * before their targets stop overlapping — at the row's `gap-1.5` they
+               * share 14px, and a positioned pseudo-element of a later sibling
+               * paints on top, so the *destructive* control would have won that
+               * band and a tap aimed just right of Retry would delete the file.
+               * That is the adjacency `TAP_GROW_Y`'s note warns about, and 20px of
+               * blank between two glyphs inside one chip is not a fix, it is a
+               * different defect on a 390px phone. Here Retry's only neighbours are
+               * the chip's own padding and an inert name, so both controls keep a
+               * whole 44px: from the previous chip's Remove there are 24px
+               * (`px-2`, two borders and `gap-x-1.5`), which clears 20px.
+               *
+               * Remove also stays last in every state, so the control does not move
+               * along the chip when an upload settles.
+               */}
               {item.state === "uploading" ? (
                 <Spinner />
+              ) : item.state === "failed" ? (
+                <IconButton
+                  icon={RefreshCw}
+                  label={`Upload ${item.name} again`}
+                  size="sm"
+                  // A retry turns a chip that holds no slot into one that does, so
+                  // it is refused exactly where the paperclip is and by the same
+                  // expression — the daemon answers `400 too_many_attachments`
+                  // above ten, and a retry into an eleventh slot would buy a chip
+                  // that can never be sent. Remove stays live, which is what keeps
+                  // a full strip out of a deadlock now that a failed chip holds
+                  // Send.
+                  disabled={slotsFull}
+                  onClick={() => retry(item)}
+                />
               ) : (
                 <Paperclip size={11} className="shrink-0 text-faint" />
               )}
@@ -1250,14 +1414,18 @@ export function Composer({
                     ? (item.error ?? "failed")
                     : formatBytes(item.size)}
               </span>
-              <button
-                type="button"
-                aria-label={`Remove ${item.name}`}
+              {/* Was a hand-rolled `<button>` around an 11px glyph: `.tap` is three
+                  transitions and adds no hit area, so this was a ~15px target on
+                  the row where a mis-tap throws away bytes that are already on the
+                  daemon. It also had colour-only hover on the faintest value in
+                  the palette, which is the pair of defects `IconButton` exists to
+                  retire. */}
+              <IconButton
+                icon={X}
+                label={`Remove ${item.name}`}
+                size="sm"
                 onClick={() => removeAttachment(key, item.localId)}
-                className="tap shrink-0 rounded p-0.5 text-faint hover:text-fg"
-              >
-                <X size={11} />
-              </button>
+              />
             </li>
           ))}
         </ul>
@@ -1520,16 +1688,34 @@ export function Composer({
              * was working or while a question was parked. `canSend` refuses now
              * and the placeholder says which of the two it is.
              */
-            label={sendRefused ? "Wait for the agent — it cannot take a message yet" : "Send"}
+            /*
+             * The third arm is heard rather than seen, and it is worth having
+             * anyway. `IconButton` carries `disabled:pointer-events-none`, so a
+             * disabled button never shows its `title` — the mechanical fact the
+             * `stopping` branch above is also built around — but the `aria-label`
+             * is still read, which is the difference between a dead control and one
+             * that says what it is waiting for. The *sighted* answer is on the row
+             * above: a chip in danger colours carrying the daemon's own message,
+             * with the Retry that clears this at its head. The uploading case gets no
+             * arm because it clears itself, and a spinner in a chip is already the
+             * sentence.
+             */
+            label={
+              sendRefused
+                ? "Wait for the agent — it cannot take a message yet"
+                : stalled(attachments)
+                  ? "An attachment did not upload — retry it or remove it"
+                  : "Send"
+            }
             tone="primary"
             size="lg"
             type="submit"
-            // A visible refusal while a file is still going up. Sending now would
-            // send the message without the attachment somebody just added, and a
-            // *failed* chip deliberately does not block — it is never going to
-            // finish, so holding Send hostage to it would leave no way out but
-            // removing it.
-            disabled={!canSend(text, attachments, sendRefused)}
+            // A visible refusal while an attachment is not something the prompt can
+            // name — one still going up, and now one that failed as well. Either
+            // way sending would deliver the message without the file it is about;
+            // `sendable` carries the argument, including why the failed half of it
+            // reverses what this comment used to say.
+            disabled={!sendable(text, attachments, sendRefused)}
           />
         )}
       </form>
@@ -1610,7 +1796,7 @@ export function Composer({
             // `resource_link`, so there is no agent for which this does nothing.
             // Only the count limit closes it, and a terminal session does not —
             // `resume` exists, and staging a file for one is the ordinary flow.
-            disabled={attachments.filter((item) => item.state !== "failed").length >= MAX_PROMPT_ATTACHMENTS}
+            disabled={slotsFull}
             onClick={() => fileInput.current?.click()}
           />
         }

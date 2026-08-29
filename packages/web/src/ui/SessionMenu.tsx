@@ -54,13 +54,25 @@ export function SessionMenu({
   sessionRef,
   state,
   onRename,
-  size = "md",
+  size = "lg",
 }: {
   sessionRef: SessionRef;
   state: AppState;
   onRename: () => void;
-  /** `sm` for a list row, where the menu must not outweigh the row it sits on. */
-  size?: "sm" | "md";
+  /**
+   * `sm` for a list row, where the menu must not outweigh the row it sits on.
+   *
+   * ⚠ **It was `"sm" | "md"` defaulting to `md`, and `md` is gone** — deleted from
+   * `ICON_BUTTON_SIZE` for being the one entry that never reached 44px, and the
+   * default at that. So the header's kebab had to be named again, and it could not
+   * simply become `sm`: `Header`'s own docblock argues that this control and the
+   * chevron opposite it must be the *same* size or the centred middle column
+   * between them stops being centred, and argues that pair to 44px boxes rather
+   * than to 24px boxes wearing an `after:-inset-2.5` that would reach 2px onto the
+   * rename button in the middle. The two values left are therefore the two places
+   * this menu is actually drawn: a row in the list, and a phone's navigation bar.
+   */
+  size?: "sm" | "lg";
 }): ReactNode {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -108,7 +120,12 @@ export function SessionMenu({
   const setMeta = (patch: { pinned?: boolean }): void => {
     const daemon = store.daemonFor(sessionRef.machineId);
     if (daemon === undefined) {
-      toast("error", "that machine is not reachable");
+      // A sentence, and it names what did not happen. This said "that machine is
+      // not reachable" — a lower-case fragment stating a fact about the fleet next
+      // to a menu row that had visibly done nothing, leaving the reader to work out
+      // for themselves whether the pin they just tapped had taken. The one caller
+      // toggles `pinned`, so the consequence can be named exactly.
+      toast("error", "That machine is not reachable right now, so the pin was not changed.");
       return;
     }
     setBusy(true);
@@ -131,7 +148,11 @@ export function SessionMenu({
   const press = (pluginId: string, actionId: string): void => {
     const daemon = store.daemonFor(sessionRef.machineId);
     if (daemon === undefined) {
-      toast("error", "that machine is not reachable");
+      // "did not run" rather than "failed": nothing was sent, so there is no
+      // half-done state to worry about and pressing the row again is safe. That is
+      // the whole of what somebody needs from this toast, and the fragment it
+      // replaces said none of it.
+      toast("error", "That machine is not reachable right now, so the action did not run.");
       return;
     }
     setBusy(true);
@@ -347,7 +368,11 @@ export function RenameField({
     if (next === (current ?? "").trim()) return;
     const daemon = store.daemonFor(sessionRef.machineId);
     if (daemon === undefined) {
-      toast("error", "that machine is not reachable");
+      // The third copy of the same fragment, and the one where the consequence is
+      // least guessable: `onDone()` has already run, so the input is gone and the
+      // old name is back on screen — which looks exactly like a rename that was
+      // accepted and then normalized away. It has to say the name was not saved.
+      toast("error", "That machine is not reachable right now, so the new name was not saved.");
       return;
     }
     void daemon

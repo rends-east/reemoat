@@ -20,15 +20,25 @@
 
 import { isNewer } from "./catalogue";
 import type { MachineId } from "./ids";
-import { daemonReadable, type MachineState } from "./machine";
+import { daemonRead, type MachineState } from "./machine";
 
 /**
  * Why a chosen machine was not even attempted.
  *
  * A closed union rather than free text, so `webcheck` can assert the partition
  * over every machine state and the sentences live in one table.
+ *
+ * ⚠ **`asking` is the newest of the five and it is not a refusal, which is the
+ * whole reason it is a member rather than a fifth spelling of `unreachable`.** The
+ * four before it are answers somebody can act on — three bans and an outage — while
+ * this one is *this client* not having asked yet. Folded into `unreachable` it made
+ * a machine nobody had put a question to report a failure it had not had, for the
+ * seconds between `bootstrap` promoting to `phase: "ready"` and the first probe
+ * landing. See {@link skipReasonFor}, where the repair is, and `machine.ts`'s
+ * `daemonRead`, which is where the same partition was already drawn for three
+ * settings screens.
  */
-export type SkipReason = "over_limit" | "owner_disabled" | "not_admin" | "unreachable";
+export type SkipReason = "over_limit" | "owner_disabled" | "not_admin" | "unreachable" | "asking";
 
 export interface SkippedTarget {
   id: MachineId;
@@ -58,7 +68,7 @@ export type TargetOutcome =
  * Which of the chosen machines can be attempted, and which cannot.
  *
  * ⚠ **The two lists are a partition of `chosen` — every id is in exactly one —
- * and that is the property `webcheck` asserts** rather than the four reasons. A
+ * and that is the property `webcheck` asserts** rather than the five reasons. A
  * machine that fell out of both would be one somebody selected and never heard
  * about again, which is the failure this whole screen is shaped to prevent.
  *
@@ -66,17 +76,24 @@ export type TargetOutcome =
  * rule: a banned owner needs an admin, an over-limit machine needs one retired,
  * a missing grant needs its owner, and only then is "it is asleep" worth saying.
  * A machine in more than one of those states names the one that has to be fixed
- * first.
+ * first. Waiting is last because it is not a remedy at all — there is nothing to
+ * do about it and it is over in a second or two.
  *
- * ⚠ **All four disable the row, and `unreachable` earns that for a reason the
- * other three do not share.** The checkbox on the screen means *this plugin is
- * installed here* — so for a machine nobody can reach, there is no honest box to
- * draw: the client cannot read what is installed there (`fetchPlugins` leaves the
- * list empty on failure, which is indistinguishable from "none"), and it could not
- * install anything if you ticked it. Drawing it unticked would be a claim. The
- * other three are controls that could only ever be *refused*: `ensureToken` throws
- * for the first two locally with no network at all, and a daemon answers the third
- * `403 insufficient_scope`.
+ * ⚠ **Four of the five disable the row's box, and the fifth deliberately does
+ * not.** This read "all four disable the row" while there were four, and the state
+ * that has since been split out of `unreachable` is the one it would have been
+ * wrong about. The four are answers: three that could only ever be *refused*
+ * (`ensureToken` throws for the first two locally with no network at all, and a
+ * daemon answers the third `403 insufficient_scope`) and one where there is nothing
+ * honest to draw at all — the client cannot read what is installed on a machine it
+ * cannot reach (`fetchPlugins` leaves the list empty on failure, which is
+ * indistinguishable from "none"), so a box drawn either way is a claim.
+ *
+ * `asking` is none of that. It is the window before the first probe, so it still
+ * offers **no act** — what is installed there is genuinely not known yet — and it
+ * leaves the **checkbox alone**, because ticking a row chooses a machine rather
+ * than asserting anything about it, and a selection made during that window is
+ * still the right selection two seconds later. `MachineInstalls` draws that half.
  */
 export function planTargets(
   machines: readonly MachineState[],
@@ -93,7 +110,12 @@ export function planTargets(
   return { eligible, skipped };
 }
 
-/** Why this machine cannot be installed to, or `null`. Ordered by remedy. */
+/**
+ * Why this machine cannot be installed to, or `null`.
+ *
+ * Ordered by remedy, with the one that has no remedy last: waiting is not
+ * something anybody can be told to fix.
+ */
 export function skipReasonFor(machine: MachineState): SkipReason | null {
   if (machine.ownerDisabled) return "owner_disabled";
   if (machine.overLimit) return "over_limit";
@@ -105,7 +127,25 @@ export function skipReasonFor(machine: MachineState): SkipReason | null {
    * arrives after somebody has waited for an upload.
    */
   if (!machine.scopes.includes("machine:admin")) return "not_admin";
-  if (!daemonReadable(machine.reach)) return "unreachable";
+  /*
+   * ⚠ **`daemonRead` rather than `daemonReadable`, and the line this replaces was
+   * `if (!daemonReadable(machine.reach)) return "unreachable"`.** That answers
+   * `false` for `unknown` as well as for `offline`, and `unknown` is not a machine
+   * that failed to answer — it is one nobody has asked. `bootstrap` promotes to
+   * `phase: "ready"` on the *machine list*, before a single probe, and
+   * `resumeMachine` calls `forgetRoute()` on every wake, so on a cold load every
+   * row on this screen reported an outage that had not happened: greyed, box
+   * disabled, acts stripped, and "not reachable right now" written under the name.
+   * `machine.ts` had already partitioned this for three settings screens; these two
+   * predicates are what it was never applied to.
+   *
+   * The three tests above stay ahead of it, because a ban is true whatever a probe
+   * would have said. `probing` is `readable` and therefore attempted, which is
+   * `daemonReadable`'s own decision kept rather than reopened.
+   */
+  const read = daemonRead(machine.reach);
+  if (read === "asking") return "asking";
+  if (read === "unreachable") return "unreachable";
   return null;
 }
 
@@ -114,7 +154,9 @@ export function skipReasonFor(machine: MachineState): SkipReason | null {
  *
  * Named for the *remedy* rather than for the state, which is what the machines
  * screen already does one file over: "over the machine limit" tells somebody
- * nothing they can act on, and "retire another" does.
+ * nothing they can act on, and "retire another" does. The exception is `asking`,
+ * which has no remedy and says the state precisely because there is nothing to
+ * offer somebody there.
  */
 export function skipText(reason: SkipReason): string {
   switch (reason) {
@@ -128,6 +170,16 @@ export function skipText(reason: SkipReason): string {
       // Says what is unknown rather than what failed: nothing was attempted, and
       // what is installed there cannot be read either.
       return "not reachable right now, so what is installed there cannot be read";
+    case "asking":
+      /*
+       * ⚠ **A wait, and it may not borrow the sentence above it.** This state was
+       * *inside* that arm until the partition split them, so a row said a host was
+       * not reachable two seconds before it turned out to be online — the same
+       * defect `reachText` records one file over, where the fix was the same words:
+       * a machine nobody has measured is "not checked yet", and nothing here has
+       * earned "not reachable".
+       */
+      return "not checked yet, so what is installed there is not known";
   }
 }
 
@@ -197,11 +249,18 @@ export type RowAct = "install" | "update" | "remove";
  * machine that already has it, so a row offering Update alone would claim an
  * install state it does not hold.
  *
- * ⚠ **A blocked row offers nothing, all four `skipReasonFor` states included.**
+ * ⚠ **A blocked row offers nothing, all five `skipReasonFor` states included.**
  * Under the draft this was a rule about `unreachable` — an unticked box on a
  * machine nobody can read would be a claim about what is installed there. Under
  * live acts it is stronger: an Install button there fires a request that cannot
  * land, and a Remove button claims there is something to remove.
+ *
+ * ⚠ **`asking` is the fifth and it is empty for a different reason**, which is
+ * worth knowing before somebody "fixes" it: the other four are refusals, this one
+ * is an absence of knowledge. Nothing is offered because `pluginsByMachine` holds
+ * nothing for a machine that has not answered a session list, so *every* act would
+ * be drawn from a guess about what is installed there. It is also the one state
+ * that leaves the row's checkbox live — see {@link planTargets}.
  *
  * ⚠ **A busy row offers nothing either**, which is also what stops a second bulk
  * press double-sending: the counts the bar reads are derived from this, so a
@@ -339,14 +398,15 @@ export function isBehind(version: string, available: string | null): boolean {
  * configure what is already there — and reusing the install predicate here would
  * grey out the one control that grant is entitled to.
  *
- * ⚠ **`not_installed` and `no_pane` sit BELOW `no_scope` and `unreachable`, and
- * the obvious order is a bug.** `store.fetchPlugins` swallows every failure into an
- * empty list, so a 403 for a missing scope and a daemon nobody can reach both
- * produce `installed === null` — and answering *"that machine does not have this
- * plugin"* about either is a claim this client cannot make. That is
- * `skipReasonFor`'s own argument about `unreachable`, one field over and one extra
- * time. It also happens to be the remedy order: two bans, then two things that
- * cannot be known, then two facts.
+ * ⚠ **`not_installed` and `no_pane` sit BELOW `no_scope`, `asking` and
+ * `unreachable`, and the obvious order is a bug.** `store.fetchPlugins` swallows
+ * every failure into an empty list — and never runs at all for a machine that has
+ * not answered a session list — so a 403 for a missing scope, a daemon nobody can
+ * reach and a daemon nobody has asked yet all three produce `installed === null`,
+ * and answering *"that machine does not have this plugin"* about any of them is a
+ * claim this client cannot make. That is `skipReasonFor`'s own argument about
+ * `unreachable`, one field over and one extra time. It also happens to be the
+ * remedy order: two bans, then three things that cannot be known, then two facts.
  *
  * ⚠ **`enabled` is not consulted**, `offersSettings`' standing rule: a plugin
  * somebody switched off is the commonest reason to open its settings.
@@ -358,6 +418,7 @@ export type SettingsBlock =
   | "owner_disabled"
   | "over_limit"
   | "no_scope"
+  | "asking"
   | "unreachable"
   | "not_installed"
   | "no_pane";
@@ -370,7 +431,18 @@ export function settingsBlockFor(
   if (machine.ownerDisabled) return "owner_disabled";
   if (machine.overLimit) return "over_limit";
   if (!machine.scopes.includes("session:read")) return "no_scope";
-  if (!daemonReadable(machine.reach)) return "unreachable";
+  /*
+   * ⚠ **{@link skipReasonFor}'s repair, made a second time because these two are
+   * deliberately not one predicate.** This was
+   * `if (!daemonReadable(machine.reach)) return "unreachable"`, so a machine nobody
+   * had asked yet wrote *"laptop is not reachable right now, so its settings cannot
+   * be read"* into the bar's notice and greyed Settings over a fleet that was about
+   * to answer — and `settingsNotice` names the first blocker in fleet order, so one
+   * unasked machine spoke for the whole selection.
+   */
+  const read = daemonRead(machine.reach);
+  if (read === "asking") return "asking";
+  if (read === "unreachable") return "unreachable";
   if (installed === null) return "not_installed";
   if (!installed.contributes.settings) return "no_pane";
   return null;
@@ -385,6 +457,11 @@ export function settingsBlockText(block: SettingsBlock, machineName: string, ver
       return `${machineName} is over the machine limit — retire another to bring it back`;
     case "no_scope":
       return `you have access to ${machineName}'s sessions but not to what is installed on it`;
+    case "asking":
+      // Not "cannot be read" but "not read yet", and the difference is the whole of
+      // this arm: nothing has been asked, so nothing has failed. `skipReasonFor`'s
+      // own note about borrowing the sentence below applies here word for word.
+      return `${machineName} has not been checked yet, so its settings have not been read`;
     case "unreachable":
       return `${machineName} is not reachable right now, so its settings cannot be read`;
     case "not_installed":

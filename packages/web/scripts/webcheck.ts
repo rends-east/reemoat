@@ -768,11 +768,23 @@ process.stdout.write("\na machine that moved to another relay\n");
  * can change, and a call site that forgets the first half prints `[object
  * Object]` where a control plane had written a sentence.
  *
- * Two arms, and the second is a *faithful extraction* rather than an improvement:
- * `String(cause)` yields `"TypeError: Failed to fetch"` for a dead network, which
- * is exactly what those 23 sites already showed. Pinned in both directions, so
- * that changing what people read on 23 screens has to be a deliberate edit here
- * rather than a side effect of tidying `errorText`.
+ * ⚠ **Three arms now, and the middle one is the edit the extraction deferred.**
+ * The note that used to stand here said the second arm was "a *faithful
+ * extraction* rather than an improvement": `String(cause)` yields
+ * `"TypeError: Failed to fetch"` for a dead network, which is what all 23 sites
+ * already showed, and *"changing what people read on 23 screens belongs in its own
+ * edit"*. This is that edit. What was reaching those screens verbatim was a
+ * constructor name and a Chrome string — and from `sendWithProgress`'s own budgets
+ * `TypeError: upload stalled` — printed at somebody who had opened a settings pane
+ * to find out what went wrong.
+ *
+ * The sentence is still pinned in both directions, and now there is a third thing
+ * to pin: **which** failures get it. `isTransportFailure` alone is a *negation* —
+ * "not an `ApiError`" — so it is true of a thrown string, a thrown object and a
+ * bug in this client as well as of a dead link. Those are this client
+ * mis-throwing, and reporting them as a network failure would hide a defect behind
+ * a sentence about the weather, so `errorText` pairs the predicate with
+ * `instanceof Error` and the arms below are what hold that pairing in place.
  * ------------------------------------------------------------------ */
 
 process.stdout.write("\nwhat a failed call puts on screen\n");
@@ -789,12 +801,48 @@ process.stdout.write("\nwhat a failed call puts on screen\n");
   );
   check("and the code is not smuggled into it", errorText(new ApiError(503, "no_tunnel", "no daemon")), "no daemon");
 
-  // The unanswered arm. `String(error)` rather than `error.message`, because that
-  // is what the 23 sites did and a bare "Failed to fetch" says less.
-  check("a dead network keeps its own words", errorText(new TypeError("Failed to fetch")), "TypeError: Failed to fetch");
-  check("an abort says so", errorText(new DOMException("The operation was aborted.", "TimeoutError")), "TimeoutError: The operation was aborted.");
-  // Nothing thrown here is guaranteed to be an `Error`: a `catch (cause: unknown)`
-  // takes whatever was thrown, and the point of the arm is that all of it renders.
+  /*
+   * The unanswered arm. `TRANSPORT_TEXT` is not exported — it is one sentence in
+   * `http.ts` and exporting it would invite a second caller to compose with it —
+   * so the literal is written out here and the three checks below are what tie it
+   * to the implementation. The assertions about its *shape* that follow are then
+   * assertions about the shipped string rather than about a copy of it.
+   *
+   * **Two clauses, and the second is the whole reason this is not "try again".** A
+   * transport failure says nothing about whether the daemon acted: `machine.ts`'s
+   * `settleTransport` argues it at length and acts on it, refusing to replay
+   * anything but a `GET` or a `DELETE`, because the failure that most often lands
+   * here is this client's own `AbortSignal.timeout` firing long after the daemon
+   * accepted the request, appended the event and started the turn.
+   */
+  const TRANSPORT = "the connection failed, and whether the request arrived is not known";
+  check("a dead network says what is known and what is not", errorText(new TypeError("Failed to fetch")), TRANSPORT);
+  check("an abort says the same thing, because it means the same thing", errorText(new DOMException("The operation was aborted.", "TimeoutError")), TRANSPORT);
+  /*
+   * ⚠ **The stalled upload, which is the one that had a *second* constructor name
+   * to leak.** `ImportCode`'s `uploadFailureText` maps the codes it knows and falls
+   * through to `errorText`, so before this arm existed a stalled archive upload
+   * read `TypeError: upload stalled` on a screen whose whole subject is a file.
+   */
+  check("and so does a request this client gave up on", errorText(new TypeError("upload stalled")), TRANSPORT);
+  /*
+   * The register, asserted rather than left to a reader's eye: lower case and
+   * unpunctuated, which is what the `ApiError` messages beside it look like — `you
+   * already have a machine called that`, `${name} is not reachable` — so a caller
+   * cannot tell which arm it got and does not have to.
+   */
+  check("in the register of the answers it sits beside", [/^[a-z]/.test(TRANSPORT), /[.!?]$/.test(TRANSPORT)], [true, false]);
+  // And it advises nothing, because there is nothing it can honestly advise: see
+  // the comment above, and `settleTransport`'s refusal to replay a write.
+  check("and it does not advise a retry it cannot promise", /try again|retry|reload|refresh/i.test(TRANSPORT), false);
+  /*
+   * ⚠ **The four `isTransportFailure` would have swallowed.** Nothing thrown here
+   * is guaranteed to be an `Error` — a `catch (cause: unknown)` takes whatever was
+   * thrown — and the predicate is true of every one of these, since it only asks
+   * whether the thing is *not* an `ApiError`. `instanceof Error` is the narrowing,
+   * and these are what it is for: a client that threw a string is a bug to find,
+   * not a network to blame.
+   */
   check("a thrown string renders", errorText("boom"), "boom");
   check("so does a thrown object", errorText({ nope: true }), "[object Object]");
   check("and nothing at all still says something", [errorText(null), errorText(undefined)], ["null", "undefined"]);
@@ -3596,9 +3644,14 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
    * `size="lg"` is absent from the pattern deliberately: an `IconButton` carries no
    * `tap` in the caller's markup, because the primitive adds its own — so a control
    * routed through the primitive is not scanned here at all. **That is an exemption
-   * rather than coverage**, and the sweep below is what makes it one; the sentence
-   * that used to sit here said the primitive's own 44px entry covered them, which
-   * is false for its *default* size and therefore for a third of its call sites.
+   * rather than coverage**, and the assertions at the end of this section are what
+   * make it one. The sentence that originally stood here said the primitive's own
+   * 44px entry covered them, which was false while `md` existed — 36px, with no
+   * growth mechanism, and the *default* — and therefore false for about a third of
+   * its call sites. `md` is deleted and `size` is required now, so the exemption is
+   * finally earned rather than assumed: the table has no entry under the floor, no
+   * caller can omit the prop, and no caller can take the size back through
+   * `className`, all three asserted down there rather than believed up here.
    * Only hand-rolled class strings reach the scan in this loop.
    */
   const DECISION_CARDS = ["AskCard.tsx", "PermissionCard.tsx", "ElicitationCard.tsx"];
@@ -3711,14 +3764,86 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
    * the standing counterexample to `web-shell.md`'s rule that everything else a
    * settings row can do sits behind **one kebab**. They are `RowAction`s now, and
    * `menuRow` is `min-h-11` at every pointer, so the four controls that left this
-   * count did not get smaller: they stopped needing an escape hatch. What remains
-   * is `PluginView`'s four (a plugin's own row actions, drawn by somebody who is
-   * not this app) and the two-step confirm this row keeps — and the assertion
+   * count did not get smaller: they stopped needing an escape hatch. The assertion
    * below is what proves the four went somewhere rather than away.
+   *
+   * ⚠ **This went on to enumerate what was left — "`PluginView`'s four and the
+   * two-step confirm this row keeps" — and that enumeration expired.** Measured
+   * now: `PluginView` still draws four (a plugin's own row actions, by somebody who
+   * is not this app) and `PluginsPanel` draws **three**, the confirming pair plus a
+   * Restart, so `small` is 7. The count below is deliberately a floor rather than
+   * the number, precisely so that a control arriving on this surface is not a
+   * failure — but a sentence naming the members is a second copy of a list, and it
+   * drifted the first time one was added. What the floor is for is the pattern:
+   * a `size="sm"` scan that matches nothing passes silently.
+   *
+   * ⚠ **And all seven now carry the escape twice**, which is a fact worth writing
+   * down before somebody reads it as duplication and tidies it: `BUTTON_SIZE.sm`
+   * carries the coarse floor itself as of this release, so these hand-written
+   * copies are redundant rather than wrong. Deleting them is safe **only** while
+   * the `BUTTON_SIZE` check directly below stands, which is why that check was
+   * added in the same change.
    */
   check("the plugin sweep actually found the controls", [tapped >= 1, small >= 6], [true, true]);
   check("nothing on a plugin's own surface is under 44px", shortPlugin, []);
   check("and every small control there keeps the coarse-pointer floor", bareSmall, []);
+
+  /*
+   * ⚠ **And the primitive all of those `size="sm"` call sites go through, which is
+   * where the floor actually lives — asserted here for the first time.**
+   *
+   * The sweep above reads *call sites*: it passes for every button that writes the
+   * escape into its own `className` by hand and says nothing whatever about the
+   * ones that do not. So for the whole time `BUTTON_SIZE.sm` was
+   * `"min-h-9 px-2.5 text-xs"` — 36px, no growth mechanism of any kind — this
+   * section was green, and the only thing holding that entry was its own docblock
+   * reserving `sm` for *"a confirmation that has replaced the controls on a
+   * settings row, so it is the only thing on that row"*. The table's docblock now
+   * carries the count of how many call sites took it anyway and how many of those
+   * are the exact opposite of that shape — an `Empty`'s `action`, the one control
+   * on an otherwise empty pane. **A reservation stated in a docblock and enforced
+   * by nothing is not a reservation**, which is `ICON_BUTTON_SIZE.md`'s lesson one
+   * table over: that one has been pinned here since it was learned, and this one
+   * never was.
+   *
+   * Held to `COARSE_FLOOR` rather than to a second spelling of 44, so there stays
+   * one definition of the escape in this file; and read off the **stripped**
+   * source, because the docblock above the table quotes the old 36px value
+   * verbatim while arguing that it expired.
+   */
+  {
+    const tableSrc = stripComments(readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8"));
+    const buttonAt = tableSrc.indexOf("const BUTTON_SIZE = {");
+    const buttonSizes = [
+      ...tableSrc.slice(buttonAt, tableSrc.indexOf("} as const;", buttonAt)).matchAll(/^ {2}(\w+): "([^"]*)",$/gm),
+    ].map((entry) => [entry[1] ?? "", entry[2] ?? ""] as const);
+    // The usual guard: a table that was renamed out from under this reads as an
+    // empty list, and every sweep below would pass over it having asserted nothing.
+    check("the button size table was found and has entries in it", [buttonAt >= 0, buttonSizes.length >= 2], [true, true]);
+    check(
+      "and every size a caller can name reaches 44px under a finger",
+      buttonSizes.filter(([, classes]) => !/\bmin-h-11\b/.test(classes)).map(([name]) => name),
+      [],
+    );
+    /*
+     * ⚠ **And which of the two ways each one gets there, because the pair is the
+     * property.** `md` is the default and is unconditionally 44px — demoting it to
+     * the media query would take the floor off every desktop pointer at once, and
+     * `/min-h-11/` above cannot tell the two apart. `sm` keeps its 36px density on a
+     * mouse and buys the floor back only where there is a finger, which is the whole
+     * of what the escape is for.
+     */
+    check(
+      "the default is 44px at every pointer",
+      buttonSizes.filter(([name]) => name === "md").map(([, classes]) => /^min-h-11\b/.test(classes)),
+      [true],
+    );
+    check(
+      "and the small one carries the escape rather than a bare height",
+      buttonSizes.filter(([name]) => name === "sm").map(([, classes]) => COARSE_FLOOR.test(classes)),
+      [true],
+    );
+  }
 
   /*
    * ⚠ **`ChoiceRow`, which neither sweep above reaches and which nothing else
@@ -4045,7 +4170,7 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
     );
   }
   {
-    const consent = readFileSync(new URL("../src/ui/PluginConsent.tsx", import.meta.url), "utf8");
+    const consent = stripComments(readFileSync(new URL("../src/ui/PluginConsent.tsx", import.meta.url), "utf8"));
     /*
      * ⚠ **The permissions are behind the fold, not on it.** The closed line
      * carried a comma-separated summary of the scopes, which truncated mid-word in
@@ -4054,40 +4179,109 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
      * label shared the row with them. A truncated permission list is worse than no
      * list, because it looks complete.
      *
-     * Asserted on the *closed line's own children* rather than on the absence of a
-     * word: one element, and it says what the control is.
+     * ⚠ **The fold is `bits.tsx`'s now, so the closed line is a prop rather than a
+     * `<button>` this file draws.** It was private here — and its own comment
+     * claimed the grid animation existed *"so a fold in this app opens one way"*
+     * while `MarketEntry` drew a native `<details>` about 200px further down **the
+     * same screen**, with an instant snap and the platform's disclosure triangle.
+     * A claim about how an app behaves cannot be kept by a function nobody outside
+     * one file can reach, which is why it moved rather than being copied.
+     *
+     * The assertion follows it: a `label` that is a bare string cannot carry a
+     * summary at all, which is a stronger form of what counting the closed line's
+     * children used to check.
      */
-    const opens = consent.indexOf("aria-expanded={open}");
-    const closed = consent.slice(opens, consent.indexOf("</button>", opens));
-    check("the closed line has one thing on it", (closed.match(/<span/g) ?? []).length, 1);
-    check("and it is the name of the control", />Permissions</.test(closed), true);
-    check("the fold takes no summary to draw there", /function Disclosure\(\{ first, children \}/.test(consent), true);
-  /*
-   * ⚠ **The card is chrome for an identification, and only the picker needs one.**
-   * On the market's entry page the name, the version and the description are the
-   * sheet's own head three lines up, so the border and its 24px of padding were
-   * drawn around a single collapsed row reading `Permissions` — a region whose
-   * contents are one word. Tied to `names`, which is already the flag for "this
-   * block is the only thing that says what the plugin is".
-   *
-   * ⚠ **And the tap target is not what was spent.** `min-h-11` stays on the fold:
-   * it opens the list of capabilities somebody is about to grant a stranger's code,
-   * and this app is used from a phone.
-   */
-  check("the bordered card is drawn only where this block names the plugin", /names \? "mt-3 rounded-lg border border-edge p-3" : "mt-3"/.test(consent), true);
-  check("and the fold keeps its 44px", /className="tap flex min-h-11 w-full items-center gap-1\.5/.test(consent), true);
+    check(
+      "the fold is the shared one rather than a private copy",
+      [/<Disclosure\b/.test(consent), /function Disclosure/.test(consent)],
+      [true, false],
+    );
+    check("and the closed line says only what the control is", /label="Permissions"/.test(consent), true);
     /*
-     * ⚠ **And nothing hangs under the closed line either.** The sentence that
-     * qualifies the whole list — *a plugin runs on this machine as you* — stood
-     * outside the fold, so the card's closed state was a collapsed row with a
-     * paragraph beneath it, which reads as a caption for a control rather than as
-     * a caveat about a list nobody has opened. It is the conclusion of that list
-     * and belongs at the end of it.
+     * ⚠ **And there is one fold on this card**, which is what makes the placement
+     * assertions below say anything: "above the fold" is satisfied by a sentence
+     * parked inside a *second* fold sitting over the first.
+     */
+    check("and there is one fold for the sentence below to be above", (consent.match(/<Disclosure\b/g) ?? []).length, 1);
+    /*
+     * ⚠ **Both plugin screens, because the fold moved to end a disagreement
+     * between them** rather than to tidy one file. `MarketEntry`'s `Earlier
+     * versions` was the native `<details>`; a second one reappearing on either
+     * screen restores exactly the state `Disclosure`'s docblock was written
+     * against. Scoped to these two rather than swept over `src/ui`, since
+     * `AgentsPanel`'s raw-transcript `<details>` is a deliberate survivor with its
+     * own argument in `ui/login.ts`.
+     */
+    check(
+      "and neither plugin screen falls back to the platform's fold",
+      /<details/.test(consent + stripComments(readFileSync(new URL("../src/ui/plugins/MarketEntry.tsx", import.meta.url), "utf8"))),
+      false,
+    );
+    /*
+     * ⚠ **The card is chrome for an identification, and only the picker needs one.**
+     * On the market's entry page the name, the version and the description are the
+     * sheet's own head three lines up, so the border and its 24px of padding were
+     * drawn around a single collapsed row reading `Permissions` — a region whose
+     * contents are one word. Tied to `names`, which is already the flag for "this
+     * block is the only thing that says what the plugin is".
+     */
+    check("the bordered card is drawn only where this block names the plugin", /names \? "mt-3 rounded-lg border border-edge p-3" : "mt-3"/.test(consent), true);
+    /*
+     * ⚠ **And the tap target went with the component instead of being lost in the
+     * move.** `min-h-11` is on the fold because it opens the list of capabilities
+     * somebody is about to grant a stranger's code, and this app is used from a
+     * phone. It is asserted against `bits.tsx` now, where the class string lives: a
+     * height that disappears in a refactor disappears silently, which is the same
+     * quiet loss `aria-expanded` was nearly a victim of when `AskCard`'s collapse
+     * became an `IconButton`.
+     */
+    check(
+      "and the fold keeps its 44px, in the file it moved to",
+      /className="tap flex min-h-11 w-full items-center gap-1\.5/.test(
+        stripComments(readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8")),
+      ),
+      true,
+    );
+    /*
+     * ⚠ **The sentence naming the blast radius is OUTSIDE the fold and above it,
+     * which reverses what this block asserted one release ago — and the reversal is
+     * the finding rather than a change of mind.**
+     *
+     * It was pinned here as the fold's *last child*, on the reasoning that it is
+     * the conclusion of the list and that outside it was a conclusion to nothing.
+     * What that reasoning produced is why it moved: the fold mounted **closed**, so
+     * the default render of every install path — the market entry, a machine's own
+     * picker, the fleet-wide import — was a collapsed 13px row reading
+     * `Permissions`, with live install controls under it and nothing on screen
+     * saying what a plugin *is*. On the market entry that collapsed row was the
+     * entire consent block. The one sentence naming what an install actually costs
+     * — *a plugin runs on this machine as you, with your files* — sat behind the
+     * same tap as the list it qualifies, and **nothing has ever gated Install on
+     * that tap being taken**. It is not the conclusion of the list; it is the frame
+     * around it, true whatever the manifest says.
+     *
+     * A placement is the one thing no type can hold, so it is pinned by position
+     * off the source the way the strip-and-rail assertions above are.
      */
     const honest = consent.indexOf("A plugin runs on this machine as you");
-    const closes = consent.indexOf("</Disclosure>");
+    const opensFold = consent.indexOf("<Disclosure");
     check("the sentence about what a plugin really is exists", honest >= 0, true);
-    check("and it is inside the fold, not a caption under it", honest >= 0 && closes > honest, true);
+    check("and it is above the fold rather than behind it", honest >= 0 && opensFold > honest, true);
+    /*
+     * ⚠ **And the list itself is open on arrival on every install path.** The fold
+     * is kept so the capabilities can be put *away*, never so they start out of
+     * sight. `Disclosure` seeds its state once at mount, so this is a default
+     * rather than a control and a fold somebody closes stays closed — which is why
+     * the primitive's own default is `false` and correctly so, and why this is
+     * asserted here instead: this is the one screen with an argument for the other
+     * value. `first` is unconditional now for the same reason the caveat is: the
+     * fold is never this block's first child any more.
+     */
+    check(
+      "and the capabilities are open on arrival",
+      /<Disclosure first=\{false\} label="Permissions" defaultOpen>/.test(consent),
+      true,
+    );
   }
   {
     /*
@@ -4139,28 +4333,165 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
   }
 
   /*
-   * ⚠ **And the other half of the exemption above, which was written down as a
-   * premise and never checked.**
+   * ⚠ **And the other half of the exemption above — a premise for a year, a
+   * ratchet for a release, and a property now.**
    *
-   * `bits.tsx`'s `ICON_BUTTON_SIZE` has four entries and only three of them
-   * reach the platform minimum: `sm` is 24px of ink with `after:-inset-2.5`
-   * around it (24 + 20 = 44), `chip` is 32px with `TAP_GROW_Y`, and `lg` is
-   * `h-11`, which is the 44px itself. `md` is `h-9 w-9` — 36px, with no growth
-   * mechanism of any kind — and `md` is the **default**. So "routed through the
-   * primitive" was never the same thing as "44px", and a call site that simply
-   * omits the prop is 36px wherever it is drawn.
+   * The history is the reason this block still exists, so it is written down
+   * rather than deleted with the mechanism it produced. `ICON_BUTTON_SIZE` had
+   * **four** entries and only three of them reached the platform minimum: `sm` is
+   * 24px of ink with `after:-inset-2.5` around it (24 + 20 = 44), `chip` is 32px
+   * with `TAP_GROW_Y`, and `lg` is `h-11`, which is the 44px itself. The fourth
+   * was `md` — `h-9 w-9`, 36px, with no growth mechanism of any kind — and `md`
+   * was the **default**. So "routed through the primitive" was never the same
+   * thing as "44px", and the call site that thought about its target least got the
+   * one size that was wrong. The sweep that stood here before skipped every
+   * `IconButton` call site on precisely the premise that disproves.
    *
-   * Swept over the whole of `src/ui` rather than over the three decision cards,
-   * because the primitive is the whole UI's answer to this question and the
-   * controls that omit the prop are not on those cards at all.
+   * The ratchet that replaced the premise named four call sites drawn at that
+   * default — `Header`'s back chevron, `SessionMenu`'s kebab, `Sheet`'s ✕ and
+   * `AgentsPanel`'s credential ✕ — recorded rather than fixed, on the stated
+   * grounds that *"fixing them is a decision about the interface and not about
+   * this driver"*. **The decision was taken.** All four name a size now and no two
+   * of them by the same argument; `md` is *deleted* rather than resized, because
+   * widening it to `h-11` would have moved every layout that had settled around a
+   * 36px box; and `size` lost its default, so omitting it no longer compiles. The
+   * list is gone because it is empty — a ratchet with nothing on it asserts a
+   * property that already holds and reads as a debt that is still owed.
    *
-   * A size handed down as a *prop* (`size={size}`) is reported too and that is
-   * deliberate: a source sweep cannot resolve it, and the component holding it
-   * has a default of its own that has to be read to know what it draws.
+   * ⚠ **What the compiler covers now, and what it still cannot see.** `size` is
+   * required and typed `keyof typeof ICON_BUTTON_SIZE`, so `tsc` is what refuses a
+   * call site with no size and a call site naming one that does not exist. The
+   * regex that used to do both is redundant *over call sites*, and it is
+   * deliberately not kept as a second opinion: a scan that agrees with the type
+   * system in every case teaches the next reader that the scan is what holds the
+   * floor, which is exactly how the old premise survived for a year.
+   *
+   * Three things are left that no type can hold, and they are what is below.
+   *
+   *   - **The table.** Three string literals whose 44px is a fact about CSS. A
+   *     value edited to `h-9 w-9` under any of those three names typechecks
+   *     perfectly and puts every call site in the app under the floor at once.
+   *   - **The absence of a default**, which is what makes the compiler's half true
+   *     at all. Restore `size = "lg"` and every future call site is silently
+   *     unreviewed again, with nothing failing anywhere.
+   *   - **`className` at a call site**, which can take the size back. The
+   *     primitive interpolates the caller's string *after* its own and that buys
+   *     nothing: every utility lands in one stylesheet at equal specificity, so
+   *     what wins is the order **in the sheet** rather than the order in the
+   *     attribute — and the call site cannot read that order.
+   *
+   *     ⚠ **This said "Tailwind v4 emits alphabetically, so `.h-11` is written to
+   *     the sheet **before** `.h-9` and a caller's `h-9` wins over `lg`", and both
+   *     halves of that are backwards.** Measured on the shipped bundle,
+   *     `packages/web/dist/assets/index-*.css`: `.h-9` is emitted at byte 14077 and
+   *     `.h-11` at 14153, so on that pair the *primitive* wins and a caller's
+   *     smaller box is the one that loses. "Alphabetical" holds for a **word**
+   *     scale — `.items-center` before `.items-start`, which is the trap `FIELD`
+   *     and `menuRow` document and which is why the shorthand was believed — while
+   *     a **numeric** scale is emitted in numeric order, so it predicts the wrong
+   *     winner exactly where two numbers straddle ten, which is where every
+   *     tap-target argument in this repository lives. `BUTTON_SIZE`'s docblock in
+   *     `bits.tsx` now carries that measurement in full, and is the copy to read.
+   *
+   *     **The sweep below is unchanged by the correction, because the property was
+   *     never "the caller wins".** It is that which one wins is decided somewhere
+   *     the call site cannot see: `h-14` against `lg` takes the size back in the
+   *     direction the numbers happen to allow, and a variant-prefixed height wins
+   *     from a block whose position has nothing to do with either number. So no
+   *     call site may pass a height or a width at all.
    */
-  const ICON_BUTTON_44 = /size="(?:sm|chip|lg)"/;
+  const bitsCode = stripComments(readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8"));
+  const tableAt = bitsCode.indexOf("const ICON_BUTTON_SIZE");
+  const sizeTable = bitsCode.slice(tableAt, bitsCode.indexOf("} as const;", tableAt));
+  /*
+   * Every entry, as a name and the class string it resolves to. The two spellings
+   * are both real — `sm` and `lg` are plain strings, `chip` is a template holding
+   * `${TAP_GROW_Y}` — and a fourth entry added in either shape is read the same
+   * way rather than skipped for not looking like its neighbours.
+   */
+  const sizes = [...sizeTable.matchAll(/^ {2}(\w+): (?:"([^"]*)"|`([^`]*)`),$/gm)].map(
+    (entry) => [entry[1] ?? "", entry[2] ?? entry[3] ?? ""] as const,
+  );
+  check("the size table was found and has entries in it", sizes.length >= 3, true);
+  /*
+   * The three mechanisms, spelled once. `sm` grows a transparent `::after` by 10px
+   * a side, `chip` grows vertically only through the shared `TAP_GROW_Y` — a
+   * symmetric inset would put its target on the mode chip's *face*, and the chip
+   * beside it changes the model — and `lg` simply is 44px. A size that reaches the
+   * floor some fourth way has to say so here, which is the point: the assertion is
+   * that the table *states* how, not that it happens to.
+   */
+  const NAMES_ITS_44 = /after:-inset-2\.5|\$\{TAP_GROW_Y\}|\bh-11\b/;
+  check(
+    "and every size a caller can name says how it reaches 44px",
+    sizes.filter(([, classes]) => !NAMES_ITS_44.test(classes)).map(([name]) => name),
+    [],
+  );
+  /*
+   * ⚠ **And 36px has not come back under a name a reader trusts.** `md` is gone
+   * for good rather than resized: a size that reappears under the name somebody
+   * remembers as 36px is worse than no size at all, and `h-9 w-9` under any other
+   * name is the same defect with the evidence removed.
+   */
+  check(
+    "and the one that never reached it is gone rather than renamed",
+    [sizes.some(([name]) => name === "md"), /h-9 w-9/.test(sizeTable)],
+    [false, false],
+  );
+
+  const iconButtonAt = bitsCode.indexOf("export function IconButton");
+  const iconButtonArgs = bitsCode.slice(iconButtonAt, bitsCode.indexOf("}: {", iconButtonAt));
+  const iconButtonProps = bitsCode.slice(bitsCode.indexOf("}: {", iconButtonAt), bitsCode.indexOf("}): ReactNode {", iconButtonAt));
+  check(
+    "the primitive's own signature and prop list were found",
+    [/\bsize\b/.test(iconButtonArgs), iconButtonProps.length > 0],
+    [true, true],
+  );
+  /*
+   * ⚠ **This is the assertion that hands the floor to the compiler**, and it is
+   * the one worth the most: `size` with no default is why every call site in
+   * `src/ui` is now type-checked against the table above, and restoring one would
+   * un-assert the whole app in a single character with nothing else failing. Both
+   * halves — no default in the destructuring, and not optional in the type — since
+   * either alone lets a caller through.
+   *
+   * Anchored to the start of a line, because the props list opens with
+   * `icon: ComponentType<{ size?: number | string; … }>` — the *glyph's* own size,
+   * which an unanchored `/size\?:/` reads as this one being optional and which is
+   * how the first draft of this check passed while asserting the opposite.
+   */
+  check("and `size` has no default, which is what makes the type check mean anything", /size = /.test(iconButtonArgs), false);
+  check("nor is it optional", /^\s*size\?:/m.test(iconButtonProps), false);
+  /*
+   * And the type is read off the table rather than spelled a second time, so the
+   * two cannot drift: a hand-written `"sm" | "chip" | "lg" | "md"` would typecheck
+   * against a table that no longer has the fourth entry only until somebody puts
+   * one back.
+   */
+  check("and the union it accepts is the table itself", /^\s*size: keyof typeof ICON_BUTTON_SIZE;$/m.test(iconButtonProps), true);
+
+  /*
+   * The call sites, swept for the one thing the compiler cannot read: a
+   * `className` that takes the size back. Every one of them today passes margins
+   * and nothing else, which is what this is here to keep true.
+   *
+   * A size handed down as a *prop* (`size={size}`) is no longer reported and that
+   * is the change: it used to be, on the correct grounds that a source sweep
+   * cannot resolve it and that the component holding it had a default of its own.
+   * The component holding it is now typed against the same table, and every value
+   * in the table clears the floor — so resolving it buys nothing a type has not
+   * already proved.
+   */
+  /*
+   * Every geometry utility a caller could reach for, variant prefixes included —
+   * `sm:h-9` is the same defect wearing a breakpoint, and a pattern anchored only
+   * to the start of a class would miss it. Margins are deliberately not matched:
+   * `-ml-1` and `ml-1` are what these call sites actually pass, and pulling a
+   * control 4px into a head row is nobody's business but the caller's.
+   */
+  const HEIGHT_OR_WIDTH = /(?:^|\s)(?:[a-z-]+:)*-?(?:min-|max-)?[hw]-/;
   const iconButtons: string[] = [];
-  const undersized: string[] = [];
+  const resized: string[] = [];
   const sweepIconButtons = (dir: URL): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const child = new URL(entry.name + (entry.isDirectory() ? "/" : ""), dir);
@@ -4170,78 +4501,124 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
       }
       if (!/\.tsx$/.test(entry.name)) continue;
       // Comments out first, for the reason every source-text pin here gives: the
-      // docblocks around these call sites quote `md` and quote the sizes.
-      const text = readFileSync(child, "utf8")
-        .replace(/\/\*[\s\S]*?\*\//g, "")
-        .replace(/\/\/[^\n]*/g, "");
+      // docblocks around these call sites quote `h-9 w-9` while arguing about it.
+      const text = stripComments(readFileSync(child, "utf8"));
       for (const call of text.matchAll(/<IconButton\b[\s\S]*?\/>/g)) {
         const where = `${entry.name}: ${call[0].replace(/\s+/g, " ").slice(0, 72)}`;
         iconButtons.push(where);
-        if (!ICON_BUTTON_44.test(call[0])) undersized.push(where);
+        const classes = /className=(?:"([^"]*)"|\{`([^`]*)`)/.exec(call[0]);
+        if (classes !== null && HEIGHT_OR_WIDTH.test(classes[1] ?? classes[2] ?? "")) resized.push(where);
       }
     }
   };
   sweepIconButtons(new URL("../src/ui/", import.meta.url));
-  check("the sweep found the primitive's call sites", iconButtons.length >= 8, true);
+  // A pattern that matches nothing passes silently, which is this driver's one
+  // failure mode. The count is a floor rather than a number so that adding a
+  // control does not fail a check about class strings.
+  check("the sweep found the primitive's call sites", iconButtons.length >= 20, true);
+  check("and no call site takes its size back through className", resized, []);
 
   /*
-   * Drawn at the 36px `md` default, known, and not yet decided.
+   * ⚠ **And the controls that never reach the primitive at all, which every sweep
+   * above is blind to by construction.**
    *
-   * This list exists because the exemption above was narrowed and told the truth
-   * for the first time. The old sweep skipped every `IconButton` call site on the
-   * stated grounds that "a control routed through the primitive is covered by the
-   * primitive's own 44px entry" — and that premise is false: of the four entries in
-   * `ICON_BUTTON_SIZE`, `sm` reaches 44 through `after:-inset-2.5`, `chip` through
-   * `TAP_GROW_Y` and `lg` by being `h-11`, while `md` is `h-9 w-9` with no growth
-   * mechanism at all. `md` is also the default, so omitting the prop is how you get
-   * the one size that does not reach the floor.
+   * They matched `<IconButton …/>`, so a control written as a raw `<button>` with
+   * a hand-rolled class string was invisible however small it was — and four were,
+   * spelling out the same `h-9 w-9` that `md` drew, arrived at independently four
+   * times. One of them was `SessionBrowser`'s bell, the control that answers this
+   * product's central question: *which agent is waiting for me*. They are all
+   * `IconButton` now, and the finding is that nothing said so: the ratchet
+   * retired above stayed green for the entire time they were on screen, because
+   * they were never call sites.
    *
-   * These four are recorded rather than fixed because fixing them is a decision
-   * about the interface and not about this driver. Neither remedy is free. Growing
-   * the target symmetrically is what `chip`'s own docblock warns against — at
-   * `gap-1.5` a 4px-a-side `::after` puts one control's target over its neighbour's
-   * *face* — and growing the box changes what is drawn. So the size stays and the
-   * debt is written down.
+   * **A source sweep is the only thing that can catch this.** There is no type to
+   * check — a tap target is a string of Tailwind utilities, and `h-9 w-9` and
+   * `h-11 w-11` are the same type — the primitive cannot see a control that never
+   * called it, and nothing in this repository renders these files. What is left is
+   * reading the class attribute off disk, which is what every placement assertion
+   * in this driver already does.
    *
-   * **The list may only shrink**, which is the whole point and is asserted twice
-   * below: a new undersized call site fails, and a fixed one fails until its line
-   * here is deleted. Same shape as `docscheck`'s `CITED_BUT_UNRESOLVED`, for the
-   * same reason — a known defect that nothing asserts is a defect nobody finds
-   * again.
+   * The rule is the **floor** rather than the routing, because a small box is not
+   * the defect: `sm` itself is `h-6 w-6`. A small box with nothing around it is.
+   * `Toast`'s dismiss is the one hand-rolled square that legitimately stays one —
+   * 24px of ink with the same transparent `after:-inset-2.5`, because a toast has
+   * to stay a thin strip over the composer and its target cannot be bought with
+   * layout — and it is what proves this scan reaches real controls rather than
+   * counting zero of them.
    */
-  const ICON_BUTTON_KNOWN_36 = new Set([
-    "Header.tsx:ChevronLeft:Back to sessions", // the phone's only way back to the session list
-    "SessionMenu.tsx:MoreVertical:Session actions", // the kebab; this file's own `size` default is `md` too
-    "Sheet.tsx:X:Close", // the ✕ that Sheet.tsx's own docblock calls "the accessible way out"
-    "AgentsPanel.tsx:X:<expr>", // removing a saved credential, and destructive
-  ]);
+  const SQUARE = /\bh-(\d+)\b[^"`]*?\bw-\1\b/;
+  const GROWS_TO_44 = /after:-inset-2\.5|TAP_GROW_Y|min-h-11/;
   /*
-   * The key carries the label, and the count is asserted beside the set.
+   * ⚠ **This sweep found one control the first time it was run, and it has since
+   * been fixed — so what stands here is the sweep and not a list.**
    *
-   * Keyed on `file:icon` alone this ratchet had a hole, found by mutation rather
-   * than by reading: a *second* undersized `X` in `Sheet.tsx` answers to the same
-   * key as the known one and was absorbed silently, so the check that exists to
-   * catch a new one passed while a new one was on screen. The label discriminates
-   * the literal cases; the count closes the rest, including a second control whose
-   * label is an expression and therefore keys as `<expr>` like its neighbour.
+   * `SessionBrowser`'s per-folder `+` (*New session in <folder>*) was `h-7 w-7`:
+   * 28px, in a folder header whose own row is `min-h-9`, with no growth mechanism
+   * of any kind. It was never one of the four `h-9 w-9` copies, which is why no
+   * scan of any earlier shape reached it, and it is always visible on a coarse
+   * pointer — so on the phone this app is used from it was a 28px target.
+   *
+   * It was briefly recorded rather than fixed, on the reasoning the retired
+   * `md` list gave: that the remedy was a decision about that header rather than
+   * about this driver, and that neither remedy was free — growing the box makes
+   * the folder row taller than every session row beneath it, and growing the
+   * target symmetrically spends 10px a side onto the face of the folder's own
+   * collapse `<button>` immediately to its left, which is the adjacency
+   * `ICON_BUTTON_SIZE.chip` exists to describe. Both are true, and both were
+   * arguments against the two remedies that were considered rather than against
+   * fixing it: `chip` is a 32px box that fits `min-h-9` unchanged, grown to 44px
+   * by `TAP_GROW_Y`, which is vertical only and so spends nothing horizontally.
+   * The control is on the primitive at that size now and no list survives it.
+   *
+   * The sweep stays, and it is the half of this section with a future: it reads
+   * `<button>` rather than `<IconButton>`, so it is the only thing here that can
+   * see a control which never went near the primitive at all.
    */
-  const keyOf = (where: string): string => {
-    const file = where.slice(0, where.indexOf(":"));
-    const icon = /icon=\{(\w+)\}/.exec(where)?.[1] ?? "?";
-    const label = /label="([^"]*)"/.exec(where)?.[1] ?? "<expr>";
-    return `${file}:${icon}:${label}`;
+  const handRolled: string[] = [];
+  let plainButtons = 0;
+  let squares = 0;
+  const sweepPlainButtons = (dir: URL): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const child = new URL(entry.name + (entry.isDirectory() ? "/" : ""), dir);
+      if (entry.isDirectory()) {
+        sweepPlainButtons(child);
+        continue;
+      }
+      if (!/\.tsx$/.test(entry.name)) continue;
+      const text = stripComments(readFileSync(child, "utf8"));
+      /*
+       * Brace and paren depth to find the tag's own `>`, the way the plugin
+       * `size="sm"` sweep further up already does: an arrow function in `onClick`
+       * puts a `>` inside the props that a lazy regex or a line scan stops at, and
+       * these files are full of them.
+       */
+      for (const piece of text.split(/<(?=button\b)/).slice(1)) {
+        let depth = 0;
+        let end = -1;
+        for (let i = 0; i < piece.length; i += 1) {
+          const ch = piece.charAt(i);
+          if (ch === "{" || ch === "(") depth += 1;
+          else if (ch === "}" || ch === ")") depth -= 1;
+          else if (ch === ">" && depth === 0) {
+            end = i;
+            break;
+          }
+        }
+        if (end < 0) continue;
+        plainButtons += 1;
+        const props = piece.slice(0, end);
+        const square = SQUARE.exec(props);
+        // Tailwind's scale is 0.25rem a step, so `h-11` is the 44px itself and
+        // anything below it has to say how it gets there.
+        if (square === null || Number(square[1]) >= 11) continue;
+        squares += 1;
+        if (!GROWS_TO_44.test(props)) handRolled.push(`${entry.name}: h-${square[1]} w-${square[1]}`);
+      }
+    }
   };
-  check(
-    "no NEW control is drawn at the 36px default",
-    undersized.filter((where) => !ICON_BUTTON_KNOWN_36.has(keyOf(where))),
-    [],
-  );
-  check(
-    "and every one still on the known list is still undersized (delete the line when you fix one)",
-    [...ICON_BUTTON_KNOWN_36].filter((key) => !undersized.some((where) => keyOf(where) === key)),
-    [],
-  );
-  check("and there are exactly as many as the list names", undersized.length, ICON_BUTTON_KNOWN_36.size);
+  sweepPlainButtons(new URL("../src/ui/", import.meta.url));
+  check("the button sweep reached the whole surface", [plainButtons >= 40, squares >= 1], [true, true]);
+  check("nothing hand-rolls a square target under 44px", handRolled, []);
 }
 
 /* ------------------------------------------------------------------ *
@@ -6046,6 +6423,103 @@ process.stdout.write("\nthe age of a row, across two clocks\n");
     "daemon 10s ahead → -5s waiting",
   );
   check("a row fetched and read at the same instant is as old as the daemon said", elapsedSince(row, 11_000, 1_000), 0);
+
+  /*
+   * ⚠ **The other half of that pair — the code that *writes* it — which nothing
+   * asserted at all, and that is exactly why the arithmetic above stayed right
+   * while three screens drew it wrong.**
+   *
+   * `onSnapshot` wrote `daemonNow: Date.now(), fetchedAt: Date.now()` under the
+   * comment *"a snapshot frame carries no clock, so anchor to ours — it is correct
+   * at this instant by construction"*. The first half is true and the conclusion
+   * never was: substitute `daemonNow === fetchedAt === T` into `elapsedSince` and
+   * `(T - at) + (now - T)` is `now - at`, which is precisely the browser-clock
+   * subtraction the two-term form exists to avoid — and `at` is always a *daemon*
+   * timestamp (`turnStartedAt`, `raisedAt`). It runs on every socket open, on every
+   * rotation, and on every action that folds a returned snapshot in, `/prompt`
+   * included, so a drifted phone drew the drift on the one row somebody was
+   * watching while the polled rows beside it were right.
+   *
+   * The pair records an **offset between two clocks, not a moment**, which is what
+   * makes carrying it forward correct rather than a stale-data compromise: only a
+   * new reading of the daemon's clock — the next poll — can better it.
+   *
+   * Driven rather than grepped: the row is seeded through the same `internals` cast
+   * the socket fixture below uses, because the only other writer of that pair is
+   * behind a real daemon and a real `GET /sessions`.
+   */
+  {
+    const { store } = await import("../src/store.js");
+    const { keyOf, machineId, sessionId } = await import("../src/ids.js");
+    const ref = { machineId: machineId("m_clock"), sessionId: sessionId("s_clock") };
+    const key = keyOf(ref);
+    const internals = store as unknown as { rows: Map<string, unknown>; transcripts: Map<string, unknown> };
+    const arriving = { ...snapshot, id: "s_clock" } as never;
+
+    // The pair a poll left behind: the daemon said 11_000 while this clock said
+    // 1_000, i.e. it is 10s ahead — the same two numbers the pure half above uses.
+    internals.rows.set(key, { key, ref, machineName: "alpha", snapshot: arriving, daemonNow: 11_000, fetchedAt: 1_000 });
+    store.onSnapshot(ref, arriving);
+    const after = store.getSnapshot().rowsByKey.get(key);
+    check(
+      "a snapshot arriving keeps the offset the poll measured, byte for byte",
+      [after?.daemonNow, after?.fetchedAt],
+      [11_000, 1_000],
+    );
+    // The consequence, stated as the arithmetic rather than as the fields: re-read
+    // to one instant `T`, the offset collapses and this answers `4_000 - 9_000`,
+    // i.e. −5_000 — the negative duration the section above exists to prevent, on
+    // the row somebody is deciding whether to walk over to.
+    check(
+      "so the age it produces is still measured in the daemon's clock",
+      after === undefined ? null : elapsedSince(after, 9_000, 4_000),
+      5_000,
+    );
+    check("and the snapshot itself is what was folded in", after?.snapshot.id, "s_clock");
+
+    /*
+     * ⚠ **And the honest bound, which is the arm that *is* allowed to read our
+     * clock.** A session created from this tab reaches here from `POST /sessions`
+     * before any list has come back, so there is no reading to keep — both halves
+     * fall back to ours, which is the old arithmetic and is wrong by the whole
+     * offset, for at most one visible poll. What is asserted is that it is **one**
+     * `Date.now()` feeding both: two reads a millisecond apart invent an offset of
+     * their own, out of nothing, that no poll is coming to correct.
+     */
+    internals.rows.delete(key);
+    internals.transcripts.delete(key);
+    store.onSnapshot(ref, arriving);
+    const cold = store.getSnapshot().rowsByKey.get(key);
+    check("with no reading to keep, the two halves are one reading rather than two", cold?.daemonNow === cold?.fetchedAt, true);
+    check(
+      "which is an offset of zero — the browser's own subtraction, until the next poll",
+      cold === undefined ? null : elapsedSince(cold, cold.daemonNow - 5_000, cold.fetchedAt),
+      5_000,
+    );
+    /*
+     * The source half, and it is here because equality above cannot distinguish one
+     * `Date.now()` from two taken inside the same millisecond — which is the
+     * overwhelmingly likely outcome of the regression, so the call-driven check
+     * would pass through it almost every run. This is the weaker form used
+     * deliberately, beside the stronger one rather than instead of it.
+     */
+    const storeSrc = stripComments(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"));
+    const writerAt = storeSrc.indexOf("onSnapshot(ref: SessionRef, session: SessionSnapshot): void {");
+    const writer = writerAt < 0 ? "" : storeSrc.slice(writerAt, storeSrc.indexOf("\n  }\n", writerAt));
+    check("the writer was found", writerAt >= 0, true);
+    check("and it reads this clock exactly once", (writer.match(/Date\.now\(\)/g) ?? []).length, 1);
+    check(
+      "and neither half of the pair is re-read where a row already has one",
+      [/daemonNow: existing\?\.daemonNow \?\? unanchored,/.test(writer), /fetchedAt: existing\?\.fetchedAt \?\? unanchored,/.test(writer)],
+      [true, true],
+    );
+
+    // The store is a singleton shared with every other block in this file, so the
+    // fixture is taken back out: left behind, this is a session on a machine
+    // nothing else here has ever heard of, published into every later `getSnapshot`.
+    internals.rows.delete(key);
+    internals.transcripts.delete(key);
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -6911,6 +7385,193 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
       line: "working… · waiting for 2 tasks",
       spoken: "agent is working, waiting for 2 tasks",
     });
+
+    /*
+     * ⚠ **The third and fourth arguments, which shipped with defaults and were
+     * exercised by nothing.** The function's own docblock says the defaults keep
+     * the five calls above meaning what they meant — which is true, and is also
+     * exactly how two new rules came to be insulated from the only driver that
+     * reads this function. A default keeps an old assertion honest; it is not a
+     * reason to leave the four-argument form unasserted.
+     */
+    check("a turn long enough to say so says it beside the working line", footSays(true, 0, "3m"), {
+      line: "working… · 3m",
+      spoken: "agent is working, 3m",
+    });
+    check("and one that is not says nothing extra", footSays(true, 0, null), { line: "working…", spoken: "agent is working" });
+    /*
+     * ⚠ **It never reaches the delegation sentence**, which is the one place the
+     * two quantities could be confused: `waiting for 2 tasks` is about work that
+     * outlived the turn, and hanging the *turn's* duration on it would be a
+     * different number wearing the same words.
+     */
+    check("but never beside work that outlived the turn", footSays(false, 2, "3m"), {
+      line: "waiting for 2 tasks",
+      spoken: "waiting for 2 tasks",
+    });
+    check("and both facts plus the duration still share one line", footSays(true, 2, "3m"), {
+      line: "working… · 3m · waiting for 2 tasks",
+      spoken: "agent is working, 3m, waiting for 2 tasks",
+    });
+    /*
+     * ⚠ **Nothing streaming: the tense changes AND the number goes.** `working` is
+     * `showsWorking` over the last snapshot that arrived, so with no live socket it
+     * is a claim about *now* made from something that may be minutes old — three
+     * bars blinking beside `working…` for as long as the tab stays open. The
+     * elapsed time is the half a reader can watch going wrong, since `turnStartedAt`
+     * is frozen at whatever that snapshot said while our own clock carries on, so
+     * dropping it is not tidiness.
+     */
+    check("with nothing streaming it says what was last true, and drops the number", footSays(true, 0, "3m", true), {
+      line: "last seen working",
+      spoken: "last seen working, not connected",
+    });
+    check("and carries the delegations under the same tense", footSays(true, 2, "3m", true), {
+      line: "last seen working · waiting for 2 tasks",
+      spoken: "last seen working, not connected, waiting for 2 tasks",
+    });
+    /*
+     * ⚠ **The spoken half says "not connected" rather than "reconnecting", and the
+     * change of word is the fix rather than a rewording.** This arm is reached with
+     * no socket at all and with one still opening for the first time, where nothing
+     * is reconnecting to anything — see the caller pair below.
+     */
+    check("and it never claims a reconnection it cannot know about", footSays(true, 0, null, true)?.spoken.includes("reconnect"), false);
+    /* A turn that has ended is not frozen: `stale` only ever bites `working`. */
+    check("a stale session with work outstanding reads exactly as a live one", footSays(false, 2, null, true), {
+      line: "waiting for 2 tasks",
+      spoken: "waiting for 2 tasks",
+    });
+    check("and one with nothing outstanding still says nothing at all", footSays(false, 0, null, true), null);
+
+    /*
+     * The whole space, because the two new arguments doubled it twice and the rules
+     * above are stated over four of the sixteen cells. Collected rather than
+     * printed, `draftAct`'s rule: a sweep whose output nobody reads is a sweep whose
+     * failure nobody sees.
+     */
+    const footCells = [false, true].flatMap((working) =>
+      [0, 2].flatMap((tasks) =>
+        [null, "3m"].flatMap((elapsed) =>
+          [false, true].map((stale) => ({ working, tasks, stale, said: footSays(working, tasks, elapsed, stale) })),
+        ),
+      ),
+    );
+    check("the sweep is the whole space", footCells.length, 16);
+    check(
+      "and nothing anywhere in it claims the agent is working now while nothing is streaming",
+      footCells.filter(
+        (one) =>
+          one.stale &&
+          one.said !== null &&
+          (one.said.line.includes("working…") || one.said.spoken.includes("agent is working")),
+      ),
+      [],
+    );
+    check(
+      "nor carries a number beside a claim it cannot check",
+      footCells.filter((one) => one.stale && one.said?.line.includes("3m") === true),
+      [],
+    );
+
+    /*
+     * ⚠ **The caller, and this half is the one that matters: a pure-function check
+     * cannot catch the bug that shipped.** `footSays` was already correct for its
+     * argument — the defect was the *predicate at the call site*, which asked
+     * `phase === "waiting"` and so answered `false` for the whole of every retry.
+     * `retryLater` sets `waiting`, arms a timer, and that timer calls `connect()`,
+     * which sets `connecting` before it has so much as a token; nothing in
+     * `stream.ts` bounds a handshake. So the phase loops `waiting → connecting →
+     * waiting` for as long as the network is down and the foot went back to
+     * blinking `working…` for the whole of each attempt, with the elapsed number
+     * reappearing several seconds larger than when it left.
+     *
+     * ⚠ **`!== "live"` rather than a list of the bad phases**, which is the part a
+     * later edit is most likely to undo: `StreamPhase` has five members and
+     * enumerating four of them is what breaks silently when a sixth arrives. And
+     * `stream === null` is a real state rather than a theoretical one —
+     * `primeBlocked` builds a transcript straight off the list poll, so a foot with
+     * nothing behind it asserted work outright.
+     */
+    const foot = stripComments(readFileSync(new URL("../src/ui/SessionView.tsx", import.meta.url), "utf8"));
+    check(
+      "the foot asks whether anything is streaming at all, by the property rather than by a list",
+      /const stale = stream === null \|\| stream\.phase !== "live";/.test(foot),
+      true,
+    );
+    /*
+     * ⚠ **And the banner keeps the narrow question, which is why these are two
+     * constants.** The banner asks *should I announce this*: `connecting` is the
+     * first attempt and the ordinary state of a session opening, so announcing a
+     * reconnection there would put a banner on every navigation. The foot asks *is
+     * what I am drawing still checkable*, and an announcement can afford to wait
+     * until it is sure while a claim about **now** cannot. Merging them is the
+     * regression in either direction, so the second half asserts the banner's
+     * answer never reaches the transcript.
+     */
+    check("while the banner keeps the narrower one", /const reconnecting = stream\?\.phase === "waiting";/.test(foot), true);
+    check(
+      "and they are two answers rather than one handed to both",
+      [/reconnecting=/.test(foot), (foot.match(/stale=\{stale\}/g) ?? []).length, /\{reconnecting && \(/.test(foot)],
+      [false, 2, true],
+    );
+    /*
+     * The transcript's own end of the same wire: the fourth argument reaches
+     * `footSays`, and the mark stops blinking in **both** of `WaitingFoot`'s arms —
+     * the bare `<p>` and the disclosure button. Anchored inside the function,
+     * because the cancelled-turn row draws a third, unrelated `WorkingMark still`
+     * and a file-wide count would be satisfied by either arm plus that one.
+     */
+    const listSrc = stripComments(readFileSync(new URL("../src/ui/EventList.tsx", import.meta.url), "utf8"));
+    const waitingFootAt = listSrc.indexOf("function WaitingFoot");
+    const waitingFoot = waitingFootAt < 0 ? "" : listSrc.slice(waitingFootAt, listSrc.indexOf("\n}\n", waitingFootAt));
+    check("the foot's own component was found", waitingFootAt >= 0, true);
+    check(
+      "the caller threads all four arguments, and both of its arms stop the mark",
+      [
+        /footSays\(working, tasks\.length, elapsedSays\(turnElapsedMs\), stale\)/.test(listSrc),
+        (waitingFoot.match(/WorkingMark still=\{stale\}/g) ?? []).length,
+      ],
+      [true, 2],
+    );
+
+    /*
+     * ⚠ **`elapsedSays`, which had zero occurrences in this file.** It is not
+     * exported — a module-private helper between the prop and `footSays` — so this
+     * is the weaker source form, and it is worth having because both of its rules
+     * are silent when broken. The floor is a *judgement*: under two minutes the
+     * number is noise on a line that already says `working…`, and `null` means both
+     * "no turn" and "not long enough", so a caller cannot draw a number this rule
+     * says not to draw. The floor doubles as the guard on a negative — our own clock
+     * moving backwards between two renders — which is why the comparison is `<`
+     * against the elapsed value rather than a `Math.max` anywhere.
+     */
+    check(
+      "the elapsed time is floored in one place, and the floor is a judgement rather than a unit",
+      [
+        /const ELAPSED_FLOOR_MS = 120_000;/.test(listSrc),
+        /return turnElapsedMs < ELAPSED_FLOOR_MS \? null : shortDuration\(turnElapsedMs\);/.test(listSrc),
+        /if \(turnElapsedMs === null\) return null;/.test(listSrc),
+      ],
+      [true, true, true],
+    );
+    /*
+     * ⚠ **And the milliseconds arrive *measured*, which is the other half of the
+     * clock pair asserted at the top of this file.** `EventList` was handed
+     * `turnStartedAt` — the daemon's stamp — and subtracted `Date.now()` from it, so
+     * a phone that drifted while it slept read a turn that started a minute ago as
+     * hours long, or printed nothing at all on one running since breakfast.
+     * `elapsedSince` is the single copy of the correct form and it takes the **row**
+     * rather than the snapshot, which is why `SessionView` keeps the row at all.
+     */
+    check(
+      "and they are measured against the row's two clocks rather than against ours",
+      [
+        /const turnElapsedMs = row === null \|\| turnStartedAt === null \? null : elapsedSince\(row, turnStartedAt\);/.test(foot),
+        /Date\.now\(\) - turnStartedAt/.test(foot + listSrc),
+      ],
+      [true, false],
+    );
   }
 
   {
@@ -14301,6 +14962,14 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     ["machines", "m_1"],
     ["machines", "m_1", "agents"],
     ["machines", "m_1", "agents", "claude"],
+    // ⚠ The two system depths were missing from this list, which is what let a
+    // system route reach the pane with no arm of its own and no sweep noticing:
+    // the chevron and the heading below both read "Machine settings" for a
+    // release. They are reachable shapes — `MachineSystemsSection` links to the
+    // first and every card on it to the second — so they belong to every sweep
+    // this list drives, not only to the three literals one block down.
+    ["machines", "m_1", "systems"],
+    ["machines", "m_1", "systems", "moonshot"],
   ];
   check(
     "every parent a chevron names is itself a real settings screen",
@@ -14338,6 +15007,18 @@ process.stdout.write("\nwhich settings screen a URL names\n");
    * which put the same word in the heading, the rename field under it and the
    * Retire button. The name lives where it is editable and where it is destroyed.
    * Q3.433.
+   *
+   * ⚠ **The system depth answers "System settings" rather than the machine's
+   * string, and this list used to demand all three be identical.** That was the
+   * assertion, not the rule: it was written when a system route had no arm of its
+   * own and fell through to the machine's, and it therefore pinned the very
+   * collision {@link settingsUpLabel} then turned into "◀ Back to Machine
+   * settings" beside `<h2>Machine settings</h2>` — one string claiming to be both
+   * where you are and where you are going. What the block is about survives
+   * unchanged and is what the third entry still tests: the title says what the
+   * **kind** of screen is. It is not the segment, which is the defect Q3.427
+   * reverted verbatim (`moonshot` in `font-semibold` over a card reading the
+   * daemon's own display name), and it is not the machine.
    */
   check(
     "every machine depth is titled by what the screen is",
@@ -14346,7 +15027,25 @@ process.stdout.write("\nwhich settings screen a URL names\n");
       pane(["machines", "m_1", "systems"]),
       pane(["machines", "m_1", "systems", "moonshot"]),
     ],
-    ["Machine settings", "Machine settings", "Machine settings"],
+    ["Machine settings", "Machine settings", "System settings"],
+  );
+  /*
+   * ⚠ **And the general form of that defect, rather than the one instance of it:
+   * no depth may share its title with its own parent's.** `settingsUpLabel` is
+   * derived from the parent's title, so a title that is not injective across a
+   * parent and its child draws a chevron and a heading that read alike, and
+   * nothing in either function can detect it — the label is *correct*, it is the
+   * pair that is useless. Swept over every reachable shape so a seventh depth
+   * cannot land on a parent's string the way the system depth did.
+   */
+  check(
+    "and no depth is titled the same as the screen its chevron points at",
+    reachable.filter((segments) => {
+      const route = parseSettingsRoute(segments);
+      const label = settingsUpLabel(route);
+      return label !== null && label === settingsPaneTitle(route);
+    }),
+    [],
   );
   /*
    * ⚠ **`…/agents` moved out of that list rather than being deleted from it, and
@@ -14702,10 +15401,19 @@ process.stdout.write("\nwhich settings screen a URL names\n");
    */
   check("and every route shape is named rather than defaulted", /function screenOf[\s\S]*?\n\}/.exec(appSrc)?.[0].includes("default:") ?? true, false);
   /*
-   * ⚠ **`md` is the one `ICON_BUTTON_SIZE` that never reaches 44px**, and it is
-   * the default — so a chevron added without a size is a 36px target on the
-   * control a phone uses to leave every screen of this pop-up. The ratchet above
-   * catches it too; this says which size and why, next to the rule it keeps.
+   * ⚠ **Which of the three, and why — the *choice*, where the sweeps in the
+   * tap-minimum section assert the *floor*.**
+   *
+   * This used to read as a guard against a default: `md` was `h-9 w-9` and was
+   * what `size` fell back to, so a chevron added without the prop was a 36px
+   * target on the control a phone uses to leave every screen of this pop-up. There
+   * is no default now — `md` is deleted and `size` is required — so omitting it
+   * does not compile and naming a size that misses 44px is not expressible. What
+   * is left to protect is which one was picked: `sm` is 24px of ink reaching 44
+   * through a transparent `after:-inset-2.5`, which is what keeps this chevron
+   * flush in a head row that a 44px box would have made taller than the title
+   * beside it. `Header`'s pair went the other way on the same question and its
+   * docblock argues why; the two must not be quietly converged.
    */
   check("at the settings pane's own size, which reaches 44px", /icon=\{ChevronLeft\}[\s\S]{0,400}size="sm"/.test(sheetSrc), true);
   /*
@@ -14733,6 +15441,170 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     /\{up !== null && \(/.test(settingsTsxSrc),
     true,
   );
+
+  /* ---------------------------------------------------------------- *
+   * What the rail says out loud, which is the third member of that pair
+   *
+   * ⚠ **The heading and the way up were pinned together above and the
+   * *announcement* was pinned by nothing** — not the prop, not the live region,
+   * not what feeds it. So `SettingsNav` derived the sentence itself, from the
+   * `active` it highlights, and `active` cannot see the branch below it: `drilled`
+   * is tested **before** `SectionBody`, so at `/settings/machines/:id`, `…/systems`
+   * and `…/agents` the pane drew a machine's own screen while the region said
+   * "Machines" — and on a desktop it said it two boxes from an `<h2>` reading
+   * "Machine settings", one chrome contradicting itself in a single paint.
+   *
+   * The remedy is that both come from one function over one route, so the pure
+   * half is an *identity* rather than a table: the announcement is
+   * `settingsPaneTitle` over the route the **body** reads, which is `here` with the
+   * index default substituted. Where the URL names a section that is `here` itself
+   * and the two strings are literally the same one.
+   * ---------------------------------------------------------------- */
+  const announced = (segments: readonly (string | undefined)[]): string | null => {
+    const route = parseSettingsRoute(segments);
+    return settingsPaneTitle({ ...route, section: route.section ?? DEFAULT_SECTION });
+  };
+  check(
+    "the rail announces the pane's own name at every depth",
+    reachable.filter((segments) => announced(segments) !== pane(segments)),
+    [],
+  );
+  /*
+   * ⚠ **And at the index, where the two deliberately differ and the prop's `null`
+   * arm would otherwise be reachable.** `/settings` parses to `section: null` — below
+   * `sm` it *is* the list — so the heading is correctly absent while the pane at
+   * `sm`+ draws `DEFAULT_SECTION`. A region mounted with nothing to say is a failure
+   * with no symptom, which is why the prop is required rather than optional.
+   */
+  check("and names the default where the URL names none", [pane([]), announced([])], [null, "Account"]);
+  check(
+    "so every section a rail can highlight has a sentence to announce",
+    SECTION_SPECS.filter((spec) => settingsPaneTitle(parseSettingsRoute([spec.id])) === null).map((spec) => spec.id),
+    [],
+  );
+  /*
+   * The wiring, which no pure assertion can reach: the caller computes it over
+   * `shown` and hands it to **both** mounts, and the nav derives nothing of its own.
+   * `rows.find` is the shape the defect took — the highlighted row's label read back
+   * out of the list — so its absence is asserted rather than the presence of the
+   * prop alone.
+   */
+  {
+    const nav = stripComments(readFileSync(new URL("../src/ui/settings/SettingsNav.tsx", import.meta.url), "utf8"));
+    check(
+      "the sentence is computed once, over the route the body reads",
+      /const paneName = settingsPaneTitle\(\{ \.\.\.here, section: shown \}\);/.test(settingsTsxSrc),
+      true,
+    );
+    check("and reaches both mounts", (settingsTsxSrc.match(/paneName=\{paneName\}/g) ?? []).length, 2);
+    check(
+      "while the rail draws it and derives nothing",
+      [
+        /<p role="status" aria-live="polite" className="sr-only">\s*\{paneName\}\s*<\/p>/.test(nav),
+        /rows\.find/.test(nav),
+      ],
+      [true, false],
+    );
+    /*
+     * Required rather than optional, and that is the whole of what keeps the check
+     * above meaning anything: an omitted optional leaves the region mounted with
+     * nothing in it, which is silent in every direction a person could notice.
+     */
+    check("and it cannot be left out", [/^\s*paneName: string \| null;$/m.test(nav), /paneName\?:/.test(nav)], [true, false]);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * What the tab says to somebody who is not looking at it
+ *
+ * ⚠ **Two rules that had no assertion of any kind here**, and both of them are
+ * about a surface this driver cannot render: the document's own `<title>`, and the
+ * `<meta name="viewport">` that decides where the layout viewport goes when a
+ * software keyboard opens. Neither is reachable by calling anything — one is an
+ * effect writing to `document`, the other is a string in `index.html` that no
+ * TypeScript in this package ever reads — so both are read off disk, which is the
+ * form every placement assertion in this file already takes.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nwhat this app says while nobody is looking at it\n");
+{
+  const appSrc = stripComments(readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8"));
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+
+  /*
+   * **The tab says how many sessions are waiting, and it is the only thing this app
+   * can say to somebody who is not looking at it.** Every other cross-screen signal
+   * — the bell, `WaitingElsewhere`, the count on a machine tab, the count on a
+   * folder header — is drawn in the rail, i.e. inside a tab that already has the
+   * reader's attention, and the question this product is shaped around is *does
+   * anything anywhere need me*.
+   *
+   * ⚠ **The count is `sessionLists(...).blocked`, the predicate every other consumer
+   * already reads**, so there is one answer to "how many need me" and this cannot
+   * become a second opinion disagreeing with the bell three inches away. That is
+   * the half worth pinning: a hand-rolled `state.sessions.filter(…)` here would look
+   * right, typecheck, and drift the first time the predicate moves.
+   */
+  check(
+    "the badge counts what the bell counts",
+    /const blocked = sessionLists\(state\)\.blocked\.length;/.test(appSrc),
+    true,
+  );
+  check(
+    "and it is a prefix on the plain name rather than a second title",
+    /document\.title = blocked === 0 \? PAGE_TITLE : `\(\$\{blocked\}\) \$\{PAGE_TITLE\}`;/.test(appSrc),
+    true,
+  );
+  /*
+   * ⚠ **Restored on unmount as well as at zero**, which is what makes "the badge
+   * never outlives the state that put it there" true by construction rather than by
+   * remembering to clear it in the zero arm. The cleanup fires on every change too,
+   * writing `PAGE_TITLE` and then immediately the new badge: one extra assignment,
+   * and no window in which a stale count survives.
+   */
+  check("and it never outlives the state that put it there", /return \(\) => \{\s*document\.title = PAGE_TITLE;\s*\};/.test(appSrc), true);
+  /*
+   * ⚠ **The name is restated rather than read back out of `document.title`**, and
+   * the pair is the assertion: the first thing this app does to that property is
+   * overwrite it, so a value recovered from it at any later moment is whatever the
+   * last render put there, badge and all. That leaves two copies of one string —
+   * this one and the document's — which is exactly the drift this file exists to
+   * catch, so they are compared.
+   */
+  const shipped = /<title>([^<]*)<\/title>/.exec(html)?.[1] ?? "";
+  const named = /const PAGE_TITLE = "([^"]*)";/.exec(appSrc)?.[1] ?? "";
+  check("both copies of the name were found", [shipped.length > 0, named.length > 0], [true, true]);
+  check("and the tab is called the same thing before and after this app loads", named, shipped);
+
+  /*
+   * ⚠ **`interactive-widget=resizes-content`, which nothing in this package reads
+   * and nothing asserted.** The default is `resizes-visual`, which does *not* move
+   * the layout viewport when the software keyboard opens: `AppShell`'s `h-dvh` and
+   * the composer's sticky `bottom-0` stay where they were, so on Chrome/Android the
+   * box you are typing in is behind the keyboard — and on a plan card, whose whole
+   * point is typing an answer, so are Send and the approvals. Nothing repositions
+   * them; `Composer` compensates for its own height cap alone.
+   *
+   * Asserted as the **pair**, because the key alone is a fact about a file nobody
+   * opens: the layout it is compensating for has to still be the one described, and
+   * `h-dvh` moving out of `AppShell` is what would make this meta line a cargo cult
+   * a reader could not evaluate. Browsers that do not know the key ignore it.
+   */
+  const viewport = /<meta name="viewport" content="([^"]*)"/.exec(html)?.[1] ?? "";
+  const shell = stripComments(readFileSync(new URL("../src/ui/AppShell.tsx", import.meta.url), "utf8"));
+  check("the viewport tag was found", viewport.length > 0, true);
+  check(
+    "the keyboard moves the layout viewport, and the layout it moves is still there",
+    [/\binteractive-widget=resizes-content\b/.test(viewport), /\bh-dvh\b/.test(shell)],
+    [true, true],
+  );
+  /*
+   * The other half of the same tag, which predates it and is load-bearing for a
+   * different reason: without `viewport-fit=cover` *and* the safe-area padding in
+   * `index.css`, the bottom action bar sits under the iPhone home indicator, which
+   * is exactly where the approve buttons are.
+   */
+  check("and the safe area is still opted into", /\bviewport-fit=cover\b/.test(viewport), true);
 }
 
 /** Source with comments removed, so a rule quoted in prose cannot satisfy a regex. */
@@ -17199,7 +18071,7 @@ process.stdout.write("\nthe machine limit\n");
  * ------------------------------------------------------------------ */
 
 /* ------------------------------------------------------------------ *
- * A re-probe is not the host going away
+ * A re-probe is not the host going away, and asking is not failing
  *
  * `resumeMachine` forgets the route on every wake — a route learned on one
  * network says nothing on another — so a healthy machine was re-probed every time
@@ -17214,15 +18086,33 @@ process.stdout.write("\nthe machine limit\n");
  * flickers, so a row may not change because of it. These screens are the two that
  * legitimately *show* reachability, and showing it is still not a reason to take
  * the content away while asking.
+ *
+ * ⚠ **The other half arrived later and is the more embarrassing one: the answer
+ * was a boolean, and `false` was being read as *offline*.** Four screens drew
+ * `` `${machine.name} is not reachable right now — ${reachText(…)}` `` on the
+ * false branch — and `unknown`, a machine **nobody has asked yet**, is false too.
+ * `bootstrap` promotes the machine list to `ready` before any `/health` has
+ * landed and `resumeMachine` forgets the route on every wake, so `unknown` is the
+ * value for the first two or three seconds of every one of those screens, and
+ * longer over a relay from a phone. For that whole window they asserted a failure
+ * that had not happened — and `reachText`'s `unknown` arm was the bare string
+ * `"…"`, so what was actually drawn was **"laptop is not reachable right now —
+ * …."**: an ellipsis substituted into a sentence, under a claim nothing had
+ * measured. An ellipsis is a *pause*; on its own it is not a phrase.
+ *
+ * So there is a partition rather than a boolean, and it is asserted by **calling**
+ * both functions over all four `Reach` values — the shape `daemonReadable`'s own
+ * docblock names for itself, *"`webcheck` walks all four values instead of
+ * asserting JSX"*, now that there is something to walk. What the source scan is
+ * left with is the only part a call cannot reach: that the screens branch on the
+ * partition, and that the arm which has measured nothing claims nothing.
  * ------------------------------------------------------------------ */
 
-process.stdout.write("\na re-probe is not the host going away\n");
+process.stdout.write("\na re-probe is not the host going away, and asking is not failing\n");
 {
-  const { daemonReadable } = await import("../src/machine.js");
+  const { daemonRead, daemonReadable } = await import("../src/machine.js");
+  const { reachText } = await import("../src/ui/bits.js");
   const mach = stripComments(readFileSync(new URL("../src/machine.ts", import.meta.url), "utf8"));
-  const panel = stripComments(
-    readFileSync(new URL("../src/ui/settings/MachineSystemsSection.tsx", import.meta.url), "utf8"),
-  );
 
   // All four, because the interesting one is `probing` and a predicate over a
   // union is only asserted by walking it.
@@ -17232,6 +18122,36 @@ process.stdout.write("\na re-probe is not the host going away\n");
   check("nor is one never asked", daemonReadable("unknown"), false);
 
   /*
+   * ⚠ **The same four through the partition, and the two `false`s coming apart is
+   * the whole change.** `unknown` and `offline` are one answer to `daemonReadable`
+   * and two different things to say to a person: the first is this client not
+   * having asked, which is a fact about this tab, and the second is a host that
+   * did not answer, which is a fact about the machine. Only the second has earned
+   * the words "not reachable", and only the second can be retried.
+   */
+  check(
+    "the partition tells the two falses apart",
+    [daemonRead("online"), daemonRead("probing"), daemonRead("offline"), daemonRead("unknown")],
+    ["readable", "readable", "unreachable", "asking"],
+  );
+  /*
+   * ⚠ **And the two can never disagree about the same machine**, which is the
+   * reason `daemonReadable` was reimplemented in terms of `daemonRead` rather than
+   * left as a second statement of the same three arms. Asserted as the equality
+   * over the whole union rather than as the identity of the source line, because
+   * the property is what matters — but the source line is pinned too, since an
+   * "equivalent" reimplementation is exactly how two copies start drifting.
+   */
+  check(
+    "and the boolean is exactly its first arm, at every value",
+    (["unknown", "probing", "online", "offline"] as const).filter(
+      (reach) => daemonReadable(reach) !== (daemonRead(reach) === "readable"),
+    ),
+    [],
+  );
+  check("derived rather than stated a second time", /return daemonRead\(reach\) === "readable";/.test(mach), true);
+
+  /*
    * The root fix, and the one that covers every other screen: a probe of a
    * machine already believed reachable does not publish `probing` at all.
    * `unknown` is still the value for never having asked.
@@ -17239,8 +18159,253 @@ process.stdout.write("\na re-probe is not the host going away\n");
   check("a re-probe keeps a known-online state", /if \(this\.reach !== "online"\) this\.reach = "probing";/.test(mach), true);
   check("and does not overwrite it unconditionally", /^\s*this\.reach = "probing";$/m.test(mach), false);
 
-  check("the systems panel asks the predicate", /!daemonReadable\(machine\.reach\)/.test(panel), true);
-  check("rather than treating a measurement as an outage", /machine\.reach !== "online"/.test(panel), false);
+  /*
+   * ⚠ **Every phrase this function can return has to survive being substituted
+   * into somebody else's sentence**, because that is the only way it is ever used:
+   * four screens compose `` `${name} is not reachable right now — ${reachText(…)}`
+   * `` and one of them ends the line with a full stop. The `unknown` arm was `"…"`,
+   * which is the failure this asserts against — swept over all four reaches times
+   * all seven `OfflineReason` values rather than over the one arm that broke, since
+   * a table entry emptied later fails exactly the same way and by hand.
+   */
+  const REASONS = [
+    null,
+    "no_route",
+    "no_token",
+    "not_enrolled",
+    "cp_unreachable",
+    "over_limit",
+    "owner_disabled",
+  ] as const;
+  const phrases = (["unknown", "probing", "online", "offline"] as const).flatMap((reach) =>
+    REASONS.map((reason) => reachText(reach, reason)),
+  );
+  check("the sweep found every reach and every reason", phrases.length, 28);
+  check("and none of them is punctuation standing in for a phrase", phrases.filter((one) => !/[a-z]/.test(one)), []);
+  check(
+    "the four reaches read as the four things they are",
+    [reachText("online", null), reachText("probing", null), reachText("unknown", null), reachText("offline", "over_limit")],
+    ["online", "probing…", "not checked yet", "over the machine limit"],
+  );
+  /*
+   * `probing…` keeps its ellipsis and that is not an exception to the rule above:
+   * there is a word in front of it, and it is the truthful trailing-off of a
+   * measurement in flight. The rule is about a phrase that is *only* punctuation.
+   */
+  check("and the one that keeps an ellipsis has a word in front of it", /^probing…$/.test(reachText("probing", null)), true);
+
+  /*
+   * ⚠ **The four screens, held to branching on the partition rather than on the
+   * boolean.** This is the half no call can make: `daemonRead` answering three
+   * values is worth nothing if a screen still writes `!daemonReadable(…)` and
+   * draws one sentence for both falses. Swept over all four rather than over the
+   * one the old assertion named — `MachineSystemsSection` was pinned and
+   * `MachineAgentsSection`, `MachineSection` and `AgentBuilder` composed the same
+   * broken sentence with nothing watching them.
+   *
+   * ⚠ **`MachinePluginsSection` is deliberately absent and its absence is the
+   * fix, not a gap.** It has exactly one caller, `MachineSection`, which now
+   * branches above it and collapses all three lists into one sentence — so a
+   * branch of its own would have been provably dead code drawing a second copy of
+   * the very sentence being de-duplicated. Asserted below as the absence of both
+   * halves, so that a second caller appearing without them fails here rather than
+   * silently reintroducing the duplicate.
+   */
+  const REACH_SCREENS = [
+    "ui/settings/MachineSystemsSection.tsx",
+    "ui/settings/MachineAgentsSection.tsx",
+    "ui/settings/MachineSection.tsx",
+    "ui/AgentBuilder.tsx",
+  ] as const;
+  const asksTheBoolean: string[] = [];
+  const claimsWithoutMeasuring: string[] = [];
+  const failureNotMarked: string[] = [];
+  const treatsProbingAsOutage: string[] = [];
+  for (const file of REACH_SCREENS) {
+    const src = stripComments(readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8"));
+    const name = file.slice(file.lastIndexOf("/") + 1);
+    if (!/daemonRead\(machine\.reach\)/.test(src) || /!daemonReadable\(/.test(src)) asksTheBoolean.push(name);
+    // A re-probe is `readable`, so a screen may not key on `online` by hand: that
+    // is the unmount-and-remount this whole section is named after, arriving by a
+    // different spelling.
+    if (/machine\.reach !== "online"/.test(src)) treatsProbingAsOutage.push(name);
+    /*
+     * The two arms, read as the span between the `<Empty` that opens them and the
+     * sentence inside them — which is where `failed` would be. Positional rather
+     * than by pattern because the tag is one line on three of these screens and
+     * four on the fourth, where an `action` sits between the prop and the words.
+     */
+    const waiting = src.indexOf("Checking whether");
+    const failing = src.indexOf("is not reachable right now");
+    const waitTag = src.slice(src.lastIndexOf("<Empty", waiting), waiting);
+    const failTag = src.slice(src.lastIndexOf("<Empty", failing), failing);
+    if (waiting < 0 || /\bfailed\b/.test(waitTag)) claimsWithoutMeasuring.push(name);
+    if (failing < 0 || !/\bfailed\b/.test(failTag)) failureNotMarked.push(name);
+  }
+  check("every screen that draws reachability asks the partition", asksTheBoolean, []);
+  check("and none of them reads a measurement in progress as an outage", treatsProbingAsOutage, []);
+  /*
+   * ⚠ **The arm that has measured nothing claims nothing** — no `failed`, so no
+   * triangle and no `role="status"`. Announcing "not reachable" from a live region
+   * two or three seconds before the list arrives is the original defect in the one
+   * channel a reader cannot skim back over.
+   */
+  check("the wait is drawn as a wait", claimsWithoutMeasuring, []);
+  check("and the failure is drawn as one", failureNotMarked, []);
+  {
+    const plugins = stripComments(
+      readFileSync(new URL("../src/ui/settings/MachinePluginsSection.tsx", import.meta.url), "utf8"),
+    );
+    check(
+      "the section whose caller says it for it does not say it twice",
+      [/daemonRead\(/.test(plugins), /is not reachable right now/.test(plugins)],
+      [false, false],
+    );
+  }
+
+  /*
+   * ⚠ **And the primitive all four of those arms are drawn with, whose subject is
+   * the same distinction one level down.** `Empty` was a single `<p>` serving at
+   * least eight materially different states — a list that is genuinely empty, a
+   * search that matched nothing, a machine that is not yours any more, a read that
+   * *failed*, a catalogue host that could not be reached — every one of them
+   * centred grey text with nothing to press. So a failure a tap would fix was
+   * drawn identically to an emptiness nobody can act on, and from a dead machine's
+   * systems screen the one way out led to a screen showing the same sentence.
+   *
+   * **Exactly one of the two is announced, and that is the property.** A failure
+   * is something that *happened*, with nothing else on screen to say so, which is
+   * the definition of what a live region is for. An absence is a **state** the
+   * reader has already been told about by the thing they just did — narrowing a
+   * filter, opening a fresh machine — so `role="status"` on it is noise in the one
+   * channel that cannot be skimmed. Nothing typed can hold that: both variants are
+   * the same return type and `role` is a string on a `<div>`, so this is read off
+   * the source the way every other placement in this file is.
+   */
+  {
+    const bits = stripComments(readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8"));
+    const emptyAt = bits.indexOf("export function Empty(");
+    const empty = emptyAt < 0 ? "" : bits.slice(emptyAt, bits.indexOf("\n}\n", emptyAt));
+    /*
+     * A slice that came back empty passes every negative assertion below while
+     * asserting nothing at all, which is this driver's one failure mode.
+     *
+     * Guarded on the *index* rather than on the slice's length, which is the form
+     * the `/danger/` narrowing further down already argues for: a missing needle
+     * makes `indexOf` answer −1, and `slice(-1, …)` is a legal call that returns
+     * the tail rather than throwing — so a length test is reading the shape of an
+     * accident. This one cannot be renamed out from under the check quietly.
+     */
+    check("the primitive was found", emptyAt >= 0, true);
+    check("only a failure is announced", /role=\{failed \? "status" : undefined\}/.test(empty), true);
+    check("and there is no second way to announce one", (empty.match(/role=/g) ?? []).length, 1);
+    /*
+     * ⚠ **The plain case returns byte-identically to what it always did**, by an
+     * early return rather than by a container that happens to collapse to the same
+     * markup. Roughly forty call sites pass text and nothing else, in list bodies,
+     * sheet panes and the transcript, and "probably the same box" is not good
+     * enough for a change nobody asked those screens for.
+     */
+    check(
+      "an absence with nothing to do about it is the same paragraph it always was",
+      /if \(!failed && action === undefined\) \{\s*return <p className="px-4 py-6 text-center text-sm text-muted">\{children\}<\/p>;/.test(empty),
+      true,
+    );
+    /*
+     * The failure changes the *drawing* as well as the wording: the leading
+     * `AlertTriangle` this app already uses for a failure in `Toast` and in
+     * `EventList`'s transcript notice, with the sentence at `text-fg`. A shape
+     * survives greyscale, reduced motion and a phone in sunlight, which is the
+     * argument `TONE_DOT` makes at the other end of the same scale.
+     */
+    check("and it takes this app's failure glyph rather than a colour", /\{failed && \(\s*<Icon as=\{AlertTriangle\}/.test(empty), true);
+    /*
+     * ⚠ **The remedy is available to an absence too, and is gated on itself
+     * alone.** "No machines yet" has an obvious next move, and having one does not
+     * make it a failure — so `action` must not be drawn inside the `failed` branch,
+     * which is the one-character version of this that would have typechecked.
+     */
+    check(
+      "a way out is offered on its own terms rather than only on a failure",
+      /\{action !== undefined && <div className="mt-3 flex justify-center">\{action\}<\/div>\}/.test(empty),
+      true,
+    );
+  }
+
+  /*
+   * ⚠ **The fifth and sixth sites of this same question, which `REACH_SCREENS`
+   * cannot see because they are not JSX** — and which is precisely where the
+   * partition had not been applied. `install.ts`'s two predicates both read
+   * `if (!daemonReadable(machine.reach)) return "unreachable"`, so a machine nobody
+   * had asked yet was reported as an outage: `bootstrap` promotes to
+   * `phase: "ready"` on the *machine list*, before a single probe, and
+   * `resumeMachine` calls `forgetRoute()` on every wake — so on a cold load every
+   * row on the install screen said "not reachable right now" about a fleet that was
+   * about to answer, and `settingsNotice` names the first blocker in fleet order,
+   * so one unasked machine spoke for the whole selection.
+   *
+   * Asserted **by call** rather than by source, which is what this pair of pure
+   * functions buys over the four components: the question is the same question, so
+   * it is swept over the same four `Reach` values here rather than grepped for a
+   * spelling.
+   */
+  {
+    const { settingsBlockFor, skipReasonFor } = await import("../src/install.js");
+    const at = (reach: string): never =>
+      ({
+        id: "m_1",
+        name: "laptop",
+        scopes: ["session:read", "session:write", "machine:admin"],
+        owned: true,
+        overLimit: false,
+        ownerDisabled: false,
+        reach,
+        offlineReason: null,
+      }) as never;
+    const pane = { version: "1.0.0", contributes: { settings: true } };
+    check(
+      "installing asks the partition rather than the boolean, at every reach",
+      (["online", "probing", "offline", "unknown"] as const).map((reach) => skipReasonFor(at(reach))),
+      [null, null, "unreachable", "asking"],
+    );
+    check(
+      "and so does configuring",
+      (["online", "probing", "offline", "unknown"] as const).map((reach) => settingsBlockFor(at(reach), pane)),
+      [null, null, "unreachable", "asking"],
+    );
+    /*
+     * ⚠ **The two `false`s of `daemonReadable` coming apart is the whole change**,
+     * so the negative is asserted too: nothing here may collapse back to the boolean,
+     * which answers `false` for both and is the one-line edit that reverts this.
+     */
+    check(
+      "so a machine nobody has asked is never reported as one that did not answer",
+      [skipReasonFor(at("unknown")) === skipReasonFor(at("offline")), daemonReadable("unknown") === daemonReadable("offline")],
+      [false, true],
+    );
+  }
+
+  /*
+   * ⚠ **`REACH_SCREENS` is the third copy of a list that also lives in two
+   * docblocks** — `reachText`'s in `bits.tsx` and `daemonRead`'s in `machine.ts` —
+   * and both of those were corrected in the round that produced the repair above,
+   * having drifted from it. A list restated from memory in prose is exactly the
+   * thing that drifts, and the member most easily got wrong is the one that is
+   * deliberately **absent**: `MachinePluginsSection` draws no such sentence, and its
+   * absence is a fix rather than a gap. Both docblocks name `REACH_SCREENS`
+   * explicitly now, so a fifth screen composing that sentence has to touch all
+   * three. This is the cheapest thing that can hold a prose cross-reference at all:
+   * that each of them still points a reader at the list rather than restating it.
+   */
+  {
+    const bitsRaw = readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8");
+    const machineRaw = readFileSync(new URL("../src/machine.ts", import.meta.url), "utf8");
+    check(
+      "both docblocks that restate this list send the reader to it",
+      [bitsRaw.includes("REACH_SCREENS"), machineRaw.includes("REACH_SCREENS")],
+      [true, true],
+    );
+  }
 }
 
 process.stdout.write("\nsaving a credential while a chat is open\n");
@@ -17249,8 +18414,23 @@ process.stdout.write("\nsaving a credential while a chat is open\n");
 
   check("one chat is singular", credentialToast(false, 1), "Saved. 1 chat is restarting to pick it up.");
   check("and several are not", credentialToast(false, 3), "Saved. 3 chats are restarting to pick it up.");
-  check("removing says removed", credentialToast(true, 2), "Removed. 2 chats are restarting to pick it up.");
+  /*
+   * ⚠ **The tail is a removal's own, and this line used to pin the save's.** Every
+   * tail here was written for a save and then reused: "restarting to pick it up"
+   * after a removal names something to pick up when the key those chats were
+   * holding is precisely what is gone, and this assertion is what kept that
+   * shipping. Only the head ever varied, so only the head was ever right.
+   */
+  check("removing says removed", credentialToast(true, 2), "Removed. 2 chats are restarting without it.");
   check("nothing to restart keeps the old sentence", credentialToast(false, 0), "Saved. Checking whether it works…");
+  /*
+   * And the same correction on the quiet arm: "Checking whether it works…" is
+   * about a key that now exists, so a removal with nothing to relaunch ends at the
+   * full stop. The chip beside the box going out is the confirmation, and a tail
+   * would have to invent a claim about a machine that was asked to stop using
+   * something.
+   */
+  check("and a removal with nothing to relaunch ends there", credentialToast(true, 0), "Removed.");
   /*
    * **`undefined` is not zero.** A daemon predating this omits the field, and
    * "0 chats" there would be a confident claim about behaviour it does not have —
@@ -18933,17 +20113,36 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
   // say to whoever is holding the manifest.
   check("a bad manifest keeps the daemon's words", failed(400, "manifest_invalid", "id must be…"), "id must be…");
   check("a code this client has never seen falls through to the message", failed(400, "brand_new_code", "the daemon's words"), "the daemon's words");
-  check("and something that is not an ApiError at all", pluginFailure(new Error("x")), "That did not work. Try again.");
+  /*
+   * ⚠ **Nothing came back at all, which is not a refusal and must not read like
+   * one.** This pinned "That did not work. Try again." — an invitation to make
+   * exactly the retry `MachineInstalls` refuses to make, since a `POST` is not
+   * replayable, a transport failure says nothing about whether the daemon acted,
+   * and it may be halfway through unpacking. A second install onto a machine that
+   * is still unpacking the first is how a `plugin_busy` and a half-written plugin
+   * directory arrive together. A read pays for a caution it does not need, and
+   * that is the trade: over-warning a refresh costs one sentence, under-warning a
+   * write costs a duplicate install.
+   */
+  check(
+    "and something that is not an ApiError at all",
+    pluginFailure(new Error("x")),
+    "That machine did not answer, and whether it acted is not known. Check before trying again.",
+  );
   /*
    * ⚠ **The one sentence on the consent screen that may not be replaced.** The
    * fan-out paths raise a broken consent by *throwing*, so the row lands on
    * `failed` with its box unticked — and a plain `Error` fell through the arm
-   * above, deleting the naming of which scope was gained and telling the person to
-   * try the install again. The generic arm is asserted on the line above so that
-   * this one is the exception rather than a widening of it.
+   * above, deleting the naming of which scope was gained. That arm has since been
+   * rewritten — it said "That did not work. Try again." and now describes a
+   * machine that did not answer — and this one is unaffected either way, which is
+   * the point: whatever the generic sentence is, it is a diagnosis of the wrong
+   * failure here, because the daemon answered and its answer is what broke the
+   * consent. The generic arm is asserted on the lines above so that this is the
+   * exception rather than a widening of it.
    */
   check(
-    "a broken consent keeps its words rather than becoming Try again",
+    "a broken consent keeps its words rather than a diagnosis of the transport",
     pluginFailure(new ConsentBrokenError("That plugin asked for more than this screen showed: net.")),
     "That plugin asked for more than this screen showed: net.",
   );
@@ -19832,10 +21031,28 @@ process.stdout.write("\nwhat somebody is shown before a plugin is sent anywhere\
     /if \(round === 0\) setView\(null\)/.test(screenSrc),
     "round === 0 guard on setView",
   );
+  /*
+   * ⚠ **This was `/if \(live && round === 0\) setError/` and the guard has widened
+   * by exactly one clause — the property it protects is unchanged and the sentence
+   * it was written under is the one that expired.** A *clock* tick that fails still
+   * leaves the board alone, which is the whole rule: on the `spoke` screen the
+   * clock keeps running, so `round === 0` is false for every tick after the first
+   * and a failed refresh must not replace what somebody is reading with an error.
+   * What that spelling also refused was a read a **person** asked for: press Try
+   * again on a screen that has ticked once, and the retry failed in silence.
+   * `asked` is the second clause, and the pair is asserted rather than the arm,
+   * since without the press detection the retry can go quiet again with this
+   * report still green.
+   */
   report(
     "a failed tick leaves what is on screen",
-    /if \(live && round === 0\) setError/.test(screenSrc),
-    "round === 0 guard on setError",
+    /if \(live && \(round === 0 \|\| asked\)\) setError/.test(screenSrc),
+    "round === 0 || asked guard on setError",
+  );
+  report(
+    "while a read somebody asked for reports at any round",
+    /const asked = attempt !== askedFor\.current;/.test(screenSrc),
+    "the press is detected from `attempt` moving, not inferred from `round`",
   );
   report("and it only ticks while somebody is looking", /if \(document\.hidden\) return/.test(screenSrc), "document.hidden");
   report(
@@ -19860,6 +21077,138 @@ process.stdout.write("\nwhat somebody is shown before a plugin is sent anywhere\
     /Install without reading it/.test(panelSrc),
     "the unreadable path is a separate control",
   );
+
+  /* ---------------------------------------------------------------- *
+   * The sentence both of these screens say when the machine has gone
+   *
+   * ⚠ **A constant nothing imports is not a de-duplication, and it is worse than
+   * the transcription it replaced: the reader who finds it stops looking.**
+   * `MACHINE_GONE` shipped exported, with a docblock written in the present tense
+   * about a wiring that had not happened — `grep` found one hit, the definition —
+   * while both screens went on hand-writing *"That machine is not reachable right
+   * now."* at all four of their `daemonFor` guards. That sentence was also the
+   * wrong one: `store.daemonFor` answers `undefined` **only** where the machine is
+   * absent from the listing (`daemons` and `connections` are written and dropped
+   * together), so it is a grant revoked in another tab or a machine retired, and
+   * waking the host does not touch it. An unreachable machine keeps its client and
+   * says so through `machine.reach`. So the old wording named a remedy — wait for
+   * it, wake it — for a state that remedy does not reach.
+   * ---------------------------------------------------------------- */
+  {
+    const { MACHINE_GONE } = await import("../src/plugins.js");
+    const screen = stripComments(screenSrc);
+    const panel = stripComments(panelSrc);
+
+    check("the sentence is about the list rather than about reachability", MACHINE_GONE, "That machine is not in your list any more.");
+    check("and it is not the reachability sentence wearing a constant's name", /reachable/.test(MACHINE_GONE), false);
+
+    /*
+     * ⚠ **Every guard that *says* something says this**, swept over the two files
+     * rather than counted per file. Three more `daemon === undefined` tests exist
+     * across them and are deliberately not in scope: two `return` without a word and
+     * one only disables a control, so there is no sentence to be wrong. The ones
+     * opening a block are the four the docblock is about, and the count is asserted
+     * so that a fifth arriving with its own wording fails here rather than joining
+     * the drift silently.
+     */
+    const guards = [screen, panel].flatMap((src) => src.split("if (daemon === undefined) {").slice(1));
+    check("all four guards were found", guards.length, 4);
+    check(
+      "and every one of them answers with the constant rather than a fifth transcription",
+      guards.filter((body) => !body.slice(0, 400).includes("MACHINE_GONE")).length,
+      0,
+    );
+    /*
+     * The negatives, off the stripped source for the reason every negative here is:
+     * both files quote the old sentence in a ⚠ paragraph explaining that it expired,
+     * and an unstripped read would let that paragraph satisfy the very check written
+     * to keep it out of the screen.
+     */
+    check(
+      "neither screen still draws the reachability sentence",
+      [/is not reachable right now/.test(screen), /is not reachable right now/.test(panel)],
+      [false, false],
+    );
+    // Named rather than filtered on the text itself, so a failure prints which
+    // screen went back to typing it out instead of a whole component.
+    check(
+      "nor transcribes the new one beside the constant it imports",
+      [
+        ["PluginScreen.tsx", screen] as const,
+        ["PluginsPanel.tsx", panel] as const,
+      ]
+        .filter(([, src]) => src.includes(MACHINE_GONE))
+        .map(([name]) => name),
+      [],
+    );
+    /*
+     * ⚠ **And the words are the ones five machine screens already draw on the same
+     * fact**, which is the claim that makes this a constant rather than a sixth
+     * wording. Those five still transcribe the string — they were saying the right
+     * words already, which is drift waiting rather than a lie on screen — so the
+     * assertion is that they and the constant have not come apart.
+     */
+    const SAME_FACT = [
+      "ui/settings/MachineSection.tsx",
+      "ui/settings/MachineSystemsSection.tsx",
+      "ui/settings/MachineAgentsSection.tsx",
+      "ui/settings/MachinePluginsSection.tsx",
+      "ui/AgentBuilder.tsx",
+    ] as const;
+    check(
+      "and every screen that says the same thing says it in the same words",
+      SAME_FACT.filter(
+        (file) => !readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8").includes(MACHINE_GONE),
+      ),
+      [],
+    );
+  }
+
+  /* ---------------------------------------------------------------- *
+   * A string this app exports and nothing says
+   *
+   * ⚠ **The defect above generalises, and it is the one shape this driver is best
+   * placed to catch**: a sentence extracted into a constant *and left unimported*
+   * reads, to every later reader, as the place that sentence lives — so the screens
+   * still hand-writing it are invisible, and a wording change made here changes
+   * nothing anywhere. Nothing typed can see it: an unused export is a perfectly
+   * legal module surface, and `tsc` says nothing about one.
+   *
+   * Narrow on purpose — a single-line `export const NAME = "…";` under an
+   * upper-case name, which is how this package writes a shared sentence — and
+   * counted, because a pattern that matches nothing passes silently. `scripts/` is
+   * swept alongside `src/`, so a constant that exists **for this driver** is not a
+   * finding: that is `daemonReadable`'s standing posture, and it is the deliberate
+   * hole in this sweep rather than an oversight.
+   * ---------------------------------------------------------------- */
+  {
+    const sources: string[] = [];
+    const collect = (dir: URL): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const child = new URL(entry.name + (entry.isDirectory() ? "/" : ""), dir);
+        if (entry.isDirectory()) collect(child);
+        else if (/\.tsx?$/.test(entry.name)) sources.push(stripComments(readFileSync(child, "utf8")));
+      }
+    };
+    collect(new URL("../src/", import.meta.url));
+    collect(new URL("../scripts/", import.meta.url));
+
+    const declared: string[] = [];
+    const unsaid: string[] = [];
+    for (const text of sources) {
+      for (const found of text.matchAll(/^export const ([A-Z][A-Z0-9_]*) = "[^"]*";$/gm)) {
+        const name = found[1] ?? "";
+        declared.push(name);
+        // Every file including the one that declares it, so a constant used only on
+        // the line below its own definition still counts as said. One hit is the
+        // definition itself; anything above that is a reader.
+        const said = sources.reduce((total, one) => total + (one.match(new RegExp(`\\b${name}\\b`, "g")) ?? []).length, 0);
+        if (said <= 1) unsaid.push(name);
+      }
+    }
+    check("the sweep found the shape it is looking for", declared.length >= 12, true);
+    check("and every sentence this package extracts is one something says", unsaid, []);
+  }
 
   /*
    * ⚠ **The same gate on the path that reaches a whole fleet, which is the one
@@ -20053,17 +21402,32 @@ process.stdout.write("\nwhere a failed install or removal is said, and how much 
     );
   }
   /*
-   * ⚠ **Removal happens from the bar and nowhere else, so there is exactly one
-   * question on this screen.** A bin on the row put an unrecoverable act 44px from
-   * a checkbox on the busiest strip here, and the question that guarded it had to
-   * *replace the row* to fit — a control answering for itself in the space it
-   * occupies, moving every row under it. Off the row, a removal always goes through
-   * a selection: two deliberate acts, one place to confirm, and a sentence that
-   * names every machine it reaches rather than a truncated one naming the row it
-   * happened to sit on.
+   * ⚠ **Every question on this screen is the bar's, and the row asks none.** A bin
+   * on the row put an unrecoverable act 44px from a checkbox on the busiest strip
+   * here, and the question that guarded it had to *replace the row* to fit — a
+   * control answering for itself in the space it occupies, moving every row under
+   * it. Off the row, a removal always goes through a selection: two deliberate
+   * acts, one place to confirm, and a sentence that names every machine it reaches
+   * rather than a truncated one naming the row it happened to sit on.
    *
-   * Both halves, because either alone is a defect: a row that still drew a bin, or
-   * a `drawnActs` that let `remove` through.
+   * ⚠ **There are two askers now, and this used to assert there was one — which
+   * would have refused the fix rather than the defect.** The old rule weighed
+   * reversibility alone, so a removal was confirmed and an install was not, and
+   * that left the act which hands somebody else's code this uid, this `HOME` and
+   * these repositories as the only unguarded tap here. What was measured is
+   * untouched, because a second asker is not a second *place* to ask: both replace
+   * the strip in place, and `Confirming` is one union rather than two booleans, so
+   * the question, the verb and what it acts on cannot disagree.
+   *
+   * ⚠ **A fan-out asks and a single machine does not**, which is the half a bare
+   * "install is confirmed" would lose: one machine is the same reach as the row's
+   * own icon two inches up, and a question there would put one on the commonest
+   * act in the app. `installTargets` on both sides of the ternary, so the count in
+   * the question and the list the answer acts on are one walk.
+   *
+   * Update is still nobody's question — it replaces code somebody already
+   * consented to on machines that already run it — and that is asserted as the
+   * absence it is, since a control *not* asking is not a value anything holds.
    */
   {
     const rowIcons = installsBody.slice(installsBody.indexOf("function MachineRow"));
@@ -20073,11 +21437,16 @@ process.stdout.write("\nwhere a failed install or removal is said, and how much 
       "the row's icons come from drawnActs, and no bin is drawn there",
     );
     report(
-      "and there is one question, in the bar",
-      (installsBody.match(/setConfirming\(true\)/g) ?? []).length === 1 &&
-        /disabled=\{!can\.install\}[\s\S]{0,80}?act\(idsWith\("install"\), \[\]\)/.test(installsBody) &&
+      "and every question is the bar's, asked by exactly the two acts that earn one",
+      (installsBody.match(/setConfirming\("/g) ?? []).length === 2 &&
+        (installsBody.match(/setConfirming\("remove"\)/g) ?? []).length === 1 &&
+        (installsBody.match(/setConfirming\("install"\)/g) ?? []).length === 1 &&
+        !/setConfirming/.test(rowIcons) &&
+        /disabled=\{!can\.install\}[\s\S]{0,120}?installTargets\.length > 1 \? setConfirming\("install"\) : act\(installTargets, \[\]\)/.test(
+          installsBody,
+        ) &&
         /disabled=\{!can\.update\}[\s\S]{0,80}?act\(idsWith\("update"\), \[\]\)/.test(installsBody),
-      "one asker, and neither install nor update is it",
+      "two askers, both in the bar; a lone install acts, and update never asks",
     );
   }
   /*
@@ -20204,16 +21573,32 @@ process.stdout.write("\nwhere a failed install or removal is said, and how much 
     "every arm that could write a failed row asks this request's own signal",
   );
   /*
-   * ⚠ **The busy flag is raised before the act and lowered inside its settle,
-   * under the epoch gate.** A caller drawing controls beside this one is gated on
-   * it, and the prop is optional — so a missing `onBusyChange?.(true)` leaves that
-   * gate dead on arrival with nothing failing.
+   * ⚠ **What the act did, said outside the scroller, in a region that was mounted
+   * before there was anything to say.** The rows scroll, so a failure on row nine
+   * of a six-row viewport is off screen and this line is the only thing that
+   * speaks it — and `EventList` and `Toast` both record that a `role="status"`
+   * inserted in the same paint as its content is commonly not spoken at all,
+   * VoiceOver on iOS included. So the ternary has to sit on the `className` and
+   * never on the mount.
+   *
+   * ⚠ **The string is `said` rather than `failure`, and that is a widening rather
+   * than a rename.** The region carried failures only, which made the commonest
+   * fan-out — one that worked — the quieter of the two: it cleared its rows and
+   * said nothing anywhere, while `PluginsPanel` toasts "Installed Clock 1.0.0" for
+   * a single machine. `doneSummary` and `failureDetail` share this one node
+   * because two live regions beside each other interleave, so the negative below
+   * has to name the joined string: pinning `failure` would have passed while the
+   * node it guards was gone.
+   *
+   * Read off the stripped body for the reason `installsBody` states — this file
+   * argues at length about the region in the comment directly above it, and the
+   * unstripped source lets that argument satisfy its own lock.
    */
   report(
     "and it is a live region that is always mounted",
-    /role="status" aria-live="polite"/.test(installsSrc) &&
-      /className=\{failure\.length === 0 \? ""/.test(installsSrc) &&
-      !/\{failure\.length > 0 &&/.test(installsSrc),
+    /role="status" aria-live="polite"/.test(installsBody) &&
+      /className=\{said\.length === 0 \? ""/.test(installsBody) &&
+      !/\{said\.length > 0 &&/.test(installsBody),
     "the ternary is on the className, not on the mount",
   );
   /*
@@ -20228,6 +21613,51 @@ process.stdout.write("\nwhere a failed install or removal is said, and how much 
       !/block truncate text-2xs text-muted/.test(installsSrc),
     "the failed arm wraps and takes full ink; the rest still truncate",
   );
+  /*
+   * ⚠ **A machine nobody has asked yet is drawn as a wait, and this row drew it as
+   * an outage** — `skipReasonFor` folded `reach: "unknown"` into `unreachable`, so
+   * for the seconds between `bootstrap` promoting to `phase: "ready"` and the first
+   * probe landing, every row here was dimmed with its box `disabled`: a whole fleet
+   * drawn as switched off on every cold load. The predicate is fixed one file over
+   * and asserted by call; what only a source read can hold is that this row splits
+   * the two halves the *right* way. The **acts** stay away, because what is
+   * installed there is genuinely not known and every icon would be drawn from a
+   * guess; the **box** comes back, because ticking a row chooses a machine rather
+   * than claiming anything about it. And the dimming goes with the box, since
+   * `opacity-60` is what this list says about a machine that is out and this one is
+   * merely late.
+   */
+  report(
+    "a machine still being asked is drawn as late rather than as out",
+    /const waiting = row\.kind === "blocked" && row\.reason === "asking";/.test(installsBody) &&
+      /const out = row\.kind === "blocked" && !waiting;/.test(installsBody) &&
+      /\$\{out \? "opacity-60" : ""\}/.test(installsBody) &&
+      /disabled=\{out\}/.test(installsBody) &&
+      !/disabled=\{row\.kind === "blocked"\}/.test(installsBody),
+    "the dimming and the box both key on `out`, which excludes the wait",
+  );
+  /*
+   * ⚠ **And the latch that decides the commonest fleet there is.** `seeded` is
+   * raised as soon as the fleet is *known*, so a fleet that later becomes one
+   * machine does not silently tick the survivor — but "known" is not "answered",
+   * and on a cold load a one-machine fleet is `reach: "unknown"`. Raised before the
+   * reason was consulted, the single machine was read as an outage, the effect
+   * returned without ticking, and the latch it had already raised meant it never
+   * ticked again: four dead buttons, permanently, on a fleet of one. The early
+   * return has to sit **above** the latch, which is the whole of the fix and is one
+   * line's ordering.
+   */
+  {
+    const seedAt = installsBody.indexOf("if (seeded.current || state.machines.length === 0) return;");
+    const seed = seedAt < 0 ? "" : installsBody.slice(seedAt, installsBody.indexOf("}, [state.machines]);", seedAt));
+    report(
+      "and a fleet of one that has not answered yet latches nothing",
+      seedAt >= 0 &&
+        /if \(reason === "asking"\) return;\s*seeded\.current = true;/.test(seed) &&
+        seed.indexOf('if (reason === "asking") return;') < seed.indexOf("seeded.current = true;"),
+      "the wait returns above the latch, so a later publish still decides",
+    );
+  }
 }
 
 process.stdout.write("\nwhich plugins screen a URL names\n");
@@ -21038,12 +22468,21 @@ process.stdout.write("\nwhich machines an act reaches, and what it says about th
     machine("ok"),
     machine("probing", { reach: "probing" }),
     machine("asleep", { reach: "offline", offlineReason: "no_route" }),
+    /*
+     * ⚠ **The row this fixture did not have, which is why the defect it exists to
+     * catch passed every driver.** `unknown` is the reach on a *cold load* — the
+     * ordinary first second, since `bootstrap` promotes to `phase: "ready"` on the
+     * machine list, before a single probe — and with `online`, `probing` and
+     * `offline` here and nothing for it, both predicates below could fold it into
+     * `unreachable` with every assertion in this section still green.
+     */
+    machine("cold", { reach: "unknown" }),
     machine("banned", { ownerDisabled: true }),
     machine("over", { overLimit: true }),
     machine("shared", { scopes: ["session:read", "session:write"], owned: false }),
     machine("unchosen"),
   ];
-  const chosen = new Set(["ok", "probing", "asleep", "banned", "over", "shared"] as never[]);
+  const chosen = new Set(["ok", "probing", "asleep", "cold", "banned", "over", "shared"] as never[]);
   const plan = planTargets(fleet, chosen as never);
 
   /*
@@ -21077,6 +22516,66 @@ process.stdout.write("\nwhich machines an act reaches, and what it says about th
     "a sleeping one is accounted for rather than attempted",
     plan.skipped.find((one) => one.id === ("asleep" as never))?.reason,
     "unreachable",
+  );
+  /*
+   * ⚠ **And one nobody has asked yet is neither of those two.** It is not attempted
+   * — what is installed there cannot be read, so every icon would be drawn from a
+   * guess — and it is not `unreachable`, because nothing has failed: the remedy for
+   * an outage is to wake the host, and there is no outage. `daemonRead`'s partition,
+   * reaching the two predicates it had never been applied to. The pair with `asleep`
+   * is the assertion: these two used to be one answer.
+   */
+  check(
+    "and one nobody has asked yet is a wait, not an outage",
+    [
+      plan.eligible.includes("cold" as never),
+      plan.skipped.find((one) => one.id === ("cold" as never))?.reason,
+    ],
+    [false, "asking"],
+  );
+  check(
+    "which is a different sentence from the one that did not answer",
+    skipText("asking") === skipText("unreachable"),
+    false,
+  );
+  check(
+    "and says what is unknown rather than what failed",
+    skipText("asking"),
+    "not checked yet, so what is installed there is not known",
+  );
+
+  /*
+   * ⚠ **Both unions are read off `install.ts` rather than typed out here a second
+   * time**, which is the shape the `MarketTab` sweep already takes and the reason a
+   * fifth and a seventh member could arrive unwatched. `SettingsBlock` had a
+   * six-member list written out by hand below; `asking` was added to the type and
+   * to the function, and "every reason has a sentence" went on sweeping the six it
+   * knew about. `SkipReason` had no sweep at all — its sentences were asserted one
+   * at a time, at the call sites that happened to need one. **A list of members
+   * maintained beside a union asserts only what somebody remembered to copy.**
+   */
+  const installSrc = stripComments(readFileSync(new URL("../src/install.ts", import.meta.url), "utf8"));
+  const unionOf = (name: string): readonly string[] => {
+    const at = installSrc.indexOf(`export type ${name} =`);
+    return at < 0 ? [] : [...installSrc.slice(at, installSrc.indexOf(";", at)).matchAll(/"([a-z_]+)"/g)].map((one) => one[1] ?? "");
+  };
+  const reasons = unionOf("SkipReason");
+  // A read that came back empty passes every sweep below while asserting nothing,
+  // which is this driver's one failure mode.
+  check("the skip union was found, and the two falses are two members of it", [reasons.length >= 5, reasons.includes("asking"), reasons.includes("unreachable")], [true, true, true]);
+  check("every skip reason has a sentence", reasons.filter((one) => skipText(one as never).length === 0), []);
+  check("and no two of them read the same", new Set(reasons.map((one) => skipText(one as never))).size, reasons.length);
+  /*
+   * ⚠ **Only one of them has earned the words "not reachable"** — `reachText`'s rule
+   * one file over, arriving here through the same partition. A machine nobody has
+   * measured is "not checked yet"; naming a remedy for an outage that has not
+   * happened is the defect, and it is worse in this list than on a screen, because
+   * these sentences are what a skipped row *reports* after the fact.
+   */
+  check(
+    "and only the one that did not answer says so",
+    reasons.filter((one) => /not reachable/.test(skipText(one as never))),
+    ["unreachable"],
   );
 
   /*
@@ -21197,6 +22696,14 @@ process.stdout.write("\nwhich machines an act reaches, and what it says about th
 
     check("a reachable machine with a pane is configurable", settingsBlockFor(named("ok"), pane), null);
     /*
+     * ⚠ **And one nobody has asked yet is blocked by the wait rather than by
+     * anything it has done**, which is the second copy of `skipReasonFor`'s repair —
+     * made a second time because these two are deliberately not one predicate. It
+     * greyed Settings over a whole fleet on every cold load, with a notice naming a
+     * machine that was about to answer.
+     */
+    check("and one nobody has asked yet is waited for rather than written off", settingsBlockFor(named("cold"), pane), "asking");
+    /*
      * ⚠ **The two predicates disagree on the shared machine, and that disagreement
      * is the reason both exist.** This is what stops somebody folding them into one.
      */
@@ -21244,16 +22751,36 @@ process.stdout.write("\nwhich machines an act reaches, and what it says about th
       null,
     );
 
-    const blocks = ["owner_disabled", "over_limit", "no_scope", "unreachable", "not_installed", "no_pane"] as const;
+    /*
+     * ⚠ **Read off the union for `SkipReason`'s reason, and it is the same defect
+     * twice.** This was six members typed out by hand; `asking` was added to the
+     * type and to `settingsBlockText`, and both sweeps below went on sweeping the
+     * six they knew about — so the newest arm was the one arm nothing checked.
+     */
+    const blocks = unionOf("SettingsBlock");
+    const blockSays = (block: string): string => settingsBlockText(block as never, "server", "0.2.1");
+    check("the block union was found, and holds the two falses separately", [blocks.length >= 7, blocks.includes("asking"), blocks.includes("unreachable")], [true, true, true]);
     check(
       "every reason has a sentence, and each names the machine",
       blocks.filter((one) => {
-        const said = settingsBlockText(one, "server", "0.2.1");
+        const said = blockSays(one);
         return said.length === 0 || !said.includes("server");
       }),
       [],
     );
-    check("and no two of them read the same", new Set(blocks.map((one) => settingsBlockText(one, "server", "0.2.1"))).size, blocks.length);
+    check("and no two of them read the same", new Set(blocks.map(blockSays)).size, blocks.length);
+    /*
+     * ⚠ **The wait says "not read yet" and never "cannot be read"**, which is the
+     * whole of this arm: nothing was asked, so nothing failed — and `settingsNotice`
+     * names the *first* blocker in fleet order, so one unasked machine was speaking
+     * for a whole selection that was about to answer.
+     */
+    check("a machine nobody has asked about yet says so, and says it as a wait", blockSays("asking"), "server has not been checked yet, so its settings have not been read");
+    check(
+      "and only the one that did not answer claims an outage",
+      blocks.filter((one) => /is not reachable/.test(blockSays(one))),
+      ["unreachable"],
+    );
     check("the version is named where there is one", settingsBlockText("no_pane", "server", "0.2.1"), "server has no settings pane for 0.2.1");
     check("and left out where there is not", settingsBlockText("no_pane", "server", null), "server has no settings pane");
 
@@ -21347,10 +22874,17 @@ process.stdout.write("\nwhat the machine table's controls can do\n");
     [],
   );
   /*
-   * ⚠ **All four `skipReasonFor` states offer nothing, `unreachable` included.**
+   * ⚠ **Every `skipReasonFor` state offers nothing, `unreachable` included.**
    * Under the draft that was a rule about a claim — an unticked box on a machine
    * nobody can read. Under live acts it is stronger: Install there fires a request
    * that cannot land, and Remove claims there is something to remove.
+   *
+   * ⚠ **This said "all four" and there are five** — `asking` split off `unreachable`
+   * — which is a comment that was true when written and quietly stopped being. The
+   * assertion under it never counted them: it reads the boolean `blocked`, which is
+   * `skipReasonFor(…) !== null` collapsed by the caller, so it swept the new state
+   * on the day it arrived. A number in prose beside a sweep that does not use it is
+   * the thing to write as a property, not to keep in step by hand.
    */
   check("a blocked row offers nothing", answers.filter((one) => one.row.blocked && one.acts.length > 0), []);
   /*
@@ -24074,12 +25608,27 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
    *
    * The negatives are the ratchet: no `danger` anywhere on this row's actions, no
    * eye button, no second removal.
+   *
+   * ⚠ **The `danger` negative is read off the row and not off the file, and it was
+   * read off the file.** `StripEditor`'s own status line sets `text-danger` when a
+   * reorder is *refused* — the one report a write gets, on a list that has already
+   * jumped back under it — and a substring sweep over the whole module counted that
+   * as the row wearing red. Scoping it to `StripRowView` is what keeps the ratchet
+   * about the thing it is about; it stays a bare `danger` rather than the prop
+   * alone, so a hand-rolled `text-danger` on a menu item fails it too.
    */
+  const rowAt = pane.indexOf("function StripRowView");
+  // A slice taken from a name that is not there passes every negative below while
+  // asserting nothing at all, which is this driver's one failure mode — and
+  // `indexOf` answering -1 makes `slice` return the last character rather than
+  // nothing, so the position is what is checked and not the length.
+  check("the row component was found", rowAt > 0, true);
+  const rowSrc = pane.slice(rowAt);
   check(
     "there is one removal per row, named and drawn the same on both kinds",
     [
       /label=\{row\.hidden \? "Add back" : "Remove"\}/.test(pane),
-      /danger/.test(pane),
+      /danger/.test(rowSrc),
       /icon=\{row\.hidden \? EyeOff : Eye\}/.test(pane),
       /label="Remove agent"/.test(pane),
     ],
@@ -24806,6 +26355,45 @@ process.stdout.write("\nno authorization on the Configure agent screen\n");
     ],
     [true, 2, true],
   );
+  /*
+   * ⚠ **The two-step confirmation on that same panel, which had a *sentence* and no
+   * geometry.** `web-shell.md` states the rule and states why it is a safety
+   * property rather than a preference: the first tap replaces the row's controls
+   * with the question and its two answers, both groups lay out in the **same box**
+   * so the last child occupies the same pixels, `setConfirming(true)` is
+   * synchronous, and `.tap` removes the double-tap delay — so a second tap aimed at
+   * a control that looked inert lands on Cancel rather than on the irreversible
+   * half. One class string rendered in both branches is what makes "the same
+   * pixels" true; two strings that happen to match are the same screen until
+   * somebody tunes one of them.
+   *
+   * ⚠ **`justify-center`, and it is pinned because `justify-end` is the value that
+   * was tried and reverted on the identical control one file over.** `AgentsPanel`'s
+   * `SignOutButton` shipped trailing-aligned on exactly the geometric argument a
+   * reader would restate — and what it drew was a Sign out button pinned to the
+   * right of an empty box. Centring replaced it with the ordering rule intact, and
+   * this panel's docblock names that as the shape it took.
+   */
+  {
+    const boxDecl = /const removeBox = "([^"]*)";/.exec(systems)?.[1] ?? "";
+    const asks = systems.indexOf("confirmingRemove ? (");
+    // Positional, and the anchors are the branch's own opening and the `</div>`
+    // that closes the box: a regex over the tag cannot be used here, because
+    // `onClick={() => …}` puts a `>` inside the props that `[^>]*` stops at — the
+    // trap the plugin-surface sweep tracks brace depth to avoid.
+    const asking = asks < 0 ? "" : systems.slice(asks, systems.indexOf("</div>", asks));
+    check("the confirming box is one string, and the question was found", [boxDecl.length > 0, asks >= 0], [true, true]);
+    check(
+      "rendered in both branches, centred rather than trailing, with Cancel last",
+      [
+        (systems.match(/className=\{removeBox\}/g) ?? []).length,
+        /\bjustify-center\b/.test(boxDecl),
+        /\bjustify-end\b/.test(boxDecl),
+        asking.indexOf("Cancel") > asking.lastIndexOf("<DangerButton"),
+      ],
+      [2, true, false, true],
+    );
+  }
   /*
    * ⚠ **The gate is unchanged, and this is the half a source assertion can carry.**
    * Removing the box removed a *remedy*, never a refusal: `choiceRefusal` still
@@ -25825,6 +27413,77 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     "a provider with no key but a published model is ready, and floats",
     seen(readyFirst([provider("keyless-table", false, "table"), provider("published", false, "published")])),
     ["published", "keyless-table"],
+  );
+  /*
+   * ⚠ **And what is at the top is what is not struck through — which stopped being
+   * true when a harness could be chosen first.**
+   *
+   * The rule above is stated over `keyMissing`, because a missing key was the only
+   * thing that struck a row through when it was written. `ModelPicker` later grew a
+   * stronger refusal: with a harness chosen, `hostable` replaces a whole provider
+   * with one sentence and a count. The sort did not know, so the two disagreed in
+   * the ordinary case — reported from the screen, not found here.
+   *
+   * `anthropic` and `openai` are `routable !== true`, so no other harness may ever
+   * be pointed at them, and both pass the key test because a published id proves
+   * the native harness holds its own credential. With `opencode` chosen they took
+   * rank 0 and 1 and were then collapsed to *"Only Claude Code can run Anthropic
+   * models. 4 models hidden."* — two dead sections above the only provider with
+   * rows in it.
+   *
+   * Driven with a harness rather than pinned off the picker's JSX: the collapse and
+   * the sort must answer the *same* call, and only one of the two is reachable from
+   * a source scan.
+   */
+  const native = (id: string, nativeHarness: NonNullable<SystemInfo["nativeHarness"]>, model = "m") => ({
+    system: system({ id, displayName: id, keySet: false, nativeHarness, routable: false }),
+    modelId: `${id}/${model}`,
+    modelName: model,
+    source: "published" as const,
+  });
+  const routable = (id: string, model = "m") => ({
+    system: system({ id, displayName: id, keySet: true, nativeHarness: null, routable: true }),
+    modelId: `${id}/${model}`,
+    modelName: model,
+    source: "table" as const,
+  });
+  const OPEN_ROUTING = { supported: [system().apiType] } as never;
+  check(
+    "with no harness chosen the order is exactly what it always was",
+    seen(readyFirst([native("anthropic", "claude"), routable("openrouter")])),
+    ["anthropic", "openrouter"],
+  );
+  check(
+    "and a provider the chosen harness will collapse sinks under one it can run",
+    seen(readyFirst([native("anthropic", "claude"), routable("openrouter")], "opencode", OPEN_ROUTING)),
+    ["openrouter", "anthropic"],
+  );
+  check(
+    "the native harness still floats its own provider, which is the case this must not break",
+    seen(readyFirst([routable("openrouter"), native("anthropic", "claude")], "claude", null)),
+    ["anthropic", "openrouter"],
+  );
+  /*
+   * It sinks rather than vanishing. This app draws what it cannot offer and labels
+   * it — filtering would answer "where did Anthropic go" with silence, which is the
+   * rule `agent-strip.md` states for the row this picker sits two taps from.
+   */
+  check(
+    "and a collapsed provider keeps its rows rather than being filtered out",
+    readyFirst([native("anthropic", "claude"), routable("openrouter")], "opencode", OPEN_ROUTING).length,
+    2,
+  );
+  /*
+   * The order the sort is applied at, restated as a driven fact: `allModels` takes
+   * the harness so the flat catalogue and the provider filter menu built from it
+   * cannot end up in two different orders — the trap the block heading names.
+   */
+  check(
+    "and `allModels` is where the harness reaches it, so the menu and the list agree",
+    /readyFirst\(out, harness,/.test(
+      stripComments(readFileSync(new URL("../src/agents.ts", import.meta.url), "utf8")),
+    ),
+    true,
   );
   /*
    * ⚠ **`some`, not `every`.** OpenRouter with no key of its own but a keyed

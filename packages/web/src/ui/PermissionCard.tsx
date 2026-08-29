@@ -15,11 +15,11 @@ import {
   detailContext,
   withheldDetail,
 } from "../permission";
-import { store } from "../store";
+import { elapsedSince, store } from "../store";
 import { toast } from "./Toast";
 import type { PendingPermissionSnapshot, PermissionOptionSummary, StoredEvent } from "../wire";
 import { AskAction, AskCard, type AskOption } from "./AskCard";
-import { Icon } from "./bits";
+import { Icon, shortDuration } from "./bits";
 import { DiffView } from "./DiffView";
 import { Markdown } from "./Markdown";
 
@@ -77,6 +77,17 @@ export function PermissionCard({
   const [expanded, setExpanded] = useState(false);
   const sessionKey = keyOf(sessionRef);
   useSyncExternalStore(subscribeAsks, asksVersion);
+  /*
+   * The session's row, and it is here for one number: how long this has waited.
+   *
+   * Subscribed rather than read off `store.getSnapshot()` in passing, which is
+   * what the parent's own re-render would have made *look* sufficient. It costs
+   * nothing measurable — `SessionView` re-renders this card on every one of these
+   * emits already, being neither memoised nor keyed against them — and it is the
+   * arrangement `AgentBuilder` uses, so there is one way in this package to read
+   * the store from a component the shell does not hand it to.
+   */
+  const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
   // Memoised: this walks the held transcript to find the tool call behind the
   // request, and it was re-running on every streamed event.
   const context = useMemo(() => permissionContext(pending, events), [pending, events]);
@@ -97,7 +108,26 @@ export function PermissionCard({
     const daemon = store.daemonFor(sessionRef.machineId);
     if (daemon === undefined) {
       setBusy(null);
-      toast("error", "that machine is gone");
+      /*
+       * A whole sentence naming what did not happen, which "that machine is gone"
+       * did not: the card stays up, the request stays parked and the agent is
+       * still stopped, and a lower-case fragment leaving in eight seconds is the
+       * whole of what somebody got told about that. The neighbouring refusals in
+       * this app are sentences — `PluginScreen` says "That machine is not
+       * reachable right now." and `AgentsPanel` says "That machine is not
+       * reachable." — and this is the one place where the thing left unfinished is
+       * an agent waiting on an answer.
+       *
+       * ⚠ **Those were quoted here as one string, and `AgentsPanel`'s carries no
+       * "right now".** Nothing turned on the difference — the point is that both
+       * name a subject and end in a full stop — but a quotation that does not match
+       * the source it names is the same defect as a claim that has expired, and
+       * this one was sitting where the next refusal would be copied from.
+       */
+      toast(
+        "error",
+        "That machine is no longer listed, so your answer was not delivered and the agent is still waiting.",
+      );
       return;
     }
     void (
@@ -238,6 +268,36 @@ export function PermissionCard({
           onPick: () => respond(option),
         }));
 
+  /*
+   * **How long the agent has been stopped, which was on the wire and drawn
+   * nowhere.** `raisedAt` has been on `PendingPermissionSnapshot` for the life of
+   * the field and its only reader was `oldestWait`, i.e. a sort — so a request
+   * parked forty minutes ago and one parked four seconds ago drew the same card,
+   * and the reader had no way to tell whether they had just missed it or had been
+   * away.
+   *
+   * **`elapsedSince` and not `Date.now() - raisedAt`.** `raisedAt` is the
+   * *daemon's* clock and this is a phone that may have slept; the row carries both
+   * clocks at the moment it was fetched, so the arithmetic is wrong by at most the
+   * age of the row rather than by the whole drift. Its docblock in `store.ts` is
+   * where that is argued, and "blocked for −2 minutes" is the reading it exists to
+   * prevent.
+   *
+   * `shortDuration` is the session list's own vocabulary — `<1m`, `12m`, `3h` —
+   * so the row you tapped and the card you land on say the same thing about the
+   * same request. It is coarse by design, which is also what makes it affordable
+   * without a timer: nothing schedules a render for this, and the store's 4s poll
+   * already re-renders the card, so the number is at most one poll stale. Drawn
+   * unconditionally rather than above a floor, because unlike the transcript's
+   * working line this is not a number that appears mid-turn to say a turn is slow
+   * — the card *is* a wait, and its length is the fact.
+   *
+   * `null` when the row has not landed, which a cold open onto a session URL
+   * genuinely is: no number is better than one measured against nothing.
+   */
+  const row = state.rowsByKey.get(sessionKey);
+  const waited = row === undefined ? null : shortDuration(elapsedSince(row, pending.raisedAt));
+
   return (
     <AskCard
       /*
@@ -247,14 +307,20 @@ export function PermissionCard({
        * the second half of "the question does not reflect what is being asked".
        */
       title={asked?.question ?? permissionHeadline(agent, pending.title, context)}
+      detail={waited === null ? null : <span className="tabular-nums">waiting {waited}</span>}
+      /* The live region's subject. Only this card can name it: the elicitation
+         route carries the question and not who asked it. */
+      agent={agent}
       collapsed={isCollapsed(sessionKey, pending.permissionId)}
       onToggle={(next) => setCollapsed(sessionKey, pending.permissionId, next)}
-      // ✕ is a cancel, exactly as it is on a question. It is also the only way out
-      // of a request the agent offered no options for, which used to be described
-      // in words with no control behind it.
+      // Cancelling is a cancel, exactly as it is on a question — and it is the only
+      // way out of a request the agent offered no options for, which used to be
+      // described in words with no control behind it. It is a labelled footer
+      // button rather than a ✕ in the header now, so this label is drawn.
       onDismiss={() => respond(null)}
       dismissLabel="Cancel this request"
       dismissDisabled={busy !== null}
+      dismissBusy={busy === CANCEL}
       more={more}
       busy={busy !== null}
       options={options}
@@ -344,17 +410,21 @@ export function PermissionCard({
         ) : null
       }
       /*
-       * The footer has two occupants and they are the same slot for a reason.
+       * The footer has one occupant here now.
        *
        * A question's non-answer option — kimi calls it `Skip` — belongs beside
        * Submit where an elicitation's Skip is, not in the list of answers where a
        * red row would read as "this one is dangerous". Its label is the agent's
-       * own word; only its *position* is ours.
+       * own word; only its *position* is ours, and the leading `flex-1` is what
+       * pushes it to the far edge from the cancel `AskCard` draws first.
        *
-       * And for a request with no options at all, the same slot offers the cancel
-       * the card described in words for a long time while providing no control:
-       * `cancelPermission` existed on the client and nothing called it, so the
-       * only way out was to stop the session.
+       * ⚠ **The second occupant is gone and nothing was lost with it.** For a
+       * request with no options at all this slot used to offer a Cancel, because
+       * `cancelPermission` existed on the client and nothing called it — the card
+       * described the only way out in words and provided no control for it. That
+       * cancel is now on every card unconditionally, drawn by `AskCard` itself, so
+       * a second one here would be the same act twice in one row. The sentence
+       * above the answers still names it and now points at something permanent.
        */
       actions={
         skip !== null ? (
@@ -367,13 +437,6 @@ export function PermissionCard({
               title="The agent carries on without an answer"
             >
               {skip.name}
-            </AskAction>
-          </>
-        ) : pending.options.length === 0 ? (
-          <>
-            <div className="flex-1" />
-            <AskAction onClick={() => respond(null)} disabled={busy !== null} busy={busy === CANCEL}>
-              Cancel
             </AskAction>
           </>
         ) : null
