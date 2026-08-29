@@ -45,7 +45,7 @@ auth gate.
 
 ---
 
-## The daemon — 52 routes
+## The daemon — 54 routes
 
 Runs on your machine, reachable through the relay. `pnpm client` drives all of it.
 
@@ -80,6 +80,7 @@ that runs the loop. Nothing here accepts a URL, a header name or a variable name
 | `PUT /systems/:system` · `DELETE /systems/:system` | Set or clear that system's key |
 | `GET /agents/capabilities` | What each harness offers and what it can be pointed at. **Starts an agent per harness**, cached ten minutes |
 | `GET /custom-agents` · `POST /custom-agents` · `PATCH /custom-agents/:id` · `DELETE /custom-agents/:id` | The harness+system+model presets on this machine. A `PATCH` carries all four fields — an edit is a replace, so the pairing is never weighed against a merge |
+| `GET /agent-strip` · `PUT /agent-strip` | Which agents this machine's New session strip offers, and in what order. A **partial** record — a position and a hidden flag for what somebody moved or hid — merged by the client against the two listings above, so a `ref` naming something that is gone keeps its place and is simply not drawn. The `PUT` carries the whole list and replaces it; no `ref` is validated against anything |
 
 ### The filesystem the picker sees
 

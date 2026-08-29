@@ -16,13 +16,42 @@ import type { AgentId } from "./agents.js";
  * from the wire would be handing somebody's key to a host of the caller's
  * choosing, over a daemon that is reachable from the internet through the relay.
  */
+/*
+ * ⚠ **The order of this array is a *reading order*, and it is the only place it is
+ * decided.** `GET /systems` maps over it, `groupModels` in the client groups by
+ * first appearance rather than by sorting, and the builder's model picker draws
+ * one heading per group — so this list is, transitively, the order somebody scrolls
+ * through when they pick a model. Nothing branches on a position; a system's
+ * meaning is entirely in `SYSTEMS[id]`.
+ *
+ * ⚠ **And it is the *default* reading order rather than the whole of one**, which
+ * it was until the picker learned to float. `readyFirst` in the client lifts every
+ * provider this machine can actually run above every provider it cannot, and this
+ * array is what orders each of those two halves. So a position here decides what
+ * somebody scrolls past **only** among providers that are equally usable — which
+ * is the half of the question a daemon can answer, since which keys a machine
+ * holds is not a property of the table.
+ *
+ * The shape is **the two vendors a harness reaches natively, then the widest
+ * router, then the single-vendor endpoints**. Anthropic and OpenAI serve claude
+ * and codex and are what most people are actually choosing between. OpenRouter is
+ * next: it is the widest catalogue and the commonest reason to scroll at all, and
+ * it sat below Moonshot for a revision — never a released one — which put one
+ * vendor's three table rows, or seven with kimi signed in, above the list most
+ * searches end in. Moonshot follows — native to kimi, but a
+ * single-vendor endpoint like the two under it. Z.ai and MiniMax are ones far
+ * fewer people hold a key for. OpenCode Zen is last: it is the free tier one
+ * harness falls back to when nothing is configured, which makes it the least
+ * likely thing anybody came here to choose — and it is last *by default only*,
+ * since a machine holding a Zen key floats it like any other.
+ */
 export const SYSTEM_IDS = [
   "anthropic",
   "openai",
+  "openrouter",
   "moonshot",
   "zhipu",
   "minimax",
-  "openrouter",
   "zen",
 ] as const;
 
@@ -608,12 +637,54 @@ export interface CustomAgentPort {
 }
 
 /**
- * Both halves together, because they are one absence.
+ * One remembered position in a machine's agent strip.
  *
- * A daemon with no database can hold neither, and handing them in separately
- * would let half the feature answer 503 while the other half looked live.
+ * ⚠ **`ref` names something this daemon may not currently have, and that is the
+ * point rather than a gap.** A harness signed out for a week and a preset a
+ * rollback cannot resolve both keep their positions; what the New session strip
+ * draws is this list *merged* against what the machine offers right now, so a
+ * `ref` that resolves to nothing is dropped at draw time and comes back the
+ * moment the thing does. Validating it on the way in would forget an order every
+ * time an agent was briefly unavailable — the one failure somebody would notice,
+ * because it looks like the daemon rearranging their screen by itself.
+ *
+ * It is therefore **bounded rather than checked**: `MAX_STRIP_REF_CHARS` on the
+ * route is what keeps an unknown id from being an essay, and nothing here has an
+ * opinion about what the id means.
+ */
+export interface AgentStripEntry {
+  /** A built-in harness, or an agent somebody assembled. */
+  kind: "harness" | "custom";
+  /** A harness id or an assembled agent's id. Never weighed against what exists. */
+  ref: string;
+  /** Kept out of the New session strip. */
+  hidden: boolean;
+}
+
+/**
+ * The strip, replaced whole.
+ *
+ * ⚠ **`replace` and not a per-entry `save`, because the screen that writes this
+ * always holds the whole list.** A reorder is a statement about every position at
+ * once, so an upsert-per-row would need a second decision — what happens to a row
+ * the caller did not mention — that no caller has. `forget` exists for the one
+ * write that is *not* the screen: dropping an assembled agent takes its position
+ * with it, so the table cannot grow forever behind a feature nobody uses.
+ */
+export interface AgentStripPort {
+  list(): AgentStripEntry[];
+  replace(entries: readonly AgentStripEntry[]): void;
+  forget(kind: AgentStripEntry["kind"], ref: string): void;
+}
+
+/**
+ * All three together, because they are one absence.
+ *
+ * A daemon with no database can hold none of them, and handing them in separately
+ * would let part of the feature answer 503 while the rest looked live.
  */
 export interface SystemStores {
   credentials: SystemCredentialPort;
   customAgents: CustomAgentPort;
+  strip: AgentStripPort;
 }

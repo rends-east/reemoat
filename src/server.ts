@@ -27,6 +27,7 @@ import {
   systemSecretFor,
   type CustomAgent,
   type SystemId,
+  type AgentStripEntry,
   type SystemStores,
 } from "./acp/systems.js";
 import { AgentAskError, type AgentCapabilityReader } from "./agentask.js";
@@ -210,6 +211,33 @@ const MAX_MODEL_CHARS = 256;
 
 /** Ceiling on what somebody calls an agent they assembled. */
 const MAX_AGENT_NAME_CHARS = 80;
+
+/**
+ * Ceiling on how many positions the agent strip may remember.
+ *
+ * Not a limit on how many agents a machine may have. It is the bound on what a
+ * *body* may ask this daemon to write in one statement, which is a different
+ * question and the only one a route can answer.
+ *
+ * ⚠ **It has to sit clear of what the client always sends, and at 200 it did
+ * not.** `custom_agents` is deliberately unbounded and the strip screen writes the
+ * **whole** list on every action — that is what makes the next read stable — so a
+ * machine holding 198 assembled agents would have had every drag, every hide and
+ * every removal answered `400`, leaving that screen permanently read-only with an
+ * error line and no way out of it. A thousand is past any plausible fleet and
+ * still far short of a transaction worth noticing.
+ */
+const MAX_STRIP_ENTRIES = 1_000;
+
+/**
+ * Ceiling on one remembered `ref`.
+ *
+ * The strip stores an id it never validates — that is the whole design, see
+ * `AgentStripEntry` — so this is the only thing standing between an unknown id
+ * and an essay in a row. Real ones are `ca_` plus eight hex, or a one-word
+ * harness id.
+ */
+const MAX_STRIP_REF_CHARS = 64;
 
 /**
  * How long a write route may spend asking a harness what it accepts.
@@ -1382,7 +1410,125 @@ export function createApp(options: ServerOptions): AppBundle {
      * wanting the row gone; a harness edit demotes without being asked to.
      */
     systems.customAgents.remove(id);
+    /*
+     * And its position in the strip goes with it.
+     *
+     * Not correctness — `orderStrip` in the client drops a `ref` that resolves to
+     * nothing, so an orphan row is invisible either way. It is the only thing
+     * standing between `agent_strip` and unbounded growth on a machine where
+     * presets are assembled and thrown away and the strip screen is never opened,
+     * and it is one statement.
+     *
+     * Unconditional on `removed`, like the remove above it and for the same
+     * reason: a row this build cannot resolve is not found by `get` and must
+     * still be deletable.
+     */
+    systems.strip.forget("custom", id);
     return c.json({ removed, id });
+  });
+
+  /* ---------------------------------------------------------------- *
+   * The strip
+   *
+   * Which agents the New session screen offers on this machine, and in what
+   * order. Two routes and no third: the screen that writes this holds the whole
+   * list, so a reorder is one `PUT` rather than a verb per row.
+   *
+   * ⚠ **This daemon does not merge and does not resolve.** It stores
+   * `(kind, ref, rank, hidden)` and hands it back; which of those refs is a
+   * harness that is installed, an assembled agent that still exists, or neither,
+   * is decided by the client against `GET /agents` and `GET /custom-agents` —
+   * the two lists it already reads to draw the row. Deciding it here would mean
+   * a third read on every strip fetch and a rule written down twice, and the
+   * rule is not this daemon's: what may have a tile is `shownHere`'s answer, and
+   * `shownHere` is a screen.
+   * ---------------------------------------------------------------- */
+
+  app.get("/agent-strip", read, (c) => {
+    if (systems === null) {
+      return jsonError(c, 503, "systems_unavailable", "this daemon has no durable store for systems");
+    }
+    return c.json({ entries: systems.strip.list() });
+  });
+
+  /**
+   * The whole strip, checked, or the refusal to hand straight back.
+   *
+   * ⚠ **`PUT` and not `PATCH`, because the body is the whole list.** `POST`/
+   * `PATCH /custom-agents` are about one row each and their verbs carry the
+   * difference between adding and editing; here there is one resource — the
+   * order — and every write replaces it. That also makes the route idempotent,
+   * which matters more than it looks: `isReplayable` in `packages/web/src/
+   * machine.ts` whitelists GET and DELETE only, so a lost answer is *not* resent
+   * — but a person tapping twice on a flaky link should not be able to produce a
+   * shape a merge would have to decide about.
+   *
+   * ⚠ **The duplicate check is here rather than left to the primary key.** Two
+   * entries naming the same `(kind, ref)` is a client bug, and SQLite would
+   * report it as `SQLITE_CONSTRAINT_PRIMARYKEY` out of the middle of a
+   * transaction — a `500 internal_error` on a body this route can see is wrong at
+   * a glance. It is the same lesson `SqliteCustomAgentStore`'s upsert records
+   * from the other direction: a constraint reaching a caller as a 500 is a
+   * refusal that was never written down.
+   *
+   * What is *not* checked is whether a `ref` names anything. See
+   * `AgentStripEntry`: the row is the memory, and forgetting a position because
+   * an agent is signed out today is the one behaviour somebody would notice.
+   */
+  const readStripEntries = async (c: Context<AppEnv>): Promise<AgentStripEntry[] | Response> => {
+    const body = await readJsonObject(c);
+    if (body === null) return jsonError(c, 400, "bad_request", "expected a JSON object body");
+    const raw = body["entries"];
+    if (!Array.isArray(raw)) return jsonError(c, 400, "bad_request", "entries must be an array");
+    if (raw.length > MAX_STRIP_ENTRIES) {
+      return jsonError(c, 400, "bad_request", `entries exceeds ${MAX_STRIP_ENTRIES} items`);
+    }
+    const entries: AgentStripEntry[] = [];
+    const seen = new Set<string>();
+    for (const item of raw) {
+      if (typeof item !== "object" || item === null || Array.isArray(item)) {
+        return jsonError(c, 400, "bad_request", "each entry must be an object");
+      }
+      const one = item as Record<string, unknown>;
+      const kind = one["kind"];
+      if (kind !== "harness" && kind !== "custom") {
+        return jsonError(c, 400, "bad_request", 'kind must be "harness" or "custom"');
+      }
+      const ref = one["ref"];
+      if (typeof ref !== "string" || ref.length === 0) {
+        return jsonError(c, 400, "bad_request", "ref must be a non-empty string");
+      }
+      if (ref.length > MAX_STRIP_REF_CHARS) {
+        return jsonError(c, 400, "bad_request", `ref exceeds ${MAX_STRIP_REF_CHARS} characters`);
+      }
+      const hidden = one["hidden"];
+      if (typeof hidden !== "boolean") {
+        return jsonError(c, 400, "bad_request", "hidden must be a boolean");
+      }
+      const key = `${kind}:${ref}`;
+      if (seen.has(key)) {
+        return jsonError(c, 400, "bad_request", `entries names ${key} twice`);
+      }
+      seen.add(key);
+      entries.push({ kind, ref, hidden });
+    }
+    return entries;
+  };
+
+  app.put("/agent-strip", write, async (c) => {
+    if (systems === null) {
+      return jsonError(c, 503, "systems_unavailable", "this daemon has no durable store for systems");
+    }
+    const entries = await readStripEntries(c);
+    if (entries instanceof Response) return entries;
+    systems.strip.replace(entries);
+    /*
+     * The saved list is echoed rather than answered `{ saved: true }` alone, and
+     * it is what the store now holds rather than what arrived: they are the same
+     * today, and a caller that reads the answer instead of trusting its own copy
+     * keeps being right if that ever stops being true.
+     */
+    return c.json({ saved: true, entries: systems.strip.list() });
   });
 
   /* ---------------------------------------------------------------- *

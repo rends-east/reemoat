@@ -10,9 +10,10 @@ import {
 } from "../../settings";
 import type { AppState } from "../../store";
 import { ChevronLeft } from "lucide-react";
-import { navigate } from "../../router";
+import { navigate, useOrigin } from "../../router";
 import { IconButton } from "../bits";
 import { AccountSection } from "./AccountSection";
+import { MachineAgentsSection } from "./MachineAgentsSection";
 import { MachineSystemsSection } from "./MachineSystemsSection";
 import { MachineSection } from "./MachineSection";
 import { MachinesSection } from "./MachinesSection";
@@ -76,9 +77,18 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
    * phone, pointing at the screen it is already on. The two must not be merged.
    */
   const shown = active ?? DEFAULT_SECTION;
-  const up = settingsUp(here);
+  /*
+   * ⚠ **Both take the origin, and handing it to one of them is the failure.** The
+   * chevron is named after where it goes — `Header`'s standing rule and the whole
+   * difference between this control and the history button it must never become —
+   * so a label computed without the origin over a destination computed with it is
+   * the control naming somewhere you are not going. `App.tsx` has the identical
+   * pair one level up, for the builder's own ◀.
+   */
+  const origin = useOrigin();
+  const up = settingsUp(here, origin);
   const paneTitle = settingsPaneTitle(here);
-  const upLabel = settingsUpLabel(here);
+  const upLabel = settingsUpLabel(here, origin);
 
   return (
     /*
@@ -185,12 +195,15 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
               </div>
             </>
           ) : drilled && route.machineId !== null ? (
-            /* The machine's own screen, and one level in, its systems. Both
+            /* The machine's own screen, and one level in, one of its two leaves:
+               its systems, or the agents its New session strip offers. All three
                parse to the same `machineId`; the segment after it is what tells
                them apart. There is no plugin leaf here any more — a plugin's
                settings are on the plugin's page under `/plugins`, and the list on
                the machine screen links to it. */
-            route.system === null ? (
+            route.agents ? (
+              <MachineAgentsSection state={state} machineId={route.machineId} />
+            ) : route.system === null ? (
               <MachineSection state={state} machineId={route.machineId} />
             ) : (
               <MachineSystemsSection

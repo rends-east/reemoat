@@ -1,17 +1,19 @@
-import { Trash2 } from "lucide-react";
+import { ChevronRight, Trash2 } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
 import * as cp from "../../cp";
 import { enrollmentExpiryText, enrollmentLines } from "../../enrollment";
 import { errorText } from "../../http";
 import type { MachineId } from "../../ids";
 import { navigate } from "../../router";
-import { settingsPath } from "../../settings";
+import { agentStripPath, settingsPath } from "../../settings";
 import { store, type AppState } from "../../store";
 import {
   Button,
+  ChoiceRow,
   DangerButton,
   Empty,
   FIELD,
+  Icon,
   SETTINGS_HEADING,
   SETTINGS_SECTION,
   Spinner,
@@ -154,6 +156,34 @@ export function MachineSection({
       <section className={SETTINGS_SECTION}>
         <h2 className={SETTINGS_HEADING}>Systems</h2>
         <MachineSystemsSection state={state} machineId={machineId} system={null} />
+      </section>
+
+      {/*
+       * ⚠ **A link, where Systems and Plugins above and below it draw their lists
+       * in place** — and the difference is what the screen behind each is *for*.
+       * Those two are lists you read: which system is signed in, which plugin is
+       * running. This one is a list you **rearrange**, with a drag on every row, and
+       * a drag inside a section of a screen that itself scrolls is a gesture with
+       * two possible owners. It gets the whole width and its own scroll.
+       *
+       * ⚠ **The second door, and the one somebody arrives at without meaning to
+       * start a session.** The first is the gear at the end of the New session
+       * strip, which is a shortcut from the place the order is felt. Both are the
+       * same route, so this is not the two-doors-into-one-flow that collapsed the
+       * sign-in wizard inline — that was one door navigating and one drawing, which
+       * is how one of them rots.
+       */}
+      <section className={SETTINGS_SECTION}>
+        <h2 className={SETTINGS_HEADING}>Agents</h2>
+        <p className="mb-2 text-xs text-muted">
+          Which agents the New session screen offers on this machine, and in what order.
+        </p>
+        <ChoiceRow
+          title="Agents"
+          subline="Reorder, hide, add and edit"
+          trailing={<Icon as={ChevronRight} size={16} className="shrink-0 text-faint" />}
+          onClick={() => navigate(agentStripPath(machineId))}
+        />
       </section>
 
       {/* The machine's second list, drawn here for the reason Systems is: what is

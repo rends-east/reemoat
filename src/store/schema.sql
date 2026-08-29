@@ -448,3 +448,32 @@ CREATE TABLE IF NOT EXISTS custom_agents (
   model         TEXT    NOT NULL,
   created_at    INTEGER NOT NULL
 );
+
+-- Which agents the New session strip offers on this machine, and in what order.
+--
+-- A **partial** record, and that is the whole design. It holds a position and a
+-- switch for the things somebody has actually moved or hidden; what the strip
+-- draws is that list merged against what the machine currently offers, so an
+-- agent this table has never heard of appends at the end and is visible. A new
+-- harness must not arrive already switched off.
+--
+-- `ref` is deliberately **not** validated against anything, on the way in or on
+-- the way out — the opposite of `custom_agents.harness` one table up, and for a
+-- reason that is the mirror of that one. There, a row naming something outside
+-- the union restores as a well-typed lie and fails later with a worktree already
+-- made. Here the row *is* the memory: a harness signed out for a week and a
+-- preset this build cannot resolve both keep their positions, and the merge drops
+-- what does not resolve at the moment it draws. Validating here would mean
+-- forgetting an order every time an agent was briefly unavailable, which is
+-- precisely what somebody would notice.
+--
+-- No `machine` column: this database *is* one machine. The strip is per machine
+-- and not per person for the reason the daemon stopped asking who the subject is
+-- — `custom_agents` beside it is shared the same way.
+CREATE TABLE IF NOT EXISTS agent_strip (
+  kind          TEXT    NOT NULL,
+  ref           TEXT    NOT NULL,
+  rank          INTEGER NOT NULL,
+  hidden        INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (kind, ref)
+);

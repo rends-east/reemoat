@@ -198,6 +198,48 @@ collapses every provider it cannot be pointed at, so a refusal arrives before th
 choice it is about. Nothing but the order says which row is first — two sibling JSX
 blocks — so `webcheck` pins it. Q3.528.
 
+## Which provider is at the top
+
+**`SYSTEM_IDS` on the daemon is the *default* order, and the client floats over
+it.** `readyFirst` in `agents.ts` lifts every provider this machine can run above
+every provider it cannot; that array orders each of the two halves and is still the
+only place the default is written down. Anthropic and OpenAI — the two vendors
+most choices are between, each serving a harness that ships by default — then
+OpenRouter, widest catalogue and commonest reason to scroll, then Moonshot, Z.ai,
+MiniMax, then OpenCode Zen. (Five of the seven carry a `nativeHarness`, so "reached
+natively" is not what puts the first two in front.) Q3.535.
+
+⭐ **"Ready" is `keyMissing`'s own answer, which is the function that greys the
+rows.** A provider floats exactly when the picker will *not* write "No <provider>
+key on this machine." under its models, so the order and the greying cannot
+disagree: what is at the top is what is not struck through. `system.keySet` is the
+obvious predicate and it is wrong on the commonest machine there is — a
+**published** id proves the native harness holds its own credential, so a laptop
+running Claude Code every day starts Anthropic models with no `ANTHROPIC_API_KEY`
+saved, and floating on `keySet` would sink it under whichever key-only endpoint
+somebody once pasted a key for.
+
+**`some`, not `every`**: one runnable model floats the provider. OpenRouter with no
+key of its own but a keyed opencode publishing 356 of its rows is ready, and
+demoting it over the catalogue-only remainder would put the order at odds with 356
+of its own ungreyed lines.
+
+**It is applied inside `allModels`, and `groupModels` is the trap.** The picker
+draws headings off `groupModels` *and* a provider filter menu off the flat
+catalogue in first-appearance order — two lists of the same providers. Sorting the
+groups leaves the menu in an order the list beside it no longer uses. Sorting the
+catalogue is one change rather than two that must agree.
+
+**Stable, so a provider's own rows never move**: two rows of one provider compare
+equal, and the rank is one number (`(ready ? 0 : N) + position`) rather than a
+two-level comparator, which is what makes that impossible to get wrong.
+
+**OpenCode Zen is not exempt.** It is last *by default*, being the free tier one
+harness falls back to when nothing is configured — and a machine holding an
+`OPENCODE_API_KEY` is exactly a machine where that is no longer true. The Systems
+**settings** screen does not float at all: that is a list somebody learns by
+position and returns to in order to add a key.
+
 ## What the picker does with a provider this size
 
 **One heading per provider, and nothing else is ever in it.** `groupModels` groups

@@ -1,4 +1,5 @@
 import type { MachineId } from "./ids";
+import type { Picked } from "./ui/NewSession";
 import type { CustomAgent } from "./wire";
 
 /*
@@ -59,4 +60,54 @@ export function takeRemoval(machine: MachineId): string | null {
   const held = removed.get(machine) ?? null;
   removed.delete(machine);
   return held;
+}
+
+/**
+ * Which tile is chosen, per machine — and this one is **read**, not taken.
+ *
+ * ⚠ **The discipline is the opposite of the two maps above, and that is because
+ * this is not a hand-off.** Those carry an event that happened once — an agent was
+ * assembled, an agent was removed — and consuming one twice would re-apply it long
+ * after the fact. This carries a *standing* choice: the tile somebody tapped, which
+ * stays true until they tap another. Taking it would clear the selection the first
+ * time anything read it.
+ *
+ * ⚠ **It exists because a pop-up can now leave for another pop-up.** `StartSheet`
+ * holds the per-machine choice in React state and is mounted for `/new` and
+ * `/agent` — which was the whole set, until the strip's gear started opening
+ * `/settings/machines/:id/agents`. Walking there unmounts `StartSheet`, so coming
+ * back re-defaulted the strip to whatever the listing suggests, which is exactly
+ * the "a stale choice indistinguishable from a fresh default" failure `NewSession`
+ * already records against holding one value for both. The folder survives that walk
+ * because it is in the address; the tile cannot go there — `/new/:machineId/:cwd`
+ * puts an `encodeURIComponent`'d path last on purpose, and a fourth segment in
+ * front of it would be a second thing to disambiguate.
+ *
+ * It is deliberately **not** persisted: this is a tab's working state, not a
+ * setting, and a choice restored from `localStorage` a week later is a claim the
+ * machine may no longer honour. `offeredHere` weighs it against the live listing on
+ * every render anyway, which is what makes a stale entry here cost nothing.
+ */
+const chosen = new Map<MachineId, Picked>();
+
+export function keepPick(machine: MachineId, picked: Picked): void {
+  chosen.set(machine, picked);
+}
+
+/** The tile chosen on this machine, as many times as anybody asks. */
+export function heldPick(machine: MachineId): Picked | null {
+  return chosen.get(machine) ?? null;
+}
+
+/**
+ * Drop it, for the one caller that clears a choice rather than making one.
+ *
+ * Removing the agent a tile stood for clears the selection, and this map has to
+ * hear about it or the next mount would restore a pick naming a row the daemon
+ * dropped — the exact state `rememberRemoval` above exists to prevent one mount
+ * earlier. `offeredHere` would refuse to draw it anyway; this keeps the two
+ * answers from disagreeing.
+ */
+export function forgetPick(machine: MachineId): void {
+  chosen.delete(machine);
 }

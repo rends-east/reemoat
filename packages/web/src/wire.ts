@@ -1542,6 +1542,26 @@ export interface CustomAgent {
   createdAt: number;
 }
 
+/**
+ * One remembered position in a machine's agent strip.
+ *
+ * ⚠ **`ref` is a string here and an `AgentId` nowhere**, which is the mirror of
+ * the daemon's own posture rather than this file being loose. The strip stores a
+ * position for something that may not exist right now — a harness signed out, an
+ * assembled agent this build cannot resolve — and the whole point is that the
+ * position survives. What resolves it is `orderStrip` in `agentStrip.ts`, against
+ * the two listings the strip already reads, and a `ref` that resolves to nothing
+ * is dropped there.
+ *
+ * `kind` *is* narrow, because it is this system's own vocabulary and reaches a
+ * branch in the client: an unknown third value would be a row nothing could draw.
+ */
+export interface AgentStripEntry {
+  kind: "harness" | "custom";
+  ref: string;
+  hidden: boolean;
+}
+
 export interface LoginRunView {
   loginId: string;
   agent: AgentId;

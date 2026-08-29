@@ -10,6 +10,7 @@ import type {
   AgentConfig,
   AgentId,
   AgentInfo,
+  AgentStripEntry,
   CustomAgent,
   SystemInfo,
   DirListing,
@@ -164,6 +165,47 @@ export class DaemonClient {
    */
   removeCustomAgent(id: string): Promise<{ removed: boolean; id: string }> {
     return this.machine.request(`/custom-agents/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  /**
+   * Which agents this machine's New session strip offers, and in what order.
+   *
+   * A partial record: it holds a position only for what somebody moved or hid.
+   * `orderStrip` in `agentStrip.ts` is what turns it into a row, against the two
+   * listings the screen already has — so a `ref` naming something that is gone is
+   * dropped there rather than here, and an agent this list has never heard of is
+   * appended, visible.
+   *
+   * Cheap, like `customAgents()` beside it: a table read that spawns nothing, so
+   * it is deliberately **not** on `slowRoute` and sits on the ordinary budget the
+   * strip's first paint deserves.
+   */
+  agentStrip(): Promise<{ entries: AgentStripEntry[] }> {
+    return this.machine.request<{ entries: AgentStripEntry[] }>("/agent-strip");
+  }
+
+  /**
+   * Write the strip back, whole.
+   *
+   * ⚠ **The whole list on every write, and that is the route's shape rather than
+   * this client being lazy.** A reorder is a statement about every position at
+   * once; a per-row verb would need a rule for the rows the body did not mention,
+   * and no caller has one. The screen always holds the full list — it is what it
+   * just drew.
+   *
+   * `isReplayable` is GET/DELETE only, so a `PUT` whose answer is lost is never
+   * resent. That is safe here in the way it is not for `POST /custom-agents`:
+   * this route replaces rather than appends, so a resend could not have made a
+   * duplicate anyway. What a lost answer costs is one error line and a screen
+   * that puts the old order back — see the caller.
+   */
+  saveAgentStrip(
+    entries: readonly AgentStripEntry[],
+  ): Promise<{ saved: true; entries: AgentStripEntry[] }> {
+    return this.machine.request("/agent-strip", {
+      method: "PUT",
+      body: JSON.stringify({ entries }),
+    });
   }
 
   /* ---------------------------------------------------------------- *

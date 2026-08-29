@@ -8,8 +8,8 @@ import {
   type ReactNode,
 } from "react";
 import { rememberPick, rememberRemoval } from "../agentPick";
-import { agentPath, navigate, newPath } from "../router";
-import type { AgentStep } from "../nav";
+import { agentPath, navigate, newPath, useOrigin } from "../router";
+import { overlayKind, type AgentStep } from "../nav";
 import {
   allModels,
   choiceRefusal,
@@ -31,7 +31,7 @@ import {
 import type { MachineId } from "../ids";
 import { daemonReadable } from "../machine";
 import { store } from "../store";
-import type { AgentCapabilities, AgentId, CustomAgent, SystemInfo } from "../wire";
+import { isAgentId, type AgentCapabilities, type AgentId, type CustomAgent, type SystemInfo } from "../wire";
 import { AgentGlyph } from "./AgentIcons";
 import { agentLabel } from "./agentCard";
 import {
@@ -101,6 +101,7 @@ export function AgentBuilder({
   cwd,
   step,
   preset,
+  harness: seed,
 }: {
   machineId: MachineId;
   /** Carried only so the way back can restore it. See the route. */
@@ -117,6 +118,19 @@ export function AgentBuilder({
    * address says which act it is rather than being read back off the id's shape.
    */
   preset: string | null;
+  /**
+   * A harness to open already pointed at, or `null`.
+   *
+   * ⚠ **`preset`'s counterpart, and never set with it.** That one names a row the
+   * daemon holds; this one names a harness there is nothing stored about, which is
+   * what editing a *built-in* agent means — it exists by default, so "edit" is
+   * "start from it". The address carries a single marker, so the pair cannot both
+   * arrive.
+   *
+   * Renamed to `seed` inside the component, because `harness` is already the name
+   * of the state it feeds and a prop shadowing it reads as the live value.
+   */
+  harness: string | null;
 }): ReactNode {
   /*
    * Subscribed here rather than taken as a prop, and it costs nothing that was
@@ -139,7 +153,22 @@ export function AgentBuilder({
    * rows in the order the screen states them — model first, then what runs it —
    * instead of quietly weighing every model against a harness nobody named.
    */
-  const [harness, setHarness] = useState<AgentId | null>(null);
+  /*
+   * ⚠ **Seeded from the address when it names one, and empty otherwise.** The
+   * paragraph above is about the *unseeded* open and is unchanged: a screen that
+   * pre-answers a question nobody asked makes the first row read as a choice
+   * somebody made. `…/from/:harness` is that question already answered out loud —
+   * it is what "edit Claude Code" means, since a built-in agent has nothing stored
+   * to edit and starting from it is the whole act.
+   *
+   * `isAgentId` because this arrives off a URL: an address naming a harness this
+   * build has never heard of opens the ordinary new-agent screen rather than a
+   * screen holding an unresolvable row, which is `compatibility.md`'s rule 2 and
+   * the same direction the `edit` marker fails in.
+   */
+  const [harness, setHarness] = useState<AgentId | null>(
+    seed !== null && isAgentId(seed) ? seed : null,
+  );
   const [picked, setPicked] = useState<{ system: string; model: string } | null>(null);
   const [name, setName] = useState("");
   /** Frozen the moment somebody types, so their name is not overwritten by a pick. */
@@ -194,6 +223,23 @@ export function AgentBuilder({
    * bootstrap it deliberately keeps outside React.
    */
   const alive = useRef(true);
+  /**
+   * Where this screen leaves to when it is finished, rather than where it goes
+   * back to one step.
+   *
+   * ⚠ **It is the ◀'s destination and it has to stay that**, which is the whole
+   * reason it reads the same `origin` `upFrom` does. The builder has two ways in
+   * now — New session's gear-less strip and the machine's Agents screen — and a
+   * save that always returned to `/new` dropped somebody out of settings onto a
+   * screen they never asked for, while the chevron two pixels away went back where
+   * they came from. Two controls on one screen disagreeing about where "done"
+   * leads is worse than either answer.
+   *
+   * `originFor` records only a *crossing*, so opened from New session this is
+   * `null` and the fallback is the address this function has always built.
+   */
+  const origin = useOrigin();
+  const leave = (): string => origin ?? newPath(machineId, cwd ?? undefined);
   const inflight = useRef<AbortController | null>(null);
   useEffect(() => {
     alive.current = true;
@@ -615,8 +661,21 @@ export function AgentBuilder({
          * report a row that was already in it. Editing is also not choosing: the
          * tile that was selected before is the one that should still be.
          */
-        if (preset === null) rememberPick(machineId, result.customAgent);
-        navigate(newPath(machineId, cwd ?? undefined), true);
+        const out = leave();
+        /*
+         * ⚠ **And only when the way out is the strip**, which the hand-off's own
+         * rule makes non-negotiable rather than tidy: `agentPick.ts` states that a
+         * hand-off left behind is one that fires on some later visit, and a pick
+         * remembered on the way back to *settings* is exactly that — nothing takes
+         * it, and the next time anybody opens New session it selects an agent
+         * assembled days ago. `overlayKind` is the same segment compare
+         * `originFor` uses, so the two cannot come to disagree about which pop-up
+         * a path names.
+         */
+        if (preset === null && overlayKind(out) === "new") {
+          rememberPick(machineId, result.customAgent);
+        }
+        navigate(out, true);
       })
       .catch((cause: unknown) => {
         if (alive.current) setError(errorText(cause));
@@ -661,8 +720,25 @@ export function AgentBuilder({
          * something: `DELETE` is idempotent now, so a replay of a delete that
          * already landed answers `removed: false`, and the tile is just as gone.
          */
+        /*
+         * ⚠ **Unconditional, unlike `rememberPick` above, and the asymmetry is the
+         * point rather than an oversight.** It was gated on the way out being the
+         * strip, by analogy with the pick — and that gate was a permanent defect:
+         * the strip's *standing* pick (`agentPick.ts`'s third map) is never taken,
+         * and the only thing that clears it is this hand-off. Removing an agent
+         * from the builder reached through the Agents screen therefore left
+         * `heldPick` naming a row the daemon had just dropped, for the life of the
+         * tab — and a stale pick suppresses nothing less than the default, so New
+         * session drew no chosen tile and kept `Start` disabled on every later
+         * visit.
+         *
+         * A hand-off left behind costs nothing here, which is what makes
+         * unconditional right rather than merely safe: `takeRemoval`'s consumer
+         * withdraws a choice only when it names *this* id, and an id that has been
+         * deleted can never be a choice somebody makes again.
+         */
         rememberRemoval(machineId, going);
-        navigate(newPath(machineId, cwd ?? undefined), true);
+        navigate(leave(), true);
       })
       .catch((cause: unknown) => {
         if (!alive.current) return;

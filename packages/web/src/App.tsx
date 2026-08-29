@@ -217,8 +217,16 @@ function OverlaySheet({
    */
   const [reported, setReported] = useState<string | null>(null);
   const titled = sheetTitle(route);
-  const upLabel = sheetUpLabel(route);
-  const up = upLabel === null ? null : upFrom(route, under);
+  /*
+   * ⚠ **Both take the origin, and passing it to one of them is the failure.** The
+   * ◀ is named after where it goes, so a label computed without the origin over a
+   * destination computed with it is the control naming somewhere you are not
+   * going — which is exactly what `sheetUpLabel`'s own docblock forbids. The
+   * screen above this one already reads `useOrigin()` for its own ◀.
+   */
+  const origin = useOrigin();
+  const upLabel = sheetUpLabel(route, origin);
+  const up = upLabel === null ? null : upFrom(route, under, origin);
 
   const spinner = (
     <div className="flex h-full items-center justify-center">
@@ -304,7 +312,12 @@ function screenOf(route: Route): string {
     // Every depth of this sheet is a screen: the index, a section, a machine, and
     // one of that machine's systems. Nothing under them rides this URL as state.
     case "settings":
-      return `settings/${route.section ?? ""}/${route.machineId ?? ""}/${route.system ?? ""}`;
+      // The strip flag is part of the identity, not screen state: it is a
+      // different screen from the machine it hangs under, so arriving on it has
+      // to move focus the way every other depth in this sheet does.
+      return `settings/${route.section ?? ""}/${route.machineId ?? ""}/${route.system ?? ""}/${
+        route.agents ? "agents" : ""
+      }`;
     // One screen, whichever machine and folder it happens to be pointed at.
     case "new":
       return "new";
@@ -315,7 +328,15 @@ function screenOf(route: Route): string {
      * that leaving the builder and coming back can restore it.
      */
     case "agent":
-      return `agent/${route.step ?? ""}/${route.preset ?? ""}`;
+      /*
+       * The seed is part of the identity beside the preset, and for its reason:
+       * the builder holds it in `useState`, seeded at mount, so two addresses that
+       * differ only in which harness they start from are two screens. Left out,
+       * moving between them would keep the panel's focus where the first one put
+       * it and the second would mount with the first's state still on screen for a
+       * frame.
+       */
+      return `agent/${route.step ?? ""}/${route.preset ?? ""}/${route.harness ?? ""}`;
     /*
      * *That* there is a settings screen, never which machines it names — the
      * screen rewrites that list from a control inside itself, so folding it in

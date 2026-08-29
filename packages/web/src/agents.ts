@@ -1,5 +1,12 @@
-import { agentLabel } from "./ui/agentCard";
-import { AGENT_IDS, type AgentCapabilities, type AgentId, type CustomAgent, type SystemInfo } from "./wire";
+import { agentLabel, agentStance, offersTile, startsBare } from "./ui/agentCard";
+import {
+  AGENT_IDS,
+  type AgentCapabilities,
+  type AgentId,
+  type AgentInfo,
+  type CustomAgent,
+  type SystemInfo,
+} from "./wire";
 
 /*
  * Which harness can be pointed at which system, as pure functions.
@@ -405,7 +412,79 @@ export function allModels(
       out.push({ system, modelId: model.id, modelName: model.name, source: "table" });
     }
   }
-  return out;
+  return readyFirst(out);
+}
+
+/**
+ * The same catalogue, with every provider this machine can actually run lifted
+ * above every provider it cannot.
+ *
+ * ⚠ **"Ready" is not a second opinion — it is {@link keyMissing}'s own answer**,
+ * which is the function that greys the rows. A provider floats exactly when the
+ * picker will *not* write "No <provider> key on this machine." under its models,
+ * so the order and the greying cannot disagree: what is at the top is what is not
+ * struck through. Any other predicate — `keySet` on its own being the obvious one
+ * — sinks Anthropic on a machine that runs Claude Code every day, because a
+ * *published* id proves the native harness holds its own credential and needs no
+ * pasted key at all. That is not a corner: it is the commonest machine there is.
+ *
+ * ⚠ **`some`, not `every`.** A provider is ready when *one* of its models is,
+ * because that is what somebody scrolling wants to know — is there anything here
+ * I can start. OpenRouter with no key of its own but a keyed opencode publishing
+ * 356 of its rows is ready, and demoting it for the handful of catalogue-only rows
+ * that would still ask for a key would be the list disagreeing with 356 of its own
+ * ungreyed lines.
+ *
+ * ⚠ **Applied inside {@link allModels} rather than at the two call sites**, and
+ * the second call site is why. `AgentBuilder` draws headings off `groupModels`
+ * *and* a provider filter menu off the flat `choices` in first-appearance order —
+ * two lists of the same providers, and sorting one leaves the menu naming them in
+ * an order the list no longer uses. Sorting the catalogue itself is the only place
+ * that is one change rather than two that must agree.
+ *
+ * ⚠ **Stable, and the models inside a provider must not move.** Two rows of one
+ * provider compare equal, and `Array.prototype.sort` has been stable by
+ * specification since ES2019 — so a provider's own order, which `allModels` built
+ * out of the published list and the table with a dedupe between them, survives
+ * intact. The rank is one number rather than a two-level comparator for the same
+ * reason: `(ready ? 0 : N) + position` cannot accidentally compare two rows of one
+ * provider by anything.
+ *
+ * ⚠ **The default order is still the daemon's**, `SYSTEM_IDS`, which arrives as
+ * the order of `GET /systems` and is read here as first appearance. This function
+ * decides one bit per provider and nothing else; a client-side copy of that list
+ * would be a second place to change it.
+ *
+ * ⚠ **No provider already on screen changes halves while somebody is reading**,
+ * which is the worry about a sort that depends on live data — and it is the whole
+ * of the guarantee rather than the whole of the worry. Both inputs are settled
+ * before the picker will open: `keySet` rides the systems read, which gates the
+ * screen entirely, and the published half comes from `capabilities`, which is what
+ * `AgentBuilder` disables the model row on (`reading`).
+ *
+ * What can still land late is the OpenRouter catalogue, and it adds a **group**.
+ * It carries table rows only, so it cannot make an existing provider ready — but a
+ * provider that contributed *no* rows before the fetch appears when it lands, and
+ * where it appears is `keySet`'s answer, not the bottom: with an OpenRouter system
+ * key saved and opencode absent, 289 ready rows arrive at rank 2 and push four
+ * providers down. That is a group appearing rather than a group moving, which is
+ * what this screen already does whenever a listing fills in.
+ */
+export function readyFirst(choices: readonly ModelChoice[]): ModelChoice[] {
+  const rank = new Map<string, number>();
+  const ready = new Set<string>();
+  for (const choice of choices) {
+    if (!rank.has(choice.system.id)) rank.set(choice.system.id, rank.size);
+    if (keyMissing(choice, null) === null) ready.add(choice.system.id);
+  }
+  // Named rather than `rank.size` inline, which reads as though it could still be
+  // growing: it is the provider count, fixed once the loop above has run, and the
+  // whole of why the two halves cannot interleave — a ready provider scores
+  // `0..total-1` and an unready one `total..2*total-1`.
+  const total = rank.size;
+  const place = (choice: ModelChoice): number =>
+    (ready.has(choice.system.id) ? 0 : total) + (rank.get(choice.system.id) ?? 0);
+  return [...choices].sort((a, b) => place(a) - place(b));
 }
 
 /** One provider's models, together, for a list that is read down rather than across. */
@@ -469,10 +548,17 @@ export function searchModels(
  * the glyphs of the harnesses that can run that one model — more precise (a row,
  * not a group), no vocabulary, read at a glance.
  *
- * In first-appearance order rather than sorted, so the groups follow `GET
- * /systems` — the daemon's table order, which puts the natively-reachable ones
- * first. Sorting by name would put a key-only provider nobody has a key for at
- * the top of the first screen somebody sees.
+ * In first-appearance order rather than sorted, so the groups follow the order of
+ * the catalogue it is handed — which is {@link readyFirst}'s: the providers this
+ * machine can run, in `GET /systems` order, then the ones it cannot, in the same
+ * order. Doing the float here instead would be the obvious place and the wrong
+ * one: the picker draws a provider **filter menu** off the same flat catalogue,
+ * so a sort that lives in this function leaves that menu in an order the list
+ * beside it no longer uses.
+ *
+ * Sorting by *name* is what neither of them does, and that is the older half of
+ * this note: it would put a key-only provider nobody has a key for at the top of
+ * the first screen somebody sees, which is the opposite of what the float is for.
  */
 export function groupModels(choices: readonly ModelChoice[]): ModelGroup[] {
   const out: ModelGroup[] = [];
@@ -874,4 +960,103 @@ export function defaultAgentName(modelName: string): string {
  */
 export function customAgentSubline(one: CustomAgent, systems: readonly SystemInfo[]): string {
   return systems.find((candidate) => candidate.id === one.system)?.displayName ?? one.system;
+}
+
+/**
+ * The line under a built-in harness: **who serves its model**.
+ *
+ * ⚠ **It said `signed in`, and a fact true of every row tells the reader
+ * nothing.** Both places that list harnesses draw only ones something can be
+ * started on — `shownHere` on the strip, and the settings list draws the badge for
+ * the rest — so the status line under a *startable* harness could say one thing
+ * and did. What is missing there is the same fact an assembled agent's line
+ * carries: which system it talks to. Claude Code is Anthropic, Codex is OpenAI,
+ * Kimi Code is Moonshot — and that is the answer somebody scanning a row of tiles
+ * is actually looking for.
+ *
+ * ⚠ **Read off `GET /systems` rather than from a table here**, which is the rule
+ * `hostable`'s own docblock states one file over: the pairing matrix lives on the
+ * daemon and this client's copy is a courtesy. `nativeHarness` is the daemon's own
+ * field and it is what makes this one line rather than a fourth place a vendor
+ * name is written down.
+ *
+ * ⚠ **The first match wins, and one harness really does have two.** opencode is
+ * native to OpenRouter *and* to OpenCode Zen — `agent-catalogue.md` records why —
+ * so this would have to choose. It never has to: `startsBare` is false for
+ * opencode, so it has no tile on the strip and no row in the settings list. The
+ * `find` is deterministic anyway, taking the daemon's own `SYSTEM_IDS` order, so
+ * the answer cannot vary between renders if that ever changes.
+ *
+ * Empty rather than a placeholder where nothing matches: the line is a reserved
+ * slot in both call sites, so an empty string costs no layout, and a harness this
+ * client cannot place a vendor for is one it should not be inventing a name for.
+ */
+export function harnessSubline(harness: string, systems: readonly SystemInfo[]): string {
+  return systems.find((candidate) => candidate.nativeHarness === harness)?.displayName ?? "";
+}
+
+/**
+ * Whether the New session strip draws a tile for this harness, in the state the
+ * machine reports it in right now.
+ *
+ * ⚠ **Two questions that read as one and are not.** {@link startsBare} asks
+ * whether the harness is a whole answer by itself — opencode is a router, so a
+ * tile naming it names no model, and that is true in every state it can be in.
+ * {@link offersTile} asks whether *this* state is one anything could be started
+ * from, which is a fact about the moment. A harness fails the first permanently
+ * and the second only until somebody signs in.
+ *
+ * ⚠ **It lives here rather than in the screen that draws the row, and moving it
+ * is what makes the settings list able to answer the same question.** That list
+ * is deliberately *wider* than the strip — a harness nobody is signed in to has
+ * a row so that its badge can say why it has no tile — so it holds rows the strip
+ * will not draw, and it now has to be able to point at the one the strip lands on.
+ * A second copy of this predicate over there is the shape that made the strip's
+ * old status line disagree with the settings card about the same agent on the
+ * same machine.
+ */
+export function offersStripTile(candidate: AgentInfo): boolean {
+  return (
+    startsBare(candidate.id) &&
+    offersTile(agentStance(candidate.available, candidate.loggedIn, candidate.login?.blocked))
+  );
+}
+
+/**
+ * Whether this row is one a session could actually be started on, weighed against
+ * the two listings the machine answered with.
+ *
+ * ⚠ **The membership half of `offeredHere`, lifted out of the screen so that two
+ * screens can ask it.** `offeredHere` is that plus one more test — whether the
+ * row has been hidden — and it is still the function New session asks, because a
+ * hidden agent is one the daemon would start perfectly well and the screen simply
+ * does not draw. The settings list asks *this* one instead: it draws hidden rows
+ * on purpose, since hiding is the act somebody came there to undo.
+ *
+ * ⚠ **A preset is only as startable as the harness under it**, and that arm is
+ * the one that is easy to leave out. An assembled agent whose harness has since
+ * been uninstalled still has a row in the daemon's table and still draws a tile —
+ * a disabled one, saying so — and `POST /sessions` answers 503 for it. Deliberately
+ * **installed rather than signed in**: an assembled agent runs on the system's
+ * saved key, which is a different credential in a different table from the CLI
+ * sign-in the bare arm above weighs, so asking for that here would refuse exactly
+ * the agents that need it least.
+ *
+ * ⚠ **Two `null` listings are a machine that has not spoken, and they answer
+ * `false`.** That is the loading state, and "yes, startable" over a machine that
+ * has said nothing is the guess that put `Start` live over a default nobody had
+ * checked.
+ */
+export function startableHere(
+  row: { kind: "harness" | "custom"; id: string },
+  agents: readonly AgentInfo[] | null,
+  presets: readonly CustomAgent[] | null,
+): boolean {
+  if (row.kind === "harness") {
+    if (!startsBare(row.id)) return false;
+    return agents?.some((candidate) => candidate.id === row.id && offersStripTile(candidate)) === true;
+  }
+  const preset = presets?.find((one) => one.id === row.id) ?? null;
+  if (preset === null) return false;
+  return agents?.some((candidate) => candidate.id === preset.harness && candidate.available) === true;
 }

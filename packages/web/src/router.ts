@@ -8,6 +8,7 @@ import { isOverlayPath } from "./ui/overlay";
 import {
   agentBuilderPath,
   agentEditPath as editPath,
+  agentFromPath as fromPath,
   isAgentStep,
   navMove,
   newSessionPath,
@@ -69,6 +70,22 @@ export type Route =
       cwd: string | null;
       step: AgentStep | null;
       preset: string | null;
+      /**
+       * A harness this screen opens already pointed at, for an agent that does not
+       * exist yet — `/agent/:machineId/from/:harness`.
+       *
+       * ⚠ **It exists because a built-in agent is an agent.** The Agents screen
+       * lists what the New session strip offers, and a built-in row and an
+       * assembled one are the same kind of thing there: something that is offered,
+       * ordered and removable. Editing one of them therefore has to be offered too
+       * — and a built-in has nothing stored to edit, so what "edit Claude Code"
+       * means is *start from Claude Code*, with the harness already answered.
+       *
+       * Never set together with `preset`: one names a row that exists, the other a
+       * harness to begin from, and `parseAgentRoute` reads a single marker so the
+       * pair is unreachable rather than merely unused.
+       */
+      harness: string | null;
     }
   /**
    * `/settings`, optionally `/settings/:section`.
@@ -203,9 +220,9 @@ function parse(pathname: string): Route {
      * nothing after it answers `preset: null` rather than a preset named nothing —
      * the new-agent screen, which is the arm holding none of somebody else's work.
      */
-    const editing = parts[2] === "edit";
-    const preset = editing && parts[3] !== undefined ? decodeSegment(parts[3]) : null;
-    const tail = parts.slice(editing ? 4 : 2);
+    const marker = parts[2] === "edit" || parts[2] === "from" ? parts[2] : null;
+    const named = marker !== null && parts[3] !== undefined ? decodeSegment(parts[3]) : null;
+    const tail = parts.slice(marker === null ? 2 : 4);
     const stepped = tail[0] !== undefined && isAgentStep(tail[0]);
     const folder = stepped ? tail[1] : tail[0];
     return {
@@ -213,7 +230,15 @@ function parse(pathname: string): Route {
       machineId: machineId(decodeSegment(parts[1])),
       cwd: folder === undefined ? null : decodeSegment(folder),
       step: stepped ? (tail[0] as AgentStep) : null,
-      preset,
+      preset: marker === "edit" ? named : null,
+      /*
+       * ⚠ **One marker read at one position, which is what makes the two mutually
+       * exclusive by construction rather than by a check nobody runs.** `edit`
+       * names a row the daemon holds and `from` names a harness to begin at; a
+       * route carrying both would be a screen that has to decide which of two
+       * things it is about, and there is no address that can express it.
+       */
+      harness: marker === "from" ? named : null,
     };
   }
   const gate = parseGateScreen(parts);
@@ -453,6 +478,15 @@ export function agentPath(
  */
 export function agentEditPath(machine: MachineId, preset: string, cwd?: string | null): string {
   return editPath(machine, preset, cwd);
+}
+
+/** The builder opened at a harness that has nothing stored. See `agentFromPath`. */
+export function agentFromHarnessPath(
+  machine: MachineId,
+  harness: string,
+  cwd?: string | null,
+): string {
+  return fromPath(machine, harness, cwd);
 }
 
 export function sessionPath(ref: SessionRef): string {

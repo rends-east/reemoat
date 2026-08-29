@@ -556,7 +556,11 @@ const { app, injectWebSocket } = createApp({
   maxChangedFiles: positiveInt(process.env["REEMOAT_CHANGES_MAX_FILES"]),
   maxDiffBytes: positiveInt(process.env["REEMOAT_DIFF_MAX_BYTES"]),
   credentials: stores.credentials,
-  systems: { credentials: stores.systemCredentials, customAgents: stores.customAgents },
+  systems: {
+    credentials: stores.systemCredentials,
+    customAgents: stores.customAgents,
+    strip: stores.agentStrip,
+  },
   asks: agentAsks,
   logins: agentLogins,
   uploads,

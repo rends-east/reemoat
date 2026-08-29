@@ -1,17 +1,26 @@
-import { ChevronRight, FileArchive, Folder, FolderPlus, GitBranch, LogIn, Pencil, Plus } from "lucide-react";
+import {
+  ChevronRight,
+  FileArchive,
+  Folder,
+  FolderPlus,
+  GitBranch,
+  LogIn,
+  Settings2,
+} from "lucide-react";
 import { Suspense, lazy, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { ApiError, errorText } from "../http";
-import { takePick, takeRemoval } from "../agentPick";
+import { forgetPick, heldPick, keepPick, takePick, takeRemoval } from "../agentPick";
 import { refOf, sessionId, type MachineId } from "../ids";
 import { machineQuotaNotice, mayAddMachine } from "../quota";
-import { settingsPath } from "../settings";
-import { agentEditPath, agentPath, navigate, newPath, sessionPath, type Route } from "../router";
+import { agentStripPath, settingsPath } from "../settings";
+import { navigate, newPath, sessionPath, type Route } from "../router";
 import { store, type AppState } from "../store";
-import type { AgentInfo, CustomAgent, DirEntry, Me, SystemInfo } from "../wire";
-import { customAgentSubline } from "../agents";
+import type { AgentInfo, AgentStripEntry, CustomAgent, DirEntry, Me, SystemInfo } from "../wire";
+import { customAgentSubline, harnessSubline, offersStripTile, startableHere } from "../agents";
+import { defaultRow, orderStrip, stripKey } from "../agentStrip";
 import { AgentGlyph } from "./AgentIcons";
 import { ImportCode } from "./ImportCode";
-import { agentLabel, agentStance, offersTile, startsBare } from "./agentCard";
+import { agentLabel } from "./agentCard";
 import { AgentDetail } from "./settings/AgentsPanel";
 import {
   Button,
@@ -177,7 +186,37 @@ export function StartSheet({
    * which is the whole of what it takes, since assembling one never went through
    * the flag that suppressed the default.
    */
-  const [picks, setPicks] = useState<ReadonlyMap<MachineId, Picked>>(new Map());
+  /*
+   * ⚠ **And seeded from `agentPick.ts`, because this component's mount is no
+   * longer the whole of the flow.** Everything above holds while the only place a
+   * tile-chooser could walk to was `/agent`, which this component is mounted for.
+   * The strip's gear opens `/settings/machines/:id/agents` — a different pop-up —
+   * and that unmounts this, so the state above is gone by the time somebody
+   * chevrons back. `heldPick` survives it: a module map, **read** rather than
+   * taken, which is the opposite discipline from the two hand-offs beside it and
+   * for the reason written down there.
+   *
+   * The state is kept rather than replaced by it. A module map cannot re-render,
+   * and this component has to: what makes the strip redraw when a tile is tapped
+   * is `setPicks`, and what makes the choice survive a walk to another pop-up is
+   * `keepPick`. Three copies of one value, each answering something the others
+   * cannot — the ref answers a `.then` that closed over an old prop.
+   */
+  const [picks, setPicks] = useState<ReadonlyMap<MachineId, Picked>>(() => {
+    const seed = new Map<MachineId, Picked>();
+    /*
+     * Only the machine this route names, and only if there is one. The map holds
+     * every machine somebody has chosen on in this tab, but a mount can only
+     * honestly restore the one it is about: `/new` with no machine takes the first
+     * reachable one, which is a guess this component makes *after* mounting, and
+     * seeding against a guess is how the wrong machine's tile gets drawn.
+     */
+    const machine = route.machineId;
+    if (machine === null) return seed;
+    const held = heldPick(machine);
+    if (held !== null) seed.set(machine, held);
+    return seed;
+  });
   const picksRef = useRef<ReadonlyMap<MachineId, Picked>>(picks);
   const choose = (machine: MachineId, next: Picked | null): void => {
     const updated = new Map(picksRef.current);
@@ -188,6 +227,11 @@ export function StartSheet({
     // one render later.
     picksRef.current = updated;
     setPicks(updated);
+    // And outside this mount, for the walk to the settings pop-up and back. A
+    // removal clears it for the same reason it clears the map: the tile it named
+    // is gone.
+    if (next === null) forgetPick(machine);
+    else keepPick(machine, next);
   };
 
   return (
@@ -223,6 +267,7 @@ export function StartSheet({
             cwd={route.cwd}
             step={route.step}
             preset={route.preset}
+            harness={route.harness}
           />
         </Suspense>
       )}
@@ -345,18 +390,6 @@ function NewSession({
   };
   const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   /**
-   * What this machine's listing defaulted to, kept **apart from what somebody
-   * chose**.
-   *
-   * ⚠ **One value for both was what made a stale choice indistinguishable from a
-   * fresh default.** The default belongs to a machine and to a listing — it is
-   * recomputed every time either changes, and cleared beside `agents` below — so
-   * holding it in `StartSheet`'s per-machine map would write a choice nobody made
-   * into the record of choices people made, and the next visit would restore it as
-   * though it had been tapped. A chosen tile outranks this one; see `picked`.
-   */
-  const [defaulted, setDefaulted] = useState<Picked | null>(null);
-  /**
    * Why `GET /agents` came back with nothing, when it came back with nothing
    * because it failed.
    *
@@ -371,15 +404,15 @@ function NewSession({
   /**
    * The agents assembled on this machine, or `null` while unread.
    *
-   * ⚠ **`[]` *with `canAssemble` false* means "this daemon is older than
+   * ⚠ **`[]` *with `canConfigure` false* means "this daemon is older than
    * assembled agents", and only that.** The client knows an old daemon by the
    * *shape of its refusal* rather than by a version — `compatibility.md`'s rule,
    * the same one the plugin market keeps — so an envelope-free 404 from `GET
-   * /custom-agents` lands here as an empty list and takes the `+` tile with it,
+   * /custom-agents` lands here as an empty list and takes the gear with it,
    * rather than drawing a control whose every press answers "update your
    * machine".
    *
-   * ⚠ **Every other failure keeps the `+` and says why**, which is the half that
+   * ⚠ **Every other failure keeps the gear and says why**, which is the half that
    * was missing: one catch mapped a timeout, a 500 and a revoked grant onto the
    * same silence as an old daemon, so the entry point to the whole assembled-agent
    * feature vanished with nothing on screen saying it had. See the catch below.
@@ -395,7 +428,34 @@ function NewSession({
    * why the *builder* is the only thing that calls it.
    */
   const [systems, setSystems] = useState<SystemInfo[]>([]);
-  const [canAssemble, setCanAssemble] = useState(false);
+  /**
+   * The order and the hidden set this machine remembers, or `[]` while unread.
+   *
+   * ⚠ **`[]` is honest in both of the states it covers, which is why there is no
+   * `null` here.** An unread strip and a strip nobody has ever touched produce the
+   * identical row — `orderStrip` falls back to natural order and hides nothing —
+   * so a loading flag would distinguish two states that draw the same. What is
+   * *not* the same is whether the gear may be drawn, and that is `canConfigure`
+   * below, which is a fact about the daemon rather than about the list.
+   */
+  const [stored, setStored] = useState<AgentStripEntry[]>([]);
+  /**
+   * Whether this daemon knows about assembled agents and the strip at all.
+   *
+   * ⚠ **One flag for three routes, because one refusal answers for all three.**
+   * `GET /custom-agents`, `GET /systems` and `GET /agent-strip` are read together
+   * and shipped together, so a daemon that has never heard of one has never heard
+   * of any — and the client knows that by the *shape of the refusal* rather than
+   * by a version, which is `compatibility.md`'s rule and the one the plugin market
+   * already keeps.
+   *
+   * ⚠ **It was `canAssemble` and it gates the gear now**, which is a wider claim
+   * than the name it replaced made: the `+` it used to gate opened the builder, and
+   * the gear opens a screen that also stores an order. Renamed rather than joined
+   * by a second boolean, because two flags read off one catch are two things to
+   * keep in step for no question either can answer alone.
+   */
+  const [canConfigure, setCanConfigure] = useState(false);
   /** Reported up by the picker, so the footer can name the folder as the agent will. */
   const [cwd, setCwd] = useState<string | null>(fromRouteCwd);
   /*
@@ -426,26 +486,101 @@ function NewSession({
   const [agentsEpoch, setAgentsEpoch] = useState(0);
 
   const selected = machine ?? reachable[0]?.id ?? null;
+  /*
+   * What this machine's strip has been told to leave out, as keys.
+   *
+   * Derived on every render rather than held, because it is a projection of
+   * `stored` and holding it would be a second thing to clear when the machine
+   * changes. It is read twice below and once by the strip, all in the same render.
+   */
+  const hiddenHere = new Set(
+    stored.filter((one) => one.hidden).map((one) => stripKey(one.kind, one.ref)),
+  );
+  /**
+   * What this machine's listing defaults to, kept **apart from what somebody
+   * chose** — and it is the row's own first tile.
+   *
+   * ⚠ **Derived here, where it used to be state set inside `GET /agents`'s own
+   * `.then`, and both halves of that move are corrections.**
+   *
+   * The *value* was `agents.find(shownHere)` — the first harness in `AGENT_IDS`
+   * order — which stopped being the first thing on screen the moment the row
+   * gained an order and a hidden set. Hiding `claude` left the default naming it,
+   * `offeredHere` refused it for being hidden, and the screen drew no chosen tile
+   * at all with `Start` disabled until somebody tapped one. It is now the first
+   * row the strip draws **that a session can be started on** — see the paragraph
+   * below for why the second half of that is not pedantry — which is also the
+   * better answer on its own terms: somebody who dragged their agent to the front
+   * meant it to be first.
+   *
+   * The *timing* was a `.then` closure, which is why it needed `picksRef` to read
+   * the choice as it stood at answer time rather than at request time. Derived,
+   * there is no capture to be stale: a choice outranks this because `??` says so,
+   * one line down, in the render that draws both.
+   *
+   * ⚠ **`customAgents === null` answers `null` rather than defaulting to a
+   * harness.** The two reads land separately, so a default computed off the first
+   * of them would name a harness for one beat and then jump to whatever the
+   * stored order actually puts first — a selection moving under somebody on the
+   * screen where the selection is the point. Nothing is chosen while the listing
+   * is still out, which is the rule this screen already keeps.
+   *
+   * ⚠ **And it skips a row it cannot start, which `.find((row) => !row.hidden)`
+   * did not.** The harness half of the row is filtered by `shownHere` on the way
+   * in, so a signed-out one is not a candidate — but a *preset* is listed whatever
+   * state its harness is in, and it draws a disabled tile saying so. First in the
+   * order, that tile was the default: `offeredHere` refused it one line down, and
+   * the screen drew nothing chosen with `Start` dead, which is the same failure as
+   * the hidden one arriving through the other door. {@link defaultRow} weighs both,
+   * and the *marked* default on the Agents screen is that same call — one rule, so
+   * the badge over there cannot name a row this line would skip.
+   */
+  const defaulted =
+    customAgents === null
+      ? null
+      : defaultRow(
+          orderStrip(
+            [
+              ...(agents ?? [])
+                .filter(shownHere)
+                .map((one) => ({ kind: "harness" as const, id: one.id })),
+              ...customAgents.map((one) => ({ kind: "custom" as const, id: one.id })),
+            ],
+            stored,
+          ),
+          (row) => startableHere(row, agents, customAgents),
+        );
   /**
    * The tile this screen draws as chosen, and the id `Start` will post.
    *
    * Two sources in order — what somebody chose on *this* machine, then what this
-   * machine's listing defaulted to — and **both are weighed against the listing**
+   * machine's listing defaults to — and **both are weighed against the listing**
    * by {@link offeredHere}. A pick that the machine no longer offers is dropped
-   * rather than drawn, which is one rule covering three failures that were three
+   * rather than drawn, which is one rule covering four failures that were four
    * separate bugs: a harness chosen on a machine that has it and restored on one
-   * that does not; a preset deleted from the builder; and a preset deleted on
-   * another device, where no hand-off exists to be told about it. All three ended
-   * the same way — a tile drawn selected while disabled, or no tile drawn at all,
-   * with `Start` enabled and posting an id the daemon answers 503 or 404 for.
+   * that does not; a preset deleted from the builder; a preset deleted on another
+   * device, where no hand-off exists to be told about it; and an agent somebody
+   * hid. All four ended the same way — a tile drawn selected while disabled, or no
+   * tile drawn at all, with `Start` enabled and posting an id the daemon answers
+   * 503 or 404 for.
    *
    * `null` is a real state and the button is gated on it: nothing is chosen while
    * the listing is still out, and a machine offering nothing startable leaves it
    * `null` rather than pointing at the first tile in the row.
    */
   const picked =
-    offeredHere(selected === null ? null : (picks.get(selected) ?? null), agents, customAgents) ??
-    offeredHere(defaulted, agents, customAgents);
+    offeredHere(
+      selected === null ? null : (picks.get(selected) ?? null),
+      agents,
+      customAgents,
+      hiddenHere,
+    ) ??
+    offeredHere(
+      defaulted === null ? null : { kind: defaulted.kind, id: defaulted.id },
+      agents,
+      customAgents,
+      hiddenHere,
+    );
   /*
    * What the pop-up that just closed did, adopted once.
    *
@@ -513,12 +648,12 @@ function NewSession({
      * `StartSheet`'s, keyed by machine, and survive on purpose.
      */
     setAgents(null);
-    setDefaulted(null);
     setAgentsFailure(null);
     setCustomAgents(null);
     setPresetsFailure(null);
     setSystems([]);
-    setCanAssemble(false);
+    setStored([]);
+    setCanConfigure(false);
     /*
      * ⚠ **And a cancel flag, for the reason the two sibling effects in this file
      * already have one.** Nothing re-requests, so a slow answer for the machine
@@ -545,34 +680,6 @@ function NewSession({
       .then((result) => {
         if (cancelled) return;
         setAgents(result.agents);
-        // Through `shownHere` for `offeredHere`'s reason: defaulting to a harness
-        // this screen draws no tile for ends as nothing chosen, which is a beat of
-        // `Start` disabled for no visible cause. That covers both halves — a router
-        // with no tile, and a harness that is installed and signed out.
-        const available = result.agents.find((candidate) => shownHere(candidate));
-        /*
-         * Only where nobody has chosen **on this machine**, and the choice is read
-         * through the ref rather than through the prop this closure captured.
-         *
-         * ⚠ **The capture is the defect this arm had.** The effect's deps are the
-         * daemon client and the epoch, and `store.daemonFor` answers the same
-         * object for a machine's whole life — so nothing re-runs this effect when a
-         * tile is tapped, and the `.then` created a round trip ago still sees the
-         * props of the render it was created in. The adoption effect above runs in
-         * the same flush and is declared *first*, so an agent assembled in the
-         * pop-up was recorded and then overwritten here a beat later by the first
-         * available harness, with nothing on screen saying so. `picksRef` is the
-         * same map at answer time.
-         *
-         * Where somebody has chosen, no default is computed at all — so a choice
-         * this machine turns out not to offer ends as *nothing* chosen rather than
-         * as a quiet substitution. `Start` is disabled there and the footer asks
-         * for an agent, which is the honest shape: this screen may not swap the
-         * agent under somebody and then start a session with it.
-         */
-        if (available !== undefined && picksRef.current.get(selected) === undefined) {
-          setDefaulted({ kind: "harness", id: available.id });
-        }
       })
       .catch((cause: unknown) => {
         if (cancelled) return;
@@ -588,15 +695,23 @@ function NewSession({
      * that has never heard of this route must not cost the three built-in tiles
      * their listing. The refusal *is* the version check — see `customAgents`.
      */
-    void Promise.all([daemon.customAgents(), daemon.systems()])
-      .then(([mine, listing]) => {
+    void Promise.all([daemon.customAgents(), daemon.systems(), daemon.agentStrip()])
+      .then(([mine, listing, strip]) => {
         if (cancelled) return;
         // Assigned, not merged: this is the daemon's own list and it is
         // authoritative. The adopted hand-off above is in it — the row was
         // written before the pop-up closed — so nothing is lost by replacing.
         setCustomAgents(mine.customAgents);
         setSystems(listing.systems);
-        setCanAssemble(true);
+        /*
+         * ⚠ **The strip rides with the presets rather than with `GET /agents`,
+         * and the grouping is the version check rather than tidiness.** All three
+         * of these routes shipped together, so one envelope-free 404 answers for
+         * all three — while the harness listing is older than every one of them
+         * and must keep its own tiles on a daemon that has none of this.
+         */
+        setStored(strip.entries);
+        setCanConfigure(true);
       })
       .catch((cause: unknown) => {
         if (cancelled) return;
@@ -607,7 +722,7 @@ function NewSession({
          * Hono 404 carrying no body of ours the code `http_404`, and that exact
          * test is what `importSupported` and `pluginFailure` already ask — a route
          * this daemon has never registered. Either read reaching here answers it
-         * the same way, since both routes shipped together. Anything else answered
+         * the same way, since all three routes shipped together. Anything else answered
          * *about* the route: `503 systems_unavailable`, a 500, a relay
          * `no_tunnel`, a `TypeError` from a dead network. Collapsing the two is
          * what made a transient failure indistinguishable from a machine that will
@@ -616,7 +731,8 @@ function NewSession({
          */
         const absent =
           ApiError.isApiError(cause) && cause.status === 404 && cause.code === `http_${cause.status}`;
-        setCanAssemble(!absent);
+        setStored([]);
+        setCanConfigure(!absent);
         setPresetsFailure(absent ? null : errorText(cause));
       });
     return () => {
@@ -752,20 +868,44 @@ function NewSession({
                  reports no agents" over a listing that was on its way. */
               customAgents={customAgents}
               systems={systems}
-              canAssemble={canAssemble}
+              stored={stored}
+              canConfigure={canConfigure}
               failure={agentsFailure}
               presetsFailure={presetsFailure}
               value={picked}
               onChange={choose}
-              /* Its own screen, one depth down, carrying the folder so the way
-                 back can restore it — see the `agent` route. */
-              onAssemble={() => selected !== null && navigate(agentPath(selected, cwd))}
-              /* The same screen, seeded from a preset that already exists. The
-                 address is built here rather than in the strip for the reason
-                 `onAssemble` is: this is where the folder lives. */
-              onEdit={(preset) =>
-                selected !== null && navigate(agentEditPath(selected, preset, cwd ?? undefined))
-              }
+              /*
+               * ⚠ **Another pop-up, and leaving this one for it is affordable
+               * only because both halves of what is on screen survive the walk.**
+               * The folder is in the address — `/new/:machineId/:cwd` — so the way
+               * back restores it, and the chosen tile is in `agentPick.ts`'s
+               * standing map, which outlives this mount. Without those two, this
+               * is exactly the navigation that put the sign-in wizard inline: a
+               * pop-up replacing a pop-up, discarding a folder somebody had walked
+               * several levels into, so the dialog appears to have wandered off.
+               *
+               * `navigate` and not `replace`: the settings screen is somewhere you
+               * go *from* here, and the phone's Back button has to come back.
+               */
+              onConfigure={() => {
+                if (selected === null) return;
+                /*
+                 * ⚠ **The address is made whole before we leave, because a bare
+                 * `/new` is a real state and it remembers nothing.** `/new` with
+                 * no machine is reached from the rail's **All** tab and from a
+                 * cold link; the sync effect above deliberately does not rewrite
+                 * it, and `StartSheet` can only seed a pick for a machine the
+                 * route names. So walking to another pop-up from there and coming
+                 * back landed on `/new` with the folder unwalked and the tile
+                 * unchosen — the very loss this door is only affordable because
+                 * it avoids.
+                 *
+                 * `replace` first, so the entry somebody comes back to is the
+                 * complete one rather than a second history step to pass through.
+                 */
+                navigate(newPath(selected, cwd ?? undefined), true);
+                navigate(agentStripPath(selected));
+              }}
               machineId={selected}
               onChanged={() => setAgentsEpoch((n) => n + 1)}
             />
@@ -862,13 +1002,22 @@ export type Picked = { kind: "harness"; id: string } | { kind: "custom"; id: str
  * the same thing by *offered*. Every time two of them have disagreed the result
  * was on screen: a tile drawn `aria-pressed` and `disabled` at once, or a `Start`
  * live over a row with nothing selected in it.
+ *
+ * ⚠ **The rule moved to `agents.ts` and the name stayed here.** It was a local
+ * `function` for as long as this screen was the only one asking — and the moment
+ * the Agents screen had to point at *the tile this row lands on by default*, that
+ * was a fifth place needing the same meaning of "offered", in a different file.
+ * A second copy is the shape the paragraph above is about, one module further
+ * out. Bound rather than re-wrapped so that the four call sites below, and the
+ * one thing this screen names itself by, read exactly as they did.
+ *
+ * ⚠ **A `const` where a `function` was, which is a real difference and a safe one
+ * here.** A declaration was hoisted; a binding is not, so a call from module scope
+ * above this line would now throw rather than work. Nothing calls it from module
+ * scope — every reader is inside a component body, which React runs long after this
+ * module is evaluated — and moving one out would be the change to think about.
  */
-function shownHere(candidate: AgentInfo): boolean {
-  return (
-    startsBare(candidate.id) &&
-    offersTile(agentStance(candidate.available, candidate.loggedIn, candidate.login?.blocked))
-  );
-}
+const shownHere = offersStripTile;
 
 /**
  * Whether this screen has a sign-in to offer for an agent.
@@ -918,51 +1067,42 @@ export function offeredHere(
   pick: Picked | null,
   agents: AgentInfo[] | null,
   customAgents: CustomAgent[] | null,
+  /**
+   * What the machine's strip has been told to leave out.
+   *
+   * ⚠ **Hidden is weighed here and not only in the row, and it is the fourth
+   * member of the family this docblock lists.** Hiding an agent takes its tile
+   * away; a pick of it restored past this point would be `Start` live over a row
+   * where nothing is drawn as chosen. It is *not* an availability failure — the
+   * daemon would start it perfectly well — which is exactly why it has to be
+   * refused here rather than left to the tile's own `disabled`: there is no tile.
+   *
+   * Keyed strings rather than the entries, so this function stays a pure test over
+   * a set and the merge stays in one place. Defaulted, because three of the four
+   * call sites in `webcheck` predate the strip and the states they drive are
+   * unchanged by it.
+   */
+  hidden: ReadonlySet<string> = new Set(),
 ): Picked | null {
   if (pick === null) return null;
-  if (pick.kind === "harness") {
-    /*
-     * ⚠ **And it has to be one this screen offers bare**, which is the gate the
-     * strip draws its tiles through — see `startsBare`. Without it a stored pick
-     * of a harness that has no tile stays "offered": `Start` goes live over a row
-     * where nothing is drawn as chosen, which is the third member of the family
-     * this function's own docblock lists.
-     */
-    if (!startsBare(pick.id)) return null;
-    /*
-     * ⚠ **And it has to be in a state the row draws**, which is no longer the same
-     * thing as installed: a harness that is signed out has no tile now, so a pick
-     * of one restored here would be `Start` live over a row where nothing is drawn
-     * as chosen — the third member of the family this docblock lists, arriving
-     * through a new door. `shownHere` is the row's own predicate, so the two cannot
-     * drift apart.
-     */
-    return agents?.some((candidate) => candidate.id === pick.id && shownHere(candidate)) === true
-      ? pick
-      : null;
-  }
+  if (hidden.has(stripKey(pick.kind, pick.id))) return null;
   /*
-   * ⚠ **The preset's *harness* is weighed too, and it was not.** This arm asked
-   * only whether the row still exists, so a preset assembled on a harness that has
-   * since been uninstalled stayed chosen with `Start` live — and posting it
-   * answers `503` from the daemon's own availability check. The paragraph above
-   * already states the rule for the other arm ("a harness has to be **available**,
-   * not merely listed"); a preset is a harness plus two more facts, so it cannot be
-   * exempt from the one that decides whether anything can run at all.
+   * ⚠ **Everything below the hidden test is `startableHere`, and it is one line
+   * here because it is two functions away rather than because it got simpler.**
+   * The four rules it holds — a harness has to be a whole answer on its own, it
+   * has to be in a state the row draws, a preset's *harness* is weighed and not
+   * only its row, and that harness has to be installed rather than signed in — are
+   * every one of them a state that was once on this screen, and they are written
+   * out where they live.
+   *
+   * ⚠ **The split falls exactly here because `hidden` is the half that is not
+   * about startability at all.** A hidden agent is one the daemon would run
+   * perfectly; it has no tile because somebody took it off this screen. So the
+   * Agents screen — which draws hidden rows on purpose, since un-hiding is what
+   * takes somebody there — asks the other function, and the two cannot answer
+   * differently about anything else.
    */
-  const preset = customAgents?.find((one) => one.id === pick.id) ?? null;
-  if (preset === null) return null;
-  /*
-   * ⚠ **Installed, and deliberately *not* signed in.** The arm above hides a
-   * signed-out harness because a bare session on it cannot start; an assembled
-   * agent is a harness plus a system plus a model, and it starts on the system's
-   * saved key — which is a different credential in a different table, and the one
-   * the daemon actually checks. Asking for a CLI sign-in here would hide the
-   * agents that need one least.
-   */
-  return agents?.some((candidate) => candidate.id === preset.harness && candidate.available) === true
-    ? pick
-    : null;
+  return startableHere(pick, agents, customAgents) ? pick : null;
 }
 
 /**
@@ -982,30 +1122,35 @@ export function offeredHere(
  * tabs in `SessionBrowser` — down to the class strings, because a second idiom
  * for one problem is one of them going stale.
  *
- * ⚠ **`+` is the last item *inside* the scroller, and this reverses what stood
- * here.** It sat outside, pinned right, and being asked for in the row was refused
- * on arithmetic — the button would start at 480px in a 358px window on a first run
- * with four harnesses and no presets, putting the only door to the builder off
- * screen the one time it has to be found. **Asked for a second time, explicitly,
- * and the trade is the caller's to make**: pinned right it overlapped the last
- * tile, which is what the report was about.
+ * ⚠ **The order is the machine's, not this component's, and that is the newest
+ * rule here.** The row used to be harnesses in `AGENT_IDS` order followed by
+ * presets in `created_at` order, which is a listing rather than a preference —
+ * there was no way to bring the one agent somebody always starts to the front, and
+ * on a phone that is usually the one off the right edge. `orderStrip` merges the
+ * daemon's stored order over the live listing, so what is drawn is what somebody
+ * arranged, with anything the store has never heard of appended and visible.
  *
- * ⚠ **Sticky was the second wrong answer and is gone.** Inside the track and
- * `sticky right-0`, the button paints at the scrollport's right edge at *every*
- * scroll position — which is pixel-for-pixel where the pinned sibling was, so it
- * still read as pinned. Both refusals came from the same place: an arithmetic that
- * this component kept trying to protect somebody from instead of doing what they
- * asked. The arithmetic is real and is written below; it is not this component's
- * to weigh.
+ * ⚠ **And what is drawn is a *subset* of what can be started.** A hidden entry has
+ * no tile at all. It is not a refusal — the daemon would start it — which is why
+ * it is weighed in `offeredHere` as well: a hidden pick would otherwise leave
+ * `Start` live over a row where nothing is drawn as chosen.
+ *
+ * ⚠ **The last item inside the scroller is a gear, and it used to be a `+`.**
+ * Where it sits was settled twice over and neither answer is being reopened: it
+ * sat outside, pinned right, where it overlapped the last tile; then inside and
+ * `sticky right-0`, where it paints at the scrollport's right edge at *every*
+ * scroll position and therefore still read as pinned. It is an ordinary item you
+ * scroll to. What changed is only what it *opens*: adding an agent is one thing
+ * you do to this list among four, so the door leads to the screen that holds all
+ * four rather than straight into the builder.
  *
  * **The cost, accepted.** Three harness tiles (opencode is not a starting point —
  * see `startsBare`) are 3 × 112 + 2 × 8 = **352px**, the gap and the button add 52,
- * and the window at 390px is 358 — so on a first run at that width the `+` begins
- * two pixels past the edge and is one short drag away. It matters because both
- * doors are one: `onAssemble` here and the Edit control below are the only mounts
- * of `AgentBuilder` in the app. What makes it reachable rather than lost is the
- * wheel handler above and the scrollbar this strip stopped hiding — the row can be
- * moved now, which it could not be with a mouse at all.
+ * and the window at 390px is 358 — so on a first run at that width the gear begins
+ * two pixels past the edge and is one short drag away. Three things answer that
+ * now where two did before: the wheel handler below, the scrollbar this strip
+ * stopped hiding, and the fade at the right edge, which is the only one of the
+ * three that says there is more *before* you touch anything.
  *
  * ⚠ **It is a 44px pill and *not* a tile, which is the same correction the
  * machine tabs already carry** — theirs takes the row's height and shape and not
@@ -1023,26 +1168,26 @@ export function offeredHere(
  * model** — and the control that does is the `+` at the end of the same row. A
  * disabled tile there would be a control you have to tap to learn is not one.
  *
- * ⚠ **Nothing here early-returns over the row any more, and the `+` is why.**
- * "This machine reports no agents" used to be returned *above* the strip, so a
- * transient failure of the cheap `GET /agents` took the entry point to the whole
- * assembled-agent feature off the screen — and the inline sign-in with it — while
- * `canAssemble` was true and the daemon was perfectly willing. The sentence is a
- * row inside the strip now: the `+` is drawn on exactly the condition it is about
- * (`canAssemble && machineId !== null`) and nothing upstream of it can decide
+ * ⚠ **Nothing here early-returns over the row any more, and the trailing control
+ * is why.** "This machine reports no agents" used to be returned *above* the
+ * strip, so a transient failure of the cheap `GET /agents` took the entry point to
+ * the whole assembled-agent feature off the screen — and the inline sign-in with
+ * it — while the daemon was perfectly willing. The sentence is a row inside the
+ * strip now: the gear is drawn on exactly the condition it is about
+ * (`canConfigure && machineId !== null`) and nothing upstream of it can decide
  * whether it exists.
  */
 function AgentStrip({
   agents,
   customAgents,
   systems,
-  canAssemble,
+  stored,
+  canConfigure,
   failure,
   presetsFailure,
   value,
   onChange,
-  onAssemble,
-  onEdit,
+  onConfigure,
   machineId,
   onChanged,
 }: {
@@ -1057,8 +1202,17 @@ function AgentStrip({
    */
   customAgents: CustomAgent[] | null;
   systems: SystemInfo[];
-  /** Whether this daemon knows about assembled agents at all. See `NewSession`. */
-  canAssemble: boolean;
+  /**
+   * The order and the hidden set this machine remembers.
+   *
+   * Not nullable, unlike `customAgents` above, and the asymmetry is honest: an
+   * unread strip and one nobody has arranged draw the identical row, so there is
+   * no second state for a `null` to name. What the *gear* needs to know is
+   * `canConfigure`, which is a fact about the daemon rather than about this list.
+   */
+  stored: readonly AgentStripEntry[];
+  /** Whether this daemon can hold an order at all. See `NewSession`. */
+  canConfigure: boolean;
   /** Why `GET /agents` answered nothing, when it answered nothing by failing. */
   failure: string | null;
   /** The same for the assembled agents, which is a separate read and a separate row. */
@@ -1074,9 +1228,8 @@ function AgentStrip({
    */
   value: Picked | null;
   onChange: (next: Picked) => void;
-  onAssemble: () => void;
-  /** Opens the chosen preset's own edit screen. See the control below the strip. */
-  onEdit: (preset: string) => void;
+  /** Opens the machine's Agents screen — where this row is ordered, hidden from and added to. */
+  onConfigure: () => void;
   machineId: MachineId | null;
   /** Re-reads the agent listing once a sign-in has changed something. */
   onChanged: () => void;
@@ -1096,6 +1249,18 @@ function AgentStrip({
    */
   const chosen = useRef<HTMLButtonElement | null>(null);
   const track = useRef<HTMLDivElement | null>(null);
+  /**
+   * The gradient at the right edge, and it is a ref for `layout`'s reason.
+   *
+   * ⚠ **It says the row is cut, which is the one thing the rail under it cannot.**
+   * That bar reports a *position* and fades out a second after you stop moving, so
+   * on a screen nobody has touched — which is every first paint — there is nothing
+   * at all saying the row continues past the edge. The tiles do not say it either:
+   * the last item is a fully drawn dashed box, which reads as the row's deliberate
+   * end, and that is exactly why `.no-scrollbar` was taken off this strip in the
+   * first place ("a half-cut pill still says more"; a whole one does not).
+   */
+  const fade = useRef<HTMLDivElement | null>(null);
   const thumb = useRef<HTMLDivElement | null>(null);
   /*
    * ⚠ **A wheel moves this row, because on a desktop nothing else does.**
@@ -1123,7 +1288,8 @@ function AgentStrip({
   useEffect(() => {
     const box = track.current;
     const bar = thumb.current;
-    if (box === null || bar === null) return;
+    const edge = fade.current;
+    if (box === null || bar === null || edge === null) return;
     const onWheel = (event: WheelEvent): void => {
       if (event.deltaX !== 0 || event.deltaY === 0) return;
       const room = box.scrollWidth - box.clientWidth;
@@ -1160,6 +1326,31 @@ function AgentStrip({
     const layout = (): void => {
       const rail = box.clientWidth;
       const room = box.scrollWidth - rail;
+      /*
+       * ⚠ **The fade is toggled here rather than in a second handler**, because
+       * this function already holds all three numbers and runs on exactly the two
+       * events that can change the answer — a scroll and a resize. A separate
+       * `onScroll` reading the same box would be the same arithmetic twice, and the
+       * failure of that shape is silent: the two disagree for one frame and the
+       * gradient blinks at the end of every flick.
+       *
+       * The one-pixel slack is not decoration. `scrollWidth`, `clientWidth` and
+       * `scrollLeft` are integers rounded from fractional layout, so a strip
+       * scrolled fully to its end routinely reports a remainder of 1 — and without
+       * the slack the gradient stays on at the end of the row, saying there is more
+       * where there is nothing. It is the opposite call from `scrolledDown` in
+       * `SessionView`, which takes no slack at all and says why: there the question
+       * is "is a line cut off by the header", and one pixel of scroll is already
+       * one cut line.
+       *
+       * `rail > 0` is the un-laid-out box, which the `ResizeObserver` really does
+       * report: with a `clientWidth` of 0 the remainder is the whole row and the
+       * arithmetic would say "cut" about a box that has not been measured. Nothing
+       * would be *drawn* — a zero-height parent gives the fade no height either —
+       * but a class asserting something false about the first frame is a class the
+       * next reader has to reason about.
+       */
+      edge.classList.toggle("is-cut", rail > 0 && box.scrollLeft < room - 1);
       if (room <= 0 || rail === 0) {
         bar.style.width = "0px";
         bar.classList.remove("is-scrolling");
@@ -1243,12 +1434,35 @@ function AgentStrip({
    */
   const shown = agents.filter(shownHere);
   /**
-   * The chosen tile, when it is an assembled agent — the one kind there is
-   * anything to edit about. A built-in harness is whatever is installed on the
-   * machine and this app changes none of it.
+   * The row, in the order this machine remembers.
+   *
+   * ⚠ **`shownHere` decides membership and the stored strip decides only order
+   * and hiding**, which is `orderStrip`'s own rule and the one that keeps this
+   * from drawing a tile for something that cannot be started. So a harness that is
+   * signed out is absent because it has no tile, not because anybody hid it — and
+   * it keeps its stored position for when it comes back.
+   *
+   * Two lists in, one out, and the two kinds are told apart by `kind` from here
+   * down. It used to be two `.map`s in sequence, which is the same thing written
+   * as an order nobody could change.
    */
-  const chosenPreset =
-    value?.kind === "custom" ? (presets.find((one) => one.id === value.id) ?? null) : null;
+  const rows = orderStrip(
+    [
+      ...shown.map((one) => ({ kind: "harness" as const, id: one.id })),
+      ...presets.map((one) => ({ kind: "custom" as const, id: one.id })),
+    ],
+    stored,
+  );
+  /**
+   * What is left after the hidden entries, which is what is drawn.
+   *
+   * ⚠ **Kept apart from `rows`, because "nothing is offered" and "everything is
+   * hidden" are two sentences below and telling them apart needs both counts.**
+   * One list would make a machine with four hidden agents say it reports none,
+   * pointing somebody at a sign-in screen for a problem one tap away in the other
+   * direction.
+   */
+  const drawn = rows.filter((row) => !row.hidden);
   /*
    * ⚠ **Said only once the second read has settled.** With `customAgents`
    * flattened to `[]` while it was still out, a fast `GET /agents` answering
@@ -1385,9 +1599,14 @@ function AgentStrip({
 
   return (
     <div className="space-y-2">
-      {/* Two children — the row, and the bar the app draws under it — so the
+      {/* Two children — the row and the bar the app draws under it — so the
           wrapper is a plain block rather than the flex row that used to stretch a
-          sibling `+` to the tiles' height. The button sets its own `min-h-16`. */}
+          sibling `+` to the tiles' height. The trailing button sets its own
+          `min-h-16`.
+
+          It stays a plain block now that there is a fade as well: that one hangs
+          off a positioned box around the *track alone*, one level in, so it cannot
+          reach over the bar. */}
       <div>
         {/*
           * ⚠ **`no-scrollbar` was here, then was not, and the class this carries
@@ -1404,136 +1623,216 @@ function AgentStrip({
           * The machine tabs in `SessionBrowser` keep `.no-scrollbar` for exactly
           * the reason this one lost it: a half-cut pill still says "more".
           */}
-        <div ref={track} className="fade-scrollbar overflow-x-auto">
-          <div className="flex w-max gap-2">
-            {shown.map((candidate) =>
-              /* No `label`: the visible text is the whole of what this tile says
-                 — the harness's name — and the glyph repeats it. No `hint`
-                 either, since a fixed three-word label in a 112px tile cannot be
-                 cut.
-
-                 ⚠ **That claim was false for one day and the tile was 128px wide
-                 for it.** A fifth status, `no sign-in needed`, is 7.95em of
-                 advance; at `--text-2xs` (0.75rem) that is 5.96rem against a
-                 content box of 112px − 20 of `p-2.5` − 2 of border = **5.625rem**,
-                 both sides in rem, so it always clipped. The width came back the
-                 moment that badge did. There is no status line at all now, which
-                 is the end of a measurement this strip paid for twice (Q7.119). */
-              tile({
-                key: candidate.id,
-                /* Against `value` and never against the resolved `harness`, which
-                   carries the sign-in door's fallback and would draw a tile as
-                   chosen on a machine where nothing can be. */
-                picked: value?.kind === "harness" && candidate.id === value.id,
-                /* ⚠ **Structurally false, and kept.** `shownHere` filters out an
-                   uninstalled harness before the row is built, so nothing here can
-                   be drawn disabled any more. It stays because the tile's own
-                   refusal must not depend on which list happened to build it —
-                   this is the state that shipped once, `aria-pressed` and
-                   `disabled` at the same time, and the assertion that it cannot
-                   recur is `offeredHere`'s rather than this row's. */
-                disabled: !candidate.available,
-                onClick: () => onChange({ kind: "harness", id: candidate.id }),
-                glyph: <AgentGlyph agent={candidate.id} size={18} />,
-                title: agentLabel(candidate.id),
-                /* ⚠ **No status, and that is the whole of what the line says
-                   now.** It carried `agentCard`'s badge — the same words the
-                   settings card uses, which is still the rule for every other
-                   place a status is printed. Here there is nothing left to print:
-                   `shownHere` draws a tile only for an agent something can be
-                   started on, so the badge could only ever read `signed in`, and a
-                   fact true of every tile in the row tells the reader nothing. It
-                   was reported as noise and it was.
-
-                   ⚠ **The empty string rather than dropping the line, and the
-                   span reserves its own height for it.** These tiles are
-                   `items-stretch` and `justify-center`: a tile with fewer lines
-                   than its neighbour has them centred inside the taller box,
-                   putting its *name* on a different baseline from every preset
-                   beside it. Rendering the span is not enough — an empty one
-                   generates no line box and is 0px tall, measured — so the height
-                   is held by `min-h` on the span itself. See the tile. */
-                subline: "",
-              }),
-            )}
-            {presets.map((one) => {
-              /*
-               * ⚠ **A preset is only as startable as the harness under it**, and
-               * this tile drew pressable regardless — so a machine without
-               * `claude` showed a greyed "Claude Code · not installed" tile beside
-               * an enabled preset carrying the same glyph, and `Start` posted it
-               * for a 503. The harness tiles two blocks up have always passed
-               * `disabled: !candidate.available`; this is that same fact, reached
-               * through the preset's own `harness`. `offeredHere` folds it in too,
-               * so a stale pick clears rather than being posted.
-               */
-              const runs = agents.find((candidate) => candidate.id === one.harness) ?? null;
-              const missing = runs === null || !runs.available;
-              const where = customAgentSubline(one, systems);
-              return tile({
-                key: one.id,
-                picked: value?.kind === "custom" && one.id === value.id,
-                disabled: missing,
-                onClick: () => onChange({ kind: "custom", id: one.id }),
-                glyph: <AgentGlyph agent={one.harness} size={18} />,
-                title: one.name,
-                // The reason displaces the system, for the same rule the harness
-                // tiles' status line follows: a tile that cannot be pressed says why
-                // on the one line it has, rather than describing a pairing nothing
-                // can run.
-                subline: missing ? `${agentLabel(one.harness)} not installed` : where,
+        {/*
+         * ⚠ **A positioned box around the track alone, and not around the wrapper
+         * above.** The wrapper holds the row *and* the rail beneath it, so an
+         * `inset-y-0` fade hung off it would paint over the scrollbar as well —
+         * and the wrapper is a plain block on purpose, for the reason stated
+         * where it is. This adds a containing block and nothing else: it has no
+         * padding, no margin and no height of its own.
+         */}
+        <div className="relative">
+          <div ref={track} className="fade-scrollbar overflow-x-auto">
+            <div className="flex w-max gap-2">
+              {drawn.map((row) => {
                 /*
-                 * ⚠ **All three facts, because one of them is a glyph and
-                 * `AgentGlyph` draws its svg `aria-hidden`.** Read out, this tile
-                 * said its name and its system and left the *harness* off — the
-                 * one fact assembling an agent exists to make choosable. The
-                 * visible name comes first, so voice control's "click <name>"
-                 * still lands on it.
+                 * ⚠ **One `.map` over an ordered list, where this was two in
+                 * sequence.** Harnesses then presets was an order nobody could
+                 * change written as a shape nobody could change — the two lists went
+                 * through `tile()` separately, so "the harnesses come first" was not
+                 * a rule anywhere, it was the order of two JSX children. `orderStrip`
+                 * decides it now and this branches on `kind`, which is the same two
+                 * tiles with the sequencing taken out of the markup.
                  */
-                label: missing
-                  ? `${one.name}, ${agentLabel(one.harness)} not installed`
-                  : `${one.name}, ${agentLabel(one.harness)}, ${where}`,
+                if (row.kind === "harness") {
+                  const candidate = shown.find((one) => one.id === row.id);
+                  // Cannot happen — `drawn` is built from `shown` — and it is a
+                  // `find` rather than a cast for `MachineAgentsSection`'s reason:
+                  // this file may not promise on `orderStrip`'s behalf that a row it
+                  // emitted is in the list it was given.
+                  if (candidate === undefined) return null;
+                  /* No `label`: the visible text is the whole of what this tile says
+                     — the harness's name — and the glyph repeats it. No `hint`
+                     either, since a fixed three-word label in a 112px tile cannot be
+                     cut.
+
+                     ⚠ **That claim was false for one day and the tile was 128px wide
+                     for it.** A fifth status, `no sign-in needed`, is 7.95em of
+                     advance; at `--text-2xs` (0.75rem) that is 5.96rem against a
+                     content box of 112px − 20 of `p-2.5` − 2 of border = **5.625rem**,
+                     both sides in rem, so it always clipped. The width came back the
+                     moment that badge did. There is no status line at all now, which
+                     is the end of a measurement this strip paid for twice (Q7.119). */
+                  return tile({
+                    // `stripKey` and not the bare id: this is one array now, and
+                    // the whole argument for that key is that a harness and an
+                    // assembled agent sharing an id must not collapse into one row.
+                    // Applying it everywhere but the JSX key would leave out the one
+                    // place React actually reads.
+                    key: stripKey("harness", candidate.id),
+                    /* Against `value` and never against the resolved `harness`, which
+                       carries the sign-in door's fallback and would draw a tile as
+                       chosen on a machine where nothing can be. */
+                    picked: value?.kind === "harness" && candidate.id === value.id,
+                    /* ⚠ **Structurally false, and kept.** `shownHere` filters out an
+                       uninstalled harness before the row is built, so nothing here can
+                       be drawn disabled any more. It stays because the tile's own
+                       refusal must not depend on which list happened to build it —
+                       this is the state that shipped once, `aria-pressed` and
+                       `disabled` at the same time, and the assertion that it cannot
+                       recur is `offeredHere`'s rather than this row's. */
+                    disabled: !candidate.available,
+                    onClick: () => onChange({ kind: "harness", id: candidate.id }),
+                    glyph: <AgentGlyph agent={candidate.id} size={18} />,
+                    title: agentLabel(candidate.id),
+                    /* ⚠ **The vendor, where this was a status and then was empty.**
+                       It carried `agentCard`'s badge and printed `signed in` on every
+                       tile — `shownHere` draws a tile only for an agent something can
+                       be started on, so that is the only word it could ever say, and a
+                       fact true of every tile in the row tells the reader nothing. It
+                       was reported as noise and it was. The line then went blank,
+                       which is a reserved slot saying nothing at all, and it was
+                       reported again.
+
+                       What belongs there is the fact the preset tiles beside it
+                       already carry: **which system serves the model**. Claude Code is
+                       Anthropic, Codex is OpenAI, Kimi Code is Moonshot. Read off
+                       `GET /systems` through `harnessSubline`, so the name is the
+                       daemon's rather than a fourth copy of a vendor table.
+
+                       ⚠ **The line is still reserved and may still be empty**, and
+                       the span holds its own height either way. These tiles are
+                       `items-stretch` and `justify-center`: a tile with fewer lines
+                       than its neighbour has them centred inside the taller box,
+                       putting its *name* on a different baseline from every preset
+                       beside it. Rendering the span is not enough — an empty one
+                       generates no line box and is 0px tall, measured — so the height
+                       is held by `min-h` on the span itself. See the tile.
+
+                       ⚠ **It fits, which the badge it replaced did not.** Q7.119
+                       measured a fifth status at 7.95em of advance against a
+                       5.625rem content box, and the tile was 128px wide for a day
+                       because of it. The vendor names that can appear here —
+                       Anthropic, OpenAI, Moonshot — are all under 5em at
+                       `--text-2xs`. */
+                    subline: harnessSubline(candidate.id, systems),
+                  });
+                }
+                const one = presets.find((preset) => preset.id === row.id);
+                if (one === undefined) return null;
                 /*
-                 * ⚠ **The tooltip is kept, and it is the name and nothing else.**
-                 * `AgentBuilder`'s `Supports` docblock measured what `title` is
-                 * worth — about a second of delay, unstyleable, reported as simply
-                 * not appearing — and it does not exist on touch at all, which is
-                 * why it may never be how a tile says something. It earns its place
-                 * on exactly the one value here that gets cut: 12px in a 112px tile
-                 * truncates at 90px against a bound of 80 characters, so a preset
-                 * named after a long model id is unreadable on screen and there is
-                 * no other pointer affordance for it. Everything the tooltip cannot
-                 * carry is in `aria-label` above, and the edit screen one tap below
-                 * shows the name in full on every device.
+                 * ⚠ **A preset is only as startable as the harness under it**, and
+                 * this tile drew pressable regardless — so a machine without
+                 * `claude` showed a greyed "Claude Code · not installed" tile beside
+                 * an enabled preset carrying the same glyph, and `Start` posted it
+                 * for a 503. The harness tiles above have always passed
+                 * `disabled: !candidate.available`; this is that same fact, reached
+                 * through the preset's own `harness`. `offeredHere` folds it in too,
+                 * so a stale pick clears rather than being posted.
                  */
-                hint: one.name,
-              });
-            })}
-            {canAssemble && machineId !== null && (
-              <button
-                type="button"
-                onClick={onAssemble}
-                aria-label="Add an agent"
-                /* ⚠ **An ordinary item, and every attempt to make it cleverer has
-                   been rejected by the person asking for it.** It was pinned
-                   outside the scroller; then it was moved inside and made
-                   `sticky right-0`, which paints at the scrollport's right edge and
-                   therefore still *looks* pinned — which was the complaint, stated
-                   a third time. It is the row's last item now and you scroll to it,
-                   which is what was asked for in those words.
+                const runs = agents.find((candidate) => candidate.id === one.harness) ?? null;
+                const missing = runs === null || !runs.available;
+                const where = customAgentSubline(one, systems);
+                return tile({
+                  key: stripKey("custom", one.id),
+                  picked: value?.kind === "custom" && one.id === value.id,
+                  disabled: missing,
+                  onClick: () => onChange({ kind: "custom", id: one.id }),
+                  glyph: <AgentGlyph agent={one.harness} size={18} />,
+                  title: one.name,
+                  // The reason displaces the system, for the same rule the harness
+                  // tiles' status line follows: a tile that cannot be pressed says why
+                  // on the one line it has, rather than describing a pairing nothing
+                  // can run.
+                  subline: missing ? `${agentLabel(one.harness)} not installed` : where,
+                  /*
+                   * ⚠ **All three facts, because one of them is a glyph and
+                   * `AgentGlyph` draws its svg `aria-hidden`.** Read out, this tile
+                   * said its name and its system and left the *harness* off — the
+                   * one fact assembling an agent exists to make choosable. The
+                   * visible name comes first, so voice control's "click <name>"
+                   * still lands on it.
+                   */
+                  label: missing
+                    ? `${one.name}, ${agentLabel(one.harness)} not installed`
+                    : `${one.name}, ${agentLabel(one.harness)}, ${where}`,
+                  /*
+                   * ⚠ **The tooltip is kept, and it is the name and nothing else.**
+                   * `AgentBuilder`'s `Supports` docblock measured what `title` is
+                   * worth — about a second of delay, unstyleable, reported as simply
+                   * not appearing — and it does not exist on touch at all, which is
+                   * why it may never be how a tile says something. It earns its place
+                   * on exactly the one value here that gets cut: 12px in a 112px tile
+                   * truncates at 90px against a bound of 80 characters, so a preset
+                   * named after a long model id is unreadable on screen and there is
+                   * no other pointer affordance for it. Everything the tooltip cannot
+                   * carry is in `aria-label` above, and the Agents screen the gear
+                   * opens shows the name in full on every device.
+                   */
+                  hint: one.name,
+                });
+              })}
+              {canConfigure && machineId !== null && (
+                <button
+                  type="button"
+                  onClick={onConfigure}
+                  aria-label="Agent settings"
+                  /* ⚠ **An ordinary item, and every attempt to make it cleverer has
+                     been rejected by the person asking for it.** It was pinned
+                     outside the scroller; then it was moved inside and made
+                     `sticky right-0`, which paints at the scrollport's right edge and
+                     therefore still *looks* pinned — which was the complaint, stated
+                     a third time. It is the row's last item now and you scroll to it,
+                     which is what was asked for in those words.
 
-                   The row's height and shape, dashed — and **not** an item's width.
-                   44px is `BUTTON_SIZE`'s floor, so the target is untouched.
+                     ⚠ **It was a `+` and it is a gear, and only the destination
+                     changed.** Adding an agent turned out to be one of four things
+                     somebody does to this list — the others are ordering it, hiding
+                     from it and editing a row — so a door straight into the builder
+                     was the narrowest of the four wearing the shape of all of them.
+                     The `+` is on the screen this opens, at the foot of the list it
+                     adds to.
 
-                   Bounded either way: dashed or not, this border is the whole of
-                   what says the control is there, which is what `edge-strong` is
-                   held at ≥3:1 for and what `edge` may never be used as. */
-                className="tap press flex min-h-16 w-11 shrink-0 flex-col items-center justify-center rounded-lg border border-dashed border-edge-strong bg-surface text-muted hover:bg-raised hover:text-fg"
-              >
-                <Icon as={Plus} size={18} />
-              </button>
-            )}
+                     The row's height and shape, dashed — and **not** an item's width.
+                     44px is `BUTTON_SIZE`'s floor, so the target is untouched.
+
+                     Bounded either way: dashed or not, this border is the whole of
+                     what says the control is there, which is what `edge-strong` is
+                     held at ≥3:1 for and what `edge` may never be used as. */
+                  className="tap press flex min-h-16 w-11 shrink-0 flex-col items-center justify-center rounded-lg border border-dashed border-edge-strong bg-surface text-muted hover:bg-raised hover:text-fg"
+                >
+                  <Icon as={Settings2} size={18} />
+                </button>
+              )}
+            </div>
           </div>
+          {/*
+           * ⚠ **A sibling of the scroller and never a `mask-image` on it**, which
+           * is the transcript's own answer at the top of a conversation, written
+           * down there: a mask on a scroll container applies to the scrollbar too.
+           * Here that would be this app's own bar, one sibling down.
+           *
+           * `pointer-events-none` is load-bearing rather than tidy: this covers the
+           * right 40px of the row, which is where the gear is when the strip is
+           * scrolled anywhere but its end.
+           *
+           * Two stops and no middle one, and 70% rather than opaque — both copied
+           * from the transcript's fade with its measurement intact. A middle stop
+           * is a kink the eye catches, which is the hard edge this exists to
+           * avoid, moved inwards; and an opaque band would delete the tile under
+           * it rather than saying there is one.
+           *
+           * `aria-hidden="true"` in full rather than the bare attribute the rail
+           * below uses. They are the same value to a browser and not to
+           * `webcheck`, which slices this component by the literal text of that
+           * rail's opening tag — so writing them alike would make a fade the anchor
+           * for every assertion about the scrollbar.
+           */}
+          <div
+            ref={fade}
+            aria-hidden="true"
+            className="edge-fade pointer-events-none absolute inset-y-0 right-0 w-10 bg-gradient-to-l from-surface/70 to-transparent"
+          />
         </div>
         {/*
          * The bar, and it is `aria-hidden` and untouchable on purpose: it reports
@@ -1555,15 +1854,25 @@ function AgentStrip({
           is not a machine with nothing on it, and the reason was otherwise only
           on the screen behind this one. */}
       {/*
-       * ⚠ **Two sentences, because an empty row now has two causes.** It used to
-       * have one: the daemon listed nothing. Since a harness that is not signed in
-       * has no tile, a machine can list three agents and draw none of them — and
-       * "this machine reports no agents" over a machine that reported three is the
-       * kind of false line that sends somebody to the wrong screen. What is *not*
-       * said here is which agent or why: the sign-in door below is drawn in exactly
-       * this state and says both, and repeating it here would be two answers to one
-       * question.
+       * ⚠ **Three sentences, because an empty row now has three causes.** It used
+       * to have one: the daemon listed nothing. Since a harness that is not signed
+       * in has no tile, a machine can list three agents and draw none of them —
+       * and "this machine reports no agents" over a machine that reported three is
+       * the kind of false line that sends somebody to the wrong screen. The third
+       * arrived with the strip: everything this machine offers can be *hidden*,
+       * which is a row somebody chose and the one cause with a one-tap remedy. It
+       * is asked **first**, because it is the only one of the three that is true
+       * of a machine with nothing wrong with it, and the sentence names the gear
+       * rather than a screen — the control is at the end of the row directly
+       * above.
+       *
+       * What is *not* said in the other two is which agent or why: the sign-in
+       * door below is drawn in exactly that state and says both, and repeating it
+       * here would be two answers to one question.
        */}
+      {drawn.length === 0 && rows.length > 0 && (
+        <Empty>Every agent on this machine is hidden. The gear above is where to bring one back.</Empty>
+      )}
       {nothingAtAll && failure === null && (
         <Empty>
           {agents.length === 0
@@ -1591,38 +1900,20 @@ function AgentStrip({
       )}
 
       {/*
-       * ⚠ **Editing hangs under the strip, not on the tile**, and the shape is
-       * the sign-in block directly below it: one control about the chosen tile,
-       * outside the scroller, drawn only while that tile is the kind it applies
-       * to. Exactly one of the two is ever on screen, since a tile is a harness
-       * or an assembled agent and never both — a built-in harness is whatever is
-       * installed on the machine and has nothing here to edit.
+       * ⚠ **There is no Edit control here any more, and its absence is the
+       * decision rather than a deletion.** It was one control about the chosen
+       * tile, hanging under the strip — the shape the sign-in block below still
+       * has — and the argument for it was that a kebab *on* a 112px tile inside a
+       * strip you drag sideways puts a target on another target's face. That
+       * argument is unchanged and this is not a reversal of it: editing moved to a
+       * row on the Agents screen, where the tile it is about is a full-width row
+       * with room for a kebab and nothing to mis-tap.
        *
-       * A kebab on the tile was the obvious answer and is the one this app has a
-       * rule against: on a 112px tile inside a strip you drag sideways it puts a
-       * target on another target's face, which is the mis-tap pair `TAP_GROW_Y`
-       * exists to prevent and the reason this app grows tap areas with
-       * pseudo-elements rather than boxes. A pencil drawn only on the chosen tile
-       * is that same object one size smaller, and it fails in the direction that
-       * costs: missing the pencil and hitting the tile re-selects what is already
-       * selected and nothing happens, while missing the tile and hitting the
-       * pencil leaves a screen holding a machine, an agent and a folder somebody
-       * walked to. A second tap on the chosen tile has no affordance at all —
-       * nothing says the tile became two controls — and on a strip that scrolls,
-       * a tap ending a drag is routinely one nobody meant.
+       * What it cost was a line under the picker that appeared and disappeared as
+       * you tapped along the row, moving the folder picker and the footer with it
+       * — on the one screen where what is below the strip is what you came to
+       * choose. The gear is in the layout unconditionally; that control never was.
        */}
-      {chosenPreset !== null && machineId !== null && (
-        <div>
-          <button
-            type="button"
-            onClick={() => onEdit(chosenPreset.id)}
-            className="tap press -my-2 inline-flex min-h-11 max-w-full items-center gap-1 rounded-sm px-2 text-xs text-muted hover:bg-raised hover:text-fg"
-          >
-            <Icon as={Pencil} size={12} />
-            <span className="min-w-0 truncate">Edit {chosenPreset.name}</span>
-          </button>
-        </div>
-      )}
 
       {/*
        * **Signing in happens here, not somewhere else.**

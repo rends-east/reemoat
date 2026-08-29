@@ -1,7 +1,7 @@
 import type { Route } from "./router";
 import { isOverlayPath } from "./ui/overlay";
 import { marketUpFrom } from "./market";
-import { settingsUp } from "./settings";
+import { parseSettingsRoute, settingsPaneTitle, settingsUp } from "./settings";
 
 /**
  * Which way a navigation goes, and what moves when it does.
@@ -96,6 +96,17 @@ export function depthOf(route: Route): number {
     case "agent":
       return route.step === null ? 2 : 3;
     case "settings":
+      /*
+       * The strip is a leaf under the machine, at the same depth one system sits
+       * at — reached from a row on that screen and left to it. Tested **before**
+       * the machine, since a strip route carries one.
+       *
+       * ⚠ It is also reached from New session's gear, and that is a *crossing*
+       * between two pop-ups rather than a push: the two stacks' depths are never
+       * compared, so `navMove` answers on the sheet stack and `origin` is what
+       * points the ◀ back at `/new`. Nothing here has to know about that door.
+       */
+      if (route.agents) return 4;
       if (route.system !== null) return 4;
       if (route.machineId !== null) return 3;
       return route.section !== null ? 2 : 1;
@@ -365,13 +376,43 @@ export function sheetTitle(route: Route): string | null {
  * control and the whole difference between it and the history button it must
  * never become.
  */
-export function sheetUpLabel(route: Route): string | null {
+export function sheetUpLabel(route: Route, origin: string | null = null): string | null {
   if (route.name !== "agent") return null;
-  if (route.step === null) return "New session";
+  /*
+   * ⚠ **The builder has two ways in now, and the ◀ names whichever it was.** It
+   * was opened only from New session, so this was a constant; the machine's
+   * Agents screen opens it too, and a chevron reading "New session" over a
+   * `upFrom` that returns to settings is precisely the control-naming-somewhere-
+   * you-are-not-going that the note below is about. `origin` is what `upFrom`
+   * reads, so it has to be what this reads — the two are one property split
+   * across two functions, which is why `webcheck` sweeps them together.
+   */
+  if (route.step === null) return origin === null ? "New session" : originLabel(origin);
   // Both strings are the destination's own head, read off `sheetTitle` above
   // rather than restated: a ◀ named "Configure agent" pointing at a screen
   // titled "Edit agent" is the control naming somewhere you are not going.
   return route.preset === null ? "Configure agent" : "Edit agent";
+}
+
+/**
+ * The head of the pop-up an address names, for a ◀ that points back into it.
+ *
+ * ⚠ **Only the two pop-ups that can cross *into* the builder, and the default is
+ * the one that always could.** `originFor` sets an origin when one overlay opens
+ * a different one, and exactly two open `/agent`: New session, whose head is a
+ * constant, and the machine's Agents screen, whose head is `settingsPaneTitle`'s
+ * answer. Anything else falls back rather than returning `null` — a ◀ with no name
+ * is worse than one naming the screen it would have gone to before, and this is
+ * reached only from a history entry a future release wrote.
+ *
+ * The settings arm is `settingsUpLabel`'s body, and it is a copy of three lines
+ * rather than a call because that function answers about a route's **parent**
+ * while this one answers about the address itself.
+ */
+function originLabel(origin: string): string {
+  const parts = origin.split("/").filter((part) => part.length > 0);
+  if (parts[0] !== "settings") return "New session";
+  return settingsPaneTitle(parseSettingsRoute(parts.slice(1), decodeURIComponent)) ?? "Settings";
 }
 
 /**
@@ -410,11 +451,39 @@ export function agentBuilderPath(
   cwd?: string | null,
   step: AgentStep | null = null,
   preset: string | null = null,
+  /**
+   * A harness to open already pointed at — `…/from/:harness`, for a built-in agent
+   * being edited, which means starting from it.
+   *
+   * ⚠ **The same slot as `edit`, and never both.** Two markers at one position is
+   * what makes the pair unexpressible rather than merely unused, and it keeps every
+   * rule this docblock already states — a marker is read where no step is read, and
+   * it can never be a folder, because a folder always arrives as `%2F…`. `preset`
+   * wins if a caller passes both, which no caller does; the parser cannot produce
+   * the state at all.
+   */
+  harness: string | null = null,
 ): string {
   const forMachine = `/agent/${encodeURIComponent(machine)}`;
-  const base = preset === null ? forMachine : `${forMachine}/edit/${encodeURIComponent(preset)}`;
+  const base =
+    preset !== null
+      ? `${forMachine}/edit/${encodeURIComponent(preset)}`
+      : harness !== null
+        ? `${forMachine}/from/${encodeURIComponent(harness)}`
+        : forMachine;
   const stepped = step === null ? base : `${base}/${step}`;
   return cwd === undefined || cwd === null ? stepped : `${stepped}/${encodeURIComponent(cwd)}`;
+}
+
+/**
+ * The builder, opened at a harness that has nothing stored — `…/from/:harness`.
+ *
+ * `agentEditPath`'s twin, and a second name for the same reason: this is opened at
+ * the builder and never at a step, so every call site would otherwise be writing
+ * two `null`s through the middle of a five-argument call.
+ */
+export function agentFromPath(machine: string, harness: string, cwd?: string | null): string {
+  return agentBuilderPath(machine, cwd, null, null, harness);
 }
 
 /**
@@ -455,13 +524,25 @@ export function upFrom(route: Route, under: string, origin: string | null = null
      * be recorded in `history.state`.
      */
     case "agent":
+      /*
+       * ⚠ **`origin` at the shallowest depth, which is the market's shape and
+       * arrived for the same reason.** The note above still holds for the way in
+       * from New session: the address carries the machine, the folder and the
+       * preset, so `newSessionPath` rebuilds it with nothing recorded. What it
+       * cannot rebuild is a *different* pop-up — the machine's Agents screen opens
+       * this one too, and walking back to New session from there drops somebody
+       * out of settings onto a screen they never asked for. `originFor` records
+       * only a crossing, so the New-session case still answers the address this
+       * arm would have built anyway.
+       */
       return route.step === null
-        ? newSessionPath(route.machineId, route.cwd ?? undefined)
+        ? (origin ?? newSessionPath(route.machineId, route.cwd ?? undefined))
         : // ⚠ The preset travels back with it, for the reason the folder does:
           // dropped here, the ◀ out of a picker would land on the *new agent*
           // screen and the agent being edited would be gone from the address —
-          // the same loss the `cwd` segment exists to prevent one field over.
-          agentBuilderPath(route.machineId, route.cwd, null, route.preset);
+          // the same loss the `cwd` segment exists to prevent one field over. The
+          // harness seed rides along for the identical reason, one marker over.
+          agentBuilderPath(route.machineId, route.cwd, null, route.preset, route.harness);
     case "settings": {
       // A section walks one level up inside the sheet; the index leaves it. Both
       // are `settingsUp`'s answer, which is what the ◀ and the ✕ already draw.

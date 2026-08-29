@@ -58,18 +58,18 @@ bug in the file.
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 114 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 77 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 274 | `####` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 281 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 44 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 109 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 65 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 125 | `###` |
-| | | **808** | |
+| | | **815** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 808 rather than the 425
+dividers. So the count is over **both** depths, and it says 815 rather than the 425
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -14332,6 +14332,546 @@ live in the same SQLite, on the same machine, read by the same uid; the secret m
 from a store into headers, which is exactly where a system secret already goes. What
 would have been a change in kind is the *other* direction — a system credential into
 a child's environment — and that is not built.
+
+#### Q3.529 — The strip is a listing, and a listing is not a preference
+
+**Question.** The New session strip drew every harness that could be started
+followed by every agent somebody had assembled — `AGENT_IDS` order, then
+`ORDER BY created_at, id`. Nothing anywhere stored a position and nothing could
+take a tile out. Somebody who uses one agent out of six has their answer wherever
+the daemon happened to put it, which on a 390px phone is usually past the right
+edge of a row you have to drag. Where should the order live?
+
+**Decision.** On the daemon, per machine, in a new `agent_strip` table, and merged
+into the live listing by the client.
+
+**Per machine and not per browser**, which is the half that decides the rest. The
+strip is about what one host can start; `custom_agents` beside it is already shared
+by everybody with a grant on that machine, and the daemon stopped asking who the
+subject is. A preference held in a tab is one that vanishes the first time a phone
+discards the page — which it does on its own, and which is why `AgentCard` already
+keeps a `sessionStorage` reattach key.
+
+**A partial record, and the merge is the design rather than an optimisation.** The
+table holds `(kind, ref, rank, hidden)` for what somebody actually moved or hid.
+`orderStrip` applies it over what the machine reports right now, in three clauses:
+stored entries in rank order keeping only what the listing still holds; then
+everything the store has never heard of, in natural order, at the end; and unknown
+means **visible**. The third is the one that would have produced a bug report — an
+agent arriving already switched off is indistinguishable from the daemon having lost
+it.
+
+**`ref` is never validated, on the way in or on the way out.** This is the opposite
+call from `custom_agents.harness` one table up, where a row naming something outside
+the union is dropped by `readCustomAgent` because restoring it produces a well-typed
+lie that fails later with a worktree already made. Here the row *is* the memory: a
+harness signed out for a week and a preset a rollback cannot resolve both keep their
+positions, and what drops them is the merge, at the moment it draws. Validating
+would forget an order every time an agent was briefly unavailable, and rearranging
+somebody's screen by itself is the one behaviour they would certainly notice. It is
+bounded instead — `MAX_STRIP_REF_CHARS`, 64 — so an unknown id cannot be an essay.
+
+**`PUT` and not `PATCH`, because the body is the whole list.** A reorder is a
+statement about every position at once, so a per-row verb would need a rule for the
+rows the body did not mention and no caller has one. `SqliteAgentStripStore.replace`
+therefore empties before it refills, inside a transaction — for atomicity, unlike
+`prune()`'s transaction, which takes one only to spend a single WAL commit. And the
+route reads the *whole* body before touching the store: a validator that ran inside
+the write loop would answer 400 on the eighth row of a fourteen-row body with the
+first seven stored and the rest gone. `daemoncheck` asserts that second half against
+every refusal.
+
+**No `SCHEMA_VERSION` bump.** It is a whole new table, so `schema.sql`'s
+`CREATE TABLE IF NOT EXISTS` is the entire migration and `migrate()` needs nothing —
+its own docblock says so. A table an older daemon never selects is invisible to it,
+which is `resume_gave_up`'s standing reason, and bumping the version would make
+`refuseNewerSchema` refuse a rollback to buy that nothing.
+
+**And the *provider* order is `SYSTEM_IDS`, which is the same kind of fact one level
+down.** `GET /systems` maps over that array and `groupModels` groups by first
+appearance rather than sorting, so the order somebody scrolls through in the model
+picker begins there. Two vendors, the widest router, then the single-vendor
+endpoints, then the fallback gateway: Anthropic and OpenAI are what most choices are
+between; OpenRouter next, as the widest catalogue and the commonest reason to scroll
+at all; Moonshot, Z.ai and MiniMax after it — Moonshot needs no key at all with kimi
+signed in, and the other two are endpoints far fewer people hold a key for; OpenCode
+Zen last, being the free tier one harness falls back to when nothing is configured.
+(It read "vendors first, then routers" until OpenRouter moved into the middle of
+them, which that framing no longer describes.) Nothing branches on a position — a system's meaning is entirely in
+`SYSTEMS[id]` — which is what makes the order safe to change and worth writing down.
+
+⚠ **That sentence said "decided there and nowhere else" and it is now the *default*
+half of the answer.** Q3.535 floats every provider this machine can run above every
+provider it cannot; this array orders each of those two halves. It also said
+"Anthropic, OpenAI and Moonshot", which was the order before OpenRouter moved above
+Moonshot in that same entry.
+
+#### Q3.530 — Hiding a harness, which is not a refusal
+
+**Question.** Ordering the strip is uncontroversial. Taking a tile *out* is not:
+this app's standing rule is that an agent which cannot run is drawn and labelled
+rather than filtered out, because filtering answers *"where did claude go"* with
+silence. Does hiding contradict that?
+
+**Decision.** No, and the distinction is who did it. Every rule of that kind is
+about the app concealing a **fact about the machine** — not installed, not signed
+in, no model. Hiding is somebody's own act on their own list, undone on the screen
+that did it, and the screen names it in a sentence when it empties the row: *"Every
+agent on this machine is hidden."*
+
+**One removal per row, and it is called the same thing on both kinds.** This was the
+opposite at first — "a harness is hidden and never removed, because there is nothing
+to delete about a harness" — and it was wrong about whose distinction it is. From
+the picker's side the two acts are one: *this stops being offered*. A built-in row is
+only an agent whose vendor picked the model, and a screen where everything but the
+harnesses can be removed makes the reader ask what is special about them. The answer
+— that one is a row in SQLite and the other is a binary on the host — is the app's
+business and not theirs.
+
+⭐ **And the rule that came out of getting this wrong three times: the row's *kind*
+may decide a lookup or a destination, never a presentation.** The kebab was
+`disabled` on a harness; then Edit was absent from it; then Remove carried `danger`
+on everything *else*. Each was defensible on its own — a harness has nothing to
+edit, and one of the two really is a `DELETE` — and each was the app showing the
+reader an internal difference they have no use for. `danger` was the last of them,
+and it was overclaiming on its own terms as well: it is for an act nothing brings
+back, and this one is rebuildable from the bar at the foot of the same screen, which
+is also why it has no confirmation. `webcheck` sweeps for a `harness` branch inside
+a `danger=` or a `className=` rather than pinning the place it last went wrong.
+
+**What still differs is what a removal *does* afterwards, and that is unavoidable
+rather than a signal.** A built-in row stays, dimmed, offering *Add back*, because a
+flag is all there is to undo. An assembled agent is `DELETE /custom-agents/:id`, so
+there is no row left to dim.
+
+**And both verbs are on both kinds, which is the same correction one step
+further.** `Edit` was absent from a built-in row because a harness has nothing
+stored to `PATCH` — true, and again the app's own distinction rather than anybody
+else's. This list holds *agents*; the built-in one is the one that exists by
+default. So editing a harness means what it can mean — **start from it** — and the
+builder opens already pointed at it via a second address marker,
+`/agent/:machineId/from/:harness`, saving as an assembled agent. The default row
+stays, and Remove is one item below for somebody who wanted theirs instead.
+
+`edit` and `from` are read at **one** position, so a route naming both is
+unexpressible rather than checked; a harness this build cannot resolve opens the
+ordinary new-agent screen, which is `compatibility.md`'s rule 2 and the direction
+`edit` already fails in. And the seed joins `preset` in `screenOf`, because the
+builder reads it once at mount: two addresses differing only in where they start
+are two screens.
+
+**The labels are one word each — `Edit`, `Remove`, `Add back`.** They were
+`Edit agent`, `Remove from the list` and `Add back to the list`: a menu row is read
+in a glance beside three others, and the list it acts on is named by the screen the
+menu is on.
+
+**There is no two-tap confirmation, which reverses the settings-row rule on
+purpose.** That rule is for acts nothing brings back — retiring a machine, deleting
+a person, uninstalling a plugin with its data — and every one of those is either a
+different person's access or bytes with no other copy. This one is rebuildable from
+the screen it was removed on, in the flow the screen's own bar opens, so a
+confirmation was a tax on the act somebody performs most often here. Removing it
+also removed the only state a row could be in that changed its *height*, which is
+what the drag measures.
+
+**It is weighed in `offeredHere`, which is where it is easy to leave it out.**
+Hiding is not an availability failure — the daemon would start the thing perfectly
+well — so nothing downstream refuses it, and a pick that survived that call would be
+`Start` live over a row with nothing drawn as chosen. That is the exact family of
+three bugs `offeredHere` already exists for, arriving through a fourth door.
+
+**And the *default* had to move with it, which is the half that was missed once.**
+`defaulted` was `agents.find(shownHere)` — the first harness in `AGENT_IDS` order —
+recorded as state inside `GET /agents`'s own `.then`. Weighing the hidden set at
+`offeredHere` alone therefore fixed nothing: hiding `claude` left the default naming
+it, `offeredHere` refused it, and New session drew *no* chosen tile with `Start`
+disabled until somebody tapped one. It is derived now, and it is **the first row the
+strip draws that a session can actually be started on** (Q3.534, which narrowed it —
+this entry recorded it as the first row drawn, full stop, and a preset on an
+uninstalled harness *is* drawn) — which is also the better answer on its own terms,
+since somebody who dragged an agent to the front meant it to be first. Deriving it closes
+a second defect for free: the `.then` needed `picksRef` to read the choice at answer
+time rather than at request time, and a value computed in the render that draws it
+has no capture to be stale.
+
+**The settings list is deliberately wider than the row it configures.** The strip
+filters by `shownHere`, so a harness nobody is signed in to has no tile; a settings
+screen that filtered the same way would answer "show Codex" with a row that changes
+nothing visible. Every harness that can *ever* have a tile is listed, with its badge
+saying why it has not got one. `startsBare` is the single exclusion and it is not a
+status — opencode is a router and has no tile in any state, so a row you could order
+that can never appear would be a lie rather than a warning.
+
+**A hidden row is dimmed in place, and it took two goes.** It keeps its position —
+that is the thing somebody came to set, and taking it out of the list would take
+away the only way to bring it back — so what says it is switched off has to be the
+row itself. The first attempt moved the name to `muted` and nothing else, and was
+reported as not looking hidden at all; it is `bg-raised/60` under `text-faint` now,
+a ground *and* an ink. Not `opacity`, for `index.css`'s standing reason: it
+composites the whole row including the line explaining what the row is, and this
+one still has to be read and pressed.
+
+**And the line under a built-in row is the vendor, not `signed in`.** It was
+`agentBadge`'s word unconditionally, which on a healthy machine printed the same
+thing under every row — the same noise the strip's own tiles had already been
+reported for, arriving one screen over. It is `harnessSubline`'s answer now: which
+system serves the model, read off `GET /systems` by `nativeHarness` so it is the
+daemon's name rather than a fourth vendor table. The badge is *not* dropped: this
+list is wider than the strip precisely so a harness that is not installed or not
+signed in has a row, so a `strong`-toned badge displaces the vendor and the two
+`plain` ones do not.
+
+#### Q3.531 — The `+` became a gear, and only the destination changed
+
+**Question.** Where the trailing control of the strip sits was settled twice, both
+times by report: pinned outside the scroller it overlapped the last tile; `sticky
+right-0` inside the track it painted at the scrollport's right edge at every scroll
+position and therefore still read as pinned. It is an ordinary item you scroll to.
+Adding a screen for the order needs a door — does it need a new control?
+
+**Decision.** No. It is the same slot, the same 44px dashed pill, and a gear instead
+of a `+`. Adding an agent turned out to be one of four things somebody does to this
+list — the others are ordering it, hiding from it and editing a row — so a door
+straight into the builder was the narrowest of the four wearing the shape of all of
+them. The `+` is on the screen the gear opens, at the foot of the list it adds to.
+`webcheck` pins the *placement* and never the glyph, which is what was reported
+twice.
+
+**The `Edit <preset>` control under the picker went with it.** Its argument is
+unchanged and this is not a reversal of it: a kebab *on* a 112px tile inside a strip
+you drag sideways puts a target on another target's face, which is what `TAP_GROW_Y`
+exists to prevent. Editing moved to a row on the Agents screen, where the thing it
+is about is a full-width row with nothing to mis-tap. What it cost while it was here
+was a line that appeared and disappeared as you tapped along the row, moving the
+folder picker and the footer with it — on the one screen where what is below the
+strip is what you came to choose.
+
+**Leaving `/new` for another pop-up is affordable now and was not before.** That
+navigation is exactly what put the sign-in wizard inline: a pop-up replacing a
+pop-up, discarding a folder somebody had walked several levels into, so the dialog
+appears to have wandered off. Two things changed. The folder is in the address —
+`/new/:machineId/:cwd`, added for the builder — so the way back restores it. And the
+chosen tile now survives in `agentPick.ts` as a **standing** map, read rather than
+taken, which is the opposite discipline from the two hand-offs beside it: those
+carry an event that happened once, this carries a choice that stays true until
+somebody taps another.
+
+**`…/agents` names a screen again.** It meant *one agent's sign-in* until a harness
+and the account it signs in to came apart, and then it meant nothing and fell to the
+machine. `/settings/machines/:machineId/agents` is the machine's agent **list** now,
+and `…/agents/claude` lands there with the tail dropped — still "fall up to the
+nearest real screen", and the screen it falls to is one tap from what that address
+used to open.
+
+**The Agents screen's own ◀ reads `origin` too, and only there.** It walked to the
+machine — the parent in the URL — which is right when you arrived from the machine's
+own row and wrong when you arrived from the gear: it strands somebody in settings
+with the New session sheet they were filling in gone. Reported. It is deliberately
+*not* general, and the reason is that `originFor` keeps an origin across a move
+**within** one pop-up: applied at every depth, a settings sheet opened from New
+session would answer `/new` for its sections and its machines too, and walking up
+inside the sheet would stop working. It is narrowed further, to an origin that is
+the New session pop-up, so that `settingsUpLabel` has exactly one name to give — a
+`/plugins` parent would parse as no settings route at all and draw a chevron reading
+"Settings" over a screen that is not it.
+
+**A crossing costs the builder an `origin`, and a *removal* may not be gated on
+it.** The builder now has two ways in, so its ◀ and its save both read `origin` —
+the market's shape — and `sheetUpLabel` reads the same value, because a label
+computed without it over a destination computed with it is the chevron naming
+somewhere you are not going. What must **not** follow that pattern is the removal
+hand-off. `rememberPick` is rightly gated on the way out being the strip: a
+hand-off left behind fires on some later visit, and a pick is a thing somebody would
+then be given without asking. `rememberRemoval` is the only thing that ever clears
+the *standing* pick, so gating it left `heldPick` naming a deleted row for the life
+of the tab — and a stale pick outranks the default, so New session drew nothing
+chosen and kept `Start` disabled on every later visit. A removal can be left behind
+safely for the reason the pick cannot: an id that has been deleted can never be a
+choice made again.
+
+#### Q3.532 — A row that is cut should look cut
+
+**Question.** The agent strip hides the browser's scrollbar and draws its own,
+which fades in when the row moves and out a second after it stops. On a first paint
+— which is every arrival at New session — there is nothing at all saying the row
+continues past the right edge. `.no-scrollbar`'s own docblock names the shape that
+does not need one: *"a strip whose contents already announce that there is more of
+them by being cut off at the edge"*. That is a half-drawn tile. This row ends in a
+**fully** drawn dashed control, which reads as its deliberate end, and losing that
+cue is precisely why the strip stopped using `.no-scrollbar`.
+
+**Decision.** A gradient at the right edge, on while `scrollLeft < scrollWidth −
+clientWidth − 1`. It is the transcript's own fade at the top of a conversation with
+its measurement intact: **two stops and no middle one**, starting at 70% and falling
+to nothing, `pointer-events-none`, and a **sibling of the scroller rather than a
+`mask-image` on it** — a mask on a scroll container applies to that container's
+scrollbar, which here is this app's own bar one sibling down.
+
+**The one-pixel slack is not decoration.** `scrollWidth`, `clientWidth` and
+`scrollLeft` are integers rounded from fractional layout, so a strip scrolled fully
+to its end routinely reports a remainder of 1 — without the slack the gradient stays
+on at the end of the row, saying there is more where there is nothing. It is the
+opposite call from `scrolledDown` in `SessionView`, which takes no slack and says
+why: there the question is "is a line cut off by the header", and one pixel of
+scroll is already one cut line.
+
+**Toggled inside the existing `layout()`.** That function already holds all three
+numbers and already runs on exactly the two events that can change the answer, a
+scroll and a resize, and it already writes to the DOM directly rather than through
+state because it fires on every frame of a flick. A second handler reading the same
+box would be the same arithmetic twice, and the failure of that shape is silent: the
+two disagree for one frame and the gradient blinks at the end of every flick.
+
+**`.edge-fade` is a class in `index.css` and not four utilities at the call site**,
+where the transcript's equivalent is inline. Two reasons, and neither is style. It
+transitions, because it changes at the end of every flick rather than rarely — and
+`webcheck` asserts the substring `opacity` appears nowhere inside `AgentStrip`, for
+a reason about tiles (Q3.510's `disabled:opacity-40` compositing a refusal down to
+1.83:1) that this would otherwise trip. It is placed **after**
+`.fade-thumb.is-scrolling` rather than beside `.fade-scrollbar`, because `webcheck`
+slices the stylesheet between those two selectors by `indexOf` and a rule inserted
+between them re-anchors every assertion about the scrollbar onto the new one.
+
+#### Q3.533 — Reordering with no library, and a handle that answers to a keyboard
+
+**Question.** `packages/web` has no drag-and-drop dependency and no reorder anywhere
+to borrow from. The only pointer-drag in the app is `AppShell`'s rail handle. What
+does a reorderable list cost?
+
+**Decision.** No dependency. The handle is a `<button>` that takes
+`setPointerCapture` — `RailHandle`'s rule, because the gesture belongs to the
+control it started on and the capture survives the pointer leaving the row, which it
+does at once since the row is what is moving — and the same button answers
+`ArrowUp`, `ArrowDown`, `Home` and `End`. A pointer gesture that is the only way to
+reorder is a control a keyboard cannot reach at all.
+
+**Per-frame work goes to the DOM and per-row work goes to React.** The dragged row's
+offset changes on every pointer event and is written straight onto its node; the
+*target index* changes once per row crossed and is state, because every other row's
+shift is a function of it. Offset in state would be a render per frame; target in a
+ref would leave the neighbours standing still.
+
+**⭐ `touch-none` was a dead class, and that is why a phone could not drag at all.**
+Reported twice, and the second report is what forced the stylesheet to be read
+rather than the component. `index.css` carried `button { touch-action: manipulation }`
+**unlayered**; Tailwind emits every utility inside `@layer utilities`; and an
+unlayered rule beats a layered one *regardless of specificity*. Measured on the built
+sheet: `.touch-none{touch-action:none}` at byte 18486 inside the layer, the button
+rule at 46097 outside every layer. So the effective value on the handle stayed
+`manipulation`, which still permits panning, and the browser took every vertical
+gesture for the scroller and fired `pointercancel` before one `pointermove` arrived.
+A mouse is not gated by `touch-action` at all, which is exactly why it worked on a
+desktop and was reported as impossible on a phone.
+
+The rule is now inside `@layer base`, which is where a *default* goes — the same
+sentence this file's cursor rule already makes, and the same hazard its focus-ring
+docblock already describes at length. A bare-element declaration left unlayered
+silently kills the matching utility everywhere, and nothing was asserting it.
+
+**A second guard that does not share that cause**, because a cascade fault that
+shipped once can ship again: a non-passive `touchmove` listener on the handle that
+`preventDefault`s only while a drag is live. React attaches `onTouchMove` passively —
+the fact `AgentStrip`'s wheel handler is written out of — so it can only be an
+`addEventListener`, and it is registered for the component's life rather than the
+gesture's, because some engines decide at `touchstart` from whether such a listener
+*exists*.
+
+**And three more, all of which were also true and none of which was the cause:**
+
+- **The handle is 44px square.** At `w-8` it was a 32px strip at the left edge of a
+  row inside a sheet that scrolls, so a miss moved the sheet instead.
+- **`.press` came off it.** That class puts `transform: scale(0.97)` on a button for
+  as long as it is `:active`, which on a drag is the whole gesture — a control that
+  shrinks under the finger and stays shrunk reads as broken.
+- **The glyph is `pointer-events-none`.** `touch-action` is not inherited, so a
+  touch beginning on the `<svg>` is one the engines may hand to the scroller before
+  they have walked up to the element carrying `touch-none`. Making the button the
+  only hit target removes the question.
+
+**And the row under the finger is never transitioned.** It was, and that was the
+whole of "it moves very unsmoothly": the transform is rewritten on every pointer
+event, so a 150ms `transition-transform` restarted the interpolation from wherever
+the last had reached and the row crawled after the finger. Only the *neighbours*
+animate, and only while a drag is live — which is also what stops the overshoot at
+the drop, where the transform clear and the keyed reorder land in one commit.
+`will-change-transform` is added for the length of the gesture and taken off again,
+because a layer per row held for as long as the screen is open is a different cost
+entirely.
+
+**The arithmetic is pure and lives in `agentStrip.ts`.** `moveRow` splices and never
+swaps — a swap leaves the list in an order nobody asked for the moment a drag crosses
+more than one row, and makes the pointer and the keyboard disagree about what "move
+down" means — and `dropIndex` **rounds** rather than truncating, so the swap happens
+when the dragged row is more than half over its neighbour rather than a full row
+late, which reads as the list resisting.
+
+**A refused write puts back what the daemon last confirmed**, not what was on screen
+one edit ago. Several writes can be in flight — the keyboard emits one per key — so
+undoing just the failed one leaves a list that is neither what somebody asked for nor
+what is stored.
+
+**Two counters, because that is two questions.** "May this answer repaint?" is about
+the newest write *issued*; "is this now what is stored?" is about the newest one
+*confirmed*, and one counter serving both was destructive in the second direction:
+with A confirmed and B in flight, A's success advanced nothing and B's failure then
+repainted the list as it stood **before A**, while the daemon held A — the screen
+and the store disagreeing with no error saying so, and a reload jumping.
+
+**And the writes are sent one after another**, because ordering the answers is not
+ordering the requests. `PUT` replaces rather than merges, so order is the whole of
+its meaning; two in flight over a relay can be applied either way round, and the
+loser is the one this client believes was superseded.
+
+#### Q3.534 — The default is marked, and "first" is not the top row
+
+**Question.** The whole point of dragging an agent to the top of this list is that
+it is the one you start, and the list said nothing about that. The behaviour was
+already there — `defaulted` on New session took the first row the strip draws — but
+it existed only as the *result* of a selection one screen away, so the order read as
+a display order and the fact that position 1 decides what a new session opens on was
+something to be found out by trying it.
+
+**Decision.** A `default` badge on the row a new session opens on, drawn by the
+**same call** that opens it: `defaultRow` in `agentStrip.ts`, over the same
+`orderStrip` merge, handed the same predicate. Not a second rule that happens to
+agree — a badge naming a different row from the one that gets selected is worse than
+no badge, because it is a confident claim about another screen that the reader
+cannot check from where they are standing.
+
+⭐ **"First" is two narrowings past index 0, and each of them was a state that
+reaches this screen.** A **hidden** row is one somebody took off New session; it
+keeps its place here, because that place is the thing they came to set and removing
+the row would remove the only way back (Q3.530). So the list's first entry is
+routinely one that is not drawn at all. An **unstartable** row is the same failure
+through the other door, and it is the one that outlived the fix for the first: the Agents list is
+deliberately wider than the strip — every harness that can *ever* have a tile is
+listed so its badge can say why it has not got one, Q3.530 again — so a signed-out harness
+is routinely first, and so is an assembled agent whose harness was uninstalled.
+
+**The second narrowing was a live defect on New session, not a concern invented for
+the badge.** `defaulted` was `orderStrip(…).find((row) => !row.hidden)`. The harness
+half of that merge is filtered by `shownHere` on the way in, so a signed-out harness
+was never a candidate — but a **preset** is listed whatever state its harness is in,
+and it draws a disabled tile saying so. First in somebody's order, that tile was the
+default: `offeredHere` refused it one line down, and the screen drew nothing as
+chosen with `Start` dead until somebody tapped. That is precisely the failure the
+hidden case had already produced through the other door, and the fix for that one
+did not generalise because it was written as `!row.hidden` rather than as *the row
+this screen will land on*.
+
+**So the membership rule moved out of the screen and `offeredHere` lost half its
+body.** It is `startableHere` in `agents.ts` now — a harness has to be a whole answer
+by itself and in a state the row draws; a preset is weighed through its harness, and
+that harness has to be **installed** rather than signed in, because an assembled
+agent runs on the system's saved key. `offeredHere` is that plus one test, and the
+split falls exactly at `hidden` because hiding is the half that is not about
+startability at all: the daemon would run a hidden agent perfectly, it simply has no
+tile. New session asks the one with the hidden test; the Agents screen, which draws
+hidden rows on purpose, asks the other. There is one body, so they cannot disagree
+about anything else.
+
+**`shownHere` went with it, as `offersStripTile`.** It was a local function for as
+long as one screen asked; the moment a second one needed the same five-state ladder
+about the same harness, a private copy in a second `.tsx` was exactly the shape
+`webcheck` already had an assertion against — "the New session tiles hold no
+vocabulary of their own", written when that screen kept a four-state ladder of its
+own and told kimi two different things two taps apart. That check follows the call
+to `agents.ts` and gains a half it could not have before: this screen now computes a
+stance in **no** spelling at all.
+
+**The badge costs no height, and on this list that is correctness rather than
+polish.** A drag measures **one** row at `pointerdown` and applies that single number
+to every neighbour's shift, so a row taller than the rest makes every step of a drag
+past it wrong. `Badge` is `text-2xs leading-tight` with `py-0.5` — 15 + 2 + 2 = 19px
+against the name's 22px line box — so the flex line is the name's either way and the
+row's content box stays 60px whether the badge is drawn or not. (`offsetHeight`, which
+is what the drag actually reads, is 61 on every row but the last: the `<li>` carries
+`border-b`.)
+
+**`tone="strong"`, which is that component's own word for "this one is not like the
+others".** Exactly one row in the list can carry it, which is the condition the tone
+exists for. It is deliberately not a border or a fill: a third box inside a row that
+is already bounded reads as something to press, and this is a statement rather than a
+control.
+
+**Decided one level up and handed down, never `index === 0`.** That is the answer a
+row can reach on its own, and it is wrong in both of the states above — which is why
+the negative is a ratchet in `webcheck` rather than a comment. `opensOnKey` is a key
+rather than an index for the same reason the rest of this screen is keyed: an index
+is a second thing to keep in step with the `.map`, and the two drifting is a badge
+one row off.
+
+**A machine with nothing to start is marked nowhere, and `defaultRow` answers
+`null` rather than pointing at row 0 anyway.** Inventing a default there would put
+the badge on a row whose own subline says `not signed in` on the line directly under
+it. New session has an `Empty` for two of the three ways to reach that state — every
+agent hidden, and a machine reporting none at all — and **not** for the third: a
+machine whose only agent is a preset on an uninstalled harness draws one disabled
+tile, `Start` dead, said only by that tile's own `not installed` subline. That gap is
+older than this entry and is not closed by it; what this closes is the case where
+such a tile is not the *only* one and was being selected over a working neighbour.
+
+#### Q3.535 — The picker floats what this machine can run
+
+**Question.** The model picker draws one heading per provider in `SYSTEM_IDS`
+order, which is a fact about the table and not about the machine. So a laptop with
+one key saved scrolled past two or three headings of models it cannot start —
+every row greyed with *"No Z.ai (GLM) key on this machine."* — to reach the
+provider it actually uses. The order was right in the abstract and wrong on every
+concrete machine.
+
+**Decision.** Two changes, and only the second is new machinery. The default order
+moves OpenRouter above Moonshot: it is the widest catalogue and the commonest
+reason to scroll at all, and below Moonshot it sat under one vendor's four models.
+And the client floats — `readyFirst` in `agents.ts` lifts every provider this
+machine can run above every provider it cannot, each half keeping the daemon's
+order. `SYSTEM_IDS` is still the only place the default is written down; it is now
+the order *within* each half rather than the whole of the answer.
+
+⭐ **"Ready" is `keyMissing`'s own answer, which is the function that greys the
+rows.** A provider floats exactly when the picker will not write "No <provider> key
+on this machine." under its models, so the order and the greying cannot disagree:
+what is at the top is what is not struck through. The obvious predicate —
+`system.keySet` — is wrong, and wrong on the commonest machine there is: a
+**published** id proves the native harness holds its own credential, so a laptop
+running Claude Code every day can start Anthropic's models with no
+`ANTHROPIC_API_KEY` saved anywhere. Floating on `keySet` would sink that provider
+beneath whichever key-only endpoint somebody once pasted a key for.
+
+**`some`, not `every`.** A provider is ready when *one* of its models is, because
+that is what somebody scrolling wants to know — is there anything here I can start.
+OpenRouter with no key of its own but a keyed opencode publishing 356 of its rows
+is ready, and demoting it for the handful of catalogue-only rows that would still
+ask for a key would put the order at odds with 356 of its own ungreyed lines.
+
+**Inside `allModels` rather than in `groupModels`, and the filter menu is why.**
+`groupModels` is where a reader looks for the heading order and it is the wrong
+place to sort: `AgentBuilder` draws headings off it *and* a provider filter menu
+off the flat catalogue in first-appearance order. Sorting the groups alone leaves
+that menu naming the same seven providers in an order the list beside it no longer
+uses, with nothing on screen to explain the difference. Sorting the catalogue is
+one change rather than two that have to agree.
+
+**Stable, and a provider's own rows may not move.** `allModels` builds each
+provider's list out of the published half and the table half with a dedupe between
+them — an order this function has no opinion about. Two rows of one provider
+compare equal and `Array.prototype.sort` has been stable by specification since
+ES2019. The rank is one number rather than a two-level comparator for the same
+reason: `(ready ? 0 : N) + position` cannot accidentally compare two rows of one
+provider by anything at all.
+
+**OpenCode Zen is not exempt, and it was the one candidate.** Q3.529 put it last as
+"the free tier one harness falls back to when nothing is configured", and a machine
+holding an `OPENCODE_API_KEY` is precisely a machine where that is no longer true.
+An exception would have meant the one provider you have configured sitting at the
+bottom, which is the behaviour this entry exists to remove. It is last **by default
+only**.
+
+**What is deliberately not floated.** The Systems settings screen still lists
+providers in `SYSTEM_IDS` order. That is a list somebody learns by position and
+returns to in order to *add* a key — floating the configured ones would move the
+rows somebody came to change, and the picker's argument (put what you can run
+first) is an argument about choosing, not about configuring.
 
 ## Deployment, packaging and code layout
 

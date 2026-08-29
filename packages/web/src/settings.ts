@@ -71,6 +71,25 @@ export interface SettingsRoute {
    * the nearest real screen rather than on nothing.
    */
   system: string | null;
+  /**
+   * The machine's **agent strip** — which agents its New session screen offers,
+   * and in what order. Never without a machine, never together with a system.
+   *
+   * ⚠ **A boolean, where its two siblings are ids, because there is nothing
+   * under it.** A system is a leaf you pick one of from a list drawn on the
+   * machine's screen; this is a single screen holding one list, so the only
+   * thing the address has to say is whether you are on it.
+   *
+   * ⚠ **`…/agents` used to mean something else, and this is the reuse rather
+   * than an addition.** It named *one agent's sign-in* — the screen that became
+   * `…/systems/:system` when a harness and the account it signs in to came
+   * apart — and since then it has parsed to the machine as "fall up to the
+   * nearest real screen". It names the machine's agent *list* now, which is what
+   * a person reading the address would guess, and a leftover fourth segment from
+   * the old shape is dropped rather than redirected: the screen it lands on is
+   * one tap from what that address used to open.
+   */
+  agents: boolean;
 }
 
 export interface SectionSpec {
@@ -219,9 +238,21 @@ export function parseSettingsRoute(
 ): SettingsRoute {
   const section = parseSettingsSection(segments[0]);
   if (section !== "machines" || segments[1] === undefined) {
-    return { section, machineId: null, system: null };
+    return { section, machineId: null, system: null, agents: false };
   }
   const machine = machineId(decode(segments[1]));
+  /*
+   * ⚠ **Before the `systems` arm, and it takes whatever follows it with it.**
+   * `…/agents/claude` is the address the old one-agent screen had, and it now
+   * lands on the machine's agent list — the nearest real screen, one tap from
+   * what it used to open — rather than on the machine, which is where it landed
+   * while `agents` named nothing. Dropping the tail rather than parsing it is the
+   * same posture the rest of this function keeps: there is no leaf here, so a
+   * segment claiming to be one is a stale link.
+   */
+  if (segments[2] === "agents") {
+    return { section, machineId: machine, system: null, agents: true };
+  }
   /*
    * ⚠ **`…/plugins` and `…/plugins/:pluginId` both fall to the machine**, which
    * is the "fall up to the nearest real screen" posture this function already
@@ -236,13 +267,14 @@ export function parseSettingsRoute(
    * page.
    */
   if (segments[2] !== "systems" || segments[3] === undefined) {
-    return { section, machineId: machine, system: null };
+    return { section, machineId: machine, system: null, agents: false };
   }
   const wanted = decode(segments[3]);
   return {
     section,
     machineId: machine,
     system: wanted.length > 0 && wanted.length <= MAX_SYSTEM_ID_CHARS ? wanted : null,
+    agents: false,
   };
 }
 
@@ -283,6 +315,25 @@ export function settingsPath(
 }
 
 /**
+ * The machine's agent strip.
+ *
+ * ⚠ **Its own function rather than a fourth positional on {@link settingsPath}.**
+ * That signature is positional *and widening* — the three call shapes read as the
+ * index, a section, a machine, one system, and "an agent with no machine is not
+ * expressible" is a property of the signature rather than of a check. A trailing
+ * boolean would break both halves: it is not a widening of `system`, and
+ * `settingsPath("machines", m, undefined, true)` is exactly the skipped
+ * positional that shape exists to make impossible.
+ *
+ * The machine is required, unlike everything in `settingsPath` after the section.
+ * A strip belongs to one daemon's database, so there is no such screen without
+ * one — the same rule that put the machine in the path in the first place.
+ */
+export function agentStripPath(machine: MachineId): string {
+  return `${settingsPath("machines", machine)}/agents`;
+}
+
+/**
  * One level up from a settings screen, or `null` at the index.
  *
  * This is `Settings.tsx`'s `closeTo` expression, lifted out of the component —
@@ -306,13 +357,54 @@ export function settingsPath(
  * what makes it stable — see `useUnder` in `router.ts` for the other half of that
  * argument, and `Header.tsx` for where it was first made.
  */
-export function settingsUp(route: SettingsRoute): { path: string; withinNav: boolean } | null {
+export function settingsUp(
+  route: SettingsRoute,
+  /**
+   * The pop-up this one was opened from, when it was opened from a different one.
+   *
+   * ⚠ **Read at exactly one screen, and only when it is New session.** The strip's
+   * gear is a *crossing* between two pop-ups, so the parent in the URL — the
+   * machine — is not where anybody came from, and a ◀ walking there strands them
+   * in settings with the sheet they were filling in gone. That was reported.
+   *
+   * It is deliberately not general. Applied at every depth it would break walking
+   * *up* inside this sheet: `originFor` keeps an origin across a move within one
+   * pop-up, so a settings sheet opened from New session would answer `/new` for
+   * its sections and its machines too. And it is narrowed to the New session
+   * pop-up rather than to "any origin" so that the label beside it can never be
+   * wrong — {@link settingsUpLabel} has one name to give, and this is the one
+   * screen that can produce it. Any other crossing falls back to the URL, which is
+   * what makes every other answer here derived rather than remembered.
+   */
+  origin: string | null = null,
+): { path: string; withinNav: boolean } | null {
   if (route.section === null) return null;
+  if (
+    route.agents &&
+    origin !== null &&
+    origin.split("/").filter((part) => part.length > 0)[0] === "new"
+  ) {
+    return { path: origin, withinNav: false };
+  }
   if (route.section === "machines" && route.machineId !== null) {
     // One system goes up to its machine — the list is drawn on that screen, so
     // there is no list depth in between. `false` because it is not a row the nav
     // draws, which makes the chevron the only way back at every width.
-    if (route.system !== null) {
+    //
+    /*
+     * The strip is the same shape and the same answer: it is reached from a row on
+     * the machine's screen, and it walks back to that machine at every width.
+     *
+     * ⚠ **The gear on New session is a *crossing*, and nothing in this sheet
+     * answers it — that is the standing rule rather than a gap.** This function is
+     * derived from the URL, which is what makes its answer stable, and `Header.tsx`
+     * argues at length against the alternative. So arriving here from the gear, the
+     * ◀ walks to the machine and the phone's Back button is what returns to New
+     * session — the same deal every crossing into this sheet has always had. The
+     * builder is the one screen that reads `origin` for its ◀, because there the
+     * label and the destination are one control naming where it goes.
+     */
+    if (route.system !== null || route.agents) {
       return { path: settingsPath("machines", route.machineId), withinNav: false };
     }
     return { path: settingsPath("machines"), withinNav: false };
@@ -344,6 +436,18 @@ export function settingsUp(route: SettingsRoute): { path: string; withinNav: boo
  */
 export function settingsPaneTitle(route: SettingsRoute): string | null {
   if (route.section === null) return null;
+  /*
+   * **"Agents", and it is what the screen is rather than what it is about** — the
+   * same rule the machine title below states at length. It is not the machine's
+   * name and not "Agents on <machine>": the machine is named by the row you came
+   * through and by the chevron pointing back at it, and a heading restating it
+   * would be the chrome saying what the body already says.
+   *
+   * Above the machine arm, since a strip route carries a machine too.
+   */
+  if (route.section === "machines" && route.machineId !== null && route.agents) {
+    return "Agents";
+  }
   if (route.section === "machines" && route.machineId !== null) {
     /*
      * **Titled by what the screen is, not by which machine it is about.**
@@ -390,9 +494,18 @@ export function settingsPaneTitle(route: SettingsRoute): string | null {
  * A sibling function rather than a field on {@link settingsUp}'s return, so the
  * six pinned answers that assert where a chevron goes stay pinned. Q3.432.
  */
-export function settingsUpLabel(route: SettingsRoute): string | null {
-  const parent = settingsUp(route);
+export function settingsUpLabel(route: SettingsRoute, origin: string | null = null): string | null {
+  const parent = settingsUp(route, origin);
   if (parent === null) return null;
+  /*
+   * ⚠ **The one destination outside this sheet, named rather than parsed.** The
+   * strip's ◀ walks back to New session when that is where it was opened from, and
+   * everything below parses the parent as a *settings* address — which answers
+   * `null` for `/new/...` and would draw a chevron labelled "Settings" pointing at
+   * a screen that is not it. `settingsUp` only ever returns a `new` path, which is
+   * what keeps this to one arm instead of a table.
+   */
+  if (parent.path.split("/").filter((part) => part.length > 0)[0] === "new") return "New session";
   const parts = parent.path.split("/").filter((part) => part.length > 0);
   /*
    * Every segment here came out of `settingsPath`, so it is `encodeURIComponent`

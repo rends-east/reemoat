@@ -2332,7 +2332,94 @@ process.stdout.write("\nthe database, across a restart\n");
     [[], null],
   );
 
+  /* ---------------------------------------------------------------- *
+   * The agent strip, against a real store
+   *
+   * ⚠ **The route section stands an array in for this port, and an array cannot
+   * show you a transaction.** That is the same blindness recorded at
+   * `SqliteCustomAgentStore`'s upsert from the other side — the stand-in there is
+   * a `Map`, and `Map.set` is an upsert by construction, so only the real store
+   * could report the missing `ON CONFLICT`. Here the two things only a database
+   * can be wrong about are that `replace` empties before it refills *atomically*,
+   * and that the order survives a file being closed and opened.
+   * ---------------------------------------------------------------- */
+  {
+    const order = [
+      { kind: "custom" as const, ref: "ca_11112222", hidden: false },
+      { kind: "harness" as const, ref: "kimi", hidden: true },
+      { kind: "harness" as const, ref: "claude", hidden: false },
+    ];
+    second.agentStrip.replace(order);
+    check("a strip written to a real file reads back in order", second.agentStrip.list(), order);
+    /*
+     * ⚠ **`rank` and not insertion order**, which is what the tie-break in `list`
+     * is for and what nothing else here could catch: SQLite is free to hand rows
+     * back in any order at all without an `ORDER BY`, and on a fresh table
+     * insertion order is the one it usually picks — so a missing clause passes
+     * every assertion above it and shuffles a strip months later. Written back in
+     * reverse, so a store that had forgotten to order would return the *new*
+     * insertion order and disagree.
+     */
+    second.agentStrip.replace([...order].reverse());
+    check("and the order it comes back in is the one it was given", second.agentStrip.list().map((one) => one.ref), [
+      "claude",
+      "kimi",
+      "ca_11112222",
+    ]);
+    second.agentStrip.replace(order);
+    check(
+      "one position can be forgotten without touching the rest",
+      (() => {
+        second.agentStrip.forget("harness", "kimi");
+        return second.agentStrip.list().map((one) => `${one.kind}:${one.ref}`);
+      })(),
+      ["custom:ca_11112222", "harness:claude"],
+    );
+    // Forgetting something that was never there is not an error: the caller is
+    // `DELETE /custom-agents/:id`, which runs for a row this build may not be able
+    // to resolve and must not start refusing because of it.
+    check(
+      "and forgetting one that is not there changes nothing",
+      (() => {
+        second.agentStrip.forget("custom", "ca_never");
+        return second.agentStrip.list().length;
+      })(),
+      2,
+    );
+    check("an empty replace really empties it", (() => {
+      second.agentStrip.replace([]);
+      return second.agentStrip.list();
+    })(), []);
+    /*
+     * ⚠ **The hidden flag is a boolean on both sides of an INTEGER column.** It is
+     * stored as 1/0 and read back through `!== 0`; a store that handed the number
+     * straight out would put `1` where the client's `hidden` is typed `boolean`,
+     * which compiles on both sides and is truthy — so every screen would look right
+     * and the `PUT` echo would carry a shape the wire says is impossible.
+     */
+    second.agentStrip.replace([{ kind: "harness", ref: "codex", hidden: true }]);
+    check(
+      "hidden survives the round trip as a boolean",
+      second.agentStrip.list().map((one) => typeof one.hidden + ":" + String(one.hidden)),
+      ["boolean:true"],
+    );
+  }
+
   second.close();
+
+  /*
+   * ⚠ **And it is still there on the next open**, which is the half the two
+   * `second.*` blocks above cannot claim: everything up to here happened inside one
+   * process holding one handle. The strip is the newest table in this file and the
+   * only one created by `schema.sql` alone — no `migrate()` step, no
+   * `SCHEMA_VERSION` bump — so "the CREATE TABLE really ran, on a file that already
+   * existed" is a claim about this release specifically.
+   */
+  const third = openStores({ path: dbPath, instanceId: "i_reopen" });
+  check("the strip outlives the process that wrote it", third.agentStrip.list(), [
+    { kind: "harness", ref: "codex", hidden: true },
+  ]);
+  third.close();
 }
 
 /* ------------------------------------------------------------------ *
@@ -18292,30 +18379,30 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
   check("the matrix is what the adapters allow", matrix, [
     "claude x anthropic: yes",
     "claude x openai: no",
+    // Routed, on the strength of OpenRouter serving an Anthropic-shaped endpoint
+    // beside its OpenAI-shaped one — probed 2026-08-27, both answer 401 in their
+    // own envelope. Same answer as `moonshot`'s cell, which is the next one along.
+    "claude x openrouter: yes",
     "claude x moonshot: yes",
     "claude x zhipu: yes",
     "claude x minimax: yes",
-    // Routed, on the strength of OpenRouter serving an Anthropic-shaped endpoint
-    // beside its OpenAI-shaped one — probed 2026-08-27, both answer 401 in their
-    // own envelope. This is `moonshot`'s cell one column over.
-    "claude x openrouter: yes",
     // Its endpoint is real and this row names none, so claude is refused by the
     // same arm that refuses it Anthropic's: nothing here has an OpenAI-shaped
     // door to route through.
     "claude x zen: no",
     "kimi x anthropic: no",
     "kimi x openai: no",
+    "kimi x openrouter: no",
     "kimi x moonshot: yes",
     "kimi x zhipu: no",
     "kimi x minimax: no",
-    "kimi x openrouter: no",
     "kimi x zen: no",
     "codex x anthropic: no",
     "codex x openai: yes",
+    "codex x openrouter: no",
     "codex x moonshot: no",
     "codex x zhipu: no",
     "codex x minimax: no",
-    "codex x openrouter: no",
     "codex x zen: no",
     // opencode answers `null` to routing, so every cell but its own is the
     // "only runs its own models" refusal — and its own is native, which needs no
@@ -18323,10 +18410,10 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     // reached a fifth system would mean `hostable` had stopped reading `supported`.
     "opencode x anthropic: no",
     "opencode x openai: no",
+    "opencode x openrouter: yes",
     "opencode x moonshot: no",
     "opencode x zhipu: no",
     "opencode x minimax: no",
-    "opencode x openrouter: yes",
     // The one it reaches with no credential at all.
     "opencode x zen: yes",
   ]);
@@ -19412,6 +19499,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
 
   const keys = new Map<string, { secret: string; updatedAt: number }>();
   const presets = new Map<string, any>();
+  const stripRows: any[] = [];
   const systems = {
     credentials: {
       list: () => [...keys].map(([system, held]) => ({ system: system as never, updatedAt: held.updatedAt })),
@@ -19424,6 +19512,24 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
       get: (id: string) => presets.get(id) ?? null,
       save: (one: any) => void presets.set(one.id, one),
       remove: (id: string) => void presets.delete(id),
+    },
+    /*
+     * ⚠ **An array and not a `Map`, unlike the two ports above it, because order
+     * is the whole subject.** A `Map` would keep insertion order and would
+     * therefore pass a round trip that a replace-in-place implementation fails —
+     * which is the same class of blindness `SqliteCustomAgentStore`'s upsert
+     * records from the other side: this section stands a `Map` in for that port,
+     * and `Map.set` is an upsert by construction, so only the real store could
+     * show the bug. Here the stand-in is the thing being ordered, so it holds an
+     * array and `replace` is a replace.
+     */
+    strip: {
+      list: () => [...stripRows],
+      replace: (entries: readonly any[]) => void stripRows.splice(0, stripRows.length, ...entries),
+      forget: (kind: string, ref: string) => {
+        const at = stripRows.findIndex((one) => one.kind === kind && one.ref === ref);
+        if (at !== -1) stripRows.splice(at, 1);
+      },
     },
   };
 
@@ -19662,7 +19768,14 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
    * *second* row leaves the row it was sent at untouched, so a snapshot of that
    * row alone would call it clean.
    */
-  const frozen = (): string => JSON.stringify([...presets.values()]);
+  /*
+   * ⚠ **Both stores, because a refusal that wrote to *either* is a refusal that
+   * wrote.** It held the presets alone while the strip was the only other thing a
+   * verb in this section can touch, so a scope gate that leaked on
+   * `PUT /agent-strip` would have reordered somebody's screen with every
+   * assertion here green.
+   */
+  const frozen = (): string => JSON.stringify([[...presets.values()], stripRows]);
 
   const edited = await call(withSystems, "PATCH", `/custom-agents/${preset}`, {
     name: "Claude Code · Opus",
@@ -19863,35 +19976,35 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
   check("editing: the route's matrix is the adapters' matrix", editMatrix, [
     "claude x anthropic: saved",
     "claude x openai: incompatible_pairing",
+    "claude x openrouter: saved",
     "claude x moonshot: saved",
     "claude x zhipu: saved",
     "claude x minimax: saved",
-    "claude x openrouter: saved",
     "claude x zen: incompatible_pairing",
     "kimi x anthropic: incompatible_pairing",
     "kimi x openai: incompatible_pairing",
+    "kimi x openrouter: incompatible_pairing",
     "kimi x moonshot: saved",
     "kimi x zhipu: incompatible_pairing",
     "kimi x minimax: incompatible_pairing",
-    "kimi x openrouter: incompatible_pairing",
     "kimi x zen: incompatible_pairing",
     "codex x anthropic: incompatible_pairing",
     "codex x openai: saved",
+    "codex x openrouter: incompatible_pairing",
     "codex x moonshot: incompatible_pairing",
     "codex x zhipu: incompatible_pairing",
     "codex x minimax: incompatible_pairing",
-    "codex x openrouter: incompatible_pairing",
     "codex x zen: incompatible_pairing",
     "opencode x anthropic: incompatible_pairing",
     "opencode x openai: incompatible_pairing",
+    // The route's own copy of the native cell below, and the reason this sweep
+    // exists beside the pure one: `readAssembledAgent` reaches for
+    // `asks.capabilities` before it weighs the pairing, and opencode's honest
+    // answer there is `routing: null` — which the native arm never consults.
+    "opencode x openrouter: saved",
     "opencode x moonshot: incompatible_pairing",
     "opencode x zhipu: incompatible_pairing",
     "opencode x minimax: incompatible_pairing",
-    // The route's own copy of the cell above, and the reason this sweep exists
-    // beside the pure one: `readAssembledAgent` reaches for `asks.capabilities`
-    // before it weighs the pairing, and opencode's honest answer there is
-    // `routing: null` — which the native arm never consults.
-    "opencode x openrouter: saved",
     "opencode x zen: saved",
   ]);
 
@@ -20025,6 +20138,246 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
   check("sending it a second time succeeds and says so", [replay.status, replay.body.removed, replay.body.id], [200, false, doomed]);
   check("with the list still empty rather than disturbed", (await call(withSystems, "GET", "/custom-agents")).body.customAgents.length, 0);
 
+  /* ---------------------------------------------------------------- *
+   * The strip: which agents this machine's New session screen offers, ordered
+   *
+   * ⚠ **This daemon stores and does not resolve.** A `ref` is never weighed
+   * against what exists — that is `AgentStripEntry`'s stated design, so a harness
+   * signed out for a week keeps its place — which means every refusal below is
+   * about the *shape* of a body and never about whether it names something real.
+   * The assertions come in pairs for the editing block's reason: the answer, and
+   * that the stored list is byte-identical afterwards. A route that refuses and
+   * writes is the failure worth catching, and only the second half catches it.
+   * ---------------------------------------------------------------- */
+  {
+    const strip = (): unknown => JSON.parse(JSON.stringify(stripRows));
+    check("an untouched machine remembers nothing", (await call(withSystems, "GET", "/agent-strip")).body, {
+      entries: [],
+    });
+
+    const order = [
+      { kind: "custom", ref: "ca_deadbeef", hidden: false },
+      { kind: "harness", ref: "claude", hidden: true },
+      { kind: "harness", ref: "kimi", hidden: false },
+    ];
+    const saved = await call(withSystems, "PUT", "/agent-strip", { entries: order });
+    check("a strip can be saved", [saved.status, saved.body.saved], [200, true]);
+    /*
+     * ⚠ **The answer is what the store now holds, read back, rather than the body
+     * echoed.** They are the same today; a caller that trusts the answer instead
+     * of its own copy stays right if that ever stops being true, and asserting it
+     * here is what keeps the route from being turned into an echo.
+     */
+    check("and comes back in the order it was written", saved.body.entries, order);
+    check("which is what the GET says too", (await call(withSystems, "GET", "/agent-strip")).body.entries, order);
+    /*
+     * ⚠ **A `ref` naming nothing on this machine is stored, and that is the design
+     * rather than a gap.** `ca_deadbeef` is no preset here and `kimi` is no
+     * installed harness; both keep their positions, and what drops them is the
+     * merge in the browser at the moment it draws. Refusing them would forget an
+     * order every time an agent was briefly unavailable.
+     */
+    check(
+      "including refs this machine has nothing under",
+      stripRows.map((one: any) => one.ref),
+      ["ca_deadbeef", "claude", "kimi"],
+    );
+
+    /*
+     * ⚠ **Replace, never merge**, which is the whole reason the verb is `PUT`. A
+     * reorder is a statement about every position at once, so a route that folded a
+     * shorter body into what was already there would leave rows nobody named — and
+     * there is no caller that could say what should happen to them.
+     */
+    const shorter = [{ kind: "harness", ref: "kimi", hidden: false }];
+    check(
+      "a shorter strip replaces rather than merging",
+      (await call(withSystems, "PUT", "/agent-strip", { entries: shorter })).body.entries,
+      shorter,
+    );
+    check(
+      "an empty one is a real answer and clears it",
+      [(await call(withSystems, "PUT", "/agent-strip", { entries: [] })).status, stripRows.length],
+      [200, 0],
+    );
+
+    // Put the order back, so the refusals below have something to fail to change.
+    await call(withSystems, "PUT", "/agent-strip", { entries: order });
+    const before = JSON.stringify(strip());
+    const refused: string[] = [];
+    for (const [why, body] of [
+      ["no body at all", undefined],
+      ["entries missing", {}],
+      ["entries not an array", { entries: { kind: "harness", ref: "claude", hidden: false } }],
+      ["an entry that is not an object", { entries: ["claude"] }],
+      ["an entry that is an array", { entries: [[]] }],
+      ["a kind this daemon does not have", { entries: [{ kind: "plugin", ref: "x", hidden: false }] }],
+      ["a missing kind", { entries: [{ ref: "claude", hidden: false }] }],
+      ["an empty ref", { entries: [{ kind: "harness", ref: "", hidden: false }] }],
+      ["a ref that is not a string", { entries: [{ kind: "harness", ref: 7, hidden: false }] }],
+      ["a ref past the bound", { entries: [{ kind: "harness", ref: "r".repeat(65), hidden: false }] }],
+      ["hidden missing", { entries: [{ kind: "harness", ref: "claude" }] }],
+      ["hidden as a string", { entries: [{ kind: "harness", ref: "claude", hidden: "yes" }] }],
+      [
+        "the same pair twice",
+        {
+          entries: [
+            { kind: "harness", ref: "claude", hidden: false },
+            { kind: "harness", ref: "claude", hidden: true },
+          ],
+        },
+      ],
+      [
+        // One past `MAX_STRIP_ENTRIES`. The bound is a thousand rather than the two
+        // hundred it started at, and the reason is written beside it: this client
+        // sends the **whole** list on every action, so a bound a real fleet could
+        // reach would make the screen permanently read-only rather than merely
+        // refusing an absurd body.
+        "more entries than the bound",
+        {
+          entries: Array.from({ length: 1001 }, (_, at) => ({
+            kind: "harness",
+            ref: `r${at}`,
+            hidden: false,
+          })),
+        },
+      ],
+    ] as const) {
+      const answer = await call(withSystems, "PUT", "/agent-strip", body);
+      refused.push(`${why}: ${answer.status} ${String(answer.body?.error?.code ?? "")}`.trim());
+    }
+    check(
+      "every malformed strip is refused",
+      refused,
+      [
+        "no body at all",
+        "entries missing",
+        "entries not an array",
+        "an entry that is not an object",
+        "an entry that is an array",
+        "a kind this daemon does not have",
+        "a missing kind",
+        "an empty ref",
+        "a ref that is not a string",
+        "a ref past the bound",
+        "hidden missing",
+        "hidden as a string",
+        "the same pair twice",
+        "more entries than the bound",
+      ].map((why) => `${why}: 400 bad_request`),
+    );
+    /*
+     * ⚠ **The second half, and it is the one with teeth.** `replace` empties the
+     * table before it refills it, so a validator that ran per entry *inside* the
+     * loop that writes would answer 400 on the eighth row of a fourteen-row body
+     * with the first seven already stored and the rest gone. Reading the whole body
+     * before touching the store is what makes that unreachable, and this is what
+     * says so.
+     */
+    check("and not one of them moved anything", JSON.stringify(strip()), before);
+    check(
+      "one at the bound is accepted, which is what makes the refusal a bound",
+      (
+        await call(withSystems, "PUT", "/agent-strip", {
+          entries: [{ kind: "harness", ref: "r".repeat(64), hidden: true }],
+        })
+      ).status,
+      200,
+    );
+
+    /*
+     * ⚠ **Deleting an assembled agent takes its position with it.** Not
+     * correctness — the merge in the browser drops a `ref` that resolves to nothing
+     * either way — but the only thing standing between this table and unbounded
+     * growth on a machine where presets are made and thrown away and the strip
+     * screen is never opened.
+     */
+    const doomed = await call(withSystems, "POST", "/custom-agents", {
+      name: "Doomed",
+      harness: "claude",
+      system: "moonshot",
+      model: "kimi-k2-thinking",
+    });
+    check("an agent to delete", doomed.status, 201);
+    const id = doomed.body.customAgent.id;
+    await call(withSystems, "PUT", "/agent-strip", {
+      entries: [
+        { kind: "custom", ref: id, hidden: false },
+        { kind: "harness", ref: "claude", hidden: false },
+      ],
+    });
+    check(
+      "deleting it answers removed",
+      (await call(withSystems, "DELETE", `/custom-agents/${id}`)).body.removed,
+      true,
+    );
+    check(
+      "and its position is forgotten while every other row stays",
+      (await call(withSystems, "GET", "/agent-strip")).body.entries,
+      [{ kind: "harness", ref: "claude", hidden: false }],
+    );
+
+    /* -------------------------------------------------------------- *
+     * And once against the real store, which is a combination neither
+     * half of this file otherwise covers
+     *
+     * ⚠ **Everything above drives the routes over an array, and the store
+     * section drives the store with no routes at all.** Between them sits the
+     * one thing only a database can be wrong about on this path: `replace`
+     * empties before it refills, so a `PUT` that reached SQLite and threw
+     * half-way would answer 500 with the order *gone* rather than restored —
+     * and an array `splice` cannot fail. The same gap `SqliteCustomAgentStore`'s
+     * upsert fell into from the other direction, where the stand-in was a `Map`
+     * and `Map.set` is an upsert by construction.
+     * -------------------------------------------------------------- */
+    const realPath = join(sandbox, "strip-live", "reemoat.db");
+    const real = openStores({ path: realPath, instanceId: "i_strip_live" });
+    const live = build({
+      registry: new SessionRegistry(new MemoryEventStore()),
+      verifier,
+      instanceId: "i_strip_live",
+      startedAt: now,
+      systems: {
+        credentials: real.systemCredentials,
+        customAgents: real.customAgents,
+        strip: real.agentStrip,
+      },
+      asks: asks as never,
+      roots: [users],
+    }).app;
+    const written = [
+      { kind: "custom", ref: "ca_aabbccdd", hidden: false },
+      { kind: "harness", ref: "codex", hidden: true },
+    ];
+    check(
+      "a strip written through the route reaches the real file",
+      (await call(live, "PUT", "/agent-strip", { entries: written })).status,
+      200,
+    );
+    check("and the store agrees with the route", real.agentStrip.list(), written);
+    check(
+      "a second write replaces rather than appending",
+      (await call(live, "PUT", "/agent-strip", { entries: [written[1]] })).body.entries,
+      [written[1]],
+    );
+    // The rank column is doing the ordering rather than SQLite's insertion order,
+    // which is the one thing a fresh table hides — see the store section.
+    check(
+      "and the order survives a write that reverses it",
+      (
+        await call(live, "PUT", "/agent-strip", { entries: [...written].reverse() })
+      ).body.entries.map((one: any) => one.ref),
+      ["codex", "ca_aabbccdd"],
+    );
+    real.close();
+    const reopened = openStores({ path: realPath, instanceId: "i_strip_live2" });
+    check("and outlives the process", reopened.agentStrip.list().map((one) => one.ref), [
+      "codex",
+      "ca_aabbccdd",
+    ]);
+    reopened.close();
+  }
+
   /**
    * Every route this section serves, and which scope each is behind.
    *
@@ -20053,6 +20406,8 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     ["POST", "/custom-agents", "write"],
     ["PATCH", "/custom-agents/:id", "write"],
     ["DELETE", "/custom-agents/:id", "write"],
+    ["GET", "/agent-strip", "read"],
+    ["PUT", "/agent-strip", "write"],
   ] as const;
 
   /*
@@ -20074,12 +20429,24 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     model: "kimi-k2-thinking",
   });
   check("a row to aim the scope sweep at", gateTarget.status, 201);
-  const gateBody = (method: string): unknown =>
-    method === "PUT"
-      ? { token: "a-read-only-grant-must-not-be-able-to-paste-this" }
-      : method === "POST" || method === "PATCH"
-        ? { name: "hijacked", harness: "claude", system: "anthropic", model: "opus" }
-        : undefined;
+  /*
+   * ⚠ **Keyed on the *shape* and not on the verb**, since `PUT` now names two
+   * routes. A body that the route would refuse anyway makes "and nothing moved" a
+   * claim about nothing: the scope gate sits above the handler, so the only way
+   * this sweep proves the gate is what stopped the write is for the body to be one
+   * that would otherwise have landed.
+   */
+  const gateBody = (method: string, shape: string): unknown => {
+    // A GET or a DELETE carries none: `new Request` refuses a body on a GET
+    // outright, and this table now holds two routes that share a path shape and
+    // differ only in the verb.
+    if (method === "GET" || method === "DELETE") return undefined;
+    if (shape === "/systems/:system") {
+      return { token: "a-read-only-grant-must-not-be-able-to-paste-this" };
+    }
+    if (shape === "/agent-strip") return { entries: [{ kind: "harness", ref: "hijacked", hidden: true }] };
+    return { name: "hijacked", harness: "claude", system: "anthropic", model: "opus" };
+  };
   const said = (one: { status: number; body: any }): string =>
     `${one.status}${one.body?.error?.code == null ? "" : ` ${String(one.body.error.code)}`}`;
 
@@ -20088,7 +20455,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
   const allowed: string[] = [];
   for (const [method, shape, scope] of sectionRoutes) {
     const path = shape.replace(":system", "moonshot").replace(":id", gateTarget.body.customAgent.id);
-    const answer = await call(withSystems, method, path, gateBody(method), tokenWith("u_reader", ["session:read"]));
+    const answer = await call(withSystems, method, path, gateBody(method, shape), tokenWith("u_reader", ["session:read"]));
     (scope === "write" ? denied : allowed).push(`${method} ${shape}: ${said(answer)}`);
   }
   check("a read-only grant reaches no write verb in this section", denied, [
@@ -20097,6 +20464,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     "POST /custom-agents: 403 insufficient_scope",
     "PATCH /custom-agents/:id: 403 insufficient_scope",
     "DELETE /custom-agents/:id: 403 insufficient_scope",
+    "PUT /agent-strip: 403 insufficient_scope",
   ]);
   /*
    * The positive half, and it is not decoration: a `write` that had drifted onto
@@ -20104,7 +20472,11 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
    * on the machine while all five refusals above went on passing. The same pair
    * the plugin section already drives.
    */
-  check("and still reaches both listings", allowed, ["GET /systems: 200", "GET /custom-agents: 200"]);
+  check("and still reaches every listing", allowed, [
+    "GET /systems: 200",
+    "GET /custom-agents: 200",
+    "GET /agent-strip: 200",
+  ]);
   check("and not one of those five moved anything", [frozen(), JSON.stringify([...keys])], beforeGate);
   check(
     "sweeping it away again",

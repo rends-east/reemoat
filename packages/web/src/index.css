@@ -575,10 +575,33 @@ body {
   padding-top: max(3.25rem, env(safe-area-inset-top));
 }
 
-/* Tap targets on a phone. 44px is the platform minimum and the approve buttons
-   are the reason it matters here. */
-button {
-  touch-action: manipulation;
+/*
+ * Tap targets on a phone. 44px is the platform minimum and the approve buttons
+ * are the reason it matters here; `manipulation` is what removes the 300ms
+ * double-tap-to-zoom wait on all of them.
+ *
+ * ⚠ **Inside `@layer base`, and it was not — which made `touch-none` a dead class
+ * on every button in this app.** The focus ring's docblock further down states the
+ * rule this broke: Tailwind emits every utility inside `@layer utilities`, an
+ * unlayered rule beats a layered one *regardless of specificity*, and this one was
+ * unlayered. Measured on the built stylesheet: `.touch-none{touch-action:none}` at
+ * byte 18486 inside the utilities layer, `button{touch-action:manipulation}` at
+ * 46097 outside every layer — so the utility lost, the effective value on a
+ * `touch-none` button stayed `manipulation`, and `manipulation` still permits
+ * panning. The agent-strip drag handle could not start a drag on a phone at all:
+ * the browser took the vertical gesture for the scroller and fired `pointercancel`
+ * before a single `pointermove` arrived. On a desktop it worked, because a mouse
+ * is not gated by `touch-action` — which is exactly the shape of bug that ships.
+ *
+ * This is a **default**, not a decision, and base is where a default goes — the
+ * same sentence the cursor rule above makes. Nothing else in this app overrides
+ * `touch-action` today, so moving it changes one control's behaviour and no
+ * other's.
+ */
+@layer base {
+  button {
+    touch-action: manipulation;
+  }
 }
 
 /*
@@ -766,6 +789,46 @@ kbd {
   transition: opacity 500ms ease;
 }
 .fade-thumb.is-scrolling {
+  opacity: 1;
+  transition-duration: 100ms;
+}
+
+/*
+ * The gradient at the cut edge of a strip you drag sideways.
+ *
+ * ⚠ **It answers the one thing the bar above cannot: that there is more, before
+ * anybody has touched anything.** `.fade-thumb` reports a *position* and is
+ * invisible until the row moves, so a first paint says nothing at all — and the
+ * agent strip's contents do not say it either. `.no-scrollbar`'s docblock names
+ * the shape that does: "a strip whose contents already announce that there is
+ * more of them by being cut off at the edge". That is a half-drawn tile. The
+ * agent strip ends in a *fully* drawn control, which reads as the row's
+ * deliberate end, and losing that cue is exactly why the strip stopped using
+ * `.no-scrollbar` in the first place.
+ *
+ * ⚠ **A class rather than the four utilities `SessionView` writes inline, and the
+ * `opacity` is why.** That fade is mounted and unmounted by a condition that
+ * changes rarely; this one changes at the end of every flick, so it transitions —
+ * and `webcheck` asserts the substring `opacity` appears nowhere inside
+ * `AgentStrip`, for a reason about *tiles* that this would otherwise trip. The
+ * gradient itself stays at the call site, because which edge and which ground it
+ * fades to are the caller's.
+ *
+ * ⚠ **Placed after `.fade-thumb.is-scrolling` rather than beside `.fade-scrollbar`
+ * above.** `webcheck` reads this file and slices it between those two selectors by
+ * `indexOf`; a rule inserted between them re-anchors every assertion about the
+ * scrollbar onto this one.
+ *
+ * Out slowly and in at once, which is `.fade-thumb`'s asymmetry and its reason: a
+ * single duration in both directions reads as lag, the gradient arriving after the
+ * row has already moved. It costs no layout in either state — the element is
+ * `absolute` and `pointer-events-none` at its one call site.
+ */
+.edge-fade {
+  opacity: 0;
+  transition: opacity 500ms ease;
+}
+.edge-fade.is-cut {
   opacity: 1;
   transition-duration: 100ms;
 }

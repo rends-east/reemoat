@@ -3,7 +3,12 @@ import { uptime } from "node:os";
 import { dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { isAgentId } from "../acp/agents.js";
-import { isSystemId, type CustomAgent, type SystemId } from "../acp/systems.js";
+import {
+  isSystemId,
+  type AgentStripEntry,
+  type CustomAgent,
+  type SystemId,
+} from "../acp/systems.js";
 import type { UploadIndex, UploadRow } from "../uploads.js";
 import {
   DEFAULT_MAX_BYTES,
@@ -138,6 +143,8 @@ export interface StoreBundle {
   systemCredentials: SqliteSystemCredentialStore;
   /** The harness+system+model presets somebody named on this machine. */
   customAgents: SqliteCustomAgentStore;
+  /** Which agents the New session strip offers here, and in what order. */
+  agentStrip: SqliteAgentStripStore;
   uploads: SqliteUploadStore;
   /** What is installed. See `src/plugins/store.ts` for why these are two subjects. */
   plugins: SqlitePluginRecordStore;
@@ -252,6 +259,7 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
   const credentials = new SqliteAgentCredentialStore(db);
   const systemCredentials = new SqliteSystemCredentialStore(db, options.onDegraded);
   const customAgents = new SqliteCustomAgentStore(db, options.onDegraded);
+  const agentStrip = new SqliteAgentStripStore(db);
   const uploads = new SqliteUploadStore(db);
   const plugins = new SqlitePluginRecordStore(db, options.onDegraded);
   const pluginData = new SqlitePluginDataStore(db);
@@ -264,6 +272,7 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
     credentials,
     systemCredentials,
     customAgents,
+    agentStrip,
     uploads,
     plugins,
     pluginData,
@@ -1852,6 +1861,114 @@ function readCustomAgent(row: Record<string, unknown>): CustomAgent | null {
     createdAt: Number(row["created_at"] ?? 0),
   };
 }
+
+/**
+ * Which agents the New session strip offers here, and in what order.
+ *
+ * ⚠ **A partial record over a list it does not own.** Nothing here knows what a
+ * harness or an assembled agent is; a row is a `(kind, ref)` somebody moved or
+ * switched off, and what the strip draws is this list merged against what the
+ * machine currently offers. So an agent this table has never heard of is
+ * *visible and last*, which is the only default that cannot surprise anybody —
+ * a new agent arriving pre-hidden reads as the daemon losing it.
+ *
+ * ⚠ **No validation of `ref`, deliberately, and it is the opposite call from
+ * `readCustomAgent` directly above.** That one drops a row naming a harness this
+ * build cannot resolve, because restoring it would produce a well-typed lie that
+ * fails later with a worktree already made. Here the row *is* the memory and
+ * resolving is the reader's job: dropping the position of an agent that happens
+ * to be signed out today would rearrange somebody's screen the moment they signed
+ * out, and put it somewhere else again when they signed back in.
+ */
+export class SqliteAgentStripStore {
+  private readonly db: DatabaseSync;
+  private readonly listStmt: StatementSync;
+  private readonly clearStmt: StatementSync;
+  private readonly insertStmt: StatementSync;
+  private readonly forgetStmt: StatementSync;
+
+  constructor(db: DatabaseSync) {
+    this.db = db;
+    this.listStmt = db.prepare(
+      "SELECT kind, ref, hidden FROM agent_strip ORDER BY rank, kind, ref",
+    );
+    this.clearStmt = db.prepare("DELETE FROM agent_strip");
+    this.insertStmt = db.prepare(
+      "INSERT INTO agent_strip (kind, ref, rank, hidden) VALUES (?, ?, ?, ?)",
+    );
+    this.forgetStmt = db.prepare("DELETE FROM agent_strip WHERE kind = ? AND ref = ?");
+  }
+
+  /**
+   * The remembered order.
+   *
+   * `ORDER BY rank` first, then `kind, ref` — the tie-break is not decoration.
+   * `rank` is the caller's array index and is therefore unique on every list this
+   * daemon writes, but the column carries no constraint saying so, and a file
+   * hand-edited or written by some future build must still come back in *one*
+   * order rather than in whatever order SQLite felt like. An unstable list here
+   * is a strip that shuffles itself between reads.
+   */
+  list(): AgentStripEntry[] {
+    return this.listStmt.all().flatMap((row) => {
+      const kind = String(row["kind"]);
+      // The one thing that *is* checked, because it is this daemon's own
+      // vocabulary rather than somebody's agent id, and a third value would reach
+      // a `switch` in the client that has no arm for it.
+      if (kind !== "harness" && kind !== "custom") return [];
+      return [{ kind, ref: String(row["ref"]), hidden: Number(row["hidden"] ?? 0) !== 0 }];
+    });
+  }
+
+  /**
+   * Replace the whole strip.
+   *
+   * ⚠ **The transaction is for atomicity here, unlike the one in `prune`.** That
+   * one wraps statements that are each already correct on their own and takes the
+   * transaction only to spend one WAL commit; this one empties the table before it
+   * refills it, so a failure part-way through without a `ROLLBACK` is somebody's
+   * order deleted by an act that reported an error. The throw is re-raised rather
+   * than swallowed — the route above turns it into a 500, and the screen restores
+   * what it drew.
+   */
+  replace(entries: readonly AgentStripEntry[]): void {
+    this.db.exec("BEGIN");
+    try {
+      this.clearStmt.run();
+      for (const [rank, one] of entries.entries()) {
+        this.insertStmt.run(one.kind, one.ref, rank, one.hidden ? 1 : 0);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // Nothing to roll back — the BEGIN itself failed.
+        //
+        // ⚠ The other way `BEGIN` can fail is *already inside a transaction*, and
+        // there the `ROLLBACK` would succeed and discard the outer one's work
+        // instead. Not reachable: this method has one caller, `PUT /agent-strip`,
+        // and no route on this daemon opens a transaction around a handler. Said
+        // out loud because the remedy if one ever does is a savepoint rather than
+        // a wider catch.
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Drop one position, for the write that is not the screen.
+   *
+   * Deleting an assembled agent takes its row with it. The merge would ignore the
+   * orphan anyway — it resolves to nothing — so this is not correctness; it is the
+   * only thing standing between this table and unbounded growth on a machine where
+   * presets are made and thrown away and the strip screen is never opened.
+   */
+  forget(kind: AgentStripEntry["kind"], ref: string): void {
+    this.forgetStmt.run(kind, ref);
+  }
+}
+
 
 export interface StoredIdentity {
   machineId: string;

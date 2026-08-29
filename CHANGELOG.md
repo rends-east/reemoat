@@ -27,6 +27,55 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Added
 
+- **The agent row on New session is yours to arrange.** The gear at the end of it
+  opens a per-machine **Agents** screen — reachable from the machine's own settings
+  too — where every agent that row can offer is a full-width row you can drag,
+  hide, edit and remove, with the `+` that used to sit in the strip now at the foot
+  of the list it adds to.
+
+  The order and the hidden set live **on the daemon, per machine**, so they are the
+  same from a phone and a laptop and survive the reload a phone performs on its
+  own. What is stored is a *partial* record — a position for what somebody actually
+  moved — merged over whatever the machine currently reports: an agent it has never
+  heard of appends at the end and is visible, and an agent that is signed out or
+  gone keeps its place for when it comes back rather than losing it.
+
+  Every row is draggable **and** movable from the keyboard, with `↑`/`↓`/`Home`/`End`
+  on the handle — a 44px target that keeps the sheet from scrolling under a thumb.
+  Everything a row can do is behind one menu, on every row, and **every** row can be
+  edited and removed: a built-in agent and one you assembled are the same thing from
+  the picker's side — the built-in one is just the one that is there by default.
+  Editing it opens the builder already pointed at that harness. Removing signs nothing out. A built-in row stays where it is,
+  dimmed, offering to add it back; an assembled one is deleted and rebuilt from *Add
+  an agent*, and sessions started on it keep resuming on the bare harness. There is
+  no confirmation, because neither is a thing you cannot redo.
+
+  Opened from the gear, the screen's ◀ goes back to the New session sheet you left —
+  folder walked and agent chosen — rather than further into settings.
+
+  A machine whose agents are *all* hidden says so, and points at the gear.
+
+  **The first agent in that order is the one a new session opens on, and its row
+  says `default`.** Drag another to the top and it becomes the default. "First"
+  skips a row that cannot be started — a hidden one, a harness that is signed out,
+  an agent assembled on a harness that has since been uninstalled — because those
+  have rows here on purpose and none of them is what a new session can open on. It
+  also fixes the picker: the last of those three used to be selected on arrival and
+  then refused, leaving New session with no agent chosen and **Start** dead until
+  you tapped one.
+
+- **A built-in agent's tile says which system it runs on.** Claude Code ·
+  Anthropic, Codex · OpenAI, Kimi Code · Moonshot — on the New session tiles and on
+  the rows of the Agents screen. It used to say `signed in`, which is true of every
+  agent you can actually start and therefore says nothing; a status only appears
+  now when there is one worth reporting, and it displaces the vendor.
+
+- **The agent row says when it is cut off.** A gradient at its right edge, on
+  exactly while there is more to the right of it — the same fade the transcript
+  draws under a session's name. The scrollbar under the row reports where you are;
+  this is the part that says there is somewhere to go before you have touched
+  anything.
+
 - **opencode is a fourth agent, and it needs no signing in.** `opencode acp`,
   vendored and pinned like the other adapters, and it needs no new machinery
   either: it publishes a model control under `category: "model"` and answers
@@ -76,7 +125,37 @@ it — so a citation here would be the one kind nothing checks.
   `https://openrouter.ai`.** Without it the picker's OpenRouter section never
   fills. See `packages/control-plane/.env.example`.
 
+### Changed
+
+- **The model picker puts the providers you can actually use first.** Any provider
+  this machine can start a model on floats above every provider it cannot — so the
+  ones whose rows would read *"No … key on this machine."* sink to the bottom
+  instead of sitting between you and the one you use. "Can use" is the same test
+  that greys the rows, so the order and the greying always agree: a provider whose
+  models are published by a signed-in harness counts, even with no key of its own
+  pasted anywhere.
+
+  Under that, the default order changed too: Anthropic, OpenAI, **OpenRouter**,
+  Moonshot, Z.ai, MiniMax, OpenCode Zen. OpenRouter is the widest catalogue and the
+  commonest reason to scroll at all, and it used to sit below one vendor's four
+  models. Zen is last by default and floats like anything else on a machine that
+  holds its key.
+
+- **The `+` at the end of the agent row is a gear, and the `Edit <agent>` line
+  under the row is gone.** Both acts moved onto the Agents screen the gear opens,
+  where an agent is a row with room for its own controls rather than a 112px tile
+  in a strip you drag sideways. Nothing below the picker appears and disappears as
+  you tap along the row any more.
+
 ### Fixed
+
+- **`touch-action: none` did nothing, on every button in the app.** `index.css`
+  declared the `touch-action` default for `button` outside any cascade layer, and an
+  unlayered rule beats every Tailwind utility regardless of specificity — so the
+  `touch-none` class was dead wherever it was used. The visible cost was that the
+  agent list could not be dragged on a phone at all: the browser took the gesture
+  for the scroller before the first `pointermove`. A mouse is not gated by
+  `touch-action`, which is why it only showed up on a touchscreen.
 
 - **A fourth harness would have drawn a blank tile.** `AgentGlyph`'s comment had
   claimed for four releases that a missing arm was a compile error; it was not —
