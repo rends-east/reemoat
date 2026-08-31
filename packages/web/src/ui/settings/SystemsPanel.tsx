@@ -3,7 +3,9 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { errorText } from "../../http";
 import type { MachineId } from "../../ids";
 import { store } from "../../store";
-import type { SystemInfo } from "../../wire";
+import type { AgentAuthInfo, SystemInfo } from "../../wire";
+import { anyKeySet, unspokenFor } from "../../agents";
+import { boundedName, harnessName } from "../agentCard";
 import { Badge, Button, ChoiceRow, DangerButton, Empty, FIELD, Icon, Spinner } from "../bits";
 import { toast } from "../Toast";
 import { AgentDetail } from "./AgentsPanel";
@@ -27,11 +29,30 @@ import { AgentDetail } from "./AgentsPanel";
 
 function useSystems(machineId: MachineId): {
   systems: SystemInfo[] | null;
+  /**
+   * Every harness this machine offers, or `null` where that read has not landed.
+   *
+   * ⚠ **A second read on a screen that had one, and it is not free.**
+   * `GET /systems` is a table and spawns nothing; `GET /agent-auth` runs the login
+   * probe, which is a CLI per agent. It is fetched because the list cannot be
+   * assembled without it — `unspokenFor` needs the harnesses and their credential
+   * slots, and no cheaper route carries them — and it is fetched *beside* the
+   * first rather than after it, so the cost is one round trip rather than two.
+   *
+   * ⚠ **Its failure is not the list's failure.** A refused `GET /agent-auth`
+   * leaves this `null` and `unspokenFor` answers nothing, so the screen draws the
+   * providers exactly as it did before this existed. The reverse is not true and
+   * must not be made so: without the systems there is no way to tell which
+   * harnesses are already spoken for, and drawing them anyway is a duplicate row
+   * for claude.
+   */
+  agents: AgentAuthInfo[] | null;
   error: string | null;
   loading: boolean;
   refresh: () => void;
 } {
   const [systems, setSystems] = useState<SystemInfo[] | null>(null);
+  const [agents, setAgents] = useState<AgentAuthInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [epoch, setEpoch] = useState(0);
@@ -41,16 +62,24 @@ function useSystems(machineId: MachineId): {
     if (daemon === undefined) return;
     let cancelled = false;
     setLoading(true);
-    void daemon
-      .systems()
-      .then((result) => {
+    /*
+     * Settled rather than raced, and the systems half decides `error`. What that
+     * word means on this screen is "the list you are looking at may be out of
+     * date", and a harness read that failed on its own leaves a list that is
+     * complete about providers and silent about a row nobody has seen yet.
+     */
+    void Promise.allSettled([daemon.systems(), daemon.agentAuth()])
+      .then(([listing, auth]) => {
         if (cancelled) return;
-        setSystems(result.systems);
-        setError(null);
-      })
-      .catch((cause: unknown) => {
-        if (cancelled) return;
-        setError(errorText(cause));
+        if (listing.status === "fulfilled") {
+          setSystems(listing.value.systems);
+          setError(null);
+        } else {
+          setError(errorText(listing.reason));
+        }
+        // Never cleared on failure: a stale harness list beside a fresh provider
+        // list is what `STALE_READ` above is already the sentence for.
+        if (auth.status === "fulfilled") setAgents(auth.value.agents);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -60,7 +89,7 @@ function useSystems(machineId: MachineId): {
     };
   }, [daemon, epoch]);
 
-  return { systems, error, loading, refresh: useCallback(() => setEpoch((n) => n + 1), []) };
+  return { systems, agents, error, loading, refresh: useCallback(() => setEpoch((n) => n + 1), []) };
 }
 
 /**
@@ -112,11 +141,21 @@ function Recheck({ onClick, busy }: { onClick: () => void; busy: boolean }): Rea
 export function SystemChooser({
   machineId,
   onPick,
+  onPickHarness,
 }: {
   machineId: MachineId;
   onPick: (system: string) => void;
+  /**
+   * The other kind of row, which lands on a different leaf.
+   *
+   * Its own callback rather than a `kind` on {@link onPick}, because the two
+   * resolve in different id spaces — a plugin may name the same local id in both
+   * of its contribution blocks — so a single string reaching the parent would be
+   * ambiguous at exactly the point it is turned into an address.
+   */
+  onPickHarness: (agent: string) => void;
 }): ReactNode {
-  const { systems, error, loading, refresh } = useSystems(machineId);
+  const { systems, agents, error, loading, refresh } = useSystems(machineId);
 
   if (loading && systems === null) {
     return (
@@ -175,9 +214,67 @@ export function SystemChooser({
         <ChoiceRow
           key={system.id}
           title={system.displayName}
-          subline={system.id}
+          /*
+           * ⚠ **The id, or where it came from — and the second is the more useful
+           * fact about a row somebody does not recognise.** The id is what this
+           * screen has always shown, and for the seven this product ships it is a
+           * word anybody reading the list already knows. A provider a plugin added
+           * carries a namespaced id nobody has seen, and the question it raises is
+           * not *what is it called* but *where did it come from* — which is the one
+           * this line can answer and the plugin's page is where it leads.
+           */
+          subline={
+            system.contributedBy === undefined
+              ? system.id
+              : // ⚠ **Bounded, and this was the one contributed name drawn raw.**
+                // `harnessSubline` puts the identical sentence through the same
+                // function; the daemon does no control-character stripping on a
+                // plugin's `name`, so an override here reorders the row and
+                // everything this app wrote after it.
+                `from ${boundedName(system.contributedBy.pluginName, "a plugin")}`
+          }
           trailing={<Badge tone={system.keySet ? "plain" : "strong"}>{stateText(system)}</Badge>}
           onClick={() => onPick(system.id)}
+        />
+      ))}
+      {/*
+       * ⚠ **After every provider, and the order is the same argument
+       * `GET /systems` makes about its own.** These rows exist only where a plugin
+       * added a harness and no provider speaks for it, so they are the newest and
+       * least familiar thing on the screen; putting them last means a group
+       * *appears* rather than a group *moving* under a reader's thumb.
+       *
+       * They are the same `ChoiceRow` and lead to the same component one tap in —
+       * what differs is which of the machine's two catalogues resolved the name,
+       * which is an internal difference and gets no presentation of its own.
+       */}
+      {unspokenFor(agents, systems).map((agent) => (
+        <ChoiceRow
+          key={`harness:${agent.id}`}
+          title={harnessName(agent)}
+          /*
+           * Where it came from rather than what it is called, which is the
+           * provider rows' own rule: every harness that reaches this list came
+           * from a plugin, and a namespaced id nobody has seen answers the wrong
+           * question.
+           */
+          subline={
+            agent.contributedBy === undefined
+              ? agent.id
+              : `from ${boundedName(agent.contributedBy.pluginName, "a plugin")}`
+          }
+          /*
+           * ⚠ **A key, never a sign-in.** These are exactly the harnesses with no
+           * wizard — that is why no provider names them — so "signed in" is a word
+           * this row cannot honestly use, and `loggedIn` is `null` for all of them
+           * anyway. What it can say is whether the box below holds anything.
+           */
+          trailing={
+            <Badge tone={anyKeySet(agent) ? "plain" : "strong"}>
+              {anyKeySet(agent) ? "key saved" : "no key"}
+            </Badge>
+          }
+          onClick={() => onPickHarness(agent.id)}
         />
       ))}
       <button

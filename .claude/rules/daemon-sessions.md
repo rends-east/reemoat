@@ -359,6 +359,16 @@ non-goal, with the numbers, at Q7.113.
   read, so it cannot drift from the pending map. `snapshot()` returns a frozen plain
   object with copied arrays — a frame built now and serialized later must describe
   now.
+- **`create` refuses a harness that just would not start, *before* `createWorkspace`.**
+  The same fence the `available` check above it already carries, on the axis it did
+  not cover: an `auth_required` at `session/new` lands after the spawn, so the
+  worktree, the branch and the session row are all made first — the growth inside
+  somebody's own repository that check exists to stop. It fires for a bare or native
+  start always, and for a routed one only when the remembered refusal was itself
+  measured while routed, since `applySystem` runs first and a bare refusal has told
+  nobody anything about a start on another system's key. A plain `Error` carrying the
+  recorded message, so it lands on the same `agent_auth_required` arm the first press
+  did. Q2.221.
 - **`doStop` uses `exitRecord ??=`.** Stopping a restored session must not rewrite
   `daemon_restarted` as `stopped`.
 - **Orphan reaping is fenced by `os.uptime()`.** Pids wrap and a reboot resets them,

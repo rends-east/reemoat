@@ -6,18 +6,19 @@ import { dirname, join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 
 import {
-  AGENT_IDS,
   AGENT_LOGIN,
   agentEnv,
   findOnPath,
   hasLoginFlow,
+  isBuiltinAgentId,
   resolveAgent,
   vendoredOpencode,
   type AgentId,
   type AgentLaunchConfig,
+  type BuiltinAgentId,
   type LoginStatusProbe,
 } from "../acp/agents.js";
-import type { SystemId } from "../acp/systems.js";
+import { BUILTIN_CATALOGUE, type MachineCatalogue, type SystemId } from "../acp/systems.js";
 import { hostGit, type GitExec } from "../git.js";
 import type {
   AgentAvailability,
@@ -28,6 +29,7 @@ import type {
   LoginProcess,
   ReapDecision,
   SessionRuntime,
+  StartRefusal,
 } from "./types.js";
 import { describeError } from "../http.js";
 
@@ -142,6 +144,57 @@ const LOGIN_PROBE_TTL_MS = 3_000;
 
 /** How long a status command may take before it is treated as no answer. */
 const LOGIN_PROBE_TIMEOUT_MS = 10_000;
+
+/**
+ * How long a refused start is remembered against the harness that refused it.
+ *
+ * ⚠ **The expiry is not a tidiness measure — it is what makes the whole record
+ * safe, and it is why the list of things that clear one does not have to be
+ * exhaustive.** An observation ages; a verdict does not. Everything else here can
+ * be got wrong without stranding anybody: somebody who signs in by running the
+ * CLI in a terminal on the machine itself has told this daemon nothing, and no
+ * hook, route or control can be relied on to notice. What can be relied on is
+ * that the record stops being believed.
+ *
+ * `MODELS_TTL_MS`'s number and `MODELS_TTL_MS`'s argument, deliberately: that is
+ * the other fact here that costs a spawn to re-measure and is re-measured by the
+ * same spawn, so the two ageing at different rates would let the model picker and
+ * the New session strip disagree about the same harness on the same machine.
+ * Emphatically **not** {@link LOGIN_PROBE_TTL_MS}: three seconds is a cache in
+ * front of a question this daemon can ask whenever it likes, and this is a
+ * question it can only ask by starting a session somebody asked for.
+ */
+export const START_REFUSAL_TTL_MS = 10 * 60_000;
+
+/**
+ * The most of a refusal that is kept.
+ *
+ * The message is built from the agent's `displayName` and its `authHint`, and for
+ * a harness a plugin added both of those are the manifest's prose — so this is
+ * `boundedName`'s argument at the other end of the wire: a value somebody else
+ * wrote, on its way to a settings card that reserved a paragraph. Bounded here,
+ * where it is *stored*, rather than at the throw: the sentence that reaches a
+ * `502` is unchanged and uncut, because that one is read once by whoever pressed
+ * Start and this one is drawn on every listing for the next ten minutes.
+ */
+export const MAX_START_REFUSAL_CHARS = 512;
+
+/**
+ * Whether a refused start is still worth believing.
+ *
+ * ⚠ **Pure and exported so a driver can reach the expiry without a clock being
+ * injected into the runtime.** `LocalRuntimeOptions` takes `exec` and `secrets`
+ * and neither is a test hook — both are seams something in production needs — so
+ * a `now` beside them would be the first, and it would sit on the class whose
+ * whole subject is spawning programs. The rule that matters is arithmetic, and
+ * arithmetic can be a function.
+ *
+ * `<` rather than `<=`: at exactly the budget the answer is stale, which is the
+ * same boundary `loginState`'s own cache test takes.
+ */
+export function startRefusalLive(held: StartRefusal, now: number): boolean {
+  return now - held.at < START_REFUSAL_TTL_MS;
+}
 
 /** What a pty-allocating login spawn looks like. */
 export interface LoginSpawn {
@@ -356,6 +409,20 @@ export interface LocalRuntimeOptions {
     env: NodeJS.ProcessEnv,
     stream: "stdout" | "stderr",
   ) => Promise<string | null>;
+  /**
+   * What this machine offers beyond what this repository ships.
+   *
+   * ⚠ **Injected rather than imported, and it is the same seam `secrets` is.**
+   * The catalogue is assembled from installed plugin manifests, which is a fact
+   * about a database this runtime deliberately knows nothing about — and a
+   * driver that wants a contributed harness stands one in here rather than
+   * building a plugin tree on disk.
+   *
+   * Defaulted to {@link BUILTIN_CATALOGUE}, so every existing caller — the
+   * drivers, `scripts/harness.ts`, and this class before there were plugins —
+   * behaves exactly as it did.
+   */
+  machine?: MachineCatalogue;
 }
 
 export class LocalRuntime implements SessionRuntime {
@@ -368,6 +435,7 @@ export class LocalRuntime implements SessionRuntime {
     env: NodeJS.ProcessEnv,
     stream: "stdout" | "stderr",
   ) => Promise<string | null>;
+  private readonly machine: MachineCatalogue;
 
   /** Memoised: `script` does not appear and disappear during a daemon's life. */
   private scriptResolved: string | null | undefined;
@@ -395,11 +463,64 @@ export class LocalRuntime implements SessionRuntime {
   private readonly loginInFlight = new Map<AgentId, Promise<boolean | null>>();
   private probeGeneration = 0;
 
+  /**
+   * What each harness said the last time it refused to open a session.
+   *
+   * ⚠ **Beside the probe's cache and under neither of its rules.** It is not
+   * cleared by `forgetAvailability()` — three of that method's five callers are a
+   * credential being taken *away*, and losing a key is not evidence that a
+   * harness which would not start now would — and it does not expire on
+   * `LOGIN_PROBE_TTL_MS`, which is three seconds in front of a question this
+   * daemon can ask for the price of a `--version`. This one costs a session
+   * somebody asked for, so it ages on {@link START_REFUSAL_TTL_MS} instead.
+   *
+   * ⚠ **In memory, per daemon, and durability was rejected rather than skipped.**
+   * Q7.99 is the recorded case of exactly this fact written down and believed
+   * afterwards — `stop("agent_signed_out")` off one observation, which stranded
+   * conversations under a notice that was already false. A restart is also when
+   * the machine has most likely changed underneath it, so surviving one would
+   * make the record most wrong exactly where it was most persistent.
+   */
+  private readonly startRefused = new Map<AgentId, StartRefusal>();
+
   constructor(options: LocalRuntimeOptions = {}) {
     this.secrets = options.secrets ?? (() => ({}));
     this.systemSecretOf = options.systemSecret ?? (() => null);
     this.onWarning = options.onWarning ?? (() => {});
     this.exec = options.exec ?? ((command, args, env, stream) => runProbe(command, args, env, stream));
+    this.machine = options.machine ?? BUILTIN_CATALOGUE;
+  }
+
+  /**
+   * This agent's row in {@link AGENT_LOGIN}, or `null` for one a plugin added.
+   *
+   * ⚠ **One place the absence is decided, because it is decided *nine* times
+   * below and every one of them used to be a total index.** A contributed
+   * harness has no login argv, no logout verb, no status probe and no credential
+   * path — deliberately, per `HarnessContribution` — so `null` here is not a
+   * missing measurement, it is opencode's shipped shape reached by a different
+   * door. Each caller answers it in the way its own screen needs.
+   */
+  private builtinLogin(agent: AgentId): (typeof AGENT_LOGIN)[BuiltinAgentId] | null {
+    return isBuiltinAgentId(agent) ? AGENT_LOGIN[agent] : null;
+  }
+
+  /**
+   * Which variables a pasted credential for this harness is written to.
+   *
+   * The `credentialEnvNames` of a built-in, the manifest's `envNames` for a
+   * contributed harness, and `[]` for one this machine does not offer — which is
+   * what makes `PUT /agent-auth/:agent` refuse a slot rather than invent one.
+   */
+  credentialSlots(agent: AgentId): readonly string[] {
+    const builtin = this.builtinLogin(agent);
+    if (builtin !== null) return builtin.envNames;
+    return this.machine.harness(agent)?.envNames ?? [];
+  }
+
+  /** What this machine offers, for the routes and for `Session`'s launch options. */
+  get catalogue(): MachineCatalogue {
+    return this.machine;
   }
 
   /**
@@ -425,7 +546,7 @@ export class LocalRuntime implements SessionRuntime {
   }
 
   describe(agent: AgentId): AgentLaunchConfig {
-    return resolveAgent(agent);
+    return resolveAgent(agent, this.machine);
   }
 
   /**
@@ -439,18 +560,41 @@ export class LocalRuntime implements SessionRuntime {
    */
   async availability(): Promise<AgentAvailability[]> {
     const generation = this.probeGeneration;
+    /*
+     * ⚠ **The built-ins first, then whatever plugins added — and a *disabled*
+     * plugin's harness is not here at all.** `harnessIds()` answers what this
+     * machine offers right now, so a tile that starts nothing is never drawn and
+     * `POST /sessions` never has to explain a row this screen put in front of
+     * somebody. What a switched-off plugin's harness keeps is its *position*, in
+     * `agent_strip`, which is never validated against anything.
+     */
     return Promise.all(
-      AGENT_IDS.map(async (id): Promise<AgentAvailability> => {
+      this.machine.harnessIds().map(async (id): Promise<AgentAvailability> => {
+        const contributed = this.machine.harness(id);
+        // The label, and never `displayName`, which carries the program name for a
+        // log line — see `contributedLaunchConfig`.
+        const extra =
+          contributed === null
+            ? {}
+            : {
+                label: contributed.name,
+                contributedBy: { pluginId: contributed.pluginId, pluginName: contributed.pluginName },
+              };
         let config: AgentLaunchConfig;
         try {
-          config = resolveAgent(id);
+          config = resolveAgent(id, this.machine);
         } catch (error) {
           return {
             id,
-            displayName: id,
+            // A contributed harness that will not resolve is still called
+            // something: falling back to the bare id here would put `acme:gemini`
+            // in the settings list beside `Kimi Code CLI`.
+            displayName: contributed?.name ?? id,
             available: false,
             hint: describeError(error),
             loggedIn: null,
+            lastStartRefusal: this.startRefusal(id),
+            ...extra,
           };
         }
         const loggedIn = await this.loginState(id, generation);
@@ -458,6 +602,7 @@ export class LocalRuntime implements SessionRuntime {
           id,
           displayName: config.displayName,
           available: true,
+          ...extra,
           // The hint is what to *do*, and "cannot tell" needs one too.
           //
           // It used to be attached only to `loggedIn === false`, on the reasoning
@@ -468,9 +613,49 @@ export class LocalRuntime implements SessionRuntime {
           // "there is no binary to ask", saying that is the whole remedy.
           hint: loggedIn === false ? config.authHint : this.cannotAskHint(id, loggedIn),
           loggedIn,
+          lastStartRefusal: this.startRefusal(id),
         };
       }),
     );
+  }
+
+  /**
+   * See {@link SessionRuntime.noteStartRefusal}.
+   *
+   * Clipped here rather than at the throw, because this is where the string stops
+   * being a one-off answer to whoever pressed Start and becomes a field on every
+   * listing for the next ten minutes. See {@link MAX_START_REFUSAL_CHARS}.
+   */
+  noteStartRefusal(agent: AgentId, message: string, routed: boolean): void {
+    this.startRefused.set(agent, {
+      at: Date.now(),
+      routed,
+      message: message.slice(0, MAX_START_REFUSAL_CHARS),
+    });
+  }
+
+  /** See {@link SessionRuntime.forgetStartRefusal}. */
+  forgetStartRefusal(agent?: AgentId): void {
+    if (agent === undefined) this.startRefused.clear();
+    else this.startRefused.delete(agent);
+  }
+
+  /**
+   * The live refusal for one harness, **expired on read**.
+   *
+   * Deleting rather than filtering is what keeps the map from being a second
+   * source of truth: nothing anywhere else has to know the budget, and a stale
+   * entry cannot survive to be read by a future caller that forgot to check it.
+   * It is also why {@link START_REFUSAL_TTL_MS} never reaches the wire — a client
+   * is handed a refusal or nothing, and has no arithmetic of its own to get
+   * wrong.
+   */
+  private startRefusal(agent: AgentId): StartRefusal | null {
+    const held = this.startRefused.get(agent);
+    if (held === undefined) return null;
+    if (startRefusalLive(held, Date.now())) return held;
+    this.startRefused.delete(agent);
+    return null;
   }
 
 /*
@@ -516,17 +701,23 @@ export class LocalRuntime implements SessionRuntime {
   async login(agent: AgentId): Promise<LoginProcess | null> {
     // Nothing to run. `loginSupport` already says so, and the route refuses before
     // reaching here — this is the same answer said where the spawn would be.
-    const flow = AGENT_LOGIN[agent].args;
-    if (flow === null) return null;
+    //
+    // ⚠ **A contributed harness reaches this too, through `null` rather than
+    // through `args: null`, and the answer has to be the same one.** It has no
+    // login table row at all, so there is no argv to spawn — which is opencode's
+    // shipped position reached by a different door, not a gap.
+    const login = this.builtinLogin(agent);
+    const flow = login?.args ?? null;
+    if (login === null || flow === null) return null;
     const script = this.scriptPath();
     if (script === null) return null;
     const command = this.resolveLoginBinary(agent);
     if (command === null) {
-      this.onWarning(`cannot log ${agent} in: ${AGENT_LOGIN[agent].command} is not on PATH`);
+      this.onWarning(`cannot log ${agent} in: ${login.command} is not on PATH`);
       return null;
     }
     const spec = hostLoginArgs(process.platform, command, flow, script);
-    const stdin = loginStdio(process.platform, AGENT_LOGIN[agent].interactiveStdin);
+    const stdin = loginStdio(process.platform, login.interactiveStdin);
     const child = spawn(spec.command, spec.args, {
       // The same environment `launch` gives an agent, and for the same reason:
       // `agentEnv` drops this daemon's own `REEMOAT_*` names (and the parent's
@@ -559,18 +750,31 @@ export class LocalRuntime implements SessionRuntime {
    * button is drawn rather than as a `503` after it is tapped.
    */
   loginSupport(agent: AgentId): AgentLoginSupport {
+    const login = this.builtinLogin(agent);
+    /*
+     * ⚠ **A contributed harness answers `no_flow`, and it must answer *something*
+     * rather than be left absent.** `agentStance` reads this: with no `login`
+     * object at all it falls to `unchecked`, and every contributed harness in the
+     * fleet would carry a permanent "cannot check" badge — a sentence about a probe
+     * that failed, over an agent that runs perfectly. `no_flow` is the one reason
+     * in that vocabulary that is a fact about the *agent* rather than about the
+     * host, which is exactly what this is.
+     */
+    if (login === null) {
+      return { supported: false, blocked: "no_flow", needsInput: false, canSignOut: false };
+    }
     const blocked = loginBlockedReason(
       process.platform,
-      AGENT_LOGIN[agent].interactiveStdin,
+      login.interactiveStdin,
       this.scriptPath() !== null,
       this.resolveLoginBinary(agent) !== null,
-      hasLoginFlow(agent),
+      isBuiltinAgentId(agent) && hasLoginFlow(agent),
     );
     return {
       supported: blocked === null,
       blocked,
-      needsInput: AGENT_LOGIN[agent].interactiveStdin,
-      canSignOut: AGENT_LOGIN[agent].logoutArgs !== null,
+      needsInput: login.interactiveStdin,
+      canSignOut: login.logoutArgs !== null,
     };
   }
 
@@ -589,11 +793,15 @@ export class LocalRuntime implements SessionRuntime {
    * another out in front of it.
    */
   async logout(agent: AgentId): Promise<{ ok: boolean; detail: string | null } | null> {
-    const args = AGENT_LOGIN[agent].logoutArgs;
-    if (args === null) return null;
+    // `null` for a contributed harness for the same reason it is `null` for kimi:
+    // there is no sign-out verb, so there is no button. The two arrive here by
+    // different routes and mean the same thing to every caller.
+    const login = this.builtinLogin(agent);
+    const args = login?.logoutArgs ?? null;
+    if (login === null || args === null) return null;
     const command = this.resolveLoginBinary(agent);
     if (command === null) {
-      return { ok: false, detail: `${AGENT_LOGIN[agent].command} is not on this daemon's PATH` };
+      return { ok: false, detail: `${login.command} is not on this daemon's PATH` };
     }
     // Both streams, because these two CLIs do not agree on which they answer on
     // — the same measurement `LoginStatusProbe.stream` exists for.
@@ -610,8 +818,8 @@ export class LocalRuntime implements SessionRuntime {
     return this.systemSecretOf(system);
   }
 
-  async launch(agent: AgentId, extra: NodeJS.ProcessEnv = {}): Promise<AgentProcess> {
-    const config = resolveAgent(agent);
+  async launch(agent: AgentId, extra: NodeJS.ProcessEnv = {}, routed = false): Promise<AgentProcess> {
+    const config = resolveAgent(agent, this.machine);
     // `detached` puts the agent in its own process group, which buys two things.
     // The agent adapters spawn their own children (claude-agent-acp runs a
     // `claude` binary), and those children only get cleaned up by an exit handler
@@ -629,7 +837,28 @@ export class LocalRuntime implements SessionRuntime {
       // outranks an ambient `ANTHROPIC_MODEL` deliberately: a session created as
       // "Claude Code on Kimi K2" has to run K2 whatever this host's shell
       // profile happens to export.
-      env: { ...config.env, ...this.secrets(agent), ...extra },
+      /*
+       * ⚠ **A routed session is spawned without the harness's own credentials.**
+       * `secrets(agent)` merges what somebody pasted for *this harness* — for
+       * claude that is `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` — and on a
+       * routed pairing the session is about to be aimed at another vendor's
+       * endpoint on a *different* key. `claude-agent-acp` 0.63.0 sets
+       * `ANTHROPIC_AUTH_TOKEN: " "` for exactly that reason: no Anthropic
+       * credential is needed there. It does not delete the two above it, and this
+       * daemon was still putting them in, so the process pointed at a third party
+       * carried a vendor credential it had no use for — with the destination
+       * author-chosen once a plugin may contribute a provider.
+       *
+       * Whether the CLI would actually *send* it to a foreign `ANTHROPIC_BASE_URL`
+       * is a precedence question inside a stripped binary and is deliberately not
+       * relied on here: this daemon should not hand a credential to a process it is
+       * simultaneously aiming somewhere else, whichever way that resolves.
+       *
+       * ⚠ **Not a fence, and the section in `CLAUDE.md` still holds.** The agent
+       * runs as this uid and can read `REEMOAT_DB`. What this removes is the
+       * accident, on the one path where the credential has no purpose at all.
+       */
+      env: { ...config.env, ...(routed ? {} : this.secrets(agent)), ...extra },
       stdio: ["pipe", "pipe", "pipe"],
       detached: true,
     }) as PipedChild;
@@ -682,14 +911,25 @@ export class LocalRuntime implements SessionRuntime {
    * binary sessions ran while this function kept resolving the vendored one.
    */
   private resolveLoginBinary(agent: AgentId): string | null {
-    const overrideName = AGENT_LOGIN[agent].executableEnv;
+    /*
+     * ⚠ **`null` for a contributed harness, and that is a refusal rather than a
+     * gap.** `executableEnv` is one of the fields a manifest may not declare —
+     * this function reads it for *every* agent, so a manifest naming
+     * `CLAUDE_CODE_EXECUTABLE` would redirect which binary somebody else's login
+     * drives. With no login to drive there is no binary to resolve, and every
+     * caller already reads `null` as "cannot": `loginSupport` answers `no_flow`
+     * above this, so nothing reaches here expecting otherwise.
+     */
+    const login = this.builtinLogin(agent);
+    if (login === null) return null;
+    const overrideName = login.executableEnv;
     if (overrideName !== null) {
       const override = (process.env[overrideName] ?? "").trim();
       if (override.length > 0) return override;
     }
     const vendored = this.vendoredCli(agent);
     if (vendored !== null) return vendored;
-    return findOnPath(AGENT_LOGIN[agent].command);
+    return findOnPath(login.command);
   }
 
   /**
@@ -704,6 +944,19 @@ export class LocalRuntime implements SessionRuntime {
   private vendoredCli(agent: AgentId): string | null {
     const cached = this.vendored.get(agent);
     if (cached !== undefined) return cached;
+    /*
+     * ⚠ **Narrowed before the `switch`, so the `switch` keeps being the thing this
+     * docblock claims it is.** Widening `AgentId` to a string would otherwise have
+     * turned an exhaustive `switch` into one with an implicit fall-through and no
+     * error — the same failure `AgentGlyph` shipped for four releases while its own
+     * comment said a missing arm was a compile error. A harness a plugin added
+     * vendors nothing by construction: what a manifest names is a program on PATH,
+     * and `resolveAgent` and this function resolve the same file for it.
+     */
+    if (!isBuiltinAgentId(agent)) {
+      this.vendored.set(agent, null);
+      return null;
+    }
     let resolved: string | null;
     switch (agent) {
       case "claude":
@@ -823,9 +1076,14 @@ export class LocalRuntime implements SessionRuntime {
    */
   private cannotAskHint(agent: AgentId, loggedIn: boolean | null): string | null {
     if (loggedIn !== null) return null;
-    if (AGENT_LOGIN[agent].status === null) return null;
+    // A contributed harness has no status probe at all, which is kimi's permanent
+    // position: "cannot tell" is the correct answer and there is nothing to say
+    // about it. `null` before the row is read, since there is no row.
+    const login = this.builtinLogin(agent);
+    if (login === null) return null;
+    if (login.status === null) return null;
     if (this.resolveLoginBinary(agent) !== null) return null;
-    const overrideName = AGENT_LOGIN[agent].executableEnv;
+    const overrideName = login.executableEnv;
     // Named from the table rather than written out, because an agent that has no
     // such variable used to be told to set claude's.
     const remedy =
@@ -833,7 +1091,7 @@ export class LocalRuntime implements SessionRuntime {
         ? `Put it on this daemon's PATH`
         : `Set ${overrideName} to the binary you log in with, or put it on this daemon's PATH`;
     return (
-      `${AGENT_LOGIN[agent].command} could not be found, so this daemon cannot tell whether ` +
+      `${login.command} could not be found, so this daemon cannot tell whether ` +
       `${agent} is signed in — sessions may still work, because the adapter resolves its own ` +
       `copy. ${remedy} (a service does not read your shell profile).`
     );
@@ -888,8 +1146,24 @@ export class LocalRuntime implements SessionRuntime {
    * falls back to it.
    */
   private async readLoginState(agent: AgentId): Promise<boolean | null> {
-    const spec = AGENT_LOGIN[agent];
     const pasted = Object.keys(this.secrets(agent)).length > 0;
+    /*
+     * ⚠ **A contributed harness lands on the same answer opencode does, and by the
+     * same argument.** It has neither a status command nor a credential path, so
+     * `false` is not a fact this daemon can produce honestly — and `admit` refuses
+     * on `loggedIn === false`, so manufacturing one would put "not signed in" in
+     * front of an agent that had just answered a prompt. A pasted key says a
+     * provider was configured; everything else is "cannot tell".
+     *
+     * ⚠ **And this stayed `null` when the daemon learned to remember a refused
+     * start, which is the whole reason that record is a separate field.** Writing
+     * it here instead would have been read by `admit` — and `admit` guards
+     * `AgentAskRuns.claim`, the one thing that ever spawns such a harness again.
+     * The record would have blocked the only spawn that could have cleared it,
+     * and a harness that refused once could never be found to have been fixed.
+     */
+    const spec = this.builtinLogin(agent);
+    if (spec === null) return pasted ? true : null;
 
     if (spec.status !== null) {
       const command = this.resolveLoginBinary(agent);

@@ -63,6 +63,53 @@ export interface PluginConsent {
   scopes: readonly string[];
   net: readonly string[];
   hooks: readonly string[];
+  /**
+   * The harnesses and providers a person was shown, each as one string.
+   *
+   * ⚠ **Flattened to strings, and that is what keeps this comparison working
+   * rather than merely existing.** The other three fields are `readonly string[]`
+   * on both sides, so `gained` is a set difference and there is nothing to
+   * normalise. Objects here would put a shape reader in `readConsent`, and a shape
+   * reader is exactly where a normalisation mismatch creeps in and the alarm starts
+   * crying wolf on healthy plugins — which is the failure the three-field rule was
+   * chosen to avoid in the first place.
+   *
+   * ⚠ **And the *whole* base URL is in the string, though the screen draws only
+   * the origin.** A plugin that showed `https://api.groq.com` and shipped
+   * `https://api.groq.com/../evil` passes an origin comparison; `parseManifest`
+   * normalises the URL — `new URL` resolves `..` — so both sides are comparing the
+   * address the daemon will actually send a key to.
+   *
+   * Optional on the wire for `compatibility.md`'s rule 2, and absent means the
+   * empty list rather than "anything": a client too old to send them is one that
+   * cannot have drawn them either, and `PluginHost` refuses an install whose
+   * consent omits a contribution the manifest makes.
+   */
+  adds: readonly string[];
+}
+
+/**
+ * One contributed harness or provider, as the exact string both sides compare.
+ *
+ * Built here and in the browser's mirror, and it is the *screen's* string rather
+ * than a hash: whatever this returns is what the consent card has to have drawn,
+ * because a disclosure and a comparison over two different renderings of the same
+ * fact is two facts.
+ */
+export function addedLine(one: { kind: "harness"; id: string; argv: readonly string[] } | { kind: "system"; id: string; baseUrl: string | null }): string {
+  return one.kind === "harness"
+    ? `harness ${one.id} runs ${one.argv.join(" ")}`
+    : `system ${one.id} sends keys to ${one.baseUrl ?? "nowhere"}`;
+}
+
+/** Every contributed line one manifest declares, in the order it declared them. */
+export function addedLines(manifest: PluginManifest): string[] {
+  return [
+    ...manifest.contributes.harnesses.map((one) =>
+      addedLine({ kind: "harness", id: one.id, argv: [one.command, ...one.args] }),
+    ),
+    ...manifest.contributes.systems.map((one) => addedLine({ kind: "system", id: one.id, baseUrl: one.baseUrl })),
+  ];
 }
 
 /** Why a `{repo, commit}` is not one this daemon will fetch. */
@@ -201,10 +248,20 @@ export function consentGap(consent: PluginConsent, manifest: PluginManifest): st
   const scopes = gained(manifest.scopes, consent.scopes);
   const net = gained(manifest.net, consent.net);
   const hooks = gained(manifest.contributes.hooks, consent.hooks);
+  /*
+   * ⚠ **The fourth comparison, and it is the one that makes an *older client*
+   * safe.** A browser deployed before contributions existed draws no row for them,
+   * `catalogue.ts`'s tolerance of unknown fields guarantees it goes on working, and
+   * therefore guarantees it under-discloses — there is no fix on that side. What it
+   * sends is a consent with no `adds`, so a commit that adds a harness is refused
+   * here with a sentence instead of installing a command line nobody was shown.
+   */
+  const adds = gained(addedLines(manifest), consent.adds);
   const parts: string[] = [];
   if (scopes.length > 0) parts.push(`it may ${scopes.join(", ")}`);
   if (net.length > 0) parts.push(`it reaches ${net.join(", ")}`);
   if (hooks.length > 0) parts.push(`it is told when ${hooks.join(", ")}`);
+  if (adds.length > 0) parts.push(`it adds ${adds.join("; ")}`);
   if (parts.length === 0) return null;
   return `that commit asks for more than was shown: ${parts.join("; ")}`;
 }
@@ -215,7 +272,12 @@ export function readConsent(raw: unknown): PluginConsent | null {
   const body = raw as Record<string, unknown>;
   const strings = (value: unknown): string[] =>
     Array.isArray(value) ? value.filter((one): one is string => typeof one === "string") : [];
-  return { scopes: strings(body["scopes"]), net: strings(body["net"]), hooks: strings(body["hooks"]) };
+  return {
+    scopes: strings(body["scopes"]),
+    net: strings(body["net"]),
+    hooks: strings(body["hooks"]),
+    adds: strings(body["adds"]),
+  };
 }
 
 /**

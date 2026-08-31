@@ -57,7 +57,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 815 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 827 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -304,6 +304,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `web-transcript.md` | `packages/web/src/ui/tail.ts`, `EventList.tsx`, `DiffView.tsx`, `AskCard.tsx`, `packages/web/src/diff.ts` | What a conversation may leave out and what it must say instead · what folds into a run and what may never · how a diff is drawn, and what refuses to draw one |
 | `web-composer.md` | `packages/web/src/ui/Composer.tsx`, `CommandMenu.tsx`, `AgentConfigBar.tsx`, `packages/web/src/keys.ts` | Which key sends · what a `/` opens · why a control never leaves the strip · what a chip may claim before the daemon has answered |
 | `plugins.md` | `src/plugins/`, `plugins/`, `packages/web/src/wire.ts` | What a plugin may add and where it may appear · the two axes of authorization, and which applies inside a hook · what an update keeps and what a failed one puts back · why `src/` now holds three `fetch` calls |
+| `plugin-contributions.md` | `src/plugins/contributions.ts`, `manifest.ts`, `src/acp/`, `src/runtime/local.ts`, `packages/web/src/ui/agentCard.ts` | A plugin that adds an *agent* or a *provider* · which id is checked for membership and which only for shape, and what each costs to get wrong · where a base URL may point now · what a machine's ceiling is and why it is a refusal |
 | `plugin-ui.md` | `packages/web/src/plugins.ts`, `catalogue.ts`, `install.ts`, `ui/plugins/`, `PluginView.tsx` | What the browser draws for a plugin and what it refuses to draw · where a plugin is installed from and what somebody agreed to · the one client that fails *closed* · what a draft of a fleet is |
 | `agent-systems.md` | `src/acp/systems.ts`, `src/agentask.ts`, `packages/web/src/agents.ts`, `ui/AgentBuilder.tsx` | Why a harness is not a system · which pairs of them exist, and who answers that · how a model is named to a harness that has never heard of it · what a session records and what it resolves at every launch |
 | `agent-strip.md` | `packages/web/src/agentStrip.ts`, `agentPick.ts`, `ui/NewSession.tsx`, `ui/settings/MachineAgentsSection.tsx` | Which agents the New session row offers and in what order · what a stored position may name and what it may never be validated against · why hiding is not a refusal · reordering with no library · why a cut row has to look cut |
@@ -358,7 +359,14 @@ counting the starts would buy a row nothing could honestly take down (Q7.113).
 nothing — but there *is* a market, and the half of Q7.104 that survived is which
 process reads it: a catalogue on its own host, read **by the browser**, with
 `POST /plugins/source` handing the daemon a repository and a pinned commit. A
-machine still installs only what somebody named it on. And no plugin draws in the
+machine still installs only what somebody named it on. **What a plugin may now add
+is an agent and an inference provider**, which is the thing Q7.31 and Q7.125 twice
+declined a registry for and named as the only case that would justify one — an ACP
+binary this repository does not vendor and cannot measure. It arrives as two
+declarative blocks in `plugin.json` rather than as `REEMOAT_AGENTS`, so it is chosen
+by a person, disclosed before it is sent, and switched off with one control;
+`AGENT_IDS` and `SYSTEMS` are still the four and the seven this repository *ships*,
+and what a machine *offers* is those merged with what is installed on it. And no plugin draws in the
 transcript or adds a slash command, both with their seams written down rather than
 half-built (Q7.105). **CD stops half-way on purpose**: nothing deploys on a push,
 and the one automated path is a manual `workflow_dispatch` that deploys the

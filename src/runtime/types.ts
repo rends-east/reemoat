@@ -143,6 +143,35 @@ export interface AgentLoginSupport {
   canSignOut: boolean;
 }
 
+/**
+ * The last time this harness refused to open a session, and what it said.
+ *
+ * ⚠ **An observation, never a verdict — and deliberately not {@link
+ * AgentAvailability.loggedIn}.** ACP's `auth_required` is a JSON-RPC
+ * implementation-defined code answered by the *adapter*, and this repository has
+ * already measured the two disagreeing: a pasted `CODEX_API_KEY` that the model's
+ * API accepted while `codex-acp` went on refusing `session/new` (`AGENT_LOGIN.codex`,
+ * Q7.65). So this says "it would not start, at this time, configured this way" and
+ * claims nothing about a credential. Absent means nothing has been observed — never
+ * that a start would succeed.
+ *
+ * ⚠ **`routed` is what stops one refusal condemning a pairing it never tested.**
+ * A harness reached through `providers/set` runs on a *system's* saved key, so a
+ * bare start refusing says nothing about a routed one — a signed-out Claude Code
+ * paired with OpenRouter is the case this repository documents as working, and a
+ * fence that read a bare refusal as a fact about every start would have broken it.
+ * `applySystem` answers this, because it is the one place that knows a pairing is
+ * routed rather than native.
+ */
+export interface StartRefusal {
+  /** `Date.now()` at the refusal. */
+  at: number;
+  /** Whether the refused start had been routed onto somebody else's system. */
+  routed: boolean;
+  /** What the agent's own refusal said, bounded. See `MAX_START_REFUSAL_CHARS`. */
+  message: string;
+}
+
 export interface AgentAvailability {
   id: AgentId;
   displayName: string;
@@ -159,8 +188,51 @@ export interface AgentAvailability {
    * agents have a non-interactive way to answer this (claude and codex do, kimi
    * does not), and reporting an unanswerable question as `false` would put a "log
    * in" prompt in front of somebody who already had.
+   *
+   * ⚠ **The negative this field refuses to manufacture lives next door.** A
+   * harness with no status probe — every one a plugin added, and opencode —
+   * can never answer `false` here however often it refuses to start, because
+   * that would be this daemon inventing a credential fact out of an adapter's
+   * error code. What it can carry is {@link AgentAvailability.lastStartRefusal},
+   * which is a different question with a different reader: `admit` weighs this
+   * one and never that one, so a harness that will not start is still spawned
+   * for a capability read and can still clear its own record by working.
    */
   loggedIn: boolean | null;
+  /**
+   * The last refusal to open a session, or `null` where none is remembered.
+   *
+   * Held in memory for `START_REFUSAL_TTL_MS` and expired on read, so an entry
+   * on the wire is always live and no client ever learns the budget.
+   */
+  lastStartRefusal: StartRefusal | null;
+  /**
+   * What a *screen* calls this harness, or absent for one this repository ships.
+   *
+   * ⚠ **Deliberately not {@link displayName}, and collapsing the two would ship
+   * the defect the client's own rule is written against.** That field is the log
+   * line and the settings-list row title, where naming the program is the point —
+   * it is literally `Claude (claude-agent-acp)` and `Kimi Code CLI` — while
+   * `agentCard.ts` requires a label that names neither a package nor a CLI,
+   * because it is drawn on a 96px tile. A built-in leaves this absent and the
+   * client uses its own table; a contributed harness carries the manifest's name.
+   */
+  label?: string;
+  /*
+   * `standalone` used to ride here and it is gone: a plugin adds a harness, never
+   * an agent. A contributed harness is opencode's shape — offered everywhere a
+   * harness is named, and needing a model before it is a whole answer. See
+   * `HarnessContribution` for the argument.
+   */
+  /**
+   * The plugin that added this harness, or absent for one this repository ships.
+   *
+   * Answers three questions at once, which is why it is one field rather than a
+   * boolean: the subline under a tile that is native to no system, the sentence
+   * saying where to go to remove it, and what a refusal names when the plugin is
+   * switched off.
+   */
+  contributedBy?: { pluginId: string; pluginName: string };
 }
 
 /**
@@ -241,6 +313,35 @@ export interface SessionRuntime {
   forgetAvailability(): void;
 
   /**
+   * Remember that this harness refused to open a session, and what it said.
+   *
+   * ⚠ **Written from exactly two places — `Session.start` and
+   * `Session.openResumed`, on ACP's typed `auth_required` — and from nowhere
+   * else.** The event pump's `errorKind: "authentication_failed"` is *not* one of
+   * them, and that is a measurement rather than an oversight: Q7.99 found a
+   * session idle 5h36m reporting it on its first prompt while the token on disk
+   * was valid for another 1.4 hours, and a fresh agent worked four minutes later.
+   * What had gone stale there was the process. `onAgentUnusable` says so at the
+   * one site that could have written this and does not.
+   *
+   * **Required rather than optional**, for the reason {@link forgetAvailability}
+   * gives about its own missing `?`: an `?.()` at these call sites would read as
+   * "this might not do anything" at exactly the places where it must.
+   */
+  noteStartRefusal(agent: AgentId, message: string, routed: boolean): void;
+
+  /**
+   * Drop what {@link noteStartRefusal} remembered — for one harness, or for all.
+   *
+   * **Separate from {@link forgetAvailability}, and the two must not be folded
+   * together.** Three of that method's five call sites are sign-out-ward — a
+   * credential deleted, a sign-out, a login cancelled — and none of them is
+   * evidence that a harness which would not start now would. Deleting a key must
+   * not erase the record of the refusal that key was pasted against.
+   */
+  forgetStartRefusal(agent?: AgentId): void;
+
+  /**
    * Start one.
    *
    * `extra` is merged over the agent's environment last, after the pasted
@@ -265,7 +366,13 @@ export interface SessionRuntime {
    * a secret it chose to put there — but see `acp/systems.ts` before writing the
    * stronger claim anywhere.
    */
-  launch(agent: AgentId, extra?: NodeJS.ProcessEnv): Promise<AgentProcess>;
+  /**
+   * @param routed Whether this session is about to be pointed at another system's
+   * endpoint. When `true` the harness's *own* pasted credentials are left out of
+   * the spawn environment — see `LocalRuntime.launch`, which is where the argument
+   * is spent, and `routedPairing`, which is the one place the question is answered.
+   */
+  launch(agent: AgentId, extra?: NodeJS.ProcessEnv, routed?: boolean): Promise<AgentProcess>;
 
   /**
    * The credential for one system, or `null` where none is stored.
@@ -305,6 +412,18 @@ export interface SessionRuntime {
    * older client still reads it.
    */
   loginSupport(agent: AgentId): AgentLoginSupport;
+
+  /**
+   * Which environment variables a pasted credential for this harness is written to.
+   *
+   * ⚠ **On the runtime rather than read from a table, because it has to agree with
+   * {@link SessionRuntime.launch}'s own `secrets` merge.** For the four this
+   * repository ships it is `credentialEnvNames`; for a harness a plugin added it is
+   * that manifest's `envNames`; and for one this machine does not offer it is
+   * empty, which is what makes `PUT /agent-auth/:agent` refuse a slot rather than
+   * store a secret under a name nothing will ever read.
+   */
+  credentialSlots(agent: AgentId): readonly string[];
 
   /**
    * Signs that agent's own CLI out, where it offers a way.

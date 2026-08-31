@@ -25,39 +25,48 @@
  * ------------------------------------------------------------------ */
 
 /**
- * Mirrored as a **closed** union, because that is what the daemon's is — the
- * opposite answer to {@link ToolKind} below, from the same rule.
+ * The four harnesses this product ships, mirrored as a **closed** union — because
+ * that is what the daemon's `AGENT_IDS` is, and it stayed closed when `AgentId`
+ * did not.
  *
- * `src/acp/agents.ts` derives `AgentId` from a literal `AGENT_IDS` tuple and
- * `resolveAgent` switches over it with no `default` arm, so the set really is
- * closed and a faithful mirror says so. Opening this to `(string & {})` would buy
- * silence rather than safety: it would stop this line needing an edit when an
- * agent is added, which is precisely the edit that keeps the mirror honest.
+ * `src/acp/agents.ts` still derives this tuple from four literals, `resolveAgent`
+ * still switches over it with no `default` arm, and `AGENT_LOGIN` is still a
+ * `Record` keyed on it. What changed is that a *machine* may now offer more than
+ * this repository ships, so the list of what exists and the list of what is
+ * built in are two different questions and this answers the second.
  *
- * It is still the one type here that nothing checks. Every *renderer* of an agent
- * id already fails open at runtime — `SessionBrowser` draws it verbatim and
- * `permissionHeadline` capitalises it — so a missed edit costs a type that lies
- * rather than a screen that breaks, which is the whole hazard this file's header
- * describes. Adding an agent means editing here and in `AGENT_IDS`.
+ * ⚠ **Keeping this closed is not sentiment; three things on this side depend on
+ * it.** `AGENT_LABEL` is a hand-written table `webcheck` reads as source text and
+ * requires a row in for every member; `AgentGlyph` is an exhaustive `switch` whose
+ * `never` arm is the only thing in the fleet that makes adding a harness loud; and
+ * `startsBare`'s built-in arm is a literal. Every one of those would become
+ * unsatisfiable — not merely weaker — against a list that grows at runtime.
  */
-export const AGENT_IDS: readonly AgentId[] = ["claude", "kimi", "codex", "opencode"];
-export type AgentId = "claude" | "kimi" | "codex" | "opencode";
+export const AGENT_IDS: readonly BuiltinAgentId[] = ["claude", "kimi", "codex", "opencode"];
+export type BuiltinAgentId = "claude" | "kimi" | "codex" | "opencode";
 
 /**
- * Whether a string off a URL names an agent.
+ * A harness id, which is a string.
  *
- * The mirror of `isAgentId` in `src/acp/agents.ts`, and the reason it now exists
- * on this side is `parseSettingsRoute`: an agent id arrives out of the path and
- * is handed straight to `PUT /agent-auth/:agent`, which the daemon refuses for
- * anything else. Validating here turns a stale link into the agent chooser
- * rather than a screen whose every control answers 400.
+ * ⚠ **Widened, and the guard that used to stand behind it is *gone* rather than
+ * loosened — which is the part worth reading.** `isAgentId` existed for one
+ * caller: an id arriving off a URL, checked so that a stale link opened the agent
+ * chooser instead of a screen whose every control answered 400. A shape test
+ * cannot do that job any more, because a machine's harnesses are a fact about
+ * which plugins are installed on it, so the check moved to where that fact is —
+ * the listing this client already fetches. `AgentBuilder` seeds its harness from
+ * `GET /agents` rather than from the address, and `parseSettingsRoute` carries the
+ * id through to a daemon that refuses what it does not offer.
  *
- * The one *check* against the closed union above, which the docblock calls out
- * as the type nothing verifies. It does not make the mirror honest — a fourth
- * agent still needs both edits — but it does mean the list and the guard cannot
- * drift from each other.
+ * ⚠ **A missing mirror edit is no longer a lie this type can tell**, which is the
+ * one thing the old docblock worried about and the one thing that got better:
+ * there is nothing here to fall out of step with, because the daemon's answer is
+ * the list.
  */
-export function isAgentId(value: string): value is AgentId {
+export type AgentId = string;
+
+/** Whether this is one of the four this product ships. Never "does this machine have it". */
+export function isBuiltinAgentId(value: string): value is BuiltinAgentId {
   return (AGENT_IDS as readonly string[]).includes(value);
 }
 
@@ -145,6 +154,16 @@ export interface AgentConfigOption {
   value: string | boolean;
   /** Empty for a boolean. */
   choices: AgentConfigChoice[];
+  /**
+   * Whether `choices` is a head rather than the whole list.
+   *
+   * Set only on the snapshot `GET /sessions` returns, where the daemon cuts a long
+   * model list to a bounded head — the selected choice always among it. Absent
+   * means the whole list, which is what every agent this repository ships sends and
+   * what an older daemon sends for all of them. A screen wanting the rest reads
+   * `GET /sessions/:id`.
+   */
+  truncated?: boolean;
 }
 
 export interface AgentModes {
@@ -1374,8 +1393,30 @@ export interface AgentInfo {
    * agents can answer this non-interactively (claude can, kimi cannot), and
    * showing `null` as "logged out" would put a login wizard in front of somebody
    * whose agent works. Absent on an older daemon, which is the same as `null`.
+   *
+   * ⚠ **A harness with no sign-in can never answer `false` here**, however often
+   * it has refused to start — that record is {@link AgentInfo.lastStartRefusal},
+   * which is a different question and has a different reader.
    */
   loggedIn?: boolean | null;
+  /**
+   * The last time this harness refused to open a session, and what it said.
+   *
+   * ⚠ **An observation, and deliberately not a credential fact.** ACP's
+   * `auth_required` is answered by the *adapter*, and the daemon has measured the
+   * two disagreeing — a key the model's API accepted while the adapter went on
+   * refusing `session/new`. So this says "it would not start, at this time,
+   * configured this way" and claims nothing about a key. The daemon ages it out;
+   * a value on the wire is always live.
+   *
+   * `routed` is what stops one refusal condemning a pairing it never tested: a
+   * bare start refusing says nothing about one that runs on a system's own saved
+   * key, which is the signed-out Claude Code on OpenRouter this app documents as
+   * working. Only a refusal measured *while routed* is evidence about a preset.
+   *
+   * Absent on an older daemon, which is the same as `null`: nothing observed.
+   */
+  lastStartRefusal?: { at: number; routed: boolean; message: string } | null;
   /**
    * Whether a sign-in can be driven here, and why not when it cannot.
    *
@@ -1391,6 +1432,35 @@ export interface AgentInfo {
    * client did before the field existed.
    */
   login?: AgentLoginSupport;
+  /**
+   * What a screen calls this harness, or absent for one this product ships.
+   *
+   * ⚠ **Deliberately not {@link AgentInfo.displayName}, and reaching for that
+   * instead is the mistake this field exists to prevent.** The daemon's
+   * `displayName` is a log line and a settings-list row title — literally
+   * `Claude (claude-agent-acp)` and `Kimi Code CLI` — while `agentCard.ts`'s own
+   * rule is that a label names neither a package nor a CLI, because it is drawn on
+   * a 96px tile. Two of the four built-ins fail that rule outright, so a client
+   * that used `displayName` as a label would put "Codex (codex-acp)" on a strip.
+   *
+   * Absent for a built-in, where `AGENT_LABEL` is the answer and is hand-written
+   * on purpose. Read through `harnessName`, never directly.
+   */
+  label?: string;
+  /*
+   * `standalone` used to ride here and is gone on both sides: a plugin adds a
+   * harness, never an agent. `startsBare` answers `false` for every contributed id
+   * now, so a daemon that still sends the field is simply not read — which is the
+   * same direction its own fallback took, made unconditional.
+   */
+  /**
+   * The plugin that added this harness, or absent for one this product ships.
+   *
+   * Three screens need it and none of them could work it out: the subline under a
+   * tile that is native to no provider, the sentence saying where to go to remove
+   * it, and what a refusal names when the plugin is switched off.
+   */
+  contributedBy?: { pluginId: string; pluginName: string };
 }
 
 /** One environment variable an agent reads a pasted credential from. */
@@ -1477,7 +1547,15 @@ export interface SystemInfo {
    * than offering one that would fail at the start.
    */
   routable?: boolean;
-  /** The harness that reaches it without being routed, or `null`. */
+  /**
+   * The harness that reaches it without being routed, or `null`.
+   *
+   * A string rather than a closed union for `AgentId`'s reason, and with one rule
+   * the daemon enforces that this side may rely on: a provider a plugin added may
+   * only ever name a harness **that same plugin added**. So this never points at a
+   * built-in it did not come with, and the settings screen cannot be made to draw
+   * "Sign in to Claude Code" under a heading its author chose.
+   */
   nativeHarness: AgentId | null;
   /** Whose CLI drives its sign-in wizard, or `null` for a key-only system. */
   loginVia: AgentId | null;
@@ -1510,6 +1588,16 @@ export interface SystemInfo {
   keyEnv?: string | null;
   keySet: boolean;
   keyUpdatedAt: number | null;
+  /**
+   * The plugin that added this provider, or absent for one this product ships.
+   *
+   * Drawn where somebody has to be told where a row came from, and named in the
+   * one refusal that is about the plugin rather than about the pairing. Never
+   * branched on for a *presentation*: a contributed provider is a provider, and a
+   * row that looked different because of where it came from would be this client
+   * having an opinion about somebody's tools.
+   */
+  contributedBy?: { pluginId: string; pluginName: string };
 }
 
 /**
@@ -1522,6 +1610,24 @@ export interface SystemInfo {
 export interface AgentRouting {
   providerId: string;
   supported: string[];
+  /**
+   * Whether this harness can be told which model to run on somebody else's system.
+   *
+   * ⚠ **The fourth arm of `hostable`, which this side could not express and had a
+   * paragraph admitting it.** The daemon folds `ROUTED_MODEL_ENV` into its own
+   * refusal precisely so a pairing that would *start*, look correct, and quietly
+   * run the endpoint's default model never reaches a session — and until this
+   * field existed the picker offered exactly that pairing and `POST /custom-agents`
+   * refused it after somebody had assembled it.
+   *
+   * ⚠ **Absent means `true`, which is the opposite fallback from `routable` one
+   * interface up — and it is airtight rather than optimistic.** A daemon too old
+   * to send this is a daemon with no plugin catalogue, so the only harness it can
+   * route is the one that has always had an arm. There is no version of an older
+   * daemon for which the safe answer is `false`, and answering `false` there would
+   * grey out Claude Code on every machine in the fleet that had not been updated.
+   */
+  pinsModel?: boolean;
 }
 
 /** One harness's answer to what it offers and what it accepts. */
@@ -1970,7 +2076,15 @@ export interface CreatedUser {
  * shapes fails open**. `plugins.ts` is where that is done and asserted.
  * ------------------------------------------------------------------ */
 
-export type PluginScope = "sessions.read" | "sessions.write" | "files.read" | "store" | "net" | "model";
+export type PluginScope =
+  | "sessions.read"
+  | "sessions.write"
+  | "files.read"
+  | "store"
+  | "net"
+  | "model"
+  | "harness"
+  | "system";
 
 /**
  * One line per scope, for the list somebody reads before installing.
@@ -2030,6 +2144,22 @@ export const PLUGIN_SCOPE_TEXT: Record<PluginScope, string> = {
   store: "keep its own data here",
   net: "reach the hosts it lists",
   model: "ask your agents, at your cost",
+  /*
+   * ⚠ **The two that gate no method, and their lines have to carry the *thing*
+   * rather than the mechanism — the same rule `sessions.write` and `model` are
+   * already written under.** "add an agent" describes a list growing by one and
+   * hides that the machine will run a program the plugin's author named, as this
+   * user, on every session started on it. "add a provider" hides that a key the
+   * operator pastes is sent to a host the plugin chose.
+   *
+   * ⚠ **And the consent screen names the command line and the address as well**,
+   * because a line in a list is where somebody learns a capability exists and not
+   * where they can judge one. These two are the only scopes with a second
+   * disclosure, and that is because they are the only two where the *value*
+   * matters as much as the verb.
+   */
+  harness: "add an agent that runs a program it names",
+  system: "add a provider your saved keys are sent to",
 };
 
 /**
@@ -2055,11 +2185,64 @@ export interface PluginAction {
   on: "session" | "screen";
 }
 
+/**
+ * A harness a plugin adds to a machine.
+ *
+ * Mirrored so the consent screen can draw it. **Nothing here is executed, drawn as
+ * markup, or reached for at runtime** — this client's whole relationship with a
+ * contributed harness is `GET /agents`, exactly as with a built-in. What this shape
+ * is for is the one screen that has to show somebody a command line before it is
+ * installed.
+ */
+export interface HarnessContribution {
+  id: string;
+  name: string;
+  command: string;
+  args: string[];
+  envNames: string[];
+  routedModelEnv: string[];
+  authHint: string | null;
+}
+
+/**
+ * A provider a plugin adds to a machine.
+ *
+ * Same standing as {@link HarnessContribution}: drawn at consent and never read
+ * again — `GET /systems` is where a provider comes from once it is installed.
+ * `baseUrl` is the field the disclosure exists for, and it is the whole normalised
+ * address rather than an origin, because that is what the daemon compares against
+ * what was agreed to.
+ */
+export interface SystemContribution {
+  id: string;
+  name: string;
+  apiType: string;
+  baseUrl: string | null;
+  authHeader: { name: string; prefix: string } | null;
+  models: { id: string; name: string }[];
+  nativeHarness: string | null;
+  loginVia: string | null;
+  nativeModelPrefix: string | null;
+  keyEnv: string | null;
+}
+
 export interface PluginContributions {
   screen: { title: string } | null;
   settings: boolean;
   actions: PluginAction[];
   hooks: PluginHook[];
+  /**
+   * Harnesses and providers this plugin adds.
+   *
+   * ⚠ **Optional on this side, and that is `compatibility.md`'s rule 2 rather than
+   * laziness.** A daemon older than this tab does not send them, and the fallback
+   * has to be "this plugin adds none" — which is true of every plugin such a daemon
+   * can have installed, since it would refuse the manifest. The direction that is
+   * *not* safe is the mirror knowing less than the daemon, and `webcheck`'s sweep
+   * is what refuses that.
+   */
+  harnesses?: HarnessContribution[];
+  systems?: SystemContribution[];
 }
 
 export type PluginState = "running" | "stopped" | "failed" | "starting";

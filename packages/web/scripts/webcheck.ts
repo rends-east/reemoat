@@ -4198,6 +4198,55 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
     );
     check("and the closed line says only what the control is", /label="Permissions"/.test(consent), true);
     /*
+     * ⚠ **What a plugin *adds* is an ask, and it has to be one or the card
+     * contradicts itself.** `asksNothing` is derived from the rows' own `asks`
+     * flag, so a plugin contributing only a harness would otherwise draw the
+     * command line it will run and *"It asks for nothing, is told nothing and
+     * reaches nowhere."* one line under it — which is the exact `net` defect this
+     * file already records, arriving through a new door.
+     *
+     * ⚠ **And it is a *separate row* from the screens-and-menu-rows one below it,
+     * which is `asks: false`.** Those are things this app draws on the plugin's
+     * behalf and nothing is granted; these are a program the machine will run and a
+     * host a key is sent to. Two lists, because one flag cannot be both.
+     */
+    check(
+      "what a plugin adds to the machine is disclosed as an ask, in its own row",
+      [
+        /title: "It adds, to this machine",\s*asks: true,\s*items: manifest\.adds,/.test(consent),
+        /title: "It adds",\s*asks: false,/.test(consent),
+      ],
+      [true, true],
+    );
+    /*
+     * ⚠ **And `http` gets one extra sentence**, because it is the one thing in that
+     * list a person cannot read off the address unless they already know what the
+     * scheme means for a pasted key. The daemon permits it only to this machine or
+     * this network; what it costs is that the key travels in the clear, and that is
+     * the difference between a self-hosted model and a mistake.
+     */
+    check(
+      "and a provider reached in the clear says so, tested on the line that is drawn",
+      // The expression itself holds `//` inside a string literal and this file's
+      // comment stripper eats a line from there on, so what is pinned is the
+      // binding and the place it is drawn — which is the pair that matters anyway.
+      [/const inTheClear = manifest\.adds\.some\(/.test(consent), /\{inTheClear && \(/.test(consent)],
+      [true, true],
+    );
+    /*
+     * ⚠ **On the `system ` lines only, and over all of them it was a false alarm.**
+     * A harness line carries an argv, and an argv is arbitrary: a plugin
+     * contributing **no providers** and one harness with
+     * `args: ["--base", "http://127.0.0.1:8080"]` drew *"one provider is reached
+     * over http"* on a card with no provider on it at all. The narrowing is the
+     * assertion, because the sentence reads perfectly well either way.
+     */
+    check(
+      "and it is a fact about a provider rather than about anything in an argv",
+      /one\.startsWith\("system "\) &&/.test(consent),
+      true,
+    );
+    /*
      * ⚠ **And there is one fold on this card**, which is what makes the placement
      * assertions below say anything: "above the fold" is satisfied by a sentence
      * parked inside a *second* fold sitting over the first.
@@ -14113,6 +14162,8 @@ process.stdout.write("\nwhat one agent's card says\n");
     agentBadge,
     agentLabel,
     agentStance,
+    harnessName,
+    MAX_HARNESS_NAME_CHARS,
     tokenBlockFor,
     stanceLine,
     credentialCaveat,
@@ -14165,6 +14216,91 @@ process.stdout.write("\nwhat one agent's card says\n");
   check("an unknown agent still has a name", agentLabel("newthing"), "newthing");
 
   /*
+   * ⚠ **A harness a plugin added is named from the *listing*, and never from the
+   * daemon's `displayName`** — which is the trap this pair exists to close. That
+   * field is a log line and carries the program: it is literally
+   * `Claude (claude-agent-acp)` and `Kimi Code CLI`, and two of the four built-ins
+   * would fail this file's own rule against a label naming a package or ending in
+   * `CLI`. A client that reached for it when `AGENT_LABEL` had no row would have
+   * put the adapter's package name on a 96px tile the first time a harness arrived
+   * it did not know.
+   */
+  check(
+    "this product's own table wins, whatever a manifest calls a built-in",
+    harnessName({ id: "claude", label: "Something Else" }),
+    "Claude Code",
+  );
+  check("a harness it has never heard of takes the manifest's name", harnessName({ id: "acme:gemini", label: "Gemini" }), "Gemini");
+  check("and one that named itself nothing is drawn as its id", harnessName({ id: "acme:gemini" }), "acme:gemini");
+  /*
+   * ⚠ **Bounded rather than filtered, and the distinction is the rule.**
+   * `noJargon` forbids *wire vocabulary in this app's own templates*; it is not,
+   * and may never become, a content filter over the nouns substituted into them,
+   * which are and always were somebody else's prose — a provider legitimately
+   * called "Anthropic-Compatible Gateway" is truthful, and refusing it would be
+   * this app renaming somebody's product.
+   *
+   * What has to be bounded is the *shape*. These strings land in one-line
+   * `truncate`d sublines, in an `aria-label` built by joining with commas, and in
+   * headings on a phone — so a newline makes one line into two inside a row that
+   * reserved one, and a bidi override reorders the sentence around it, including
+   * sentences this app wrote.
+   */
+  check("a name longer than the row is cut", harnessName({ id: "a:b", label: "G".repeat(200) }).length, MAX_HARNESS_NAME_CHARS);
+  check(
+    "and control characters never reach a sentence",
+    harnessName({ id: "a:b", label: "Gem\u0000ini\nCLI\u202e" }),
+    "Gem ini CLI",
+  );
+  check("an empty name falls back rather than drawing nothing", harnessName({ id: "a:b", label: "   " }), "a:b");
+  /*
+   * ⚠ **And `noJargon` is deliberately *not* asserted over these**, which is the
+   * comment that stops somebody "fixing" it by widening the predicate. A plugin's
+   * name is not this app's template, and the honest answer to a hostile one is a
+   * bound on its shape rather than a rule about its words.
+   */
+  check(
+    "a hostile name is still one line with nothing in it that can reorder a sentence",
+    (() => {
+      const drawn = harnessName({ id: "a:b", label: "\u202eAnthropic\nOpenAI/\u0007" });
+      return [drawn.includes("\n"), drawn.includes("\u202e"), drawn.length <= MAX_HARNESS_NAME_CHARS];
+    })(),
+    [false, false, true],
+  );
+  /*
+   * ⚠ **Cut by character, not by code unit — this drew a replacement glyph.** A
+   * name whose 32nd character is astral was sliced through the middle of a surrogate
+   * pair, so a tile read `AAAA…\uFFFD`. `MonogramGlyph` one file over uses
+   * `Array.from` for exactly this and this did not.
+   */
+  check(
+    "a name cut at the bound is cut between characters",
+    (() => {
+      const drawn = harnessName({ id: "a:b", label: `${"A".repeat(31)}\u{1F680} Tools` });
+      return [Array.from(drawn).length, drawn.includes("\uFFFD"), /[\uD800-\uDBFF]$/.test(drawn)];
+    })(),
+    [MAX_HARNESS_NAME_CHARS, false, false],
+  );
+  /*
+   * ⚠ **And the invisible half, which `\s` does not match and `trim()` therefore
+   * keeps.** `U+061C` is a bidi control outside the block anybody reaches for, and
+   * `U+200B`/`U+2060`/`U+FEFF`/`U+00AD` are zero-width — so a name made only of
+   * those survived as a non-empty string and drew a blank, unsearchable row rather
+   * than falling back. The daemon does not strip them either: `"\u200b".trim()` has
+   * length 1, and `parseManifest` has no control-character rule on a name.
+   */
+  check(
+    "a name made of nothing visible falls back rather than drawing blank",
+    [
+      harnessName({ id: "a:b", label: "\u200b\u200b" }),
+      harnessName({ id: "a:b", label: "\u00ad\u2060\ufeff" }),
+      harnessName({ id: "a:b", label: "\u061c" }),
+    ],
+    ["a:b", "a:b", "a:b"],
+  );
+  check("while one that merely contains them keeps its words", harnessName({ id: "a:b", label: "Acme\u061cCorp" }), "Acme Corp");
+
+  /*
    * ⚠ **An agent with nothing to sign in to says so, and says it as good news.**
    * Measured: opencode runs against an empty `XDG_DATA_HOME` with no provider
    * variables at all, so `loggedIn` is `null` and every other reading of that
@@ -14205,12 +14341,22 @@ process.stdout.write("\nwhat one agent's card says\n");
   );
   check(
     "and every state draws exactly one badge, or none where there is nothing to report",
-    (["not_installed", "no_login", "signed_in", "signed_out", "unchecked"] as const).map((one) => {
-      const badge = agentBadge(one);
-      return badge === null ? `${one}: none` : `${one}: ${badge.tone}/${badge.text}`;
-    }),
+    (["not_installed", "start_refused", "no_login", "signed_in", "signed_out", "unchecked"] as const).map(
+      (one) => {
+        const badge = agentBadge(one);
+        return badge === null ? `${one}: none` : `${one}: ${badge.tone}/${badge.text}`;
+      },
+    ),
     [
       "not_installed: strong/not installed",
+      /*
+       * ⚠ **"would not start" and never "not signed in".** This badge reports what
+       * was observed — the agent declined to open a session — and every harness that
+       * can reach this state has no status to probe, so the app holds no evidence
+       * about a credential at all. Naming it a sign-in would also name the wrong
+       * remedy: for these harnesses the other one is to run the CLI on the machine.
+       */
+      "start_refused: strong/would not start",
       "no_login: none",
       "signed_in: plain/signed in",
       "signed_out: strong/not signed in",
@@ -14225,7 +14371,7 @@ process.stdout.write("\nwhat one agent's card says\n");
    */
   check(
     "and it is the only state that draws none",
-    (["not_installed", "no_login", "signed_in", "signed_out", "unchecked"] as const).filter(
+    (["not_installed", "start_refused", "no_login", "signed_in", "signed_out", "unchecked"] as const).filter(
       (one) => agentBadge(one) === null,
     ),
     ["no_login"],
@@ -14237,7 +14383,7 @@ process.stdout.write("\nwhat one agent's card says\n");
    * key box stays drawn, and a box with no stated purpose is the furniture this
    * screen keeps deleting.
    */
-  const noLoginLine = stanceLine("opencode", "no_login", false, "darwin");
+  const noLoginLine = stanceLine({ id: "opencode" }, "no_login", false, "darwin");
   check(
     "and its sentence says nothing is missing, and what the box below is for",
     [
@@ -14252,6 +14398,111 @@ process.stdout.write("\nwhat one agent's card says\n");
    * nothing is broken — and hiding it would hide the only control this agent has.
    */
   check("and the key box is still offered", tokenBlockFor("no_login", 0), "editable");
+
+  /*
+   * ⭐ **A harness that refused to open a session, which is the sixth state and
+   * the only one here that is a *measurement*.**
+   *
+   * Reported with a screenshot: the New session strip drew a tile for a harness a
+   * plugin had added, Start answered "rejected session/new: authentication
+   * required", and the tile was still there afterwards. `readLoginState` answers
+   * `pasted ? true : null` for every harness with no status command, so the
+   * credential axis could never say otherwise — and `agentStance` tested
+   * `no_flow` *before* that axis anyway.
+   *
+   * ⚠ **It was added above `no_flow` rather than by reordering the two arms below
+   * it, and the difference is three sentences.** A reorder would have let
+   * `signed_out` win for such a harness, and `stanceLine`'s signed-out arm blames
+   * the *host* — "macOS can't run its own sign-in, so a saved key is the only way
+   * in" — which is false on every platform here and forecloses the remedy the
+   * daemon's own hint offers first. `dividerWord` would have drawn "Sign in with a
+   * key instead" with nothing above it (Q3.513, again), and `storedChip` would
+   * have said "still isn't signed in" about a probe that never ran. None of the
+   * three is driven at `agentStance(true, false, "no_flow")`, so all three would
+   * have shipped silently.
+   *
+   * The second cell is what proves it: with no refusal, a harness with no sign-in
+   * is `no_login` exactly as before, whatever the credential axis says.
+   */
+  check(
+    "a harness that refused to start outranks having nothing to sign in to",
+    [
+      agentStance(true, null, "no_flow", true),
+      agentStance(true, false, "no_flow", false),
+      agentStance(true, null, "no_flow", false),
+      // Not installed still wins: a harness that is not there cannot have refused
+      // anything, and the older fact is the one worth drawing.
+      agentStance(false, null, "no_flow", true),
+      // And it reaches an ordinary harness too — this is not a contributed-only
+      // state, it is whatever the daemon last measured.
+      agentStance(true, true, null, true),
+    ],
+    ["start_refused", "no_login", "no_login", "not_installed", "start_refused"],
+  );
+  /*
+   * ⚠ **Absent means nothing was observed**, which is what an older daemon sends
+   * and what every other cell in this file passes. Asserted rather than assumed,
+   * because the argument's whole shape is that this axis defaults to silence.
+   */
+  check(
+    "and a daemon that never mentions it changes nothing",
+    [agentStance(true, null, "no_flow", undefined), agentStance(true, false, null, undefined)],
+    ["no_login", "signed_out"],
+  );
+  /*
+   * ⚠ **The sentence blames the harness, never the host.** That is the whole
+   * reason this is a member rather than a reorder: the agent was asked to open a
+   * session and said no, which is true on every platform. It also names both
+   * remedies where there is no button for either — a harness with no wizard is
+   * fixed by running its own program on the machine, or by a key — and it carries
+   * no word from the wire, since what the daemon recorded is drawn separately.
+   */
+  const refusedLine = stanceLine({ id: "byo:gemini", label: "Gemini" }, "start_refused", false, "darwin");
+  check(
+    "and its sentence blames the harness rather than the machine it is on",
+    [
+      refusedLine !== null,
+      /macOS|Windows|Linux|this machine can't/i.test(refusedLine ?? ""),
+      /session\/new|auth_required|-32000/.test(refusedLine ?? ""),
+      /key/i.test(refusedLine ?? ""),
+      // The label, not the namespaced id. Every sentence in this module named the
+      // agent with `agentLabel`, which answers the bare id for anything this
+      // product does not ship — so a harness a plugin added has been drawing
+      // `byo:gemini needs no sign-in.` on its own settings card.
+      (refusedLine ?? "").includes("Gemini"),
+      (refusedLine ?? "").includes("byo:gemini"),
+    ],
+    [true, false, false, true, true, false],
+  );
+  /*
+   * With a wizard below it the sentence stops at what happened: naming the button
+   * directly underneath is the self-reference this file keeps deleting.
+   */
+  check(
+    "and it stops there where there is a control to press",
+    /key|machine itself/i.test(stanceLine({ id: "claude" }, "start_refused", true) ?? ""),
+    false,
+  );
+  /*
+   * ⚠ **The two arms that fall through, and both would have been wrong.**
+   * `dividerWord` draws "Sign in with a key instead" whenever nothing sits above
+   * it — Q3.513's defect — and `storedChip` would otherwise report a stored key as
+   * plain "saved" beside a harness that would not start, which is the one arm
+   * where "saved" alone is misleading in the direction that matters.
+   */
+  check(
+    "the divider needs something above it here too",
+    [dividerWord("start_refused", false, "editable"), dividerWord("start_refused", true, "editable")],
+    [null, "or"],
+  );
+  check(
+    "and a stored key does not read as a working one",
+    storedChip({ id: "byo:gemini", label: "Gemini" }, "start_refused"),
+    "saved — Gemini still wouldn't start",
+  );
+  // The box is the strongest remedy this card has for a harness with no wizard,
+  // so it stays typeable.
+  check("and the key box is offered", tokenBlockFor("start_refused", 0), "editable");
 
   /*
    * ⚠ **And *two* screens draw this now, off the same call, because for a release
@@ -14296,9 +14547,18 @@ process.stdout.write("\nwhat one agent's card says\n");
     [
       /function agentStatusText/.test(newSessionRaw),
       /return "state unknown"/.test(newSessionRaw),
-      agentsRaw.includes(
-        "agentStance(candidate.available, candidate.loggedIn, candidate.login?.blocked)",
-      ),
+      /*
+       * ⚠ **Comments off and whitespace gone, because the subject is the argument
+       * list and not its formatting.** The call is four arguments over five lines
+       * with a paragraph inside it now — the literal-text form of this assertion
+       * broke on the reflow and said nothing about whether the fourth argument was
+       * right, which is a check that fails for the one reason it must not.
+       */
+      stripComments(agentsRaw)
+        .replace(/\s+/g, "")
+        .includes(
+          "agentStance(candidate.available,candidate.loggedIn,candidate.login?.blocked,candidate.lastStartRefusal!=null",
+        ),
       /agentStance\(/.test(stripComments(newSessionRaw)),
       newSessionRaw.includes("const shownHere = offersStripTile;"),
     ],
@@ -14384,11 +14644,25 @@ process.stdout.write("\nwhat one agent's card says\n");
    * which is the shape of the defect that put a private four-state ladder on the
    * New session tiles in the first place.
    */
-  const stances = ["not_installed", "no_login", "signed_in", "signed_out", "unchecked"] as const;
+  /*
+   * ⚠ **Every member, and it is a hand-written list on purpose.** These two sweeps
+   * are the file's only exhaustive statement about `tokenBlockFor`, whose body is
+   * two `if`s and a fallthrough — so a new stance joins it silently and the sweep
+   * is what makes that a decision. The list grew for `start_refused`, which falls
+   * through to `editable` correctly and by accident until it is written down here.
+   */
+  const stances = [
+    "not_installed",
+    "start_refused",
+    "no_login",
+    "signed_in",
+    "signed_out",
+    "unchecked",
+  ] as const;
   check(
     "a saved key is never hidden, whatever the stance",
     stances.map((stance) => tokenBlockFor(stance, 1) === "hidden"),
-    [false, false, false, false, false],
+    [false, false, false, false, false, false],
   );
   check(
     "and nothing is typeable where nothing could help",
@@ -14396,17 +14670,19 @@ process.stdout.write("\nwhat one agent's card says\n");
     // `no_login` is editable and it is the one state where the box is not a
     // remedy: nothing is broken, and a key buys *more models* rather than
     // admission. Hiding it would hide the only control that agent has.
-    ["hidden", "editable", "hidden", "editable", "editable"],
+    // `start_refused` is editable because there the box is the *strongest* remedy
+    // on the card — the harnesses that reach it have no wizard to run instead.
+    ["hidden", "editable", "editable", "hidden", "editable", "editable"],
   );
 
   /* The two commonest states say nothing at all: the badge says it and the
      control below does something about it. */
   check(
     "the card is silent where a sentence could only repeat the badge",
-    [stanceLine("codex", "signed_in", true), stanceLine("codex", "signed_out", true)],
+    [stanceLine({ id: "codex" }, "signed_in", true), stanceLine({ id: "codex" }, "signed_out", true)],
     [null, null],
   );
-  check("and speaks where there is no way in", stanceLine("codex", "signed_out", false) !== null, true);
+  check("and speaks where there is no way in", stanceLine({ id: "codex" }, "signed_out", false) !== null, true);
 
   /*
    * ⭐ **Codex's caveat is the one measurement that survives the cull** (Q2.200):
@@ -14436,15 +14712,15 @@ process.stdout.write("\nwhat one agent's card says\n");
   for (const id of AGENT_IDS) {
     for (const stance of stances) {
       for (const can of [true, false]) {
-        const line = stanceLine(id, stance, can);
+        const line = stanceLine({ id }, stance, can);
         if (line !== null) sentences.push(line);
       }
     }
     const caveat = credentialCaveat(id, true);
     if (caveat !== null) sentences.push(caveat);
     sentences.push(signOutSentence(id, 0), signOutSentence(id, 1));
-    for (const stance of stances) sentences.push(storedChip(id, stance));
-    const multi = multiSlotLine(id, 2);
+    for (const stance of stances) sentences.push(storedChip({ id }, stance));
+    const multi = multiSlotLine({ id }, 2);
     if (multi !== null) sentences.push(multi);
   }
   check(
@@ -14519,7 +14795,7 @@ process.stdout.write("\nwhat one agent's card says\n");
     ]),
     [null, null, null, null, null, null],
   );
-  check("claude is the only agent told it has a choice", multiSlotLine("claude", 1), null);
+  check("claude is the only agent told it has a choice", multiSlotLine({ id: "claude" }, 1), null);
   /*
    * ⚠ **And the caveat that duplicated the sentence above it is gone.** opencode's
    * said a key was not needed to get started — true, measured, and exactly what
@@ -14612,12 +14888,12 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "a machine path round-trips",
     parseSettingsRoute(seg(settingsPath("machines", "m_1" as never))),
-    { section: "machines", machineId: "m_1", system: null, agents: false },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false },
   );
   check(
     "a system path round-trips",
     parseSettingsRoute(seg(settingsPath("machines", "m_1" as never, "moonshot"))),
-    { section: "machines", machineId: "m_1", system: "moonshot", agents: false },
+    { section: "machines", machineId: "m_1", system: "moonshot", signin: null, agents: false },
   );
   /*
    * ⚠ **A system this client has never heard of still parses**, which is the one
@@ -14652,7 +14928,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "a segment that is not `systems` drops to the machine",
     parseSettingsRoute(["machines", "m_1", "sessions", "kimi"]),
-    { section: "machines", machineId: "m_1", system: null, agents: false },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false },
   );
   /*
    * ⚠ **`…/agents` names a screen again, and the tail of the old address goes
@@ -14669,12 +14945,12 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "the machine's agent strip parses",
     parseSettingsRoute(["machines", "m_1", "agents"]),
-    { section: "machines", machineId: "m_1", system: null, agents: true },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: true },
   );
   check(
     "and the old one-agent address falls to it, tail dropped",
     parseSettingsRoute(["machines", "m_1", "agents", "claude"]),
-    { section: "machines", machineId: "m_1", system: null, agents: true },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: true },
   );
   check(
     "which is the address the builder emits",
@@ -14684,7 +14960,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "and it round-trips",
     parseSettingsRoute(seg(agentStripPath("m_1" as never))),
-    { section: "machines", machineId: "m_1", system: null, agents: true },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: true },
   );
   /*
    * ⚠ **A strip route never carries a system and a system route never carries the
@@ -14704,7 +14980,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "a machine id under another section is ignored",
     parseSettingsRoute(["account", "m_1", "agents", "kimi"]),
-    { section: "account", machineId: null, system: null, agents: false },
+    { section: "account", machineId: null, system: null, signin: null, agents: false },
   );
   /*
    * The decoder is threaded in rather than applied inside, so the one place that
@@ -14734,17 +15010,17 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "a bare plugins segment is the machine",
     parseSettingsRoute(["machines", "m_1", "plugins"]),
-    { section: "machines", machineId: "m_1", system: null, agents: false },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false },
   );
   check(
     "and so is one that still names a plugin",
     parseSettingsRoute(["machines", "m_1", "plugins", "board"]),
-    { section: "machines", machineId: "m_1", system: null, agents: false },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false },
   );
   check(
     "including one nobody has installed",
     parseSettingsRoute(["machines", "m_1", "plugins", "not-installed"]),
-    { section: "machines", machineId: "m_1", system: null, agents: false },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false },
   );
   /*
    * ⚠ **Nothing in this module builds that path any more.** `pluginSettingsPath`
@@ -14764,7 +15040,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
    */
   check(
     "a system goes up to its machine",
-    settingsUp({ section: "machines", machineId: "m_1" as never, system: "moonshot", agents: false }),
+    settingsUp({ section: "machines", machineId: "m_1" as never, system: "moonshot", signin: null, agents: false }),
     { path: "/settings/machines/m_1", withinNav: false },
   );
   /*
@@ -14778,12 +15054,25 @@ process.stdout.write("\nwhich settings screen a URL names\n");
    */
   check(
     "the agent strip goes up to its machine, wherever it was opened from",
-    settingsUp({ section: "machines", machineId: "m_1" as never, system: null, agents: true }),
+    settingsUp({ section: "machines", machineId: "m_1" as never, system: null, signin: null, agents: true }),
+    { path: "/settings/machines/m_1", withinNav: false },
+  );
+  /*
+   * ⚠ **And so does a sign-in, which was the one leaf that did not.** It walked to
+   * the machines *list* — one level past its own machine — under a chevron reading
+   * "Back to Machines" beside a pane `settingsPaneTitle` titles "Sign-in". Same
+   * defect as the system leaf above, reintroduced by an `if` that enumerates the
+   * leaves rather than deriving them, and asserted here so the next leaf added has
+   * a row to copy.
+   */
+  check(
+    "a sign-in goes up to its machine, like the two leaves beside it",
+    settingsUp({ section: "machines", machineId: "m_1" as never, system: null, signin: "acme:gemini", agents: false }),
     { path: "/settings/machines/m_1", withinNav: false },
   );
   check(
     "and it is titled by what it is rather than by which machine",
-    settingsPaneTitle({ section: "machines", machineId: "m_1" as never, system: null, agents: true }),
+    settingsPaneTitle({ section: "machines", machineId: "m_1" as never, system: null, signin: null, agents: true }),
     "Agents",
   );
   /*
@@ -14805,7 +15094,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
       section: "machines" as const,
       machineId: "m_1" as never,
       system: null,
-      agents: true,
+      signin: null, agents: true,
     };
     const fromNew = "/new/m_1/%2FUsers%2Fme%2Fsrc";
     check(
@@ -14817,11 +15106,11 @@ process.stdout.write("\nwhich settings screen a URL names\n");
       "and nothing else in this sheet reads it",
       [
         settingsUp(
-          { section: "machines" as const, machineId: "m_1" as never, system: null, agents: false },
+          { section: "machines" as const, machineId: "m_1" as never, system: null, signin: null, agents: false },
           fromNew,
         ),
         settingsUp(
-          { section: "account" as const, machineId: null, system: null, agents: false },
+          { section: "account" as const, machineId: null, system: null, signin: null, agents: false },
           fromNew,
         ),
       ],
@@ -15026,9 +15315,174 @@ process.stdout.write("\nwhich settings screen a URL names\n");
       pane(["machines", "m_1"]),
       pane(["machines", "m_1", "systems"]),
       pane(["machines", "m_1", "systems", "moonshot"]),
+      pane(["machines", "m_1", "signin", "byo:gemini"]),
     ],
-    ["Machine settings", "Machine settings", "System settings"],
+    /*
+     * ⚠ **"Sign-in", and the two leaves say the same word on purpose.** The list
+     * above them holds providers *and* harnesses now — signing in on a machine is
+     * not only about inference — so what a reader opened is a sign-in either way,
+     * and the leaves differ only in which of the machine's two catalogues resolved
+     * the name. That is an internal difference and gets no presentation, which is
+     * this screen's own standing rule about a row's kind.
+     */
+    ["Machine settings", "Machine settings", "Sign-in", "Sign-in"],
   );
+  /* ---------------------------------------------------------------- *
+   * ⭐ The Sign-ins list holds two kinds of row
+   *
+   * Reported: a plugin declared that its harness reads `GEMINI_API_KEY`, the
+   * daemon accepted that key over `PUT /agent-auth/:agent`, and **no screen
+   * anywhere offered a box to type it into**. A paste box for a harness is drawn
+   * by `AgentDetail`, and for a harness with no wizard the only screen that
+   * mounted it was a *system's* card, gated on `system.loginVia !== null`. Every
+   * built-in is named that way — Anthropic names claude, OpenRouter and OpenCode
+   * Zen both name opencode — and nothing requires a plugin to contribute such a
+   * provider, so a plugin declaring only routed ones left its harness's slots
+   * unreachable. `docs/PLUGINS.md` promised the box in as many words.
+   *
+   * So the list stopped being about inference. `unspokenFor` is the membership
+   * rule and it is pure, which is what lets these run with no DOM.
+   * ---------------------------------------------------------------- */
+  {
+    const { unspokenFor, anyKeySet } = await import("../src/agents.js");
+    const sys = (id: string, loginVia: string | null): unknown => ({ id, displayName: id, loginVia });
+    const harness = (id: string, slots: { envName: string; set: boolean }[]): unknown => ({
+      id,
+      displayName: id,
+      available: true,
+      loggedIn: null,
+      credentials: slots,
+    });
+    const built = [
+      sys("anthropic", "claude"),
+      sys("openai", "codex"),
+      sys("moonshot", "kimi"),
+      sys("openrouter", "opencode"),
+      // The example plugin's own shape: a routed provider, naming no harness.
+      sys("byo:deepseek", null),
+    ] as never;
+    const machine = [
+      harness("claude", [{ envName: "ANTHROPIC_API_KEY", set: true }]),
+      harness("opencode", [{ envName: "OPENROUTER_API_KEY", set: false }]),
+      harness("byo:gemini", [{ envName: "GEMINI_API_KEY", set: false }]),
+    ] as never;
+    /*
+     * ⚠ **The first half is what stops this being a duplicate.** Adding every
+     * harness would put claude beside Anthropic — two rows, one credential, two
+     * answers to *signed in?* — which is the shape `MachineSystemsSection` was
+     * built to remove and says so in its own docblock. So on a machine with no
+     * plugins this answers nothing at all, and the list is byte-for-byte what it
+     * was before any of this.
+     */
+    check(
+      "only a harness no provider speaks for gets a row of its own",
+      unspokenFor(machine, built).map((one: { id: string }) => one.id),
+      ["byo:gemini"],
+    );
+    /*
+     * And the plugin that *did* contribute a provider naming its harness keeps the
+     * one card it already had, rather than gaining a second.
+     */
+    check(
+      "and a plugin that named its own harness gets no second row",
+      unspokenFor(machine, [...(built as unknown as unknown[]), sys("byo:native", "byo:gemini")] as never).map(
+        (one: { id: string }) => one.id,
+      ),
+      [],
+    );
+    /*
+     * ⚠ **A harness with nothing to paste gets no row either.** `envNames: []` is
+     * an author saying a key is not how this is configured — opencode's own
+     * `authHint` sends people to a terminal — and a row opening an empty card is a
+     * control that is not true in the state it is drawn in.
+     */
+    check(
+      "nor one with nowhere to put a key",
+      unspokenFor([harness("byo:keyless", [])] as never, built).map((one: { id: string }) => one.id),
+      [],
+    );
+    /*
+     * ⚠ **An unread listing answers nothing, and the systems half is the one that
+     * matters.** Without the providers there is no way to know which harnesses are
+     * already spoken for, and guessing the permissive way draws a duplicate row for
+     * claude for as long as that read is in flight. The screen degrades the other
+     * way round on purpose: a failed `GET /agent-auth` leaves the providers exactly
+     * as they were.
+     */
+    check(
+      "and an unread listing offers nothing",
+      [unspokenFor(machine, null).length, unspokenFor(null, built).length],
+      [0, 0],
+    );
+    // The badge's own fact, which is a key rather than a sign-in: these are exactly
+    // the harnesses with no wizard, so "signed in" is a word this row cannot use.
+    check(
+      "a row says whether a key is saved, never whether anybody signed in",
+      [
+        anyKeySet(harness("a", [{ envName: "X", set: false }, { envName: "Y", set: true }]) as never),
+        anyKeySet(harness("b", [{ envName: "X", set: false }]) as never),
+      ],
+      [true, false],
+    );
+    /*
+     * The address, and the two leaves are separate because a plugin may name the
+     * same local id in both of its contribution blocks — so one segment could not
+     * say which catalogue resolves it.
+     */
+    const { harnessSigninPath, parseSettingsRoute } = await import("../src/settings.js");
+    // With the decoder the real caller passes: a contributed id carries a colon,
+    // which `harnessSigninPath` percent-encodes, so an identity decode here would
+    // be asserting the wrong half of the round trip.
+    const walked = parseSettingsRoute(
+      harnessSigninPath("m_1" as never, "byo:gemini").slice("/settings/".length).split("/"),
+      decodeURIComponent,
+    );
+    check(
+      "the harness leaf round-trips through its own segment",
+      [walked.signin, walked.system, walked.agents],
+      ["byo:gemini", null, false],
+    );
+    /*
+     * ⚠ **And every address that ever worked still does**, which is why the
+     * provider leaf was left where it was rather than moved under one shared
+     * segment.
+     */
+    const asBefore = parseSettingsRoute(["machines", "m_1", "systems", "moonshot"]);
+    check("while the provider leaf is untouched", [asBefore.system, asBefore.signin], ["moonshot", null]);
+    /*
+     * ⚠ **Placements, read off disk, because nothing typed can hold one.** The
+     * rule is pure and asserted above; what is not expressible in a type is that
+     * the list actually calls it, that the row leads to the leaf rather than to the
+     * provider one, and that the heading stopped saying a word that is no longer
+     * true of what is under it.
+     */
+    const panel = stripComments(
+      readFileSync(new URL("../src/ui/settings/SystemsPanel.tsx", import.meta.url), "utf8"),
+    );
+    const machinePane = stripComments(
+      readFileSync(new URL("../src/ui/settings/MachineSection.tsx", import.meta.url), "utf8"),
+    );
+    check(
+      "the list draws the rule's rows, after every provider, and leads to the other leaf",
+      [
+        /unspokenFor\(agents, systems\)\.map/.test(panel),
+        // After the providers: a group appearing rather than a group moving.
+        panel.indexOf("unspokenFor(agents, systems)") > panel.indexOf("onClick={() => onPick(system.id)}"),
+        /onPickHarness\(agent\.id\)/.test(panel),
+        /harnessSigninPath\(machineId, agent\)/.test(
+          stripComments(
+            readFileSync(new URL("../src/ui/settings/MachineSystemsSection.tsx", import.meta.url), "utf8"),
+          ),
+        ),
+      ],
+      [true, true, true, true],
+    );
+    check(
+      "and the heading no longer says the half that came first",
+      [machinePane.includes(">Sign-ins</h2>"), machinePane.includes(">Systems</h2>")],
+      [true, false],
+    );
+  }
   /*
    * ⚠ **And the general form of that defect, rather than the one instance of it:
    * no depth may share its title with its own parent's.** `settingsUpLabel` is
@@ -18451,11 +18905,11 @@ process.stdout.write("\na sign-in that is not offered\n");
    * every BSD, so the name comes from the daemon — a hardcoded "macOS" would tell
    * a FreeBSD operator something false in the one sentence meant to absolve them.
    */
-  check("the sentence names the system", stanceLine("claude", "signed_out", false, "darwin"), "macOS can't run Claude Code's own sign-in, so a saved key is the only way in.");
+  check("the sentence names the system", stanceLine({ id: "claude" }, "signed_out", false, "darwin"), "macOS can't run Claude Code's own sign-in, so a saved key is the only way in.");
   check("and a different BSD gets its own name", osName("freebsd"), "FreeBSD");
   check("while a daemon that does not say names nothing", osName(undefined), "This machine");
-  check("a wizard that can run says nothing at all", stanceLine("claude", "signed_out", true, "darwin"), null);
-  check("and the panel passes the platform through", /stanceLine\(agent\.id, stance, canSignIn, os\)/.test(panel), true);
+  check("a wizard that can run says nothing at all", stanceLine({ id: "claude" }, "signed_out", true, "darwin"), null);
+  check("and the panel passes the platform through", /stanceLine\(agent, stance, canSignIn, os\)/.test(panel), true);
 
   /*
    * **The command sits on the field it fills.** It was a paragraph above the
@@ -18797,11 +19251,11 @@ process.stdout.write("\nwhat a navigation moves\n");
   const session = { name: "session", ref: { machineId: "m", sessionId: "s" } } as never;
   const other = { name: "session", ref: { machineId: "m", sessionId: "t" } } as never;
   const gate = { name: "gate", screen: "register" } as never;
-  const index = { name: "settings", section: null, machineId: null, system: null } as never;
-  const account = { name: "settings", section: "account", machineId: null, system: null } as never;
-  const users = { name: "settings", section: "users", machineId: null, system: null } as never;
-  const machines = { name: "settings", section: "machines", machineId: null, system: null } as never;
-  const oneMachine = { name: "settings", section: "machines", machineId: "m", system: null } as never;
+  const index = { name: "settings", section: null, machineId: null, system: null, signin: null } as never;
+  const account = { name: "settings", section: "account", machineId: null, system: null, signin: null } as never;
+  const users = { name: "settings", section: "users", machineId: null, system: null, signin: null } as never;
+  const machines = { name: "settings", section: "machines", machineId: null, system: null, signin: null } as never;
+  const oneMachine = { name: "settings", section: "machines", machineId: "m", system: null, signin: null } as never;
   /*
    * ⚠ **The deepest fixture carries the field the depth is decided by.** This was
    * `agent: "claude"`, left behind when the route's leaf became a system, and `as
@@ -18811,7 +19265,18 @@ process.stdout.write("\nwhat a navigation moves\n");
    * answered 4 just as readily. The literal is the only thing standing in for the
    * type here, which is exactly why it has to name the real field.
    */
-  const oneSystem = { name: "settings", section: "machines", machineId: "m", system: "moonshot" } as never;
+  const oneSystem = { name: "settings", section: "machines", machineId: "m", system: "moonshot", signin: null } as never;
+  /*
+   * ⚠ **The third leaf under a machine, which no fixture named.** `signin` shipped
+   * with a shape, a parse, a title and a path builder and was in neither `depthOf`
+   * nor `settingsUp`, so its ◀ walked past the machine to the machines list and it
+   * got no slide in either direction. Nothing here could see it: a `grep` for
+   * `signin:` across this driver returned nothing at all, and every fixture above
+   * omitting the key meant `route.signin !== null` was satisfied by `undefined` the
+   * moment the arm was added — the exact trap the paragraph above this one records.
+   * So all six carry it now, and this one carries a value.
+   */
+  const oneSignin = { name: "settings", section: "machines", machineId: "m", system: null, signin: "acme:gemini" } as never;
 
   check("opening a conversation pushes a screen", navMove(home, session), "push");
   check("and leaving it pops one", navMove(session, home), "pop");
@@ -18827,6 +19292,9 @@ process.stdout.write("\nwhat a navigation moves\n");
   check("a machine's agents are deeper still", navMove(machines, oneMachine), "section-push");
   check("and one system deeper again", navMove(oneMachine, oneSystem), "section-push");
   check("walking back up pops each time", navMove(oneSystem, oneMachine), "section-pop");
+  check("a machine's sign-in is a leaf like the other two", depthOf(oneSignin), depthOf(oneSystem));
+  check("so opening one from the machine slides", navMove(oneMachine, oneSignin), "section-push");
+  check("and walking back up from it pops", navMove(oneSignin, oneMachine), "section-pop");
   /*
    * ⚠ **A plugin is no longer a depth in this sheet, and the URL that used to be
    * one has to agree.** Its settings moved to the plugin's own page under
@@ -19296,11 +19764,11 @@ process.stdout.write("\nwhat Telegram's own control does\n");
   const home = { name: "home" } as never;
   const gate = { name: "gate", screen: "register" } as never;
   const session = { name: "session", ref: { machineId: "m", sessionId: "s" } } as never;
-  const index = { name: "settings", section: null, machineId: null, system: null } as never;
-  const account = { name: "settings", section: "account", machineId: null, system: null } as never;
-  const machines = { name: "settings", section: "machines", machineId: null, system: null } as never;
-  const oneMachine = { name: "settings", section: "machines", machineId: "m", system: null } as never;
-  const oneSystem = { name: "settings", section: "machines", machineId: "m", system: "moonshot" } as never;
+  const index = { name: "settings", section: null, machineId: null, system: null, signin: null } as never;
+  const account = { name: "settings", section: "account", machineId: null, system: null, signin: null } as never;
+  const machines = { name: "settings", section: "machines", machineId: null, system: null, signin: null } as never;
+  const oneMachine = { name: "settings", section: "machines", machineId: "m", system: null, signin: null } as never;
+  const oneSystem = { name: "settings", section: "machines", machineId: "m", system: "moonshot", signin: null } as never;
 
   /*
    * **`null` is the answer, not the absence of one.** Telegram has one control:
@@ -19807,13 +20275,22 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
       "Child extends Base",
     ]);
     /*
-     * ⚠ **45, raised from 40 when `systems.ts` and `agentask.ts` joined the source
-     * list.** Measured: 44 interfaces without them, 47 with — the three the
-     * assembled-agent work put on the wire. A floor of 40 would have gone on
-     * passing if either file were dropped from the list again, which is the exact
-     * silence this number exists to break.
+     * ⚠ **48, raised from 45 when `HarnessContribution` and `SystemContribution`
+     * joined the mirror.** Measured: 44 interfaces before `systems.ts` and
+     * `agentask.ts` were sources at all, 47 with them, **50** with the two a
+     * contributed harness and provider put on the wire. The floor is the count
+     * less the slack the last raise chose, and it moves *with* the corpus — a floor
+     * left where it was is one that goes on passing over a whole group deleted,
+     * which is the exact silence this number exists to break.
+     *
+     * ⚠ **The number and the sentence above it move together or neither means
+     * anything.** This is the second time a raise has been owed and the first time
+     * one was nearly missed: a corpus that grows while its floor stands still looks
+     * healthier every release. The sibling driver in the catalogue service hit the
+     * sharper version of it in the same week — its corpus tripled against an
+     * unmoved floor, which would have passed with an entire check group removed.
      */
-    report("there are mirrored interfaces to compare at all", compared >= 45, `${compared} interfaces`);
+    report("there are mirrored interfaces to compare at all", compared >= 48, `${compared} interfaces`);
     check("and the session snapshot is one of them", fieldsOf(registrySrc, "SessionSnapshot") !== null, true);
     check("no interface this client mirrors knows less than the daemon's own", behind, []);
 
@@ -20446,9 +20923,118 @@ process.stdout.write("\nwhat somebody is shown before a plugin is sent anywhere\
   const bare = await peek(tarOf({ "plugin.json": JSON.stringify({ id: "x", name: "X", version: "1.0.0" }) }));
   check(
     "a plugin that asks for nothing reads as asking for nothing",
-    bare.kind === "ok" ? [bare.manifest.scopes, bare.manifest.hooks, bare.manifest.net] : bare,
-    [[], [], []],
+    bare.kind === "ok" ? [bare.manifest.scopes, bare.manifest.hooks, bare.manifest.net, bare.manifest.adds] : bare,
+    [[], [], [], []],
   );
+
+  /*
+   * ⚠ **The two lines that are the disclosure *and* the comparison, which is the
+   * whole reason they are strings rather than objects.** `consentGap` on the daemon
+   * and `consentBroken` on the way back are set differences over exactly these, so
+   * what a person reads and what is checked are one value — there is no second
+   * rendering of the same fact to drift. It is also why the *whole* address appears
+   * rather than an origin: a plugin showing `https://api.groq.com` and shipping
+   * `https://api.groq.com/../evil` would pass an origin comparison.
+   *
+   * Read leniently, like everything else here: this reader may fail to describe an
+   * archive and may never invent one, and what it must not do is *under*-report.
+   */
+  const adding = await peek(
+    tarOf({
+      "plugin.json": JSON.stringify({
+        id: "acme",
+        name: "Acme",
+        version: "1.0.0",
+        api: 5,
+        scopes: ["harness", "system"],
+        contributes: {
+          harnesses: [{ id: "gemini", name: "Gemini", command: "gemini", args: ["acp"] }],
+          systems: [{ id: "groq", name: "Groq", baseUrl: "https://api.groq.com/anthropic" }],
+        },
+      }),
+    }),
+  );
+  check(
+    "what a plugin adds is one line each, and the line names the argv and the address",
+    adding.kind === "ok" ? adding.manifest.adds : adding,
+    ["harness gemini runs gemini acp", "system groq sends keys to https://api.groq.com/anthropic"],
+  );
+  /*
+   * ⚠ **A provider with no endpoint says so rather than being left out.** Its key
+   * box is its own harness's, so nothing is sent anywhere by the daemon — but a
+   * blank in a disclosure reads as an absence, and this is the one place a person
+   * finds out the plugin adds a provider at all.
+   */
+  const native = await peek(
+    tarOf({
+      "plugin.json": JSON.stringify({
+        id: "acme",
+        name: "Acme",
+        version: "1.0.0",
+        api: 5,
+        scopes: ["system"],
+        contributes: { systems: [{ id: "zen", name: "Zen" }] },
+      }),
+    }),
+  );
+  check(
+    "a provider this daemon sends nothing to still appears",
+    native.kind === "ok" ? native.manifest.adds : native,
+    ["system zen sends keys to nowhere"],
+  );
+  /*
+   * ⚠ **The address is normalised here because it is normalised there, and this
+   * caught a real defect** — a manifest writing `https://api.groq.com/anthropic/`,
+   * which is the ordinary way somebody writes a base URL, produced one string here
+   * and another in `parseManifest`, so `consentGap` answered *"that commit asks for
+   * more than was shown"* about a plugin that had asked for exactly what was shown.
+   * An alarm that cries wolf is the one failure this whole path is written against.
+   *
+   * Driven against the daemon's own reader rather than against a literal, which is
+   * the only form of this assertion that cannot drift: the two functions are in two
+   * packages that may not import each other, and what has to hold is that they agree.
+   */
+  {
+    const { parseManifest } = await import("../../../src/plugins/manifest.js");
+    const { addedLines } = await import("../../../src/plugins/source.js");
+    const { readManifestText } = await import("../src/pluginArchive.js");
+    const differed: string[] = [];
+    for (const baseUrl of [
+      "https://api.groq.com/anthropic/",
+      "https://api.groq.com/a/../evil",
+      "https://api.groq.com",
+      "http://127.0.0.1:11434/v1/",
+    ]) {
+      const json = JSON.stringify({
+        id: "acme",
+        name: "Acme",
+        version: "1.0.0",
+        api: 5,
+        scopes: ["system"],
+        contributes: {
+          systems: [
+            {
+              id: "groq",
+              name: "Groq",
+              apiType: "anthropic",
+              baseUrl,
+              authHeader: { name: "authorization", prefix: "Bearer " },
+              models: [{ id: "m", name: "M" }],
+            },
+          ],
+        },
+      });
+      const parsed = parseManifest(json);
+      if (!parsed.ok) {
+        differed.push(`${baseUrl}: refused`);
+        continue;
+      }
+      const here = readManifestText(json);
+      const drawn = here.kind === "ok" ? here.manifest.adds : ["unreadable"];
+      if (JSON.stringify(drawn) !== JSON.stringify(addedLines(parsed.manifest))) differed.push(baseUrl);
+    }
+    check("what this screen draws is the string the daemon compares, address for address", differed, []);
+  }
 
   /*
    * ⚠ **The ceiling is charged against what the decompressor produced**, not
@@ -20992,7 +21578,7 @@ process.stdout.write("\nwhat somebody is shown before a plugin is sent anywhere\
    * generous costs nobody anything and a reader that was blind costs the operator
    * the whole point of the screen.
    */
-  const shown = { scopes: ["sessions.read"], net: [], hooks: ["turn.ended"] };
+  const shown = { scopes: ["sessions.read"], net: [], hooks: ["turn.ended"], adds: [] };
   check(
     "a plugin that installed exactly what it showed says nothing",
     consentBroken(shown, { scopes: ["sessions.read"], net: [], contributes: { hooks: ["turn.ended"] } }),
@@ -21015,6 +21601,53 @@ process.stdout.write("\nwhat somebody is shown before a plugin is sent anywhere\
   check(
     "and a plugin that ended up with less than it showed is not a broken consent",
     consentBroken(shown, { scopes: [], net: [], contributes: { hooks: [] } }),
+    null,
+  );
+  /*
+   * ⚠ **The fourth compared field, and the two largest things this screen can
+   * show.** A harness is a program the machine will run as its owner on every
+   * session started with it; a provider is a host a key pasted here is sent to. A
+   * row that came back holding one the screen did not draw is exactly what this
+   * function exists to catch, and it was the one gap the three above could not see
+   * — `consentGap` on the daemon refuses first, and this is the half that does not
+   * depend on having predicted the failure.
+   */
+  check(
+    "a plugin that came back adding an agent nobody was shown says so, and names what it runs",
+    consentBroken(shown, {
+      scopes: ["sessions.read"],
+      net: [],
+      contributes: {
+        hooks: ["turn.ended"],
+        harnesses: [{ id: "gemini", command: "gemini", args: ["acp"] }],
+        systems: [{ id: "groq", baseUrl: "https://api.groq.com/anthropic" }],
+      },
+    }),
+    "That plugin asked for more than this screen showed: harness gemini runs gemini acp; " +
+      "system groq sends keys to https://api.groq.com/anthropic. Remove it unless you know why.",
+  );
+  check(
+    "and one that came back with exactly what was drawn says nothing",
+    consentBroken(
+      { ...shown, adds: ["harness gemini runs gemini acp"] },
+      {
+        scopes: ["sessions.read"],
+        net: [],
+        contributes: { hooks: ["turn.ended"], harnesses: [{ id: "gemini", command: "gemini", args: ["acp"] }] },
+      },
+    ),
+    null,
+  );
+  /*
+   * ⚠ **Absent on the installed side must mean *none*, not *unknown*.** A daemon
+   * older than this tab sends no such field — and it also refuses a manifest that
+   * declares one, so "it did not say" and "there are none" really are the same fact
+   * there. Reading absence as unknown and refusing would take every install on
+   * every un-updated machine down over a field they cannot send.
+   */
+  check(
+    "and a daemon too old to describe its contributions is not a breach",
+    consentBroken(shown, { scopes: ["sessions.read"], net: [], contributes: { hooks: ["turn.ended"] } }),
     null,
   );
 
@@ -24307,14 +24940,60 @@ process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
    * so adding one that is also a router is a green sweep and a red member check.
    */
   check(
-    "exactly one harness is not a starting point on its own",
-    AGENT_IDS.filter((id: string) => !startsBare(id)),
+    "exactly one harness this product ships is not a starting point on its own",
+    AGENT_IDS.filter((id: string) => !startsBare({ id })),
     ["opencode"],
   );
   check(
     "and every other one is",
-    AGENT_IDS.filter((id: string) => startsBare(id)).length,
+    AGENT_IDS.filter((id: string) => startsBare({ id })).length,
     AGENT_IDS.length - 1,
+  );
+  /*
+   * ⭐ **And a harness a plugin added is never one — a plugin adds a harness, not
+   * an agent.**
+   *
+   * It answered `standalone === true` off the manifest for a release, and that
+   * field is gone. Spelling the default as "no tile" made the wrong answer rarer
+   * without making it unsayable: the claim is the one thing in that manifest
+   * nothing on either side can check, and an author writes `true` because their
+   * harness feels like a whole answer to them. This predicate's subject is the
+   * **model**, and a harness this product has never run cannot be known to be its
+   * own — which is Q3.522's failure with somebody else's binary: a session billed
+   * to the operator, on a model nobody chose, under a tile that names none, and
+   * unlike opencode nothing here could find out afterwards what it ran.
+   *
+   * Driven with the field still present, because a manifest that carries it must
+   * install unchanged and simply not be read — and because a reader that starts
+   * consulting it again would otherwise pass.
+   */
+  check(
+    "a harness a plugin added is never a starting point on its own",
+    [
+      startsBare({ id: "acme:gemini" } as { id: string }),
+      startsBare({ id: "acme:gemini", standalone: true } as unknown as { id: string }),
+      startsBare({ id: "acme:gemini", standalone: false } as unknown as { id: string }),
+    ],
+    [false, false, false],
+  );
+  check(
+    "and a built-in still answers from this product's own list",
+    [startsBare({ id: "opencode" }), startsBare({ id: "claude" })],
+    [false, true],
+  );
+  /*
+   * ⚠ **Read off the source as well, because a flat `false` is the shape that can
+   * be re-derived by accident.** The daemon no longer sends the field and the wire
+   * type no longer carries it, so a reader reaching for `agent.standalone` would
+   * be reading `undefined` — falsy, therefore green, therefore silent — right up
+   * until somebody restored the field on either side.
+   */
+  check(
+    "and it consults nothing a manifest could have said",
+    /standalone/.test(
+      stripComments(readFileSync(new URL("../src/ui/agentCard.ts", import.meta.url), "utf8")),
+    ),
+    false,
   );
   check(
     "so a bare pick of it is not offered, however installed and available it is",
@@ -24365,27 +25044,66 @@ process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
    * ---------------------------------------------------------------- */
   const { offersTile, agentStance: stanceOf } = await import("../src/ui/agentCard.js");
   /*
-   * ⚠ **Swept over all five states, and the three that stay are the point.**
+   * ⚠ **Swept over all six states, and the three that stay are the point.**
    * `unchecked` is the load-bearing one: it is kimi's **permanent** answer —
    * `AGENT_LOGIN.kimi.status` is null, so `loggedIn` is never anything else — and
    * it is what claude answers when a probe times out. Hiding on it would delete
    * kimi from this screen on every machine in the fleet and make a slow probe look
    * like an uninstall. A sixth state has to arrive here as a decision.
+   *
+   * ⚠ **The sixth arrived, and it arrived as a decision only because `offersTile`
+   * stopped being a negative allowlist.** It was
+   * `stance !== "not_installed" && stance !== "signed_out"`, which answers a silent
+   * `true` for anything it has not heard of — so `start_refused` would have kept
+   * its tile, quietly, while the paragraph above claimed it could not. It is a
+   * `switch` with a `never` arm now, which is `AgentGlyph`'s lesson in another
+   * file: a default that reads as safe is not the same as a default that was
+   * taken.
    */
   check(
-    "two states of five keep an agent out of the picker, and they are the two that cannot start",
-    (["not_installed", "no_login", "signed_in", "signed_out", "unchecked"] as const).map((one) => [
-      one,
-      offersTile(one),
-    ]),
+    "three states of six keep an agent out of the picker, and they are the ones that cannot start",
+    (["not_installed", "start_refused", "no_login", "signed_in", "signed_out", "unchecked"] as const).map(
+      (one) => [one, offersTile(one)],
+    ),
     [
       ["not_installed", false],
+      ["start_refused", false],
       ["no_login", true],
       ["signed_in", true],
       ["signed_out", false],
       ["unchecked", true],
     ],
   );
+  /*
+   * ⚠ **And the predicate is exhaustive rather than an allowlist**, read off the
+   * source because a `never` arm leaves nothing at runtime to observe. This is the
+   * assertion that makes the paragraph above true of the *seventh* state as well.
+   */
+  check(
+    "and it decides every state rather than defaulting to a tile",
+    /export function offersTile\(stance: AgentStance\): boolean \{\s*switch \(stance\)/.test(
+      readFileSync(new URL("../src/ui/agentCard.ts", import.meta.url), "utf8"),
+    ),
+    true,
+  );
+  /*
+   * ⚠ **A harness a plugin added has to land on `no_login` and never on
+   * `unchecked`, and the difference is a badge every machine in the fleet would
+   * have carried.** It has no sign-in and no status probe — deliberately, per
+   * `HarnessContribution` — so the daemon sends
+   * `login: {blocked: "no_flow", …}` for it. With no `login` object at all,
+   * `agentStance(true, null, undefined)` answers `unchecked`, whose badge reads
+   * *cannot check*: a sentence about a probe that failed, drawn permanently over an
+   * agent that runs perfectly. `no_flow` is the one reason in that vocabulary which
+   * is a fact about the **agent** rather than about the host, which is exactly what
+   * this is.
+   */
+  check(
+    "a harness a plugin added is an agent with nothing to sign in to, not one nobody could ask",
+    [stanceOf(true, null, "no_flow"), stanceOf(true, null, undefined)],
+    ["no_login", "unchecked"],
+  );
+  check("and it gets a tile", offersTile(stanceOf(true, null, "no_flow")), true);
   /*
    * ⚠ **And a stored pick is weighed the same way**, which is the half that has
    * gone wrong every time this screen has changed what it draws: a pick of a
@@ -24436,8 +25154,8 @@ process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
   check(
     "and the two rules do not stand in for each other",
     [
-      startsBare("opencode") && offersTile(stanceOf(true, null, "no_flow")),
-      startsBare("claude") && offersTile(stanceOf(true, false)),
+      startsBare({ id: "opencode" }) && offersTile(stanceOf(true, null, "no_flow")),
+      startsBare({ id: "claude" }) && offersTile(stanceOf(true, false)),
     ],
     [false, false],
   );
@@ -24588,7 +25306,15 @@ process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
     [
       strip.includes("const shown = agents.filter(shownHere);"),
       stripRow.includes("{drawn.map((row) =>"),
-      stripRow.includes("subline: harnessSubline(candidate.id, systems),"),
+      /*
+       * ⚠ **And the *third* argument is pinned with it, because it is what keeps a
+       * contributed harness from drawing a blank line.** A harness that is native
+       * to no provider — the common case for one a plugin added, paired only with
+       * built-in providers — answers `""` here, which is a tile with a title and
+       * nothing under it beside tiles that have one. `contributedBy` is the honest
+       * second answer, and passing it is the whole of the fix.
+       */
+      stripRow.includes("subline: harnessSubline(candidate.id, systems, candidate.contributedBy),"),
       strip.includes("agentBadge"),
     ],
     [true, true, true, false],
@@ -24607,6 +25333,7 @@ process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
    */
   {
     const { harnessSubline } = await import("../src/agents.js");
+    const { MAX_HARNESS_NAME_CHARS } = await import("../src/ui/agentCard.js");
     const systems = [
       { id: "anthropic", displayName: "Anthropic", nativeHarness: "claude" },
       { id: "openai", displayName: "OpenAI", nativeHarness: "codex" },
@@ -24633,6 +25360,31 @@ process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
     // Empty rather than a placeholder: the slot is reserved at both call sites, and
     // a vendor this client cannot place is not one it should be naming.
     check("and nothing is invented for a harness no system claims", harnessSubline("claude", [] as never), "");
+    /*
+     * ⚠ **Except where there *is* something honest to say, which is a harness a
+     * plugin added.** Empty was right while every harness with a row had a vendor;
+     * for a contributed one paired only with built-in providers, native to none,
+     * the blank line is the **common** case — a tile with a title and nothing under
+     * it beside tiles that have one, which is what a second-class row looks like.
+     * "from <plugin>" is not a vendor and is not pretending to be: it answers the
+     * question somebody actually has about a row they do not recognise.
+     */
+    check(
+      "while a harness a plugin added says where it came from",
+      harnessSubline("acme:gemini", systems, { pluginName: "Acme Tools" }),
+      "from Acme Tools",
+    );
+    check(
+      "and a vendor still wins over that, where there is one",
+      harnessSubline("claude", systems, { pluginName: "Acme Tools" }),
+      "Anthropic",
+    );
+    // Somebody else's prose, bounded on the way in like every other name here.
+    check(
+      "and the plugin's name is bounded the same way a harness's is",
+      harnessSubline("acme:gemini", [] as never, { pluginName: "P".repeat(200) }).length,
+      "from ".length + MAX_HARNESS_NAME_CHARS,
+    );
   }
   /*
    * ⚠ **One `.map` over an ordered list, where it was two in sequence — and the
@@ -24715,6 +25467,29 @@ process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
       strip.includes('"This machine reports no agents."'),
       strip.includes('"No agent on this machine is ready to start."'),
       strip.includes("const nothingAtAll = shown.length === 0"),
+    ],
+    [true, true, true],
+  );
+  /*
+   * ⚠ **The second sentence now has two endings, and the assertion above cannot
+   * tell them apart.** It matches a literal that appears twice, so it went from
+   * distinguishing the arms to being satisfied by either — the failure this file
+   * warns about generally and had here specifically.
+   *
+   * The second ending exists because the first overclaimed: the gear opens a
+   * screen that lists harnesses `startsBare` answers true for and nothing else, so
+   * on a machine holding only opencode, or only a contributed harness without
+   * one a plugin added, "the gear above lists them all" pointed at a screen that would
+   * draw *This machine reports no agents* — two screens answering one question,
+   * one of them wrong. What is true in that state is the bar at its foot, which is
+   * always drawn.
+   */
+  check(
+    "and the gear is only named for what it will actually show",
+    [
+      strip.includes("agents.some(startsBare)"),
+      strip.includes('"The gear above lists them all, with what each one said."'),
+      strip.includes('"The gear above is where to add one."'),
     ],
     [true, true, true],
   );
@@ -25478,6 +26253,88 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ] as never),
     true,
   );
+  /* ---------------------------------------------------------------- *
+   * ⭐ And a harness that refused to open a session
+   *
+   * The reported defect: a harness a plugin added kept its tile after the machine
+   * had been told it would not start. Its `loggedIn` is permanently `null` — there
+   * is no status to probe — so the two arms above could never take the tile away,
+   * and every press cost a worktree and a branch before the agent declined.
+   *
+   * ⚠ **The refusal axis reaches the preset arm and the credential axis still does
+   * not, which is the pair that has to be asserted together.** The comment above
+   * `ca_so` is unchanged and still true: an assembled agent runs on the *system's*
+   * saved key, so a signed-out codex still starts one. A refused *start* is a
+   * different fact — the harness declined to open a session at all — but only
+   * where it was measured with routing already applied, because `applySystem` runs
+   * before `session/new` and a **bare** refusal has told nobody anything about a
+   * start that runs on somebody else's key.
+   * ---------------------------------------------------------------- */
+  const refused = (id: string, routed: boolean): unknown => ({
+    id,
+    available: true,
+    loggedIn: null,
+    login: { supported: false, blocked: "no_flow", needsInput: false, canSignOut: false },
+    lastStartRefusal: { at: 1, routed, message: "it said no" },
+  });
+  /*
+   * ⚠ **The `login` object is here for the first time in this whole block.** Every
+   * other fixture omits it, so `no_flow` had never travelled through
+   * `offersStripTile` → `startableHere` → `offeredHere` → `defaultRow` in one
+   * piece — which is exactly the path the defect was on.
+   */
+  const plugged = [
+    refused("byo:gemini", false),
+    refused("byo:routed", true),
+    { id: "byo:fine", available: true, loggedIn: null, login: { supported: false, blocked: "no_flow", needsInput: false, canSignOut: false } },
+    // A built-in, because the bare-tile arm needs a harness that *can* have a tile
+    // and no contributed one can any more — a plugin adds a harness, not an agent.
+    { id: "claude", available: true, loggedIn: true },
+    { ...(refused("codex", false) as object), loggedIn: true },
+  ] as never;
+  const onThem = [
+    { id: "ca_bare", name: "on gemini", harness: "byo:gemini", system: "anthropic", model: "m", createdAt: 0 },
+    { id: "ca_routed", name: "on routed", harness: "byo:routed", system: "anthropic", model: "m", createdAt: 0 },
+  ] as never;
+  check(
+    "a harness that refused to start has no tile, however it was configured",
+    [
+      startableHere({ kind: "harness", id: "claude" }, plugged, onThem),
+      startableHere({ kind: "harness", id: "codex" }, plugged, onThem),
+    ],
+    [true, false],
+  );
+  /*
+   * ⚠ **And no contributed harness has a tile at all now**, refusal or none —
+   * `startsBare` answers `false` for every one of them, so this arm is settled
+   * before the refusal is even weighed. Asserted beside the arm above so the two
+   * reasons a tile is absent cannot be confused for each other: one is a
+   * measurement about a moment, the other is what a plugin may contribute.
+   */
+  check(
+    "and one a plugin added has none in any state",
+    [
+      startableHere({ kind: "harness", id: "byo:fine" }, plugged, onThem),
+      startableHere({ kind: "harness", id: "byo:gemini" }, plugged, onThem),
+    ],
+    [false, false],
+  );
+  /*
+   * ⚠ **And the preset arm splits where the harness arm does not**, which is the
+   * assertion that keeps one refusal from condemning a pairing it never tested. A
+   * bare tile *is* a bare start, so any refusal takes it; a preset routed onto
+   * somebody else's system is only condemned by a refusal that had already
+   * survived `providers/set`.
+   */
+  check(
+    "while a preset is only condemned by a refusal that routing did not save",
+    [
+      startableHere({ kind: "custom", id: "ca_bare" }, plugged, onThem),
+      startableHere({ kind: "custom", id: "ca_routed" }, plugged, onThem),
+    ],
+    [true, false],
+  );
+
   /*
    * ⚠ **A machine that has not spoken offers nothing.** Two `null` listings are the
    * loading state, and "yes, startable" over silence is the guess that put `Start`
@@ -25507,6 +26364,67 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
   );
   const pane = stripComments(
     readFileSync(new URL("../src/ui/settings/MachineAgentsSection.tsx", import.meta.url), "utf8"),
+  );
+  /* ---------------------------------------------------------------- *
+   * ⭐ And the way back from a hidden tile
+   *
+   * `offersStripTile` takes a harness's tile away once the machine reports it
+   * refused to open a session, so this screen is the only place it appears. What
+   * it owes back is a control, and the control's whole subject is off-screen —
+   * somebody ran the harness's own program on the machine, which reaches the
+   * daemon in no way at all.
+   *
+   * Placements again, read off disk, because nothing typed can hold one.
+   * ---------------------------------------------------------------- */
+  check(
+    "a refused harness can be asked again from the list that still holds it",
+    [
+      // Conditional on the fact the row is already reporting one line up, never on
+      // the row's *kind*, which this screen may not use for a presentation.
+      /behind\?\.lastStartRefusal != null && \(\s*<RowAction\s+label="Check again"/.test(pane),
+      /*
+       * ⚠ **Resolved for both kinds of row, which is the half that was missing.**
+       * This list excludes every harness `startsBare` is false for — opencode, and
+       * every one a plugin added — so those appear here *only*
+       * through the presets built on them, and keying the control on the harness
+       * row alone left it unreachable for exactly the harnesses whose remedy is
+       * furthest away.
+       */
+      /const behind = harness \? info : \(listing\.agents\.find/.test(pane),
+      // The harness's id, not the row's: on a preset row those differ and the
+      // record is kept against the harness.
+      /onRecheck\(behind\.id\)/.test(pane),
+      /*
+       * ⚠ **It patches the one row rather than re-reading the listing.** `attempt`
+       * is `Try again`'s counter and it refetches `GET /agent-strip` with it —
+       * drawn optimistically, possibly with a `PUT` in the air — so a blanket
+       * re-read would put the pre-write order back under a finger that had just
+       * moved a row. That button can afford it because it is only drawn when the
+       * *read* failed.
+       */
+      /setListing\(\(held\) =>[\s\S]{0,400}one\.id === fresh\.id \? fresh : one/.test(pane),
+    ],
+    [true, true, true, true],
+  );
+  /*
+   * ⚠ **And the card that *states* the refusal carries one too**, because the list
+   * above cannot reach every harness that can be in this state. `AgentDetail` is
+   * where `stanceLine` draws the sentence, and a sentence naming a remedy with no
+   * control beside it is the dead end this whole state was hidden into.
+   */
+  check(
+    "and so does the card that says so",
+    /stance === "start_refused" && \(\s*<Button[\s\S]{0,400}recheckAgent\(agent\.id\)/.test(
+      stripComments(readFileSync(new URL("../src/ui/settings/AgentsPanel.tsx", import.meta.url), "utf8")),
+    ),
+    true,
+  );
+  check(
+    "and the verb it calls is the daemon's own re-check route",
+    /recheckAgent\([\s\S]{0,200}\/agent-auth\/\$\{encodeURIComponent\(agent\)\}\/recheck/.test(
+      stripComments(readFileSync(new URL("../src/daemon.ts", import.meta.url), "utf8")),
+    ),
+    true,
   );
   check(
     "the gear opens the machine's Agents screen, built by the one function that names it",
@@ -25879,20 +26797,44 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
       true,
     );
     /*
-     * ⚠ **The seed is read once, at mount, and weighed before it is trusted.** It
-     * arrives off a URL, so a harness this build has never heard of must open the
-     * ordinary new-agent screen rather than a screen holding a value nothing can
-     * resolve — `compatibility.md`'s rule 2, and the direction the `edit` marker
-     * already fails in. Read at mount rather than in an effect for the reason the
-     * *preset* seed states beside it: anything re-applying an address after the
-     * first paint fights the person, putting a value back a beat after they changed
-     * it with nothing on screen saying why.
+     * ⚠ **The seed is weighed against the *listing* now, and it therefore waits —
+     * which is a real change to this screen and is why the assertion moved rather
+     * than being deleted.** It arrives off a URL, so a harness this machine does
+     * not have must open the ordinary new-agent screen rather than one holding a
+     * value nothing can resolve (`compatibility.md`'s rule 2, and the direction the
+     * `edit` marker already fails in). That used to be answerable at mount, against
+     * a closed union; which harnesses exist is a fact about the machine now, and a
+     * *shape* test — the only thing this side could answer alone — would seed the
+     * screen with a harness that is not there: a selected row, a raw id where a
+     * name goes, and every model refused against something absent.
+     *
+     * ⚠ **So the two halves are pinned together and neither is enough alone.** The
+     * state must start empty, or the address is trusted before it is checked; and
+     * the effect must be guarded by a ref, or a re-read puts the address's harness
+     * back over one somebody cleared — which is exactly the clobber `touched`
+     * exists to prevent one component over, arriving through a different door.
      */
     check(
-      "the builder starts at the harness the address names, and only if it knows it",
-      /useState<AgentId \| null>\(\s*seed !== null && isAgentId\(seed\) \? seed : null,\s*\)/.test(
-        builderSrc,
-      ),
+      "the builder does not trust the address until the machine has confirmed it",
+      [
+        /useState<AgentId \| null>\(null\);\s*const seeded = useRef\(false\)/.test(builderSrc),
+        /if \(seed === null \|\| agents === null \|\| seeded\.current\) return;/.test(builderSrc),
+        /agents\.some\(\(one\) => one\.id === seed\)\) setHarness\(seed\)/.test(builderSrc),
+      ],
+      [true, true, true],
+    );
+    /*
+     * ⚠ **And the row it fills still does not wait, which is the property Q3.528's
+     * own assertion cannot see.** That one compares two string indices — the
+     * Harness field appearing above the Model field — and it goes on passing
+     * whatever either row is gated on. What made the order worth having is that the
+     * cheap question is answered while the expensive read runs, so what has to be
+     * pinned is that the harness *rows* fall back rather than blocking: with the
+     * listing still in flight the picker draws the four this product ships.
+     */
+    check(
+      "and the harness rows fall back rather than waiting on that listing",
+      /agents \?\? AGENT_IDS\.map\(\(id\) => \(\{ id \}\)\)/.test(builderSrc),
       true,
     );
   }
@@ -26409,7 +27351,13 @@ process.stdout.write("\nno authorization on the Configure agent screen\n");
   check(
     "the one button on the screen is still wired to the refusal that folds the key in",
     [
-      /const conflict = current === null \? null : choiceRefusal\(harness, current, routingOf\(harness\)\);/.test(builder),
+      // ⚠ **`nameOf` is part of the wiring now, not decoration.** `choiceRefusal`
+      // names the harness, and `agentLabel` — its default — answers a raw id for a
+      // harness a plugin added. Dropping the argument would put `acme:gemini` into
+      // the one sentence that stands between somebody and a Save they cannot undo.
+      /const conflict = current === null \? null : choiceRefusal\(harness, current, routingOf\(harness\), nameOf\);/.test(
+        builder,
+      ),
       /disabled=\{busy \|\| current === null \|\| harness === null \|\| conflict !== null\}/.test(builder),
     ],
     [true, true],
@@ -26486,7 +27434,9 @@ process.stdout.write("\nno authorization on the Configure agent screen\n");
   check(
     "a provider the harness cannot be pointed at is one heading, asked of hostable and no one else",
     [
-      /const wholeProvider = harness === null \? null : hostable\(harness, group\.system, routing\);/.test(builder),
+      /const wholeProvider = harness === null \? null : hostable\(harness, group\.system, routing, nameOf\);/.test(
+        builder,
+      ),
       /if \(wholeProvider !== null\)/.test(builder),
       // With no harness answered it may not fire, so the flow's own order — the
       // model first — reaches exactly the screen it always did.
@@ -26630,6 +27580,41 @@ process.stdout.write("\nno authorization on the Configure agent screen\n");
   const slot = /const emptyGlyph = <span aria-hidden="true" className="block h-\[(\d+)px\] w-\[(\d+)px\]" \/>;/.exec(builder);
   const mark = /<AgentGlyph agent=\{harness\} size=\{(\d+)\}/.exec(stacked);
   check("and the hole is square and exactly as wide as the mark it holds a place for", [slot?.[1], slot?.[2], mark?.[1]], ["18", "18", "18"]);
+
+  /*
+   * ⚠ **`AgentGlyph`'s `never` arm is the only mechanism in this fleet that makes
+   * adding a harness *loud*, and widening `AgentId` to a string would have deleted
+   * it in silence.** A `switch` over a string has no exhaustiveness to check, so
+   * the arm would have gone on compiling while meaning nothing — which is exactly
+   * the failure this function shipped for four releases with a docblock claiming
+   * the opposite. What preserves it is the narrowing: the `switch` runs inside
+   * `isBuiltinAgentId`, where `never` is still `never`.
+   *
+   * ⚠ **And the other branch takes no second prop**, which is not a style rule.
+   * Two contributed harnesses drawn as one generic mark are two identical tiles on
+   * a strip whose titles `truncate` at 96px — the row would say nothing about which
+   * is which, which is what the four distinct shapes exist to prevent. A monogram
+   * derived from `agent` alone is what makes them distinct without a `label` prop,
+   * and without one the two pinned `<AgentGlyph …>` call sites above stay exactly
+   * as they are.
+   */
+  {
+    const icons = readFileSync(new URL("../src/ui/AgentIcons.tsx", import.meta.url), "utf8");
+    check(
+      "a harness a plugin added is drawn, and the never arm that makes a fifth built-in loud is still reachable",
+      [
+        /if \(!isBuiltinAgentId\(agent\)\) return <MonogramGlyph agent=\{agent\} size=\{size\} \/>;\s*switch \(agent\) \{/.test(icons),
+        /function unglyphed\(agent: never\)/.test(icons),
+        // Derived from the id, so the element keeps its two props.
+        /function MonogramGlyph\(\{ agent, size \}: \{ agent: string; size: number \}\)/.test(icons),
+        /agent\.slice\(agent\.indexOf\(":"\) \+ 1\)/.test(icons),
+      ],
+      [true, true, true, true],
+    );
+    // And it is a letter rather than nothing: a blank shape is the state this
+    // branch exists to avoid, and an empty `<text>` is indistinguishable from one.
+    check("and what it draws is a letter", /\{letter\}/.test(icons) && /\(Array\.from\(local\)\[0\] \?\? "\?"\)\.toUpperCase\(\)/.test(icons), true);
+  }
 }
 
 process.stdout.write("\nwhich harness can be pointed at which system\n");
@@ -26756,6 +27741,51 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     hostable("claude", system({ routable: false, nativeHarness: null }), claude),
     "Moonshot cannot be reached from this machine.",
   );
+
+  /*
+   * ⚠ **The fourth arm, which this file could not express and had a paragraph
+   * admitting it.** The daemon folds `ROUTED_MODEL_ENV` into its own refusal so
+   * that a pairing it can *route* but cannot *pin* never reaches a session — that
+   * state starts, looks right, and quietly runs the endpoint's default model. Only
+   * one boolean crosses, on `routing`, so this side asks the question without
+   * holding the table.
+   *
+   * It was unreachable and only by coincidence: every routed provider this product
+   * ships is `anthropic`-shaped, and codex — the one routing-capable harness with
+   * no arm — is refused one arm earlier. A plugin adding an `openai`-shaped
+   * provider ends that coincidence, and a plugin adding a harness that names no
+   * model variable is the other half of it.
+   */
+  check(
+    "a harness that cannot be told which model to run is refused",
+    hostable("claude", system(), { ...claude, pinsModel: false }),
+    "Claude Code cannot run Moonshot models.",
+  );
+  /*
+   * ⚠ **And it shares a sentence with the protocol arm, deliberately.** This file
+   * earns a second string only where the *remedy* differs — a system nothing can
+   * be routed at names the CLI that reaches it, which is a row on the screen
+   * below. "Does not speak the protocol" and "cannot be told which model to run"
+   * share a remedy exactly: pick something else.
+   */
+  check(
+    "and it is the same sentence the protocol arm draws, because the remedy is",
+    // The same harness on both sides, or the comparison is about whose name is in
+    // the sentence rather than about which arm produced it.
+    hostable("claude", system(), { ...claude, pinsModel: false }) ===
+      hostable("claude", system({ apiType: "openai" }), claude),
+    true,
+  );
+  /*
+   * ⚠ **Absent means yes, which is the opposite fallback from `routable` above and
+   * is airtight rather than optimistic.** A daemon too old to send this is one with
+   * no plugin catalogue, so the only harness it can route is the one that has
+   * always had an arm — there is no version of an older daemon for which `false`
+   * is the safe answer, and answering `false` would grey Claude Code out on every
+   * un-updated machine in the fleet.
+   */
+  check("while a daemon too old to say is read as yes", hostable("claude", system(), claude), null);
+  check("and so is one that says yes", hostable("claude", system(), { ...claude, pinsModel: true }), null);
 
   /*
    * ⚠ **A missing key and an impossible pairing are two different sentences, and
@@ -27902,6 +28932,46 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
   check(
     "and a missing key changes none of it",
     supportingHarnesses({ ...tabled, system: system({ keySet: false }) }, caps3 as never),
+    ["claude"],
+  );
+  /*
+   * ⚠ **The harnesses come from the *listing*, and reading `AGENT_IDS` here was
+   * the clearest way a harness a plugin added could have been made a second-class
+   * row.** That constant is the four this product ships — so a contributed harness
+   * would have drawn no glyph on any model row, and a model only *it* can run would
+   * have drawn **none at all**, silently, on the row whose whole job is to say what
+   * will run it. `supportingHarnesses`' own claim that it is "never empty in
+   * practice" would have become false in exactly the case somebody most needed it
+   * to be true.
+   *
+   * Both halves are driven: the contributed harness appears where it can run the
+   * model, and the row is not empty where it is the only thing that can.
+   */
+  const withPlugin = {
+    ...caps3,
+    "acme:gemini": { models: [], routing: { providerId: "g", supported: ["anthropic"], pinsModel: true }, error: null },
+  };
+  const offeredHarnesses = ["claude", "kimi", "codex", "opencode", "acme:gemini"];
+  check(
+    "a harness a plugin added draws its glyph on the rows it can run",
+    supportingHarnesses(tabled, withPlugin as never, offeredHarnesses),
+    ["claude", "acme:gemini"],
+  );
+  check(
+    "and a model only it can run is not a row that says nothing",
+    // A model that harness *published*, on a provider nothing else can reach: the
+    // one shape where the answer is a single contributed row, and the shape that
+    // drew an empty glyph strip before the list was a parameter.
+    supportingHarnesses(
+      { ...published, system: system({ nativeHarness: "acme:gemini", routable: false }) },
+      withPlugin as never,
+      offeredHarnesses,
+    ),
+    ["acme:gemini"],
+  );
+  check(
+    "while the default is still the four this product ships, in their own order",
+    supportingHarnesses(tabled, withPlugin as never),
     ["claude"],
   );
   /*

@@ -264,8 +264,16 @@ export function seedForm(fields: readonly PluginField[]): Record<string, string>
  * to give it".
  */
 export function consentBroken(
-  shown: { scopes: readonly string[]; net: readonly string[]; hooks: readonly string[] },
-  installed: { scopes: readonly string[]; net: readonly string[]; contributes: { hooks: readonly string[] } },
+  shown: { scopes: readonly string[]; net: readonly string[]; hooks: readonly string[]; adds: readonly string[] },
+  installed: {
+    scopes: readonly string[];
+    net: readonly string[];
+    contributes: {
+      hooks: readonly string[];
+      harnesses?: readonly { id: string; command: string; args: readonly string[] }[];
+      systems?: readonly { id: string; baseUrl: string | null }[];
+    };
+  },
 ): string | null {
   const gained = (theirs: readonly string[], ours: readonly string[]): string[] =>
     [...theirs].filter((one) => !ours.includes(one)).sort();
@@ -275,11 +283,40 @@ export function consentBroken(
   const scopes = gained(installed.scopes, shown.scopes);
   const net = gained(installed.net, shown.net);
   const hooks = gained(installed.contributes.hooks, shown.hooks);
-  if (scopes.length === 0 && net.length === 0 && hooks.length === 0) return null;
+  /*
+   * ⚠ **The fourth comparison, and the two largest things on the list.** A harness
+   * is a program this machine will run as its owner, and a provider is where a
+   * pasted key is sent — so a row that came back holding one the screen did not
+   * draw is exactly what this function exists to catch, and it was the one gap the
+   * three above could not see.
+   *
+   * ⚠ **Optional on the installed side, and absent must mean *none*.** A daemon
+   * older than this tab sends no such field, and it also refuses a manifest that
+   * declares one, so "it did not say" and "there are none" really are the same
+   * fact there. Treating absence as *unknown* and refusing would take every
+   * install on every un-updated machine down over a field they cannot send.
+   *
+   * The line is rebuilt here rather than trusted off the row, so what is compared
+   * is what this app would have *drawn* — the same discipline the three above
+   * keep, and the reason `pluginArchive.ts` flattens to the same string.
+   */
+  const adds = gained(
+    [
+      ...(installed.contributes.harnesses ?? []).map(
+        (one) => `harness ${one.id} runs ${[one.command, ...one.args].filter((word) => word.length > 0).join(" ")}`,
+      ),
+      ...(installed.contributes.systems ?? []).map(
+        (one) => `system ${one.id} sends keys to ${one.baseUrl ?? "nowhere"}`,
+      ),
+    ],
+    shown.adds,
+  );
+  if (scopes.length === 0 && net.length === 0 && hooks.length === 0 && adds.length === 0) return null;
   const parts: string[] = [];
   if (scopes.length > 0) parts.push(scopes.join(", "));
   if (net.length > 0) parts.push(`network access to ${net.join(", ")}`);
   if (hooks.length > 0) parts.push(hooks.join(", "));
+  if (adds.length > 0) parts.push(adds.join("; "));
   return `That plugin asked for more than this screen showed: ${parts.join("; ")}. Remove it unless you know why.`;
 }
 

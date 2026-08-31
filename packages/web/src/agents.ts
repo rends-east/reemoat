@@ -1,6 +1,7 @@
-import { agentLabel, agentStance, offersTile, startsBare } from "./ui/agentCard";
+import { agentLabel, agentStance, boundedName, offersTile, startsBare } from "./ui/agentCard";
 import {
   AGENT_IDS,
+  type AgentAuthInfo,
   type AgentCapabilities,
   type AgentId,
   type AgentInfo,
@@ -28,23 +29,24 @@ import {
 export type HostRefusal = string | null;
 
 /**
- * Mirrors `hostable` in `src/acp/systems.ts` — every refusal but one.
+ * Mirrors `hostable` in `src/acp/systems.ts` — all four refusals.
  *
- * ⚠ **The daemon has a fourth refusal this side cannot express, and nothing on
- * the wire stands for it.** `ROUTED_MODEL_ENV` is a table of how each harness
- * is *told which model to run* on a foreign system, and the daemon refuses a
- * pairing it could route but could not pin — that state would start, look
- * right, and quietly run the endpoint's default model. Only the daemon holds
- * that table; `SystemInfo` and `AgentCapabilities` carry nothing derived from
- * it, so the arm cannot be written here without putting the fact on the wire.
+ * ⚠ **The fourth used to be missing and this docblock said so at length; what
+ * closed it was putting the fact on the wire rather than the table.**
+ * `ROUTED_MODEL_ENV` is how each harness is *told which model to run* on a
+ * foreign system, and the daemon refuses a pairing it could route but could not
+ * pin — a state that would start, look right, and quietly run the endpoint's
+ * default model. That table is the daemon's and stays there; what crosses is one
+ * boolean derived from it, `AgentRouting.pinsModel`, so this side asks the
+ * question without holding the answer.
  *
- * It is unreachable today and only by coincidence: every routed system is
- * `anthropic`-shaped and codex — the one routing-capable harness missing from
- * that table — is already refused one arm earlier by `supported`. The day an
- * `openai`-shaped routable system is added, this function offers a pairing
- * `POST /custom-agents` answers `400 incompatible_pairing` for, *after*
- * somebody has assembled it. The route is still the gate; what is lost is the
- * greying-out this file exists to do.
+ * It was unreachable and only by coincidence — every routed system this
+ * repository ships is `anthropic`-shaped, and codex, the one routing-capable
+ * harness with no arm, is already refused by `supported`. **A plugin adding an
+ * `openai`-shaped provider is the day that coincidence ends**, and it is also the
+ * day a harness can arrive that names no model variable at all. Without the field
+ * this function would have offered exactly the pairing `POST /custom-agents`
+ * answers `400 incompatible_pairing` for, after somebody had assembled it.
  *
  * ⚠ **`routing` is the agent's own answer and must never be assumed.** It
  * carries which protocols this harness accepts, and the two that support any
@@ -72,6 +74,17 @@ export function hostable(
   harness: AgentId,
   system: SystemInfo,
   routing: AgentCapabilities["routing"],
+  /**
+   * What to call a harness, where one is named.
+   *
+   * ⚠ **Defaulted to `agentLabel`, which can only answer for the four this product
+   * ships** — and answers a raw id for anything else, which is `acme:gemini` in a
+   * sentence somebody reads on a phone. This file is DOM-free and holds no listing,
+   * so the name has to arrive from a caller that does; the default keeps every
+   * existing call site and every driver fixture as it was, in the shape
+   * `supportingHarnesses`' own `harnesses` parameter already uses.
+   */
+  nameOf: (id: string) => string = agentLabel,
 ): HostRefusal {
   if (system.nativeHarness === harness) return null;
   /*
@@ -84,15 +97,46 @@ export function hostable(
   if (system.routable !== true) {
     return system.nativeHarness === null
       ? `${system.displayName} cannot be reached from this machine.`
-      : `Only ${agentLabel(system.nativeHarness)} can run ${system.displayName} models.`;
+      : `Only ${nameOf(system.nativeHarness)} can run ${system.displayName} models.`;
   }
   if (routing === null) {
-    return `${agentLabel(harness)} only runs its own models.`;
+    return `${nameOf(harness)} only runs its own models.`;
   }
   if (!routing.supported.includes(system.apiType)) {
-    return `${agentLabel(harness)} cannot run ${system.displayName} models.`;
+    return cannotRunSystem(harness, system, nameOf);
+  }
+  /*
+   * ⚠ **The same sentence as the arm above, deliberately.** This file earns a
+   * second string only where the *remedy* differs — a system nothing can be routed
+   * at names the CLI that reaches it, which is a harness somebody can switch to on
+   * the screen below. "Does not speak the protocol" and "cannot be told which model
+   * to run" share a remedy exactly: pick something else. Two strings for one remedy
+   * is how "Only Kimi Code can run this model" ended up drawn on a screen where
+   * neither noun was visible.
+   *
+   * ⚠ **Absent means yes**, which is the opposite fallback from `routable` above
+   * and is airtight rather than optimistic: a daemon too old to send `pinsModel` is
+   * one with no plugin catalogue, so the only harness it can route is the one that
+   * has always had an arm. Answering `false` there would grey Claude Code out on
+   * every machine in the fleet that had not been updated.
+   */
+  if (routing.pinsModel === false) {
+    return cannotRunSystem(harness, system, nameOf);
   }
   return null;
+}
+
+/**
+ * The sentence two of `hostable`'s arms share, written once.
+ *
+ * ⚠ **Named apart from `cannotRun` further down, which is about a *model*.** The
+ * two are one sentence pattern over two different nouns — `cannot run <provider>
+ * models.` against `cannot run <model>.` — and collapsing them would put the
+ * provider's name on a row already titled with the model, which is the exact
+ * substitution `choiceRefusal` refuses.
+ */
+function cannotRunSystem(harness: AgentId, system: SystemInfo, nameOf: (id: string) => string): string {
+  return `${nameOf(harness)} cannot run ${system.displayName} models.`;
 }
 
 /** One offerable pairing of a system and one of its models. */
@@ -641,12 +685,26 @@ export function groupModels(choices: readonly ModelChoice[]): ModelGroup[] {
  * it — or from a routable endpoint, so at least one harness can be pointed there.
  * An empty answer would mean the daemon offered something nothing can run, which
  * is a bug in the table rather than a state to draw.
+ *
+ * ⚠ **The harnesses come from the *listing*, and reading `AGENT_IDS` here was the
+ * clearest way a contributed harness could have been made a second-class row.**
+ * That constant is the four this product ships, so a harness a plugin added would
+ * have drawn no glyph on any model row — and a model only it can run would have
+ * drawn **none at all**, silently, on a row whose whole job is to say what will run
+ * it. The sentence above about "never empty" would have become false in exactly the
+ * case somebody most needed it to be true.
+ *
+ * ⚠ **In the listing's order, which is the daemon's.** `AGENT_IDS` was also an
+ * order, and taking `Object.keys(capabilities)` instead would have made the glyph
+ * row's order depend on JSON property order — stable in practice and not a
+ * property anybody stated.
  */
 export function supportingHarnesses(
   choice: ModelChoice,
   capabilities: Readonly<Record<string, AgentCapabilities>>,
+  harnesses: readonly AgentId[] = AGENT_IDS,
 ): AgentId[] {
-  return AGENT_IDS.filter((id) => pairable(id, choice, capabilities[id]?.routing ?? null));
+  return harnesses.filter((id) => pairable(id, choice, capabilities[id]?.routing ?? null));
 }
 
 /**
@@ -740,6 +798,8 @@ export function choiceRefusal(
   harness: AgentId | null,
   choice: ModelChoice,
   routing: AgentCapabilities["routing"],
+  /** What to call the harness. See `hostable`'s own parameter, which is the same one. */
+  nameOf: (id: string) => string = agentLabel,
 ): HostRefusal {
   // With no harness there is no pairing to weigh, so the model's own route into its
   // system is the whole of what this can say — and that is also what the pairing arm
@@ -749,7 +809,7 @@ export function choiceRefusal(
   if (harness !== null) {
     const failure = pairFailure(harness, choice, routing);
     if (failure !== null) {
-      return failure === "name" ? noModelCalled(harness, choice) : cannotRun(harness, choice);
+      return failure === "name" ? noModelCalled(harness, choice, nameOf) : cannotRun(harness, choice, nameOf);
     }
   }
   return keyMissing(choice, harness);
@@ -864,8 +924,8 @@ function pairable(
 }
 
 /** The sentence a `"host"` failure gets. See {@link choiceRefusal}. */
-function cannotRun(harness: AgentId, choice: ModelChoice): string {
-  return `${agentLabel(harness)} cannot run ${choice.modelName}.`;
+function cannotRun(harness: AgentId, choice: ModelChoice, nameOf: (id: string) => string): string {
+  return `${nameOf(harness)} cannot run ${choice.modelName}.`;
 }
 
 /**
@@ -876,8 +936,8 @@ function cannotRun(harness: AgentId, choice: ModelChoice): string {
  * the model instead and it asserts an equivalence Q3.488 says nothing carries. See
  * {@link choiceRefusal} for the three bounds this had to clear.
  */
-function noModelCalled(harness: AgentId, choice: ModelChoice): string {
-  return `${agentLabel(harness)} has no model called ${choice.modelName}.`;
+function noModelCalled(harness: AgentId, choice: ModelChoice, nameOf: (id: string) => string): string {
+  return `${nameOf(harness)} has no model called ${choice.modelName}.`;
 }
 
 /**
@@ -1031,17 +1091,32 @@ export function customAgentSubline(one: CustomAgent, systems: readonly SystemInf
  *
  * ⚠ **The first match wins, and one harness really does have two.** opencode is
  * native to OpenRouter *and* to OpenCode Zen — `agent-catalogue.md` records why —
- * so this would have to choose. It never has to: `startsBare` is false for
- * opencode, so it has no tile on the strip and no row in the settings list. The
- * `find` is deterministic anyway, taking the daemon's own `SYSTEM_IDS` order, so
- * the answer cannot vary between renders if that ever changes.
+ * so this would have to choose. It never has to: `startsBare` is false for opencode
+ * and for every harness a plugin added, so a harness native to two providers has no
+ * tile and no row either way. ⚠ **What is drawn from here instead is the *preset*
+ * row's line**, which names its own system and never guesses. The `find` is
+ * deterministic regardless — it takes the daemon's own `systemIds()` order,
+ * built-ins first, then contributed sorted by plugin id — and that determinism is
+ * worth keeping rather than relying on the exclusion above to make it moot.
  *
- * Empty rather than a placeholder where nothing matches: the line is a reserved
- * slot in both call sites, so an empty string costs no layout, and a harness this
- * client cannot place a vendor for is one it should not be inventing a name for.
+ * ⚠ **And where nothing matches, the plugin's name is the honest second answer.**
+ * Empty was right while every harness with a row had a vendor: an empty string
+ * costs no layout in either call site, and inventing a name for a harness this
+ * client cannot place would be worse than silence. A contributed harness paired
+ * only with built-in providers is native to none, and for those the *common* case
+ * is the blank line — a tile with a title and nothing under it, beside tiles that
+ * have one. "from <plugin>" is not a vendor and is not pretending to be: it answers
+ * the question somebody actually has about a row they do not recognise, which is
+ * where it came from.
  */
-export function harnessSubline(harness: string, systems: readonly SystemInfo[]): string {
-  return systems.find((candidate) => candidate.nativeHarness === harness)?.displayName ?? "";
+export function harnessSubline(
+  harness: string,
+  systems: readonly SystemInfo[],
+  from?: { pluginName: string } | undefined,
+): string {
+  const native = systems.find((candidate) => candidate.nativeHarness === harness)?.displayName;
+  if (native !== undefined) return native;
+  return from === undefined ? "" : `from ${boundedName(from.pluginName, "a plugin")}`;
 }
 
 /**
@@ -1064,10 +1139,75 @@ export function harnessSubline(harness: string, systems: readonly SystemInfo[]):
  * old status line disagree with the settings card about the same agent on the
  * same machine.
  */
+/**
+ * The harnesses the Sign-ins list has to draw itself, because no provider does.
+ *
+ * ⚠ **A paste box for a *harness* is drawn on a **provider's** card, and that is
+ * the fact this function exists to finish.** `SystemDetail` mounts `AgentDetail`
+ * when a system names a harness in `loginVia` — Anthropic names claude, OpenRouter
+ * and OpenCode Zen both name opencode — so every harness this product ships has a
+ * card, one tap into the row a person already understands. A harness a plugin
+ * added has one only if that plugin also contributed a provider naming it, and
+ * nothing requires that: `parseManifest` refuses a system with no `baseUrl` and no
+ * `loginVia` (*"its key box would store a secret and never send it"*) and has no
+ * mirror-image rule, so a plugin declaring only routed providers leaves its
+ * harness's `envNames` a slot the daemon accepts over `PUT /agent-auth/:agent` and
+ * no screen ever offers. Reported: `GEMINI_API_KEY` could be typed nowhere at all.
+ *
+ * ⚠ **Which is why the test is "no provider speaks for it" rather than "it is
+ * contributed".** Adding every harness would put claude beside Anthropic — two
+ * rows, one credential, two answers to *signed in?* — which is the exact shape
+ * `MachineSystemsSection` was built to remove, and it says so in its own docblock.
+ * So this answers nothing on a machine with no plugins, and on one with a plugin
+ * it answers exactly the rows that had nowhere to live.
+ *
+ * ⚠ **And only a harness with somewhere to put a key.** `envNames: []` is a
+ * harness whose author says a key is not how you configure it — opencode's own
+ * `authHint` sends people to a terminal — and a row offering an empty card is a
+ * control that is not true in the state it is drawn in.
+ *
+ * A null listing answers nothing rather than everything: an unread `GET /systems`
+ * is not evidence that no provider names a harness, and guessing the permissive
+ * way would draw a duplicate row for claude for as long as that read was in
+ * flight.
+ */
+export function unspokenFor(
+  agents: readonly AgentAuthInfo[] | null,
+  systems: readonly SystemInfo[] | null,
+): AgentAuthInfo[] {
+  if (agents === null || systems === null) return [];
+  const spoken = new Set(
+    systems.map((one) => one.loginVia).filter((one): one is string => one !== null && one !== undefined),
+  );
+  return agents.filter((one) => one.credentials.length > 0 && !spoken.has(one.id));
+}
+
+/** Whether this row already holds a key, for the badge the list draws. */
+export function anyKeySet(agent: AgentAuthInfo): boolean {
+  return agent.credentials.some((slot) => slot.set);
+}
+
 export function offersStripTile(candidate: AgentInfo): boolean {
   return (
-    startsBare(candidate.id) &&
-    offersTile(agentStance(candidate.available, candidate.loggedIn, candidate.login?.blocked))
+    // The whole row rather than its id: whether a harness is a starting point on
+    // its own is a fact this repository knows about its own four and a fact the
+    // *daemon* answers for one a plugin added.
+    startsBare(candidate) &&
+    offersTile(
+      agentStance(
+        candidate.available,
+        candidate.loggedIn,
+        candidate.login?.blocked,
+        /*
+         * ⚠ **Unconditionally, `routed` and all** — because a tile *is* a bare
+         * start, and a bare start is the least-configured thing this row can do.
+         * A refusal measured while routed condemns everything including this; one
+         * measured bare condemns exactly this. Either way the tile goes, which is
+         * why the flag is weighed on the preset arm below and not here.
+         */
+        candidate.lastStartRefusal != null,
+      ),
+    )
   );
 }
 
@@ -1102,10 +1242,40 @@ export function startableHere(
   presets: readonly CustomAgent[] | null,
 ): boolean {
   if (row.kind === "harness") {
-    if (!startsBare(row.id)) return false;
+    /*
+     * ⚠ **Asked of the listing rather than of the id, which is one test where
+     * there were two.** `startsBare` needs the row now — a contributed harness
+     * answers it from the manifest — and the row is `offersStripTile`'s subject
+     * anyway, so the early return had nothing left to say that the line below does
+     * not. A machine that has not answered is `false`, which is the loading state
+     * and the same answer it gave before.
+     */
     return agents?.some((candidate) => candidate.id === row.id && offersStripTile(candidate)) === true;
   }
   const preset = presets?.find((one) => one.id === row.id) ?? null;
   if (preset === null) return false;
-  return agents?.some((candidate) => candidate.id === preset.harness && candidate.available) === true;
+  return (
+    agents?.some(
+      (candidate) =>
+        candidate.id === preset.harness &&
+        candidate.available &&
+        /*
+         * ⚠ **The refusal axis reaches a preset, and the credential axis still
+         * does not — the paragraph above is unchanged and this is not an
+         * exception to it.** That one says an assembled agent runs on the
+         * *system's* saved key, so asking whether the harness is signed in would
+         * refuse exactly the agents that need it least. This is a different
+         * fact: the harness declined to open a session at all.
+         *
+         * ⚠ **And only `routed === true`.** `applySystem` runs before
+         * `session/new`, so a refusal measured on a routed pairing has already
+         * survived `providers/set` and is evidence about every way of starting
+         * this harness. A refusal measured *bare* is not: it is exactly the
+         * signed-out Claude Code that OpenRouter still runs, and reading it as a
+         * fact about presets would delete the pairing this app documents as the
+         * reason the two axes are separate.
+         */
+        candidate.lastStartRefusal?.routed !== true,
+    ) === true
+  );
 }

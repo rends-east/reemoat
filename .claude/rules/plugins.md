@@ -51,9 +51,11 @@ bump is owed at all** — `protocol.ts` carries the argument in full:
 - **v4, a new *method*** (`model.list`): `SCOPE_OF` decides at call time, so the
   failure would be an `unknown_method` when somebody presses something. Passing a
   model needs no bump — the field is optional.
+- **v5, a *contribution point***: refused below the rung rather than ignored, which
+  is v3's shape wearing v2's clothes. `plugin-contributions.md`.
 
-**Adding a field is not the same act as adding a scope or a method**, and the rung a
-change owes follows from which of the three it is.
+**A field, a scope, a method and a contribution point are four different acts**, and
+the rung a change owes follows from which of them it is.
 
 **Daemons first, then the control plane.** `compatibility.md`'s rule — whoever has
 to answer ships first — and here that is the daemon, because the web client is what
@@ -89,15 +91,13 @@ comparing, with a loud skip where this side is absent. Q4.105.
   Everything else here is hygiene by comparison. The cost is stated rather than
   hidden: a plugin screen is a list, a form, columns and text, never a canvas.
   Q1.613.
-- **Four contribution points, and the set is closed**: a screen, a settings pane,
-  an action on a session's menu, and server-side hooks. The client is shaped around
-  *does anything anywhere need me*, and the signals answering it are computed by
-  subtraction (`waitingFloor`) — so a contribution able to insert rows into the
-  session list would open a hole nothing else can see. A transcript card and a slash
-  command are non-goals with their seams named (`renderEvent`, `buildCommands`).
-  Q3.446.
-- **The control plane hosts nothing.** No sessions, no files, and its image is
-  rebuilt by a release — "installing" there would be a deploy. Q4.104.
+- **Six contribution points, and the set is closed**: a screen, a settings pane, an
+  action on a session's menu, server-side hooks, a **harness** and a **provider**. The
+  client is shaped around *does anything anywhere need me*, and the signals answering
+  it are computed by subtraction (`waitingFloor`) — so a contribution able to insert
+  rows into the session list would open a hole nothing else can see. A transcript card
+  and a slash command are non-goals with their seams named. Q3.446. The last two are
+  `plugin-contributions.md`.
 
 **Authorization has two axes and neither implies the other**
 
@@ -339,7 +339,7 @@ comparing, with a loud skip where this side is absent. Q4.105.
 | `src/plugins/api.ts` | The host API and the scope gate. `SCOPE_OF` is the table; the absence of a method from it is a refusal |
 | `src/plugins/host.ts` | Install, update, remove, enable, the running set, the invoke path, the restart budget, and the hook fan-out |
 | `src/plugins/store.ts` | `InstalledPlugin`, the two store interfaces, and `checkPluginWrite` — the quota, shared so a memory implementation refuses exactly what SQLite does |
-| `plugins/board/` | The reference plugin. Uses all four contribution points, reaches nothing outside the machine, and is what `docs/PLUGINS.md` walks through |
+| `plugins/board/` | The reference for the four points a plugin *draws*. Reaches nothing outside the machine, and is what `docs/PLUGINS.md` walks through |
 | `packages/web/src/pluginArchive.ts` | The manifest, read out of the archive **before it is sent**. tar.gz and zip, bounded at the daemon's own unpacked ceiling, DOM-free so `webcheck` can drive it. Lenient by contract — the daemon is what refuses |
 | `packages/web/src/plugins.ts` | Every decision about a plugin on the client: the fail-open narrowings, `pluginFailure`, `pluginPath`, which plugins offer a screen or a session action. DOM-free, so `webcheck` can import it |
 | `packages/web/src/ui/PluginView.tsx` | The five blocks, drawn with `bits.tsx` |

@@ -13,6 +13,7 @@ paths:
 
 ```bash
 pnpm client agents                   # what's installed on the server, and signed in
+pnpm client agents recheck <agent>   # forget that one refused to start, and ask again
 pnpm client agentauth [<agent>]      # where each agent's credentials go
 pnpm client agentauth <agent> --set <env> [token] | --clear <env>
 pnpm client dirs [path]              # browse the server's filesystem
@@ -70,6 +71,17 @@ pnpm client plugin view <id> [screen|settings]
   nothing about whether the daemon *acted* — the timeout that triggers it is the
   client's own, fired long after the daemon started the turn. `isReplayable` gates
   the retry to `GET` and `DELETE`. Q5.18.
+- **`POST /agent-auth/:agent/recheck` refuses nothing where its two neighbours
+  answer `503`.** `login` and `logout` refuse a harness with no such verb — and a
+  harness with no such verb is precisely what this route is for. It asks the agent
+  nothing and takes nothing away: it drops what the daemon remembered about a
+  refused start and answers the fresh row, which is `DELETE /systems/:system`'s
+  shape and is why a screen redrawing from this response cannot disagree with one
+  redrawing from `GET /agents`. ⚠ **Its placement is load-bearing**: it calls
+  `availability()`, so it spawns a CLI per harness, and `slowRoute` matches
+  `/agent-auth` by prefix while matching `/agents` on `GET` only — named anywhere
+  else this `POST` would take the ordinary 15s, and an abort there is a transport
+  failure that draws a healthy machine as unreachable. Q3.538.
 - **A relay `503 no_tunnel` is the only answered request that means the machine is
   gone.** `meansMachineGone` keys on the **code and never the status**, because the
   daemon answers its own `503 unresponsive` when a browse path sits on a stalled

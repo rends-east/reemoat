@@ -12,16 +12,24 @@ paths:
 
 `agent-systems.md` answers *which harness can be pointed at which system*. This
 one answers the question underneath it: **whose spelling is on the row, and who
-fetched it.** Three sources now, and they are not interchangeable.
+fetched it.** Four sources, and they are not interchangeable.
 
 | Source | Read by | Reaches the picker as | Key |
 |---|---|---|---|
 | The harness's own `configOptions`, `category: "model"` | the daemon, `GET /agents/capabilities` | `source: "published"` | never — the agent's own login covers it |
 | `SYSTEMS[id].models`, written down | the daemon, `GET /systems` | `source: "table"` | always — a table id is the *routed* spelling |
 | `openrouter.ai/api/v1/models` | **the browser** | substituted into `SystemInfo.models`, so `"table"` | always, same rule |
+| A plugin's `contributes.systems[].models` | the daemon, off the manifest | `"table"`, indistinguishably | always, same rule |
 
-The third is the new one and it is the plugin market's shape rather than a new
-idea: *a catalogue on its own host, read by the browser*. Two measurements make
+⚠ **The fourth is the second wearing a different hat, and it is deliberately not a
+fourth `source`.** A row a plugin wrote down and a row this repository wrote down are
+the same kind of fact — what the endpoint answers to when a harness is routed at it —
+so the key biconditional stays true of it word for word and `agents.ts` learns nothing
+about where the names came from. A contributed provider whose **own** harness publishes
+its models needs no list at all, and those arrive as `"published"` like any other.
+
+The third was the new one when it arrived and it is the plugin market's shape rather
+than a new idea: *a catalogue on its own host, read by the browser*. Two measurements make
 it legal — the endpoint needs **no credential** and answers
 `access-control-allow-origin: *` — and one rule makes it necessary:
 `compatibility.md` states the count of `fetch` calls in `src/` as the property,
@@ -61,6 +69,13 @@ they did before the division existed: those harnesses serve one system each.
 `SYSTEMS.zen` is `baseUrl: null` for the reason `anthropic` and `openai` are —
 its endpoint exists, and naming it would offer claude a routed arm that dies on
 the pinning test, since `ROUTED_MODEL_ENV` has no OpenAI-shaped door.
+
+⚠ **A provider a plugin added may only ever name a harness that plugin added**, which
+is what keeps this whole section true of it: `nativeHarness`, `loginVia`, `keyEnv` and
+`nativeModelPrefix` all take a local id from the same manifest. Naming a built-in
+would let a manifest assert that a vendor's two lists are the same models — the
+equivalence the section below refuses without evidence — and would put a sign-in card
+for somebody else's CLI under a heading its author chose.
 
 ⚠ **And it names a `loginVia` even though its CLI has no sign-in**, which is what
 made that field say what it always meant: *whose CLI owns this system's
@@ -189,10 +204,15 @@ row, the auto-default and `offeredHere` alike. A preset is exempt: it starts on 
 
 ⚠ **The harness row is above the model row, and the order is asserted.** The model
 row is the only control on the builder that waits — `GET /agents/capabilities`
-starts an agent per harness, 2159 ms — while the harness list is `AGENT_IDS` and
-needs no read, and `HarnessPicker` has never been behind the `reading` gate that
-`step === "llm"` has (with no model chosen `harnessRowRefusal` answers `null` for
-every row). So answering the free question is what the wait runs under. It is also
+starts an agent per harness, 2159 ms — while `HarnessPicker` has never been behind
+the `reading` gate that `step === "llm"` has (with no model chosen
+`harnessRowRefusal` answers `null` for every row). So answering the free question is
+what the wait runs under. ⚠ **The harness list stopped being `AGENT_IDS` and still
+does not wait**: a machine may offer harnesses a plugin added, so the list comes from
+the cheap `GET /agents` — and `harnessRows` *falls back* to the four this product
+ships while that is in flight rather than gating the row on it. Q3.528's own
+assertion is a string-index comparison and cannot see that, which is why the
+fall-back is pinned separately. It is also
 the order the model list is built for: with a harness chosen, `ModelPicker`
 collapses every provider it cannot be pointed at, so a refusal arrives before the
 choice it is about. Nothing but the order says which row is first — two sibling JSX
@@ -200,8 +220,17 @@ blocks — so `webcheck` pins it. Q3.528.
 
 ## Which provider is at the top
 
-**`SYSTEM_IDS` on the daemon is the *default* order, and the client floats over
-it.** `readyFirst` in `agents.ts` lifts every provider this machine can run above
+**`SYSTEM_IDS` on the daemon is the *default* order for the rows this repository
+ships, and the client floats over it.**
+
+⚠ **A machine may hold more, and the rule rather than the list is what is true.**
+Providers a plugin added are appended **after every built-in**, sorted by plugin id
+so the order does not depend on what somebody happened to install when. Naming the
+seven in order below is therefore a description of the built-in half; a plugin's row
+is a group *appearing* at the end, which is what makes it safe, where one inserted in
+the middle would move every heading below it under a thumb. `plugin-contributions.md`.
+
+`readyFirst` in `agents.ts` lifts every provider this machine can run above
 every provider it cannot; that array orders each of the two halves and is still the
 only place the default is written down. Anthropic and OpenAI — the two vendors
 most choices are between, each serving a harness that ships by default — then

@@ -11,10 +11,12 @@ import { MAX_PARENT_ID_CHARS, toolCallLineage } from "./acp/subagents.js";
 import { sessionMetaFor } from "./acp/agents.js";
 import type { AgentRouting } from "./acp/systems.js";
 import {
+  BUILTIN_CATALOGUE,
   hostable,
   routedModelEnv,
+  routedPairing,
   routingHeaders,
-  SYSTEMS,
+  type MachineCatalogue,
   type SystemId,
 } from "./acp/systems.js";
 import type { AgentId } from "./acp/agents.js";
@@ -482,6 +484,22 @@ export interface SessionOptions {
    * decided by the table, not here.
    */
   model?: string | null;
+  /**
+   * What this machine offers beyond what this repository ships.
+   *
+   * ⚠ **In the bag rather than read from a module, and that is Q2.215's rule
+   * rather than a preference.** Every launch site builds one `SessionOptions`,
+   * `ManagedSession.launchOptions` is the one place it is built, and the failure
+   * that made it so was a site that *dropped* the system half and produced no
+   * route rather than a wrong one. A catalogue read from a global here would be a
+   * second source that a driver could not stand something else in for, and the
+   * three functions below would then disagree with the route that validated the
+   * pairing.
+   *
+   * Absent means `BUILTIN_CATALOGUE` — a machine with no plugins, which is what
+   * `scripts/harness.ts` and every offline driver are.
+   */
+  machine?: MachineCatalogue | null;
 }
 
 export interface ResumeOptions extends SessionOptions {
@@ -915,7 +933,7 @@ export class Session {
 
     const runtime = options.runtime ?? new LocalRuntime();
     const config = runtime.describe(options.agent);
-    const client = await AcpClient.launch(config, await runtime.launch(options.agent, spawnEnvOf(options)), {
+    const client = await AcpClient.launch(config, await runtime.launch(options.agent, spawnEnvOf(options), routedPairing(options.agent, options.system ?? null, options.machine ?? BUILTIN_CATALOGUE)), {
       fileIo: runtime.clientFileIo,
       // Derived rather than configured: a question with nobody to answer it has
       // no default, so "no resolver" and "do not tell the agent it can ask" are
@@ -923,8 +941,9 @@ export class Session {
       elicitation: options.elicitations != null,
     });
 
+    let routed: boolean;
     try {
-      await applySystem(client, options, runtime);
+      routed = await applySystem(client, options, runtime);
     } catch (error) {
       await client.close();
       throw error;
@@ -944,12 +963,32 @@ export class Session {
     } catch (error) {
       await client.close();
       if (isAuthRequired(error)) {
-        throw new Error(
-          `${config.displayName} rejected session/new: authentication required.\n${config.authHint}`,
-        );
+        const message = `${config.displayName} rejected session/new: authentication required.\n${config.authHint}`;
+        /*
+         * ⚠ **Recorded here and at `openResumed`, and at no third place.** This is
+         * ACP's typed `auth_required` — the agent declining to open a session at
+         * all — which is a different signal from the `errorKind:
+         * "authentication_failed"` the event pump reads mid-turn. Q7.99 measured
+         * that one against a token with 1.4 hours left on it, so `onAgentUnusable`
+         * replaces the process and writes nothing here on purpose.
+         *
+         * The sentence thrown below is unchanged and uncut; what is *stored* is
+         * clipped by the runtime. See `MAX_START_REFUSAL_CHARS`.
+         */
+        runtime.noteStartRefusal(options.agent, message, routed);
+        throw new Error(message);
       }
       throw error;
     }
+
+    /*
+     * The strongest clear there is, and it is free: this harness has just opened a
+     * session, so whatever it refused before is over. Ahead of `pinNativeModel`
+     * deliberately — a model this agent has retired is a refusal about the
+     * *model*, and leaving a start refusal standing for it would take the harness
+     * off the New session strip over a preset nobody has to use.
+     */
+    runtime.forgetStartRefusal(options.agent);
 
     const session = Session.adopt(options, client, response.sessionId, response);
     try {
@@ -1017,7 +1056,7 @@ export class Session {
 
     const runtime = options.runtime ?? new LocalRuntime();
     const config = runtime.describe(options.agent);
-    const client = await AcpClient.launch(config, await runtime.launch(options.agent, spawnEnvOf(options)), {
+    const client = await AcpClient.launch(config, await runtime.launch(options.agent, spawnEnvOf(options), routedPairing(options.agent, options.system ?? null, options.machine ?? BUILTIN_CATALOGUE)), {
       fileIo,
       elicitation: options.elicitations != null,
     });
@@ -1025,8 +1064,9 @@ export class Session {
     // Re-applied on every resume, and it has to be: routing lives in the agent
     // *process*, and a resume is a new one. A session that came back unrouted
     // would carry on in the same conversation against a different vendor.
+    let routed: boolean;
     try {
-      await applySystem(client, options, runtime);
+      routed = await applySystem(client, options, runtime);
     } catch (error) {
       await client.close();
       throw error;
@@ -1052,9 +1092,13 @@ export class Session {
     } catch (error) {
       await client.close();
       if (isAuthRequired(error)) {
-        throw new Error(
-          `${config.displayName} rejected session/resume: authentication required.\n${config.authHint}`,
-        );
+        // The same record the start path writes, from the same typed code. A
+        // resume is how a harness that went stale overnight announces itself, and
+        // a daemon that only learned from `session/new` would keep offering a
+        // tile for one that had refused every conversation on the machine.
+        const message = `${config.displayName} rejected session/resume: authentication required.\n${config.authHint}`;
+        runtime.noteStartRefusal(options.agent, message, routed);
+        throw new Error(message);
       }
       // Typed here rather than left for the registry to recognise, because this
       // is the ACP boundary and a JSON-RPC code has no business travelling any
@@ -1065,6 +1109,10 @@ export class Session {
       }
       throw error;
     }
+
+    // See `Session.start`: a harness that has just picked a conversation back up
+    // is not one that would not start.
+    runtime.forgetStartRefusal(options.agent);
 
     const session = Session.adopt(options, client, options.agentSessionId, response);
 
@@ -2546,7 +2594,22 @@ async function pinNativeModel(session: Session, options: SessionOptions): Promis
   const model = options.model ?? null;
   const system = options.system ?? null;
   if (model === null || model === "") return null;
-  if (system !== null && SYSTEMS[system].nativeHarness !== options.agent) return null;
+  const machine = options.machine ?? BUILTIN_CATALOGUE;
+  const spec = system === null ? null : machine.system(system);
+  /*
+   * ⚠ **The arm that would otherwise be a `TypeError` on the resume path, and
+   * that is why it answers a sentence.** `openResumed` calls this and is designed
+   * never to refuse — it resumes anyway and pushes one `error` event saying what
+   * the session came back on (Q2.217) — so a throw here would strand a
+   * conversation for a reason that has nothing to do with it. A system whose
+   * plugin was removed is exactly that reason.
+   */
+  if (system !== null && spec === null) {
+    return machine.systemState(system) === "disabled"
+      ? `This session's provider comes from a plugin that is switched off on this machine.`
+      : `This session's provider is no longer on this machine.`;
+  }
+  if (spec !== null && spec.nativeHarness !== options.agent) return null;
 
   /*
    * ⚠ **The one place a stored model id is respelled, and it is the last moment
@@ -2562,11 +2625,41 @@ async function pinNativeModel(session: Session, options: SessionOptions): Promis
    * older client that stored what the agent published — pins instead of failing
    * with the prefix doubled.
    */
-  const prefix = system === null ? null : SYSTEMS[system].nativeModelPrefix;
+  const prefix = spec?.nativeModelPrefix ?? null;
   const wanted = prefix === null || model.startsWith(prefix) ? model : `${prefix}${model}`;
 
   const option = session.modelOption;
   if (option === null) return `${options.agent} offers no choice of model on this machine.`;
+  /*
+   * ⚠ **Already on it is *done*, and this is checked before the list — because a
+   * current value outside the published choices is a state this daemon already
+   * treats as normal everywhere else.** Q2.219 says so outright about the model
+   * menu: the selected choice is never removed from a narrowed list, whatever
+   * namespace it is in, precisely so a session somebody switched by hand keeps a
+   * way back to itself. An agent that resumed a conversation on the model it was
+   * started with and no longer *offers* that model is the same fact seen from the
+   * other end.
+   *
+   * ⚠ **Without this the refusal below contradicts itself in one sentence, on the
+   * loudest row in the transcript, about a session that is fine.** Reported from
+   * the app, verbatim: *"opencode has no model called `opencode/hy3-free` — it
+   * offers … and 352 more. The conversation was resumed anyway, running
+   * opencode/hy3-free."* Both halves were true and the row was still wrong: the
+   * clause `openResumed` appends names what the session *came back on*, and it
+   * came back on exactly what the preset asked for. There was no demotion to
+   * announce. `daemoncheck` drove only `current !== wanted`, so the sentence that
+   * shipped was the one nothing had ever produced.
+   *
+   * Answering here rather than only silencing the notice, because the two callers
+   * weigh this differently and both are wrong to act: `openResumed` would draw an
+   * error row about a session running the right model, and `Session.start` would
+   * throw `SystemRoutingError` — a permanent 502 on a preset whose model the agent
+   * is *currently running*, which is the stranding Q2.216 chose a demotion over.
+   *
+   * It also spends one fewer round trip on every resume of a session already on
+   * its model: `setConfigOption` below would send a value the agent is holding.
+   */
+  if (option.value === wanted) return null;
   if (!option.choices.some((one) => one.value === wanted)) {
     const names = option.choices.map((one) => one.value);
     const shown = names.slice(0, MODEL_NAMES_IN_PIN_REFUSAL).join(", ");
@@ -2599,7 +2692,7 @@ function spawnEnvOf(options: SessionOptions): NodeJS.ProcessEnv {
   const system = options.system ?? null;
   const model = options.model ?? null;
   if (system === null || model === null || model === "") return {};
-  return routedModelEnv(options.agent, system, model);
+  return routedModelEnv(options.agent, system, model, options.machine ?? BUILTIN_CATALOGUE);
 }
 
 /**
@@ -2625,21 +2718,58 @@ function spawnEnvOf(options: SessionOptions): NodeJS.ProcessEnv {
  * `ANTHROPIC_CUSTOM_HEADERS` on the CLI it spawns, so the key does touch a process
  * table, one below this one, where `agentEnv` cannot reach it. See
  * `acp/systems.ts` for the measurement and for what would actually close it.
+ *
+ * ⚠ **Answers whether it actually routed, which is a different question from
+ * whether a system was named.** A native pairing configures nothing here and
+ * returns at the line that says so, because the agent already reaches its vendor
+ * on its own credential — so "asked for a system" and "running on somebody else's
+ * key" are not the same fact, and only this function can tell them apart. Its one
+ * reader is {@link SessionRuntime.noteStartRefusal}: a `session/new` refused on a
+ * routed pairing has already survived `providers/set` and condemns every way of
+ * starting this harness, while one refused bare says nothing about a routed
+ * start — which is the signed-out Claude Code on OpenRouter that this repository
+ * documents as working. Returned rather than recomputed at the call site, because
+ * a second copy of `spec.nativeHarness === options.agent` is the kind of test that
+ * comes to disagree with this one.
  */
 async function applySystem(
   client: AcpClient,
   options: SessionOptions,
   runtime: SessionRuntime,
-): Promise<void> {
+): Promise<boolean> {
   const system = options.system ?? null;
-  if (system === null) return;
-  const spec = SYSTEMS[system];
+  if (system === null) return false;
+  const machine = options.machine ?? BUILTIN_CATALOGUE;
+  const spec = machine.system(system);
+  /*
+   * ⚠ **A `SystemRoutingError` and never a `TypeError`.** What reaches a screen
+   * from an unguarded index here is `agent_launch_failed` carrying the words
+   * "cannot read properties of null", which says nothing anybody can act on. This
+   * is a `502 system_not_routable` with the same shape as every other refusal on
+   * this path — and it names the plugin, because reinstalling it is the remedy.
+   */
+  if (spec === null) {
+    throw new SystemRoutingError(
+      machine.systemState(system) === "disabled"
+        ? `This session's provider comes from a plugin that is switched off on this machine.`
+        : `This session's provider is no longer on this machine.`,
+    );
+  }
   // Native needs no configuring — the agent already reaches it, and replacing
   // its own routing with a copy would swap an OAuth token for a pasted key.
-  if (spec.nativeHarness === options.agent) return;
+  //
+  // ⚠ **`routedPairing` is the same question asked before the spawn**, and the two
+  // are allowed to differ in exactly one direction: it answers `true` wherever this
+  // function would go on to *throw* — no key saved, a protocol the agent cannot
+  // speak, a provider whose plugin is off — because all of those are still sessions
+  // aimed somewhere else, and none is a reason to have handed the harness its own
+  // vendor credential at spawn time. Where this returns `false` for a native
+  // pairing, so does that. Keep them that way round: a `routedPairing` that
+  // answered `false` on any path this one routes would put the credential back.
+  if (spec.nativeHarness === options.agent) return false;
 
   const routing = await client.routing();
-  const refusal = hostable(options.agent, system, routing);
+  const refusal = hostable(options.agent, system, routing, machine);
   if (refusal !== null) throw new SystemRoutingError(refusal);
   // `hostable` returning null with a null routing is unreachable for a
   // non-native system — it refuses on `routing === null` — but the compiler
@@ -2662,7 +2792,7 @@ async function applySystem(
         providerId: routing.providerId,
         apiType: spec.apiType,
         baseUrl: spec.baseUrl,
-        headers: routingHeaders(system, secret),
+        headers: routingHeaders(system, secret, machine),
       }),
       SET_CONFIG_TIMEOUT_MS,
       "providers/set",
@@ -2675,6 +2805,7 @@ async function applySystem(
         `${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  return true;
 }
 
 /**

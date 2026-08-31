@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type * as acp from "@agentclientprotocol/sdk";
 import { AgentUnavailableError, type AgentId } from "./acp/agents.js";
-import { SYSTEMS, type SystemId } from "./acp/systems.js";
+import { BUILTIN_CATALOGUE, type MachineCatalogue, type SystemId } from "./acp/systems.js";
 import { resolveCwd } from "./browse.js";
 import {
   MemoryEventStore,
@@ -605,7 +605,7 @@ export function withUltracode(config: AgentConfig, agent: AgentId, on: boolean):
  * which collapses a placeholder onto the concrete row it duplicates and moves the
  * selection with it. Nothing an agent offers uniquely is ever dropped.
  */
-function snapshotConfig(config: AgentConfig, namespace: string | null): AgentConfig {
+function snapshotConfig(config: AgentConfig, namespace: string | null, full = false): AgentConfig {
   return {
     modes:
       config.modes === null
@@ -621,6 +621,15 @@ function snapshotConfig(config: AgentConfig, namespace: string | null): AgentCon
     options: config.options
       .map(dedupeAliasChoices)
       .map((option) => narrowToSystem(option, namespace))
+      // After the narrowing, never before it: a pairing's own catalogue is what
+      // somebody is choosing from, so cutting the union first would drop rows the
+      // narrowing was about to keep and leave a head of another system's models.
+      //
+      // Skipped whole for the one route that is not polled — see `snapshot`. The
+      // *narrowing* above still runs there, because that is a correctness rule
+      // about which system's models a pinned session may be offered rather than a
+      // size bound, and it must not differ between the two reads.
+      .map((option) => (full ? option : clipChoices(option)))
       .map((option) => ({
       ...option,
       // The option's own description is kept too, and it is short — "AI model to
@@ -695,6 +704,53 @@ export function narrowToSystem(option: AgentConfigOption, namespace: string | nu
 
 /** Bounded, because it now rides a record `GET /sessions` returns sixty of. */
 const MAX_CHOICE_DESCRIPTION_CHARS = 120;
+
+/**
+ * How many choices of one option ride the *list*.
+ *
+ * ⚠ **The description was bounded and the count was not, and the count is the one
+ * that grew.** `clipChoiceDescription` above was measured against claude, which
+ * "advertises five models, each with prose" — so N descriptions was the expensive
+ * part and N itself was small. opencode is not: with an `OPENROUTER_API_KEY` in its
+ * environment it publishes **362** models in one control (measured 2026-08-27, and
+ * `narrowToSystem` keeps 356 of them for the OpenRouter pairing and *all* 362 for a
+ * bare session, whose namespace is `null` and which returns before it filters). At
+ * sixty rows on a four-second poll, over a relay, to a phone, that is the largest
+ * thing in the response by an order of magnitude — the cost this whole function
+ * exists to control, arriving through the one dimension it did not bound.
+ *
+ * **The selected choice is always kept, wherever it sits**, because it is what the
+ * chip, the strip tile and `configProse` draw; losing it would make a session
+ * report a model it is not running. `truncated` is what tells a client the menu is
+ * a head rather than the whole list, so a picker can say so and read the rest from
+ * `GET /sessions/:id`, which is not paginated and not polled.
+ *
+ * 40 rather than a rounder number: claude's five, codex's dozen and kimi's list all
+ * fit whole, so nothing this repository ships is truncated at all and the flag stays
+ * false on every session anybody has today.
+ */
+const MAX_SNAPSHOT_CHOICES = 40;
+
+/**
+ * One option's choices, cut to {@link MAX_SNAPSHOT_CHOICES} with the selected one
+ * kept.
+ *
+ * Returns the option by identity when nothing was cut, so a client comparing
+ * snapshots sees no change where there is none — `narrowToSystem` above takes the
+ * same care for the same reason.
+ */
+function clipChoices(option: AgentConfigOption): AgentConfigOption {
+  if (option.choices.length <= MAX_SNAPSHOT_CHOICES) return option;
+  const head = option.choices.slice(0, MAX_SNAPSHOT_CHOICES);
+  // The selected choice may sit past the cut, and it is the one a client cannot do
+  // without. Swapped into the last slot rather than prepended: the order of what
+  // survives is the agent's own, and moving the head around would reorder a menu.
+  if (!head.some((choice) => choice.value === option.value)) {
+    const selected = option.choices.find((choice) => choice.value === option.value);
+    if (selected !== undefined) head[head.length - 1] = selected;
+  }
+  return { ...option, choices: head, truncated: true };
+}
 
 function clipChoiceDescription(description: string | null): string | null {
   if (description === null) return null;
@@ -1382,6 +1438,15 @@ export interface ManagedSessionOptions {
    */
   resolveCustomAgent?: (id: string) => { harness: AgentId; system: SystemId; model: string } | null;
   /**
+   * What this machine offers beyond what this repository ships.
+   *
+   * **A thunk, for `elicitationAllowed`'s reason and `resolveCustomAgent`'s**: it
+   * is answered at every launch rather than captured, so a plugin installed while
+   * a session slept is offering its harness by the time that session resumes, and
+   * one removed is refused rather than silently resolved against a stale copy.
+   */
+  machineCatalogue?: () => MachineCatalogue;
+  /**
    * Where a degradation nobody else can see gets reported.
    *
    * Exists for exactly one thing today: `SessionLog`'s fan-out guard evicts a
@@ -1754,6 +1819,7 @@ export class ManagedSession {
 
   /** See `ManagedSessionOptions.customAgent`. Immutable, like `agent`. */
   readonly customAgent: string | null;
+  private readonly machineCatalogue: () => MachineCatalogue;
   private readonly resolveCustomAgent: (
     id: string,
   ) => { harness: AgentId; system: SystemId; model: string } | null;
@@ -1767,6 +1833,7 @@ export class ManagedSession {
   ) {
     this.customAgent = options.customAgent ?? null;
     this.resolveCustomAgent = options.resolveCustomAgent ?? (() => null);
+    this.machineCatalogue = options.machineCatalogue ?? (() => BUILTIN_CATALOGUE);
     // The third argument is what `SessionLog` has always taken and nobody ever
     // supplied: an evicted listener is a live socket that has silently stopped
     // receiving, and every other degradation in this codebase reports through a
@@ -2063,7 +2130,20 @@ export class ManagedSession {
    * Copied, not referenced: a frame built now and serialized four seconds later
    * must describe now, not some moment in between that never existed.
    */
-  snapshot(): SessionSnapshot {
+  /**
+   * This session as a frame, built now.
+   *
+   * ⚠ **`fullConfig` decides whether the model list is cut, and exactly one route
+   * asks for it.** `snapshotConfig` bounds the choice count because this record
+   * rides `GET /sessions` — sixty of them, every four seconds, over a relay, to a
+   * phone. But the *browser reads its model picker out of this same object*
+   * (`store.ts`'s rule: state comes from the snapshot, only prose comes from the
+   * log), so a cut with no way to read past it is a picker missing rows and
+   * nothing saying so. `GET /sessions/:id` passes `true`: it is one session,
+   * fetched on demand, and is not polled — which is what makes it the place the
+   * rest can honestly live.
+   */
+  snapshot(options: { fullConfig?: boolean } = {}): SessionSnapshot {
     const stats = this.log.stats();
     return Object.freeze({
       id: this.id,
@@ -2092,6 +2172,7 @@ export class ManagedSession {
       agentConfig: snapshotConfig(
         withUltracode(this.snapshotConfigSource, this.agent, this.ultracodeWanted),
         this.modelNamespace,
+        options.fullConfig === true,
       ),
       commandsRevision: this.commandsRevisionValue,
       // The derived floor rather than the raw `firstSeq`. A client reads this as
@@ -2299,7 +2380,11 @@ export class ManagedSession {
   private get modelNamespace(): string | null {
     const system = this.assembled.system;
     if (system === undefined) return null;
-    const spec = SYSTEMS[system];
+    // `null` for a system this machine no longer offers, and this is on the
+    // **poll** path — `narrowToSystem` shapes every snapshot. A throw here would
+    // be one per client per touch on a session whose plugin somebody removed.
+    const spec = this.machineCatalogue().system(system);
+    if (spec === null) return null;
     return spec.nativeHarness === this.agent ? spec.nativeModelPrefix : null;
   }
 
@@ -2339,6 +2424,7 @@ export class ManagedSession {
       permissions: this.resolvePermission,
       elicitations: this.elicitationAllowed() ? this.resolveElicitation : null,
       runtime: this.runtime,
+      machine: this.machineCatalogue(),
       keepImage: this.keepAgentImage,
       ultracode: this.ultracodeWanted,
     };
@@ -3676,6 +3762,18 @@ export class ManagedSession {
     // actually happened.
     if (this.stopRequested && event.type === "error") return;
     this.log.append(event);
+    /*
+     * ⚠ **And this may not write `noteStartRefusal`, however much it looks like
+     * the place.** The daemon does remember a harness that refused to open a
+     * session, and this is the third signal that says the word "authentication" —
+     * but Q7.99 measured it and it was not about a credential: a session idle
+     * 5h36m reported `errorKind: "authentication_failed"` on its first prompt with
+     * the token on disk still valid for 1.4 hours, and a freshly spawned agent
+     * worked four minutes later. Recording it would take the harness off the New
+     * session strip for everybody on the machine because one conversation's agent
+     * had gone stale. Only ACP's typed `auth_required` at `session/new` and
+     * `session/resume` writes that record; see `SessionRuntime.noteStartRefusal`.
+     */
     if (isAuthFailure(event)) this.onAgentUnusable();
   }
 
@@ -4461,6 +4559,29 @@ export class SessionRegistry {
    */
   private ultracodeByDefault = false;
 
+  /**
+   * What this machine offers beyond what this repository ships.
+   *
+   * ⚠ **A setter, and it must be called before `restore()` — the same rule as
+   * {@link SessionRegistry.setCustomAgents} and a stronger reason.** `restore()`
+   * rebuilds every persisted session, and `assembled` reads `custom_agents`
+   * through a validator that *drops* a row naming a harness this build cannot
+   * resolve. A session on a plugin's harness that came back before this was set
+   * would resume demoted to its bare harness, on a different vendor, with nothing
+   * on screen saying so.
+   */
+  private machine: MachineCatalogue = BUILTIN_CATALOGUE;
+
+  /** See {@link machine}. Called by `daemon.ts` before `restore()`. */
+  setMachineCatalogue(machine: MachineCatalogue): void {
+    this.machine = machine;
+  }
+
+  /** What this machine offers, for the routes that list and refuse. */
+  get machineCatalogue(): MachineCatalogue {
+    return this.machine;
+  }
+
   /** See {@link MAX_LIVE_SESSIONS}; `daemon.ts` overrides all three. */
   private maxLiveSessions = MAX_LIVE_SESSIONS;
   private createBurst = SESSION_CREATE_BURST;
@@ -4691,6 +4812,56 @@ export class SessionRegistry {
       );
     }
 
+    /*
+     * **And the same fence for a harness that refused to open a session.**
+     *
+     * ⚠ **This is the paragraph directly above, applied to the axis it did not
+     * cover.** That one moved the *installed* check ahead of `createWorkspace`
+     * because "every retry of a failing start was permanent growth inside the
+     * tenant's own tree plus a branch left in their repository". A harness that
+     * answers `session/new` with `auth_required` reaches that same outcome by the
+     * other door, and it is the commoner one: the refusal happens *after* the
+     * spawn, so the worktree, the branch and the session row are all made before
+     * anything knows. Reported with a screenshot — a harness a plugin added,
+     * pressed four times.
+     *
+     * ⚠ **Bare and native starts, and a routed one only once routing has itself
+     * been refused.** `routed` is the fact `applySystem` answers: a refusal
+     * measured on a routed pairing has already survived `providers/set` and
+     * condemns every way of starting this harness, while one measured bare says
+     * nothing about a start that runs on somebody else's key. A signed-out Claude
+     * Code paired with OpenRouter is the case this repository documents as
+     * working, and a fence that read one bare refusal as a fact about every start
+     * would have broken it.
+     *
+     * ⚠ **`customAgent == null` is *not* the whole test, and reading it as one is
+     * the mistake this paragraph made for a draft.** A **native** pairing carries a
+     * system and configures nothing: `applySystem` returns at
+     * `spec.nativeHarness === options.agent`, before `providers/set` and before any
+     * key is looked up, so the session runs on the harness's own credential exactly
+     * as a bare start does — which makes a bare refusal precisely as dispositive.
+     * Left to the preset arm alone, the one press that had just been refused was
+     * the one press this fence never caught, and every repeat cost a worktree, a
+     * branch and a session row again. `nativeHere` is that third case, resolved
+     * through the two accessors this class already holds.
+     *
+     * A bare `Error` and not a typed class, deliberately: it lands on the same
+     * `/authentication required/i` arm in `server.ts` the *first* press landed on,
+     * so the second answers the same code with the same body — one reason, drawn
+     * once, whether or not it cost a worktree.
+     */
+    const refusal = agentState?.lastStartRefusal ?? null;
+    if (refusal !== null) {
+      const preset = options.customAgent == null ? null : this.resolveCustomAgentBy(options.customAgent);
+      // A preset this daemon cannot resolve names no system, so it starts bare —
+      // the same reading `assembled` takes one table over, and the safe one here.
+      const nativeHere =
+        preset !== null && this.machine.system(preset.system)?.nativeHarness === options.agent;
+      if (refusal.routed || options.customAgent == null || nativeHere) {
+        throw new Error(refusal.message);
+      }
+    }
+
     // Minted before the workspace, because the worktree path and branch name
     // embed it.
     const id = `s_${randomBytes(4).toString("hex")}`;
@@ -4714,6 +4885,7 @@ export class SessionRegistry {
       customAgent: options.customAgent ?? null,
       // Re-read through `this` at every call, never captured — see the field.
       resolveCustomAgent: (id) => this.resolveCustomAgentBy(id),
+      machineCatalogue: () => this.machine,
       sessionStore: this.sessionStore,
       runtime: this.runtime,
       uploads: this.uploads,
@@ -4774,6 +4946,7 @@ export class SessionRegistry {
         elicitationAllowed: () => this.elicitationAllowed,
         ultracodeDefault: () => this.ultracodeByDefault,
         resolveCustomAgent: (id) => this.resolveCustomAgentBy(id),
+      machineCatalogue: () => this.machine,
         onWarning: this.onWarning,
       });
       this.sessions.set(row.id, managed);

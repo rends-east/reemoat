@@ -673,6 +673,32 @@ export class AgentAskRuns {
     }
   }
 
+  /**
+   * Forget what an agent last said, so the next ask really asks.
+   *
+   * ⚠ **The TTL was the *only* thing that ever emptied this map, and a
+   * contribution changing under it is not a passage of time.** `PluginHost`
+   * already calls `forgetStartRefusal()` and `forgetAvailability()` on the runtime
+   * after every install, update, remove and enable — but neither can reach here,
+   * so an install followed by an update inside {@link MODELS_TTL_MS}, or a disable
+   * followed by an enable, cleared the refusal record and then hit this cache:
+   * nothing spawned, and `GET /agents/capabilities` served the *previous* binary's
+   * model list and routing for the rest of the ten minutes. `readAssembledAgent`
+   * feeds exactly that `routing` to `hostable`, so a preset could be weighed
+   * against a harness that is no longer installed.
+   *
+   * Whole-map with no argument, because that is what a plugin write means: the
+   * ids that changed are the plugin's, and a caller holding only "something was
+   * installed" cannot name them. `capsInFlight` is deliberately **not** touched —
+   * a run already in flight belongs to whoever started it and will settle on its
+   * own; dropping it here would leave that caller waiting on a promise nothing
+   * completes.
+   */
+  forget(agent?: AgentId): void {
+    if (agent === undefined) this.models_.clear();
+    else this.models_.delete(agent);
+  }
+
   /** {@link capabilities} with the cache and the in-flight collapse taken off. */
   private async readCapabilities(agent: AgentId, queue: boolean): Promise<AgentCapabilities> {
     /*

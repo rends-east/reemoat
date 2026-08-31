@@ -18,7 +18,7 @@ import { agentEditPath, agentFromHarnessPath, agentPath, navigate } from "../../
 import { settingsPath } from "../../settings";
 import { store, type AppState } from "../../store";
 import type { AgentId, AgentInfo, AgentStripEntry, CustomAgent, SystemInfo } from "../../wire";
-import { agentBadge, agentLabel, agentStance, startsBare } from "../agentCard";
+import { agentBadge, agentStance, harnessName, startsBare } from "../agentCard";
 import { AgentGlyph } from "../AgentIcons";
 import { Badge, Button, Empty, Icon, IconButton, Menu, reachText, RowAction, Spinner } from "../bits";
 
@@ -426,7 +426,7 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
     if (listing === null) return;
     const natural = [
       ...listing.agents
-        .filter((one) => startsBare(one.id))
+        .filter((one) => startsBare(one))
         .map((one) => ({ kind: "harness" as const, id: one.id })),
       ...listing.presets.map((one) => ({ kind: "custom" as const, id: one.id })),
     ];
@@ -480,6 +480,24 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
         if (mine <= confirmed.current) return;
         confirmed.current = mine;
         saved.current = [...next];
+        /*
+         * ⚠ **The merge effect keys on the whole `listing`, so `stored` has to move
+         * with the write or any later `setListing` reverts the screen.**
+         * `listing.stored` was written once at load and never again: `recheck` mints
+         * a fresh `listing` object to patch one agent's status, the `[listing]`
+         * effect re-ran `orderStrip` against the *mount-time* order, and every
+         * reorder and hide made since load was silently undone — with no write
+         * issued, so the daemon kept the arranged order and the New session strip
+         * went on drawing it. `saved.current` was overwritten with the stale order
+         * too, so the next refused write restored to it as well.
+         *
+         * Advanced here rather than in the effect, and only past the `confirmed`
+         * guard above: this is the point at which the daemon is known to hold
+         * exactly `next`, which is what `stored` is supposed to mean. The round trip
+         * is stable — `orderStrip(natural, stripEntries(next))` is `next` — so the
+         * effect this re-runs repaints the same rows rather than moving anything.
+         */
+        setListing((held) => (held === null ? held : { ...held, stored: stripEntries(next) }));
         setWriteFailure(null);
       })
       .catch((cause: unknown) => {
@@ -494,6 +512,55 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
 
   /** Ask the daemon for the listing again. See {@link attempt}. */
   const retryReads = (): void => setAttempt((one) => one + 1);
+
+  /**
+   * Ask a harness again, after somebody has fixed it off-screen.
+   *
+   * ⚠ **This is what the New session strip owes for taking a tile away.** A
+   * harness that refused to start has no tile — `offersStripTile` — and this list
+   * is deliberately wider, so the row is here and the badge says *would not
+   * start*. But the commonest remedy for a harness with no sign-in wizard is to
+   * run its own program once on the machine itself, and nothing about that
+   * reaches the daemon: without this control the only way back is to wait for the
+   * refusal to age out.
+   *
+   * ⚠ **The row the route answers is what lands, and re-reading the whole listing
+   * instead would silently undo a drag.** `attempt` is `Try again`'s counter and
+   * it re-fetches `GET /agent-strip` with it — which is drawn optimistically and
+   * may have a `PUT` in the air, so the merge effect below would put the
+   * pre-write order back under a finger that had just moved a row. That button
+   * can afford it because it is only drawn when the *read* failed, where nothing
+   * is in flight. This is not, so it patches the one agent it asked about and
+   * leaves the order alone. It is also what makes the route's `info` load-bearing
+   * rather than decorative.
+   *
+   * The fallback is the counter, for the one answer that carries no row: a
+   * harness the machine no longer offers at all, where a full re-read is exactly
+   * the right thing.
+   */
+  const recheck = (id: string): void => {
+    const daemon = store.daemonFor(machineId);
+    if (daemon === undefined) {
+      setWriteFailure("That machine is not reachable right now.");
+      return;
+    }
+    void daemon
+      .recheckAgent(id)
+      .then((answer) => {
+        setWriteFailure(null);
+        const fresh = answer.info ?? null;
+        if (fresh === null) {
+          setAttempt((one) => one + 1);
+          return;
+        }
+        setListing((held) =>
+          held === null
+            ? held
+            : { ...held, agents: held.agents.map((one) => (one.id === fresh.id ? fresh : one)) },
+        );
+      })
+      .catch((cause: unknown) => setWriteFailure(errorText(cause)));
+  };
 
   const remove = (id: string): void => {
     const daemon = store.daemonFor(machineId);
@@ -529,6 +596,16 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
          * back with a kebab offering Edit on an id that answers 404.
          */
         saved.current = saved.current.filter((row) => !(row.kind === "custom" && row.id === id));
+        /*
+         * ⚠ **And out of the listing, or one `Check again` brings it back.** The
+         * merge effect rebuilds `natural` from `listing.presets`, so a preset left
+         * there after its `DELETE` succeeded reappears the next time anything mints
+         * a fresh `listing` — with a live Edit kebab on an id that answers 404,
+         * which is the row the comment above this block says must never be drawn.
+         */
+        setListing((held) =>
+          held === null ? held : { ...held, presets: held.presets.filter((one) => one.id !== id) },
+        );
         // The ref and not the closure's `rows`: see its docblock. A reorder that
         // landed while the DELETE was in flight is somebody's work.
         write(latest.current.filter((row) => !(row.kind === "custom" && row.id === id)));
@@ -708,6 +785,7 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
                 )
               }
               onAnnounce={setMoved}
+              onRecheck={(agent) => recheck(agent)}
               onRemove={() => remove(row.id)}
             />
           ))}
@@ -778,6 +856,7 @@ function StripRowView({
   onMove,
   onToggle,
   onAnnounce,
+  onRecheck,
   onRemove,
 }: {
   row: StripRow;
@@ -826,6 +905,13 @@ function StripRowView({
    * function about the list.
    */
   onAnnounce: (line: string) => void;
+  /**
+   * Drop what the daemon remembers about this harness refusing to start.
+   *
+   * Takes the **harness** id rather than the row's, because on a preset row those
+   * are two different things and the record is kept against the harness.
+   */
+  onRecheck: (agent: string) => void;
   onRemove: () => void;
 }): ReactNode {
   const node = useRef<HTMLLIElement | null>(null);
@@ -921,7 +1007,9 @@ function StripRowView({
   const badge =
     info === null
       ? null
-      : agentBadge(agentStance(info.available, info.loggedIn, info.login?.blocked));
+      : agentBadge(
+          agentStance(info.available, info.loggedIn, info.login?.blocked, info.lastStartRefusal != null),
+        );
   /*
    * Which harness the glyph draws, and it is read off the *listing* rather than
    * cast from the row's id. `orderStrip` only emits rows `natural` holds and every
@@ -932,7 +1020,28 @@ function StripRowView({
    * costs a gap rather than a row that is narrower than its neighbours.
    */
   const glyph: AgentId | null = harness ? (info?.id ?? null) : (preset?.harness ?? null);
-  const name = harness ? agentLabel(row.id) : (preset?.name ?? row.id);
+  /**
+   * The listing row for the harness *behind* this row, whichever kind it is.
+   *
+   * ⚠ **`info` is null on a preset row, and keying the re-check on it left the
+   * control unreachable for exactly the harnesses that need it.** This screen
+   * lists harnesses `startsBare` answers true for and nothing else — that
+   * exclusion is deliberate and defended in this file's own header — so opencode,
+   * and every harness a plugin added, appear here **only**
+   * through the presets built on them. Those are the harnesses whose refusals are
+   * routed ones, whose remedy is somewhere this app cannot see, and which had no
+   * control anywhere.
+   */
+  const behind = harness ? info : (listing.agents.find((one) => one.id === preset?.harness) ?? null);
+  /*
+   * ⚠ **`harnessName` over the listing row, not `agentLabel` over its id.** That
+   * function answers only for the four this product ships and falls through to the
+   * raw id for anything else — right, and pinned — so a harness a plugin added
+   * would have drawn `acme:gemini` here beside `Kimi Code`. The label rides
+   * `AgentInfo`, and the `?? {id}` arm is the impossible case `glyph` above already
+   * refuses to cast away.
+   */
+  const name = harness ? harnessName(info ?? { id: row.id }) : (preset?.name ?? row.id);
   /*
    * ⚠ **The vendor, and a status only when there is a fault to report.**
    *
@@ -951,7 +1060,7 @@ function StripRowView({
   const under = harness
     ? badge?.tone === "strong"
       ? badge.text
-      : harnessSubline(row.id, listing.systems)
+      : harnessSubline(row.id, listing.systems, info?.contributedBy)
     : preset === null
       ? ""
       : customAgentSubline(preset, listing.systems);
@@ -1401,6 +1510,32 @@ function StripRowView({
                * its data. A confirmation on a reversible act is a tax on the act
                * somebody performs most.
                */}
+              {/*
+               * ⚠ **Only where there is something to drop, and that is the one
+               * conditional row in this menu.** The screen's standing rule is that
+               * a row's *kind* may decide a lookup or a destination and never a
+               * presentation — this is not keyed on kind. It is keyed on a fact
+               * the row is already reporting one line up, in the badge that
+               * displaced the vendor: this harness would not start. Offered on
+               * every row it would be a control that does nothing on all but one
+               * of them, which is what "Edit" was before it meant *start from
+               * this*.
+               *
+               * ⚠ **And it is what the strip owes.** `offersStripTile` has taken
+               * this harness's tile away, so this list is the only place it
+               * appears — and for a harness with no sign-in wizard the remedy is
+               * off-screen entirely: run its own program once on the machine. This
+               * is the only control in the app that says "I did that, look again".
+               */}
+              {behind?.lastStartRefusal != null && (
+                <RowAction
+                  label="Check again"
+                  onClick={() => {
+                    close();
+                    onRecheck(behind.id);
+                  }}
+                />
+              )}
               <RowAction
                 label={row.hidden ? "Add back" : "Remove"}
                 onClick={() => {

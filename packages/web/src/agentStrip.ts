@@ -39,8 +39,18 @@ export interface StripRow {
  * `${kind}:${id}`, which is the same string `AgentStrip` already builds to decide
  * which tile to scroll into view — so a harness and an assembled agent that
  * happen to share an id are two rows, and a colon in an id cannot make them one.
- * A `ca_` id is hex and a harness id is one word, so nothing today can collide;
- * this is what keeps that from being a thing to remember.
+ *
+ * ⚠ **"A harness id is one word" stopped being true and the key is still safe,
+ * which is worth stating rather than leaving to be re-derived.** A harness a
+ * plugin added is `<pluginId>:<localId>` — a colon inside the id, in a key built by
+ * joining on a colon. It cannot collide, and the reason is structural rather than
+ * arithmetic: `kind` is a fixed two-member set, this string is only ever *joined*
+ * and compared, and nothing anywhere splits it back. So the ambiguity a reader
+ * would look for — is `custom:a:b` the custom `a:b` or something else — is one no
+ * caller can ask.
+ *
+ * ⚠ It is bounded on the way to the daemon rather than here: `MAX_STRIP_REF_CHARS`
+ * has to hold two 32-character ids and a colon, and it was 64.
  */
 export function stripKey(kind: StripKind, id: string): string {
   return `${kind}:${id}`;

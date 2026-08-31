@@ -67,7 +67,17 @@ export class DaemonClient {
     });
   }
 
-  removeSystemKey(system: string): Promise<{ removed: true; system: string }> {
+  /**
+   * ⚠ **`removed` is a `boolean`, not a `true`** — the same point
+   * {@link removeCustomAgent} makes below, and this method had it wrong.
+   * `DELETE /systems/:system` answers `removed: system !== null`, so a key naming
+   * a system this build cannot resolve — one written by a newer daemon, or a
+   * contributed id whose plugin is switched off — comes back `false`. `DELETE` is
+   * on `isReplayable`, so a replayed delete whose first answer was lost is
+   * *expected* to answer `false`. A `true` literal here narrows `if
+   * (!result.removed)` to `never` and deletes that branch at compile time.
+   */
+  removeSystemKey(system: string): Promise<{ removed: boolean; system: string }> {
     return this.machine.request(`/systems/${encodeURIComponent(system)}`, { method: "DELETE" });
   }
 
@@ -276,6 +286,21 @@ export class DaemonClient {
     });
   }
 
+  /**
+   * Drop what the daemon remembers about this harness having refused to start.
+   *
+   * ⚠ **The one control on this screen whose subject is outside the app.** A
+   * harness with no sign-in wizard is fixed by running its own program once on the
+   * machine itself, and nothing about that reaches the daemon — so without this
+   * the only way back from a refusal is to wait for it to age out. It asks nothing
+   * of the agent and takes nothing away.
+   */
+  recheckAgent(agent: string): Promise<{ agent: string; rechecked: boolean; info?: AgentInfo }> {
+    return this.machine.request(`/agent-auth/${encodeURIComponent(agent)}/recheck`, {
+      method: "POST",
+    });
+  }
+
   cancelLogin(loginId: string): Promise<{ cancelled: boolean }> {
     return this.machine.request(`/agent-auth/login/${encodeURIComponent(loginId)}`, {
       method: "DELETE",
@@ -356,6 +381,23 @@ export class DaemonClient {
   }
 
   /** Stopping is a DELETE. There is no `POST /stop`. */
+  /**
+   * One session, read in full.
+   *
+   * ⚠ **The only read that carries the whole model list.** `GET /sessions` bounds
+   * every option's choices, because sixty of those records ride a four-second poll
+   * to a phone and a keyed opencode publishes 362 models — so the polled copy is a
+   * head, flagged `truncated`. This route is not polled and answers complete. A
+   * picker that finds `truncated` on the option it is about to draw comes here for
+   * the rest; nothing else should, or the saving is spent.
+   *
+   * `GET`, so `isReplayable` allows the retry — the same reason `sessions()` may be
+   * replayed, and it reads rather than writes.
+   */
+  session(id: SessionId): Promise<{ session: SessionSnapshot }> {
+    return this.machine.request<{ session: SessionSnapshot }>(`/sessions/${encodeURIComponent(id)}`);
+  }
+
   stopSession(id: SessionId): Promise<{ session: SessionSnapshot }> {
     return this.machine.request<{ session: SessionSnapshot }>(`/sessions/${encodeURIComponent(id)}`, {
       method: "DELETE",
@@ -550,7 +592,7 @@ export class DaemonClient {
    */
   installPluginFromSource(
     source: { kind: "github"; repo: string; commit: string },
-    consent: { scopes: readonly string[]; net: readonly string[]; hooks: readonly string[] } | null,
+    consent: { scopes: readonly string[]; net: readonly string[]; hooks: readonly string[]; adds: readonly string[] } | null,
     signal?: AbortSignal,
   ): Promise<PluginInstalled> {
     return this.machine.request<PluginInstalled>("/plugins/source", {

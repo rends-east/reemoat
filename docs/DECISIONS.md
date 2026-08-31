@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 114 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 77 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 281 | `####` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 117 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 79 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 286 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 44 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 109 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 65 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 125 | `###` |
-| | | **815** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 127 | `###` |
+| | | **827** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 815 rather than the 425
+dividers. So the count is over **both** depths, and it says 827 rather than the 432
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -2783,6 +2783,165 @@ meaning.
 
 
 
+### Q1.622 — A plugin names a program and an endpoint. What is it trusted with?
+
+**What this answers.** `contributes.harnesses` puts a program on this daemon's spawn
+path and `contributes.systems` puts a host on the path a pasted key travels. Both
+read like new authority. Only one of them is.
+
+**A harness adds none, and that is the finding.** A plugin is already a child process
+running as this uid — Q1.612 — and can `import("node:child_process")` and spawn
+whatever it likes. Declaring a harness cannot widen that; what it buys is the same
+thing `manifest.scopes` buys and no more: the program is **named**, shown before
+anything is installed, refused when it is one of this machine's own agents, and
+switched off with the plugin. It catches the mistake rather than the attacker, which
+is the standing this whole subsystem already has.
+
+**A provider does add something, and it is the one field in this feature that
+changes a stated property.** `agent-systems.md` said *"no route, body field or header
+anywhere names a base URL"* and that sentence is still literally true — a request
+names a `SystemId`. What is no longer true is the sentence underneath it: **the set
+of hosts this daemon can be pointed at is no longer a compile-time constant of this
+repository.** The honest restatement is that a base URL now arrives in a
+`plugin.json`, inside an archive fetched from one hardcoded host at a full 40-hex
+commit, over `redirect: "error"`, after `consentGap` compared it against an origin
+somebody read and pressed a named button about — and is then fixed for the life of
+that install. Every link in that chain already existed.
+
+**Which is why the disclosure carries the *value* and not only the verb.** Two scopes
+were added, and their lines say what is at stake — *add an agent that runs a program
+it names*, *add a provider your saved keys are sent to*. But a line in a list is where
+somebody learns a capability exists, not where they can judge one, so the consent card
+also draws the **argv** and the **whole normalised base URL**. These are the only two
+scopes with a second disclosure, because they are the only two where the value matters
+as much as the verb.
+
+**And the compared string is the drawn string.** `addedLines` produces one line per
+contribution; `PluginConsent` draws exactly those, `consentGap` diffs exactly those,
+and `consentBroken` rebuilds exactly those from the row that came back. One value, so
+there is no second rendering of the same fact to drift — and the *whole* path is in
+it, because a plugin showing `https://api.groq.com` and shipping
+`https://api.groq.com/../evil` passes an origin comparison.
+
+**`http` is permitted to this machine and to this network, and refused everywhere
+else.** That is the opposite call from `readNet`'s `LOCAL_HOST` refusal forty lines
+away in the same file, and the difference is whose key is at stake: that one refuses a
+local target in a plugin's *own* outbound list, where it is a mistake somebody is
+approving without reading, while this is where the **operator's** pasted key goes to a
+model they named — and Ollama, vLLM and LM Studio are exactly this and nothing else in
+the product reaches them. `169.254.169.254` and its IPv6 sibling are refused under
+`https` as well, because a base URL pointed at instance metadata is not a self-hosted
+model somebody stood up.
+
+**Status.** Applied.
+
+### Q1.623 — Where a refused start lives, and what clears one
+
+**Question.** Q2.221 gives the daemon a negative it never had. A negative about
+somebody else's machine is exactly the kind of fact this repository has been wrong
+about before. Where does it live, how long is it believed, and what takes it back?
+
+**Decision. In memory, per daemon, per harness, expiring on read after
+`START_REFUSAL_TTL_MS` — and the expiry is the design rather than housekeeping.**
+
+Durability was rejected rather than skipped. Q7.99 is this fact written down and
+believed afterwards: `stop("agent_signed_out")` off one observation, which stranded
+conversations under a notice that was already false, and was reverted. A restart is
+also the moment the machine has most likely changed underneath the record, so
+surviving one would make it most wrong exactly where it was most persistent.
+
+**The budget is `MODELS_TTL_MS`'s number and `MODELS_TTL_MS`'s argument** — ten
+minutes — because that is the other fact here that costs a spawn to re-measure and
+is re-measured by the same spawn. Two different budgets would let the model picker
+and the New session strip disagree about the same harness on the same machine.
+Emphatically **not** `LOGIN_PROBE_TTL_MS`: three seconds is a cache in front of a
+question this daemon may ask whenever it likes, and this is one it can only ask by
+starting a session somebody asked for.
+
+**What the expiry buys is that the list of clearings does not have to be
+exhaustive**, which is the whole reason it is not a control-flow problem. Somebody
+who signs in by running the CLI in a terminal on the machine itself has told this
+process nothing, and no hook, route or watcher can be relied on to notice. An
+observation ages; a verdict does not.
+
+The early clearings, in the order somebody meets them:
+
+1. **A successful start.** `Session.start` and `Session.openResumed` call
+   `forgetStartRefusal` on the success path. Free, and — because the record never
+   reaches `admit` — the capability sweep still spawns the harness for real on every
+   builder open, so this fires by itself the moment the harness works.
+2. **A credential arriving**, which has two doors: `PUT /agent-auth/:agent`, and a
+   login run reaching `done`. **Two of the five `forgetAvailability` call sites, and
+   the other three must not.** Those are a key being deleted, a sign-out and a login
+   abandoned — a credential going *away* — and the first would erase the record of
+   the refusal the deleted key was pasted against.
+
+   ⚠ **The login-run door was missing for a draft, and the cost was the whole flow
+   reading backwards.** `agentStance` puts `start_refused` above `signed_in`, so
+   somebody who signed in *inside the app* kept the badge **would not start**, kept
+   no tile, and lost the sign-in door itself — `signInOffered` wants
+   `loggedIn === false` — while `POST /sessions` went on refusing on the stale
+   message. It clears on the run *ending* rather than on it succeeding: this route
+   has no verdict to read, and a wrongly cleared record costs one start attempt
+   that re-records it, where a wrongly kept one costs ten minutes of a screen
+   contradicting the wizard just finished.
+
+   ⚠ **And `daemoncheck` asserts this per handler rather than by counting the
+   file**, because a count is not an anchor. Measured: moving the call out of the
+   `PUT` handler and into `POST …/logout` — whose parameter is also named `agent`,
+   so the line is textually identical — left the total unchanged and every driver
+   green, while inverting the rule the code beside it argues for.
+   `reloadCredentials`' own pair two blocks away already used the right technique
+   and said why.
+3. **A plugin lifecycle event.** `PluginHost.syncContributions`, which covers
+   install, update, remove, enable and disable — a harness whose command, arguments
+   and environment may all have changed is not the harness that refused.
+4. **Pressing Check again.** `POST /agent-auth/:agent/recheck`, and see Q3.538 for
+   why a control is owed at all.
+
+**Status.** Done.
+
+### Q1.624 — When does the machine find out that a harness will not start?
+
+**Reported, in the same breath as Q3.539**: *"не должно быть такого, что демон
+после добавления плагина не знает о невозможности запустить."*
+
+**Question.** Q2.221 gave the daemon a way to *record* a refused start, and
+`Session.start` writes it. But the only thing that ever started a contributed
+harness was a person pressing Start — so the first press was still the measurement,
+and still paid for it. Is that acceptable?
+
+**Decision. No, and what was missing was an occasion rather than a mechanism.**
+`PluginHost.probeContributed` fires the **existing** capability read — `admit`,
+`claim`, a real handshake and a real `session/new`, the same one the agent builder
+performs — for each harness a plugin contributes, at the three moments the machine
+has just learned about one: install, update and enable. Nothing reads the result.
+Whichever way it goes, `Session.start` has already written or cleared the record,
+so the answer is on `GET /agents` before anybody taps anything. That is the whole
+implementation, and it is small because Q2.221 put the record where a *start* would
+find it rather than where a route would.
+
+**Detached, and that is what makes it affordable.** An install runs under
+`exclusive()`, and a spawn plus a handshake is 627–2260 ms per harness measured
+across the four built-ins. Awaited, `POST /plugins` would hold its answer for the
+length of somebody else's binary starting up, and a plugin whose harness never
+completes a handshake would hold the mutex with it. Bounded by what it calls rather
+than by anything new: `MAX_CONCURRENT_ASKS` meters every one, and a manifest may
+contribute at most `MAX_PLUGIN_HARNESSES`.
+
+**Three occasions, and the three exclusions are the interesting half.** Remove and
+disable have nothing to ask about — the harness is no longer offered, so a spawn is
+work about something nobody can reach. **Boot is the one that is tempting and is
+still refused**: it would put a spawn per contributed harness in front of
+`autoResume`, which is already starting an agent per interrupted session, and Q1.623
+decided the record is in memory precisely so that a restart does not carry a
+measurement across a moment when the machine has most likely changed. So a daemon
+that has just come up is honestly ignorant, and one press is what that costs.
+`daemoncheck` asserts all six occasions, because the call is detached and every
+outcome is swallowed — the *occasion* is the only observable thing about it.
+
+**Status.** Applied.
+
 ## Session lifecycle, questions and attachments
 
 ### Q2.1 — What happens to a live session when the daemon restarts?
@@ -4988,6 +5147,140 @@ agent, and `onAgentUnusable` must not fire on one.
 
 **Status.** Current
 
+
+### Q2.220 — "It has no model called X. It is running X."
+
+**Reported from the app, as a screenshot of one row.** A resumed opencode session
+drew the error notice:
+
+> opencode has no model called "opencode/hy3-free" — it offers
+> openrouter/aion-labs/aion-2.0, … and 352 more. The conversation was resumed
+> anyway, running opencode/hy3-free.
+
+Both halves are true. The row is still wrong, and the way it is wrong is the
+interesting part.
+
+**`pinNativeModel` tests the wrong thing, and the two facts it conflates have
+different answers.** It asks whether the model is in `option.choices` — what the
+agent currently *offers* — and refuses when it is not. What the pin is *for* is
+that the session runs the model. `option.value` is what it is running, and it can
+sit outside `choices`: opencode resumed the conversation on the model it was
+started with, while the list it publishes now reflects whichever provider keys the
+machine holds today. So the session was on exactly what its preset named, and the
+daemon announced a demotion that had not happened.
+
+**This daemon already treats that state as normal at the other end**, which is what
+makes the conflation a defect rather than a judgement call. Q2.219 narrows the
+model menu to the session's own system and then says: *"The selected choice is
+never removed, whatever namespace it is in"* — precisely so a session somebody had
+switched by hand keeps a way back to itself. An agent that stopped listing the
+model it is running is the same fact seen from the agent's side.
+
+**Two consequences, and the second is the worse one.** `openResumed` drew a loud
+`error` row — `agent-systems.md` calls it "the loud row on purpose" — about a
+session that was fine, contradicting itself in one sentence. And `Session.start`
+turns the same refusal into `SystemRoutingError`, so **a preset whose model the
+agent is currently running answered a permanent `502`**. That is Q2.216's stranding
+reached from the opposite side: that entry chose a demotion over a 502 that never
+expires, and this produced the 502 anyway, for a pairing that works.
+
+**Fixed by asking the right question first**: `option.value === wanted` returns
+`null` before the list is read. Nothing to do, nothing to say — and one fewer
+`session/set_config_option` round trip on every resume of a session already on its
+model.
+
+⚠ **The driver had a whole column for this and never drove the case.** The pinning
+rig hardcoded `current: "sonnet"` while the pinned model was `"opus"`, so every
+"the model is gone" cell was a genuine demotion — and the assertion *"the demotion
+names both models"* is correct about the fixture and silent about the shape that
+shipped. `current` is a parameter now and the four cells are pinned for
+`current === wanted` too, including `start` answering `(started)` where it used to
+answer `SystemRoutingError`.
+
+**Status.** Fixed.
+
+### Q2.221 — Is a refused `session/new` a fact about the credential?
+
+**Reported from the app, as a screenshot of the New session sheet.** The strip
+drew a tile reading `Gemini / from Bring yo…` — a harness the `byo` plugin adds —
+and pressing Start answered:
+
+> Gemini (gemini) rejected session/new: authentication required. Gemini refused
+> this session. Run `gemini` once in a terminal on this machine to sign in with
+> Google, or paste a GEMINI_API_KEY below.
+
+The sentence is correct and the tile should not have been there. What made it
+persistent is that nothing this daemon knows could have taken it away:
+`readLoginState` answers `pasted ? true : null` for every harness with no status
+command — which is opencode and every harness a plugin adds — so `loggedIn` was
+`null`, `agentStance` answered `no_login`, and `offersTile` draws a tile for that.
+Each press cost a worktree, a branch and a session row before the agent declined,
+because the refusal happens *after* the spawn.
+
+**Question.** The daemon now remembers the refusal. Does it belong on `loggedIn`?
+
+**Decision. No, and the reason is not fastidiousness — it is that writing it there
+closes the only door out.** `AgentAskRuns.admit` refuses on `loggedIn === false`,
+and `admit` guards `claim`, which is what `GET /agents/capabilities` uses to start
+a harness and read what it offers. That sweep is the **one** live re-measurement a
+harness with no status probe ever gets: it performs a real `session/new` and caches
+only successes. Route the refusal through `loggedIn` and the record blocks the
+spawn that would have discovered the harness had been fixed — a lockout closing its
+own last door, and one nothing on any screen could explain.
+
+The narrower argument stands beside it. ACP's `auth_required` is answered by the
+*adapter*, and Q7.65 is this repository's own counterexample: a pasted
+`CODEX_API_KEY` that reached the model's API and was accepted, while `codex-acp`
+went on refusing `session/new`. `loggedIn` answers "is this CLI signed in"; a
+refusal answers "would this harness open a session, configured this way, a moment
+ago". They are different questions and the second one is the one a tile is about.
+
+So `AgentAvailability.lastStartRefusal` is its own field, carrying `at`, `routed`
+and the message. `readLoginState` is untouched, and its own ⚠ now names where the
+negative went — the docblocks at `runtime/types.ts`, `local.ts` and
+`daemoncheck.ts:1525` all say a harness with no probe cannot report itself signed
+out, and all three stay true.
+
+**Two places write it and a third deliberately does not.** `Session.start` and
+`Session.openResumed`, both on `isAuthRequired` — ACP's *typed* code rather than a
+message match. Not the event pump's `errorKind: "authentication_failed"`: Q7.99
+measured that against a session idle 5h36m whose token had 1.4 hours left, where a
+fresh agent worked four minutes later. What is stale there is the process, and
+`onAgentUnusable` carries a comment saying so at the one site that could have
+written this.
+
+**`routed` is what stops one refusal condemning a pairing it never tested.**
+`applySystem` runs before `session/new` and returns whether it actually routed — a
+native pairing configures nothing, because the agent already reaches its vendor on
+its own credential. A refusal measured while routed has survived `providers/set`
+and is evidence about every way of starting the harness. One measured bare is not:
+that is the signed-out Claude Code on OpenRouter this repository documents as
+working, and a fence reading a bare refusal as a fact about every start would have
+deleted it. `registry.create` fences before `createWorkspace` — the same paragraph
+the `available` check above it already carries, applied to the axis it did not
+cover.
+
+⚠ **And `customAgent == null` is not the whole test, which cost a draft.** A
+**native** pairing carries a system and configures nothing: `applySystem` returns
+at `spec.nativeHarness === options.agent`, before `providers/set` and before any
+key is read, so the session runs on the harness's own credential exactly as a bare
+start does — which makes a bare refusal precisely as dispositive. Written as two
+disjuncts, the fence let through the one press that had just been refused, and
+every repeat cost a worktree, a branch and a session row again. It resolves the
+preset and asks the catalogue now. The case needs no plugin: `hostable` accepts
+every native pairing, so a signed-out Claude Code with a native Anthropic preset
+reproduces it.
+
+⚠ **And the route that undoes it must answer the same row shape the listings do.**
+`availability()` carries no `login` object — that is built in `loginSupportOf` and
+spread onto `GET /agents` and `GET /agent-auth` by hand — so `POST
+/agent-auth/:agent/recheck` returning its lookup verbatim dropped the one field
+whose absence makes every reader fall to *cannot check*, which is the permanent
+wrong badge `local.ts` answers `no_flow` to prevent. Measured: `pnpm client agents`
+printed *no sign-in needed* and `pnpm client agents recheck` printed *cannot check*
+for the same harness in the same state.
+
+**Status.** Fixed.
 
 ## The web client
 
@@ -14873,6 +15166,292 @@ returns to in order to *add* a key — floating the configured ones would move t
 rows somebody came to change, and the picker's argument (put what you can run
 first) is an argument about choosing, not about configuring.
 
+#### Q3.536 — A harness with no glyph, no label and no vendor
+
+**Where this came from.** Every per-harness fact this client draws was a table keyed
+on four literals: `AGENT_LABEL` for the name, `AgentGlyph` for the mark,
+`harnessSubline` for the line under a tile. A harness a plugin adds has a row in none
+of them, and the fall-throughs each produce a different kind of wrong.
+
+**The name is the one that looked solved and was not.** `agentLabel` already answers
+`?? id`, and the obvious fix — fall through to the daemon's `AgentInfo.displayName` —
+is wrong for a reason this file already writes down twice: that field is a *log line*
+and carries the program. It is literally `Claude (claude-agent-acp)` and
+`Kimi Code CLI`, and `agentCard.ts`'s own rule forbids a label naming a package or
+ending in `CLI`, which `webcheck` sweeps for. So the manifest's name rides its own
+field, `AgentInfo.label`, and `harnessName` is the pair: this product's table, then
+that, bounded.
+
+**Bounded, never filtered, and the distinction is the rule.** `noJargon` forbids
+*wire vocabulary in this app's templates*; it is not a content filter over the nouns
+substituted into them, which are and always were somebody else's prose — a provider
+legitimately called "Anthropic-Compatible Gateway" is truthful, and `CREDENTIAL_LABELS`
+already draws "Anthropic API key". What has to be bounded is the **shape**, because
+these strings land in one-line `truncate`d sublines, in an `aria-label` built by
+joining with commas, and in headings on a phone: `boundedName` trims, collapses
+whitespace, strips C0/C1 and bidi controls, and cuts. The driver adds a hostile-name
+arm and says out loud that `noJargon` is deliberately *not* asserted over it, or the
+next person closes the gap by widening the predicate.
+
+**The glyph is a monogram, and one generic mark was the obvious answer.** It is wrong
+at eight: a machine may hold eight contributed harnesses, the tile is 96px and its
+title `truncate`s, so eight identical shapes is a row that says nothing about which is
+which — the failure the four distinct shapes exist to prevent. A letter in this app's
+own weight is not a mark and cannot be mistaken for one, which is the property those
+four are careful about. **Derived from the id's local half**, so the element keeps its
+two props and `webcheck`'s two pinned JSX call sites are untouched.
+
+⚠ **And the narrowing is what keeps `AgentGlyph`'s `never` arm real.** A `switch` over
+a string has no exhaustiveness to check, so widening `AgentId` without
+`isBuiltinAgentId` would have deleted the only mechanism in this fleet that makes
+adding a harness loud — silently, while the docblock went on claiming it. That is
+exactly what this function shipped for four releases before Q7.125.
+
+**The subline falls back to the plugin's name.** Empty was right while every harness
+with a row had a vendor; a contributed harness paired only with built-in providers is
+native to none, so the blank line is its **common** case — a tile with a title and
+nothing under it, beside tiles that have one. *"from Acme Tools"* is not a vendor and
+is not pretending to be; it answers the question somebody actually has about a row
+they do not recognise.
+
+**`standalone` was spelled so that absent means no tile — and is gone entirely; see
+Q3.539.** `startsBare` is about the *model*: getting it wrong the permissive way is
+Q3.522's failure with somebody else's binary — a session billed to the operator on a
+model nobody chose, under a tile that names none, and unlike opencode nothing on this
+side could find out afterwards what it ran. Getting it wrong the other way is
+opencode's own position, which this repository already argues is not a demotion.
+
+**Status.** Applied.
+
+#### Q3.537 — A sixth stance, or a reordered ladder?
+
+**Question.** Q2.221 puts a refused start on the wire. `agentStance` tests
+`blocked === "no_flow"` **before** the credential axis, so a harness with no
+sign-in can never be `signed_out`. The one-line fix is to move the `loggedIn ===
+false` test above it. Is that right?
+
+**Decision. No. It is a sixth member, `start_refused`, inserted below
+`not_installed` and above `no_flow`.** A reorder makes three sentences false, and
+none of the three has a driver that would have caught it — `webcheck` drives no
+`agentStance(true, false, "no_flow")` at all, so all three would have shipped.
+
+- `stanceLine`'s signed-out arm reads *"macOS can't run Claude Code's own sign-in,
+  so a saved key is the only way in"*. For a harness with no wizard that blames the
+  host for an absence that exists on every platform, and it forecloses the remedy
+  the daemon's own hint offers **first** — run the program once on the machine.
+- `dividerWord` would draw *"Sign in with a key instead"* with nothing above it for
+  the key to be instead *of*, which is Q3.513's recorded defect arriving again by
+  the next door.
+- `storedChip` would say *"still isn't signed in"* about a probe that never ran.
+
+The badge is **"would not start"** rather than "not signed in": it reports what was
+observed and diagnoses nothing, because for every harness that can reach this state
+there is no status to probe, and naming a sign-in would name only one of the two
+remedies. `tokenBlockFor` answers `editable`, where the box is the strongest thing
+on the card rather than — as under `no_login` — the least urgent.
+
+⚠ **And `offersTile` had to stop being a negative allowlist first.** It was
+`stance !== "not_installed" && stance !== "signed_out"`, which answers a silent
+`true` for anything it has not heard of — so the sixth member would have kept its
+tile while that function's own docblock claimed *"a sixth state has to arrive here
+as a decision"*. It is a `switch` with a `never` arm now. This is `AgentGlyph`'s
+lesson in another file: a default that reads as safe is not the same thing as a
+default that was taken.
+
+⚠ **One thing found on the way, unrelated to the refusal and shipped for as long as
+contributed harnesses have existed.** Every sentence in `agentCard.ts` named the
+agent with `agentLabel`, which answers the bare id for anything this product does
+not ship — so a harness a plugin added has been drawing **`byo:gemini` needs no
+sign-in.** on its own settings card. `stanceLine` and `storedChip` take the listing
+row now and go through `harnessName`, which is the same repair `hostable` and
+`choiceRefusal` already took.
+
+**Status.** Fixed.
+
+#### Q3.538 — Hiding a tile is concealing a fact about the machine. Why is this one allowed?
+
+**Question.** `agent-strip.md` states the standing posture: *"Every other 'this
+agent is not on the row' rule in this app is the app concealing a **fact about the
+machine**, and the standing answer is don't — an unavailable harness is drawn and
+labelled, because filtering answers 'where did claude go' with silence."* Q2.221
+hides a tile. Why is that not that mistake?
+
+**Decision. Because it is `offersTile`'s established rule rather than a new one,
+and because the doors it owes are paid.** That function already hides two states of
+five, and its docblock argues the trade in full and names what it costs: *"With
+every signed-out harness out of the row, the sign-in wizard under the strip is no
+longer reached by tapping the tile that says why."* `offersStripTile`'s docblock
+says the settings list is *deliberately wider* for exactly this. Concealment would
+be hiding it **everywhere**; this hides it in the picker, which is a list of things
+you can start.
+
+Three doors, and the third is the one this feature had to build:
+
+- **The row survives, and its badge is the fault.** Settings → Machines → agents
+  keeps the harness in its stored position and draws *would not start* where the
+  vendor line goes — the "a fault displaces the vendor" rule that list already has.
+- **The paste box is still typeable.** `tokenBlockFor` answers `editable`.
+- **`POST /agent-auth/:agent/recheck`, from that row's kebab *and* from the card
+  that states the refusal.** This is the new one, and it exists because the
+  commonest remedy for a harness with no wizard is entirely off-screen: run its own
+  program once on the machine. Nothing about that reaches this daemon, so without a
+  control the only way back is to wait out the budget. It refuses nothing — unlike
+  `login` and `logout`, which answer `503` for exactly the harnesses this is for.
+
+  ⚠ **Two copies, because one could not reach every harness.** The machine's agent
+  list excludes everything `startsBare` is false for — opencode, and any a plugin
+  added without `standalone` — and that exclusion is deliberate and defended. Those
+  are precisely the harnesses that live on presets, whose refusals are the routed
+  ones, and whose card in `AgentDetail` said *would not start* with nothing beside
+  it. The list's copy also had to stop keying on the harness row, which is `null`
+  on a preset row, and it patches the single agent the route answers rather than
+  re-reading: `attempt` refetches `GET /agent-strip`, which is drawn optimistically
+  and may have a `PUT` in the air, so a blanket re-read would put the pre-write
+  order back under a finger that had just moved a row.
+
+⚠ **And the empty arm on New session gained a sentence — with two endings.** *"No
+agent on this machine is ready to start."* was drawn bare on the argument that the
+sign-in door below says the rest, and that door hangs off `signInOffered`, which
+answers `false` for every harness with no wizard. Those are precisely the harnesses
+this state can now hide, so on a machine whose only harness came from a plugin it
+was one sentence with nothing under it. It names the gear now — and only for what
+the gear will actually show: on a machine holding nothing `startsBare` answers true
+for, that screen lists no rows at all, so "lists them all" would have been two
+screens answering one question with one of them wrong. The second ending names the
+bar at its foot, which is drawn either way.
+
+**Status.** Done.
+
+#### Q3.539 — May a plugin add an *agent*?
+
+**Reported, after the first fix shipped**: *"убери возможность добавлять агента
+плагином, только харнесс и провайдера."* A plugin adds a harness and a provider,
+and it was also adding an agent — the Gemini tile on New session.
+
+**Question.** `HarnessContribution.standalone` let a manifest say *tapping this on
+New session is a whole decision*. Absent meant no tile, which is the safe
+direction. Is a safe default enough?
+
+**Decision. No. The field is removed**, and `startsBare` answers a flat `false`
+for every contributed id.
+
+**A safe default makes a wrong answer rarer without making it unsayable, and this
+is the one claim in that block nothing on either side can check.** `startsBare`'s
+subject is the **model**, not the CLI: the three built-ins that get a tile *are*
+their own model, and opencode does not get one because a bare session there starts
+on `opencode/big-pickle` — a model nobody on the screen chose. A harness this
+repository has never run cannot be known to be the first kind, and an author writes
+`standalone: true` because their harness feels like a whole answer *to them*.
+Getting it wrong the permissive way is Q3.522's failure with somebody else's
+binary: a session billed to the operator, on a model no tile names, and — unlike
+opencode — a client cannot even find out afterwards what it ran.
+
+**It is not a demotion, which is the whole of what this repository already argues
+about opencode.** The harness is offered everywhere a harness is named: the
+builder's harness row, `POST /sessions`, its own settings card with its paste box,
+Settings → Machines. What it needs first is a model. An agent built on it is
+something a person assembled and named — which is the only way an agent has ever
+been made here, and the difference between the two words this feature had blurred.
+
+**Removed rather than ignored, and it owes no rung.** `PLUGIN_API_VERSION` 5 has
+not shipped in a release, so there is no manifest in the world whose behaviour this
+changes except the example's own. A manifest still carrying the key installs
+unchanged and the key is simply not read, which is what "removed" has to mean for a
+plugin somebody already published — `daemoncheck`'s fixture declares
+`standalone: true` for exactly that reason, and `webcheck` reads `agentCard.ts` to
+assert the word appears in it nowhere at all. That second one matters because a
+flat `false` is the shape that can be re-derived by accident: with the field gone
+from the wire, a reader reaching for `agent.standalone` gets `undefined` — falsy,
+therefore green, therefore silent.
+
+⚠ **And it moved a contract that lives in two repositories, which the *removal*
+direction hides.** `services/plugins` mirrors `parseManifest` by hand, and deleting
+the field here left it validating one there — so the catalogue refused
+`standalone: "yes"` and `standalone: null` while every daemon accepted them, an
+unknown key being ignored. That is Q4.105's asymmetry with the cheap and expensive
+sides swapped: not a screen telling somebody to update their machine, but a plugin
+the market calls malformed. Its own driver caught it — two failures, the field list
+and the verdict comparison — and the mirror moved with the daemon. The coupling
+reads as though it were about additions; it is not, and the order is unchanged:
+daemons, then the control plane, then the catalogue, with the last two out
+together.
+
+**Status.** Applied.
+
+#### Q3.540 — A list of providers, when a harness also takes a key
+
+**Reported, as a question**: *"почему Gemini не появился в списке авторизаций — он
+что, открытый?"* No — Gemini was signed in on that machine with Google since July.
+It was not in the list because the list was of **providers**, and a harness is not
+one.
+
+**The defect underneath it was worse than the missing row.** A paste box for a
+harness's own `envNames` is drawn by `AgentDetail`, and for a harness with no
+sign-in wizard the only screen that mounted it was a **system's** card, gated on
+`system.loginVia !== null`. Every harness this product ships is named that way —
+Anthropic through claude, OpenAI through codex, Moonshot through kimi, OpenRouter
+and OpenCode Zen both through opencode — so all four have a card, one tap into a
+row a person already understands. Nothing requires a plugin to contribute such a
+provider: `parseManifest` refuses a system with **no** `baseUrl` and no `loginVia`
+(*"its key box would store a secret and never send it"*) and has no mirror-image
+rule. So a plugin declaring only routed providers — which is the example plugin's
+own shape — left `envNames` a slot the daemon accepts over `PUT /agent-auth/:agent`
+and **no screen anywhere offered**. `docs/PLUGINS.md` promised the box in as many
+words, and the rule file said "a paste box" flatly.
+
+**Question.** Refuse the shape, build a screen, or widen the list?
+
+**Decision. Widen the list, on the owner's call, and the word with it.** *"Лучше
+включить харнесс в список с провайдерами. И в целом абстрагировать список
+провайдеров, авторизоваться можно не только для инференса."* The heading is
+**Sign-ins**: what a reader is looking at either way is a thing they have or have
+not given a credential to, and naming the list after the half that came first is
+what left the other half homeless.
+
+**Membership is "no provider speaks for it", never "it is contributed",** and that
+is the whole of what keeps this from being a regression. `unspokenFor` in
+`agents.ts` — pure, so `webcheck` drives it — answers the harnesses with at least
+one credential slot that no system names in `loginVia`. On a machine with no
+plugins it answers nothing and the list is byte-for-byte what it was. Adding every
+harness instead would put claude beside Anthropic: two rows, one credential, two
+answers to *signed in?* — which is the exact shape `MachineSystemsSection` was
+built to remove, in its own docblock, in those words.
+
+**Two leaves under one list, and they cannot share a segment.** A plugin may name
+the same local id in both of its contribution blocks, so one string reaching the
+router could not say which catalogue resolves it. `…/systems/:system` therefore
+keeps its meaning — every address that ever worked goes on working — and the
+harness leaf is `…/signin/:agent`. Both are titled **Sign-in**: which catalogue
+resolved the name is an internal difference, and a row's kind may decide a lookup
+or a destination and never a presentation.
+
+**Three smaller decisions, each with its own reason.** The badge says *key saved*
+rather than *signed in*, because these are precisely the harnesses with no wizard
+and `loggedIn` is `null` for all of them. A harness with `envNames: []` gets no
+row: an author saying a key is not how this is configured, and a row opening an
+empty card is a control that is not true in the state it is drawn in. And the rows
+come **after** every provider — they are the newest and least familiar thing on the
+screen, so a group appears rather than a group moving under a reader's thumb.
+
+⚠ **It costs a second read on a screen that had one.** `GET /systems` is a table
+and spawns nothing; `GET /agent-auth` runs the login probe, a CLI per agent. It is
+unavoidable — no cheaper route carries the harnesses' credential slots — and it is
+issued *beside* the first rather than after it, so the screen pays one round trip.
+The two failures are not symmetric: a refused `GET /agent-auth` leaves the
+providers exactly as they were, while a refused `GET /systems` must draw no harness
+rows at all, since without the providers there is no way to know which harnesses
+are already spoken for.
+
+**Rejected: refusing the shape in `parseManifest`** — a mirror-image rule making a
+harness with unreachable slots unsayable. Symmetric with the rule two lines away,
+and it would have made the documentation true by deleting the case. It is the
+smaller change and it answers the wrong question: the slots were reachable in
+principle all along, and what was missing was a place to draw them. It would also
+have invalidated an already-published plugin over a screen this product could
+simply have.
+
+**Status.** Applied.
+
 ## Deployment, packaging and code layout
 
 ### Q4.1 — Is this one deployment or two, and why can the two services not be checked out separately?
@@ -23585,3 +24164,90 @@ Q5.85's gate still applies to it.
 
 **Status.** Q7.31's precondition is met and its answer is unchanged. Applied,
 2026-08-27.
+
+### Q7.126 — A plugin adds the agent, and the registry is still not built
+
+**What this answers.** Q7.31 declined to turn `AgentId` into a registry; Q7.125 met
+its precondition and kept the answer, and named the one thing that would change it:
+
+> an agent this repository does not vendor and cannot measure — `REEMOAT_AGENTS`, an
+> operator's own ACP binary. That is a different feature from a tidier union.
+
+That feature is built. It is not `REEMOAT_AGENTS`.
+
+**Why a plugin is the better door, and it is not a matter of taste.** Q7.31's whole
+argument against a registry was that the per-agent cost is *empirical* — which
+environment variable authenticates a CLI, which stream its status probe answers on,
+what its permission payload omits — and that a mechanism letting somebody add an agent
+*without* taking those measurements would produce exactly those failures on their
+machine with nothing to read. That is still true, and it is why a contributed harness
+is **opencode's shape rather than claude's**: no wizard, no sign-out, no status probe,
+a paste box and nothing else. Every field an `AGENT_LOGIN` row carries is a measurement
+nobody but the CLI's author can take, so the feature declines to ask for any of them.
+What is left is what a manifest genuinely knows: a program name, an argv, which
+variables it reads a key from, and whether it is its own model.
+
+**And a plugin brings four things an environment variable does not.** It is *chosen*
+— installed under `machine:admin` by somebody holding the archive. It is *disclosed*
+before anything is sent, with the argv on screen. It is *switched off* with one
+control, and switching it off is a different answer from uninstalling it — `503`
+naming the plugin against `400` naming the request. And it is *bounded*: eight
+harnesses a machine, refused at install, because each is a process on
+`GET /agents/capabilities` and a sweep holds both ask slots while it runs.
+
+**What it cost, against Q7.125's own accounting.** That entry counted seven edit
+sites for a fourth built-in and observed that four were compiler-enforced. Opening
+the union moved the count rather than the kind: `noUncheckedIndexedAccess` turned
+every `SYSTEMS[…]` and `AGENT_LOGIN[…]` read into an error the moment `SystemId` and
+`AgentId` widened, which is twenty-four decisions the compiler *demanded* — and the
+sharpest of them, `pinNativeModel`, would otherwise have been a `TypeError` on the
+resume path, the one path designed never to refuse (Q2.217). Resolvers rather than a
+widened `Record` is what makes each of those a visible `null` arm.
+
+**The one thing that had to be decided rather than derived** is where membership is
+checked. `POST /sessions` and `POST /custom-agents` ask the live catalogue, because
+nothing has been created yet and a refusal is free. `fromRow` and `readCustomAgent`
+ask only the *shape*, because they run at boot — before the plugin host has opened, so
+"is that plugin installed" is not a question that read can answer — and a membership
+test there would delete every session, preset and saved key belonging to a plugin
+somebody switched off an hour ago. That is `custom_agents.harness` (validated) against
+`agent_strip.ref` (never validated), applied to the case that sits between them.
+
+**Decision: still no registry, and now for a third reason.** The first was that the
+cost is empirical (Q7.31). The second was that four of seven edit sites are
+compiler-enforced (Q7.125). The third is that the feature a registry was being asked
+to enable **exists without one**: `AGENT_IDS` and `SYSTEMS` are still the four and the
+seven this repository ships, measured and pinned, and what a machine *offers* is those
+merged with what somebody installed on it. A registry would have made the built-ins
+look like the contributions, which is the opposite of true — this repository can drive
+`hostable` over its own four because it measured them, and can drive it over a
+contributed pair only as a *property*, because there is nothing to transcribe.
+
+**Status.** Q7.125's named condition is spent. Applied.
+
+### Q7.127 — Declined: let a manifest say the harness needs a key
+
+**Question.** Q2.221's record is an observation, kept for ten minutes, cleared five
+ways. A declarative alternative exists: let `HarnessContribution` carry
+`requiresKey: true`, and hide the tile whenever the harness declares credential
+slots and none is stored. No memory, no expiry, no clearing rules.
+
+**Decision. Declined as the mechanism, kept as a named seam.**
+
+It is the more elegant design and it does not fix the machine the defect was
+reported from: the installed plugin declares no such field, so the tile stays until
+its author republishes and every daemon in the fleet updates. It is also *wrong*
+for the case it looks right for — a harness signed in by running its own program on
+the machine has no stored key here and starts perfectly, which is exactly what the
+example plugin's own `authHint` tells somebody to do. Hiding it would be this
+daemon inferring a credential state from the absence of one of two credentials.
+
+What it would cost on top: a new manifest field, a new bound, a new refusal, a
+`protocol.ts` rung, a mirror in `wire.ts` and an edit to the catalogue that
+publishes plugins — for a claim weaker than the one an observation already makes.
+
+The seam is `HarnessContribution` and it stays open. If a plugin author ever wants
+the stronger, earlier claim, that is where it goes — and it would narrow the tile
+*before* a first refusal rather than replacing what happens after one.
+
+**Status.** Declined.

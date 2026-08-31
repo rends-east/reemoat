@@ -3,11 +3,99 @@ import { createRequire } from "node:module";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+/**
+ * The harnesses this repository ships, vendors, pins and measures.
+ *
+ * ⚠ **Still exactly four, and it stays that way — this is not the list of what a
+ * machine offers.** Everything that makes a built-in a built-in is written down
+ * here and nowhere else: a `resolveAgent` arm, an `AGENT_LOGIN` row, a
+ * `vendoredCli` arm, a `pincheck` entry, and a glyph. A machine may also offer
+ * harnesses a plugin added — see {@link HarnessCatalogue} — and those have none of
+ * those things and cannot: `pincheck` pins an adapter version this repository
+ * depends on, and a program somebody named in a manifest is not one it can pin.
+ *
+ * Keeping this array meaning *built-in* is what keeps every sweep written against
+ * it honest. `AGENT_IDS.every((id) => AGENT_LOGIN[id] !== undefined)` is a real
+ * assertion because both halves are this list; re-pointing it at what a machine
+ * currently offers would make that vacuous on the day it mattered.
+ */
 export const AGENT_IDS = ["claude", "kimi", "codex", "opencode"] as const;
-export type AgentId = (typeof AGENT_IDS)[number];
 
-export function isAgentId(value: string): value is AgentId {
+/** One of the four. Exhaustive `switch`es narrow to this and keep their `never` arms. */
+export type BuiltinAgentId = (typeof AGENT_IDS)[number];
+
+/**
+ * A harness id, which is a string.
+ *
+ * ⚠ **It was `BuiltinAgentId` and the widening is the feature, so the two rules
+ * that replaced the compiler are worth stating together.** A closed union meant
+ * every door into the set was checked by `tsc`; now exactly two predicates stand
+ * in, and they answer different questions on purpose:
+ *
+ *   - **Membership** — is this a harness this machine offers *right now* — is asked
+ *     where nothing has been created yet (`POST /sessions`, `POST /custom-agents`),
+ *     so a refusal costs nothing and no worktree is made for a harness that cannot
+ *     run. It needs a {@link HarnessCatalogue}.
+ *   - **Shape** — could this ever have been one — is asked where the row *is* the
+ *     memory (`fromRow`, `readCustomAgent`). `isContributedId` in
+ *     `plugins/manifest.ts` is that test, and it needs no catalogue, which is the
+ *     whole point: a plugin switched off for an hour must not delete every
+ *     conversation on its harness.
+ */
+export type AgentId = string;
+
+/** Whether this is one of the four this repository ships. */
+export function isBuiltinAgentId(value: string): value is BuiltinAgentId {
   return (AGENT_IDS as readonly string[]).includes(value);
+}
+
+/** Whether a machine currently offers a harness, and if not, which kind of not. */
+export type CatalogueState = "enabled" | "disabled" | "unknown";
+
+/**
+ * A harness a plugin added to this machine.
+ *
+ * The resolved form of `HarnessContribution` in `plugins/protocol.ts`: local ids
+ * namespaced, the owning plugin carried so a refusal can say whose it is.
+ */
+export interface ContributedHarness {
+  /** Namespaced — `<pluginId>:<localId>`. */
+  id: string;
+  pluginId: string;
+  /** What the plugin calls itself. Drawn where somebody has to be told where this came from. */
+  pluginName: string;
+  /** The label. Never `AgentLaunchConfig.displayName`, which is a log line. */
+  name: string;
+  command: string;
+  args: readonly string[];
+  envNames: readonly string[];
+  routedModelEnv: readonly string[];
+  authHint: string | null;
+}
+
+/**
+ * What a machine offers, as opposed to what this repository ships.
+ *
+ * ⚠ **An interface rather than a module-level table, and read through rather than
+ * indexed.** `tsconfig` sets `noUncheckedIndexedAccess`, so a `Record` over a
+ * literal union indexes totally today and would silently become an index signature
+ * the moment the union widened — turning every `SYSTEMS[id]` and `AGENT_LOGIN[id]`
+ * into a `| undefined` a cast could quietly swallow. Going through a resolver makes
+ * each of those a visible `null` arm with a decided answer, which is the difference
+ * between a `TypeError` on the resume path and a sentence naming the plugin.
+ */
+export interface HarnessCatalogue {
+  /** A harness a plugin added, or `null` for a built-in and for anything unknown. */
+  harness(id: string): ContributedHarness | null;
+  /** Every harness this machine offers: the built-ins in order, then the contributed. */
+  harnessIds(): readonly string[];
+  /**
+   * ⚠ **Three answers, because `unknown` and `disabled` need opposite sentences.**
+   * Unknown is *fix your request*; disabled is *this was correct yesterday and
+   * somebody switched the plugin off* — a `503` naming the plugin and the switch,
+   * never the `400` that tells an operator their own address is wrong.
+   */
+  harnessState(id: string): CatalogueState;
 }
 
 export interface AgentLaunchConfig {
@@ -61,7 +149,7 @@ const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", ".."
  * a list: `CODEX_HOME` has to survive, and a prefix with an exception is a prefix
  * somebody will later "simplify".
  */
-const SESSION_SCOPED_ENV = [
+export const SESSION_SCOPED_ENV = [
   "AI_AGENT",
   "CLAUDECODE",
   "CLAUDE_CODE_ENTRYPOINT",
@@ -101,7 +189,7 @@ const SESSION_SCOPED_ENV = [
  * variable nobody thought of — the same argument the git environment allowlist
  * in `src/git.ts` makes, one level down.
  */
-const DAEMON_ENV_PREFIX = "REEMOAT_";
+export const DAEMON_ENV_PREFIX = "REEMOAT_";
 
 /**
  * Exported because a login is a spawn too.
@@ -162,7 +250,7 @@ export const ULTRACODE_SETTING = "ultracode";
  * agent that has to parse it; absence is not.
  */
 export function sessionMetaFor(
-  agent: AgentId,
+  agent: string,
   flags: { ultracode: boolean },
 ): Record<string, unknown> | undefined {
   // Every other agent, and claude with nothing to ask for. Deliberately not a
@@ -252,7 +340,7 @@ export type LoginStatusProbe = {
  * perfectly and `claude` was not on PATH.
  */
 export const AGENT_LOGIN: Record<
-  AgentId,
+  BuiltinAgentId,
   {
     command: string;
     /**
@@ -503,12 +591,12 @@ export const AGENT_LOGIN: Record<
  * the daemon's own driver and `pnpm client` — and a predicate spelled three times
  * is how one of them comes to disagree.
  */
-export function hasLoginFlow(agent: AgentId): boolean {
+export function hasLoginFlow(agent: BuiltinAgentId): boolean {
   return AGENT_LOGIN[agent].args !== null;
 }
 
 /** Which environment variables carry a pasted credential for this agent. */
-export function credentialEnvNames(agent: AgentId): readonly string[] {
+export function credentialEnvNames(agent: BuiltinAgentId): readonly string[] {
   return AGENT_LOGIN[agent].envNames;
 }
 
@@ -653,7 +741,21 @@ export function vendoredOpencode(): string | null {
  * measurement in this file that decides daemon behaviour was taken against the
  * vendored pair, because that is what runs.
  */
-export function resolveAgent(id: AgentId): AgentLaunchConfig {
+export function resolveAgent(id: string, machine?: HarnessCatalogue): AgentLaunchConfig {
+  /*
+   * ⚠ **Contributed first, and the order is not arbitrary.** A contributed id
+   * carries a colon and a built-in never does, so the two sets cannot overlap and
+   * either order would resolve the same thing — but asking the catalogue first is
+   * what makes the *refusals* right. A plugin whose harness is gone falls out of
+   * this branch into the throw below, which says so; reaching the `switch` first
+   * would put an unknown id through four arms it can never match on the way to the
+   * same place, and would tempt somebody to add a `default` that reports it as a
+   * missing binary.
+   */
+  const contributed = machine?.harness(id) ?? null;
+  if (contributed !== null) return contributedLaunchConfig(contributed);
+  if (!isBuiltinAgentId(id)) throw new AgentUnavailableError(unknownHarness(id, machine ?? null));
+
   switch (id) {
     case "claude": {
       const vendored = join(PACKAGE_ROOT, "node_modules", ".bin", "claude-agent-acp");
@@ -772,5 +874,62 @@ export function resolveAgent(id: AgentId): AgentLaunchConfig {
           "catalogue, OPENCODE_API_KEY for the rest of Zen's), or pick one of the free models.",
       };
     }
+  }
+}
+
+/**
+ * How a contributed harness is launched.
+ *
+ * The four built-in arms above each resolve a *different* file — an adapter this
+ * repository vendors, a CLI on PATH, a subcommand of one binary — because each was
+ * a measurement. There is exactly one shape here, and that is the honest
+ * difference: what a manifest names is a program on PATH and nothing else, so
+ * `findOnPath` is the whole of the resolution and `pincheck` has nothing to pin.
+ *
+ * ⚠ **`displayName` carries the program and the label does not.** This string is
+ * the log line and the settings-list row title, where naming the binary is the
+ * point; `ContributedHarness.name` is what a tile draws, and the client's own rule
+ * forbids a label naming a package. Collapsing the two is how `Kimi Code CLI`
+ * would end up on a 96px tile.
+ */
+function contributedLaunchConfig(harness: ContributedHarness): AgentLaunchConfig {
+  const command = findOnPath(harness.command);
+  if (command === null) {
+    throw new AgentUnavailableError(
+      `${harness.name} needs ${harness.command} on this machine's PATH, and it is not there. ` +
+        `It was added by the ${harness.pluginName} plugin, which does not install it.`,
+    );
+  }
+  return {
+    id: harness.id,
+    displayName: `${harness.name} (${harness.command})`,
+    command,
+    args: [...harness.args],
+    env: agentEnv(),
+    authHint:
+      harness.authHint ??
+      `${harness.name} refused this session. It was added by the ${harness.pluginName} plugin, ` +
+        `which did not say what it needs — a key pasted under Settings → Machines → this machine ` +
+        `is the control this daemon has.`,
+  };
+}
+
+/**
+ * What to say about a harness id that resolves to nothing.
+ *
+ * ⚠ **Three sentences, because "not installed" is the wrong one twice.** A row
+ * naming a plugin's harness after the plugin was removed is not a missing `npm i
+ * -g`, and sending somebody to install a package that does not exist is worse than
+ * saying nothing. `harnessState` is what tells the three apart, and it is the only
+ * caller that needs it here.
+ */
+function unknownHarness(id: string, machine: HarnessCatalogue | null): string {
+  const plugin = id.indexOf(":") > 0 ? id.slice(0, id.indexOf(":")) : null;
+  if (plugin === null) return `${id} is not an agent this machine knows about.`;
+  switch (machine?.harnessState(id) ?? "unknown") {
+    case "disabled":
+      return `This agent comes from the ${plugin} plugin, which is switched off on this machine.`;
+    default:
+      return `This agent came from the ${plugin} plugin, which is no longer installed on this machine.`;
   }
 }

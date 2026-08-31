@@ -1,4 +1,4 @@
-import type { AgentId } from "./agents.js";
+import { AGENT_IDS, type AgentId, type CatalogueState, type ContributedHarness, type HarnessCatalogue } from "./agents.js";
 
 /**
  * Which *system* a model comes from, as opposed to which harness runs the loop.
@@ -55,10 +55,20 @@ export const SYSTEM_IDS = [
   "zen",
 ] as const;
 
-export type SystemId = (typeof SYSTEM_IDS)[number];
+/** One of the seven this repository ships. */
+export type BuiltinSystemId = (typeof SYSTEM_IDS)[number];
 
-/** The HTTP boundary's guard, exactly as `isAgentId` is for a harness. */
-export function isSystemId(value: string): value is SystemId {
+/**
+ * A system id, which is a string.
+ *
+ * Widened for `AgentId`'s reason and with the same two predicates standing in for
+ * the compiler — membership where nothing has been created yet, shape where the
+ * row is the memory. See {@link SystemCatalogue}.
+ */
+export type SystemId = string;
+
+/** Whether this is one of the seven this repository ships. */
+export function isBuiltinSystemId(value: string): value is BuiltinSystemId {
   return (SYSTEM_IDS as readonly string[]).includes(value);
 }
 
@@ -183,6 +193,16 @@ export interface SystemConfig {
    */
   keyEnv: string | null;
 
+  /**
+   * The plugin this row came from, or absent for one this repository ships.
+   *
+   * ⚠ **Carried on the row rather than kept in a second map**, because every
+   * sentence that needs it is built where the row is already in hand: a refusal
+   * naming which plugin is switched off, the settings screen saying where a
+   * provider came from, and `GET /systems` reporting it so the browser can say the
+   * same thing without a second lookup it could get wrong.
+   */
+  contributedBy?: { pluginId: string; pluginName: string };
 }
 
 /**
@@ -196,7 +216,7 @@ export interface SystemConfig {
  * than the type, and the same is true one layer down. A routed row that has not
  * been run with a real key is a row that can still be wrong about a header name.
  */
-export const SYSTEMS: Record<SystemId, SystemConfig> = {
+export const SYSTEMS: Record<BuiltinSystemId, SystemConfig> = {
   anthropic: {
     displayName: "Anthropic",
     apiType: "anthropic",
@@ -385,6 +405,51 @@ export const SYSTEMS: Record<SystemId, SystemConfig> = {
 };
 
 /**
+ * Which systems a *machine* offers, as opposed to which this repository ships.
+ *
+ * The other half of {@link HarnessCatalogue}, and the two travel together as
+ * {@link MachineCatalogue} because every question worth asking needs both: whether
+ * a harness can be pointed at a system is a fact about a pair.
+ *
+ * ⚠ **`system()` answers the built-ins too**, unlike `harness()` next door which
+ * answers only the contributed. The asymmetry is deliberate and follows what each
+ * caller does with the answer: a system's row is *read* — a base URL, a header, a
+ * model list — so one resolver that always answers is what keeps nine call sites
+ * from each having to remember to check two places. A harness's row is *branched
+ * on*, into a `switch` this repository owns and a shape it does not, so the two
+ * kinds must stay distinguishable.
+ */
+export interface SystemCatalogue {
+  /** A system this machine offers, built-in or contributed, or `null`. */
+  system(id: string): SystemConfig | null;
+  /** Every system id, in reading order: the built-ins first, then the contributed. */
+  systemIds(): readonly string[];
+  systemState(id: string): CatalogueState;
+}
+
+/** Both halves. Every function below takes one, defaulted to what this repository ships. */
+export type MachineCatalogue = HarnessCatalogue & SystemCatalogue;
+
+/**
+ * A machine with no plugins — which is what every function here means by "no
+ * catalogue given".
+ *
+ * ⚠ **A default argument rather than a required one, and that is what kept this
+ * change from touching two hundred call sites.** Every existing caller — the
+ * drivers' whole `hostable` matrix included — goes on asking exactly what it asked
+ * before and gets exactly the same answer, because the built-in table *is* this
+ * object. What a caller that knows about plugins passes is a wider one.
+ */
+export const BUILTIN_CATALOGUE: MachineCatalogue = {
+  harness: () => null,
+  harnessIds: () => AGENT_IDS,
+  harnessState: (id) => (AGENT_IDS as readonly string[]).includes(id) ? "enabled" : "unknown",
+  system: (id) => (isBuiltinSystemId(id) ? SYSTEMS[id] : null),
+  systemIds: () => SYSTEM_IDS,
+  systemState: (id) => (isBuiltinSystemId(id) ? "enabled" : "unknown"),
+};
+
+/**
  * What an agent answered about its own provider routing, or `null` where it
  * answered nothing.
  *
@@ -508,9 +573,14 @@ export function systemSecretFor(
   system: SystemId,
   stored: string | null,
   agentEnv: (agent: AgentId) => Record<string, string>,
+  machine: MachineCatalogue = BUILTIN_CATALOGUE,
 ): string | null {
   if (stored !== null) return stored;
-  const spec = SYSTEMS[system];
+  const spec = machine.system(system);
+  // A system this machine no longer offers has no key, borrowed or otherwise —
+  // and saying so is not the same as saying there is none saved. `GET /systems`
+  // does not list the row at all, so nothing draws a box over this answer.
+  if (spec === null) return null;
   if (spec.keyEnv === null || spec.nativeHarness === null) return null;
   return agentEnv(spec.nativeHarness)[spec.keyEnv] ?? null;
 }
@@ -526,12 +596,79 @@ export function systemSecretFor(
  * Pure, so `daemoncheck` and `webcheck` both drive it rather than driving a
  * transcription of it.
  */
+/**
+ * How a harness is told which model to run on somebody else's system, or `null`
+ * where it cannot be told at all.
+ *
+ * One function for the two kinds, and the shapes really are the same: claude's arm
+ * sets two variables to the same string, and a contributed harness sets however
+ * many its manifest named to the same string. What differs is only where the names
+ * come from — a measurement in this repository, or a manifest — which is why the
+ * *values* were never a template on either side.
+ *
+ * ⚠ **Empty means `null`, not an empty environment.** A harness that named no
+ * variable cannot be pointed at a foreign model, and {@link hostable} folds that in
+ * as a refusal. Answering `{}` instead would start the session, look correct, and
+ * quietly run the endpoint's default model — the failure with no symptom this whole
+ * table exists to prevent.
+ */
+export function routedModelNaming(
+  harness: AgentId,
+  machine: MachineCatalogue = BUILTIN_CATALOGUE,
+): ((model: string) => NodeJS.ProcessEnv) | null {
+  const contributed: ContributedHarness | null = machine.harness(harness);
+  if (contributed === null) return ROUTED_MODEL_ENV[harness] ?? null;
+  if (contributed.routedModelEnv.length === 0) return null;
+  return (model) => Object.fromEntries(contributed.routedModelEnv.map((name) => [name, model]));
+}
+
+/**
+ * Whether this pairing will be *routed* — pointed at somebody else's endpoint on
+ * a key this daemon stores — rather than run on the agent's own credential.
+ *
+ * ⚠ **One copy of `spec.nativeHarness === harness && spec.baseUrl !== null`,
+ * because `applySystem` already says a second one "is the kind of test that comes
+ * to disagree with this one".** It answers the same question that function returns
+ * after the fact; what this adds is that it can be asked *before* the spawn, which
+ * is where `LocalRuntime.launch` needs it — the harness's own credentials go into
+ * the environment at spawn time, and `applySystem` runs afterwards.
+ *
+ * Deliberately silent about whether the routing would *succeed*: a missing key, a
+ * protocol the agent cannot speak and a provider whose plugin is switched off all
+ * answer `true` here and are refused, with a sentence, by `applySystem`. The
+ * question is "is this session aimed somewhere else", and for every one of those it
+ * is, so none of them is a reason to hand over a vendor credential.
+ */
+export function routedPairing(
+  harness: AgentId,
+  system: SystemId | null,
+  machine: MachineCatalogue = BUILTIN_CATALOGUE,
+): boolean {
+  if (system === null) return false;
+  const spec = machine.system(system);
+  if (spec === null) return false;
+  return spec.nativeHarness !== harness && spec.baseUrl !== null;
+}
+
 export function hostable(
   harness: AgentId,
   system: SystemId,
   routing: AgentRouting | null,
+  machine: MachineCatalogue = BUILTIN_CATALOGUE,
 ): HostRefusal {
-  const spec = SYSTEMS[system];
+  const spec = machine.system(system);
+  /*
+   * ⚠ **Reachable only through something stored, which is why it answers a
+   * sentence rather than throwing.** `GET /systems` never lists a system this
+   * machine does not offer, so nothing on a picker can produce this pair. What can
+   * is a saved preset whose plugin was removed, and a preset whose only button
+   * throws is worse than one whose row says why.
+   */
+  if (spec === null) {
+    return machine.systemState(system) === "disabled"
+      ? `This provider comes from a plugin that is switched off on this machine.`
+      : `This provider is no longer on this machine.`;
+  }
   // Native needs no routing at all, so it is answered before `routing` is even
   // consulted — kimi supports no provider methods and still reaches Moonshot.
   if (spec.nativeHarness === harness) return null;
@@ -557,7 +694,16 @@ export function hostable(
   }
   // Routable and un-pinnable is the state that must not reach a session: see
   // ROUTED_MODEL_ENV. It would run somebody else's default model under our name.
-  if (ROUTED_MODEL_ENV[harness] === undefined) {
+  //
+  // ⚠ **This is the arm that fires for an openai-shaped system paired with codex,
+  // and it is the *fourth* rather than the third.** codex answers
+  // `supported: ["openai"]`, so it passes the protocol test one line up and dies
+  // here. `ROUTED_MODEL_ENV`'s own comment predicted the day an openai-shaped
+  // system was added and said this is what would refuse it; a plugin adding one is
+  // that day. Do not close it by inventing a codex arm — which variable codex reads
+  // for a custom-gateway model is a measurement nobody here has taken, and guessing
+  // produces exactly the silent wrong-model failure this line prevents.
+  if (routedModelNaming(harness, machine) === null) {
     return `This agent cannot be told which model to use on another system.`;
   }
   return null;
@@ -576,9 +722,15 @@ export function routedModelEnv(
   harness: AgentId,
   system: SystemId,
   model: string,
+  machine: MachineCatalogue = BUILTIN_CATALOGUE,
 ): NodeJS.ProcessEnv {
-  if (SYSTEMS[system].nativeHarness === harness) return {};
-  return ROUTED_MODEL_ENV[harness]?.(model) ?? {};
+  const spec = machine.system(system);
+  // `{}` for a system that no longer resolves, and this arm runs *before the
+  // spawn* on both launch paths. Refusing here would throw where nothing catches
+  // it; what refuses the pairing is `hostable`, one call later on `start` and — on
+  // `openResumed`, which may not refuse — `pinNativeModel`'s reported sentence.
+  if (spec === null || spec.nativeHarness === harness) return {};
+  return routedModelNaming(harness, machine)?.(model) ?? {};
 }
 
 /**
@@ -588,8 +740,12 @@ export function routedModelEnv(
  * nothing else, and a function here that could read a credential store would be
  * a second place credentials are fetched from.
  */
-export function routingHeaders(system: SystemId, secret: string): Record<string, string> {
-  const header = SYSTEMS[system].authHeader;
+export function routingHeaders(
+  system: SystemId,
+  secret: string,
+  machine: MachineCatalogue = BUILTIN_CATALOGUE,
+): Record<string, string> {
+  const header = machine.system(system)?.authHeader ?? null;
   if (header === null) return {};
   return { [header.name]: `${header.prefix}${secret}` };
 }

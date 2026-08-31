@@ -1,10 +1,17 @@
 /**
  * A board, whose cards are this machine's sessions.
  *
- * This is the reference plugin: it uses all four contribution points and reaches
- * nothing outside the machine, which is what lets `daemoncheck` drive the whole
- * of it. Read it beside `docs/PLUGINS.md` — everything here is in that document,
- * and everything in that document is here.
+ * This is the reference plugin for the four contribution points a plugin *draws*
+ * or *is told about* — a screen, a settings pane, actions and hooks — and it
+ * reaches nothing outside the machine, which is what lets `daemoncheck` drive the
+ * whole of it. Read it beside `docs/PLUGINS.md` — everything here is in that
+ * document, and everything in that document is here.
+ *
+ * ⚠ **It is no longer all six.** A harness and a provider are *declarations* the
+ * daemon reads — no export, no view, nothing here to demonstrate them with — so
+ * this file covers four of six and `plugin-contributions.md` covers the rest. A
+ * plugin using all six would teach that they are one kind of thing, which they
+ * are not.
  *
  * Plain JavaScript on purpose. The daemon happens to run under `tsx` today, so a
  * TypeScript `server.js` would also load; that is a measurement rather than a

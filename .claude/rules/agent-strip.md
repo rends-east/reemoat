@@ -1,5 +1,10 @@
 ---
 paths:
+  # `offersStripTile` and `startableHere` are the membership rule this file is
+  # about, and they live here rather than in either screen. Without this glob the
+  # file that decides what the strip draws summoned `agent-catalogue.md`, which is
+  # about model names.
+  - packages/web/src/agents.ts
   - packages/web/src/agentStrip.ts
   - packages/web/src/agentPick.ts
   - packages/web/src/ui/NewSession.tsx
@@ -92,10 +97,23 @@ drops them at the moment it draws. Validating would forget an order every time a
 agent was briefly unavailable — the daemon rearranging somebody's screen by itself,
 which is the one behaviour they would certainly notice.
 
-It is **bounded instead**: `MAX_STRIP_REF_CHARS` (64) and `MAX_STRIP_ENTRIES` (200)
+It is **bounded instead**: `MAX_STRIP_REF_CHARS` (96) and `MAX_STRIP_ENTRIES` (200)
 on the route, so an unknown id cannot be an essay and a body cannot be a migration.
 The one thing that *is* checked is `kind`, because that is this system's own
 vocabulary and reaches a branch in the client.
+
+⚠ **That bound was 64 and 64 is one short.** A harness a plugin adds is
+`<pluginId>:<localId>` with each half bounded at 32, so the longest legal id is 65 —
+and this route is the *one* write the whole strip screen makes, so refusing it would
+have left that screen permanently unable to save an order, with an error line and no
+way out of it. The number is not derived from the manifest's bound, which is somebody
+else's subject; it is comfortably past every id shape that exists.
+
+⚠ **And `stripKey` is still `${kind}:${id}` and still cannot collide**, though its
+docblock's reason changed: "a harness id is one word" stopped being true. What makes
+it safe is structural rather than arithmetic — `kind` is a fixed two-member set and
+the key is only ever joined and compared, never split, so the ambiguity a reader would
+look for is one no caller can ask.
 
 ## The route is a replace, and the store is a transaction
 
@@ -121,6 +139,38 @@ echo as well and one agent drawn twice is two tiles that select each other.
 `CREATE TABLE IF NOT EXISTS` is the entire migration and `migrate()` needs nothing.
 A table an older daemon never selects is invisible to it, and bumping would make
 `refuseNewerSchema` refuse a rollback to buy that nothing.
+
+## A harness that would not start has no tile either
+
+**`offersTile` keeps three states of six out of the row now, and the third is the
+only one that is a *measurement*.** `start_refused` means the daemon opened a
+session and the agent declined — not that anything here read a credential, which
+for these harnesses it cannot: `loggedIn` is permanently `null` for anything with
+no status probe, so the two existing arms could never take the tile away and a
+harness a plugin added kept one after refusing. Q2.221; the badge, the ladder's
+sixth member and the three sentences a *reorder* would have falsified are
+`agent-login.md`'s.
+
+⚠ **`offersStripTile` weighs the refusal unconditionally and `startableHere`'s
+preset arm does not, and the asymmetry is the whole of what keeps one refusal from
+condemning a pairing it never tested.** A tile *is* a bare start, so any refusal
+takes it. A preset routed onto somebody else's system runs on that system's saved
+key, and `applySystem` lands before `session/new` — so only a refusal measured
+**while routed** is evidence about it. Refused bare, a preset still starts, which is
+the signed-out Claude Code on OpenRouter the paragraph below already protects. That
+is the *refusal* axis reaching the preset arm; the **credential** axis still does
+not, and `webcheck` asserts the pair together so neither can be collapsed into the
+other by somebody tidying.
+
+⚠ **The door this one owes is not the sign-in block.** `signInOffered` answers
+`false` for every harness with no wizard — which is exactly the population this
+state hides — so New session's *"No agent on this machine is ready to start."* was
+a sentence with nothing under it on a machine whose only harness came from a
+plugin. It names the gear in that case. What is behind the gear is the row, kept in
+place with `would not start` where the vendor line goes, a paste box, and **Check
+again**: the only control in this app whose subject is off-screen entirely, because
+the commonest remedy for such a harness is to run its own program once on the
+machine and nothing about that reaches the daemon. Q3.538.
 
 ## Hidden is not a refusal
 

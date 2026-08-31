@@ -16,7 +16,7 @@ import { Badge, Button, ChoiceRow, DangerButton, Empty, FIELD, Icon, IconButton,
 import { copyText } from "../clipboard";
 import { loginOutcome, rawTranscriptIsOpen, readLoginTranscript, type LoginOutcome } from "../login";
 import {
-  agentLabel,
+  harnessName,
   agentBadge,
   agentStance,
   credentialCaveat,
@@ -131,7 +131,9 @@ function useAgentAuth(machineId: MachineId): {
  * `agentCard.ts` with everything else this panel decides. See {@link agentBadge}.
  */
 function statusOf(agent: AgentAuthInfo): { tone: "plain" | "strong"; text: string } | null {
-  return agentBadge(agentStance(agent.available, agent.loggedIn, agent.login?.blocked));
+  return agentBadge(
+    agentStance(agent.available, agent.loggedIn, agent.login?.blocked, agent.lastStartRefusal != null),
+  );
 }
 
 /**
@@ -353,10 +355,14 @@ export function AgentDetail({
   return (
     <div className="mt-4 space-y-4">
       <div className="flex items-center gap-2">
-        {/* `agentLabel`, so the title is "Codex" rather than "Codex (codex-acp)".
-            The package name is the wall of text in miniature. */}
+        {/* `harnessName`, so the title is "Codex" rather than "Codex (codex-acp)":
+            the package name is the wall of text in miniature, and the daemon's own
+            `displayName` is the log line that carries it. A harness a plugin added
+            has no row in this product's table and takes its manifest's name — which
+            is the whole reason that name rides its own field rather than reusing
+            `displayName`. */}
         <span className="min-w-0 flex-1 truncate text-sm font-medium">
-          {title ?? agentLabel(agent.id)}
+          {title ?? harnessName(agent)}
         </span>
         {/*
          * ⚠ **While a re-probe is in flight the previous listing is still on
@@ -485,7 +491,7 @@ function SignIn({
   const stored = slots.filter((slot) => slot.set).length;
   // The blocked reason is read here too, so the sentence and the badge cannot
   // come to disagree about whether this agent has a sign-in at all.
-  const stance = agentStance(agent.available, agent.loggedIn, login.blocked);
+  const stance = agentStance(agent.available, agent.loggedIn, login.blocked, agent.lastStartRefusal != null);
   /*
    * Two axes, not one. `available` is the *adapter*; `login.supported` is
    * `script` plus the agent's own CLI, a different binary — so "adapter missing
@@ -497,13 +503,13 @@ function SignIn({
   // Every one of these is a sentence about the *harness*, so a card scoped to one
   // of its keys draws none of them: the box's own label and note say what the key
   // is for, and that is the whole of what somebody opened this screen to read.
-  const line = wholeAgent ? stanceLine(agent.id, stance, canSignIn, os) : null;
+  const line = wholeAgent ? stanceLine(agent, stance, canSignIn, os) : null;
   // Stays true while the wizard runs, or the divider would flip to "Sign in with
   // a key instead" beside a live sign-in.
   const signInAbove = canSignIn && stance !== "signed_in";
   const divider = wholeAgent ? dividerWord(stance, signInAbove, block) : null;
   const caveat = wholeAgent ? credentialCaveat(agent.id, canSignIn) : null;
-  const choice = wholeAgent ? multiSlotLine(agent.id, slots.length) : null;
+  const choice = wholeAgent ? multiSlotLine(agent, slots.length) : null;
 
   return (
     /*
@@ -520,7 +526,7 @@ function SignIn({
         <LoginWizard
           machineId={machineId}
           agent={agent.id}
-          displayName={agentLabel(agent.id)}
+          displayName={harnessName(agent)}
           needsInput={login.needsInput}
           loggedIn={agent.loggedIn}
           checking={checking}
@@ -552,9 +558,46 @@ function SignIn({
       ) : canSignIn ? (
         <Button tone="primary" className="mt-2 w-full" onClick={() => setWizard(true)}>
           <Icon as={LogIn} size={14} />
-          Sign in to {agentLabel(agent.id)}
+          Sign in to {harnessName(agent)}
         </Button>
       ) : null}
+
+      {/*
+       * ⚠ **The card that *states* the refusal is where the control for it has to
+       * be, and for a whole draft it was not.** The strip's own remedy lives in
+       * the machine's agent list, which excludes every harness `startsBare` is
+       * false for — opencode, and every one a plugin added — so
+       * exactly the harnesses that live on presets had a card saying "would not
+       * start" with nothing beside it. `stanceLine` above already named both
+       * remedies; this is the one of them that is a button.
+       *
+       * Below the sign-in block rather than instead of it: a harness with a wizard
+       * can be in this state too, and there the sign-in is the *first* answer —
+       * this is what to press after signing in somewhere this app cannot see.
+       */}
+      {wholeAgent && stance === "start_refused" && (
+        <Button
+          className="mt-2 w-full"
+          onClick={() => {
+            const daemon = store.daemonFor(machineId);
+            if (daemon === undefined) {
+              toast("error", "That machine is not reachable.");
+              return;
+            }
+            void daemon
+              .recheckAgent(agent.id)
+              // Framed rather than dumped, which is this screen's rule for all
+              // five of its writes: `errorText` answers in an `ApiError`'s
+              // register and has no subject of its own.
+              .catch((cause: unknown) =>
+                toast("error", `Couldn't ask ${harnessName(agent)} again — ${errorText(cause)}.`),
+              )
+              .finally(onChanged);
+          }}
+        >
+          Check again
+        </Button>
+      )}
 
       {/* Drawn only when there is something on both sides of it: an "or" with one
           branch missing is a lie. */}
@@ -575,7 +618,7 @@ function SignIn({
             <CredentialSlot
               key={slot.envName}
               machineId={machineId}
-              agentId={agent.id}
+              agent={agent}
               slot={slot}
               stance={stance}
               caveat={caveat}
@@ -651,7 +694,7 @@ function SignOutButton({
        * them. The call site is the only thing left that knows what was tried.
        */
       .catch((cause: unknown) =>
-        toast("error", `Couldn't sign ${agentLabel(agent.id)} out — ${errorText(cause)}.`),
+        toast("error", `Couldn't sign ${harnessName(agent)} out — ${errorText(cause)}.`),
       )
       .finally(() => setBusy(false));
   };
@@ -694,7 +737,7 @@ function SignOutButton({
   return (
     <div className={box}>
       <span className="basis-full text-center text-xs text-muted">
-        Sign {agentLabel(agent.id)} out on this machine?
+        Sign {harnessName(agent)} out on this machine?
       </span>
       <DangerButton icon={LogOut} disabled={busy} onClick={run}>
         {busy ? <Spinner /> : "Sign out"}
@@ -720,7 +763,7 @@ function SignOutButton({
  */
 function CredentialSlot({
   machineId,
-  agentId,
+  agent,
   slot,
   stance,
   caveat,
@@ -729,7 +772,9 @@ function CredentialSlot({
   onChanged,
 }: {
   machineId: MachineId;
-  agentId: string;
+  /* The row rather than the id: `storedChip` names the harness in a sentence, and
+     a name is not derivable from an id for one a plugin added. */
+  agent: { id: string; label?: string };
   slot: AgentCredentialSlot;
   stance: AgentStance;
   /** The one thing to read before typing. See `credentialCaveat`. */
@@ -825,7 +870,7 @@ function CredentialSlot({
        */
       className="ml-1"
       label={`Remove the saved ${label.name}`}
-      onClick={() => withDaemon((daemon) => daemon.clearCredential(agentId, slot.envName), true)}
+      onClick={() => withDaemon((daemon) => daemon.clearCredential(agent.id, slot.envName), true)}
       disabled={busy}
     />
   );
@@ -841,7 +886,7 @@ function CredentialSlot({
         </span>
         {slot.set && (
           <span className="flex shrink-0 items-center gap-1 text-2xs text-muted">
-            <Icon as={Check} size={11} /> {storedChip(agentId, stance)}
+            <Icon as={Check} size={11} /> {storedChip(agent, stance)}
           </span>
         )}
       </div>
@@ -910,7 +955,7 @@ function CredentialSlot({
                  because `sm`'s `px-2.5` around four characters is a button narrower
                  than its own label is long. */
               className="min-w-20 [@media(pointer:coarse)]:min-h-11"
-              onClick={() => withDaemon((daemon) => daemon.saveCredential(agentId, slot.envName, value))}
+              onClick={() => withDaemon((daemon) => daemon.saveCredential(agent.id, slot.envName, value))}
               disabled={busy || value.trim().length === 0 || tooLong}
             >
               {busy ? <Spinner /> : "Save"}

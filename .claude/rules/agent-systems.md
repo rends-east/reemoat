@@ -75,8 +75,8 @@ there is a fact about kimi rather than a bound invented here — worth having un
 a picker whose whole job is to say what will and will not run. Q3.487.
 
 **⚠ The two lists are two *products*, not two spellings, and `~/.kimi-code/config.toml`
-says so outright.** This has now cost three rounds of "surely that K2 is the same
-K2", so the evidence lives here:
+says so outright.** This has cost three rounds of "surely that K2 is the same K2",
+so the evidence lives here:
 
 ```toml
 [providers."managed:kimi-code"]
@@ -118,22 +118,13 @@ which is the rule this daemon already applies in the other direction to its own
 
 **`ANTHROPIC_MODEL` at spawn, plus `ANTHROPIC_CUSTOM_MODEL_OPTION`.** Measured
 against `claude-agent-acp` 0.63.0, because reading the adapter's source gives the
-wrong answer three times over — `applyAvailableModelsAllowlist` visibly
-synthesizes an entry for an id it cannot match, and driving it shows it does not:
-
-- `CLAUDE_MODEL_CONFIG={"availableModels":["kimi-k2-thinking"]}` collapses the
-  published list to `["default"]`. The allowlist is plainly read — the built-in
-  aliases disappear — and the unknown id does not survive it.
-- `_meta.claudeCode.options.settings.availableModels` does exactly the same. (It
-  would also have collided with `ultracode`, which owns that key.)
-- `ANTHROPIC_CUSTOM_MODEL_OPTION` alone appends the row, keeping the built-ins —
-  the documented "add a custom model option" — and leaves `currentValue` on the
-  CLI's own default.
-- `ANTHROPIC_MODEL` alone appends the row **and** makes it current.
-
-Both of the last two are set, and setting them together was measured to compose.
-Relying on the undocumented half alone is how a CLI update takes the feature out
-silently.
+wrong answer three times over — `applyAvailableModelsAllowlist` visibly synthesizes
+an entry for an id it cannot match, and driving it shows it does not. **The three
+doors that were tried and the two that are set are written out at
+`ROUTED_MODEL_ENV` in `src/acp/systems.ts`**, which is where the measurement
+belongs; the half worth carrying here is that relying on the undocumented one alone
+is how a CLI update takes the feature out silently. A harness a plugin contributes
+names its own variables instead — `plugin-contributions.md`.
 
 **A native pairing takes the other door entirely**: `session/set_config_option`
 under `category: "model"`, after `session/new` — **and after `session/resume`,
@@ -144,12 +135,17 @@ the first is the invariant below, and it cost a release.
 
 ## Invariants
 
-- **`SYSTEMS` is fixed, and the fixity is the security property `AGENT_LOGIN`
-  claims.** No route, body field or header anywhere names a base URL, a header
-  name or an environment variable. A request names a `SystemId`; the table is what
-  it resolves against. This daemon is reachable from the internet through the
-  relay, and a caller able to name an endpoint could point somebody's key at a
-  host of its own.
+- **No *request* names a base URL, a header name or an environment variable**, and
+  that is the security property `AGENT_LOGIN` claims. A request names a `SystemId`
+  and a table resolves it; this daemon is reachable from the internet through the
+  relay, and a caller able to name an endpoint could point somebody's key at a host
+  of its own. ⚠ **The table is assembled rather than compiled in, and the honest
+  restatement is that the set of reachable hosts is no longer a constant of this
+  repository.** A plugin's `plugin.json` may add a row — inside an archive fetched
+  from one hardcoded host at a full 40-hex commit, after somebody read the origin on
+  a consent screen and pressed a named button about it, and fixed for the life of
+  that install. `plugin-contributions.md` is that subject; the `minimax` caveat
+  below now applies to rows nobody here has ever seen.
 - **The credential travels in `providers/set`'s headers, never in the environment
   *this daemon* spawns — which buys one hop, not secrecy.** ⚠ **The adapter puts it
   back**: `claude-agent-acp` folds those headers into `ANTHROPIC_CUSTOM_HEADERS` on
@@ -192,7 +188,9 @@ the first is the invariant below, and it cost a release.
   session came back on. Refusing there would strand a conversation for ever the
   first time a CLI retires a model, which is the permanent refusal Q2.216 chose a
   demotion over; demoting silently is the bug being fixed. So a resumed session may
-  honestly come back un-pinned, and it says so in the transcript. **A pairing that
+  honestly come back un-pinned, and it says so in the transcript.
+  ⚠ **"No longer *offered*" is not "not *on* it"** — `pinNativeModel` answers
+  `null` for the second before it reads the list. Q2.220. **A pairing that
   `POST /sessions` refuses is therefore resumable**, and that asymmetry is the
   decision rather than an oversight — a driver asserting only one arm records
   nothing about it.
@@ -436,38 +434,31 @@ itself. Q3.480, Q3.486.
 ## Where the cost is
 
 Q7.31's finding applies one layer down and unchanged: **the per-cell cost is
-empirical, not structural.** The three native rows are today's behaviour
-restated. The routed rows are derived from each vendor's published
-Anthropic-compatible endpoint and are **not driven end to end** — a row that has
-not been run with a real key can still be wrong about a header name, and the
-symptom would be a 401 from somebody else's API.
+empirical, not structural.** The native rows are today's behaviour restated. The
+routed rows come from each vendor's published Anthropic-compatible endpoint and are
+**not driven end to end** — a row never run with a real key can still be wrong about
+a header name, and the symptom is a 401 from somebody else's API.
 
-**And a row cannot be detected, which was asked and measured.** Probed
-2026-08-26, keyless, against all three routed endpoints plus one OpenAI-shaped
-one — four endpoints, four conventions, no classifier possible:
-
-| Probe | Answer |
-|---|---|
-| `GET api.moonshot.ai/anthropic/v1/models` | **404** — it serves `/v1/messages` and nothing else, so the model list cannot be enumerated at all |
-| `GET api.z.ai/api/anthropic/v1/models` | **200** carrying a *failure* body (`code:1001, success:false`) — status says nothing |
-| `GET api.minimax.io/anthropic/v1/models` | 401, Anthropic-shaped error, names `X-Api-Key` in prose |
-| `GET api.moonshot.ai/v1/models` | 401, OpenAI-shaped error — Moonshot serves both shapes |
-
-A bogus key changes none of it: MiniMax returns the **same** canned string for
-`authorization: Bearer` and for `x-api-key`, so even "which header" is not
-answerable without a real one. OpenRouter is the exception: a keyless probe
-answered, and both header conventions are read.
+**And a row cannot be detected, which was asked and measured.** Probed 2026-08-26,
+keyless, against all three routed endpoints plus one OpenAI-shaped one: four
+endpoints, four conventions, no classifier. Moonshot's Anthropic base serves
+`/v1/messages` and 404s a model list; Z.ai answers **200** carrying a failure body;
+MiniMax answers 401 naming `X-Api-Key` in prose while the row sends `authorization`;
+and Moonshot's OpenAI base answers a third shape. A bogus key changes none of it —
+MiniMax returns the same canned string for both conventions — so even "which header"
+is unanswerable without a real one. OpenRouter is the exception: a keyless probe
+answered, and both conventions are read. The per-row evidence is in `SYSTEMS`.
 
 ## Layout
 
 | File | Holds |
 |---|---|
-| `src/acp/systems.ts` | The table, the compatibility rule, the two halves of a routed launch, and the store ports. Imports one type and nothing else |
+| `src/acp/systems.ts` | The table, the compatibility rule, the two halves of a routed launch, the store ports, and `MachineCatalogue` — what a machine offers, as against what this repository ships |
 | `src/agentask.ts` | One spawn, two answers: what an agent offers and what it accepts. `AgentCapabilityReader` is the port `server.ts` takes, so both routes are drivable with no agent installed |
 | `packages/web/src/agents.ts` | The client's half: the same refusals, the whole-fleet catalogue, the default name. DOM-free so `webcheck` drives it |
 | `packages/web/src/ui/AgentBuilder.tsx` | The flow: the draft, its reads, and the three screens it dispatches between. Over a stored preset it is the **edit** screen, and the preset is a third read — deliberately not a third leg of the `Promise.all`, since a daemon too old for `GET /custom-agents` would then take down the new-agent flow it runs perfectly well |
 | `packages/web/src/agentPick.ts` | The agent a pop-up assembled, held until the strip can draw it. Taken, never read twice |
-| `packages/web/src/ui/AgentIcons.tsx` | One glyph per harness. Shapes of ours, not vendor marks — exhaustive over `AgentId` with no `default` arm |
+| `packages/web/src/ui/AgentIcons.tsx` | One glyph per harness. Shapes of ours, not vendor marks — exhaustive over the four this product ships, and a monogram for one a plugin added |
 | `packages/web/src/openrouter.ts` | One provider's list, read by the browser. **`agent-catalogue.md` is that subject whole**: where a name comes from, and which spellings relate |
 | `packages/web/src/ui/settings/SystemsPanel.tsx` | A system's whole configuration, and `KeyOnly` — exported, and mounted twice **here**, routed and not. The builder mounted it too and no longer does: authorization is a property of the machine, so it lives where a machine is configured. Q3.497 |
 

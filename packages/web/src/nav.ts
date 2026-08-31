@@ -108,6 +108,11 @@ export function depthOf(route: Route): number {
        */
       if (route.agents) return 4;
       if (route.system !== null) return 4;
+      // The third leaf under a machine, and it shares their depth for their reason.
+      // Missing, it read as depth 3 — the machine screen it is pushed *from* — so
+      // `navMove` saw `here === there`, answered `null`, and the section slide every
+      // other leaf gets was silently absent in both directions.
+      if (route.signin !== null) return 4;
       if (route.machineId !== null) return 3;
       return route.section !== null ? 2 : 1;
     /*

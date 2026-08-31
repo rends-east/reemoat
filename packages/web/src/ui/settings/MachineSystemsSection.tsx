@@ -2,9 +2,10 @@ import type { ReactNode } from "react";
 import { daemonRead } from "../../machine";
 import type { MachineId } from "../../ids";
 import { navigate } from "../../router";
-import { settingsPath } from "../../settings";
+import { harnessSigninPath, settingsPath } from "../../settings";
 import type { AppState } from "../../store";
 import { Button, Empty, reachText, Spinner } from "../bits";
+import { AgentDetail } from "./AgentsPanel";
 import { SystemChooser, SystemDetail } from "./SystemsPanel";
 
 /**
@@ -31,11 +32,21 @@ export function MachineSystemsSection({
   state,
   machineId,
   system,
+  signin,
   lede = true,
 }: {
   state: AppState;
   machineId: MachineId;
   system: string | null;
+  /**
+   * The harness whose own card this screen is, if the URL names one.
+   *
+   * ⚠ **Never together with `system`** — they are two leaves of one list, and the
+   * parser produces at most one of them. Handled here rather than in a section of
+   * its own because the screen above them is the same list and the reachability
+   * arms above are the same three.
+   */
+  signin: string | null;
   /**
    * Draw the paragraph saying where this machine's credentials live.
    *
@@ -156,6 +167,18 @@ export function MachineSystemsSection({
            */}
           {system === null ? "." : `, so nothing about ${system} can be read or changed.`}
         </Empty>
+      ) : signin !== null ? (
+        /*
+         * The other leaf, and it is the same component the provider leaf reaches
+         * one layer down — `SystemDetail` mounts `AgentDetail` too. What differs is
+         * that there is no system standing over it, so nothing scopes the card to
+         * one variable: a harness nobody speaks for draws its own name and every
+         * slot its manifest declared.
+         *
+         * Keyed for `SystemDetail`'s reason, which is a live login run rather than
+         * anything about this screen.
+         */
+        <AgentDetail key={`${machineId}:${signin}`} machineId={machineId} agentId={signin} />
       ) : system === null ? (
         /* "readable" — and `probing` lands here deliberately. A re-probe is this
            client re-checking a route it forgot on waking, on a machine it already
@@ -164,6 +187,7 @@ export function MachineSystemsSection({
         <SystemChooser
           machineId={machineId}
           onPick={(picked) => navigate(settingsPath("machines", machineId, picked))}
+          onPickHarness={(agent) => navigate(harnessSigninPath(machineId, agent))}
         />
       ) : (
         /*

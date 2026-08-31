@@ -31,9 +31,9 @@ import {
 import type { MachineId } from "../ids";
 import { daemonRead } from "../machine";
 import { store } from "../store";
-import { isAgentId, type AgentCapabilities, type AgentId, type CustomAgent, type SystemInfo } from "../wire";
+import { AGENT_IDS, type AgentCapabilities, type AgentId, type AgentInfo, type CustomAgent, type SystemInfo } from "../wire";
 import { AgentGlyph } from "./AgentIcons";
-import { agentLabel } from "./agentCard";
+import { harnessName } from "./agentCard";
 import {
   Button,
   ChoiceRow,
@@ -52,7 +52,6 @@ import {
   Spinner,
   menuRow,
 } from "./bits";
-import { AGENT_IDS } from "../wire";
 
 /**
  * Assembling an agent: a model, a harness, a name. And editing one already saved.
@@ -157,6 +156,13 @@ export function AgentBuilder({
   const [systems, setSystems] = useState<SystemInfo[] | null>(null);
   const [capabilities, setCapabilities] = useState<Record<string, AgentCapabilities> | null>(null);
   /**
+   * What this machine offers, or `null` while it is being asked.
+   *
+   * Only ever *widens* the harness row: with nothing yet, the picker draws the
+   * four this product ships, which is what it drew before there were plugins.
+   */
+  const [agents, setAgents] = useState<readonly AgentInfo[] | null>(null);
+  /**
    * The harness, or `null` until somebody picks one.
    *
    * ⚠ **No default, and that is what makes the row pressable.** It opened on
@@ -174,14 +180,49 @@ export function AgentBuilder({
    * it is what "edit Claude Code" means, since a built-in agent has nothing stored
    * to edit and starting from it is the whole act.
    *
-   * `isAgentId` because this arrives off a URL: an address naming a harness this
-   * build has never heard of opens the ordinary new-agent screen rather than a
-   * screen holding an unresolvable row, which is `compatibility.md`'s rule 2 and
-   * the same direction the `edit` marker fails in.
+   * ⚠ **Weighed against the listing rather than against a constant, which means
+   * it now *waits* — and the waiting is the smaller of two costs.** It was
+   * `isAgentId(seed)`, a membership test over a closed union, and that could be
+   * answered before the first paint. Which harnesses exist is a fact about the
+   * machine now, so a shape test is the only thing this side could answer alone
+   * and a shape test would seed the screen with a harness the machine does not
+   * have: a selected row, a raw id where a name goes, and every model refused
+   * against something that is not there. `GET /agents` is milliseconds and the row
+   * this fills was going to be filled anyway — this screen is reached by tapping
+   * *edit* on a row that is offered — so an address naming a harness this machine
+   * does not have still opens the ordinary new-agent screen, which is
+   * `compatibility.md`'s rule 2 and the direction the `edit` marker fails in.
+   *
+   * Seeded **once**, by the effect below rather than by a `useState` initialiser,
+   * and guarded so a re-read cannot put back a harness somebody has since cleared.
    */
-  const [harness, setHarness] = useState<AgentId | null>(
-    seed !== null && isAgentId(seed) ? seed : null,
-  );
+  const [harness, setHarness] = useState<AgentId | null>(null);
+  const seeded = useRef(false);
+  /**
+   * What to call a harness, anywhere on this screen.
+   *
+   * ⚠ **One function rather than `agentLabel` at six call sites, because
+   * `agentLabel` can only answer for the four this product ships.** It falls
+   * through to the raw id for anything else — which is right, and is what
+   * `webcheck` pins — but a raw `acme:gemini` is not a name to put in *"Chats you
+   * started with it are not deleted…"* or in an `aria-label`. `harnessName` is the
+   * pair of them: this product's table, then the listing's own bounded label.
+   *
+   * Falls back to `{id}` for a harness the listing does not hold, which is the
+   * loading state and a stale preset alike — and there `harnessName` answers
+   * exactly what `agentLabel` did.
+   */
+  const nameOf = useMemo(() => {
+    const byId = new Map((agents ?? []).map((one) => [one.id, one] as const));
+    return (id: string): string => harnessName(byId.get(id) ?? { id });
+  }, [agents]);
+  /**
+   * The harness rows, which are the listing's — falling back to the four this
+   * product ships while it is in flight, so this row never waits.
+   */
+  const harnessRows = useMemo(() => agents ?? AGENT_IDS.map((id) => ({ id })), [agents]);
+  /** The same list as ids, for the two readers that only need to iterate it. */
+  const harnessIds = useMemo(() => harnessRows.map((one) => one.id), [harnessRows]);
   const [picked, setPicked] = useState<{ system: string; model: string } | null>(null);
   const [name, setName] = useState("");
   /** Frozen the moment somebody types, so their name is not overwritten by a pick. */
@@ -363,6 +404,47 @@ export function AgentBuilder({
     setReadFailure(null);
     setSystems(null);
     setCapabilities(null);
+    setAgents(null);
+    /*
+     * ⚠ **A fourth read, and it is the *cheap* one — which is the whole reason the
+     * row it feeds is still not the row that waits.** The harness list used to be
+     * `AGENT_IDS`, a constant, and Q3.528's argument was that answering the free
+     * question is what the expensive one runs under. A machine may now offer
+     * harnesses a plugin added, so the list is a fact about the machine — but
+     * `GET /agents` spawns nothing (the daemon's own docblock says so beside the
+     * capabilities route that does), and the picker below **draws the four
+     * built-ins immediately and appends whatever this answers**. So nothing waits,
+     * and a read that fails or a daemon too old to have plugins leaves exactly
+     * today's screen.
+     *
+     * Its own `.catch`, and one that does not touch `readFailure`: a listing this
+     * screen only *widens* with is not a read whose failure is worth a sentence,
+     * and putting one there would report an outage on a screen that is working.
+     */
+    void daemon
+      .agents()
+      .then((listing) => {
+        if (cancelled) return;
+        setAgents(listing.agents);
+      })
+      .catch(() => {
+        /*
+         * ⚠ **Left `null`, and `[]` here was a screen that could not be used.**
+         * `harnessRows` is `agents ?? AGENT_IDS`, so an empty array defeats the
+         * fallback rather than being it: the picker drew its "this machine named no
+         * agents" arm with no rows and no way out, `Supports` lost every glyph on
+         * every model row, and — because this catch deliberately says nothing —
+         * nothing on screen explained any of it. `null` is *"still asking"*, which
+         * is what a failed read leaves this screen in and is exactly today's
+         * behaviour: the four this product ships, drawn immediately.
+         *
+         * It also keeps the seed recoverable. The effect below returns before it
+         * burns its guard while this is `null`, so a Retry that succeeds still
+         * adopts the harness the address named — which `[]` made permanently
+         * impossible, on the one path the seed exists for.
+         */
+        if (cancelled) return;
+      });
     void daemon
       .systems()
       .then((listing) => {
@@ -389,6 +471,21 @@ export function AgentBuilder({
       cancelled = true;
     };
   }, [daemon, attempt]);
+
+  /**
+   * Adopt the harness the address named, once, and only if this machine has it.
+   *
+   * ⚠ **`seeded` rather than a dependency on `seed`**, because the guard is about
+   * *having answered* rather than about the value changing: without it a re-read —
+   * a retry, a machine switch — would put the address's harness back over one
+   * somebody had cleared on the screen, which is the same clobber `touched` exists
+   * to prevent one component over.
+   */
+  useEffect(() => {
+    if (seed === null || agents === null || seeded.current) return;
+    seeded.current = true;
+    if (agents.some((one) => one.id === seed)) setHarness(seed);
+  }, [seed, agents]);
 
   useEffect(() => {
     if (daemon === undefined || preset === null) return;
@@ -575,7 +672,7 @@ export function AgentBuilder({
       : `${catalogue.length === 0 ? MODELS_UNREAD : SOME_MODELS_UNREAD} ${readFailure}`);
 
   /** Why the chosen pair cannot be saved, or `null`. */
-  const conflict = current === null ? null : choiceRefusal(harness, current, routingOf(harness));
+  const conflict = current === null ? null : choiceRefusal(harness, current, routingOf(harness), nameOf);
   /** What the agent is called: theirs if they typed one, the model's otherwise. */
   const shown = name.trim().length > 0 ? name.trim() : (current?.modelName ?? "");
   /** The machine this is all happening on, for the reachability branch below. */
@@ -823,6 +920,8 @@ export function AgentBuilder({
       <ModelPicker
         choices={catalogue}
         capabilities={caps}
+        harnesses={harnessIds}
+        nameOf={nameOf}
         harness={harness}
         routing={routingOf(harness)}
         failure={readFailure}
@@ -844,7 +943,8 @@ export function AgentBuilder({
 
   /*
    * ⚠ **And the harness picker waits too, but only over a stored preset.** It has
-   * rows either way — the list is `AGENT_IDS` and needs no read — so what it draws
+   * rows either way — the list falls back to the four this product ships until the
+   * cheap `GET /agents` widens it, so it never waits on a read — so what it draws
    * without the catalogue is worse than an empty screen: on the **edit** path
    * `picked` is already seeded while `current` is a lookup in a catalogue that has
    * not arrived, so `harnessRowRefusal` answers `null` for every row and the screen
@@ -854,7 +954,10 @@ export function AgentBuilder({
    *
    * On the **new** path it does not fire, and must not: with no model chosen there
    * is nothing for the catalogue to change about this list, and answering the free
-   * question is exactly what the expensive read is meant to run under.
+   * question is exactly what the expensive read is meant to run under. ⚠ **That
+   * argument survived the list becoming a listing only because the listing does not
+   * gate the row** — `harnessRows` falls back rather than blocking, so the wait
+   * here is still the model read's and nothing else's.
    */
   if (step === "harness" && reading && preset !== null) {
     return (
@@ -870,6 +973,8 @@ export function AgentBuilder({
     return (
       <HarnessPicker
         capabilities={caps}
+        harnesses={harnessRows}
+        nameOf={nameOf}
         current={current}
         value={harness}
         onPick={(next) => {
@@ -1069,7 +1174,7 @@ export function AgentBuilder({
           <Field label="Harness" clear={harness === null || busy ? null : () => setHarness(null)}>
             <ChoiceRow
               glyph={harness === null ? emptyGlyph : <AgentGlyph agent={harness} size={18} />}
-              title={harness === null ? "Choose" : agentLabel(harness)}
+              title={harness === null ? "Choose" : nameOf(harness)}
               placeholder={harness === null}
               /*
                * ⚠ **The refusal, on the row it is about.** It was only at the foot
@@ -1243,7 +1348,7 @@ export function AgentBuilder({
                * spawned with.
                */}
               Chats you started with it are not deleted — the next time one comes back it runs on{" "}
-              {agentLabel(stored.harness)} with its own model rather than this one.
+              {nameOf(stored.harness)} with its own model rather than this one.
             </p>
             {confirming ? (
               <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -1688,6 +1793,8 @@ function Field({
  * hiding the rows would answer "where did Kimi K2 go" with silence.
  */
 function ModelPicker({
+  nameOf,
+  harnesses,
   choices,
   capabilities,
   harness,
@@ -1737,6 +1844,10 @@ function ModelPicker({
    * invisibly two screens away.
    */
   onClearHarness: () => void;
+  /** What to call a harness. See `AgentBuilder`'s own `nameOf`. */
+  nameOf: (id: string) => string;
+  /** Every harness this machine offers, for the glyph row on each model. */
+  harnesses: readonly string[];
   /**
    * What is missing from an otherwise working list, or `null`.
    *
@@ -1799,12 +1910,12 @@ function ModelPicker({
       groups.reduce(
         (count, group) =>
           count +
-          (harness === null || hostable(harness, group.system, routing) === null
+          (harness === null || hostable(harness, group.system, routing, nameOf) === null
             ? group.choices.length
             : 0),
         0,
       ),
-    [groups, harness, routing],
+    [groups, harness, routing, nameOf],
   );
   const wanted = query.trim();
 
@@ -1999,7 +2110,7 @@ function ModelPicker({
               </Button>
             }
           >
-            Nothing here runs under {agentLabel(harness)}.
+            Nothing here runs under {nameOf(harness)}.
           </Empty>
         ) : (
           groups.map((group) => {
@@ -2034,7 +2145,7 @@ function ModelPicker({
              * half. Picking the model first — the order this flow is built in — is
              * untouched.
              */
-            const wholeProvider = harness === null ? null : hostable(harness, group.system, routing);
+            const wholeProvider = harness === null ? null : hostable(harness, group.system, routing, nameOf);
             if (wholeProvider !== null) {
               return (
                 <section key={group.system.id} className="mt-4 first:mt-2">
@@ -2125,7 +2236,14 @@ function ModelPicker({
                          * `trailing`, so the primitive draws it *before* the check
                          * slot and becoming the answer never displaces it.
                          */
-                        trailing={<Supports choice={choice} capabilities={capabilities} />}
+                        trailing={
+                          <Supports
+                            choice={choice}
+                            capabilities={capabilities}
+                            harnesses={harnesses}
+                            nameOf={nameOf}
+                          />
+                        }
                         subline={
                           shared !== null
                             ? null
@@ -2178,34 +2296,47 @@ function ModelPicker({
  */
 function HarnessPicker({
   capabilities,
+  harnesses,
   current,
   value,
+  nameOf,
   onPick,
 }: {
   capabilities: Readonly<Record<string, AgentCapabilities>>;
+  /**
+   * Every harness this machine offers, in the daemon's own order.
+   *
+   * ⚠ **Rows rather than ids, because a name is no longer derivable from one.** A
+   * harness a plugin added carries its label on the listing, and `harnessName` is
+   * where the two sources meet — this product's own table first, then the
+   * manifest's, bounded. Reading `AGENT_LABEL` alone would have drawn a namespaced
+   * id where a name goes on every contributed row.
+   */
+  harnesses: readonly { id: string; label?: string }[];
   /** The model already chosen, against which each harness is weighed. */
   current: ModelChoice | null;
   /** `null` until somebody picks one, which is how this screen opens. */
   value: AgentId | null;
+  nameOf: (id: string) => string;
   onPick: (next: AgentId) => void;
 }): ReactNode {
   const [query, setQuery] = useState("");
   const needle = query.trim().toLowerCase();
-  const shown = AGENT_IDS.filter(
-    (id) =>
+  const shown = harnesses.filter(
+    (one) =>
       needle.length === 0 ||
-      agentLabel(id).toLowerCase().includes(needle) ||
-      id.includes(needle),
+      harnessName(one).toLowerCase().includes(needle) ||
+      one.id.includes(needle),
   );
   /**
    * What each harness that could not be asked actually said, for the disclosure.
    *
-   * Off the rows on screen rather than off `AGENT_IDS`, so a narrowed list does
+   * Off the rows on screen rather than off the whole list, so a narrowed list does
    * not explain a row that is not in it.
    */
   const reported = shown
-    .map((id) => ({ id, said: capabilities[id]?.error ?? null }))
-    .filter((one): one is { id: AgentId; said: string } => one.said !== null);
+    .map((one) => ({ id: one.id, said: capabilities[one.id]?.error ?? null }))
+    .filter((one): one is { id: string; said: string } => one.said !== null);
 
   return (
     <div className={SHEET_SCREEN}>
@@ -2220,11 +2351,20 @@ function HarnessPicker({
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-2 pb-5 sm:px-5">
         {shown.length === 0 ? (
           /*
-           * ⚠ **`AGENT_IDS` has four members and no way to be empty, so the query
-           * is the only thing that can produce this** — which is what makes the act
-           * unambiguous, unlike the model screen where three narrowings can each
-           * empty the list. The way back is one control and it undoes the one
-           * narrowing there is.
+           * ⚠ **There are now two ways to empty this list, where the docblock here
+           * said there was one.** It read: *"`AGENT_IDS` has four members and no way
+           * to be empty, so the query is the only thing that can produce this"* —
+           * true while the list was a constant, and false the moment it came from a
+           * machine. A `Show all` over an empty list shows nothing, and a screen
+           * that offers to undo a narrowing that is not the cause is worse than one
+           * that says what happened.
+           *
+           * The two are told apart by the *query* rather than by the listing's
+           * state, deliberately: this component never sees `null`, because the
+           * screen above it falls back to the four this product ships while the
+           * read is in flight. So an empty list here is a machine that answered
+           * with nothing — which is not a state a healthy daemon reaches, and is
+           * exactly the state a person needs told rather than guessed at.
            *
            * ⚠ **Curly quotes, never `JSON.stringify`**, which shows somebody their
            * own input escaped as soon as it holds a quote or a backslash —
@@ -2232,16 +2372,21 @@ function HarnessPicker({
            */
           <Empty
             action={
-              <Button size="sm" onClick={() => setQuery("")}>
-                Show all
-              </Button>
+              needle.length === 0 ? undefined : (
+                <Button size="sm" onClick={() => setQuery("")}>
+                  Show all
+                </Button>
+              )
             }
           >
-            {`Nothing here is called “${query.trim()}”.`}
+            {needle.length === 0
+              ? "This machine did not name any agents."
+              : `Nothing here is called “${query.trim()}”.`}
           </Empty>
         ) : (
           <ul className="flex flex-col gap-2">
-            {shown.map((id) => {
+            {shown.map((one) => {
+              const id = one.id;
               /*
                * ⚠ **A harness that could not be *asked* is not a harness that
                * refuses.** `routing: null` means both — "declares no provider
@@ -2270,7 +2415,7 @@ function HarnessPicker({
                 <li key={id}>
                   <ChoiceRow
                     glyph={<AgentGlyph agent={id} size={18} />}
-                    title={agentLabel(id)}
+                    title={harnessName(one)}
                     subline={why}
                     selected={id === value}
                     disabled={why !== null}
@@ -2281,7 +2426,7 @@ function HarnessPicker({
             })}
           </ul>
         )}
-        {reported.length > 0 && <Reported entries={reported} />}
+        {reported.length > 0 && <Reported entries={reported} nameOf={nameOf} />}
       </div>
     </div>
   );
@@ -2365,7 +2510,13 @@ const COULD_NOT_ASK = "This machine couldn't check what it can run.";
  * as wide as the thing it draws, so the pressable area and the ink are the same
  * object.
  */
-function Reported({ entries }: { entries: readonly { id: AgentId; said: string }[] }): ReactNode {
+function Reported({
+  entries,
+  nameOf,
+}: {
+  entries: readonly { id: string; said: string }[];
+  nameOf: (id: string) => string;
+}): ReactNode {
   const [open, setOpen] = useState(false);
   return (
     <div className="mt-4 border-t border-edge pt-3">
@@ -2388,7 +2539,7 @@ function Reported({ entries }: { entries: readonly { id: AgentId; said: string }
         <div className="space-y-2 pb-1">
           {entries.map((one) => (
             <p key={one.id} className="text-2xs text-faint wrap-anywhere">
-              <span className="text-muted">{agentLabel(one.id)}</span> — {one.said}
+              <span className="text-muted">{nameOf(one.id)}</span> — {one.said}
             </p>
           ))}
         </div>
@@ -2545,16 +2696,30 @@ function countText(count: number, one: string, many: string): string {
 function Supports({
   choice,
   capabilities,
+  harnesses,
+  nameOf,
 }: {
   choice: ModelChoice;
   capabilities: Readonly<Record<string, AgentCapabilities>>;
+  /**
+   * Every harness this machine offers, in the daemon's order.
+   *
+   * ⚠ **Passed in rather than read from `AGENT_IDS`, and this row is where that
+   * constant would have been most visibly wrong.** A model only a contributed
+   * harness can run would have drawn *no glyphs at all* — on the one row whose
+   * whole job is to say what will run it — and `supportingHarnesses`' own claim
+   * that it is "never empty in practice" would have become false in exactly the
+   * case somebody most needed it.
+   */
+  harnesses: readonly string[];
+  nameOf: (id: string) => string;
 }): ReactNode {
-  const able = supportingHarnesses(choice, capabilities);
+  const able = supportingHarnesses(choice, capabilities, harnesses);
   if (able.length === 0) return null;
   return (
     <span
       role="img"
-      aria-label={`Supports ${able.map((id) => agentLabel(id)).join(", ")}`}
+      aria-label={`Supports ${able.map((id) => nameOf(id)).join(", ")}`}
       className="flex shrink-0 items-center gap-1 text-faint"
     >
       {/* `max-w-32` is what makes the truncation land *here* rather than on the
@@ -2566,7 +2731,7 @@ function Supports({
         aria-hidden="true"
         className="hidden max-w-32 truncate text-2xs [button:focus-visible_&]:block [@media(pointer:coarse)]:block"
       >
-        {able.map((id) => agentLabel(id)).join(" · ")}
+        {able.map((id) => nameOf(id)).join(" · ")}
       </span>
       {able.map((id) => (
         <span
@@ -2576,7 +2741,7 @@ function Supports({
         >
           <AgentGlyph agent={id} size={13} />
           <span className="pointer-events-none absolute top-1/2 right-full mr-2 hidden -translate-y-1/2 rounded-md border border-edge bg-surface px-2 py-1 text-2xs whitespace-nowrap text-fg shadow-lg group-hover/mark:block">
-            Supports {agentLabel(id)}
+            Supports {nameOf(id)}
           </span>
         </span>
       ))}

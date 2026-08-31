@@ -31,6 +31,7 @@ import {
 import { RelayTunnel } from "../src/relay/tunnel.js";
 import { createApp } from "../src/server.js";
 import { openStores, type StoreBundle, type StoredIdentity } from "../src/store/sqlite.js";
+import { Contributions } from "../src/plugins/contributions.js";
 import { PluginHost } from "../src/plugins/host.js";
 import { resolveUploadRoot, Uploads } from "../src/uploads.js";
 import { DEFAULT_BRANCH_PREFIX, resolveWorktreeRoot } from "../src/worktree.js";
@@ -353,6 +354,44 @@ if (stores.prunedSessions.length > 0) {
   void uploads.forgetSessions(stores.prunedSessions);
 }
 
+/**
+ * What plugins add to this machine's two tables.
+ *
+ * ⚠ **Built here — immediately after `openStores`, and *before* the runtime, the
+ * registry and `restore()` — for a reason stronger than the one that puts
+ * `setCustomAgents` above `restore()`.** `restore()` rebuilds every persisted
+ * session, and a `ManagedSession`'s `assembled` getter reads `custom_agents`
+ * through a validator that **drops** a row it cannot resolve. With contributions
+ * unknown at that moment, every preset built on a plugin's harness would be
+ * dropped and every session on one would come back demoted to the bare harness it
+ * was started with — a different vendor, with nothing on screen saying so — and
+ * `autoResume` fires inside that window.
+ *
+ * Nothing is started to build it: `stores.plugins.list()` already re-validates
+ * each `manifest_json` through `parseManifest` on the way out, so this is a read
+ * of rows that are already there. `PluginHost` opens much later, after restore,
+ * and keeps this current from then on.
+ *
+ * ⚠ **`REEMOAT_PLUGINS=0` makes it empty, and that is what the switch means.**
+ * The rows stay in the database — the switch is documented as *"an operator who
+ * does not want somebody else's code running as this user should not have to
+ * uninstall anything"* — and a contributed harness **is** a program this daemon
+ * spawns. Listing one on a machine that has switched plugins off would be the
+ * switch not meaning what it says.
+ */
+const pluginsEnabled = process.env["REEMOAT_PLUGINS"] !== "0";
+/*
+ * ⚠ **Switched off means every row is *disabled*, not that the rows are gone.**
+ * Handing an empty list would make `harnessState` answer `unknown` for a harness
+ * that is plainly installed, so `POST /sessions` would say `400 invalid_agent` —
+ * *your request is wrong* — about a request that was correct until somebody set
+ * this variable. `disabled` is the whole reason that answer is three-valued: it
+ * names a switch rather than blaming a caller.
+ */
+const contributions = new Contributions(
+  stores.plugins.list().map((one) => (pluginsEnabled ? one : { ...one, enabled: false })),
+);
+
 /*
  * Where agents run: as children of this daemon, as this user.
  *
@@ -376,9 +415,17 @@ const runtime = new LocalRuntime({
   // exists — the disagreement being a pairing the picker offers and the start
   // refuses.
   systemSecret: (system) =>
-    systemSecretFor(system, stores.systemCredentials.get(system), (agent: AgentId) =>
-      stores.credentials.envFor(agent),
+    systemSecretFor(
+      system,
+      stores.systemCredentials.get(system),
+      (agent: AgentId) => stores.credentials.envFor(agent),
+      contributions,
     ),
+  // What this machine offers beyond what this repository ships. Read at every
+  // launch through the object rather than captured as a list, so a plugin
+  // installed while a session slept is offering its harness by the time that
+  // session resumes.
+  machine: contributions,
   // Nothing in src/ prints. A login that cannot be driven is the one an operator
   // most needs to hear about, because the button for it is on a screen.
   onWarning: (detail: string) => console.error(`runtime: ${detail}`),
@@ -448,6 +495,11 @@ const registry = new SessionRegistry(
  * when they disagree, and it can only do that if this hands it the harness to
  * compare.
  */
+/*
+ * Before `restore()`, for `setCustomAgents`' reason and a stronger one — see
+ * {@link contributions}, which is where the argument is written out.
+ */
+registry.setMachineCatalogue(contributions);
 registry.setCustomAgents((id) => {
   const one = stores.customAgents.get(id);
   return one === null ? null : { harness: one.harness, system: one.system, model: one.model };
@@ -525,7 +577,7 @@ registry.setSessionLimits({
  * start must not hold up a boot `deploy.sh` is polling `/health` for.
  */
 let pluginHost: PluginHost | null = null;
-if (process.env["REEMOAT_PLUGINS"] !== "0") {
+if (pluginsEnabled) {
   try {
     pluginHost = await PluginHost.open({
       root: pluginRoot,
@@ -539,6 +591,38 @@ if (process.env["REEMOAT_PLUGINS"] !== "0") {
         ask: agentAsks,
       },
       onWarning: (detail: string) => console.error(`plugins: ${detail}`),
+      // Kept current from here on: every install, update, remove and enable runs
+      // under the host's own single-writer gate, so this is the only thing that
+      // ever writes to the object built above.
+      contributions,
+      /*
+       * Where an uninstalled plugin's secrets are swept from. Both tables, because
+       * a contributed harness's pasted key and a contributed provider's key are
+       * the same namespaced id in two different stores, and neither is touched by
+       * `prune()`.
+       */
+      secrets: {
+        /*
+         * Swept off the *stores* rather than off the manifest, which is the
+         * difference between removing what a version declared and removing what is
+         * actually there. Two rows this cannot miss and a manifest-driven sweep
+         * would: a slot an earlier release of the plugin declared and this one does
+         * not, and every row belonging to a plugin whose manifest this build cannot
+         * re-validate at all — which is exactly the row `doRemove` is reachable for.
+         *
+         * ⚠ **`systemCredentials.list()` and not a key-by-key guess**, because that
+         * listing is itself shape-validated: a contributed id survives it, which is
+         * what makes this reachable at all.
+         */
+        forgetPrefix: (prefix) => {
+          for (const row of stores.credentials.list()) {
+            if (row.agent.startsWith(prefix)) stores.credentials.remove(row.agent, row.envName);
+          }
+          for (const row of stores.systemCredentials.list()) {
+            if (row.system.startsWith(prefix)) stores.systemCredentials.remove(row.system);
+          }
+        },
+      },
     });
   } catch (error) {
     // Not fatal, and deliberately so: a plugin root that cannot be made is a

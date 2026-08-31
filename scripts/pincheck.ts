@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createRequire } from "node:module";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 /**
@@ -420,11 +420,21 @@ process.stdout.write("\nthe plugin API, and the one plugin in this repository\n"
  * to drift. Adding a constant there in order to have something to compare would
  * be manufacturing the second copy this whole file exists to argue against.
  *
- * What *can* go quietly wrong is the reference plugin. `plugins/board` is what
- * `docs/PLUGINS.md` walks through and what somebody trying this feature installs
- * first, and it declares an `api` like any other plugin — so the day
+ * What *can* go quietly wrong is a plugin this repository ships. `plugins/board`
+ * is what `docs/PLUGINS.md` walks through and what somebody trying this feature
+ * installs first, and it declares an `api` like any other plugin — so the day
  * `PLUGIN_API_MIN_VERSION` is raised past it, the documented first step stops
  * working, on a machine that is running exactly what the tree says it should.
+ *
+ * ⚠ **Swept over every directory under `plugins/`, though there is one today, and
+ * it was written around the one constant `"board"`.** That is this file's own
+ * recorded mistake one subject over: `ADAPTERS` is a loop *because* the version
+ * check was written around a single constant and therefore pinned the second
+ * adapter nowhere. The same trap was open here, and a second plugin is a thing
+ * this tree has already had once — so the loop goes in while the answer is still
+ * "one", rather than after somebody has found out. A **floor** under the count
+ * comes with it, because finding nothing to check must not read as finding
+ * nothing wrong.
  */
 const protocolTs = read("src/plugins/protocol.ts");
 const apiVersion = capture(protocolTs, /^export const PLUGIN_API_VERSION = (\d+);$/m);
@@ -437,16 +447,33 @@ check(
   true,
 );
 
-const boardManifest = JSON.parse(read("plugins/board/plugin.json")) as { api?: number; id?: string; version?: string };
-check("the reference plugin declares an API version", typeof boardManifest.api === "number", true);
+const shipped = readdirSync(new URL("plugins/", root), { withFileTypes: true })
+  .filter((entry) => entry.isDirectory())
+  .map((entry) => entry.name)
+  .sort();
+check("this repository ships a plugin at all", shipped.length >= 1, true);
+
+const manifests = shipped.map(
+  (name) => [name, JSON.parse(read(`plugins/${name}/plugin.json`)) as { api?: number; id?: string }] as const,
+);
 check(
-  "and this daemon would still install it",
-  apiMin !== null &&
-    apiVersion !== null &&
-    typeof boardManifest.api === "number" &&
-    boardManifest.api >= Number(apiMin) &&
-    boardManifest.api <= Number(apiVersion),
-  true,
+  "every plugin this repository ships declares an API version",
+  manifests.filter(([, one]) => typeof one.api !== "number").map(([name]) => name),
+  [],
+);
+check(
+  "and this daemon would still install each of them",
+  manifests
+    .filter(
+      ([, one]) =>
+        apiMin === null ||
+        apiVersion === null ||
+        typeof one.api !== "number" ||
+        one.api < Number(apiMin) ||
+        one.api > Number(apiVersion),
+    )
+    .map(([name]) => name),
+  [],
 );
 
 /*
@@ -454,7 +481,23 @@ check(
  * `tar -C`, so the two have to agree or the documented command builds an archive
  * the daemon then unpacks under a different name.
  */
-check("the reference plugin's id is the directory it lives in", boardManifest.id, "board");
+check(
+  "and each one's id is the directory it lives in",
+  manifests.filter(([name, one]) => one.id !== name).map(([name, one]) => `${name}: ${String(one.id)}`),
+  [],
+);
+/*
+ * And the entry point, which is the other half of what the daemon refuses at
+ * install (`entry_missing`) and the only part of a shipped plugin a manifest check
+ * cannot see. Cheap here and expensive to find otherwise: a plugin with no
+ * `server.js` parses perfectly, installs nowhere, and says so only on the machine
+ * somebody is trying it on.
+ */
+check(
+  "and each one has an entry point beside its manifest",
+  shipped.filter((name) => !existsSync(new URL(`plugins/${name}/server.js`, root))),
+  [],
+);
 
 process.stdout.write(failures === 0 ? "\nall green\n\n" : `\n${failures} FAILED\n\n`);
 process.exit(failures === 0 ? 0 : 1);

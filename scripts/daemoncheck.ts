@@ -100,7 +100,7 @@ import { toolCallLineage } from "../src/acp/subagents.js";
 // Type only: every *value* in that module is reached through a dynamic import
 // inside the block that drives it, so each section reads the table rather than a
 // binding somebody could have shadowed at the top of this file.
-import type { SystemId } from "../src/acp/systems.js";
+import type { BuiltinSystemId, SystemId } from "../src/acp/systems.js";
 import { atOrUnder, atOrUnderResolved, containedIn, containedInResolved } from "../src/paths.js";
 import { gitArgs, gitEnv, GitError, hostGit, type GitExec, type GitRun } from "../src/git.js";
 import {
@@ -1872,6 +1872,196 @@ process.stdout.write("\nwhether a login can be driven\n");
     cheap["opencode"],
   ], [true, "no_flow"]);
   check("and the two routes cannot disagree about it", cheap, await loginRows("/agent-auth"));
+
+  /*
+   * ⚠ **And a harness a plugin added rides both of them, which is the whole of
+   * what "as though this product had shipped it" means on the wire.** Driven end
+   * to end rather than inferred from `Contributions`, because everything between
+   * the registry and the response is where a field is quietly dropped: the runtime
+   * has to be handed the catalogue, `availability()` has to iterate it,
+   * `loginSupportOf` has to answer for a harness with no `AGENT_LOGIN` row, and
+   * `credentialSlots` has to find the manifest's `envNames`.
+   *
+   * ⚠ **`no_flow` is the assertion with teeth.** With no `login` object at all,
+   * `agentStance(true, null, undefined)` answers `unchecked`, whose badge reads
+   * *cannot check* — a sentence about a probe that failed, drawn permanently over
+   * an agent that runs perfectly, on every machine in the fleet.
+   */
+  {
+    const { Contributions } = await import("../src/plugins/contributions.js");
+    const { parseManifest } = await import("../src/plugins/manifest.js");
+    const { PLUGIN_API_VERSION } = await import("../src/plugins/protocol.js");
+    const { SYSTEM_IDS } = await import("../src/acp/systems.js");
+    const read = parseManifest(
+      JSON.stringify({
+        id: "acme",
+        name: "Acme Tools",
+        version: "1.0.0",
+        api: PLUGIN_API_VERSION,
+        scopes: ["harness", "system"],
+        contributes: {
+          harnesses: [
+            /*
+             * ⚠ **`standalone` is declared here on purpose and must not be
+             * removed.** The field is gone from `HarnessContribution`, and what
+             * "gone" has to mean for a plugin somebody already published is that a
+             * manifest still carrying it installs unchanged and the key is simply
+             * not read. Take it out of this fixture and the assertion below stops
+             * saying anything.
+             */
+            { id: "gemini", name: "Gemini", command: "gemini", args: ["acp"], envNames: ["GEMINI_API_KEY"], standalone: true },
+          ],
+          systems: [
+            {
+              id: "groq",
+              name: "Groq",
+              apiType: "anthropic",
+              baseUrl: "https://api.groq.com/anthropic",
+              authHeader: { name: "authorization", prefix: "Bearer " },
+              models: [{ id: "llama-4", name: "Llama 4" }],
+            },
+          ],
+        },
+      }),
+    );
+    if (!read.ok) throw new Error(read.message);
+    const machine = new Contributions([
+      { id: "acme", version: "1.0.0", manifest: read.manifest, enabled: true, installedAt: 1, updatedAt: 1, source: null },
+    ]);
+    const own = new SessionRegistry(new MemoryEventStore(), null, undefined, new LocalRuntime({ machine }));
+    own.setMachineCatalogue(machine);
+    const withPlugin = createApp({
+      registry: own,
+      verifier,
+      instanceId: "i_contrib",
+      startedAt: now,
+      credentials,
+      roots: [users],
+      systems: {
+        credentials: { list: () => [], get: () => null, save: () => {}, remove: () => {} },
+        customAgents: { list: () => [], get: () => null, save: () => {}, remove: () => {} },
+        strip: { list: () => [], replace: () => {}, forget: () => {} },
+      },
+    }).app;
+    const get = async (path: string): Promise<Record<string, unknown>> =>
+      JSON.parse(
+        await (
+          await withPlugin.fetch(new Request(`http://d${path}`, { headers: { authorization: `Bearer ${tokenFor("u_a")}` } }))
+        ).text(),
+      ) as Record<string, unknown>;
+
+    const agents = (await get("/agents"))["agents"] as {
+      id: string;
+      label?: string;
+      displayName: string;
+      contributedBy?: { pluginId: string; pluginName: string };
+      login?: { blocked?: string | null };
+    }[];
+    const added = agents.find((one) => one.id === "acme:gemini") ?? null;
+    check(
+      "a harness a plugin added is on GET /agents, named, placed and with nothing to sign in to",
+      added === null
+        ? "absent"
+        : [added.label ?? null, added.contributedBy ?? null, added.login?.blocked ?? null],
+      ["Gemini", { pluginId: "acme", pluginName: "Acme Tools" }, "no_flow"],
+    );
+    /*
+     * ⚠ **And it carries no claim about being a whole agent, because a plugin adds
+     * a harness and never an agent.** `standalone` rode this row for a release and
+     * is gone from the manifest, the catalogue and the wire together: the fixture's
+     * own manifest still declares it, so what is asserted is that a manifest
+     * carrying the key installs unchanged and the key is simply not read — which is
+     * the whole of what "removed" has to mean for a plugin already published.
+     */
+    check(
+      "and says nothing about being one on its own",
+      added === null ? "absent" : "standalone" in added,
+      false,
+    );
+    /*
+     * ⚠ **The label and the display name are two different strings, and this is
+     * the assertion that keeps them apart.** `displayName` is the log line and
+     * carries the program; a client that drew it on a tile would put the binary's
+     * name there, which is the rule `agentCard.ts` sweeps its own four for.
+     */
+    check(
+      "and its log line is not its label",
+      added === null ? "absent" : added.displayName !== added.label,
+      true,
+    );
+    const slots = ((await get("/agent-auth"))["agents"] as { id: string; credentials: { envName: string }[] }[]).find(
+      (one) => one.id === "acme:gemini",
+    );
+    check(
+      "and the paste box it offers is the one its manifest named",
+      slots?.credentials.map((one) => one.envName) ?? "absent",
+      ["GEMINI_API_KEY"],
+    );
+
+    const systems = (await get("/systems"))["systems"] as { id: string; displayName: string; contributedBy?: unknown }[];
+    check(
+      "a provider a plugin added is on GET /systems, after every built-in",
+      [systems.length, systems[systems.length - 1]?.id, systems[systems.length - 1]?.displayName],
+      [SYSTEM_IDS.length + 1, "acme:groq", "Groq"],
+    );
+    check(
+      "and it says which plugin it came from",
+      systems[systems.length - 1]?.contributedBy ?? null,
+      { pluginId: "acme", pluginName: "Acme Tools" },
+    );
+    /*
+     * ⚠ **And switching the plugin off takes both off the wire in the same tick.**
+     * A tile drawn for a harness `POST /sessions` would refuse is the state this
+     * has to make unreachable; what a switched-off plugin keeps is its *position*,
+     * in `agent_strip`, which is never validated against anything.
+     */
+    const off = new Contributions([
+      { id: "acme", version: "1.0.0", manifest: read.manifest, enabled: false, installedAt: 1, updatedAt: 1, source: null },
+    ]);
+    const ownOff = new SessionRegistry(new MemoryEventStore(), null, undefined, new LocalRuntime({ machine: off }));
+    ownOff.setMachineCatalogue(off);
+    const offApp = createApp({
+      registry: ownOff,
+      verifier,
+      instanceId: "i_contrib_off",
+      startedAt: now,
+      credentials,
+      roots: [users],
+    }).app;
+    const offAgents = JSON.parse(
+      await (
+        await offApp.fetch(new Request("http://d/agents", { headers: { authorization: `Bearer ${tokenFor("u_a")}` } }))
+      ).text(),
+    ) as { agents: { id: string }[] };
+    check("a switched-off plugin's harness is not listed at all", offAgents.agents.map((one) => one.id), [...AGENT_IDS]);
+    /*
+     * ⚠ **And the refusal for it is a `503` naming the switch, never the `400`
+     * that tells an operator their own request is wrong** — it was correct
+     * yesterday, and sending its author looking for a bug in their own code is the
+     * failure a two-valued answer produces here.
+     */
+    const refused = await offApp.fetch(
+      new Request("http://d/sessions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${tokenFor("u_a")}`, "content-type": "application/json" },
+        body: JSON.stringify({ agent: "acme:gemini", cwd: users }),
+      }),
+    );
+    const body = JSON.parse(await refused.text()) as { error?: { code?: string } };
+    check(
+      "and starting a session on it is refused as a machine's state rather than a caller's mistake",
+      [refused.status, body.error?.code ?? null],
+      [503, "harness_unavailable"],
+    );
+    const never = await offApp.fetch(
+      new Request("http://d/sessions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${tokenFor("u_a")}`, "content-type": "application/json" },
+        body: JSON.stringify({ agent: "nobody:here", cwd: users }),
+      }),
+    );
+    check("while one nobody ever offered is the caller's", never.status, 400);
+  }
   /*
    * ⚠ **`no_flow` outranks the daemon's own missing login store, and it did not.**
    * The handler read `logins === null ? "no_script" : support.blocked`, which
@@ -2140,6 +2330,64 @@ process.stdout.write("\nthe database, across a restart\n");
   );
   check("read one at a time, the same", second.customAgents.get("ca_future1"), null);
   check("both halves of that, not just the harness", second.customAgents.get("ca_future2"), null);
+
+  /*
+   * ⚠ **The mirror of all three drops above, in a store of its own — because these
+   * rows must *survive* and the fixtures above are controls for retention.**
+   *
+   * This is the asymmetry the whole plugin-contribution feature rests on.
+   * Membership is checked where nothing has been created yet — `POST /sessions`,
+   * `POST /custom-agents` — so a refusal there costs nothing and no worktree is
+   * made. **Shape** is checked here, because everything below runs through
+   * `openStores` at boot: before anything is on screen, and *before the plugin host
+   * has opened at all*, so "is that plugin installed" is not a question this read
+   * can answer. A membership test would therefore delete every session, preset and
+   * saved key belonging to a plugin somebody had switched off an hour ago — and
+   * switching it back on would not bring them back. What refuses an unrunnable one
+   * is `resolveAgent`, at the launch, with a sentence naming the plugin.
+   *
+   * Driven against the **real** store rather than a `Map`, for the reason the
+   * upsert case one block down is: `fromRow` and `readCustomAgent` are the readers
+   * under test, and a memory store has neither.
+   */
+  {
+    const path = join(tmp("plugin-rows-"), "d.db");
+    const first = openStores({ path, instanceId: "i_plugin_w" });
+    first.db.exec(
+      "INSERT INTO custom_agents (id, name, harness, system, model, created_at) " +
+        "VALUES ('ca_plugin', 'Acme · Llama', 'acme:gemini', 'acme:groq', 'llama-4', 1)",
+    );
+    first.db.exec("INSERT INTO system_credentials (system, secret, updated_at) VALUES ('acme:groq', 'sk-acme', 1)");
+    first.sessions.put(persisted("s_plugin"));
+    first.db.exec("UPDATE sessions SET agent = 'acme:gemini' WHERE id = 's_plugin'");
+    first.close();
+
+    const dropped: string[] = [];
+    const next = openStores({ path, instanceId: "i_plugin_r", onDegraded: (detail) => dropped.push(detail) });
+    check(
+      "a session on a harness a plugin adds comes back, plugin installed or not",
+      next.sessions.list().map((one) => one.agent),
+      ["acme:gemini"],
+    );
+    check(
+      "so does a preset built on one, whole",
+      next.customAgents.get("ca_plugin"),
+      { id: "ca_plugin", name: "Acme · Llama", harness: "acme:gemini", system: "acme:groq", model: "llama-4", createdAt: 1 },
+    );
+    /*
+     * ⚠ **And so does the key — which is what keeps the one control that can
+     * delete it on screen.** `prune()` sweeps neither credential table, so a row
+     * dropped from this listing is a plaintext secret nothing lists and nothing
+     * collects.
+     */
+    check(
+      "and a key saved for a provider one adds",
+      [next.systemCredentials.list().map((one) => one.system), next.systemCredentials.get("acme:groq")],
+      [["acme:groq"], "sk-acme"],
+    );
+    check("and none of it was reported as unreadable", dropped, []);
+    next.close();
+  }
 
   /*
    * ⚠ **Saving an assembled agent that is already there is an *upsert*, and only
@@ -4154,6 +4402,397 @@ process.stdout.write("\nsigning out, as a state of the machine\n");
    */
   check("the probe is gone rather than left for a future caller", /async signedOut\(/.test(runtime), false);
   check("with the reason it is gone written where it was", /`signedOut\(agent\)` used to live here/.test(runtime), true);
+
+  /* ---------------------------------------------------------------- *
+   * ⭐ A harness that refused to open a session
+   *
+   * The other half of the same subject, and the one that had no field to live in.
+   * `readLoginState` answers `pasted ? true : null` for every harness with no
+   * status command — opencode, and every harness a plugin adds — so a New session
+   * tile was drawn for one that had never been shown to work, and each press cost
+   * a worktree, a branch and a session row before the agent declined.
+   *
+   * ⚠ **It is not `loggedIn: false`, and that is the whole design.** Writing it
+   * there would have been read by `AgentAskRuns.admit`, which guards `claim` —
+   * the one thing that ever spawns such a harness again, and therefore the only
+   * thing that could ever discover it had been fixed. The record would have shut
+   * the door it needs to be let out of.
+   * ---------------------------------------------------------------- */
+  {
+    const { startRefusalLive, START_REFUSAL_TTL_MS, MAX_START_REFUSAL_CHARS } = await import(
+      "../src/runtime/local.js"
+    );
+
+    const rowFor = async (rt: LocalRuntime, agent: string) =>
+      (await rt.availability()).find((one) => one.id === agent) ?? null;
+
+    const rt = new LocalRuntime({ exec: async () => null });
+    check("nothing is remembered until something is measured", (await rowFor(rt, "opencode"))?.lastStartRefusal, null);
+
+    rt.noteStartRefusal("opencode", "opencode rejected session/new: authentication required.", false);
+    const noted = await rowFor(rt, "opencode");
+    check("a refused start is remembered against the harness", noted?.lastStartRefusal?.message, "opencode rejected session/new: authentication required.");
+    check("and it says whether the refusal had been routed", noted?.lastStartRefusal?.routed, false);
+    /*
+     * ⚠ **The assertion this whole section exists for.** The harness has just
+     * refused, in as many words, and the credential axis still answers "cannot
+     * tell" — because it still cannot. `AGENT_LOGIN.opencode.status` is `null`,
+     * and manufacturing a `false` here is what would have reached `admit`.
+     */
+    check("and the credential axis is untouched by it", noted?.loggedIn, null);
+
+    rt.noteStartRefusal("claude", "x".repeat(MAX_START_REFUSAL_CHARS + 50), true);
+    const clipped = await rowFor(rt, "claude");
+    check("what is stored is bounded", clipped?.lastStartRefusal?.message.length, MAX_START_REFUSAL_CHARS);
+    check("and a routed refusal says so", clipped?.lastStartRefusal?.routed, true);
+
+    rt.forgetStartRefusal("opencode");
+    check("one can be forgotten", (await rowFor(rt, "opencode"))?.lastStartRefusal, null);
+    check("without taking the others with it", (await rowFor(rt, "claude"))?.lastStartRefusal !== null, true);
+    rt.forgetStartRefusal();
+    check("and all of them at once, which is what a plugin change does", (await rowFor(rt, "claude"))?.lastStartRefusal, null);
+
+    /*
+     * ⚠ **The expiry driven through the reader the listing actually uses**, and
+     * not only through the exported helper. Asserted on the helper alone, deleting
+     * both the `startRefusalLive` call and the `delete` from `startRefusal` left
+     * every driver green — measured — because both round trips above read entries
+     * noted microseconds earlier. A never-expiring reader is the one failure this
+     * whole design's fourth point rests on not happening.
+     *
+     * The clock is faked around one call rather than injected into the runtime:
+     * `LocalRuntimeOptions` takes `exec` and `secrets` and neither is a test hook,
+     * so a `now` beside them would be the first, on the class whose subject is
+     * spawning programs.
+     */
+    rt.noteStartRefusal("opencode", "opencode rejected session/new: authentication required.", false);
+    const realNow = Date.now;
+    let aged: unknown;
+    try {
+      Date.now = () => realNow.call(Date) + START_REFUSAL_TTL_MS;
+      aged = (await rowFor(rt, "opencode"))?.lastStartRefusal;
+    } finally {
+      Date.now = realNow;
+    }
+    check("the reader the listing uses ages one out", aged, null);
+    /*
+     * ⚠ **And *dropped* it rather than filtering it, which is what the clock going
+     * back is for.** A reader that only filtered would hand the entry straight
+     * back here, since `now - at` is inside the budget again.
+     */
+    check("and dropped it rather than hiding it", (await rowFor(rt, "opencode"))?.lastStartRefusal, null);
+
+    /*
+     * The arithmetic itself, at the boundary. It is the load-bearing half of the
+     * design: an observation ages and a verdict does not, which is what makes the
+     * list of things that *clear* one not have to be exhaustive — nobody who signs
+     * in by running the CLI on the machine itself tells this daemon anything.
+     */
+    const held = { at: 1_000_000, routed: false, message: "no" };
+    check("a refusal is believed inside its budget", [
+      startRefusalLive(held, held.at),
+      startRefusalLive(held, held.at + START_REFUSAL_TTL_MS - 1),
+      startRefusalLive(held, held.at + START_REFUSAL_TTL_MS),
+      startRefusalLive(held, held.at + START_REFUSAL_TTL_MS * 4),
+    ], [true, true, false, false]);
+
+    /*
+     * ⚠ **Written from two places and from nowhere else.** The event pump says
+     * "authentication" too, and Q7.99 measured that signal against a token with
+     * 1.4 hours left on it — so recording it would take a harness off every strip
+     * in the fleet because one conversation's agent had gone stale.
+     */
+    const session = readFileSync(new URL("../src/session.ts", import.meta.url), "utf8");
+    check("only a typed auth_required writes it", (session.match(/noteStartRefusal\(/g) ?? []).length, 2);
+    check("on the start path", /session\/new: authentication required[\s\S]{0,900}noteStartRefusal\(/.test(session), true);
+    check("and on the resume path", /session\/resume: authentication required[\s\S]{0,600}noteStartRefusal\(/.test(session), true);
+    check("and the pump writes nothing", /noteStartRefusal/.test(code), false);
+    /*
+     * ⚠ **Anchored to the statement that follows a *successful* open, not counted
+     * over the file.** Two calls sitting in the two catch arms would satisfy a
+     * count and mean the opposite: a refusal forgotten by the refusal itself.
+     * `response` is assigned only where `session/new` or `session/resume` came
+     * back, so a clear textually after it is on the path that succeeded.
+     */
+    check("while a session that opens forgets it", (session.match(/forgetStartRefusal\(options\.agent\)/g) ?? []).length, 2);
+    check("on the start path, after the agent answered", /const session = Session\.adopt\(options, client, response\.sessionId/.test(session) && /forgetStartRefusal\(options\.agent\);[\s\S]{0,600}Session\.adopt\(options, client, response\.sessionId/.test(session), true);
+    check("and on the resume path, after it answered there", /forgetStartRefusal\(options\.agent\);[\s\S]{0,400}Session\.adopt\(options, client, options\.agentSessionId/.test(session), true);
+
+    /*
+     * ⚠ **Exactly one of the five `forgetAvailability` call sites clears it, and
+     * it is the one where a credential *arrived*.** The other four are a key being
+     * deleted, a sign-out, a login run ending and a login cancelled — none of them
+     * evidence that a harness which would not start now would, and one of them is
+     * the opposite. This counts rather than naming a line, because the failure
+     * mode is somebody pairing the two calls everywhere out of tidiness.
+     */
+    /*
+     * ⚠ **Per handler, never as a count over the file — and this assertion shipped
+     * as a count for one revision.** Measured: moving the call out of the `PUT`
+     * handler and into `POST …/logout` left the total at two, left the anchored
+     * half matching, and left `daemoncheck` green — while inverting the rule the
+     * code beside it argues for. `reloadCredentials`' own pair two blocks down
+     * already uses this technique and says why.
+     */
+    const bodyOfRoute = (verb: string, path: string): string =>
+      new RegExp(`app\\.${verb}\\("${path.replace(/[/:]/g, (one) => `\\${one}`)}"[\\s\\S]*?\\n  \\}\\);`).exec(routes)?.[0] ?? "";
+    const put = bodyOfRoute("put", "/agent-auth/:agent");
+    const del = bodyOfRoute("delete", "/agent-auth/:agent");
+    const out = bodyOfRoute("post", "/agent-auth/:agent/logout");
+    const again = bodyOfRoute("post", "/agent-auth/:agent/recheck");
+    const chunk = bodyOfRoute("get", "/agent-auth/login/:loginId");
+    check("all five agent-auth handlers were found", [put, del, out, again, chunk].map((one) => one.length > 0), [true, true, true, true, true]);
+    check("a saved credential clears the refusal", /forgetStartRefusal\(/.test(put), true);
+    check("and so does a sign-in that ran to the end", /forgetStartRefusal\(chunk\.agent\)/.test(chunk), true);
+    check("and the re-check route, which is what it is for", /forgetStartRefusal\(agent\)/.test(again), true);
+    /*
+     * The three that must not, and they are the reason this is per handler:
+     * deleting a key, signing out and abandoning a login are all a credential
+     * going *away*, and none is evidence that a harness which would not start now
+     * would. `DELETE` is the sharpest — it would erase the record of the refusal
+     * the key it deletes was pasted against.
+     */
+    check("while deleting a key does not", /forgetStartRefusal/.test(del), false);
+    check("and neither does signing out", /forgetStartRefusal/.test(out), false);
+    check("nor abandoning a login", /forgetStartRefusal/.test(bodyOfRoute("delete", "/agent-auth/login/:loginId")), false);
+    // The count stays as a backstop, so a fourth site cannot appear unremarked.
+    check("and those are the only three", (routes.match(/forgetStartRefusal\(/g) ?? []).length, 3);
+    check("which refuses nothing, unlike its neighbours", /logout_unsupported/.test(again), false);
+    /*
+     * ⚠ **And it answers the same row shape the listings do.** `availability()`
+     * carries no `login` object — that is spread on by hand at the two listings —
+     * so a third route answering an agent row drops the one field whose absence
+     * makes every reader fall to *cannot check*.
+     */
+    check("and it answers the row with the field availability() does not carry", /loginSupportOf\(found\.id\)/.test(again), true);
+
+    /*
+     * ⚠ **And the second press costs no worktree**, which is the half of
+     * `registry.create`'s existing fence that had never been extended to this
+     * axis. The refusal happens *after* the spawn, so without this the branch and
+     * the session row are made before anything knows — the growth inside somebody
+     * else's repository that the `available` check above it was written for.
+     */
+    /*
+     * ⚠ **Comments off, and this assertion shipped wrong for one run without
+     * it.** The fence carries a paragraph naming the field it reads, so a slice of
+     * the raw source is satisfied by the explanation whether or not the code is
+     * there — measured: deleting the `throw` outright left this green. `code` is
+     * the same stripped copy the assertions above already use, for the same
+     * reason and one docblock away.
+     */
+    const workspaceAt = code.indexOf("await createWorkspace(");
+    // `indexOf` answers -1 for a call that has been renamed, and `slice(0, -1)` is
+    // the whole file minus one character — an assertion that cannot fail, about an
+    // ordering that no longer exists.
+    check("the workspace call this ordering is about is still called that", workspaceAt > 0, true);
+    const beforeWorkspace = code.slice(0, workspaceAt);
+    check(
+      "a remembered refusal is refused before a workspace exists",
+      // The `throw`, not merely the read: deleting the refusal and keeping the
+      // `const` left this green, which is a check satisfied by a variable nobody
+      // acts on.
+      /lastStartRefusal[\s\S]{0,600}throw new Error\(refusal\.message\)/.test(beforeWorkspace),
+      true,
+    );
+    /*
+     * ⚠ **Bare and native starts only, unless routing has itself been refused.**
+     * `applySystem` runs before `session/new`, so a refusal measured while routed
+     * condemns every way of starting the harness — but one measured bare says
+     * nothing about a start that runs on somebody else's key, which is the
+     * signed-out Claude Code on OpenRouter this repository documents as working.
+     */
+    check("and a bare refusal does not condemn a routed preset", /refusal\.routed \|\| options\.customAgent == null/.test(code), true);
+    /*
+     * ⚠ **And a *native* pairing is fenced too, which `customAgent == null` alone
+     * does not reach.** `applySystem` returns at `spec.nativeHarness ===
+     * options.agent`, before `providers/set` and before any key is read, so such a
+     * session runs on the harness's own credential exactly as a bare start does —
+     * making a bare refusal precisely as dispositive. Left to the two disjuncts
+     * above, the press that had just been refused was the one press the fence never
+     * caught, and every repeat cost a worktree and a branch again.
+     */
+    check("and a native pairing is fenced by the same bare refusal", /nativeHarness === options\.agent[\s\S]{0,400}refusal\.routed \|\| options\.customAgent == null \|\| nativeHere/.test(code), true);
+    /*
+     * The lockout test, as source rather than as behaviour: `admit` may never read
+     * this field, or the capability sweep — the only live re-measurement a harness
+     * with no probe has — would be refused by the record it is the cure for.
+     */
+    const ask = readFileSync(new URL("../src/agentask.ts", import.meta.url), "utf8");
+    check("and the one thing that could clear it is never gated on it", /lastStartRefusal/.test(ask), false);
+
+    /*
+     * ⚠ **And the whole of it driven over HTTP**, because everything between the
+     * runtime and the response is where a field is quietly dropped — `GET /agents`
+     * spreads the availability row, and the re-check route has to answer with what
+     * its own lookup saw rather than with a claim of its own.
+     *
+     * This is also the only assertion that the route **refuses nothing** where its
+     * two neighbours answer `503`: `opencode` has no sign-out verb and no login
+     * flow, which is exactly the harness this control exists for.
+     */
+    const own = new SessionRegistry(new MemoryEventStore(), null, undefined, new LocalRuntime());
+    const app = createApp({
+      registry: own,
+      verifier,
+      instanceId: "i_refusal",
+      startedAt: now,
+      credentials,
+      roots: [users],
+      logins: new AgentLoginRuns({ runtime: own.sessionRuntime, onWarning: () => {} }),
+    }).app;
+    const call = async (path: string, method = "GET"): Promise<Record<string, unknown>> => {
+      const response = await app.fetch(
+        new Request(`http://d${path}`, { method, headers: { authorization: `Bearer ${tokenFor("u_a")}` } }),
+      );
+      return JSON.parse(await response.text()) as Record<string, unknown>;
+    };
+    const refusalOn = async (agent: string): Promise<unknown> =>
+      ((await call("/agents"))["agents"] as { id: string; lastStartRefusal: unknown }[]).find(
+        (one) => one.id === agent,
+      )?.lastStartRefusal;
+
+    check("a fresh listing carries no refusal", await refusalOn("opencode"), null);
+    own.sessionRuntime.noteStartRefusal("opencode", "opencode rejected session/new: authentication required.", false);
+    check("one that has been measured rides GET /agents", (await refusalOn("opencode")) !== null, true);
+    const rechecked = await call("/agent-auth/opencode/recheck", "POST");
+    check("the re-check answers the row its own lookup saw", [
+      rechecked["rechecked"],
+      (rechecked["info"] as { id?: string } | undefined)?.id,
+      (rechecked["info"] as { lastStartRefusal?: unknown } | undefined)?.lastStartRefusal,
+    ], [true, "opencode", null]);
+    check("and the listing agrees on the next read", await refusalOn("opencode"), null);
+    /*
+     * ⚠ **The same row, key for key, and not merely the same id.** `availability()`
+     * carries no `login`; the two listings spread it on by hand, so a third route
+     * answering an agent row silently drops it — and a row without it falls to
+     * *cannot check* in both this repository's clients, which is the permanent
+     * wrong badge `local.ts` answers `no_flow` to prevent. Measured before this
+     * assertion existed: `pnpm client agents` printed "no sign-in needed" and
+     * `pnpm client agents recheck` printed "cannot check", for one harness in one
+     * state, seconds apart.
+     *
+     * Compared as **key sets** rather than as values: `hint` and `loggedIn` are
+     * answers to a live probe and may legitimately differ between two calls, while
+     * the shape may not.
+     */
+    const listedRow = ((await call("/agents"))["agents"] as { id: string }[]).find(
+      (one) => one.id === "opencode",
+    );
+    const rowAgain = (await call("/agent-auth/opencode/recheck", "POST"))["info"];
+    check(
+      "and the row it answers is the shape the listing answers",
+      Object.keys(rowAgain as object).sort(),
+      Object.keys(listedRow as object).sort(),
+    );
+    // The one this route exists for: `logout` refuses opencode outright, and a
+    // harness with no sign-out verb is precisely the population that can be hidden.
+    const refused = await app.fetch(
+      new Request("http://d/agent-auth/opencode/logout", {
+        method: "POST",
+        headers: { authorization: `Bearer ${tokenFor("u_a")}` },
+      }),
+    );
+    check("where its neighbour refuses the same harness", refused.status, 503);
+    check("and an agent this machine does not have is still a 400", (await call("/agent-auth/nobody/recheck", "POST"))["error"], {
+      code: "invalid_agent",
+      message: "unknown agent",
+      detail: null,
+    });
+
+    /* ---------------------------------------------------------------- *
+     * ⭐ And the write itself, driven against an agent that really refuses
+     *
+     * Everything above this pins the *record*; this is the one case that pins
+     * where it comes from. A scripted agent answers `initialize` and then refuses
+     * `session/new` with ACP's `auth_required`, which is a typed JSON-RPC code and
+     * the whole reason this signal is believed at all — the message match this
+     * daemon also carries is a concession `isAuthRequiredMessage` documents, and
+     * matching prose is not what writes the record.
+     * ---------------------------------------------------------------- */
+    {
+      const acp = await import("@agentclientprotocol/sdk");
+      const { Session } = await import("../src/session.js");
+      const { PassThrough } = await import("node:stream");
+      const toAgent = new PassThrough();
+      const toClient = new PassThrough();
+      let buffer = "";
+      toAgent.on("data", (chunk: Buffer) => {
+        buffer += chunk.toString("utf8");
+        for (let nl = buffer.indexOf("\n"); nl >= 0; nl = buffer.indexOf("\n")) {
+          const line = buffer.slice(0, nl);
+          buffer = buffer.slice(nl + 1);
+          if (line.trim().length === 0) continue;
+          const message = JSON.parse(line) as Record<string, any>;
+          const id = message["id"];
+          if (message["method"] === acp.methods.agent.initialize) {
+            toClient.write(
+              `${JSON.stringify({ jsonrpc: "2.0", id, result: { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: {}, authMethods: [] } })}\n`,
+            );
+          } else if (message["method"] === acp.methods.agent.session.new) {
+            // -32000 is ACP's `auth_required`, the code `isAuthRequired` reads.
+            toClient.write(`${JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message: "not signed in" } })}\n`);
+          }
+        }
+      });
+      class RefusingRuntime extends LocalRuntime {
+        override describe(agent: AgentId): AgentLaunchConfig {
+          return stubAgentConfig(agent);
+        }
+        override async launch(): Promise<any> {
+          return {
+            stdin: toAgent,
+            stdout: toClient,
+            stderr: new PassThrough(),
+            handle: null,
+            onceStartError: () => () => {},
+            onceExit: () => () => {},
+            hasExited: false,
+            waitForExit: async () => true,
+            endStdin: () => toAgent.end(),
+            kill: async () => {},
+          };
+        }
+      }
+      const refusing = new RefusingRuntime();
+      /*
+       * Read first, because the property is that this axis does **not** move — and
+       * on a developer's own machine kimi's credential file may or may not exist,
+       * so a literal here would be an assertion about whoever ran the driver.
+       */
+      const before = (await refusing.availability()).find((one) => one.id === "kimi")?.loggedIn ?? null;
+      let said = "";
+      try {
+        await Session.start({ agent: "kimi", cwd: process.cwd(), runtime: refusing });
+      } catch (error) {
+        said = error instanceof Error ? error.message : String(error);
+      }
+      check("a real refusal reaches the caller as the agent's own sentence", /authentication required/i.test(said), true);
+      /*
+       * ⚠ **A full re-probe first, and it must not take the record with it.**
+       * `forgetAvailability` is the credential cache's clear and the record is
+       * deliberately not under it — three of its five callers are a credential
+       * going *away*, and losing a key is not evidence that a harness which would
+       * not start now would.
+       */
+      refusing.forgetAvailability();
+      const row = (await refusing.availability()).find((one) => one.id === "kimi") ?? null;
+      check("and is what wrote the record, which a re-probe does not clear", row?.lastStartRefusal?.message, said);
+      /*
+       * ⚠ **`routed: false`, and this is the cell that keeps a bare refusal from
+       * condemning a routed preset.** No system was named, so `applySystem`
+       * returned at its first line — the harness refused on its own credential and
+       * has said nothing about a start that would run on somebody else's key.
+       */
+      check("under the configuration it was measured with", row?.lastStartRefusal?.routed, false);
+      /*
+       * ⚠ **And the credential axis did not move**, which is the property the
+       * whole design rests on: `admit` reads that field, and `admit` guards the
+       * only spawn that could ever clear this record.
+       */
+      check("while the credential axis did not move at all", row?.loggedIn, before);
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -4262,7 +4901,16 @@ process.stdout.write("\na credential saved while an agent is already running\n")
   // The route reports it, so a client can say what happened rather than guessing.
   const routes = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
   check("saving a credential relaunches and says how many", /saved: true, agent, envName, restarting/.test(routes), true);
-  check("and so does removing one", /removed: true, agent, envName, restarting/.test(routes), true);
+  /*
+   * ⚠ **`removed` reports what the lookup saw rather than being the literal
+   * `true` it was.** `DELETE /systems/:system` already answered that way, and this
+   * route now has to for the same reason: a harness a plugin added stops being
+   * *offered* the moment somebody switches that plugin off, and the one control
+   * that can clear its saved key must not be the one that disappears with it. So
+   * the removal happens whatever the catalogue says, and the answer is a fact about
+   * the row rather than an error about the request.
+   */
+  check("and so does removing one", /removed: had, agent: named, envName, restarting/.test(routes), true);
 
   /*
    * ⚠ **Which direction the credential went, which both routes used to lose.**
@@ -4293,7 +4941,7 @@ process.stdout.write("\na credential saved while an agent is already running\n")
   const put = /app\.put\("\/agent-auth\/:agent"[\s\S]*?\n  \}\);/.exec(routes)?.[0] ?? "";
   const del = /app\.delete\("\/agent-auth\/:agent"[\s\S]*?\n  \}\);/.exec(routes)?.[0] ?? "";
   check("both agent-auth handlers were found, so the two below mean something", [put.length > 0, del.length > 0], [true, true]);
-  check("removing a credential does not revive what a sign-out ended", /reloadCredentials\(agent, false\)/.test(del), true);
+  check("removing a credential does not revive what a sign-out ended", /reloadCredentials\(named, false\)/.test(del), true);
   check("and saving one still does", /reloadCredentials\(agent\)/.test(put), true);
 }
 
@@ -7418,7 +8066,7 @@ process.stdout.write("\nwhat the agent says, and what survives\n");
     // Overridden so this does not probe the host for a real `kimi` — the point is
     // the registry's wiring, not whether this machine has an agent installed.
     override async availability(): Promise<any> {
-      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null }];
+      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
 
     // The same intent, and it was half-applied: `availability` was overridden and
@@ -9520,7 +10168,7 @@ process.stdout.write("\nanswering a permission the agent is waiting on\n");
 
   class PermissionRuntime extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null }];
+      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
@@ -10038,7 +10686,7 @@ process.stdout.write("\nanswering a question the agent is waiting on\n");
 
   class AskRuntime extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null }];
+      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
@@ -10428,7 +11076,7 @@ process.stdout.write("\nstopping the turn without stopping the session\n");
 
   class CancelRuntime extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null }];
+      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
@@ -10946,7 +11594,7 @@ process.stdout.write("\nwhat else may talk to the agent during a clear\n");
 
   class ClearingRuntime extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null }];
+      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
@@ -11192,7 +11840,7 @@ process.stdout.write("\nwhat the agent says after its turn has ended\n");
 
   class TalkativeRuntime extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null }];
+      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
@@ -11349,7 +11997,7 @@ process.stdout.write("\nwho owns a session's events\n");
 
   class HeldRuntime extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null }];
+      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
@@ -11803,7 +12451,7 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
 
   class ModalRuntime extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "claude", displayName: "fake", available: true, loggedIn: true, hint: null }];
+      return [{ id: "claude", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
@@ -12117,7 +12765,7 @@ process.stdout.write("\ntwo config changes at once\n");
 
   class PairRuntime extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null }];
+      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
@@ -12172,6 +12820,141 @@ process.stdout.write("\ntwo config changes at once\n");
   await pairRegistry.shutdown();
 }
 
+/* -------------------------------------------------------------------------- *
+ * ⭐ A long model list is cut on the poll and whole on the one read that is not
+ *
+ * `GET /sessions` returns sixty of these records every four seconds, over a
+ * relay, to a phone — and a keyed opencode publishes **362** models in a single
+ * control. `snapshotConfig` bounded each choice's *description* for exactly that
+ * reason and never bounded the count, so the menu was the largest thing in the
+ * response by an order of magnitude.
+ *
+ * ⚠ **The cut is only safe because there is somewhere to read the rest**, and
+ * that is what these cases are really about. The browser draws its model picker
+ * out of the snapshot — `store.ts`: *state comes from the snapshot, only prose
+ * comes from the log* — so a cut with no complete read behind it is a picker
+ * silently missing rows, which is worse than the payload it saves.
+ * `GET /sessions/:id` is one session, asked for on purpose, never polled, and
+ * answers in full.
+ * -------------------------------------------------------------------------- */
+
+process.stdout.write("\na long model list, cut and whole\n");
+{
+  const acp = await import("@agentclientprotocol/sdk");
+  const MANY = 400;
+
+  const spawnLong = (): AgentProcess => {
+    const toAgent = new PassThrough();
+    const toClient = new PassThrough();
+    const send = (message: unknown): void => void toClient.write(`${JSON.stringify(message)}\n`);
+    /*
+     * The selected value sits **past** the cut on purpose. It is the one choice a
+     * client cannot do without — the chip, the strip tile and `configProse` all
+     * name the session from it — so a head that simply took the first N would make
+     * a running session report a model it is not on.
+     */
+    const options = () => [
+      {
+        id: "model",
+        name: "Model",
+        description: null,
+        category: "model",
+        type: "select",
+        currentValue: `m${MANY - 1}`,
+        options: Array.from({ length: MANY }, (_, index) => ({
+          value: `m${index}`,
+          name: `Model ${index}`,
+          description: null,
+        })),
+      },
+    ];
+    let buffer = "";
+    toAgent.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      for (let nl = buffer.indexOf("\n"); nl >= 0; nl = buffer.indexOf("\n")) {
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (line.trim().length === 0) continue;
+        const message = JSON.parse(line) as Record<string, any>;
+        const id = message["id"];
+        switch (message["method"]) {
+          case acp.methods.agent.initialize:
+            send({
+              jsonrpc: "2.0",
+              id,
+              result: {
+                protocolVersion: acp.PROTOCOL_VERSION,
+                agentCapabilities: { sessionCapabilities: { resume: {} } },
+                authMethods: [],
+              },
+            });
+            break;
+          case acp.methods.agent.session.new:
+          case acp.methods.agent.session.resume:
+            send({ jsonrpc: "2.0", id, result: { sessionId: "conv_long", configOptions: options() } });
+            break;
+          default:
+            if (id !== undefined) send({ jsonrpc: "2.0", id, result: {} });
+        }
+      }
+    });
+    return {
+      stdin: toAgent,
+      stdout: toClient,
+      stderr: new PassThrough(),
+      pid: 4321,
+      onceExit: () => () => {},
+      onceStartError: () => () => {},
+      hasExited: false,
+      waitForExit: async () => true,
+      endStdin: () => toAgent.end(),
+      kill: async () => {},
+    } as unknown as AgentProcess;
+  };
+
+  class LongRuntime extends LocalRuntime {
+    override async availability(): Promise<AgentAvailability[]> {
+      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
+    }
+    override describe(agent: AgentId): AgentLaunchConfig {
+      return stubAgentConfig(agent);
+    }
+    override async launch(): Promise<AgentProcess> {
+      return spawnLong();
+    }
+  }
+
+  const longRegistry = new SessionRegistry(new MemoryEventStore(), null, undefined, new LongRuntime());
+  const managed = await longRegistry.create({ agent: "kimi", cwd: tmp("longcheck-") });
+  const polled = managed.snapshot().agentConfig?.options[0];
+  const whole = managed.snapshot({ fullConfig: true }).agentConfig?.options[0];
+
+  check("the agent really published a list worth bounding", MANY, 400);
+  check("the polled snapshot cuts it", polled?.choices.length ?? -1, 40);
+  check("and says so, which is what sends a picker to the other route", polled?.truncated, true);
+  /*
+   * The assertion the cut exists to survive. Taking the first forty would drop the
+   * selected model, and every screen that names the session reads it from here.
+   */
+  check(
+    "the selected choice survives the cut even sitting past it",
+    polled?.choices.some((one) => one.value === `m${MANY - 1}`),
+    true,
+  );
+  check("and is still what the control is set to", String(polled?.value), `m${MANY - 1}`);
+
+  check("the single-session read is whole", whole?.choices.length ?? -1, MANY);
+  /*
+   * ⚠ **And is not flagged**, or a picker drawing the complete list would still
+   * print the line that says rows are missing — the failure `clamped` had in
+   * `fitView`, which reported a shortening that had not happened.
+   */
+  check("and is not flagged as cut", whole?.truncated ?? false, false);
+  check("both reads agree about the value", String(whole?.value), String(polled?.value));
+
+  await longRegistry.shutdown();
+}
+
 /* ------------------------------------------------------------------------- *
  * Plugins
  *
@@ -12202,6 +12985,8 @@ process.stdout.write("\nwhat a plugin manifest may say\n");
     MAX_NAME_CHARS,
     MAX_NET_HOSTS,
     MAX_SCREEN_TITLE_CHARS,
+    MAX_HARNESS_ARGS,
+    MAX_AUTH_HINT_CHARS,
     parseManifest,
   } = await import("../src/plugins/manifest.js");
   const { PLUGIN_API_VERSION, negotiatePluginApi } = await import("../src/plugins/protocol.js");
@@ -12213,6 +12998,14 @@ process.stdout.write("\nwhat a plugin manifest may say\n");
     api: PLUGIN_API_VERSION,
     scopes: ["store"],
     contributes: { screen: { title: "Board" }, settings: true, actions: [], hooks: ["turn.ended"] },
+  };
+  /** A contributed harness this reader accepts, so a case can break one field. */
+  const CONTRIBUTED_HARNESS = {
+    id: "gemini",
+    name: "Gemini",
+    command: "gemini",
+    args: ["acp"],
+    envNames: ["GEMINI_API_KEY"],
   };
   const of = (patch: Record<string, unknown>): ReturnType<typeof parseManifest> =>
     parseManifest(JSON.stringify({ ...base, ...patch }));
@@ -12232,9 +13025,39 @@ process.stdout.write("\nwhat a plugin manifest may say\n");
       description: null,
       scopes: ["store"],
       net: [],
-      contributes: { screen: { title: "Board" }, settings: true, actions: [], hooks: ["turn.ended"] },
+      contributes: {
+        screen: { title: "Board" },
+        settings: true,
+        actions: [],
+        hooks: ["turn.ended"],
+        // Synthesised, exactly as `actions` and `hooks` already are for a manifest
+        // that wrote neither — and the empty arrays are load-bearing rather than
+        // noise: `SqlitePluginRecordStore` re-validates `manifest_json` through
+        // `parseManifest` on **every read**, so this output is also an input, and
+        // an api gate that fired on a *present* key rather than a non-empty one
+        // made every installed plugin vanish at the second read.
+        harnesses: [],
+        systems: [],
+      },
     },
   });
+
+  /*
+   * ⚠ **And that round trip is asserted rather than assumed.** `toRecord` runs this
+   * function over its own output on every read of the `plugins` table, so
+   * `parseManifest` has to be idempotent — a rule nothing states and one release
+   * broke, silently, in the direction where every plugin on the machine disappears
+   * from `GET /plugins` after a restart.
+   */
+  check(
+    "and running it over its own output changes nothing",
+    (() => {
+      const first = of({});
+      if (!first.ok) return first;
+      return parseManifest(JSON.stringify(first.manifest));
+    })(),
+    of({}),
+  );
 
   /*
    * Every refusal, because the refusals are the whole value of that file — a
@@ -12320,15 +13143,36 @@ process.stdout.write("\nwhat a plugin manifest may say\n");
   /* ---------------------------------------------------------------- *
    * The other eighteen.
    *
-   * `manifest.ts` refuses in **thirty-seven** places: nine in `parseManifest`
-   * itself and twenty-eight spread over the five readers it delegates to. The
-   * cases above drive nineteen. These are the other eighteen, plus three
-   * conditions *inside* branches those already reach from the opposite side — a
-   * name too long rather than empty, an api that is a number and not a whole one,
-   * a screen title that is only spaces. Most of what was missing is the type
-   * refusals ("must be an array", "must be a string", "must be true or false"),
-   * which is the half of a hand-written validator nobody writes a case for and
-   * the half a `plugin.json` written by a person hits first.
+   * `manifest.ts` refuses in **eighty-two** places: nine in `parseManifest`
+   * itself and seventy-three spread over the ten readers it delegates to. The
+   * cases above drive nineteen. These are the other eighteen of the original
+   * thirty-seven, plus three conditions *inside* branches those already reach from
+   * the opposite side — a name too long rather than empty, an api that is a number
+   * and not a whole one, a screen title that is only spaces. Most of what was
+   * missing is the type refusals ("must be an array", "must be a string", "must be
+   * true or false"), which is the half of a hand-written validator nobody writes a
+   * case for and the half a `plugin.json` written by a person hits first.
+   *
+   * ⚠ **It was thirty-seven and stayed thirty-seven while forty-five landed**, and
+   * that is the tripwire below failing rather than a number being untidy. The
+   * release that let a plugin contribute a harness and a provider added
+   * `readHarnesses` (13), `readSystems` (19), `readSystemModels` (6) and
+   * `readEnvNames` (6), and one more in `readContributions` — none of which existed
+   * at `fcfe914` — and this sentence did not move, so nothing said the inventory had
+   * stopped describing the file. The type/shape half of the new readers was undriven
+   * in **both** drivers as a result; the block at the end of this list is those
+   * cases, and the contributed-*value* refusals (command shape, reserved argv,
+   * envNames, apiType, baseUrl, metadata-service, nativeHarness/loginVia) are driven
+   * in the contributions section further down.
+   *
+   * **How to re-derive it**, since the paragraph below is right that a grep for the
+   * messages is a check on a regular expression: count `return` statements whose
+   * value is a refusal — a bare string, a template literal, an `invalid(…)` or a
+   * `{ ok: false, code }` — per enclosing declaration, skipping `invalid` itself and
+   * the three `*ContributedId` helpers, whose string returns are ids rather than
+   * refusals. That gives 9 + 73; the three in-branch conditions above are the
+   * difference between 79 statements and the 82 stated here, exactly as they were
+   * the difference between 34 and 37 before.
    *
    * ⚠ **Asserted on the sentence rather than on the code**, because twenty-eight
    * of the thirty-seven answer `manifest_invalid` and a case that reads only the
@@ -12407,6 +13251,60 @@ process.stdout.write("\nwhat a plugin manifest may say\n");
   says("hooks that are not a list", contributing({ hooks: "turn.ended" }), "contributes.hooks must be an array");
   says("a hook that is not a string", contributing({ hooks: [7] }), "every hook must be a string");
   says("the same hook twice", contributing({ hooks: ["turn.ended", "turn.ended"] }), "is listed twice");
+
+  /*
+   * ⚠ **The type half of the two readers this release added**, which was driven by
+   * neither driver. The contributions section further down drives what a
+   * contributed harness or provider may *say* — command shape, reserved argv,
+   * env names, apiType, baseUrl, the metadata-service refusal, the
+   * nativeHarness/loginVia pairing — and every one of those cases hands
+   * `parseManifest` a well-formed array of well-formed objects. So the branches a
+   * hand-written `plugin.json` hits *first* were the ones with no case at all: a
+   * block that is not an array, an entry that is not an object, and the three
+   * per-field type refusals inside a harness.
+   *
+   * The scope on each is chosen to reach the branch under test rather than to be
+   * realistic: `must be an array` is tested before the scope gate in both readers,
+   * so those two keep the base's `store`, while `every … must be an object` sits
+   * *after* it and needs the scope declared or it refuses for the other reason.
+   */
+  says("harnesses that are not a list", contributing({ harnesses: "gemini" }), "contributes.harnesses must be an array");
+  says("systems that are not a list", contributing({ systems: 7 }), "contributes.systems must be an array");
+  says(
+    "a harness that is a string",
+    { scopes: ["harness"], contributes: { harnesses: ["gemini"] } },
+    "every harness must be an object",
+  );
+  says(
+    "a system that is a string",
+    { scopes: ["system"], contributes: { systems: ["groq"] } },
+    "every system must be an object",
+  );
+  says(
+    "a harness whose args are a string",
+    { scopes: ["harness"], contributes: { harnesses: [{ ...CONTRIBUTED_HARNESS, args: "acp" }] } },
+    "args must be an array",
+  );
+  says(
+    "a harness passing more arguments than it may",
+    {
+      scopes: ["harness"],
+      contributes: {
+        harnesses: [
+          {
+            ...CONTRIBUTED_HARNESS,
+            args: Array.from({ length: MAX_HARNESS_ARGS + 1 }, (_, index) => `a${index}`),
+          },
+        ],
+      },
+    },
+    `may pass at most ${MAX_HARNESS_ARGS} arguments`,
+  );
+  says(
+    "a harness whose authHint is a number",
+    { scopes: ["harness"], contributes: { harnesses: [{ ...CONTRIBUTED_HARNESS, authHint: 7 }] } },
+    `authHint must be a string of at most ${MAX_AUTH_HINT_CHARS} characters`,
+  );
 
   /* ---------------------------------------------------------------- *
    * And the last character each of them allows, which is the half that makes the
@@ -13854,6 +14752,19 @@ process.stdout.write("\ninstalling a plugin, and updating one\n");
   const stores = openStores({ path: join(tmp("plugin-db-"), "d.db"), instanceId: "i_plugins" });
   const registry = new SessionRegistry(stores.events, stores.sessions);
   const warnings: string[] = [];
+  /**
+   * What an uninstall swept, recorded so it can be asserted.
+   *
+   * ⚠ **The handle is optional on `PluginHostOptions` for the drivers' sake and is
+   * load-bearing in production** — so both arms have to be driven, and this block
+   * is the one that has it. A contributed harness's pasted key lands in
+   * `agent_credentials` under `<pluginId>:<id>` and a contributed provider's in
+   * `system_credentials` under the same shape; neither table is touched by
+   * `prune()`, so what is left behind by skipping this is not litter — it is a
+   * third party's API key in a plaintext column that nothing lists and nothing
+   * collects.
+   */
+  const swept: string[] = [];
   const host = await PluginHost.open({
     root: join(root, "plugins"),
     records: stores.plugins,
@@ -13862,6 +14773,7 @@ process.stdout.write("\ninstalling a plugin, and updating one\n");
     api: { git: hostGit },
     onWarning: (detail) => warnings.push(detail),
     timeouts: { start: 3_000, invoke: 3_000 },
+    secrets: { forgetPrefix: (prefix) => swept.push(prefix) },
   });
 
   const install = (files: Record<string, string>, name = "p.tar.gz"): ReturnType<typeof host.install> =>
@@ -14078,6 +14990,14 @@ process.stdout.write("\ninstalling a plugin, and updating one\n");
         return [];
       },
       get: () => undefined,
+      /*
+       * ⚠ **Present because `syncContributions` calls through it, and the cast
+       * above is why nothing else says so.** `PluginHostOptions.registry` is a
+       * `SessionRegistry`, so a fixture that omits a member the host reaches for is
+       * a `TypeError` at run time and green at `typecheck` — the same trap
+       * `describe` on the ask-runner fakes already records.
+       */
+      sessionRuntime: { forgetStartRefusal: () => {}, forgetAvailability: () => {} },
     } as unknown as SessionRegistry;
 
     const shakyStores = openStores({ path: join(tmp("plugin-shaky-db-"), "d.db"), instanceId: "i_shaky" });
@@ -14185,7 +15105,7 @@ process.stdout.write("\ninstalling a plugin, and updating one\n");
         timeouts: { start: 3_000, invoke: 3_000 },
       });
       await first.install({
-        body: bodyOf(tarOf({ "plugin.json": manifestOf({ id: "veiled", version: "1.0.0" }), "server.js": SERVER })),
+        body: bodyOf(tarOf({ "plugin.json": manifestOf({ id: "veiled", version: "1.0.0" }), "server.js": "export async function settings() { return { title: null, blocks: [] }; }" })),
         name: "p.tar.gz",
       });
       shakyStores.pluginData.set("veiled", "card:7", JSON.stringify({ keep: true }));
@@ -14405,6 +15325,26 @@ process.stdout.write("\ninstalling a plugin, and updating one\n");
     check("and the switch is answerable again", (await switched("board", true))?.enabled, true);
   }
 
+  /*
+   * ⚠ **What an *update* must not sweep, asserted before the remove that must.**
+   * The two are one rule seen from either end: "an update keeps what the plugin
+   * kept" is what makes an update an update, and a saved key is more of that than
+   * a board's cards are. It holds by construction — the update path never calls
+   * `doRemove` — and the whole value of this line is that the construction is now
+   * pinned rather than being a thing somebody has to notice.
+   */
+  swept.length = 0;
+  await install({
+    "plugin.json": manifestOf({
+      version: "9.0.0",
+      api: 5,
+      scopes: ["harness"],
+      contributes: { harnesses: [{ id: "gemini", name: "Gemini", command: "gemini", args: ["acp"] }] },
+    }),
+    "server.js": SERVER,
+  });
+  check("an update sweeps no credentials at all", swept, []);
+
   check("removing one that is not there", await host.remove("nothing"), false);
   check("removing one that is", await host.remove("board"), true);
   check("takes its row", host.list(), []);
@@ -14412,6 +15352,22 @@ process.stdout.write("\ninstalling a plugin, and updating one\n");
   // Its data goes with it, and only here — an update keeps it, which is the pair
   // this assertion makes with the one above.
   check("and everything it kept", stores.pluginData.keys("board", ""), []);
+  /*
+   * ⚠ **Everything under its namespace, out of *both* credential tables.** A
+   * harness's pasted key and a provider's key are the same namespaced id in two
+   * different stores, and one sweep that reached only one of them would leave a
+   * secret with no listing to find it on and no `prune()` to collect it.
+   *
+   * ⚠ **A prefix, not the manifest's own list of ids** — and that was the defect.
+   * The ids were read off `records.get(id)`, which answers `null` for a row this
+   * build cannot re-validate, while `installed()` deliberately asks `records.has`
+   * so `doRemove` proceeds for exactly that row: a daemon downgraded under a plugin
+   * declaring a newer `api` removed the row and the data and swept nothing. A
+   * prefix needs no manifest, so it cannot be defeated by one being unreadable —
+   * and it also catches a slot an *earlier* version of the plugin declared and this
+   * one does not.
+   */
+  check("and everything under its namespace, out of both credential tables", swept, ["board:"]);
 
   await host.shutdown();
   await registry.shutdown();
@@ -15067,6 +16023,14 @@ process.stdout.write("\na rollback that cannot put the tree back, and one that c
         throw new Error("the registry was being torn down");
       },
       get: () => undefined,
+      /*
+       * ⚠ **Present because `syncContributions` calls through it, and the cast
+       * above is why nothing else says so.** `PluginHostOptions.registry` is a
+       * `SessionRegistry`, so a fixture that omits a member the host reaches for is
+       * a `TypeError` at run time and green at `typecheck` — the same trap
+       * `describe` on the ask-runner fakes already records.
+       */
+      sessionRuntime: { forgetStartRefusal: () => {}, forgetAvailability: () => {} },
     } as unknown as SessionRegistry;
 
     const stores = openStores({ path: join(tmp("plugin-unremovable-db-"), "d.db"), instanceId: "i_unremovable" });
@@ -15186,8 +16150,34 @@ process.stdout.write("\nwhat a plugin is allowed to ask the daemon for\n");
    * inherits the previous one's spent budget.)
    */
   const manifestWith = (scopes: string[], net: string[] = [], id = "p"): PluginManifest => {
+    /*
+     * ⚠ **The contribution blocks ride their scopes, exactly as `net`'s host list
+     * rides `net`.** `harness` and `system` are biconditional with the blocks they
+     * disclose — a scope with an empty block reads, to whoever is approving an
+     * install, as a plugin that adds nothing — so a helper that declared the scope
+     * and nothing else would refuse before it reached the thing under test. And the
+     * `api` follows: a contribution below rung 5 is refused rather than silently
+     * dropped, so this helper cannot pin `1` once it declares one.
+     */
+    const contributes: Record<string, unknown> = {};
+    if (scopes.includes("harness")) {
+      contributes["harnesses"] = [{ id: "h", name: "H", command: "hcli", args: ["acp"] }];
+    }
+    if (scopes.includes("system")) {
+      contributes["systems"] = [
+        {
+          id: "s",
+          name: "S",
+          apiType: "anthropic",
+          baseUrl: "https://api.example.com/anthropic",
+          authHeader: { name: "authorization", prefix: "Bearer " },
+          models: [{ id: "m", name: "M" }],
+        },
+      ];
+    }
+    const api = Object.keys(contributes).length > 0 ? 5 : 1;
     const parsed = parseManifest(
-      JSON.stringify({ id, name: "P", version: "1.0.0", api: 1, scopes, net, contributes: {} }),
+      JSON.stringify({ id, name: "P", version: "1.0.0", api, scopes, net, contributes }),
     );
     if (!parsed.ok) throw new Error(parsed.message);
     return parsed.manifest;
@@ -15282,9 +16272,52 @@ process.stdout.write("\nwhat a plugin is allowed to ask the daemon for\n");
     if ((await codeOf(nothing, method, args)) !== "plugin_scope_denied") denied.push(method);
   }
   check("every method needs a scope, and a plugin with none reaches nothing", denied, []);
+  /*
+   * ⚠ **This said "every scope is the gate for at least one method", and that
+   * stopped being the property rather than stopping being true.** Six of the eight
+   * gate a `SCOPE_OF` entry; `harness` and `system` gate nothing at call time and
+   * were never going to — a contributed harness is a *declaration*, validated once
+   * at install and then read by this daemon rather than called by the plugin. They
+   * are scopes because the scope list is the sentence somebody reads before
+   * agreeing, and these are the two largest things in it to agree to.
+   *
+   * So the property is restated rather than weakened: **no scope is inert.** Each
+   * one either gates a method or is refused when its own contribution block is
+   * missing, and the second half is driven here rather than asserted as a number —
+   * a count would go on passing if somebody added a scope that did neither.
+   */
+  const inert: string[] = [];
+  for (const scope of PLUGIN_SCOPES) {
+    // Does holding *only* this one open any method? Derived by asking rather than
+    // by reading a table — `SCOPE_OF` is module-private on purpose.
+    const only = manifestWith([scope], scope === "net" ? ["api.example.com"] : []);
+    let gatesCall = false;
+    for (const [method, args] of METHODS) {
+      /*
+       * ⚠ **`net.fetch` is probed at a host the manifest does not list**, and that
+       * is not a weaker probe: this sweep asks one thing — did the *scope gate*
+       * fire — and the allowlist is checked after the gate and before anything
+       * leaves. Probed at the listed host it would perform a real request, which
+       * lands in the recorded list two sections down and makes an assertion about
+       * *what was requested* fail for a reason that has nothing to do with it.
+       */
+      const probe = method === "net.fetch" ? { url: "https://nowhere.invalid/" } : args;
+      if ((await codeOf(only, method, probe)) !== "plugin_scope_denied") {
+        gatesCall = true;
+        break;
+      }
+    }
+    // Or is it refused outright when the block it discloses is missing? That is
+    // the `net` biconditional, and the two contribution scopes have it too.
+    const alone = parseManifest(
+      JSON.stringify({ id: "q", name: "Q", version: "1.0.0", api: 5, scopes: [scope], contributes: {} }),
+    );
+    if (!gatesCall && alone.ok) inert.push(scope);
+  }
+  check("and no scope in the union is inert", inert, []);
   report(
-    "and every scope in the union is the gate for at least one of them",
-    PLUGIN_SCOPES.length === 6,
+    "which is six that gate a call and two that disclose a contribution",
+    PLUGIN_SCOPES.length === 8,
     `${METHODS.length} methods behind ${PLUGIN_SCOPES.length} scopes`,
   );
   /*
@@ -15722,6 +16755,7 @@ process.stdout.write("\nasking an agent one question, and every way that is refu
             available: one.available,
             hint: one.hint ?? null,
             loggedIn: one.loggedIn,
+            lastStartRefusal: null,
           })),
         ),
       launch: () => {
@@ -15790,7 +16824,7 @@ process.stdout.write("\nasking an agent one question, and every way that is refu
    */
   const slow = new AgentAskRuns({
     runtime: {
-      availability: () => Promise.resolve([{ id: "claude", displayName: "claude", available: true, hint: null, loggedIn: true }]),
+      availability: () => Promise.resolve([{ id: "claude", displayName: "claude", available: true, hint: null, loggedIn: true, lastStartRefusal: null }]),
       // `Session.start` asks for this *before* it launches, so a fake without it
       // throws there and never reaches the park — which is how the first version
       // of this case measured `model_failed` and an empty `starting`.
@@ -15829,7 +16863,7 @@ process.stdout.write("\nasking an agent one question, and every way that is refu
       runtime: {
         availability: () =>
           Promise.resolve(
-            everyone.map((id) => ({ id, displayName: id, available: true, hint: null, loggedIn: true })),
+            everyone.map((id) => ({ id, displayName: id, available: true, hint: null, loggedIn: true, lastStartRefusal: null })),
           ),
         describe: () => ({ displayName: "stub", authHint: "" }),
         clientFileIo: false,
@@ -16103,7 +17137,7 @@ process.stdout.write("\nwhich model a one-shot ask runs on\n");
       return stubAgentConfig(agent);
     }
     override availability(): Promise<any> {
-      return Promise.resolve([{ id: "claude", displayName: "claude", available: true, hint: null, loggedIn: true }]);
+      return Promise.resolve([{ id: "claude", displayName: "claude", available: true, hint: null, loggedIn: true, lastStartRefusal: null }]);
     }
     override async launch(): Promise<any> {
       const { toAgent, toClient } = speak();
@@ -16679,7 +17713,7 @@ process.stdout.write("\nhooks reaching a plugin\n");
    */
   class NoAgent extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null }];
+      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
@@ -17856,6 +18890,56 @@ process.stdout.write("\ninstalling a plugin over HTTP, and what each refusal is 
   await sneaky.close();
 
   /*
+   * ⚠ **The fourth compared field, and it is what makes a browser *older than
+   * this daemon* safe.** Such a client draws no row for a contributed harness —
+   * `catalogue.ts`'s tolerance of unknown fields guarantees it goes on working and
+   * therefore guarantees it under-discloses — and there is no fix on that side.
+   * What it sends is a consent with no `adds`, so a commit that adds a harness is
+   * refused here with a sentence instead of installing a command line nobody was
+   * shown.
+   *
+   * ⚠ **And the refusal is `plugin_consent_broken` rather than a new code**, which
+   * is not laziness: the whole point is that the *old* client renders it, and
+   * `pluginFailure` already has a sentence for that one.
+   */
+  const adder = await sourceRig("adder", () =>
+    tarball({
+      api: 5,
+      scopes: ["harness"],
+      contributes: { harnesses: [{ id: "gemini", name: "Gemini", command: "gemini", args: ["acp"] }] },
+    }),
+  );
+  const unshown = await postSource(adder.app, {
+    source: { kind: "github", repo: REPO_NAME, commit: SHA },
+    consent: { scopes: ["harness"], net: [], hooks: [] },
+  });
+  check(
+    "a commit that adds an agent nobody was shown",
+    [unshown.status, errorOf(unshown.body).code],
+    [409, "plugin_consent_broken"],
+  );
+  /*
+   * ⚠ **The *argv* is in the sentence, because the argv is what was agreed to.**
+   * A person who sees "it adds gemini" and gets a plugin that runs something else
+   * under that name has been told nothing useful, so the compared string carries
+   * the command line and the refusal repeats it.
+   */
+  check(
+    "and the sentence names what it would have run",
+    String((unshown.body["error"] as { message?: string } | undefined)?.message ?? "").includes(
+      "harness gemini runs gemini acp",
+    ),
+    true,
+  );
+  check("and nothing was installed", [adder.host.list(), adder.rows.has("board")], [[], false]);
+  const shown = await postSource(adder.app, {
+    source: { kind: "github", repo: REPO_NAME, commit: SHA },
+    consent: { scopes: ["harness"], net: [], hooks: [], adds: ["harness gemini runs gemini acp"] },
+  });
+  check("while the same commit, disclosed, installs", shown.status, 201);
+  await adder.close();
+
+  /*
    * ⚠ **The bound holds with no `content-length`, which is the only way it is
    * ever exercised in the fleet.** Measured: codeload sends none — the tarball is
    * generated as it is sent. So a guard reading that header would bound precisely
@@ -18327,7 +19411,7 @@ process.stdout.write("\nbeing told a session appeared\n");
 
 process.stdout.write("\nwhich harness can be pointed at which system\n");
 {
-  const { AGENT_IDS: harnesses } = await import("../src/acp/agents.js");
+  const { AGENT_IDS: harnesses, isBuiltinAgentId } = await import("../src/acp/agents.js");
   const {
     hostable,
     routedModelEnv,
@@ -18335,9 +19419,21 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     SYSTEM_IDS,
     SYSTEMS,
     systemSecretFor,
-    isSystemId,
+    isBuiltinSystemId,
     ROUTED_MODEL_ENV,
   } = await import("../src/acp/systems.js");
+  /*
+   * ⚠ **This section sweeps what this repository *ships*, and it stays that way.**
+   * `AGENT_IDS` and `SYSTEM_IDS` are the built-ins and nothing else, so every
+   * assertion below is a real one: `AGENT_IDS.every((id) => AGENT_LOGIN[id])` says
+   * something because both halves are the same closed list. Re-pointing either at
+   * what a *machine* offers would make these vacuous on the day it mattered.
+   *
+   * What a plugin adds is swept separately, further down, as a **property** over a
+   * synthetic catalogue — because the value of the matrix below is that it is a
+   * transcription of four measured answers, and a sweep that computes both sides
+   * passes whenever both are wrong.
+   */
 
   // The four answers the pinned adapters actually gave — claude, codex and kimi
   // measured 2026-08-25, opencode 2026-08-27. Written out here so the matrix below
@@ -18554,7 +19650,10 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
       const named = SYSTEMS[id].keyEnv;
       if (named === null) return false;
       const harness = SYSTEMS[id].nativeHarness;
-      return harness === null || !credentialEnvNames(harness).includes(named);
+      // `isBuiltinAgentId` first: every row in this table names one, and the
+      // narrowing is what says so rather than assuming it.
+      if (harness === null || !isBuiltinAgentId(harness)) return true;
+      return !credentialEnvNames(harness).includes(named);
     }),
     [],
   );
@@ -18656,7 +19755,7 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
   ROUTED_MODEL_ENV.claude = claudeEnv;
 
   /** Every (harness, system) a refusal can be drawn for, on both routing answers. */
-  const drawn: { system: SystemId; why: string }[] = [];
+  const drawn: { system: BuiltinSystemId; why: string }[] = [];
   for (const pinnable of [true, false]) {
     if (!pinnable) delete ROUTED_MODEL_ENV.claude;
     for (const harness of harnesses) {
@@ -18709,7 +19808,7 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
    * predicates that are *supposed* to differ are not that; a shared one would
    * have to be widened until it permitted both, which is weaker than either.
    */
-  const jargonIn = (why: string, about: SystemId): string[] => {
+  const jargonIn = (why: string, about: BuiltinSystemId): string[] => {
     const found: string[] = [];
     if (!why.endsWith(".")) found.push("no full stop");
     if (/\bapiType\b|\bprovider(Id)?\b|\bsupported\b|\bnativeHarness\b|\bbaseUrl\b|\//i.test(why)) {
@@ -18791,9 +19890,905 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     [[], [], []],
   );
 
-  check("an id this daemon knows", isSystemId("moonshot"), true);
-  check("and one it does not", isSystemId("gemini"), false);
+  /*
+   * ⚠ **A *built-in* test now, and the change of name is the change of meaning.**
+   * `isSystemId` asked "is this in the tuple" and was the HTTP boundary's guard;
+   * the boundary now asks a machine's catalogue, because which systems exist is a
+   * fact about which plugins are installed. What is left here is the narrower
+   * question this predicate can still answer honestly, and the negative case is
+   * chosen to say so: `gemini` is not refused because nobody could ever contribute
+   * it — a plugin can — but because it is not one of the seven this repository
+   * ships. A contributed id could never collide with one, since it carries a
+   * colon and none of these does.
+   */
+  check("an id this repository ships", isBuiltinSystemId("moonshot"), true);
+  check("and one it does not", isBuiltinSystemId("gemini"), false);
+  check("and a contributed id is never mistaken for one", isBuiltinSystemId("acme:moonshot"), false);
 }
+
+/* ------------------------------------------------------------------ *
+ * What a plugin may add to a machine
+ *
+ * ⚠ **The section above sweeps what this repository *ships*, and this one sweeps
+ * what a machine may be *told about*. They are deliberately not merged.** That
+ * one is a transcription of four measured adapter answers into a 28-cell matrix,
+ * and its value is exactly that both sides were written down by hand — a sweep
+ * that computes both halves passes whenever both are wrong, which this file names
+ * as its own failure mode. This one is the opposite shape on purpose: a synthetic
+ * catalogue, driven as a **property**, because there is nothing measured to
+ * transcribe and never will be. What a plugin names is somebody else's binary at
+ * somebody else's endpoint.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nwhat a plugin may add to a machine\n");
+{
+  const { parseManifest, isContributedId, contributedId, MAX_PLUGIN_HARNESSES, MAX_PLUGIN_SYSTEMS } = await import(
+    "../src/plugins/manifest.js"
+  );
+  const { Contributions } = await import("../src/plugins/contributions.js");
+  type Installed = Parameters<typeof Contributions.prototype.refresh>[0][number];
+  const { hostable, routedModelNaming, systemSecretFor, BUILTIN_CATALOGUE, SYSTEM_IDS } = await import("../src/acp/systems.js");
+  const { SESSION_SCOPED_ENV, AGENT_IDS, AGENT_LOGIN, resolveAgent } = await import("../src/acp/agents.js");
+  const { PLUGIN_API_VERSION } = await import("../src/plugins/protocol.js");
+
+  /** A manifest holding whatever `contributes` is handed, at the current rung. */
+  const withContributes = (contributes: unknown, scopes: string[] = ["harness", "system"]): ReturnType<typeof parseManifest> =>
+    parseManifest(
+      JSON.stringify({ id: "acme", name: "Acme", version: "1.0.0", api: PLUGIN_API_VERSION, scopes, contributes }),
+    );
+  const said = (contributes: unknown, scopes?: string[]): string => {
+    const answer = withContributes(contributes, scopes);
+    return answer.ok ? "ok" : answer.message;
+  };
+
+  const HARNESS = { id: "gemini", name: "Gemini", command: "gemini", args: ["acp"], envNames: ["GEMINI_API_KEY"] };
+  const SYSTEM = {
+    id: "groq",
+    name: "Groq",
+    apiType: "anthropic",
+    baseUrl: "https://api.groq.com/anthropic",
+    authHeader: { name: "authorization", prefix: "Bearer " },
+    models: [{ id: "llama-4", name: "Llama 4" }],
+  };
+  const both = { harnesses: [HARNESS], systems: [SYSTEM] };
+
+  check("a plugin that adds a harness and a provider", said(both), "ok");
+
+  /* ---------------------------------------------------------------- *
+   * ⭐ The machine asks the harness itself, rather than waiting to be told
+   *
+   * Reported: a plugin was installed, its harness was offered, and the daemon did
+   * not know it would not start until somebody pressed Start and paid a worktree
+   * for the answer. The record of a refused start is written by `Session.start`,
+   * so what was missing was not a mechanism but an *occasion* — nothing ever
+   * started that harness on the machine's own initiative.
+   *
+   * `probeContributed` fires the existing capability read, which is a real
+   * handshake and a real `session/new`. Nothing reads its result: whichever way it
+   * goes, the answer is on `GET /agents` before anybody taps anything.
+   *
+   * ⚠ **What is asserted is the *occasions*, since the call is detached and every
+   * outcome is swallowed.** Three that must probe and three that must not, and the
+   * three that must not are the interesting half: remove and disable have nothing
+   * to ask about, and boot would put a spawn per contributed harness in front of
+   * `autoResume`, which is already starting an agent per interrupted session.
+   * ---------------------------------------------------------------- */
+  {
+    const { PluginHost } = await import("../src/plugins/host.js");
+    const asked: string[] = [];
+    const ask = {
+      capabilities: (agent: string) => {
+        asked.push(agent);
+        // Refusing is the interesting outcome and the one this exists to provoke;
+        // the host must swallow it, because no request is waiting on it.
+        return Promise.reject(new Error("gemini rejected session/new: authentication required."));
+      },
+    } as never;
+    const PROBE_SERVER = "export async function settings() { return { title: null, blocks: [] }; }";
+    const probeStores = openStores({ path: join(tmp("probe-db-"), "d.db"), instanceId: "i_probe" });
+    const probeRegistry = {
+      watchSessions: () => () => {},
+      list: () => [],
+      get: () => undefined,
+      sessionRuntime: { forgetStartRefusal: () => {}, forgetAvailability: () => {} },
+    } as unknown as SessionRegistry;
+    const probeRoot = join(tmp("probe-root-"), "plugins");
+    const probeHost = await PluginHost.open({
+      root: probeRoot,
+      records: probeStores.plugins,
+      data: probeStores.pluginData,
+      registry: probeRegistry,
+      api: { git: hostGit, ask },
+      timeouts: { start: 3_000, invoke: 3_000 },
+    });
+    const manifest = JSON.stringify({
+      id: "acme",
+      name: "Acme",
+      version: "1.0.0",
+      api: PLUGIN_API_VERSION,
+      scopes: ["harness"],
+      contributes: { harnesses: [HARNESS] },
+    });
+    // The capability read is fired and not awaited, so a tick has to pass before
+    // the array holds anything — the same shape the ask-runner's own park uses.
+    const settle = async (): Promise<void> => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    };
+
+    const put = async (version: string): Promise<void> => {
+      await probeHost.install({
+        body: bodyOf(tarOf({ "plugin.json": manifest.replace("1.0.0", version), "server.js": PROBE_SERVER })),
+        name: "p.tar.gz",
+      });
+      await settle();
+    };
+
+    await put("1.0.0");
+    check("installing a plugin asks its harness whether it starts", asked, ["acme:gemini"]);
+
+    asked.length = 0;
+    await put("1.1.0");
+    check("and so does updating it, since the program may be a different one", asked, ["acme:gemini"]);
+
+    asked.length = 0;
+    await probeHost.setEnabled("acme", false);
+    await settle();
+    check("switching it off asks nothing, there being nothing to start", asked, []);
+
+    await probeHost.setEnabled("acme", true);
+    await settle();
+    check("and switching it on asks again", asked, ["acme:gemini"]);
+
+    asked.length = 0;
+    await probeHost.remove("acme");
+    await settle();
+    check("removing it asks nothing", asked, []);
+
+    /*
+     * ⚠ **And a boot does not**, which is the exclusion worth pinning rather than
+     * the inclusions. A restart deliberately forgets what was measured — the
+     * record is in memory — so a machine that has just come up is honestly
+     * ignorant, and one press is what that costs. Probing here instead would put N
+     * spawns in front of the resume pass.
+     */
+    await put("1.2.0");
+    asked.length = 0;
+    await probeHost.shutdown();
+    const rebooted = await PluginHost.open({
+      root: probeRoot,
+      records: probeStores.plugins,
+      data: probeStores.pluginData,
+      registry: probeRegistry,
+      api: { git: hostGit, ask },
+      timeouts: { start: 3_000, invoke: 3_000 },
+    });
+    await settle();
+    check("and a daemon coming up asks nothing either", asked, []);
+    await rebooted.shutdown();
+  }
+
+  /*
+   * ⚠ **The machine-wide ceiling, which nothing drove at all.**
+   * `plugin_too_many_contributions` appeared exactly once in this repository — its
+   * own `return` in `host.ts` — and `MAX_CONTRIBUTED_HARNESSES` was read by no
+   * driver, while the per-plugin siblings `MAX_PLUGIN_HARNESSES`/`MAX_PLUGIN_SYSTEMS`
+   * are each driven three times a few hundred lines up. The two are different
+   * questions: those bound one manifest, this bounds the *machine*, and only this
+   * one has to reason about what is already installed.
+   *
+   * Which is where the half worth pinning is. `contributionsOver` skips the
+   * incumbent — `if (row.id === manifest.id) continue` — so **reinstalling** a
+   * plugin on a machine already at the ceiling must not be refused for the
+   * contributions it is about to replace. Its own comment calls getting that wrong
+   * "the same class of mistake as clearing a target directory before the new build
+   * is proven, arrived at through arithmetic". Delete that one line and every other
+   * assertion in this file stays green while updating any plugin on a full machine
+   * starts answering `plugin_too_many_contributions`; the update case below is what
+   * goes red instead, which is this repository's standing rule that a pin is only
+   * real once it has been seen to fail.
+   */
+  {
+    const { PluginHost, MAX_CONTRIBUTED_HARNESSES } = await import("../src/plugins/host.js");
+    const CEIL_SERVER = "export async function settings() { return { title: null, blocks: [] }; }";
+    const ceilStores = openStores({ path: join(tmp("ceiling-db-"), "d.db"), instanceId: "i_ceiling" });
+    const ceilRegistry = {
+      watchSessions: () => () => {},
+      list: () => [],
+      get: () => undefined,
+      sessionRuntime: { forgetStartRefusal: () => {}, forgetAvailability: () => {} },
+    } as unknown as SessionRegistry;
+    /*
+     * The real catalogue rather than a counter of this driver's own, so what is
+     * asserted below is what a machine would actually offer — `PluginHost` calls
+     * `refresh` on it after every install, update and remove, and that wiring is
+     * the thing a hand-kept tally would stop testing.
+     */
+    const ceilContributions = new Contributions([]);
+    const contributedCount = (): number =>
+      ceilContributions.harnessIds().filter((id) => isContributedId(id)).length;
+    const ceilHost = await PluginHost.open({
+      root: join(tmp("ceiling-root-"), "plugins"),
+      records: ceilStores.plugins,
+      data: ceilStores.pluginData,
+      registry: ceilRegistry,
+      contributions: ceilContributions,
+      api: { git: hostGit, ask: { capabilities: () => Promise.resolve({}) } as never },
+      timeouts: { start: 3_000, invoke: 3_000 },
+    });
+
+    /** A plugin contributing `count` harnesses, each with a name of its own. */
+    const ceilManifest = (id: string, version: string, count: number): string =>
+      JSON.stringify({
+        id,
+        name: id,
+        version,
+        api: PLUGIN_API_VERSION,
+        scopes: ["harness"],
+        contributes: {
+          harnesses: Array.from({ length: count }, (_, n) => ({
+            id: `h${n}`,
+            name: `H${n}`,
+            command: "gemini",
+            args: ["acp"],
+            envNames: [`GEMINI_${n}_API_KEY`],
+          })),
+        },
+      });
+    const ceilInstall = async (
+      id: string,
+      version: string,
+      count: number,
+    ): Promise<Awaited<ReturnType<typeof ceilHost.install>>> =>
+      ceilHost.install({
+        body: bodyOf(tarOf({ "plugin.json": ceilManifest(id, version, count), "server.js": CEIL_SERVER })),
+        name: `${id}.tar.gz`,
+      });
+    const ceilCode = (outcome: Awaited<ReturnType<typeof ceilHost.install>>): string =>
+      outcome.kind === "refused" ? outcome.code : outcome.kind;
+    const ceilMessage = (outcome: Awaited<ReturnType<typeof ceilHost.install>>): string =>
+      outcome.kind === "refused" ? outcome.message : `not refused: ${outcome.kind}`;
+
+    // `MAX_PLUGIN_HARNESSES` is 2, so the machine ceiling of 8 is four plugins.
+    const perPlugin = 2;
+    const plugins = MAX_CONTRIBUTED_HARNESSES / perPlugin;
+    for (let n = 0; n < plugins; n += 1) {
+      check(
+        `filling the machine to its ceiling, plugin ${n + 1} of ${plugins}`,
+        ceilCode(await ceilInstall(`fill${n}`, "1.0.0", perPlugin)),
+        "ok",
+      );
+    }
+
+    /*
+     * At the ceiling rather than past it — the acceptance that makes the refusal
+     * below a bound rather than a blanket, the same pairing every other bound in
+     * this file is driven with.
+     */
+    check(
+      "the machine is at its ceiling and not over it",
+      contributedCount(),
+      MAX_CONTRIBUTED_HARNESSES,
+    );
+
+    check(
+      "one contribution past the ceiling is refused",
+      ceilCode(await ceilInstall("over", "1.0.0", 1)),
+      "plugin_too_many_contributions",
+    );
+    check(
+      "and the refusal names the ceiling rather than blaming the plugin",
+      ceilMessage(await ceilInstall("over", "1.0.0", 1)),
+      `this machine already has ${MAX_CONTRIBUTED_HARNESSES} agents added by plugins, which is as many as it will run`,
+    );
+    check(
+      "and nothing was installed for it",
+      ceilStores.plugins.list().some((one) => one.id === "over"),
+      false,
+    );
+
+    /*
+     * ⚠ **The one that goes red if the incumbent skip is removed.** The machine is
+     * full; this plugin already owns two of those eight, and is replacing them with
+     * two more. Counting its own incumbent contributions would put the arithmetic at
+     * ten and refuse an ordinary update.
+     */
+    check(
+      "updating a plugin on a machine already at the ceiling is not refused",
+      ceilCode(await ceilInstall("fill0", "1.1.0", perPlugin)),
+      "ok",
+    );
+    check(
+      "and the update really replaced the row rather than adding one",
+      ceilStores.plugins.list().find((one) => one.id === "fill0")?.version,
+      "1.1.0",
+    );
+    check(
+      "and the machine is still exactly at its ceiling afterwards",
+      contributedCount(),
+      MAX_CONTRIBUTED_HARNESSES,
+    );
+
+    /*
+     * And removing one makes room again, which is what says the ceiling counts what
+     * is installed now rather than what has ever been installed.
+     */
+    await ceilHost.remove("fill0");
+    check(
+      "removing a plugin makes room under the ceiling",
+      ceilCode(await ceilInstall("over", "1.0.0", perPlugin)),
+      "ok",
+    );
+    await ceilHost.shutdown();
+  }
+
+  /*
+   * ⚠ **The rung, and it is v3's shape rather than v2's.** `readContributions`
+   * reads the keys it knows and ignores the rest, so without this an `api: 4`
+   * manifest holding a `harnesses` block installs cleanly on every daemon and
+   * contributes nothing — and unlike a lost `refreshMs` there is no degraded half
+   * of the feature left over, because the harness *is* the plugin.
+   */
+  const atApi = (api: number): string => {
+    const answer = parseManifest(
+      JSON.stringify({ id: "acme", name: "Acme", version: "1.0.0", api, scopes: ["harness"], contributes: { harnesses: [HARNESS] } }),
+    );
+    return answer.ok ? "ok" : answer.message;
+  };
+  check("declared below the rung it needs", atApi(4).includes("need plugin API 5"), true);
+  check("and at it", atApi(5), "ok");
+  /*
+   * ⚠ **And the gate fires on a *non-empty* block, which is what keeps
+   * `parseManifest` idempotent over its own output.** It normalises an absent
+   * `contributes` into one carrying `harnesses: []`, and `SqlitePluginRecordStore`
+   * re-validates `manifest_json` through it on **every read** — so a presence test
+   * refused, on the second read, every plugin it had itself accepted on the first,
+   * and every installed plugin vanished from `list()` at the next daemon start.
+   */
+  check(
+    "an empty block at an older rung is not a contribution",
+    (() => {
+      const answer = parseManifest(
+        JSON.stringify({ id: "acme", name: "Acme", version: "1.0.0", api: 1, scopes: [], contributes: { harnesses: [], systems: [] } }),
+      );
+      return answer.ok;
+    })(),
+    true,
+  );
+
+  /*
+   * The scope biconditional, both directions — `net`'s rule applied to the two
+   * things on this card that are larger than `net`.
+   */
+  check("a scope with nothing under it", said({ systems: [SYSTEM] }, ["harness", "system"]).includes("needs contributes.harnesses"), true);
+  check("and a block with no scope", said({ harnesses: [HARNESS] }, []).includes('"harness" scope is not declared'), true);
+  check("and `contributes` left out entirely, with a scope declared", said(undefined, ["harness"]).includes("needs contributes.harnesses"), true);
+
+  /* ── the argv this daemon will spawn ─────────────────────────────────── */
+
+  const harnessSaid = (patch: Record<string, unknown>): string =>
+    said({ harnesses: [{ ...HARNESS, ...patch }] }, ["harness"]);
+  check("a command with a path in it", harnessSaid({ command: "/usr/bin/gemini" }).includes("program name"), true);
+  check("a command with a capital in it", harnessSaid({ command: "Gemini" }).includes("program name"), true);
+  /*
+   * ⚠ **Not tidiness.** Naming `claude` here would let a plugin drive the
+   * operator's own signed-in CLI, with its credentials, under a row the consent
+   * screen labels with the plugin's name — a command line that is true under a
+   * heading that is a lie.
+   */
+  check(
+    "a command that is one of this machine's own agents",
+    AGENT_IDS.map((id) => harnessSaid({ command: AGENT_LOGIN[id].command }).includes("already runs that program")),
+    AGENT_IDS.map(() => true),
+  );
+  check("and `script`, which is what a login's pty is allocated with", harnessSaid({ command: "script" }).includes("already runs that program"), true);
+  check("an argument that is not a string", harnessSaid({ args: [1] }).includes("not a string"), true);
+  check("two harnesses with one id", said({ harnesses: [HARNESS, HARNESS] }, ["harness"]).includes("declared twice"), true);
+  check(
+    "more harnesses than one plugin may add",
+    said({ harnesses: Array.from({ length: MAX_PLUGIN_HARNESSES + 1 }, (_, at) => ({ ...HARNESS, id: `h${at}` })) }, ["harness"]).includes(
+      `at most ${MAX_PLUGIN_HARNESSES}`,
+    ),
+    true,
+  );
+  check(
+    "more providers than one plugin may add",
+    said({ systems: Array.from({ length: MAX_PLUGIN_SYSTEMS + 1 }, (_, at) => ({ ...SYSTEM, id: `s${at}` })) }, ["system"]).includes(
+      `at most ${MAX_PLUGIN_SYSTEMS}`,
+    ),
+    true,
+  );
+
+  /* ── the variables a manifest may claim ──────────────────────────────── */
+
+  check("a variable name that is not one", harnessSaid({ envNames: ["gemini key"] }).includes("in capitals"), true);
+  check("this daemon's own prefix", harnessSaid({ envNames: ["REEMOAT_TOKEN"] }).includes("belongs to this daemon"), true);
+  /*
+   * ⚠ **Swept rather than sampled, and both halves matter.** `LocalRuntime.launch`
+   * spreads the routed-model environment **last**, so a manifest naming
+   * `CLAUDE_CODE_SESSION_ID` restores exactly the variable `agentEnv()` had just
+   * deleted, and `CODEX_SANDBOX_NETWORK_DISABLED` takes the network away from an
+   * agent nobody confined. A name added to that list later and not reflected here
+   * is the drift this sweep exists to refuse.
+   */
+  check(
+    "every session-scoped variable this daemon strips",
+    SESSION_SCOPED_ENV.filter((name) => !harnessSaid({ envNames: [name] }).includes("another agent on this machine reads it")),
+    [],
+  );
+  /*
+   * ⚠ **The sharpest one, and it is not hygiene.** `envNames` decides which
+   * variable names a *person* is invited to paste a secret into, under a card
+   * headed with the plugin's own name. `CLAUDE_CODE_OAUTH_TOKEN` there is a
+   * phishing box.
+   */
+  check(
+    "and every credential slot a built-in reads",
+    AGENT_IDS.flatMap((id) => AGENT_LOGIN[id].envNames).filter(
+      (name) => !harnessSaid({ envNames: [name] }).includes("another agent on this machine reads it"),
+    ),
+    [],
+  );
+  check(
+    "and the variable that names a built-in's binary",
+    harnessSaid({ envNames: ["CLAUDE_CODE_EXECUTABLE"] }).includes("another agent on this machine reads it"),
+    true,
+  );
+  check("routedModelEnv is held to the same rule", harnessSaid({ routedModelEnv: ["ANTHROPIC_API_KEY"] }).includes("another agent"), true);
+
+  /* ── where a pasted key is sent ──────────────────────────────────────── */
+
+  const systemSaid = (patch: Record<string, unknown>): string => said({ systems: [{ ...SYSTEM, ...patch }] }, ["system"]);
+  check("a protocol this daemon cannot configure", systemSaid({ apiType: "vertex" }).includes('must be "anthropic" or "openai"'), true);
+  /*
+   * ⚠ **`routingHeaders` builds `{[name]: prefix + secret}` and hands it straight
+   * to `providers/set`.** A CR or an LF in either half is header injection into
+   * whatever the adapter does with the pair.
+   */
+  check(
+    "a header name with a newline in it",
+    systemSaid({ authHeader: { name: "x-api-key\r\nx-forwarded-for", prefix: "" } }).includes("lower-case header name"),
+    true,
+  );
+  check("a header prefix that is not one", systemSaid({ authHeader: { name: "authorization", prefix: "Bearer \n" } }).includes("short word"), true);
+  check("a base URL that is not a URL", systemSaid({ baseUrl: "api.groq.com" }).includes("not a URL"), true);
+  check("a base URL carrying a password", systemSaid({ baseUrl: "https://me:pw@api.groq.com/x" }).includes("user name or a password"), true);
+  check("a base URL carrying a query", systemSaid({ baseUrl: "https://api.groq.com/x?k=1" }).includes("query or a fragment"), true);
+  /*
+   * ⚠ **Normalised on the way in, which is what makes the consent comparison
+   * mean anything.** A plugin showing `https://api.groq.com` and shipping
+   * `https://api.groq.com/../evil` would pass an origin comparison; `new URL`
+   * resolves the `..` away here, so what is stored and what is compared is the
+   * address a key is actually sent to.
+   */
+  check(
+    "and a base URL is stored resolved rather than as written",
+    (() => {
+      const answer = withContributes({ systems: [{ ...SYSTEM, baseUrl: "https://api.groq.com/a/../evil/" }] }, ["system"]);
+      return answer.ok ? answer.manifest.contributes.systems[0]?.baseUrl : answer.message;
+    })(),
+    "https://api.groq.com/evil",
+  );
+
+  /*
+   * ⚠ **`http` is permitted to this machine and this network, and to nothing
+   * else — which is the opposite decision from `net`'s allowlist forty lines up in
+   * the same file.** That one refuses a local target in a plugin's outbound list,
+   * where it is a mistake somebody is approving without reading. This is where the
+   * *operator's own pasted key* goes to a model they named, and a private address
+   * is the one case where they plainly mean it: Ollama, vLLM, LM Studio.
+   */
+  const httpTo = (host: string): boolean => systemSaid({ baseUrl: `http://${host}/v1` }) === "ok";
+  check(
+    "http to this machine and to this network",
+    ["127.0.0.1:11434", "localhost:11434", "[::1]:8000", "10.0.0.5:8000", "172.16.3.4", "192.168.1.5:1234", "ollama.local", "box.internal"].map(httpTo),
+    [true, true, true, true, true, true, true, true],
+  );
+  check(
+    "and to nowhere else",
+    ["api.groq.com", "172.32.0.1", "192.169.1.1", "8.8.8.8", "example.com", "localhost.evil.example"].map(httpTo),
+    [false, false, false, false, false, false],
+  );
+  /*
+   * ⚠ **The spellings that dodge a hand-rolled address parser, and the reason
+   * none of them dodges this one is `URL` rather than anything written here.**
+   * Measured: `new URL` canonicalises every IPv4 form before `hostname` is read —
+   * `0x7f.0.0.1`, `2130706433`, `127.1` and `0177.0.0.1` all become `127.0.0.1`,
+   * and `010.0.0.1` becomes **`8.0.0.1`** because `010` is octal. So the octal one
+   * is correctly *refused* under `http` (it is a public address) and the other
+   * three are correctly allowed (they are loopback), which is the opposite of what
+   * a regex over the written string would have concluded for all four.
+   *
+   * Driven rather than reasoned about, because the failure is silent in both
+   * directions and this is the parser the whole `http` arm rests on.
+   */
+  check(
+    "an address written the long way round is classified by what it is, not by how it is spelled",
+    ["0x7f.0.0.1", "2130706433", "127.1", "0177.0.0.1", "010.0.0.1"].map(httpTo),
+    [true, true, true, true, false],
+  );
+  /*
+   * ⚠ **Refused under `https` as well, which every other private address is not.**
+   * `169.254.169.254` is cloud instance metadata — a base URL pointed at one is not
+   * a self-hosted model somebody stood up, it is a request for this daemon to sign
+   * a call to its own host's credentials service with a key the operator pasted.
+   */
+  check(
+    "an address that is never an inference endpoint, under either scheme",
+    [
+      systemSaid({ baseUrl: "http://169.254.169.254/latest" }).includes("metadata service"),
+      systemSaid({ baseUrl: "https://169.254.169.254/latest" }).includes("metadata service"),
+      systemSaid({ baseUrl: "https://[fd00:ec2::254]/latest" }).includes("metadata service"),
+      // The IPv4-mapped spelling, which `URL` serialises as `[::ffff:a9fe:a9fe]`
+      // — so the dotted-quad arm never sees it.
+      systemSaid({ baseUrl: "https://[::ffff:169.254.169.254]/latest" }).includes("metadata service"),
+    ],
+    [true, true, true, true],
+  );
+  /*
+   * ⚠ **And by *name*, which is the arm that was missing and the one that made the
+   * `http` allowance and the metadata refusal fail on the same string.** GCP's
+   * metadata service is `metadata.google.internal`; `isPrivateHost` returns `true`
+   * for anything ending `.internal`, so without a name check a manifest could point
+   * a base URL at the host's own credentials service, **in the clear**, and be
+   * accepted. This file already disagreed with itself about it — `LOCAL_HOST`
+   * refuses `internal` in a `net` allowlist on exactly those grounds.
+   */
+  check(
+    "and a metadata service named rather than numbered, which is how anybody would reach one",
+    [
+      systemSaid({ baseUrl: "http://metadata.google.internal/computeMetadata/v1" }).includes("metadata service"),
+      systemSaid({ baseUrl: "https://metadata.google.internal/computeMetadata/v1" }).includes("metadata service"),
+      systemSaid({ baseUrl: "http://metadata/computeMetadata/v1" }).includes("metadata service"),
+    ],
+    [true, true, true],
+  );
+  // …while an ordinary name on the same private zone is still reachable, which is
+  // the whole point of allowing `.internal` at all.
+  check("while a model on the same private zone still is", httpTo("llm.corp.internal"), true);
+  /*
+   * ⚠ **The reserved-program list has to cover the whole argv, or it is a rule
+   * about one word rather than about a command line.** `env claude` and
+   * `sh -c "exec claude"` both walk past a check on the program name and spawn the
+   * operator's *signed-in* CLI, with its credentials, under a row the consent
+   * screen labels with the plugin's name — verbatim what that list says it exists
+   * to prevent. It cannot be complete; what it closes is the shape a reader of that
+   * card would not think to look for.
+   */
+  check(
+    "a reserved program passed as an argument rather than named as the command",
+    [
+      harnessSaid({ command: "env", args: ["claude"] }).includes("as an argument"),
+      harnessSaid({ command: "sh", args: ["-c", "exec claude"] }).includes("as an argument"),
+      harnessSaid({ command: "sh", args: ["--agent=codex"] }).includes("as an argument"),
+    ],
+    [true, true, true],
+  );
+  // Word by word rather than by substring: a flag that merely contains a name is
+  // not a program being invoked, and refusing it would be this daemon having an
+  // opinion about somebody's own command line.
+  check("while a flag that merely contains one is left alone", harnessSaid({ args: ["--profile", "codexish"] }), "ok");
+
+  /* ── a provider may only ever name its own plugin's harness ──────────── */
+
+  check(
+    "a provider naming a harness this plugin does not add",
+    said({ harnesses: [HARNESS], systems: [{ ...SYSTEM, nativeHarness: "claude" }] }).includes("not a harness this plugin adds"),
+    true,
+  );
+  check(
+    "and one naming its own",
+    said({
+      harnesses: [HARNESS],
+      systems: [{ ...SYSTEM, baseUrl: null, authHeader: null, nativeHarness: "gemini", loginVia: "gemini", models: [] }],
+    }),
+    "ok",
+  );
+  /*
+   * The four rules that keep a row from being a control nobody can spend, each of
+   * which the built-in table is already swept for one section up.
+   */
+  check(
+    "a provider with no endpoint and no harness of its own",
+    said({ systems: [{ ...SYSTEM, baseUrl: null, authHeader: null }] }, ["system"]).includes("needs a nativeHarness"),
+    true,
+  );
+  check("a provider with an endpoint and no header", systemSaid({ authHeader: null }).includes("needs an authHeader"), true);
+  check(
+    "a routed provider naming no model",
+    systemSaid({ models: [] }).includes("at least one model"),
+    true,
+  );
+  check(
+    "a keyEnv its own harness does not read",
+    said({
+      harnesses: [HARNESS],
+      systems: [{ ...SYSTEM, baseUrl: null, authHeader: null, nativeHarness: "gemini", loginVia: "gemini", models: [], keyEnv: "OTHER_KEY" }],
+    }).includes("does not read"),
+    true,
+  );
+
+  /* ── ids ─────────────────────────────────────────────────────────────── */
+
+  /*
+   * ⚠ **Shape, and shape only — which is the whole reason this predicate is
+   * exported.** Membership is asked where nothing has been created yet, so a
+   * refusal is free. Shape is asked where the row *is* the memory: `fromRow` and
+   * `readCustomAgent` run at boot, and a membership test there would delete every
+   * session on a harness whose plugin somebody switched off an hour ago.
+   */
+  check(
+    "what could be an id a plugin contributed",
+    ["acme:gemini", "a:b", "acme-tools:gemini-cli"].map(isContributedId),
+    [true, true, true],
+  );
+  check(
+    "and what could not",
+    ["claude", "", ":", "acme:", ":gemini", "acme:gemini:extra", "Acme:gemini", "acme:GEMINI"].map(isContributedId),
+    [false, false, false, false, false, false, false, false],
+  );
+  check("a built-in id can never be mistaken for one", AGENT_IDS.filter(isContributedId), []);
+  check("and the namespace is applied by this daemon rather than written by an author", contributedId("acme", "gemini"), "acme:gemini");
+
+  /* ── the registry these turn into ───────────────────────────────────── */
+
+  const installed = (id: string, contributes: unknown, enabled = true): Installed => {
+    /*
+     * The scopes follow the blocks, for the reason `manifestWith` gives one
+     * section over: each is a biconditional, so a fixture declaring both and
+     * carrying one is refused before it reaches the thing under test.
+     */
+    const holds = (contributes ?? {}) as Record<string, unknown>;
+    const scopes = [
+      ...(Array.isArray(holds["harnesses"]) && holds["harnesses"].length > 0 ? ["harness"] : []),
+      ...(Array.isArray(holds["systems"]) && holds["systems"].length > 0 ? ["system"] : []),
+    ];
+    const answer = parseManifest(
+      JSON.stringify({ id, name: id.toUpperCase(), version: "1.0.0", api: PLUGIN_API_VERSION, scopes, contributes }),
+    );
+    if (!answer.ok) throw new Error(`${id}: ${answer.message}`);
+    return { id, version: "1.0.0", manifest: answer.manifest, enabled, installedAt: 1, updatedAt: 1, source: null };
+  };
+
+  const acme = installed("acme", both);
+  const machine = new Contributions([acme]);
+
+  check("a contributed harness is namespaced on the way out", machine.harness("acme:gemini")?.command ?? null, "gemini");
+  check("and a local id on its own reaches nothing", machine.harness("gemini"), null);
+  /*
+   * ⚠ **The built-ins first and the contributed after, never interleaved.** This
+   * array is the reading order: `GET /systems` maps over it, `groupModels` groups
+   * by first appearance rather than by sorting, and `readyFirst` orders each of its
+   * two halves by position. A group *appearing* at the end is a group appearing; a
+   * group inserted in the middle is every heading below it moving under a thumb.
+   */
+  check("the built-ins keep their order and the contributed follow", machine.systemIds().slice(0, SYSTEM_IDS.length), [...SYSTEM_IDS]);
+  check("and the contributed are after them", machine.systemIds().slice(SYSTEM_IDS.length), ["acme:groq"]);
+  check("harnesses the same way", machine.harnessIds(), [...AGENT_IDS, "acme:gemini"]);
+  /*
+   * ⚠ **Sorted by plugin id rather than by install order**, or the picker's
+   * headings depend on the order somebody happened to install things in — which
+   * reorders a screen for a reason nobody can see, and differently on two machines
+   * holding the same plugins.
+   */
+  const two = new Contributions([installed("zeta", { systems: [{ ...SYSTEM, id: "z" }] }), installed("alpha", { systems: [{ ...SYSTEM, id: "a" }] })]);
+  check("two plugins are ordered by their own ids, not by which arrived first", two.systemIds().slice(SYSTEM_IDS.length), ["alpha:a", "zeta:z"]);
+
+  /*
+   * ⚠ **Three answers, because "switched off" and "never existed" have opposite
+   * remedies.** A `400` says *fix your request*, which is the truth for an id
+   * nobody has ever offered and a lie for one that worked yesterday.
+   */
+  const off = new Contributions([installed("acme", both, false)]);
+  check(
+    "a plugin somebody switched off still owns its ids",
+    [off.harnessState("acme:gemini"), off.systemState("acme:groq")],
+    ["disabled", "disabled"],
+  );
+  check("and offers neither of them", [off.harness("acme:gemini"), off.system("acme:groq")], [null, null]);
+  check("and does not list them", [off.harnessIds().length, off.systemIds().length], [AGENT_IDS.length, SYSTEM_IDS.length]);
+  check(
+    "while a plugin nobody has is a different answer entirely",
+    [machine.harnessState("other:thing"), machine.systemState("other:thing")],
+    ["unknown", "unknown"],
+  );
+  check("and a built-in is never either of those", [machine.harnessState("claude"), machine.systemState("anthropic")], ["enabled", "enabled"]);
+
+  /*
+   * ⚠ **The two sentences a launch can produce, and neither is "not installed".**
+   * Sending somebody to `npm i -g` for a package that does not exist is worse than
+   * saying nothing, and it is what a fall-through to the built-in arm would have
+   * said about a plugin's harness.
+   */
+  const refusalOf = (id: string, cat: typeof machine): string => {
+    try {
+      resolveAgent(id, cat);
+      return "ok";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  };
+  check("a harness whose plugin is switched off", refusalOf("acme:gemini", off).includes("switched off on this machine"), true);
+  check("and one whose plugin is gone", refusalOf("acme:gemini", new Contributions([])).includes("no longer installed"), true);
+  check("and neither of them mentions installing anything", [refusalOf("acme:gemini", off), refusalOf("acme:gemini", new Contributions([]))].filter((why) => /npm|PATH/.test(why)), []);
+
+  /* ── the matrix, as a property over a catalogue nobody measured ──────── */
+
+  /** A contributed harness that names a model variable, beside a routed provider. */
+  const smartRouted = new Contributions([
+    installed("acme", { harnesses: [{ ...HARNESS, routedModelEnv: ["GEMINI_MODEL"] }], systems: [SYSTEM] }),
+  ]);
+  const claudeRouting = { providerId: "main", supported: ["anthropic", "bedrock", "vertex"] };
+  const codexRouting = { providerId: "custom-gateway", supported: ["openai"] };
+  const geminiRouting = { providerId: "g", supported: ["anthropic"] };
+  /*
+   * The four measured answers, restated here rather than reached for across the
+   * section boundary — the block above owns them as *its* transcription, and a
+   * second reader of one variable is how two sections come to disagree about what
+   * was measured. What this block does with them is different: it asks whether the
+   * cells change, never what they are.
+   */
+  const routings: Record<string, { providerId: string; supported: string[] } | null> = {
+    claude: claudeRouting,
+    codex: codexRouting,
+    kimi: null,
+    opencode: null,
+  };
+
+  /*
+   * Native short-circuits before `routing` is consulted at all, exactly as kimi at
+   * Moonshot does — which is what makes a contributed pair that declares no
+   * provider methods runnable.
+   */
+  const native = new Contributions([
+    installed("acme", {
+      harnesses: [HARNESS],
+      systems: [{ ...SYSTEM, baseUrl: null, authHeader: null, nativeHarness: "gemini", loginVia: "gemini", models: [] }],
+    }),
+  ]);
+  check("a contributed harness on its own contributed provider is native", hostable("acme:gemini", "acme:groq", null, native), null);
+  /*
+   * ⚠ **And the same provider reached by anything else is refused with the
+   * sentence that names the CLI it ships with** — `zen`'s row, arrived at from a
+   * manifest. The name in it is the plugin author's, which is the one place this
+   * daemon's own refusals carry somebody else's prose.
+   */
+  check(
+    "while nothing else can reach a provider with no endpoint",
+    hostable("claude", "acme:groq", claudeRouting, native),
+    "Groq can only be reached by the CLI it ships with.",
+  );
+  check("a contributed harness routed at a contributed provider it can speak to", hostable("acme:gemini", "acme:groq", geminiRouting, smartRouted), null);
+  check("a built-in routed at a contributed provider it can speak to", hostable("claude", "acme:groq", claudeRouting, machine), null);
+  /*
+   * ⚠ **This is the arm `ROUTED_MODEL_ENV`'s own comment predicted, and a plugin
+   * adding an openai-shaped provider is the day it fires.** codex answers
+   * `supported: ["openai"]`, so it passes the protocol test and dies one line
+   * later. The *sentence* is asserted rather than merely `!== null`, so the next
+   * reader cannot close it by inventing a codex arm nobody measured — which
+   * variable codex reads for a custom-gateway model is a measurement this
+   * repository has never taken.
+   */
+  const openaiShaped = new Contributions([installed("acme", { systems: [{ ...SYSTEM, apiType: "openai" }] })]);
+  check(
+    "an openai-shaped provider paired with codex is refused on the pinning arm",
+    hostable("codex", "acme:groq", codexRouting, openaiShaped),
+    "This agent cannot be told which model to use on another system.",
+  );
+  check(
+    "and on the protocol arm where the protocol is the thing that is wrong",
+    hostable("codex", "acme:groq", codexRouting, machine),
+    "This agent cannot run Groq models.",
+  );
+  /*
+   * ⚠ **A contributed harness that named no model variable cannot host a foreign
+   * provider either**, and it is refused by the same arm rather than being allowed
+   * to start and quietly run the endpoint's default — the failure with no symptom
+   * that folding `ROUTED_MODEL_ENV` into `hostable` exists to prevent.
+   */
+  const dumb = new Contributions([
+    installed("acme", { harnesses: [{ ...HARNESS, id: "plain" }], systems: [SYSTEM] }),
+  ]);
+  check("a contributed harness with no model variable", hostable("acme:plain", "acme:groq", geminiRouting, dumb), "This agent cannot be told which model to use on another system.");
+  const smart = new Contributions([
+    installed("acme", { harnesses: [{ ...HARNESS, id: "plain", routedModelEnv: ["GEMINI_MODEL"] }], systems: [SYSTEM] }),
+  ]);
+  check("and one that named one", hostable("acme:plain", "acme:groq", geminiRouting, smart), null);
+  check(
+    "and what it names is set to the model, without a template language anywhere",
+    routedModelNaming("acme:plain", smart)?.("llama-4") ?? null,
+    { GEMINI_MODEL: "llama-4" },
+  );
+  check("a built-in's naming is untouched by any of this", routedModelNaming("claude", machine)?.("m") ?? null, {
+    ANTHROPIC_MODEL: "m",
+    ANTHROPIC_CUSTOM_MODEL_OPTION: "m",
+  });
+  /*
+   * ⚠ **And a system this machine no longer offers answers a sentence rather than
+   * throwing**, because the pairing is only reachable through something *stored* —
+   * a preset whose plugin was removed — and a preset whose only button throws is
+   * worse than one whose row says why.
+   */
+  check("a provider that is no longer here", hostable("claude", "acme:groq", claudeRouting, new Contributions([])), "This provider is no longer on this machine.");
+  check("and one whose plugin is switched off", hostable("claude", "acme:groq", claudeRouting, off), "This provider comes from a plugin that is switched off on this machine.");
+  /*
+   * The whole built-in matrix, asked through a catalogue that also holds
+   * contributions — the assertion that adding rows changed no cell of it.
+   */
+  check(
+    "and every built-in pairing answers exactly what it did with no plugins at all",
+    AGENT_IDS.flatMap((harness) =>
+      SYSTEM_IDS.filter(
+        (system) =>
+          hostable(harness, system, routings[harness] ?? null, machine) !==
+          hostable(harness, system, routings[harness] ?? null, BUILTIN_CATALOGUE),
+      ).map((system) => `${harness}/${system}`),
+    ),
+    [],
+  );
+
+  /*
+   * ⚠ **One account, one box, across a contributed pair too.** `systemSecretFor`
+   * fills a system's gap from its native harness's own credential store, gated on
+   * `keyEnv` — and the manifest is refused unless that variable is one the harness
+   * actually reads, which is the property that makes this reachable at all.
+   */
+  const paired = new Contributions([
+    installed("acme", {
+      harnesses: [{ ...HARNESS, id: "gemini", envNames: ["GEMINI_API_KEY"] }],
+      systems: [{ ...SYSTEM, baseUrl: null, authHeader: null, nativeHarness: "gemini", loginVia: "gemini", models: [], keyEnv: "GEMINI_API_KEY" }],
+    }),
+  ]);
+  check(
+    "a key saved on a contributed harness answers for its own provider",
+    systemSecretFor(
+      "acme:groq",
+      null,
+      (agent): Record<string, string> => (agent === "acme:gemini" ? { GEMINI_API_KEY: "sk-x" } : {}),
+      paired,
+    ),
+    "sk-x",
+  );
+  check(
+    "and a provider this machine does not offer has no key, borrowed or otherwise",
+    systemSecretFor("acme:groq", null, () => ({ GEMINI_API_KEY: "sk-x" }), new Contributions([])),
+    null,
+  );
+
+  /*
+   * ⚠ **A secret must never become unreachable because the thing that named it
+   * stopped being offered**, and there were two ways that could have happened.
+   * `doRemove` sweeps both credential tables on an uninstall — driven in the
+   * lifecycle section above — and `DELETE /agent-auth/:agent` removes **before** it
+   * validates, so a key pasted under a plugin's harness is still deletable while
+   * that plugin is switched off. Without the second, disabling a plugin would have
+   * hidden the row from `GET /agent-auth` and refused the one route that could
+   * clear it, in the same instant.
+   *
+   * Read off the source because the order is the property and nothing typed can
+   * hold an order — the same shape as `DELETE /systems/:system`'s own assertion.
+   */
+  {
+    const routes = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+    const del = /app\.delete\("\/agent-auth\/:agent"[\s\S]*?\n  \}\);/.exec(routes)?.[0] ?? "";
+    check(
+      "the route that clears a pasted credential does not depend on the harness still being offered",
+      [
+        del.length > 0,
+        // It removes whatever was named, without asking the catalogue first…
+        /const had = credentials\.list\(\)\.some/.test(del) && /credentials\.remove\(named, envName\);/.test(del),
+        // …and it answers what the lookup saw rather than an error, which is the
+        // half that was missing: a route that removes and then 400s has neither
+        // property, and skips both invalidation steps on the way out.
+        /removed: had/.test(del),
+        !/return jsonError\(c, 400, "invalid_agent"/.test(del),
+        // The slot is still checked where the harness does resolve.
+        /agent !== null && !registry\.sessionRuntime\.credentialSlots\(agent\)/.test(del),
+      ],
+      [true, true, true, true, true],
+    );
+  }
+}
+
 
 /* ------------------------------------------------------------------ *
  * What an assembled session is actually launched as
@@ -19041,7 +21036,7 @@ process.stdout.write("\nwhat an assembled session is launched as\n");
     // `create` asks before it builds anything, and the real answer depends on
     // whether this machine happens to have a `claude` on its PATH.
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "claude", displayName: "fake", available: true, loggedIn: true, hint: null }];
+      return [{ id: "claude", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
@@ -19334,6 +21329,8 @@ process.stdout.write("\nwhat an assembled session is launched as\n");
     pairing: { harness: AgentId; system: SystemId; model: string },
     offering: readonly string[],
     withoutIt: readonly string[],
+    /** What the agent says it is *on* once the model has left its list. */
+    currentWhenGone = "sonnet",
   ): Promise<{ lines: string[]; id: string }> => {
     preset = { ...pairing };
 
@@ -19351,7 +21348,7 @@ process.stdout.write("\nwhat an assembled session is launched as\n");
     lines.push(`resume, offered: ${pinOf(launches[0])} notices=${notices(managed.id).length}`);
     await own.stop(managed.id);
 
-    published = { choices: withoutIt, current: "sonnet" };
+    published = { choices: withoutIt, current: currentWhenGone };
     launches.length = 0;
     const came = await managed
       .resume(5_000)
@@ -19399,6 +21396,36 @@ process.stdout.write("\nwhat an assembled session is launched as\n");
       model: "opus",
     },
   ]);
+
+  /*
+   * ⚠ **The same pairing with one cell changed: the agent no longer *lists* the
+   * model and is nevertheless still *on* it.** Every case above moves `current` to
+   * something else, so the whole "gone" column was only ever driven as a real
+   * demotion — and the sentence that shipped was the one nothing had produced.
+   *
+   * Reported from the app, verbatim: *"opencode has no model called
+   * `opencode/hy3-free` — it offers … and 352 more. The conversation was resumed
+   * anyway, running opencode/hy3-free."* Both halves were true and the row was
+   * still wrong: the clause `openResumed` appends names what the session came back
+   * on, and it came back on exactly what the preset asked for. There was nothing to
+   * announce.
+   *
+   * ⚠ **Four cells, and the last two are the fix.** `resume, gone` resumes with
+   * **nothing sent** (`config=[]`) and **no notice** — the pin's job is that the
+   * session runs the model, and it already does, so there is neither work nor news.
+   * `start, gone` is the half that is easy to forget: `Session.start` turns this
+   * same refusal into `SystemRoutingError`, so before the fix a preset whose model
+   * the agent is *currently running* answered a permanent `502` — which is exactly
+   * the stranding Q2.216 chose a demotion over, reached from the other side.
+   */
+  const still = await column({ harness: "claude", system: "anthropic", model: "opus" }, ["opus", "sonnet"], ["sonnet"], "opus");
+  check("a model the agent no longer offers but is already running", still.lines, [
+    "start, offered:  opened config=[model-picker=opus] env=- routed=-",
+    "resume, offered: resumed config=[model-picker=opus] env=- routed=- notices=0",
+    "resume, gone:    (resumed) resumed config=[] env=- routed=- notices=0",
+    "start, gone:     (started) opened config=[] env=- routed=- disposed=false",
+  ]);
+  check("and it says nothing, because there is no demotion to report", notices(still.id), []);
 
   /*
    * `{claude, moonshot, kimi-k2-thinking}` — routed, and the regression fence for
@@ -20215,7 +22242,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
       ["a missing kind", { entries: [{ ref: "claude", hidden: false }] }],
       ["an empty ref", { entries: [{ kind: "harness", ref: "", hidden: false }] }],
       ["a ref that is not a string", { entries: [{ kind: "harness", ref: 7, hidden: false }] }],
-      ["a ref past the bound", { entries: [{ kind: "harness", ref: "r".repeat(65), hidden: false }] }],
+      ["a ref past the bound", { entries: [{ kind: "harness", ref: "r".repeat(97), hidden: false }] }],
       ["hidden missing", { entries: [{ kind: "harness", ref: "claude" }] }],
       ["hidden as a string", { entries: [{ kind: "harness", ref: "claude", hidden: "yes" }] }],
       [
@@ -20275,11 +22302,26 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
      * says so.
      */
     check("and not one of them moved anything", JSON.stringify(strip()), before);
+    /*
+     * ⚠ **At the bound, not merely under it.** This said `repeat(64)` against a
+     * bound of 96 while the refusal above says `repeat(97)`, so the pair proved
+     * only that the bound lay somewhere in [64, 96] — lowering
+     * `MAX_STRIP_REF_CHARS` to 64 would have left both green while truncating
+     * every `ca_…` preset id and every contributed harness id longer than that.
+     * The custom-agents bounds two sections up are driven at exactly 80/81 and
+     * 256/257 and say "at the bound, not past it"; this is that, applied here.
+     *
+     * 96 is written out rather than imported because `MAX_STRIP_REF_CHARS` is
+     * module-private to `server.ts` — so the literal below and the refusal's 97
+     * are a pair, and both move together or the acceptance stops sitting on the
+     * bound. That is the same trade `pincheck` makes everywhere it compares a
+     * written-down number against a source it cannot import.
+     */
     check(
       "one at the bound is accepted, which is what makes the refusal a bound",
       (
         await call(withSystems, "PUT", "/agent-strip", {
-          entries: [{ kind: "harness", ref: "r".repeat(64), hidden: true }],
+          entries: [{ kind: "harness", ref: "r".repeat(96), hidden: true }],
         })
       ).status,
       200,

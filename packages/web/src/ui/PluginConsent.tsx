@@ -87,6 +87,34 @@ export function PluginConsent({
     },
     { title: "It reaches", asks: true, items: manifest.net },
     {
+      /*
+       * ⚠ **An *ask*, and the two largest on this card.** A harness is a program
+       * this machine will run as its owner on every session started with it; a
+       * provider is a host a key pasted on this machine is sent to. The row below
+       * — screens, panes, menu rows — is `asks: false` because those are things
+       * *this app* draws on the plugin's behalf and nothing is granted. These are
+       * the opposite, which is why they are their own row above it rather than two
+       * more lines in it.
+       *
+       * ⚠ **Drawn as the exact strings the daemon compares.** `consentGap` on the
+       * far side and `consentBroken` on the way back are set differences over these
+       * same lines, so what is read here and what is checked are one value — there
+       * is no second rendering of the same fact to drift. That is also why the
+       * *whole* address appears rather than an origin: a plugin showing
+       * `https://api.groq.com` and shipping `https://api.groq.com/../evil` would
+       * pass an origin comparison, and the path is what a key is actually sent to.
+       *
+       * ⚠ **And the scheme is in the line, which is the whole of the `http`
+       * disclosure.** A provider on this machine's own network may be reached over
+       * `http` — the daemon refuses it anywhere else — and the honest way to say a
+       * key travels in the clear is to show the address it travels to. The sentence
+       * below the list qualifies it.
+       */
+      title: "It adds, to this machine",
+      asks: true,
+      items: manifest.adds,
+    },
+    {
       title: "It adds",
       /*
        * ⚠ **The one row that is not an ask.** A screen, a settings pane and a menu
@@ -110,6 +138,25 @@ export function PluginConsent({
   ];
 
   const shown = rows.filter((row) => row.items.length > 0);
+  /**
+   * Whether any provider on this card is reached without TLS.
+   *
+   * Hoisted rather than inlined into the JSX so that a driver can find it: the one
+   * expression that can express this contains `//` inside a string literal, and
+   * `webcheck`'s comment stripper eats a line from there on. A named binding is
+   * readable on both sides of that.
+   *
+   * Tested on the *drawn* strings rather than on a parsed field, because those
+   * strings are also what the two consent checks compare — so a line that says
+   * `http` here is a line that says `http` there.
+   *
+   * ⚠ **Only the `system ` lines, because a harness line carries an argv and an
+   * argv is arbitrary.** `{"command": "acme", "args": ["--base",
+   * "http://127.0.0.1:8080"]}` is a perfectly ordinary thing for a CLI to be
+   * handed, and over all the lines this drew *"one provider is reached over
+   * http"* on a card with no provider on it at all.
+   */
+  const inTheClear = manifest.adds.some((one) => one.startsWith("system ") && one.includes(" http://"));
   /*
    * ⚠ **`net` was missing from this and the card contradicted itself.** It tested
    * `scopes` and `hooks` only, while the row above it — *It reaches
@@ -179,6 +226,24 @@ export function PluginConsent({
       <p className={names ? "mt-2 text-xs text-fg" : "text-xs text-fg"}>
         A plugin runs on this machine as you, with your files. This is what it declared, not a limit on it.
       </p>
+      {/*
+       * ⚠ **One extra sentence, and only where it is about this plugin.** Every
+       * other line on this card is drawn for every plugin; this one is drawn when a
+       * provider's address is `http`, which the daemon permits only to this machine
+       * or this network. It is the one thing in the list a person cannot read off
+       * the address unless they already know what `http` means for a pasted key,
+       * and it is the difference between a self-hosted model and a key on the wire.
+       *
+       * Tested on the *drawn* strings rather than on a parsed field, because those
+       * strings are the whole of what this component has and are also what the two
+       * consent checks compare — so a line that says `http` here is a line that
+       * says `http` there.
+       */}
+      {inTheClear && (
+        <p className={names ? "mt-1 text-xs text-fg" : "mt-1 text-xs text-fg"}>
+          One provider is reached over http, so a key you save for it is sent unencrypted across that network.
+        </p>
+      )}
       {/*
        * ⚠ **`defaultOpen` on all three paths: the fold is kept so the list can be
        * put *away*, never so it starts out of sight.** {@link Disclosure} seeds its

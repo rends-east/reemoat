@@ -254,13 +254,16 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
                the machine screen links to it. */
             route.agents ? (
               <MachineAgentsSection state={state} machineId={route.machineId} />
-            ) : route.system === null ? (
+            ) : route.system === null && route.signin === null ? (
               <MachineSection state={state} machineId={route.machineId} />
             ) : (
+              /* Both leaves of the Sign-ins list, and the parser guarantees at most
+                 one of them is set — see `SettingsRoute.signin`. */
               <MachineSystemsSection
                 state={state}
                 machineId={route.machineId}
                 system={route.system}
+                signin={route.signin}
               />
             )
           ) : (

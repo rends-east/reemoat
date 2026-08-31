@@ -157,6 +157,21 @@ export interface AgentConfigOption {
   value: string | boolean;
   /** Empty for a boolean. */
   choices: AgentConfigChoice[];
+  /**
+   * Whether `choices` is a head rather than the whole list.
+   *
+   * ⚠ **Set only on the snapshot that rides `GET /sessions`**, never on the
+   * `agent_config` event, which carries what the agent actually said. The list
+   * route returns sixty of these on a four-second poll to a phone, and opencode
+   * publishes 362 models in one control — see `MAX_SNAPSHOT_CHOICES` in
+   * `registry.ts`. The selected choice is always present regardless.
+   *
+   * Optional so that every producer that is *not* the snapshot keeps its shape and
+   * an older client reading `undefined` reads it as "the whole list", which is what
+   * it was before this field existed and is still true of every agent this
+   * repository ships. A client wanting the rest reads `GET /sessions/:id`.
+   */
+  truncated?: boolean;
 }
 
 export interface AgentModes {

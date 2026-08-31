@@ -25,7 +25,114 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A pasted key no longer expires on its own, and a machine left alone over a
+  holiday comes back signed in.** There was a sweep in `prune()` that deleted a
+  saved agent credential once it was older than the session horizon *and* no
+  sessions were left. Both halves had to be true, which read like a narrow rule and
+  was not: `updated_at` moves only when a key is **pasted** — nothing touches it on
+  read — so the age half was permanently true of every key in real use, and what
+  was actually left binding was "no sessions left", which unpinned sessions reach
+  after seven days. Eight idle days and a restart, and the paste was gone, with
+  nothing on any screen connecting the two. It is removed: a key in
+  `agent_credentials` or `system_credentials` now goes when you clear it, when a
+  paste replaces it, or when you uninstall the plugin that added the harness or
+  provider it belongs to — and at no other time.
+
+  ⚠ **A daemon that ran an earlier build may already have deleted keys this way,
+  and there is nothing to restore** — the sweep was a plain `DELETE`. If a machine
+  that has been quiet for over a week now reports an agent as signed out, that is
+  this bug rather than anything at the vendor: paste the key again under Settings →
+  Machines → this machine, and it will stay. Deleting a local copy never revoked
+  anything at the vendor, which is the largest reason the sweep was not worth its
+  cost. `docs/DECISIONS.md` Q7.124 carries the whole argument.
+
+- **A harness that will not start stops being offered, and stops costing a
+  worktree.** Reported with a screenshot: New session drew a tile for an agent a
+  plugin had added, Start answered *"rejected session/new: authentication
+  required"*, and the tile was still there for the next press — and the one after
+  that. The daemon remembers a refused start now, so the tile goes, the model
+  picker greys the row, and a second press is refused before a worktree, a branch
+  and a session row are made for it. It is remembered for ten minutes rather than
+  written down: an agent's refusal is an observation, and this project has once
+  already turned one into a standing verdict and stranded conversations under it.
+  A successful start forgets it, so does pasting a key, so does finishing a sign-in
+  in the app, so does switching the plugin off and on — and where none of those
+  happened there is **Check again**, on the machine's agent list and on the agent's
+  own card, for after you have signed in on the machine itself.
+  `pnpm client agents recheck <agent>` is the same thing from a terminal.
+
+- **A settings card called an agent a plugin added by its identifier.** Every
+  sentence on that card named the harness with this product's own table, which
+  answers the bare id for anything it does not ship — so the card read *"byo:gemini
+  needs no sign-in"*. It uses the manifest's name now, bounded, exactly as the
+  tiles and the refusal sentences already did.
+
+- **A resumed session no longer reports a demotion that did not happen.** An agent
+  that comes back on the model it was started with, and has since stopped *listing*
+  that model, drew an error row contradicting itself in one sentence — *"has no
+  model called X … resumed anyway, running X"* — because the pin asked whether the
+  model was **offered** rather than whether the session was **on** it. Worse, the
+  same refusal made `POST /sessions` answer a permanent `502` for a preset whose
+  model the agent was running. Both gone: the pin answers "already there" before it
+  reads the list.
+
+### Changed
+
+- **Settings → Machines → *Systems* is now *Sign-ins*, and it holds both halves.**
+  Signing in on a machine was never only about inference: a harness can read a key
+  of its own, and until now the only place that key could be typed was a
+  *provider's* card — reached when that provider named the harness. Every harness
+  this product ships is named that way, so all four had one; a harness a plugin
+  added had one only if that plugin also contributed a provider naming it, and
+  nothing required that. A key box could be declared in a manifest and drawn on no
+  screen at all. Such a harness has a row of its own now, after the providers,
+  saying whether a key is saved. Nothing changes on a machine with no plugins —
+  adding every harness would have put Claude Code beside Anthropic, which is two
+  rows for one account.
+
 ### Added
+
+- **A plugin can add a harness, or a provider.** Two declarative blocks in
+  `plugin.json` — `contributes.harnesses` and `contributes.systems` — put an ACP
+  program and an inference endpoint on a machine, and both then behave as though
+  this product had shipped them: the harness is in the agent builder's harness row
+  and in Settings → Machines with a paste box, and the provider is a heading in the
+  model picker and a key box beside the built-in ones. The two are assembled into a
+  named agent exactly as Claude Code on OpenRouter is, and **that** is what gets a
+  tile on New session — a plugin adds a harness, never an agent, because whether a
+  harness is a whole answer on its own is a claim about the *model* that nothing on
+  the machine can check. No plugin code runs for either and nothing is fetched at
+  runtime; the daemon reads the manifest and answers its own routes with it.
+
+  A machine that has just been told about a harness asks it whether it starts,
+  rather than leaving that to whoever presses Start first: installing, updating or
+  switching a plugin on runs the same capability read the agent builder does, so
+  the answer is on screen before anybody taps anything.
+
+  Both need plugin API 5, and a daemon that speaks less refuses the block rather
+  than ignoring it — a plugin whose whole reason to exist is a harness has no useful
+  degraded form, so its owner is told to update the machine instead of installing
+  something inert. Two new scopes say what is at stake, and the consent screen also
+  draws the **command line** and the **whole base URL**, because a line in a list is
+  where somebody learns a capability exists and not where they can judge one. What
+  is drawn is exactly what the daemon compares, so a commit asking for more than was
+  shown is refused before the plugin runs — including from a browser too old to have
+  drawn the rows at all.
+
+  A provider's endpoint may be `https` anywhere, or `http` to this machine or this
+  network, which is what makes Ollama, vLLM and LM Studio reachable; where it is
+  `http` the consent screen says the key travels in the clear.
+  `rends-east/reemoat-plugin-byo` is a working example — Gemini CLI as the agent,
+  DeepSeek as the provider, both measured — and it holds no scope that gates a
+  method, so its consent card shows the two things it adds and nothing else. A
+  contributed harness
+  has no sign-in wizard and will not get one — everything a wizard needs is a
+  measurement about somebody else's CLI — so it is opencode's shape: a paste box and
+  nothing else. Uninstalling a plugin now takes its saved keys with it, out of both
+  credential tables; switching one off keeps every session, preset and position it
+  had, and putting it back brings them all back.
 
 - **The agent row on New session is yours to arrange.** The gear at the end of it
   opens a per-machine **Agents** screen — reachable from the machine's own settings

@@ -20,7 +20,7 @@ import { customAgentSubline, harnessSubline, offersStripTile, startableHere } fr
 import { defaultRow, orderStrip, stripKey } from "../agentStrip";
 import { AgentGlyph } from "./AgentIcons";
 import { ImportCode } from "./ImportCode";
-import { agentLabel } from "./agentCard";
+import { harnessName, startsBare } from "./agentCard";
 import { AgentDetail } from "./settings/AgentsPanel";
 import {
   Button,
@@ -1741,7 +1741,7 @@ function AgentStrip({
                     disabled: !candidate.available,
                     onClick: () => onChange({ kind: "harness", id: candidate.id }),
                     glyph: <AgentGlyph agent={candidate.id} size={18} />,
-                    title: agentLabel(candidate.id),
+                    title: harnessName(candidate),
                     /* ⚠ **The vendor, where this was a status and then was empty.**
                        It carried `agentCard`'s badge and printed `signed in` on every
                        tile — `shownHere` draws a tile only for an agent something can
@@ -1772,7 +1772,7 @@ function AgentStrip({
                        because of it. The vendor names that can appear here —
                        Anthropic, OpenAI, Moonshot — are all under 5em at
                        `--text-2xs`. */
-                    subline: harnessSubline(candidate.id, systems),
+                    subline: harnessSubline(candidate.id, systems, candidate.contributedBy),
                   });
                 }
                 const one = presets.find((preset) => preset.id === row.id);
@@ -1789,6 +1789,10 @@ function AgentStrip({
                  */
                 const runs = agents.find((candidate) => candidate.id === one.harness) ?? null;
                 const missing = runs === null || !runs.available;
+                // The harness's own name, from the listing where there is one — a
+                // preset whose harness came from a plugin has a namespaced id, and
+                // `harnessName` is where the label lives.
+                const ranBy = harnessName(runs ?? { id: one.harness });
                 const where = customAgentSubline(one, systems);
                 return tile({
                   key: stripKey("custom", one.id),
@@ -1801,7 +1805,7 @@ function AgentStrip({
                   // tiles' status line follows: a tile that cannot be pressed says why
                   // on the one line it has, rather than describing a pairing nothing
                   // can run.
-                  subline: missing ? `${agentLabel(one.harness)} not installed` : where,
+                  subline: missing ? `${ranBy} not installed` : where,
                   /*
                    * ⚠ **All three facts, because one of them is a glyph and
                    * `AgentGlyph` draws its svg `aria-hidden`.** Read out, this tile
@@ -1811,8 +1815,8 @@ function AgentStrip({
                    * still lands on it.
                    */
                   label: missing
-                    ? `${one.name}, ${agentLabel(one.harness)} not installed`
-                    : `${one.name}, ${agentLabel(one.harness)}, ${where}`,
+                    ? `${one.name}, ${ranBy} not installed`
+                    : `${one.name}, ${ranBy}, ${where}`,
                   /*
                    * ⚠ **The tooltip is kept, and it is the name and nothing else.**
                    * `AgentBuilder`'s `Supports` docblock measured what `title` is
@@ -1967,8 +1971,41 @@ function AgentStrip({
               harness on it is a CLI installed there — so this is a machine to go
               and look at rather than a screen to fix.
             </>
-          ) : (
+          ) : harness !== null && signInOffered(harness) ? (
             "No agent on this machine is ready to start."
+          ) : (
+            /*
+             * ⚠ **The same state, with the door taken away — and the sentence has
+             * to carry it.** The arm above is bare because the sign-in block below
+             * is drawn in exactly that state and names the agent and the remedy.
+             * That block hangs off `signInOffered`, which answers `false` for every
+             * harness with no wizard — and those are precisely the harnesses that
+             * can be hidden by `start_refused`, since a harness that refused and
+             * *has* a wizard is `signed_out`-shaped and reaches the arm above. So
+             * on a machine whose only harness a plugin added, this used to be one
+             * sentence with nothing under it and nowhere to go.
+             *
+             * The gear, for the hidden arm's reason: it is at the end of the row
+             * directly above, and the list behind it keeps the row this screen has
+             * stopped drawing, with the badge saying what happened and the control
+             * that asks again.
+             */
+            <>
+              {"No agent on this machine is ready to start."}{" "}
+              {/*
+               * ⚠ **And the gear is only worth naming for what it will actually
+               * show.** That screen lists harnesses `startsBare` answers true for
+               * and nothing else — opencode, and any a plugin added without
+               * one a plugin added, have no row there at all — so on a machine holding
+               * only those, "lists them all" pointed at a screen that would draw
+               * *This machine reports no agents*: two screens answering one
+               * question, one of them wrong. The bar at its foot is drawn either
+               * way, which is what the second arm names instead.
+               */}
+              {agents.some(startsBare)
+                ? "The gear above lists them all, with what each one said."
+                : "The gear above is where to add one."}
+            </>
           )}
         </Empty>
       )}
@@ -2056,7 +2093,7 @@ function AgentStrip({
             className="tap press -my-2 inline-flex min-h-11 items-center gap-1 rounded-sm px-2 text-xs text-muted hover:bg-raised hover:text-fg"
           >
             <Icon as={LogIn} size={12} />
-            {signingIn === harness.id ? "Hide sign-in" : `Sign in to ${agentLabel(harness.id)}`}
+            {signingIn === harness.id ? "Hide sign-in" : `Sign in to ${harnessName(harness)}`}
           </button>
           {/* `bg-raised/50` — the quiet grade, the one a tool card uses. This is
               a container for the wizard rather than a value to read. */}

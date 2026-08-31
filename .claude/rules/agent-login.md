@@ -175,6 +175,88 @@ a card mounted for a **system** (`keyEnv`) draws that system's key and nothing
 else: opencode reads two variables, so the screen headed `OpenRouter` was offering
 a box for somebody's OpenCode Zen account. Q3.513.
 
+## A harness that would not start
+
+**Signing in is one question and *would this open a session* is another, and for
+four agents they were close enough to be the same one.** `readLoginState` answers
+`pasted ? true : null` for every harness with no status command — opencode, and
+every harness a plugin adds — so `loggedIn` is permanently "cannot tell", and
+`agentStance` reads that as `no_login`. A tile was drawn for a harness that had
+just refused, and each press cost a worktree, a branch and a session row, because
+the refusal comes **after** the spawn. Reported with a screenshot. Q2.221.
+
+**`AgentAvailability.lastStartRefusal` is its own field and may never become
+`loggedIn: false`.** That is not fastidiousness: `AgentAskRuns.admit` refuses on
+`loggedIn === false`, and `admit` guards `claim` — the one thing that ever spawns
+such a harness again. `GET /agents/capabilities` performs a real `session/new` and
+caches only successes, so it is the only live re-measurement a harness with no
+probe gets. Writing the refusal onto `loggedIn` would block the spawn that would
+have discovered the harness was fixed. The narrower argument holds too: ACP's
+`auth_required` comes from the *adapter*, and Q7.65 is the measured disagreement —
+a `CODEX_API_KEY` the model's API accepted while `codex-acp` went on refusing.
+
+**Two writers, and the third is refused on purpose.** `Session.start` and
+`Session.openResumed`, both on `isAuthRequired` — the **typed** JSON-RPC code, not
+a message match. Not the event pump's `errorKind: "authentication_failed"`: Q7.99
+measured that against a token with 1.4 hours left on it, so `onAgentUnusable`
+replaces the process and carries a comment saying why it writes nothing here.
+
+**`routed` stops one refusal condemning a pairing it never tested.** `applySystem`
+returns whether it actually routed — a native pairing configures nothing, the agent
+already reaching its vendor on its own credential. Routed-and-refused has survived
+`providers/set` and condemns every way of starting the harness; refused **bare**
+says nothing about a start on somebody else's key, which is the signed-out Claude
+Code on OpenRouter this repository documents as working. `registry.create` fences
+on `refusal.routed || customAgent == null`, before `createWorkspace`.
+
+**It expires, and the expiry is what makes the clearings not have to be
+exhaustive.** `START_REFUSAL_TTL_MS` is `MODELS_TTL_MS`'s number and its argument —
+the same fact re-measured by the same spawn — and emphatically not
+`LOGIN_PROBE_TTL_MS`, which fronts a question this daemon may ask at will. In
+memory, never persisted: Q7.99 is this fact written down and believed afterwards.
+Somebody who signs in by running the CLI on the machine tells this process nothing,
+so the record has to stop being believed by itself. The early clears: a successful
+start, `PUT /agent-auth/:agent`, a login run reaching `done`, a plugin lifecycle
+event, and `POST /agent-auth/:agent/recheck`.
+
+⚠ **Two of the five `forgetAvailability` sites clear it and three must not**, and
+`daemoncheck` asserts that **per handler** rather than by counting the file — a
+count stayed green while the call was moved from the `PUT` into the *logout*
+handler, which is the exact inversion. The two are a credential arriving: pasted,
+or a wizard that ran to the end. The three are a credential going *away* — a key
+deleted, a sign-out, a login abandoned — and the first would erase the record of
+the refusal the deleted key was pasted against. The login-run arm was missing for a
+draft and the cost is worth keeping: `start_refused` outranks `signed_in`, so
+somebody who signed in **inside the app** kept the badge, kept no tile, and lost
+the sign-in door itself, since `signInOffered` wants `loggedIn === false`.
+
+**`AgentStance` gained a sixth member rather than a reordered ladder**, below
+`not_installed` and above `no_flow`. Moving `loggedIn === false` up instead makes
+three sentences false and `webcheck` drives none of them: `stanceLine` would blame
+the *host* for an absence present on every platform and foreclose the terminal
+remedy the hint offers first, `dividerWord` would draw "Sign in with a key instead"
+with nothing above it (Q3.513 again), and `storedChip` would report a probe that
+never ran. The badge is **"would not start"** — what was observed, diagnosing
+nothing, since these harnesses have no status to probe and a key is only one of the
+two remedies. `tokenBlockFor` stays `editable`, where here the box is the strongest
+thing on the card. ⚠ **`offersTile` had to become an exhaustive `switch` first**:
+as a pair of `!==` tests it answered a silent `true` for a member it had not heard
+of, which is the `AgentGlyph` lesson one file over. Q3.537.
+
+⚠ **Every sentence here takes the listing row, not the id.** `agentLabel` answers
+the bare id for anything this product does not ship, so this card has been drawing
+`byo:gemini needs no sign-in.` since contributed harnesses landed. `stanceLine` and
+`storedChip` and `multiSlotLine` go through `harnessName` — the repair `hostable`
+and `choiceRefusal` already took. The jargon sweep still iterates `AGENT_IDS` only,
+so a contributed name reaches it pointwise rather than by sweep.
+
+⚠ **And the card carries the control, not only the sentence.** `AgentDetail` draws
+**Check again** for this stance, because the machine's agent list — where the other
+copy lives — excludes every harness `startsBare` is false for, which is opencode
+and every one a plugin added. Those are precisely the harnesses that
+live on presets, whose refusals are the routed ones, and they had a card saying
+*would not start* with nothing beside it.
+
 ## Layout
 
 | File | Holds |

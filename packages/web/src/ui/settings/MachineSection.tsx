@@ -195,7 +195,7 @@ export function MachineSection({
        * and not the machine.
        */}
       <p className="text-xs text-muted">
-        Systems, agents and plugins belong to <code className="text-muted/80">{machine.id}</code> —
+        Sign-ins, agents and plugins belong to <code className="text-muted/80">{machine.id}</code> —
         they live in that daemon's database and on that host's home, and a plugin runs there as you.
         Nothing here is shared with your other machines.
       </p>
@@ -277,8 +277,24 @@ export function MachineSection({
               also a whole screen one level down, where there is nothing above it to
               have said anything. */}
           <section className={SETTINGS_SECTION}>
-            <h2 className={SETTINGS_HEADING}>Systems</h2>
-            <MachineSystemsSection state={state} machineId={machineId} system={null} lede={false} />
+            {/*
+             * ⚠ **"Sign-ins", and the word is the point rather than a tidy.** These
+             * rows were providers — who serves a model, and whose key you paste —
+             * and the list now also holds a harness that reads a key of its own,
+             * because signing in on this machine is not only about inference. What
+             * a reader is looking at either way is a thing they have or have not
+             * given a credential to; naming the list after the half that came first
+             * left the other half homeless, which is exactly how a key box could be
+             * declared in a manifest and drawn on no screen at all.
+             */}
+            <h2 className={SETTINGS_HEADING}>Sign-ins</h2>
+            <MachineSystemsSection
+              state={state}
+              machineId={machineId}
+              system={null}
+              signin={null}
+              lede={false}
+            />
           </section>
 
           {/*

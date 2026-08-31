@@ -2,13 +2,14 @@ import { chmodSync, mkdirSync, readFileSync } from "node:fs";
 import { uptime } from "node:os";
 import { dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
-import { isAgentId } from "../acp/agents.js";
+import { isBuiltinAgentId } from "../acp/agents.js";
 import {
-  isSystemId,
+  isBuiltinSystemId,
   type AgentStripEntry,
   type CustomAgent,
   type SystemId,
 } from "../acp/systems.js";
+import { isContributedId } from "../plugins/manifest.js";
 import type { UploadIndex, UploadRow } from "../uploads.js";
 import {
   DEFAULT_MAX_BYTES,
@@ -1587,9 +1588,20 @@ function fromRow(row: Record<string, unknown>): PersistedSession | null {
      * here for a row with no workspace: there is no honest substitute for an
      * agent, and guessing one would resume somebody's conversation under a
      * different model.
+     *
+     * ⚠ **Shape, not membership, and the two are not interchangeable here.** A
+     * harness a plugin added passes {@link isContributedId} whether or not that
+     * plugin is currently installed, switched on, or even readable — because this
+     * runs at boot, before anything is on screen, and a membership test would
+     * delete every session on a harness whose plugin somebody switched off an hour
+     * ago. What refuses such a session is `resolveAgent`, at launch, with a
+     * sentence naming the plugin; the conversation is still there when it comes
+     * back. The original rule is untouched for the four this repository ships: a
+     * built-in that is renamed or removed still drops, which is the case Q7.31
+     * named and the only one where there is nothing to come back to.
      */
     const agent = String(row["agent"]);
-    if (!isAgentId(agent)) return null;
+    if (!isBuiltinAgentId(agent) && !isContributedId(agent)) return null;
     const exitJson = row["exit_json"];
     return {
       id: String(row["id"]),
@@ -1741,14 +1753,21 @@ export class SqliteSystemCredentialStore {
     // become a well-typed value naming one this build cannot resolve.
     return this.listStmt.all().flatMap((row) => {
       const system = String(row["system"]);
-      if (isSystemId(system)) return [{ system, updatedAt: Number(row["updated_at"] ?? 0) }];
+      // Shape rather than membership, for the reason `readCustomAgent` gives:
+      // a key saved for a provider whose plugin is switched off is still that
+      // person's key, and dropping it from the listing would make the one control
+      // that can delete it disappear at the moment it matters most.
+      if (isBuiltinSystemId(system) || isContributedId(system)) {
+        return [{ system, updatedAt: Number(row["updated_at"] ?? 0) }];
+      }
       /*
        * Reported rather than merely dropped, for `SqliteSessionStore.list`'s
        * reason: "the key disappears from a list" is visible only to somebody who
        * remembers saving it, and this row is a plaintext secret. `DELETE
        * /systems/:system` can still remove it — it removes before it validates,
-       * exactly so this state is not a strand — and `prune()` sweeps it on the
-       * ordinary retention rule. The line is what tells an operator it is there.
+       * exactly so this state is not a strand — and since Q7.124 that route is the
+       * *only* thing that will: `prune()` names neither credential table, so
+       * nothing ages this row out. The line is what tells an operator it is there.
        */
       this.onDegraded?.(
         `a key is stored for system ${JSON.stringify(system)}, which this build ` +
@@ -1848,10 +1867,25 @@ export class SqliteCustomAgentStore {
   }
 }
 
+/**
+ * A preset, or `null` for a row this build cannot honestly resolve.
+ *
+ * ⚠ **Shape rather than membership, for `fromRow`'s reason and one of its own.**
+ * This runs inside `restore()`, through `ManagedSession.assembled`, on every boot
+ * — so a membership test would mean that installing a plugin and restarting the
+ * daemon in the wrong order silently un-assembles every preset built on it, and
+ * every session on those presets would come back demoted to the bare harness its
+ * `agent` column names. What refuses an unrunnable pairing is the launch, which
+ * has the live catalogue and answers a sentence.
+ *
+ * The refusal that stays is the one Q7.31 asked for: a row naming something with
+ * no possible id at all is dropped rather than cast.
+ */
 function readCustomAgent(row: Record<string, unknown>): CustomAgent | null {
   const harness = String(row["harness"]);
   const system = String(row["system"]);
-  if (!isAgentId(harness) || !isSystemId(system)) return null;
+  if (!isBuiltinAgentId(harness) && !isContributedId(harness)) return null;
+  if (!isBuiltinSystemId(system) && !isContributedId(system)) return null;
   return {
     id: String(row["id"]),
     name: String(row["name"]),

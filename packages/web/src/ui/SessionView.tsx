@@ -16,7 +16,14 @@ import { displayCwd, downloadablePath, relativeTo } from "../paths";
 import { navigate } from "../router";
 import { settingsPath } from "../settings";
 import { elapsedSince, store, type AppState, type SessionRow } from "../store";
-import { humanRequests, mayStillReport, showsWorking, waitingCount, type SessionSnapshot } from "../wire";
+import {
+  humanRequests,
+  isBuiltinAgentId,
+  mayStillReport,
+  showsWorking,
+  waitingCount,
+  type SessionSnapshot,
+} from "../wire";
 import { agentLabel } from "./agentCard";
 import { Composer } from "./Composer";
 import { EventList } from "./EventList";
@@ -551,7 +558,22 @@ function ExitNotice({ row, machineName }: { row: SessionRow; machineName: string
           onClick={() => navigate(settingsPath("machines", row.ref.machineId))}
           className="tap rounded border border-edge px-2 py-0.5 text-2xs text-fg hover:bg-raised"
         >
-          Sign in to {agentLabel(row.snapshot.agent)}
+          {/*
+            * ⚠ **The name only where this screen can honestly have one.**
+            * `agentLabel` answers for the four this product ships and falls through
+            * to the raw id for anything else — so a session on a harness a plugin
+            * added would read *"Sign in to acme:gemini"*, which is wrong twice: the
+            * id where a name goes, and a sign-in a contributed harness does not
+            * have. This screen holds a snapshot and no listing, and fetching one to
+            * build a label would be a request on the transcript path.
+            *
+            * So it goes one step shallower, which is the same refusal the docblock
+            * above makes about mapping a harness to its system: the destination is
+            * unchanged and the sentence stops claiming something it cannot check.
+            */}
+          {isBuiltinAgentId(row.snapshot.agent)
+            ? `Sign in to ${agentLabel(row.snapshot.agent)}`
+            : "Open agent settings"}
         </button>
       )}
     </p>

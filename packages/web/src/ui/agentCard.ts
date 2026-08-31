@@ -12,8 +12,10 @@
  * reads no `.tsx` file in this package.
  */
 
+import { isBuiltinAgentId } from "../wire";
+
 /**
- * Five states, and the fifth is the only one that is good news.
+ * Six states, and only one of them is good news.
  *
  * ⚠ **`no_login` is not "signed out" and not "cannot check".** It is an agent
  * that needs no sign-in at all: opencode reaches its own gateway anonymously —
@@ -21,8 +23,30 @@
  * no provider variables — so nothing here is missing and nothing needs doing. It
  * outranks the credential axis entirely, because a stored key changes what such
  * an agent can *reach* and never whether it runs.
+ *
+ * ⚠ **`start_refused` is not "signed out" either, and it is the only member here
+ * that is a *measurement* rather than a reading of two flags.** The daemon tried
+ * to open a session and the agent declined with ACP's `auth_required`. That is
+ * why it sits above `no_login`: an agent with nothing to sign in to still has
+ * something to report once it has refused, and "needs no sign-in" drawn over a
+ * harness that just would not start is the sentence this member exists to stop.
+ * It is *below* `not_installed`, because a harness that is not there cannot have
+ * refused anything and the older fact is the more useful one.
+ *
+ * ⚠ **And it is not `signed_out`, though it draws a similar badge.** A harness
+ * with no status probe can never be known signed out — see
+ * `AgentInfo.lastStartRefusal` — so collapsing the two would put this app's
+ * "not signed in" over a state it has no evidence for, and `stanceLine`'s
+ * signed-out arm would then blame the host's missing `script` for something that
+ * has nothing to do with the host.
  */
-export type AgentStance = "not_installed" | "no_login" | "signed_in" | "signed_out" | "unchecked";
+export type AgentStance =
+  | "not_installed"
+  | "start_refused"
+  | "no_login"
+  | "signed_in"
+  | "signed_out"
+  | "unchecked";
 
 /**
  * Whether a harness is a complete answer on its own, with no model chosen.
@@ -56,8 +80,31 @@ export type AgentStance = "not_installed" | "no_login" | "signed_in" | "signed_o
  * would be a control you have to tap to learn is not one, and the control that
  * *does* answer it — the `+` — is two tiles away in the same row.
  */
-export function startsBare(agent: string): boolean {
-  return agent !== "opencode";
+export function startsBare(agent: { id: string }): boolean {
+  /*
+   * ⚠ **Two arms, and the contributed one is a flat `false`.** For the four this
+   * product ships the answer is a literal and stays one: this is the list
+   * `webcheck` sweeps to assert that exactly one of them is not a starting point,
+   * and deriving it from the wire would make that assertion a statement about
+   * whatever the daemon happened to say.
+   *
+   * ⚠ **For a harness a plugin added it was `standalone === true` off the manifest,
+   * and that field is gone — a plugin adds a harness, never an agent.** Spelling
+   * the default as "no tile" made the wrong answer rarer without making it
+   * unsayable: an author writes `true`, and the claim it makes is the one thing in
+   * that manifest nothing here can check. This function's subject is the **model**,
+   * and a harness this product has never run cannot be known to be its own; the
+   * cost of guessing wrong is Q3.522's, with somebody else's binary — a session
+   * billed to the operator, on a model no tile names, and unlike opencode a client
+   * cannot even find out afterwards what it ran.
+   *
+   * It is not a demotion, which is the whole of what this file argues about
+   * opencode: the harness is offered everywhere a harness is named — the builder,
+   * `POST /sessions`, its own settings card — and what it needs first is a model.
+   * An agent built on it is something a person assembled and named, which is the
+   * only way an agent has ever been made here.
+   */
+  return isBuiltinAgentId(agent.id) ? agent.id !== "opencode" : false;
 }
 
 /**
@@ -72,8 +119,11 @@ export function startsBare(agent: string): boolean {
  * one state on that screen that needs no words — it is the state every tile in the
  * row is in now, and a fact true of everything visible identifies nothing.
  *
- * ⚠ **Two states out of five, and the three that stay are the point.**
- * `not_installed` and `signed_out` are the ones where "start a chat" is a lie.
+ * ⚠ **Three states out of six, and the three that stay are the point.**
+ * `not_installed`, `signed_out` and `start_refused` are the ones where "start a
+ * chat" is a lie — the third by measurement rather than by inference, which is
+ * what makes it the only one of the three that can be true of a harness whose
+ * `loggedIn` is permanently `null`.
  * `unchecked` stays, and that is the load-bearing arm: it is kimi's **permanent**
  * answer — `AGENT_LOGIN.kimi.status` is null, so `loggedIn` is never anything else
  * — and it is what claude or codex answers when a probe times out. Hiding on it
@@ -90,11 +140,26 @@ export function startsBare(agent: string): boolean {
  * start, rather than a row of agents with a status report under each.
  *
  * A predicate over the stance rather than over the listing, so `webcheck` sweeps
- * it across all five states and a sixth arrives as a decision rather than as a
+ * it across all six states and a seventh arrives as a decision rather than as a
  * silent `true`.
+ *
+ * ⚠ **A `switch` with a `never` arm, and it was a pair of `!==` tests.** That
+ * spelling answered `true` for anything it had not heard of — so the sixth member
+ * would have kept its tile, silently, which is the exact outcome the paragraph
+ * above claims cannot happen. It is `AgentGlyph`'s lesson in another file: a
+ * default that reads as safe is not the same thing as a default that was decided.
  */
 export function offersTile(stance: AgentStance): boolean {
-  return stance !== "not_installed" && stance !== "signed_out";
+  switch (stance) {
+    case "not_installed":
+    case "signed_out":
+    case "start_refused":
+      return false;
+    case "no_login":
+    case "signed_in":
+    case "unchecked":
+      return true;
+  }
 }
 export type TokenBlock = "hidden" | "stored_only" | "editable";
 
@@ -146,6 +211,84 @@ export function agentLabel(id: string): string {
 }
 
 /**
+ * How long a name somebody else wrote may be before it is cut.
+ *
+ * ⚠ **A bound rather than a filter, and the difference is the whole rule.**
+ * `noJargon` forbids *wire vocabulary in this app's own templates* — it is a
+ * predicate over the sentences here, never a content filter over the nouns
+ * substituted into them, which are and always were somebody else's prose. A
+ * provider legitimately called "Anthropic-Compatible Gateway" is truthful, and
+ * refusing it would be this app renaming somebody's product.
+ *
+ * What has to be bounded is the *shape*: these strings land in one-line
+ * `truncate`d sublines (`No <provider> key on this machine.`), in an `aria-label`
+ * built by joining with commas, and in headings on a phone. 32 is
+ * `MAX_CONTRIBUTED_NAME_CHARS` on the daemon, restated rather than imported —
+ * `packages/web` may not import from `src/` — and it is a ceiling on what is
+ * *drawn* rather than a second validator: a daemon older or newer than this tab is
+ * the case this has to survive.
+ */
+export const MAX_HARNESS_NAME_CHARS = 32;
+
+/**
+ * A name a plugin wrote, made safe to put in a sentence.
+ *
+ * Trimmed, whitespace collapsed, C0/C1 and bidi controls removed, then cut. The
+ * control characters are the half that is not about width: a newline makes one
+ * line into two inside a row that reserved one, and an override reorders the
+ * sentence around it — including sentences this app wrote.
+ */
+export function boundedName(raw: string | undefined, fallback: string): string {
+  if (raw === undefined) return fallback;
+  const clean = raw.replace(INVISIBLE, " ").replace(/\s+/g, " ").trim();
+  if (clean.length === 0) return fallback;
+  /*
+   * ⚠ **Cut by *character* and not by code unit.** `slice` counts UTF-16 units, so
+   * a name whose 32nd character is astral was cut through the middle of a surrogate
+   * pair and rendered as `U+FFFD` — a name ending in a replacement glyph, on a tile.
+   * `MonogramGlyph` one file over uses `Array.from` for exactly this reason and
+   * this did not.
+   */
+  const runes = Array.from(clean);
+  return runes.length > MAX_HARNESS_NAME_CHARS ? runes.slice(0, MAX_HARNESS_NAME_CHARS).join("") : clean;
+}
+
+/**
+ * Characters that are not a name.
+ *
+ * ⚠ **Two classes, and the second is the one a shorter list misses.** C0/C1 and
+ * the well-known bidi controls are the obvious half — a newline makes one line into
+ * two inside a row that reserved one, and an override reorders the sentence around
+ * it, including sentences this app wrote. The other half is *zero-width*:
+ * `U+061C` is a bidi control too and is not in the `U+202A–E` block anybody reaches
+ * for; `U+200B`, `U+2060`, `U+FEFF` and `U+00AD` are invisible and are **not**
+ * matched by JavaScript's `\s`, so a name of nothing but those survived `trim()`
+ * as a non-empty string and drew a blank, unsearchable row. Replaced with a space
+ * rather than deleted, so the collapse-and-trim below turns that case into the
+ * fallback instead of into nothing.
+ */
+const INVISIBLE =
+  /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
+
+/**
+ * What a screen calls this harness.
+ *
+ * ⚠ **Never the daemon's `displayName`, which is the trap this exists to close.**
+ * That field is a log line and carries the program: `Claude (claude-agent-acp)`,
+ * `Kimi Code CLI`. Two of the four built-ins would fail this file's own rule
+ * against a label naming a package or ending in `CLI`, and `webcheck` sweeps for
+ * exactly those words — so a client that reached for `displayName` when
+ * `AGENT_LABEL` had no row would have put the adapter's package name on a 96px
+ * tile the first time a harness arrived it did not know.
+ *
+ * The order is: this product's own table, then the manifest's `label` bounded,
+ * then the id. The last is unchanged and is what `webcheck` already pins.
+ */
+export function harnessName(agent: { id: string; label?: string }): string {
+  return AGENT_LABEL[agent.id] ?? boundedName(agent.label, agent.id);
+}
+
+/**
  * The two axes, read as one state. They are **not** independent and reading them
  * as one boolean is what produced the disabled button: `available` is the
  * adapter, `login.supported` is `script` plus the agent's own CLI — a different
@@ -164,8 +307,22 @@ export function agentStance(
    * `login` object at all, and its absence must read as "an ordinary agent".
    */
   blocked?: string | null,
+  /**
+   * Whether the daemon is still holding a refused start for this harness.
+   *
+   * ⚠ **Added rather than folded into `loggedIn`, and tested above `blocked`
+   * rather than below it.** It is the only input here that is a measurement — the
+   * daemon opened a session and the agent declined — so it outranks the two
+   * arms below, which describe an *absence*: no wizard, no readable status.
+   * Absent means nothing has been observed, which is what an older daemon says
+   * and what every one of this function's existing cells asserts.
+   */
+  refused?: boolean,
 ): AgentStance {
   if (!available) return "not_installed";
+  // Above the two arms below, because those describe an absence and this is
+  // something that happened. See the type's own note.
+  if (refused === true) return "start_refused";
   // Before the credential axis, deliberately. An agent with nothing to sign in to
   // is not "signed out" when it holds no key and not "cannot check" when its
   // status is unreadable — both of those describe a gap, and there is none.
@@ -209,6 +366,17 @@ export function agentBadge(stance: AgentStance): { tone: "plain" | "strong"; tex
       return { tone: "plain", text: "signed in" };
     case "signed_out":
       return { tone: "strong", text: "not signed in" };
+    /*
+     * ⚠ **"would not start", and never "not signed in".** This badge reports what
+     * was *observed* — the agent declined to open a session — and the app has no
+     * evidence about a credential: for every harness that can reach this state
+     * there is no status to probe, which is why `loggedIn` is `null` under it.
+     * "not signed in" would be this screen diagnosing, and the remedy it implies
+     * (paste a key) is only one of the two, the other being to run the CLI once on
+     * the machine itself. `stanceLine` has the room to say both; a badge does not.
+     */
+    case "start_refused":
+      return { tone: "strong", text: "would not start" };
     // "cannot check" and not "status unknown": for kimi this is the permanent,
     // correct answer — `AGENT_LOGIN.kimi.status` is null — and naming it a fault
     // would put a warning on every kimi in the fleet.
@@ -236,12 +404,27 @@ export function tokenBlockFor(stance: AgentStance, stored: number): TokenBlock {
   // `no_login` falls through to editable on purpose, and it is the one state where
   // the box is not a remedy: nothing is broken, and a key here buys *more models*
   // rather than admission. Hiding it would hide the only control this agent has.
+  //
+  // `start_refused` falls through too, and there it is the strongest remedy the
+  // screen has: the harnesses that can reach that state are the ones with no
+  // sign-in to run, so the box below is the only thing on this card that can
+  // change the answer. Weighed rather than inherited.
   return "editable";
 }
 
 /** At most one sentence, and empty in the two commonest states. */
 export function stanceLine(
-  id: string,
+  /**
+   * The row, not the id — and that is a correction rather than a widening.
+   *
+   * ⚠ **Every sentence below named the agent with `agentLabel`, which answers the
+   * bare id for anything this product does not ship.** So a harness a plugin added
+   * has been drawing `byo:gemini needs no sign-in.` on its settings card since
+   * contributed harnesses landed: a namespaced identifier in the subject position
+   * of a sentence written for somebody holding a phone. `harnessName` is where the
+   * two sources of a name meet, and it needs the `label` the daemon sends.
+   */
+  agent: { id: string; label?: string },
   stance: AgentStance,
   canSignIn: boolean,
   /**
@@ -255,7 +438,7 @@ export function stanceLine(
    */
   os?: string,
 ): string | null {
-  const name = agentLabel(id);
+  const name = harnessName(agent);
   const host = osName(os);
   /*
    * ⚠ **First, and it is the only sentence here that is not an apology.** Every
@@ -275,6 +458,25 @@ export function stanceLine(
   if (stance === "not_installed") {
     return `${name} isn't installed on this machine. Nothing on this screen can change that — it has to be installed on the machine itself.`;
   }
+  /*
+   * ⚠ **It blames the harness, and it must never blame the host.** The
+   * signed-out arm below names the platform, because there the fault genuinely is
+   * the host's — this OS will not give a background service a terminal. Here the
+   * agent was asked to open a session and said no, which is true on every
+   * platform, and `${host} can't run …` would send somebody to look at their own
+   * machine for a refusal that came from somewhere else.
+   *
+   * ⚠ **And it reports rather than diagnoses.** This app does not know *why* the
+   * agent refused — the harnesses that reach this state have no status to probe —
+   * so the sentence says what happened and names both remedies where there is no
+   * button for either. Where there is a wizard the button is directly below and
+   * naming it here would be the self-reference this file keeps deleting.
+   */
+  if (stance === "start_refused") {
+    return canSignIn
+      ? `${name} refused to start the last time this machine tried.`
+      : `${name} refused to start the last time this machine tried. Sign it in on the machine itself, or paste a key below.`;
+  }
   // Signed in, and signed out with a way in: the badge says it and the control
   // below does something about it. A sentence here can only be self-reference,
   // which is what the deleted paragraph's second clause was.
@@ -288,7 +490,7 @@ export function stanceLine(
   // accident. The load-bearing half of `cannotAskHint` is the same either way:
   // do not panic, sessions may still work.
   const why =
-    id === "kimi"
+    agent.id === "kimi"
       ? `${name} doesn't report whether it's signed in. That's normal.`
       : `This machine couldn't check whether ${name} is signed in.`;
   const cannotRun = canSignIn
@@ -364,8 +566,10 @@ export function credentialCaveat(id: string, canSignIn: boolean): string | null 
 }
 
 /** Claude is the only agent with two, and they are not interchangeable. */
-export function multiSlotLine(id: string, slots: number): string | null {
-  return slots > 1 ? `${agentLabel(id)} takes either one — you only need one of them.` : null;
+export function multiSlotLine(agent: { id: string; label?: string }, slots: number): string | null {
+  // The row, for `stanceLine`'s reason: this is the last sentence on the card that
+  // was still naming a contributed harness by its namespaced id.
+  return slots > 1 ? `${harnessName(agent)} takes either one — you only need one of them.` : null;
 }
 
 /**
@@ -376,10 +580,15 @@ export function multiSlotLine(id: string, slots: number): string | null {
  * a measured claim: `probe` merges the pasted secret into the child's
  * environment, so a clean `false` is the CLI having seen that key and refused it.
  */
-export function storedChip(id: string, stance: AgentStance): string {
-  const name = agentLabel(id);
+export function storedChip(agent: { id: string; label?: string }, stance: AgentStance): string {
+  const name = harnessName(agent);
   if (stance === "signed_out") return `saved — ${name} still isn't signed in`;
   if (stance === "not_installed") return `saved — ${name} isn't installed, so nothing is reading it`;
+  // The chip's whole job is to stop a green tick reading as "and it works". A key
+  // is stored, the agent has seen it — the spawn merges it — and it still would
+  // not start, which is the one arm where "saved" alone would be misleading in
+  // the direction that matters.
+  if (stance === "start_refused") return `saved — ${name} still wouldn't start`;
   // `unchecked` is unreachable with a key stored: every `null` arm of
   // `readLoginState` ends `return pasted ? true : null`. Kept so this is total.
   return "saved";
@@ -411,6 +620,16 @@ export function dividerWord(
    */
   if (stance === "no_login") return null;
   if (block === "stored_only") return "Saved keys";
+  /*
+   * ⚠ **And the same guard for the sixth state, which reaches this the same way.**
+   * A harness that refused to start is very often one with no wizard at all — that
+   * is the whole population `no_login` describes — so `signInAbove` is false and
+   * the line below would draw `Sign in with a key instead` with nothing above it
+   * for the key to be instead *of*. Written as its own arm rather than folded into
+   * the `no_login` test, because the two states differ where there **is** a
+   * wizard: then there is something above, and `or` is right.
+   */
+  if (stance === "start_refused" && !signInAbove) return null;
   return signInAbove ? "or" : "Sign in with a key instead";
 }
 

@@ -90,6 +90,24 @@ export interface SettingsRoute {
    * one tap from what that address used to open.
    */
   agents: boolean;
+  /**
+   * The **harness** whose credentials are being configured, if the URL names one.
+   * Never without a machine, never together with a system.
+   *
+   * ⚠ **A second leaf under one list, and the asymmetry is deliberate.** The
+   * Sign-ins list holds two kinds of row — a provider you have an account with,
+   * and a harness that reads a key of its own — and they cannot share a segment,
+   * because a plugin may name the same local id in both of its contribution
+   * blocks. `…/systems/:system` therefore keeps its meaning and every address
+   * that ever worked goes on working; this is where the second kind lives.
+   *
+   * ⚠ **Only a harness *no provider speaks for* is ever addressed here.** Every
+   * built-in is named by a system's `loginVia` — Anthropic signs in through
+   * claude, OpenRouter through opencode — and that system's own leaf is where its
+   * card is drawn. Two leaves for one credential is the "two copies and two
+   * answers to *signed in?*" this whole section was built to remove.
+   */
+  signin: string | null;
 }
 
 export interface SectionSpec {
@@ -238,7 +256,7 @@ export function parseSettingsRoute(
 ): SettingsRoute {
   const section = parseSettingsSection(segments[0]);
   if (section !== "machines" || segments[1] === undefined) {
-    return { section, machineId: null, system: null, agents: false };
+    return { section, machineId: null, system: null, signin: null, agents: false };
   }
   const machine = machineId(decode(segments[1]));
   /*
@@ -251,7 +269,23 @@ export function parseSettingsRoute(
    * segment claiming to be one is a stale link.
    */
   if (segments[2] === "agents") {
-    return { section, machineId: machine, system: null, agents: true };
+    return { section, machineId: machine, system: null, signin: null, agents: true };
+  }
+  /*
+   * The harness leaf, beside `systems/:system` rather than inside it — see
+   * `SettingsRoute.signin`. Bounded by the same number and dropped the same way: a
+   * segment longer than any real id is a stale link, and this parser never decides
+   * *which* ids exist.
+   */
+  if (segments[2] === "signin") {
+    const named = segments[3] === undefined ? "" : decode(segments[3]);
+    return {
+      section,
+      machineId: machine,
+      system: null,
+      signin: named.length > 0 && named.length <= MAX_SYSTEM_ID_CHARS ? named : null,
+      agents: false,
+    };
   }
   /*
    * ⚠ **`…/plugins` and `…/plugins/:pluginId` both fall to the machine**, which
@@ -267,13 +301,14 @@ export function parseSettingsRoute(
    * page.
    */
   if (segments[2] !== "systems" || segments[3] === undefined) {
-    return { section, machineId: machine, system: null, agents: false };
+    return { section, machineId: machine, system: null, signin: null, agents: false };
   }
   const wanted = decode(segments[3]);
   return {
     section,
     machineId: machine,
     system: wanted.length > 0 && wanted.length <= MAX_SYSTEM_ID_CHARS ? wanted : null,
+    signin: null,
     agents: false,
   };
 }
@@ -331,6 +366,19 @@ export function settingsPath(
  */
 export function agentStripPath(machine: MachineId): string {
   return `${settingsPath("machines", machine)}/agents`;
+}
+
+/**
+ * One harness's own sign-in, for a harness no provider speaks for.
+ *
+ * ⚠ **Its own function for `agentStripPath`'s reason** — `settingsPath`'s
+ * signature is positional and widening, and this is not a widening of `system`:
+ * the two are different id spaces that a plugin may populate with the same word.
+ * Machine required, for the same reason a strip's is: a credential lives in one
+ * daemon's database.
+ */
+export function harnessSigninPath(machine: MachineId, agent: string): string {
+  return `${settingsPath("machines", machine)}/signin/${encodeURIComponent(agent)}`;
 }
 
 /**
@@ -404,7 +452,16 @@ export function settingsUp(
      * builder is the one screen that reads `origin` for its ◀, because there the
      * label and the destination are one control naming where it goes.
      */
-    if (route.system !== null || route.agents) {
+    /*
+     * ⚠ **All three leaves under a machine, and `signin` was the one that got
+     * missed.** It has a shape, a parse, a path builder and a title arm, and
+     * `MachineSystemsSection` navigates to it — but it was absent here, so its ◀
+     * walked past the machine it was opened from, to the machines *list*, under a
+     * label reading "Back to Machines" beside a pane this file titles "Sign-in".
+     * That is the exact defect the paragraph above records closing for `system`,
+     * reintroduced one leaf over by an `if` that enumerates rather than derives.
+     */
+    if (route.system !== null || route.signin !== null || route.agents) {
       return { path: settingsPath("machines", route.machineId), withinNav: false };
     }
     return { path: settingsPath("machines"), withinNav: false };
@@ -475,7 +532,13 @@ export function settingsPaneTitle(route: SettingsRoute): string | null {
    * shared with its own parent cost.
    */
   if (route.section === "machines" && route.machineId !== null && route.system !== null) {
-    return "System settings";
+    return "Sign-in";
+  }
+  // The other kind of row in the same list, and it says the same word: what the
+  // reader opened is a sign-in either way, and the two leaves differ only in which
+  // of the machine's two catalogues resolved the name.
+  if (route.section === "machines" && route.machineId !== null && route.signin !== null) {
+    return "Sign-in";
   }
   if (route.section === "machines" && route.machineId !== null) {
     /*

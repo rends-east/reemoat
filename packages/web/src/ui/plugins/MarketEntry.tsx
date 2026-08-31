@@ -206,7 +206,7 @@ function Entry({
   const install: InstallAct = async (daemon, machineId, _onProgress, signal): Promise<TargetOutcome> => {
     const answer = await daemon.installPluginFromSource(
       { kind: "github", repo: entry.source.repo, commit: entry.source.commit },
-      { scopes: shown.scopes, net: shown.net, hooks: shown.hooks },
+      { scopes: shown.scopes, net: shown.net, hooks: shown.hooks, adds: shown.adds },
       signal,
     );
     /*
