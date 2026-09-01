@@ -57,7 +57,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 827 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 838 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -177,6 +177,12 @@ pnpm docscheck                       # the documentation, held to what it claims
 pnpm imagecheck                      # the control plane's image, and both services it runs.
                                      #   NOT offline: needs docker + network
 pnpm daemon                          # needs REEMOAT_TOKEN; see .env.example
+curl -fsSL 'https://<control-plane>/install.sh' | sh   # a machine, from nothing to enrolled.
+                                     #   `deploy/bootstrap.sh` served by `GET /install.sh` with the
+                                     #   requesting origin quoted in — so an instance hands out an
+                                     #   installer that joins *it*, and a checkout copy refuses rather
+                                     #   than picking one. Hands off to `install.sh daemon
+                                     #   --non-interactive` once the env file exists
 pnpm harness --agent codex --prompt "hi"  # drives a bare Session locally, with no daemon
 
 pnpm cp                              # the control plane + relay in one process (own package, own SQLite).

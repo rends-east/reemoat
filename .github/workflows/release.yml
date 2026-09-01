@@ -229,7 +229,9 @@ jobs:
     timeout-minutes: 10
     permissions:
       # The only job here that may write to the repository, and all it writes is
-      # the release.
+      # the release — its notes, and the `install.sh` asset `README.md` tells
+      # strangers to download. Same permission for both; `gh release create`
+      # uploads the file in the call that creates the release.
       contents: write
       actions: read
 

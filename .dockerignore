@@ -49,6 +49,14 @@
 
 !deploy/docker/prune-store.mjs
 
+# Served by `GET /install.sh`, with this instance's own address substituted into
+# it — so a self-hosted control plane hands out an installer that points at
+# itself. Its twin is the COPY line in deploy/docker/Dockerfile's runtime stage;
+# missing here the build fails at COPY with "not found", missing there the route
+# answers 404 and nothing else notices, which is why `imagecheck` asks for it
+# from a real container.
+!deploy/bootstrap.sh
+
 !packages/web/package.json
 !packages/web/tsconfig.json
 !packages/web/vite.config.ts

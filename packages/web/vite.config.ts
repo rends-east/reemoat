@@ -17,6 +17,12 @@ export default defineConfig({
     host: true,
     proxy: {
       "/v1": { target: "http://127.0.0.1:7888", changeOrigin: false },
+      // The installer the empty-fleet screens print, for the same reason and
+      // with the same `changeOrigin: false`: the control plane substitutes the
+      // `Host` it was asked on into the script it serves, so leaving the header
+      // alone is what makes the command this page draws and the command that
+      // URL answers with name the same address in dev.
+      "/install.sh": { target: "http://127.0.0.1:7888", changeOrigin: false },
     },
   },
   build: {

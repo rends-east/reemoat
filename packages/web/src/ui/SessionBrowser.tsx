@@ -1,6 +1,7 @@
 import { Bell, Check, ChevronRight, Folder as FolderIcon, Layers, ListFilter, Pin, Plus, Search } from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { MachineId, SessionKey } from "../ids";
+import { installCommand } from "../enrollment";
 import { machineQuotaNotice, mayAddMachine } from "../quota";
 import { displayCwd } from "../paths";
 import { navigate, newPath, sessionPath } from "../router";
@@ -46,6 +47,7 @@ import {
   type FolderId,
   type MachineTab,
 } from "./groups";
+import { CommandLine } from "./CommandLine";
 import { Mark } from "./Mark";
 import { HelpButton, ProfileMenu } from "./ProfileMenu";
 import { RenameField, SessionMenu } from "./SessionMenu";
@@ -221,9 +223,29 @@ export function SessionBrowser({
               * emphasis it did not already have.
               */}
             {mayAddMachine(state.me) ? (
-              <Button className="mt-3" onClick={() => navigate(settingsPath("machines"))}>
-                Add a machine
-              </Button>
+              <>
+                {/*
+                  * The command comes first, because it is the whole answer: it
+                  * installs the daemon, asks for a credential on the terminal and
+                  * enrols the machine, where the button below leads to a screen
+                  * that hands back a code you then have to carry. Both stay —
+                  * somebody who already has a checkout wants the code.
+                  *
+                  * `location.origin` and not a constant: the page is served by
+                  * the control plane it talks to, so this is the same address the
+                  * server substitutes into the script it hands back. A
+                  * self-hosted instance prints its own.
+                  */}
+                <p className="mx-auto mt-3 max-w-xs text-xs text-muted">
+                  Run this on the machine you want to use:
+                </p>
+                <div className="mx-auto max-w-xs text-left">
+                  <CommandLine command={installCommand(location.origin)} />
+                </div>
+                <Button className="mt-3" onClick={() => navigate(settingsPath("machines"))}>
+                  Add a machine
+                </Button>
+              </>
             ) : (
               <p className="mx-auto mt-2 max-w-xs text-xs text-muted">{machineQuotaNotice(state.me)}</p>
             )}

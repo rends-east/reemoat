@@ -506,12 +506,33 @@ case "$verb" in
     # creating one from whatever the runner happens to have checked out.
     # Never `--generate-notes`: the notes are the CHANGELOG section, which is a
     # thing a person wrote and a driver checks.
+    # **The installer rides the release, and that is what makes the download
+    # source neutral.** The one-liner in `README.md` points at
+    # `releases/latest/download/install.sh`, so what a stranger pipes into a
+    # shell comes from the repository rather than from anybody's control plane —
+    # "where the software is" and "which fleet I join" stay two questions. The
+    # copy uploaded here has its placeholder **unsubstituted**, which is the
+    # whole point: fetched this way the script has no address in it and asks.
+    #
+    # Copied under its published name rather than uploaded as `bootstrap.sh#label`:
+    # `releases/latest/download/<name>` resolves on the *asset* name, so the file
+    # name is part of the URL people paste. `deploy/bootstrap.sh` keeps its own
+    # name in the tree, where it sits beside `install.sh` and must not be
+    # confused with it.
+    [ -f "$RELEASE_ROOT/deploy/bootstrap.sh" ] \
+      || fail "refusing $RELEASE_TAG: no deploy/bootstrap.sh to publish as install.sh.
+
+  README.md's one-liner points at that asset; a release without it publishes a
+  URL that 404s for everybody who reads it."
+    cp "$RELEASE_ROOT/deploy/bootstrap.sh" "$RELEASE_WORK/install.sh"
+
     echo "publishing $RELEASE_TAG"
     "$GH" release create "$RELEASE_TAG" \
       --title "$RELEASE_TAG" \
       --notes-file "$RELEASE_NOTES_FILE" \
       --verify-tag \
-      --latest
+      --latest \
+      "$RELEASE_WORK/install.sh"
     ;;
 
 esac

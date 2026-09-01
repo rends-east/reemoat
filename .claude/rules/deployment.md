@@ -12,6 +12,14 @@ paths:
 ## Commands
 
 ```bash
+curl -fsSL https://github.com/rends-east/reemoat/releases/latest/download/install.sh | sh
+                                     # a machine, from nothing to enrolled. Neutral source;
+                                     #   it ASKS which control plane to join
+  … | sh -s -- --url https://cp.example  #   or say it outright (REEMOAT_CONTROL_PLANE too)
+  … | sh -s -- --enroll-code ec_…    #   with a code already minted, and no account credential
+  … | sh -s -- --uninstall           #   stop it and take the unit away; names your data, deletes none
+  … | sh -s -- --uninstall --purge   #   and delete it, after printing the worktrees it would take
+
 deploy/install.sh control-plane      # one-time, interactive: settings → image → start → admin key → first user
 deploy/install.sh daemon             #   same; enrolls itself against a local control plane if there is one
 deploy/install.sh daemon --non-interactive  # writes the env file and stops, for scripts
@@ -34,6 +42,80 @@ deploy/compose.sh up -d --no-deps relay      # just the relay, which is what a r
 deploy/compose.sh logs -f control-plane      # the only place the one-time admin key survives
 deploy/compose.sh ps | down | config #   a passthrough, so any compose command reaches the stack
 ```
+
+## The one-liner
+
+**`deploy/bootstrap.sh` is served at `/install.sh`, and the two names differ on
+purpose.** `install.sh` configures a service on a checkout somebody already has;
+`bootstrap.sh` gets a machine from *nothing* — no repository, possibly no node —
+and then **hands off to `install.sh`** rather than reimplementing unit rendering,
+`runtime_path` or the health probe. Two files called `install.sh` in one
+repository is a trap, and the one people grep for is the wrong one.
+
+**The hand-off works because writing the env file first is what makes the install
+non-interactive**, and that is a property of `install.sh` rather than of its flag:
+both its interview and its refusal-to-start are gated on `cmp -s "$ENV_FILE"
+"$ENV_EXAMPLE"`. A real file in place, `--non-interactive` renders the unit,
+starts it and probes it. `services/premium`'s cloud-init provisioner has done
+exactly this in production since before this script existed.
+
+**Three provenances, one order, no fallback constant.** `--url` /
+`REEMOAT_CONTROL_PLANE` wins; else the origin `GET /install.sh` substituted into
+the placeholder (`publicUrl(c)` corrected by `x-forwarded-proto` — see below);
+else it **asks**, with no default. `deploycheck` asserts no URL naming a real host
+sits on any line that could act on one, and separately that the hosted instance
+*is* named in prose — both halves, because "never mentioned" and "used as a
+default" are both wrong.
+
+**⚠ The README downloads from a release asset, not from a control plane, and that
+is Q4.112.** A download URL answers *where the software is*; letting it also
+answer *which fleet this machine joins* is how somebody who wanted their own
+control plane enrols into the author's by pressing Enter. `ci-release.sh`'s
+`publish` uploads `deploy/bootstrap.sh` as `install.sh`, and `docscheck` pins the
+README's URL to `SOURCE_URL` plus that asset name. The **route** stays for the
+in-app case, where you are already signed in to the control plane in question and
+there is nothing ambiguous about it.
+
+**`publicUrl` alone is wrong behind a TLS proxy.** `@hono/node-server` takes the
+scheme from `socket.encrypted`, and this service runs plain HTTP behind Traefik —
+so it answers `http://`, and `http://app.reemoat.com/v1/instance` is a **301**
+that `bootstrap.sh` deliberately does not follow. `installOrigin` reads
+`x-forwarded-proto`, gated on `trustedProxyHops` exactly as `callerAddressOf` is.
+⚠ The same defect on `controlPlaneUrl` (four routes) is **open** — Q1.627.
+
+⚠ **The substituted value is caller-influenced and is shell-quoted for a measured
+reason.** A `Host` of ``a`id`b`` reaches `URL.origin` intact; unquoted, sourcing
+the result *executes* it. `app.ts` holds the third copy of `shellQuote` in this
+repository — `webcheck` runs all three over a hostile table, and `imagecheck`
+sends a hostile `Host` through a real container, because agreeing in three files
+is not the same as being called.
+
+**Everything runs from one `main "$@"` on the last line.** `curl … | sh` executes
+bytes as they arrive, so a truncated download runs a *prefix* — with `set -e`
+silent, because nothing failed. Wrapped, it defines a function and exits.
+`deploycheck` asserts the shape.
+
+**stdin is the download, so nothing in it reads stdin.** Every question is asked
+on `/dev/tty`. `lib.sh`'s `interactive()` is `[ -t 0 ] && [ -t 2 ]` and stdin here
+is a pipe on a perfectly good terminal — teaching that function to redirect was
+refused, because it would change every existing caller and make `deploycheck`'s
+EOF-driven `ask` cases unreachable.
+
+**`PNPM_VERSION` and `NODE_MAJOR` are pinned in the file and tied to the root
+manifest by `deploycheck`.** Nothing else in this tree reads those two lines:
+`pincheck` compares the six *version* sites to each other and has never heard of
+this one, so a bootstrap installing pnpm 10 against a lockfile written by 11.17.0
+would fail on a stranger's laptop and be green here.
+
+**The machine is created before the clone**, so `409 machine_limit` costs seconds
+rather than 750 MB. **Only the enrollment code reaches disk** — an API key is used
+in memory and dropped, a minted session is revoked with `DELETE
+/v1/me/sessions/current` (the `:id` form is below `requirePasswordCurrent` and
+would 403 for exactly the account most likely to be running this).
+
+**`svc_uninstall` lives in `lib.sh`, not in the bootstrap.** That file is the only
+one that knows one machine from another, and a script issuing `launchctl`
+directly would be the second. It refuses a docker-backed service outright.
 
 ## Deployment
 
@@ -200,9 +282,21 @@ own argument against alpine applies word for word. `RELEASE_PLATFORMS` is the on
 variable, the way `REEMOAT_CP_IMAGE` is the one variable for pulled-against-built;
 earning arm64 costs one more matrix entry there **and** one in `check.yml`.
 
-**`deploy.sh` and `install.sh` still only build.** The published image is consumed
-with `compose.sh pull` and a registry-qualified `REEMOAT_CP_IMAGE`, and the two
-paths must not be mixed on one host: a deploy would build over what was pulled.
+**`deploy.sh` now does either, and `install.sh` still only builds.**
+`REEMOAT_CP_IMAGE` is the one variable: a registry-qualified ref pulls, a bare one
+builds, `cp_image_source` derives it and `REEMOAT_CP_SOURCE` overrides. There is
+nothing left to "not mix" — one resolver in `lib.sh` answers for `compose.sh`,
+`deploy.sh` and `cp_image_fingerprint` alike, and `deploycheck` asserts no script
+holds a second copy of the default. That was not tidiness: two copies meant a pull
+could move the digest while the fingerprint inspected a different name, report
+**"unchanged"**, and recreate nothing — a green deploy of bytes that were not
+running. ⚠ And the env-file recipe `deploy/README.md` carried from the day the
+published image existed was **inert**: compose gives the shell environment
+precedence over `--env-file` for `${...}`, and `compose.sh` exported its default
+first. In pull mode `CP_IMAGE_INPUTS` does not apply — a git diff is a guess at
+what a build produces, and a registry ref names exact bytes — while
+`cp_image_fingerprint`, `CP_IMAGE_MOVED` and the `RELAY_INPUTS` recreate rule are
+untouched, because that function inspects the *local* image either way.
 
 ## Layout
 

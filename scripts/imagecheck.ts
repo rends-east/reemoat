@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { connect } from "node:net";
 import { join } from "node:path";
 
 /**
@@ -38,6 +39,14 @@ import { join } from "node:path";
  *     `claude-agent-sdk` platform binary in the image of a process that spawns
  *     no agent. `prune-store.mjs` removes what is unreachable; over-pruning
  *     fails the start below, under-pruning fails this.
+ *   * **`GET /install.sh` answers, with this instance's own origin quoted into
+ *     it.** `deploy/bootstrap.sh` reaches the image through two lines written
+ *     down separately — `.dockerignore` and a runtime `COPY` — and a miss in the
+ *     second is silent in every other driver, because they all read the file
+ *     from the checkout. This is also the only place the shell-quoting is proved
+ *     *on the path a request takes*: `webcheck` proves the three copies of
+ *     `shellQuote` agree, and a hostile `Host` header through a real socket is
+ *     what proves one of them is actually called.
  *   * **The refusal paths refuse.** `main.ts` exits 2 without
  *     REEMOAT_CP_RELAY_URL and on equal ports; those are its config contract,
  *     asserted through the container rather than around it.
@@ -166,9 +175,17 @@ function cleanup(): void {
 }
 
 /** Unauthenticated by default; `headers` is for the few checks that need a credential. */
-async function get(path: string, headers: Record<string, string> = {}): Promise<{ status: number; body: string }> {
+async function get(
+  path: string,
+  headers: Record<string, string> = {},
+): Promise<{ status: number; body: string; type: string; cache: string }> {
   const res = await fetch(`http://127.0.0.1:${PORT}${path}`, { headers, signal: AbortSignal.timeout(5000) });
-  return { status: res.status, body: await res.text() };
+  return {
+    status: res.status,
+    body: await res.text(),
+    type: res.headers.get("content-type") ?? "",
+    cache: res.headers.get("cache-control") ?? "",
+  };
 }
 
 async function waitHealthy(): Promise<boolean> {
@@ -480,6 +497,110 @@ check("a client-side route serves the same index.html", spa.body === index.body,
  * fallback must not swallow the API and answer HTML — and both statuses prove it;
  * a stranger simply stops learning which routes exist as well.
  */
+/*
+ * **`GET /install.sh`, and this is the only place it is proved at all.**
+ *
+ * The route reads `deploy/bootstrap.sh` off disk at a path `main.ts` resolves
+ * relative to its own file URL. That file reaches the image through **two**
+ * lines — `!deploy/bootstrap.sh` in `.dockerignore` and a `COPY` in the runtime
+ * stage — and a miss in the second is silent everywhere else: `typecheck`,
+ * `webcheck`, `deploycheck` and `docscheck` all pass, and the route answers 404.
+ * So the assertion is made against a real container or it is not made.
+ */
+const installer = await get("/install.sh");
+ok(
+  "GET /install.sh serves the bootstrap script",
+  installer.status === 200 && installer.body.startsWith("#!/bin/sh"),
+  `status ${installer.status}`,
+);
+/*
+ * `text/plain` is part of the safety story rather than a formality:
+ * `application/x-sh` makes a browser download the file, and "read it before you
+ * pipe it into a shell" is advice this route has to be able to honour.
+ */
+check("as text a browser will show rather than download", installer.type.startsWith("text/plain"), true);
+// The body varies by `Host`, so a shared cache keyed on the path alone would
+// hand one instance's address to another instance's users.
+check("and is not stored by anything in front of it", installer.cache, "no-store");
+check("the placeholder is gone", installer.body.includes("@REEMOAT_CONTROL_PLANE@"), false);
+check(
+  "and this instance's own address is in it, quoted",
+  installer.body.includes(`CONTROL_PLANE_DEFAULT='http://127.0.0.1:${PORT}'`),
+  true,
+);
+/*
+ * ⚠ **The one assertion no offline driver can reach, and the one that matters
+ * most.** The substituted value is `new URL(c.req.url).origin`, i.e. the `Host`
+ * header — measured 2026-08-08 to carry a backtick through `URL.origin` intact.
+ * Unquoted, this route is remote code execution in a script people pipe into
+ * `sh`. `webcheck` proves the three `shellQuote` copies agree; only this proves
+ * the quoting is on the path a real request takes.
+ */
+/*
+ * ⚠ **Over a raw socket, because `fetch` cannot ask this question.** undici
+ * treats `Host` as a forbidden header and silently replaces whatever the caller
+ * sets with the URL's own authority — measured against a local `node:http`
+ * server, `fetch(url, {headers: {host: "a`id`b"}})` arrives as
+ * `host: 127.0.0.1:<port>`. So the first version of this check could only ever
+ * fail, which is the safe direction and still not a test of what it claims.
+ * Thirty lines of HTTP/1.1 is the whole cost, and this is the one assertion in
+ * the repository that proves the quoting is on the path a request takes rather
+ * than merely present in three files.
+ */
+const rawHost = async (host: string): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const socket = connect(PORT, "127.0.0.1");
+    let body = "";
+    socket.setTimeout(5000, () => {
+      socket.destroy();
+      reject(new Error("timed out"));
+    });
+    socket.on("connect", () => {
+      socket.write(`GET /install.sh HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`);
+    });
+    socket.on("data", (chunk) => (body += chunk.toString()));
+    socket.on("error", reject);
+    socket.on("close", () => resolve(body));
+  });
+
+const hostile = await rawHost("a`id`b");
+check(
+  "a hostile Host arrives as data, not as source",
+  hostile.includes("CONTROL_PLANE_DEFAULT='http://a`id`b'"),
+  true,
+);
+// And an apostrophe, which is the arm the `'\''` rendering exists for: without
+// it the quoting can be closed and stepped out of, which is the whole attack
+// rather than a corner of it.
+const apostrophe = await rawHost("a'b");
+check(
+  "and an apostrophe is closed, escaped and reopened",
+  apostrophe.includes("CONTROL_PLANE_DEFAULT='http://a'\\''b'"),
+  true,
+);
+// Exactly once — the route asserts `split(...).length === 2`, and a second
+// substitution site would mean a value spliced somewhere nobody quoted for.
+check(
+  "and exactly once",
+  hostile.split("CONTROL_PLANE_DEFAULT=").length - 1,
+  1,
+);
+/*
+ * **`x-forwarded-proto` is ignored where no proxy has been declared**, which is
+ * this container: `REEMOAT_CP_TRUSTED_PROXY_HOPS` is unset, so the default is
+ * zero hops. The header is caller-supplied, and believing it from a direct
+ * client would let anybody make a plaintext instance hand out an `https://`
+ * default — an installer that then cannot reach the thing it was told to join.
+ * The half where it *is* believed needs a proxy declared and is asserted on the
+ * two-container start below.
+ */
+const spoofed = await get("/install.sh", { "x-forwarded-proto": "https" });
+check(
+  "an untrusted x-forwarded-proto is ignored",
+  spoofed.body.includes(`CONTROL_PLANE_DEFAULT='http://127.0.0.1:${PORT}'`),
+  true,
+);
+
 const api401 = await get("/v1/nope");
 ok(
   "an unknown /v1 path is refused, not answered with the SPA",
@@ -663,6 +784,9 @@ if (healthySupplied) {
     "-e", `REEMOAT_CP_RELAY_URL=http://127.0.0.1:${RELAY_PORT}`,
     "-e", `REEMOAT_CP_PORT=${PORT}`,
     "-e", `REEMOAT_CP_RELAY_PORT=${RELAY_PORT}`,
+    // One declared hop, which is what the deployed stack sets and what makes the
+    // `x-forwarded-proto` half of `/install.sh` reachable at all.
+    "-e", "REEMOAT_CP_TRUSTED_PROXY_HOPS=1",
   ];
   docker([
     "run", "-d", "--name", `${PROJECT}-cp`,
@@ -702,6 +826,27 @@ if (healthySupplied) {
     if (!relayUp) await new Promise((r) => setTimeout(r, 1000));
   }
   ok("and the relay runs from the same image, on its own entry point", relayUp, dockerLogs(`${PROJECT}-relay`).slice(-1500));
+
+  /*
+   * ⚠ **The one that decides whether the installer works in production at all.**
+   * This service is served over plain HTTP behind a proxy that terminates TLS —
+   * Traefik forwards `app.reemoat.com` to `http://control-plane:7888` — so
+   * `publicUrl` answers `http://app.reemoat.com`. Measured against the live
+   * deployment: `http://app.reemoat.com/v1/instance` is a **301** to the `https`
+   * form, and `bootstrap.sh` does not follow redirects. An installer built from
+   * `publicUrl` alone therefore refuses on its first request, on the only
+   * deployment shape this feature exists for. With a hop declared, the header
+   * that says so is believed.
+   */
+  // No `host:` here — undici silently replaces a caller-set `Host` with the
+  // URL's own authority (measured), so passing one would read as testing
+  // something this call cannot test. The scheme is the whole subject.
+  const proxied = await get("/install.sh", { "x-forwarded-proto": "https" });
+  check(
+    "a declared proxy's x-forwarded-proto reaches the installer's default",
+    proxied.body.includes("CONTROL_PLANE_DEFAULT='https://"),
+    true,
+  );
 
   if (apiUp && relayUp) {
     const relayLogs = dockerLogs(`${PROJECT}-relay`);

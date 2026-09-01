@@ -8,8 +8,15 @@
 # command against their own stack is stuck at exactly the moment they need not
 # to be.
 #
-# Standalone for the same reason as run-daemon.sh: it must work when the
-# environment is at its strangest, so it sources nothing from lib.sh.
+# ⚠ **It used to source nothing from lib.sh, and that is no longer true.** The
+# claim was "standalone for the same reason as run-daemon.sh: it must work when
+# the environment is at its strangest", and the cost of keeping it was a second
+# copy of the image default — which is what made `deploy/README.md`'s pull recipe
+# inert and let a moved digest report "unchanged". `run-daemon.sh` is still
+# standalone and still must be: it is what the *supervisor* runs, at boot, with
+# nothing inherited. This is run by an operator from a shell that already found
+# the script, so `lib.sh` being reachable is the same assumption as this file
+# being reachable. One function is taken from it: `cp_image_ref`.
 set -eu
 
 DEPLOY_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
@@ -51,7 +58,20 @@ export COMPOSE_PROJECT_NAME
 
 # A value here and a `${...}` in the compose file, so moving from "built on this
 # host" to "pulled from a registry" is one variable and no edit to anything else.
-REEMOAT_CP_IMAGE=${REEMOAT_CP_IMAGE:-reemoat/control-plane:current}
+#
+# **Through `cp_image_ref`, not a second copy of the default.** This file used to
+# hold its own `${REEMOAT_CP_IMAGE:-reemoat/control-plane:current}` and so did
+# `lib.sh`'s `cp_image_fingerprint`, which is how a pull could move the digest and
+# a deploy could report "unchanged" — and how the env-file recipe in
+# `deploy/README.md` came to be inert, since exporting a default here beats
+# `--env-file` for compose's `${...}` interpolation. One resolver, consulted by
+# everything, is what makes "a host is built or pulled" a fact rather than advice.
+#
+# `lib.sh` is sourced for that one function. It is `set -eu` and its only
+# top-level effect is `detect_init`, which sets a variable and never exits.
+# shellcheck source=lib.sh
+. "$DEPLOY_DIR/lib.sh"
+REEMOAT_CP_IMAGE=$(cp_image_ref)
 export REEMOAT_CP_IMAGE
 
 # **`--project-directory` is this directory, NOT the repository root**, and that

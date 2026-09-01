@@ -16775,21 +16775,36 @@ process.stdout.write("\nthe three lines a daemon is started with\n");
    * passed in as a third parameter. That fallback is the only permitted
    * difference between the two copies and is asserted below rather than assumed.
    */
-  const callable = (source: string): ((url: string, code: string, baseUrl: string) => string) => {
+  /*
+   * ⚠ **Named, because there are two functions extracted this way now.** The
+   * second is `shellQuote`, which `packages/control-plane/src/app.ts` has a third
+   * copy of for `GET /install.sh` — where the value substituted in comes from the
+   * caller's `Host` header, so a copy that drifts is remote code execution in a
+   * script people pipe into `sh`. Generalising the name rather than writing a
+   * second extractor is what keeps the four refusals below covering both.
+   */
+  const extract = (
+    source: string,
+    name: string,
+    params: readonly string[],
+  ): ((...args: string[]) => string) => {
     const lines = source.split("\n");
-    const start = lines.findIndex((line) => line.startsWith("function enrollmentLines("));
-    if (start < 0) throw new Error("cpctl.ts no longer declares enrollmentLines at the top level");
-    // A top-level declaration in that file ends at a bare `}` in column 0, which
-    // is why this does not have to count braces through template literals.
+    const start = lines.findIndex((line) => line.startsWith(`function ${name}(`));
+    if (start < 0) throw new Error(`no top-level ${name} to extract`);
+    // A top-level declaration in these files ends at a bare `}` in column 0,
+    // which is why this does not have to count braces through template literals.
     const end = lines.indexOf("}", start);
-    if (end < 0) throw new Error("cpctl.ts's enrollmentLines has no closing brace in column 0");
+    if (end < 0) throw new Error(`${name} has no closing brace in column 0`);
     const body = lines.slice(start + 1, end).join("\n").replaceAll(": string", "");
-    return new Function("controlPlaneUrl", "code", "BASE_URL", body) as (
+    return new Function(...params, body) as (...args: string[]) => string;
+  };
+
+  const callable = (source: string): ((url: string, code: string, baseUrl: string) => string) =>
+    extract(source, "enrollmentLines", ["controlPlaneUrl", "code", "BASE_URL"]) as (
       url: string,
       code: string,
       baseUrl: string,
     ) => string;
-  };
 
   const cpctl = callable(
     readFileSync(new URL("../../control-plane/scripts/cpctl.ts", import.meta.url), "utf8"),
@@ -16872,6 +16887,111 @@ process.stdout.write("\nthe three lines a daemon is started with\n");
     extractionFails("function enrollmentLines(controlPlaneUrl: string, code: string): string {\n  return controlPlaneUrl;\n}\n"),
     false,
   );
+
+  /*
+   * **The third `shellQuote`, compared rather than trusted.**
+   *
+   * `packages/control-plane/src/app.ts` has its own copy because `GET
+   * /install.sh` substitutes an origin into a shell script and cannot import
+   * either of the other two — `packages/web` is a Vite bundle that service only
+   * serves, and the image's runtime stage carries no web `src` at all. So the
+   * agreement is asserted the only way it can be: both bodies read off disk, made
+   * callable, and run over the same hostile table.
+   *
+   * The table is the measured one. A `Host` of ``a`id`b``, `a$(id)b`, `a'b` and
+   * `a;id` all reach `URL.origin` intact, and the apostrophe arm is the one that
+   * matters most: without `'\''` the quoting can be closed and stepped out of,
+   * which is the whole attack rather than a corner of it.
+   */
+  {
+    const quoteOf = (source: string): ((value: string) => string) =>
+      extract(source, "shellQuote", ["value"]) as (value: string) => string;
+    const webQuote = quoteOf(readFileSync(new URL("../src/enrollment.ts", import.meta.url), "utf8"));
+    const appQuote = quoteOf(
+      readFileSync(new URL("../../control-plane/src/app.ts", import.meta.url), "utf8"),
+    );
+    for (const hostile of [
+      "https://cp.example",
+      "http://a`id`b",
+      "http://a$(id)b",
+      "http://a'b",
+      "http://a;id",
+      "http://a$&b",
+      "http://a''b",
+    ]) {
+      check(`app.ts quotes ${JSON.stringify(hostile)} as web does`, appQuote(hostile), webQuote(hostile));
+    }
+    // And that the shared body is the one that actually defends: a bare
+    // `'${value}'` would pass every line above except this one.
+    check("an apostrophe is closed, escaped and reopened", appQuote("a'b"), "'a'\\''b'");
+  }
+
+  /*
+   * `installCommand` — the third place shell text is rendered in this repository,
+   * and the first that is *printed on a screen for somebody to paste*.
+   */
+  {
+    const { installCommand } = await import("../src/enrollment.js");
+    check(
+      "the installer command is the literal both READMEs carry",
+      installCommand("https://app.reemoat.com"),
+      "curl -fsSL 'https://app.reemoat.com/install.sh' | sh",
+    );
+    // One trailing slash, removed once — `https://cp//install.sh` is a 404 with
+    // nothing in it that says why.
+    check("a trailing slash does not double", installCommand("https://cp/"), installCommand("https://cp"));
+    // The URL is data here too. It cannot be attacker-chosen on a same-origin
+    // page, which is exactly why an unquoted version would have looked fine.
+    check(
+      "and the origin is data, not source",
+      installCommand("http://a`id`b"),
+      "curl -fsSL 'http://a`id`b/install.sh' | sh",
+    );
+  }
+
+  /*
+   * **Which screens print it, and which deliberately do not.**
+   *
+   * The composer strip's `MachineLine` has the same three-arm empty state and is
+   * the obvious place to copy this to; it is a field label on a 390px phone
+   * beside a door that already leads to the screen that has the command, and
+   * `.claude/rules/web-composer.md`'s rule is that a control never leaves the
+   * strip. Asserted rather than left to a comment, because "put it in all three"
+   * is what a reader of the other two would reasonably do.
+   */
+  {
+    const reads = (path: string): string =>
+      stripComments(readFileSync(new URL(`../src/ui/${path}`, import.meta.url), "utf8"));
+    const browser = reads("SessionBrowser.tsx");
+    const machines = reads("settings/MachinesSection.tsx");
+    const newSession = reads("NewSession.tsx");
+    check(
+      "the two screens with room for it call the one renderer",
+      [/installCommand\(/.test(browser), /installCommand\(/.test(machines)],
+      [true, true],
+    );
+    // Never a hand-typed second copy: `docscheck` pins the READMEs against the
+    // same function, and a literal here would be a third thing to keep in step.
+    check(
+      "and neither writes the command out by hand",
+      [/curl -fsSL/.test(browser), /curl -fsSL/.test(machines)],
+      [false, false],
+    );
+    check("the composer strip does not draw it", /installCommand/.test(newSession), false);
+    /*
+     * And the door-or-the-sentence property is untouched: the command sits inside
+     * the `mayAddMachine` arm on both, so the state that says there is no way to
+     * add a machine still shows no way to add one.
+     */
+    check(
+      "the command is inside the door arm, not beside the notice",
+      [
+        /mayAddMachine\(state\.me\) \? \([\s\S]{0,1200}installCommand\(/.test(browser),
+        /canAdd && \([\s\S]{0,600}installCommand\(/.test(machines),
+      ],
+      [true, true],
+    );
+  }
 
   const now = 1_700_000_000_000;
   check("time left is said in minutes", enrollmentExpiryText(now + 58 * 60_000, now), "expires in 58m");
@@ -18941,7 +19061,7 @@ process.stdout.write("\na sign-in that is not offered\n");
    * divider, which restated the sentence above it and then said "paste the token
    * below" with a heading and two inputs in between.
    */
-  check("the command is rendered inside the credential slot", /howTo !== null && editable && <SetupTokenCommand/.test(panel), true);
+  check("the command is rendered inside the credential slot", /howTo !== null && editable && <CommandLine/.test(panel), true);
   check("and only on the slot that command actually fills", /slot\.envName === "CLAUDE_CODE_OAUTH_TOKEN"/.test(panel), true);
   check("and only where the wizard cannot run", /login\.blocked === "interactive_pty"/.test(panel), true);
   check("naming the command the CLI really has", /"claude setup-token"/.test(panel), true);
@@ -18949,8 +19069,17 @@ process.stdout.write("\na sign-in that is not offered\n");
    * A row of two, not a control laid over a box: the overlay took its height from
    * the field's own text and hung off the edge the moment the two disagreed.
    */
-  check("the copy control is a sibling of the field, not an overlay on it", /items-stretch/.test(panel), true);
-  check("so it cannot be positioned out of the box it belongs to", /SetupTokenCommand[\s\S]{0,900}absolute top-/.test(panel), false);
+  /*
+   * ⚠ **These two moved file when the component did.** `SetupTokenCommand` became
+   * `ui/CommandLine.tsx` the day the empty-fleet screens grew a second caller for
+   * it, and reading `panel` for them would have gone quietly green — the regexes
+   * would simply stop matching anything, which is the failure mode this driver
+   * exists to refuse. What is asserted is the component's own layout, so it is
+   * read from wherever the component now is.
+   */
+  const commandLine = stripComments(readFileSync(new URL("../src/ui/CommandLine.tsx", import.meta.url), "utf8"));
+  check("the copy control is a sibling of the field, not an overlay on it", /items-stretch/.test(commandLine), true);
+  check("so it cannot be positioned out of the box it belongs to", /absolute top-/.test(commandLine), false);
   check("the button is still gated on supported, not on the reason", /login\.supported && agent\.available/.test(panel), true);
 
   /*
@@ -19005,8 +19134,21 @@ process.stdout.write("\na sign-in that is not offered\n");
     const offenders = withFields.filter((src) => /\$\{FIELD\}[^`]*\bpy-\d/.test(src)).length;
     report("no screen composes FIELD with a padding that cannot win", offenders === 0, `${withFields.length} files scanned`);
   }
-    check("the command box states the same height", /flex min-h-9 items-stretch/.test(panel), true);
-    check("and the same floor, so the two cannot drift", (panel.match(/\[@media\(pointer:coarse\)\]:min-h-11/g) ?? []).length >= 2, true);
+    /*
+     * **The field and the command box are in two files now, so this is a pair
+     * rather than a count.** It used to assert `min-h-11` appeared at least twice
+     * in `AgentsPanel.tsx` — the field's and the command box's — which stopped
+     * meaning anything the moment the box moved to `ui/CommandLine.tsx`: one
+     * occurrence would have read as a drift and two in either file alone would
+     * have read as agreement. Asked of each file separately it is the same
+     * property and it survives the split.
+     */
+    check("the command box states the same height", /flex min-h-9 items-stretch/.test(commandLine), true);
+    check(
+      "and the same floor, so the two cannot drift",
+      [/\[@media\(pointer:coarse\)\]:min-h-11/.test(panel), /\[@media\(pointer:coarse\)\]:min-h-11/.test(commandLine)],
+      [true, true],
+    );
   }
   // Width is the other fields', which is what it was before a wrong axis was tried.
   check("and its width is left alone", /max-w-80/.test(panel), false);

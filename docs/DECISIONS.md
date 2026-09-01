@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 117 | `###` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 120 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 79 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 286 | `####` |
-| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 44 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 287 | `####` |
+| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 51 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 109 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 65 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 127 | `###` |
-| | | **827** | |
+| | | **838** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 827 rather than the 432
+dividers. So the count is over **both** depths, and it says 838 rather than the 442
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -2941,6 +2941,107 @@ that has just come up is honestly ignorant, and one press is what that costs.
 outcome is swallowed — the *occasion* is the only observable thing about it.
 
 **Status.** Applied.
+
+### Q1.625 — What credential does a one-line installer hold, and for how long?
+
+**Rule.** Only the **enrollment code** reaches the host's disk. An API key is
+used in memory to mint one and then dropped; a session minted by signing in is
+revoked before the script exits, in the trap rather than on the happy path.
+
+**Why.** This is the same rule Q1.53 states for the provisioning key, arriving at
+the same host by a different door. A daemon host runs agents as its owner and
+`agentEnv`'s strip is hygiene rather than a fence — the agent has that uid and can
+read the env file, `/proc/<pid>/environ` and `REEMOAT_DB`. An account credential
+left there is the whole account; an enrollment code is single-use, lives an hour
+and is worth exactly one machine. The installer is the one moment when a person's
+password is legitimately typed on that host, because it is *their* laptop — and
+that is an argument for the password, not for what it mints.
+
+**`DELETE /v1/me/sessions/current`, not `…/sessions/:id`, and this is not a
+preference.** `app.ts` registers `…/current` at 2675 and `…/:id` at 2760, with
+`app.use("/v1/*", requirePasswordCurrent(db))` at 2736 between them. Every
+account `cpctl admin adduser` creates owes a password change, so the `:id` form
+answers `403 password_change_required` for exactly the person most likely to be
+running an installer — and the failure would be a live session left behind on a
+path that looked like it cleaned up.
+
+**The same gate is why `POST /v1/machines` can refuse.** It is at 3155, below the
+line, so an admin-created account cannot add a machine until it has set a
+password — and the installer cannot do that for them (`POST /v1/me/password`
+needs the current one). It prints the remedy and exits rather than looping.
+
+**Status.** Current
+
+### Q1.626 — Waiting for a mailed confirmation, without locking somebody out of the account they just made
+
+**Rule.** The installer waits on **a keypress, not a timer**. It prints that the
+mail was sent, then spends exactly one `POST /v1/login` per Enter, capped at
+five.
+
+**Measured.** `DEFAULT_THROTTLE` in `packages/control-plane/src/throttle.ts` is
+`{threshold: 5, windowMs: 15 min, baseBlockMs: 30s, maxBlockMs: 15 min}`, and
+`POST /v1/login` calls `fail(loginKey(name, address))` on every 401 — before the
+await, so a refusal costs its count whatever else happens. A five-second poll
+therefore spends the entire budget in **twenty-five seconds** and then sits in a
+block that doubles to fifteen minutes, against an account created ninety seconds
+earlier, on somebody's first contact with the product.
+
+**Why five and not three or ten.** Five *is* the budget. One attempt per human
+action means it is only spent by somebody actually opening mail, and stopping at
+the threshold rather than past it means the script can never be the thing that
+causes the block — it names the rule when it stops.
+
+**It also matches the browser.** `Gate.tsx` submits nothing on mount and reaches
+the confirm screen by the link being opened, never by polling for it.
+
+**Rejected: a `GET /v1/register/status` route.** `POST /v1/register` goes to real
+trouble to answer identically for a fresh address and a taken one; a route saying
+whether an address had confirmed would hand that enumeration straight back.
+
+**Rejected: telling the person which of the two things is wrong.** The script
+cannot. `POST /v1/login` answers `401 invalid_login` for an unknown name, an
+unconfirmed address, a wrong password and an account with no password row, and
+that is deliberate — so the message says it cannot tell rather than guessing.
+
+**Status.** Current
+
+### Q1.627 — The installer's default origin behind a TLS-terminating proxy
+
+**Rule.** `GET /install.sh` substitutes `installOrigin(c, trustedProxyHops)` —
+`publicUrl` corrected by `x-forwarded-proto`, and **only as far as an operator has
+declared a proxy**.
+
+**Why `publicUrl` alone is wrong, and wrong in production specifically.**
+`@hono/node-server` derives the scheme from `socket.encrypted`. This service is
+served over plain HTTP behind a proxy that terminates TLS — Traefik forwards
+`app.reemoat.com` to `http://control-plane:7888` with `passHostHeader` — so
+`publicUrl` answers `http://app.reemoat.com`. **Measured against the live
+deployment**: `http://app.reemoat.com/v1/instance` answers `301` to the `https`
+form, because the `web` entry point redirects permanently. `bootstrap.sh` does not
+follow redirects — a redirect is somebody else's idea of where the control plane
+is — so an installer built from `publicUrl` would refuse on its very first
+request, on the only deployment shape the feature exists for. Nothing installed,
+and the message would blame the control plane for not being one.
+
+**Gated on `trustedProxyHops`, the same gate `callerAddressOf` uses.** The header
+is caller-supplied. Believed from a direct client it would let anybody make a
+plaintext instance hand out an `https://` default — an installer that cannot reach
+what it was told to join. At zero hops it is ignored and `publicUrl` stands, which
+is exactly right for a host with no proxy. Both halves are asserted in
+`imagecheck`, from a real container, because a header this service reads only
+under a condition is not something an offline driver can pose the question to.
+
+**⚠ Scoped to this route, and the wider defect is recorded rather than fixed in
+passing.** `publicUrl` also feeds `controlPlaneUrl` on the four code-minting
+routes, which have the same latent problem: an enrollment paste generated on a
+proxied instance names `http://`, and `enroll.ts`'s `fetch` follows the 301 —
+which for a `POST` means most implementations re-issue it as a `GET`. Changing
+`publicUrl` itself changes what every enrollment paste has said since the first
+release, and that is a decision with its own blast radius rather than a fix to
+make while adding a route.
+
+**Status.** Applied to `/install.sh`. The same defect on `controlPlaneUrl` is
+**open**.
 
 ## Session lifecycle, questions and attachments
 
@@ -15452,6 +15553,41 @@ simply have.
 
 **Status.** Applied.
 
+#### Q3.541 — Which empty state prints the installer, and which deliberately does not
+
+**Decision.** The rail's `No machines yet.` (`SessionBrowser.tsx`) and Settings →
+Machines. **Not** `NewSession.tsx`'s `MachineLine`, which has the identical
+three-arm shape and is the obvious third.
+
+**Why not the third.** `MachineLine` is a field label inside the composer strip,
+on a phone 390px wide, and the person reading it is mid-task creating a session.
+A ~50-character shell command wrapping there is noise, `web-composer.md`'s rule is
+that a control never leaves the strip, and it already has a door to the screen
+that carries the command. Asserted in `webcheck` rather than left to this
+paragraph, because "put it in all three" is what a reader of the other two would
+reasonably do.
+
+**Inside the `mayAddMachine` arm on both, and that is the load-bearing part.**
+`quota.ts`'s property is *a door, or the sentence saying why there is not one —
+never neither*, and `webcheck` asserts `machineQuotaNotice(me) === null` iff
+`mayAddMachine(me)`. A command that adds a machine, printed under the sentence
+saying there is no way to add one, would keep that assertion literally true while
+destroying the thing it protects: a door is a door whichever control opens it.
+
+**The command comes before the button on the rail and after the form in
+Settings.** The rail is where somebody with no machines lands and the command is
+the whole answer; Settings → Machines is where somebody who already has a
+checkout goes for a code, and there the command is the other case.
+
+**`location.origin`, never a constant.** `cp.ts` has no base URL at all — every
+call is a relative `/v1/…` because the page is served by the control plane it
+talks to — so the page and the server name the same host by construction. In
+Vite dev that is `localhost:5173`, which is why `vite.config.ts` proxies
+`/install.sh` beside `/v1`: without it the command a dev screen draws would point
+at a server that does not serve it.
+
+**Status.** Applied.
+
 ## Deployment, packaging and code layout
 
 ### Q4.1 — Is this one deployment or two, and why can the two services not be checked out separately?
@@ -16549,6 +16685,289 @@ the other way, and it caught this bump by itself: the first drift either of thes
 mirrors has found that nobody planted.
 
 **Status.** Current
+
+### Q4.106 — Why is there a `curl | sh` at all, and what does it get to do?
+
+**Decision.** One command, served by the control plane, that takes a machine from
+nothing to enrolled. It may not use `sudo`, may not touch a shell profile, and may
+not write outside `~/.reemoat` and the checkout it is told to make.
+
+**Why anything.** Adding a machine meant: find the repository, have Node ≥ 24 and
+pnpm 11.17.0, `pnpm install --frozen-lockfile`, run `deploy/install.sh daemon`,
+then go back to a browser for a code and paste three `export` lines. Every one of
+those steps is documented and none of them is on the screen that says *"No
+machines yet."* The daemon is not on npm (`"private": true`, no `bin`, no
+`files`), so there was no shorter path than "clone this first".
+
+**The three constraints are what make the pipe acceptable rather than the pipe
+being acceptable on its own.** A `curl | sh` that asks for a password is the thing
+everybody is right to be afraid of; one that installs a package manager as a side
+effect has installed somebody else's whole ecosystem; one that edits `.zshrc` has
+left something behind that its own uninstall will not find. Removing all three is
+also what makes `--uninstall` complete rather than approximate — see Q4.109.
+
+**Rejected: a Homebrew formula and an apt repository.** Both are a permanent
+third-party write path into a box that runs your agents, which is the argument
+`services/premium`'s provisioner already makes for taking Node from the official
+tarball rather than from NodeSource.
+
+**Rejected: publishing the daemon to npm.** It would be a second release channel
+to keep in step with the six version sites, and `deploy/deploy.sh` — which is the
+whole update mechanism on a host — does `git reset --hard`, so any other
+distribution needs a second update path invented beside it.
+
+**Status.** Applied.
+
+### Q4.107 — Which control plane does a downloaded installer join?
+
+**Rule.** Three provenances, in this order: **`--url` / `REEMOAT_CONTROL_PLANE`**
+said outright; else **the origin that served it**, substituted by
+`GET /install.sh` from `publicUrl(c)`; else — fetched from anywhere neutral — it
+**asks**, with no default. **There is no fallback constant anywhere in the file**,
+and `deploycheck` asserts no URL naming a real host is on any line that could act
+on one.
+
+**Why it is a route and not a file in the bundle.** A static file cannot know what
+host it was asked on. Dropping `install.sh` into `packages/web/public/` costs zero
+build-list edits and was the cheaper option; it also means every fork's installer
+says `app.reemoat.com`, which is a self-hosted operator's laptop silently joining
+somebody else's fleet.
+
+**The asking arm replaced a refusal, and that is the correction.** This entry
+originally said the checkout copy *refuses* rather than picking one, which was
+right about the danger and wrong about the remedy: once the README stopped
+pointing at a control plane (Q4.112), "no address in it" became the **normal**
+way to get this script rather than a mistake. Refusing would have made the
+documented path fail. Asking has the same safety property — nothing is guessed —
+and it is the only arm that can tell somebody what a control plane *is*, which a
+refusal cannot do without becoming a tutorial.
+
+**⚠ The substituted value is caller-influenced.** `publicUrl(c)` is `new
+URL(c.req.url).origin`, i.e. the `Host` header. Measured 2026-08-08 through a real
+`node:http` server and recorded at `packages/web/src/enrollment.ts`: a `Host` of
+``a`id`b``, `a$(id)b`, `a'b` and `a;id` all reach `URL.origin` intact, and sourcing
+``REEMOAT_CONTROL_PLANE=http://a`touch PWNED`b`` **created the file** while leaving
+the variable reading a plausible `http://ab`. So it goes through `shellQuote` —
+the third copy of that function in this repository, compared to the other two by
+behaviour in `webcheck` and proved to actually be *called* by `imagecheck` sending
+a hostile `Host` through a real container.
+
+**⚠ `split`/`join`, never `replace`/`replaceAll`.** The replacement is derived
+from that same header and can contain `$&`, `` $` ``, `$'` and `$$`, every one of
+which expands inside a `String.replace` replacement. `src/changes.ts` records this
+exact defect shipping once already, in `rewriteNoIndexHeader`, where a file named
+`a$&b.txt` spliced an absolute path back into a diff header. `split`/`join`
+expands nothing, and asserting `length === 2` gets "exactly one placeholder" for
+free — which is the other thing that has to be true.
+
+**Which ref it then clones: `v<instance.source.version>` from the repository
+`instance.source.url` names.** That pair is the AGPL section 13 offer, so cloning
+it is honouring the offer rather than restating it, and a fork gets a correct
+installer with no edit. Not `main`: `docs/RELEASING.md` rule 6 is that only a tag
+publishes and rule 1 is that every branch push bumps, so `main` is routinely ahead
+of every tag and would put an unreleased daemon on a stranger's laptop. A version
+with no tag behind it falls back to the default branch **and says so out loud**.
+
+**Status.** Applied.
+
+### Q4.108 — `curl | sh` has a pipe on stdin. Where do the answers come from?
+
+**Rule.** `/dev/tty`, opened explicitly on fd 3. No terminal means **no menu**: it
+prints the non-interactive invocation and exits 2.
+
+**Why it is not `interactive()`.** `deploy/lib.sh`'s test is `[ -t 0 ] && [ -t 2 ]`,
+and under a pipe stdin is not a terminal while the person is sitting at one — so
+every prompt would be silently skipped and the installer would take defaults
+nobody chose. Teaching `interactive()` to redirect was refused twice over: it
+changes the meaning of every existing caller, and it makes `deploycheck`'s
+EOF-driven `ask` cases — the only place `ask` is covered at all — unreachable.
+
+**The related property, and it is cheaper than it looks.** Everything in the
+script is inside `main`, called on the last line. `curl … | sh` executes bytes as
+they arrive, so a download cut off half-way runs a **prefix** of the file, with
+`set -e` silent because nothing failed. Wrapped, a truncated file defines a
+function and exits having done nothing. `deploycheck` asserts the shape — it is a
+fact about the file rather than about any function in it — and asserts the call is
+`/^main /` rather than `/^main\b/`, because the declaration is `main() {` at
+column 0 and a word boundary matches that too.
+
+**Two pins with no other witness.** `PNPM_VERSION` and `NODE_MAJOR` are written in
+the script and tied to the root manifest by `deploycheck`. Nothing else in this
+tree reads them: `pincheck` compares the six *version* sites to each other and has
+never heard of this file, so a bootstrap installing pnpm 10 against a lockfile
+written by 11.17.0 would fail on a stranger's laptop, minutes in, at
+`--frozen-lockfile`, and be green here.
+
+**Status.** Applied.
+
+### Q4.109 — What may a script that installed a service delete when it uninstalls?
+
+**Rule.** The unit, and a toolchain **this script installed** on the evidence of a
+marker it wrote. Everything else is **named and left**: the env file, the SQLite
+database, the checkout, and above all `~/.reemoat/worktrees`.
+
+**Why worktrees decide it.** Those are git working copies an agent has been
+editing, and they routinely hold uncommitted work. An installer that threw
+somebody's branch away is not recoverable by anything — not by re-running it, not
+by the control plane, not from a backup nobody took. `--purge` deletes them and
+**prints the list first**.
+
+**Why it exists at all.** There is no uninstall verb anywhere in `deploy/`; the
+raw calls live inside `svc_reload`. Shipping a one-liner people pipe into a shell
+with no way back is not a thing to do, so `svc_uninstall` was added to `lib.sh` —
+**not** to the bootstrap, because that file is the only one in this repository
+that knows one machine from another and a script issuing `launchctl` directly
+would be the second. It refuses a docker-backed service outright: the control
+plane's named volume holds the key that mints every token in the fleet, and
+"uninstall" there is `compose.sh down` plus a decision about that volume, which is
+not a decision a function called from an installer gets to make.
+
+**It does not retire the machine row**, and that follows from Q1.625: doing so
+would mean the uninstall path held an account credential, which is the opposite of
+what sending only an enrollment code to the host buys. It prints the machine id
+and says where to retire it.
+
+**Status.** Applied.
+
+### Q4.110 — How does a host stop building the control-plane image?
+
+**Decision.** `REEMOAT_CP_IMAGE` decides, and `deploy.sh` follows it: a
+registry-qualified ref pulls, a bare one builds. `cp_image_source` derives the
+mode from the ref's first path segment — a `.` or a `:`, or exactly `localhost`,
+is a registry host — and `REEMOAT_CP_SOURCE` overrides it for the one ambiguous
+case, an image loaded locally under a registry-shaped name.
+
+**Why the derivation rather than a second knob.** `ci-release.sh` already states
+that `REEMOAT_CP_IMAGE` is *the* variable deciding built-here against
+pulled-from-a-registry, and adding an independent one would make that false — and
+create a state where the two disagree. The mode is **printed on every run**, so a
+switch nobody can see in the log is not a thing that can happen; an unrecognised
+`REEMOAT_CP_SOURCE` is refused rather than defaulted, because silently building
+where somebody asked to pull is a host quietly doing the expensive thing for weeks.
+
+**What the pull arm does *not* consult, and why that is a simplification.**
+`CP_IMAGE_INPUTS` is a regex over the git diff — a *guess* at what a build would
+produce. A registry ref is a name for exact bytes, so asking git whether they
+moved is asking the wrong repository. The pull is unconditional, and costs nothing
+when the digest is already local.
+
+**Everything downstream is untouched, and that was checked rather than hoped.**
+`cp_image_fingerprint` runs `docker image inspect` on the **local** image whatever
+its name, so after a pull it answers exactly as it does after a build — which
+means `_before_image`/`_after_image`, `CP_IMAGE_MOVED`, and therefore
+`CP_IMAGE_MOVED && touched "$RELAY_INPUTS"` (the rule deciding whether every
+tunnel in the fleet drops) keep working with no change at all. `deploy.sh` still
+does `git reset --hard` first, so `touched` still has a real diff.
+
+**⚠ Written as a `case`, and the `&&`/`||` one-liner it replaced was wrong.**
+`[ "$x" = pull ] && pull || [ "$x" = build ] && build` runs the **build** after a
+successful pull: those operators are left-associative with equal precedence in
+`sh`, so the `||` short-circuits on the pull's own success and hands a true
+left-hand side to the `&&`. Measured — the one-liner printed both `PULLED` and
+`BUILT` — and caught before it shipped. A `case` cannot express it.
+
+**"PULL FAILED", never "BUILD FAILED".** Two distinct outcomes may not collapse
+into one message, which this file says twice and `lib.sh` once. The remedies have
+nothing in common: one is a compiler or a dependency on this host, the other is a
+registry, a network, or a digest that does not exist yet.
+
+**`install.sh` still only builds.** First setup on a pull host is `install.sh` for
+the env file and the stack, then the variable, then `deploy.sh`. Adding a
+question to that interview was refused: every prompt in it is argued for
+individually, and this is a value an operator either has or does not.
+
+**Status.** Applied.
+
+### Q4.111 — The documented way to run the published image had never worked
+
+**Rule.** One resolver — `cp_image_ref` in `lib.sh` — answers for `compose.sh`,
+`deploy.sh` and `cp_image_fingerprint`. No script holds a second copy of the
+default, and `deploycheck` asserts it.
+
+**What was wrong.** `deploy/README.md` told operators to put
+`REEMOAT_CP_IMAGE=ghcr.io/...` **in the control plane's env file**. Compose gives
+the *shell environment* precedence over `--env-file` for `${...}` interpolation,
+and `compose.sh` did `REEMOAT_CP_IMAGE=${REEMOAT_CP_IMAGE:-reemoat/control-plane:current}; export`
+before compose ever ran — so the env-file value was never consulted and the pull
+reached for `docker.io/reemoat/control-plane:current`. **Measured:**
+`deploy/compose.sh config` with a registry ref in that file printed
+`image: reemoat/control-plane:current`, twice, one line per service.
+
+**The worse half is the one that had no symptom.** `deploy.sh` calls
+`cp_image_fingerprint` from a process where `REEMOAT_CP_IMAGE` may be unset while
+compose's child had it set from the env file. The fingerprint would then inspect a
+*different name*, get `""` before and `""` after, conclude the image had not
+moved, and recreate nothing — a deploy that printed success while the old bytes
+kept serving. Neither half is visible in a log.
+
+**Why it survived.** The instruction was correct-looking prose next to a variable
+that exists and is honoured everywhere else, and nothing in `deploy/` had a caller
+that both wrote the file and read it back. `deploycheck` now drives
+`cp_image_ref` with the value in the environment, in the env file, in both, and in
+neither — and asserts by reading the source that the literal
+`reemoat/control-plane:current` appears in no script.
+
+**⚠ `compose.sh` stopped being standalone, and the claim in its own header had to
+go with it.** It said it sourced nothing from `lib.sh` "for the same reason as
+run-daemon.sh". `run-daemon.sh` is what the *supervisor* runs, at boot, inheriting
+nothing, and it must stay standalone; `compose.sh` is run by an operator from a
+shell that already located the script, so `lib.sh` being reachable is the same
+assumption as `compose.sh` being reachable. Keeping the claim cost a second copy
+of a default, which is what this entry is about.
+
+**Status.** Applied. Fixes a defect present since the published image existed.
+
+### Q4.112 — The installer was downloaded from a control plane, and that conflated two questions
+
+**Reported**: *"скачивание не должно быть с app, это непонятно где для юзера. А
+если он не хочет регаться в app, а хочет в своей контрольной панели."*
+
+**Decision.** `README.md`'s one-liner downloads from a **release asset on this
+repository** — `releases/latest/download/install.sh`, uploaded by
+`ci-release.sh`'s `publish` verb. The hosted instance is no longer a download
+source anywhere in the documentation.
+
+**What was wrong.** The first version led with `curl … app.reemoat.com/install.sh`,
+on the reasoning that an instance serving its own installer is elegant — which it
+is, and which is why the route stays. What it got wrong is that a download URL
+answers **"where is the software"**, and this one silently also answered **"which
+fleet does this machine join"**. Two consequences, and the second is the serious
+one. A reader of the README has no idea what `app.reemoat.com` is or why they are
+fetching a shell script from it. And somebody who wants their *own* control plane
+has no way to tell from that line that they are about to enrol into somebody
+else's — the safety property was real (the served copy points where it came from)
+and completely invisible at the moment it mattered.
+
+**Why a release asset rather than `raw.githubusercontent…/main`.** Both are
+neutral and both cost nothing. But `docs/RELEASING.md` rule 1 is that *every*
+push carries a version bump, so `main` is routinely ahead of every tag — a `raw`
+URL hands strangers unreleased code as the documented path. A release asset is
+pinned to what was actually cut, and `releases/latest/download/<name>` follows
+each release with no edit. **Measured 2026-09-01**: `releases/latest` redirects
+to `v0.4.0` and every release carries **no assets at all**, so this needed one
+upload line rather than a new mechanism.
+
+**Why not npm.** `npx` was the other suggestion and is genuinely nicer to type,
+with a better integrity story than `curl | sh` — the registry verifies the
+tarball. It loses on two counts: it is a second release channel to keep in step
+with the six version sites, and it needs node **already present**, which is one
+of the things this script exists to install. All four candidate names are free
+if that trade ever changes.
+
+**What the route keeps.** `GET /install.sh` still serves the same file with the
+instance's own origin in it, and that is what Settings → Machines prints. In the
+app the ambiguity does not exist: you are signed in to *that* control plane,
+looking at *its* machines. The README needed a neutral URL; the empty state
+needed a zero-configuration one; they are different questions with different
+right answers, and `docscheck` now pins the README's to `SOURCE_URL` while
+`webcheck` pins the app's to `installCommand`.
+
+**And the hosted instance is still named**, in the README and in the one question
+the script asks — as an option, never as a default. Somebody who wants it should
+not have to go and find it; somebody who does not should not arrive there by
+pressing Enter.
+
+**Status.** Applied. Reverses this feature's original download source.
 
 ## Invariants — rules that were defects first
 

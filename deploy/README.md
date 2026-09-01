@@ -54,6 +54,66 @@ carried across by hand.
 
 ## Install
 
+### The one-liner
+
+On a machine that has nothing on it yet:
+
+```
+curl -fsSL https://github.com/rends-east/reemoat/releases/latest/download/install.sh | sh
+```
+
+**Three ways to say which control plane, and the download URL is not one of
+them.** `--url` (or `REEMOAT_CONTROL_PLANE`) wins outright. Failing that, a copy
+**served by a control plane** carries that control plane's own origin, which is
+what Settings → Machines prints and why there is nothing to type there. Failing
+both — which is this command, fetched from the repository — it **asks**, with no
+default: a download URL says where the software is, and letting it also mean
+"and join the author's fleet" is how a self-hoster's laptop ends up somewhere
+they did not choose by pressing Enter.
+
+The served copy is `text/plain` so it can be read in a browser before it is piped
+into a shell; the release asset is the same file with no address in it.
+
+What it does, in order: checks this machine has git and a node ≥ 24 (installing
+one under `~/.reemoat/toolchain` from the official tarball, checksum-verified, if
+not); reads `GET /v1/instance` to learn whether that instance takes sign-ups;
+asks for a credential; **creates the machine before it clones anything**, so a
+refusal costs seconds rather than 750 MB; clones the version that instance runs;
+`pnpm install --frozen-lockfile`; writes `~/.reemoat/daemon.env`; and then hands
+the rest to `deploy/install.sh daemon --non-interactive`, which renders the unit,
+starts it and probes it. It reimplements none of that.
+
+Four ways to prove who you are, offered least-authority-first:
+
+| | |
+|---|---|
+| a setup code | `--enroll-code ec_…`, from Settings → Machines. Single-use, one hour, worth exactly one machine — and the only one that needs no account credential at all |
+| an API key | `REEMOAT_API_KEY=rk_…` (or `--api-key`, which is visible in `ps`). Used in memory to mint one code, then dropped; it is never written to disk |
+| signing in | name or email and a password, read off `/dev/tty` with echo off. The session it mints is revoked before the script exits |
+| signing up | only offered where `registration.enabled` is on. Where the instance confirms by mail it waits on **a keypress, not a timer** — `POST /v1/login` tolerates five failures in fifteen minutes before it starts blocking, so a polling loop would lock you out of the account you just made |
+
+Flags: `--url`, `--api-key`, `--enroll-code`, `--label`, `--dir` (default
+`~/srv/reemoat`), `--ref`, `--node`, `--yes`, `--uninstall`, `--purge`, `--help`.
+
+**What it will not do:** no `sudo`, no package manager, nothing written to a
+shell profile, and nothing outside `~/.reemoat` and the checkout. The daemon does
+not need node on *your* `PATH` — `runtime_path` bakes the resolved one into the
+unit — which is what makes the removal below complete rather than approximate.
+
+`--uninstall` stops the service, removes its unit, and removes a toolchain this
+script installed. It **names your data and deletes none of it**: the env file,
+the SQLite database and above all `~/.reemoat/worktrees`, which holds git working
+copies that may carry uncommitted work. `--purge` deletes those too, and prints
+the list of worktrees first. Neither retires the machine row — that is one tap in
+Settings → Machines, and doing it here would mean the uninstall path held a
+credential.
+
+⚠ Under `curl … | sh` the script's **stdin is the download**, so every question
+is asked on `/dev/tty` and nothing here reads stdin. With no terminal it prints
+the non-interactive invocation and exits rather than silently skipping the
+questions.
+
+
 The two roles need different things from the host, so they are two blocks
 rather than one. **The control plane needs no `pnpm install`** — its
 dependencies, its Node and its web bundle are all built into the image, and a
@@ -484,19 +544,44 @@ first.
 
 ### Running the published image
 
-`deploy/deploy.sh` and `install.sh` always **build**, and that is unchanged. To run
-the published image instead, point the variable at it and use compose directly:
+**A host is in one mode or the other, and `REEMOAT_CP_IMAGE` is what says
+which.** A registry-qualified ref pulls; a bare one builds. Set it in the control
+plane's env file and `deploy.sh` follows it:
 
 ```bash
 # in the control plane's env file
-REEMOAT_CP_IMAGE=ghcr.io/rends-east/reemoat/control-plane:v0.1.0
+REEMOAT_CP_IMAGE='ghcr.io/rends-east/reemoat/control-plane:v0.4.0'
 ```
 
 ```bash
-deploy/compose.sh pull && deploy/compose.sh up -d
+deploy/deploy.sh --service control-plane     # pulls, then restarts only what moved
 ```
 
-⚠ **Do not mix the two on one host.** `deploy.sh` would rebuild over what you
-pulled and tag the result with the same name, which looks like a successful deploy
-and is not the image you meant to be running. A host that pulls updates with
-`compose.sh`; a host that builds updates with `deploy.sh`.
+`deploy.sh` prints `source: pull` or `source: build` on every run, so the mode is
+in the log rather than inferred from which line produced output.
+`REEMOAT_CP_SOURCE=build|pull` overrides the derivation for the one ambiguous
+case — an image loaded locally under a registry-shaped name — and an unrecognised
+value is refused rather than defaulted.
+
+In pull mode there is no diff to consult, so the pull is unconditional and
+`CP_IMAGE_INPUTS` does not apply: `CP_IMAGE_INPUTS` is a *guess* at what a build
+would produce, and against a registry the ref names exact bytes. Everything
+downstream is unchanged — `cp_image_fingerprint` inspects the local image either
+way, so `CP_IMAGE_MOVED` and the `RELAY_INPUTS` rule that decides whether the
+fleet's tunnels drop behave exactly as they do after a build.
+
+⚠ **This used not to work, and the instructions above are the fix.** They
+previously said to set the variable in the env file and then use `compose.sh`
+directly — and the env-file half was inert: compose gives the *shell environment*
+precedence over `--env-file` for `${...}` interpolation, and `compose.sh` exported
+its own default before compose ever ran. Measured, `deploy/compose.sh config` with
+a registry ref in that file still printed `image: reemoat/control-plane:current`.
+There is one resolver now (`cp_image_ref` in `lib.sh`), every script reads it, and
+`deploycheck` asserts no script holds a second copy of the default.
+
+⚠ **`install.sh` still only builds.** First-time setup on a pull host is
+`install.sh` for the env file and the stack, then set the variable and
+`deploy.sh`.
+
+⚠ **The published image is `linux/amd64` only** (`RELEASE_PLATFORMS`), so an
+arm64 host still builds.

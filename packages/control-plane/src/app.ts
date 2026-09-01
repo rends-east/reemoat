@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import type { DatabaseSync } from "node:sqlite";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono, type Context, type MiddlewareHandler } from "hono";
@@ -433,6 +434,17 @@ export interface ControlPlaneOptions {
    * depend on a bundler.
    */
   webRoot?: string | null;
+  /**
+   * Absolute path to `deploy/bootstrap.sh`, or `null`/missing to serve no
+   * installer.
+   *
+   * `null` by default so `relaycheck`, which builds apps directly, needs no
+   * change and no fixture: an option nobody passes registers no route. `main.ts`
+   * resolves the real path the same way it resolves `webRoot` — from its own
+   * file URL rather than the working directory — and `REEMOAT_CP_INSTALL=0`
+   * switches it off.
+   */
+  bootstrapScript?: string | null;
   /**
    * Where outgoing mail goes, or `null` on an instance that cannot send.
    *
@@ -5385,6 +5397,90 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * never to a daemon and never to the relay.
    * ---------------------------------------------------------------- */
 
+  /* ----------------------------------------------------------------
+   * `GET /install.sh` — the one command a machine is added with.
+   *
+   * The body is `deploy/bootstrap.sh` with **this instance's own origin**
+   * substituted in, so the copy somebody downloads from their own control plane
+   * defaults to their own control plane and never to anybody else's. That is
+   * the whole reason this is a route and not a file in the bundle: a static file
+   * cannot know what host it was asked on.
+   *
+   * **Public by path rather than by position, and that is worth saying out loud
+   * here** — every other public route in this file sits above THE LINE
+   * deliberately, and this one looks like a violation of that rule. It is not:
+   * `callerAuth` is mounted on `/v1/*`, so nothing outside that prefix has ever
+   * reached it. What decides this route's placement is the two handlers *below*
+   * it. It must come before `serveStatic`, or a stray `install.sh` in `dist`
+   * would answer first with an unsubstituted copy; and before the SPA fallback,
+   * which refuses it anyway — `looksLikeAsset` matches a trailing `.sh`, which
+   * is exactly what makes `/install.sh` a free path.
+   *
+   * ⚠ **The substituted value is caller-influenced, and unquoted it is remote
+   * code execution in a script people pipe into `sh`.** `publicUrl` is
+   * `new URL(c.req.url).origin`, i.e. the `Host` header. Measured 2026-08-08
+   * through a real `node:http` server and written up at
+   * `packages/web/src/enrollment.ts`: a `Host` of ``a`id`b``, `a$(id)b`, `a'b`
+   * and `a;id` all reach `URL.origin` intact, and sourcing
+   * ``REEMOAT_CONTROL_PLANE=http://a`touch PWNED`b`` created the file. So it
+   * goes through `shellQuote`, which is the third hand-mirrored copy of that
+   * function in this repository and is compared to the other two **by
+   * behaviour** — `webcheck` reads all three off disk and runs them over a table
+   * of hostile URLs.
+   *
+   * ⚠ **`split`/`join`, never `replace`/`replaceAll`.** The replacement string
+   * is derived from the `Host` header and can contain `$&`, `` $` ``, `$'` and
+   * `$$`, every one of which expands inside a `String.replace` replacement.
+   * `src/changes.ts` records this exact defect being shipped once already, in
+   * `rewriteNoIndexHeader`, where a file named `a$&b.txt` spliced an absolute
+   * path back into a diff header. `split`/`join` expands nothing — and asserting
+   * `length === 2` gets "exactly one placeholder" for free, which is the other
+   * thing that has to be true.
+   *
+   * `text/plain` rather than `application/x-sh` or `text/x-shellscript`: those
+   * two make Chrome and Safari download the file instead of showing it, and
+   * "read it before you pipe it into a shell" is advice this route has to be
+   * able to honour. `nosniff` is already on every response here, so the type
+   * cannot be reinterpreted as HTML.
+   *
+   * `no-store` rather than `no-cache`, because **this body varies by `Host`**. A
+   * shared cache keyed on the path alone would hand one instance's address to
+   * another instance's users. `Vary` is not the tool — `Host` is part of the
+   * HTTP/1.1 cache key by definition — and a 30 KB file fetched once per machine
+   * is not worth being clever about.
+   * ---------------------------------------------------------------- */
+  const bootstrapScript = options.bootstrapScript ?? null;
+  if (bootstrapScript !== null) {
+    app.get("/install.sh", async (c) => {
+      let template: string;
+      try {
+        // Read per request, and asynchronously. Both halves are lessons this
+        // file already learnt one block down: a copy taken once at registration
+        // goes stale because `deploy.sh` moves the checkout under a running
+        // process, and a *synchronous* read blocks the event loop that carries
+        // every relay tunnel.
+        template = await readFile(bootstrapScript, "utf8");
+      } catch {
+        // A missing file is a legal deployment — a trimmed image, or an
+        // override pointing at nothing — not a 500. Same answer the SPA
+        // fallback gives when there is no `index.html` behind it.
+        return jsonError(c, 404, "not_found", "no such endpoint");
+      }
+      const origin = installOrigin(c, trustedProxyHops);
+      const parts = template.split(INSTALL_PLACEHOLDER);
+      // An installer with no control plane in it, or one with two places to put
+      // it, is worse than no installer: the first refuses at run time with a
+      // message about a placeholder and the second is ambiguous. Neither ships.
+      if (origin === "" || parts.length !== 2) {
+        return jsonError(c, 404, "not_found", "no such endpoint");
+      }
+      return c.body(parts.join(shellQuote(origin)), 200, {
+        "content-type": "text/plain; charset=utf-8",
+        "cache-control": "no-store",
+      });
+    });
+  }
+
   const webRoot = options.webRoot ?? null;
   if (webRoot !== null && existsSync(webRoot)) {
     app.use("*", serveStatic({ root: webRoot, precompressed: true }));
@@ -5912,6 +6008,80 @@ function connectOrigins(relayUrl: string | null, relayUrls: Record<string, strin
     sources.add(`${socket}//${parsed.host}`);
   }
   return sources.size === 0 ? "" : ` ${[...sources].join(" ")}`;
+}
+
+/**
+ * The one token `deploy/bootstrap.sh` reserves for this instance's address.
+ *
+ * Spelled once in each file, and `deploycheck` reads this constant out of here
+ * and counts occurrences in the script — the same "two lists, one fact" shape
+ * `.dockerignore` and the Dockerfile's COPY lines already have, except that
+ * this one is checkable offline.
+ */
+const INSTALL_PLACEHOLDER = "@REEMOAT_CONTROL_PLANE@";
+
+/**
+ * A value as shell *data*, for the one place this service emits shell.
+ *
+ * The third copy of this function in the repository — `packages/web/src/
+ * enrollment.ts` has one and `packages/control-plane/scripts/cpctl.ts` has one
+ * — and it is a copy rather than an import because neither of those is
+ * reachable from here: `packages/web` is a Vite bundle this service only
+ * serves, and the Dockerfile's runtime stage carries no web `src` at all.
+ *
+ * What keeps three copies honest is that nothing here claims they agree.
+ * `webcheck` extracts this body off disk, makes it callable, and runs all three
+ * over a table of hostile URLs. The extraction finds `function shellQuote(` at
+ * the top level of this file and reads to the next bare `}` in column 0 — so
+ * nesting it, renaming it, or giving it an annotation the extractor cannot
+ * strip makes that driver **throw** rather than quietly compare two things
+ * instead of three.
+ *
+ * Everything inside single quotes is literal to a POSIX shell except a single
+ * quote, which is closed, escaped and reopened. That arm is reachable rather
+ * than defensive: an apostrophe survives `URL.origin`, measured.
+ */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * The origin to bake into the installer — `publicUrl`, corrected for a TLS proxy.
+ *
+ * ⚠ **`publicUrl` alone is wrong here, and it is wrong in production
+ * specifically.** `@hono/node-server` derives the scheme from
+ * `socket.encrypted`, and this service is served over plain HTTP behind a proxy
+ * that terminates TLS — Traefik forwards `app.reemoat.com` to
+ * `http://control-plane:7888` with `passHostHeader`. So `publicUrl` answers
+ * `http://app.reemoat.com`, and **measured against the live deployment**,
+ * `http://app.reemoat.com/v1/instance` answers `301` to the `https` form.
+ * `bootstrap.sh` does not follow redirects — deliberately, since a redirect is
+ * somebody else's idea of where the control plane is — so an installer built
+ * from `publicUrl` would refuse on its very first request, on the only
+ * deployment shape this feature exists for.
+ *
+ * `x-forwarded-proto` is the header that says so, and it is read **only as far
+ * as the operator has said to trust one**: the same `trustedProxyHops` gate
+ * `callerAddressOf` uses for `x-forwarded-for`, and for the same reason — the
+ * header is caller-supplied, and believing it from a direct client would let
+ * anybody make this route hand out an `https://` default for a plaintext
+ * instance. At zero hops the header is ignored and `publicUrl` stands, which is
+ * exactly the behaviour on a host with no proxy.
+ *
+ * ⚠ **Scoped to this route on purpose.** `publicUrl` also feeds
+ * `controlPlaneUrl` on the four code-minting routes, which have the same latent
+ * defect — but changing it there changes what every enrollment paste has said
+ * since the first release, and that is a decision with its own blast radius
+ * rather than a fix to make in passing. Recorded rather than smoothed over.
+ */
+function installOrigin(c: Context, trustedHops: number): string {
+  const base = publicUrl(c);
+  if (base === "" || trustedHops <= 0) return base;
+  // The left-most value is the client's own claim; with a proxy in front it is
+  // the scheme the browser actually used, which is the question being asked.
+  const forwarded = (c.req.header("x-forwarded-proto") ?? "").split(",")[0]?.trim().toLowerCase() ?? "";
+  if (forwarded !== "https" && forwarded !== "http") return base;
+  return base.replace(/^https?:/, `${forwarded}:`);
 }
 
 function publicUrl(c: Context): string {

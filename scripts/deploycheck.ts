@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -55,6 +55,21 @@ import { tmp } from "./tmp.js";
  * half that needs a supervisor, a container, a network or a human at a prompt —
  * `svc_*`, `compose`, `cpctl`, `cp_image_id`, `wait_healthy`, `http_ok`,
  * `detect_init`, `host_addresses`, `lan_address`, `ask`, `confirm`, `choose`.
+ * **`svc_uninstall` is in that second list with one exception**: its *refusal*
+ * arm needs no supervisor and is driven, because refusing to "uninstall" the
+ * control plane — a container whose named volume holds the key that mints every
+ * token in the fleet — is the half that must not quietly become a `down`.
+ *
+ * **And `deploy/bootstrap.sh`, which is a third subject rather than a
+ * function.** It is served to strangers and piped into `sh`, so four things
+ * about it are asserted here and nowhere else: that the pnpm and node it
+ * installs still agree with the root manifest (nothing else in this tree reads
+ * those two lines — `pincheck` compares the six *version* sites and has never
+ * heard of this file); that no control-plane host is written into it, since a
+ * fallback constant would point every fork's installer at the author's fleet;
+ * that the placeholder `app.ts` substitutes into is spelled there exactly once;
+ * and that everything runs from one `main "$@"` on the last line, which is what
+ * makes a truncated download define a function instead of running a prefix.
  *
  * **And two whose subject is `deploy.sh` rather than a function.**
  * `RELAY_INPUTS` decides whether the relay container is recreated, and getting
@@ -2250,12 +2265,19 @@ process.stdout.write("\nwhat a release does, driven without a registry\n");
    * did exactly that, and `publish` failed with status 1 in a case written to
    * prove it returns 0.
    */
+  /*
+   * ⚠ **`release create` echoes its argv, not a fixed word.** It answered
+   * `created` and nothing else, which is enough to prove the verb ran and
+   * nothing about *what it published* — and `publish` now uploads the installer
+   * asset `README.md` tells strangers to download. Recording the command is the
+   * same device `SSH=echo` and `dockerEcho` already use one screen up.
+   */
   const gh = (verdict: string): string =>
     stub(
       `case "$1 $2" in\n` +
         `  "run list") echo "${verdict}" ;;\n` +
         `  "release view") exit 1 ;;\n` +
-        `  "release create") echo "created" ;;\n` +
+        `  "release create") echo "created $*" ;;\n` +
         `esac`,
     );
 
@@ -2264,7 +2286,7 @@ process.stdout.write("\nwhat a release does, driven without a registry\n");
     `case "$1 $2" in\n` +
       `  "run list") echo "success" ;;\n` +
       `  "release view") exit 0 ;;\n` +
-      `  "release create") echo "created" ;;\n` +
+      `  "release create") echo "created $*" ;;\n` +
       `esac`,
   );
 
@@ -2311,6 +2333,11 @@ process.stdout.write("\nwhat a release does, driven without a registry\n");
     mkdirSync(join(dir, "packages", "control-plane", "src"), { recursive: true });
     mkdirSync(join(dir, "src"), { recursive: true });
     mkdirSync(join(dir, "deploy", "docker"), { recursive: true });
+    // `publish` uploads this as the release's `install.sh` asset — the neutral
+    // download source `README.md` points at — so a tree without one is a tree
+    // that cannot be released, and the fixture has to carry it or every publish
+    // case below fails for a reason that is not the case's subject.
+    writeFileSync(join(dir, "deploy", "bootstrap.sh"), "#!/bin/sh\nmain() { :; }\nmain \"$@\"\n");
 
     writeFileSync(
       join(dir, "package.json"),
@@ -2603,6 +2630,21 @@ process.stdout.write("\nwhat a release does, driven without a registry\n");
   /* The publish verb. */
   const published = release("publish", { RELEASE_WORK: publishWork });
   check("the release is created from the section somebody wrote", published.out.includes("publishing v0.1.0"), true);
+  /*
+   * **And it carries the installer.** `README.md`'s one-liner points at
+   * `releases/latest/download/install.sh`, so a release published without that
+   * asset is a URL that 404s for every reader — and nothing else would notice,
+   * because the README, the release and the script are three files no compiler
+   * relates. Asserted on the argv the `GH` seam records, and on the *published*
+   * name rather than the file's own: `releases/latest/download/<name>` resolves
+   * on the asset name, so `bootstrap.sh` reaching the release under that name
+   * would be a working upload and a broken README.
+   */
+  check(
+    "and the release carries the installer people are told to download",
+    /release create[\s\S]*\/install\.sh/.test(published.out),
+    true,
+  );
   check("publish refuses when plan never wrote the notes", release("publish").status, 2);
 
   /*
@@ -2784,6 +2826,391 @@ process.stdout.write("\nthe backup\n");
    * leaving a 0700 directory somewhere the operator did not mean.
    */
   check("with nothing created on the way to the refusal", existsSync(join(home, ".reemoat", "backups")), false);
+}
+
+/* ------------------------------------------------------------------ *
+ * Which image, and whether this host builds it or pulls it
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nbuilt here, or pulled\n");
+
+{
+  const cpEnv = join(home, ".reemoat", "control-plane.env");
+  mkdirSync(dirname(cpEnv), { recursive: true });
+
+  const ref = (env: Record<string, string> = {}): string => sh('printf "%s" "$(cp_image_ref)"', env).out;
+  const source = (env: Record<string, string> = {}): string => sh('printf "%s" "$(cp_image_source)"', env).out;
+
+  check("with nothing set, the local build tag", ref(), "reemoat/control-plane:current");
+  check("which means this host builds", source(), "build");
+  check("the environment wins when it speaks", ref({ REEMOAT_CP_IMAGE: "ghcr.io/x/y:v1" }), "ghcr.io/x/y:v1");
+  check("and a registry-qualified ref means pull", source({ REEMOAT_CP_IMAGE: "ghcr.io/x/y:v1" }), "pull");
+  check("a port counts as a registry too", source({ REEMOAT_CP_IMAGE: "localhost:5000/y:v1" }), "pull");
+  check("a bare name does not", source({ REEMOAT_CP_IMAGE: "someone/control-plane:v1" }), "build");
+
+  /*
+   * **The env file is consulted, and this is a fix rather than a feature.**
+   * `deploy/README.md` told operators to put `REEMOAT_CP_IMAGE=ghcr.io/...` in
+   * the control plane's env file, and it could never work: compose gives the
+   * shell environment precedence over `--env-file` for `${...}` interpolation,
+   * and `compose.sh` exported its own default before compose ever ran. Measured
+   * — `deploy/compose.sh config` with a registry ref in that file still printed
+   * `image: reemoat/control-plane:current`. The recipe was in the README from
+   * the day the published image existed.
+   */
+  writeFileSync(cpEnv, "REEMOAT_CP_IMAGE='ghcr.io/rends-east/reemoat/control-plane:v0.4.0'\n", { mode: 0o600 });
+  check("the env file is read when the environment is silent", ref(), "ghcr.io/rends-east/reemoat/control-plane:v0.4.0");
+  check("and that is enough to put the host in pull mode", source(), "pull");
+  // Precedence, not merger: an operator exporting a ref for one run is not
+  // overridden by a file they are deliberately stepping around.
+  check("but the environment still wins over it", ref({ REEMOAT_CP_IMAGE: "reemoat/control-plane:current" }), "reemoat/control-plane:current");
+
+  /*
+   * **An unrecognised override is refused rather than defaulted.** Silently
+   * building where somebody asked to pull is the direction that hurts: it is a
+   * host that has been quietly doing the expensive thing for weeks.
+   */
+  const bad = sh("cp_image_source", { REEMOAT_CP_SOURCE: "nonsense" });
+  check("an unknown REEMOAT_CP_SOURCE is refused", bad.status, 2);
+  check("naming what was typed", bad.err.includes("nonsense"), true);
+  check("and the override is honoured when it is one of the two", source({ REEMOAT_CP_IMAGE: "ghcr.io/x/y:v1", REEMOAT_CP_SOURCE: "build" }), "build");
+
+  /*
+   * **One resolver, asserted as a fact about the source.** Two copies of the
+   * default is what let a pull move the digest while `cp_image_fingerprint`
+   * inspected a different name, reported "unchanged", and recreated nothing —
+   * a deploy that printed success over the old bytes. Neither script may hold a
+   * second copy of that literal.
+   */
+  const composeSource = readFileSync(join(deployDir, "compose.sh"), "utf8");
+  const deploySource = readFileSync(join(deployDir, "deploy.sh"), "utf8");
+  const codeOf = (src: string): string =>
+    src.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
+  check(
+    "no script writes the image default out for itself",
+    [codeOf(composeSource), codeOf(deploySource)].map((src) => /reemoat\/control-plane:current/.test(src)),
+    [false, false],
+  );
+  check(
+    "and both reach it through the resolver",
+    [/cp_image_ref/.test(codeOf(composeSource)), /cp_image_source/.test(codeOf(deploySource))],
+    [true, true],
+  );
+  /*
+   * ⚠ **`cp_image_fingerprint` is what decides whether every relay tunnel in the
+   * fleet drops**, through `CP_IMAGE_MOVED && touched "$RELAY_INPUTS"`. It
+   * inspects the *local* image either way, so a pull needs no change there — but
+   * only while it asks about the same name compose ran.
+   */
+  check(
+    "including the fingerprint the relay recreate decision reads",
+    /cp_image_fingerprint\(\)[\s\S]{0,400}cp_image_ref/.test(readFileSync(join(deployDir, "lib.sh"), "utf8")),
+    true,
+  );
+
+  rmSync(cpEnv, { force: true });
+}
+
+/* ------------------------------------------------------------------ *
+ * bootstrap.sh — the one-liner, and the four things about it that are
+ * checkable without a network, a terminal or a supervisor
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nthe one-line installer\n");
+
+{
+  const bootstrapPath = join(deployDir, "bootstrap.sh");
+  const bootstrap = readFileSync(bootstrapPath, "utf8");
+  const bootstrapLines = bootstrap.split("\n");
+  // Comments are where the hosted example is *documented*, which is legitimate;
+  // what must not exist is a host in code. Stripped the crude way on purpose —
+  // a full-line `#` is the only comment form this file uses.
+  const code = bootstrapLines.filter((line) => !/^\s*#/.test(line)).join("\n");
+
+  /*
+   * **The toolchain pins, tied to the repository rather than to memory.**
+   *
+   * This is the highest-value assertion in this section and the one with no
+   * other witness. A bootstrap that installed pnpm 10 against a lockfile written
+   * by 11.17.0 fails on a stranger's laptop, at `--frozen-lockfile`, minutes in —
+   * and nothing else in this tree looks at these two lines. `pincheck` compares
+   * the six *version* sites to each other and has never heard of this file.
+   */
+  const rootManifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as {
+    packageManager: string;
+    engines: { node: string };
+  };
+  const pinned = (name: string): string =>
+    /^\s*([^\s=]+)\s*$/.exec(
+      lineIn("bootstrap.sh", bootstrapLines, `${name}`, `${name}=`).slice(name.length + 1),
+    )?.[1] ?? "";
+  check(
+    "the pnpm it installs is the one the lockfile was written by",
+    `pnpm@${pinned("PNPM_VERSION")}`,
+    rootManifest.packageManager,
+  );
+  /*
+   * Numbers, not strings. `">=24"` against `"24"` held by luck; `">=24.1"`
+   * becomes `"241"`, and `"241" <= "24"` is false — a red build blaming the
+   * bootstrap's pin for a manifest that got more precise.
+   */
+  const engineMajor = Number.parseInt(rootManifest.engines.node.replace(/[^\d.]/g, ""), 10);
+  check(
+    "and the node it installs satisfies engines.node",
+    Number.parseInt(pinned("NODE_MAJOR"), 10) >= engineMajor,
+    true,
+  );
+
+  /*
+   * **No control plane is written down here.** The script defaults to whichever
+   * instance served it and has no fallback constant — a self-hosted operator
+   * whose installer quietly pointed at somebody else's fleet is the worst
+   * outcome this feature has available, and it is one careless line away. Only
+   * nodejs.org may appear, and only for the toolchain download.
+   */
+  const urls = [...code.matchAll(/https:\/\/[^\s"'`$)\\]+/g)].map((m) => m[0]);
+  /*
+   * A *host*, not a URL. `https://<control-plane>` and the `https://*` in a
+   * `case` glob are the script saying "wherever you fetched this from" and are
+   * the point rather than a violation; what may not appear is something a
+   * resolver would answer for. So the test is a dotted authority, which is what
+   * separates the two.
+   */
+  const hosts = urls.filter((u) => /^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}/i.test(u));
+  /*
+   * ⚠ **Named in prose is allowed; used as a value is not**, and the difference
+   * is the whole decision. The script *tells* somebody the author runs a control
+   * plane at a particular address, because otherwise finding it is a research
+   * task. What it may never do is put that address into a variable, a default or
+   * a request — a download URL says where the software is, and letting it also
+   * decide which fleet a machine joins is how a self-hoster's laptop ends up
+   * somewhere they did not choose. So the test is not "is the host mentioned"
+   * but "is it on a line that could act on it".
+   */
+  const acting = bootstrapLines.filter(
+    (line) =>
+      !/^\s*#/.test(line) &&
+      // A real URL with a real authority. Anchoring on the scheme is what keeps
+      // this off `process.stdin`, `source.url` and `registration.enabled`; the
+      // `[a-z0-9]` after the slashes is what keeps it off `https://<placeholder>`
+      // and `$CP/…`, neither of which names a host.
+      /https?:\/\/[a-z0-9][a-z0-9.-]*\.[a-z]{2,}/i.test(line) &&
+      !/nodejs\.org/.test(line) &&
+      /(=|\bcurl\b|\bhttp_request\b)/.test(line),
+  );
+  check("no control-plane host is written into the script as a value", acting, []);
+  // And the sieve is not simply dropping everything: the one host the script may
+  // *fetch* from is still seen, on a line that acts on it.
+  check(
+    "while the toolchain download still is",
+    hosts.some((u) => u.startsWith("https://nodejs.org/")),
+    true,
+  );
+  /*
+   * And it *is* named, which is the other half of the decision: somebody who
+   * wants the hosted instance should not have to go and find it. A count of zero
+   * here would mean the prose quietly lost it and every reader of the prompt is
+   * on their own.
+   */
+  check(
+    "and the hosted one is named to the reader, in prose",
+    bootstrapLines.some((l) => !/^\s*#/.test(l) && /app\.reemoat\.com/.test(l)),
+    true,
+  );
+
+  /*
+   * **The placeholder is spelled once, and the same way in both files.** The
+   * route asserts `split(...).length === 2` at run time; this is the offline half
+   * of the same fact, and it reads the constant out of `app.ts` rather than
+   * restating it — the "two lists, one fact" shape `.dockerignore` and the
+   * Dockerfile already have, except that this one is cheap to check.
+   */
+  const appSource = readFileSync(join(repoRoot, "packages/control-plane/src/app.ts"), "utf8");
+  const placeholder = /^const INSTALL_PLACEHOLDER = "([^"]+)";$/m.exec(appSource)?.[1] ?? "";
+  check("app.ts declares the placeholder as a plain literal", placeholder.length > 0, true);
+  check(
+    "and bootstrap.sh reserves it exactly once",
+    bootstrap.split(placeholder).length - 1,
+    1,
+  );
+
+  /*
+   * **Run out of a checkout it refuses rather than guessing**, which is the arm
+   * that keeps the paragraph above true: with no substitution and no `--url`
+   * there is no control plane, and a script that picked one would pick the
+   * author's. Driven for real — `sh bootstrap.sh` with the placeholder still
+   * literal — because this is the one branch where being wrong is silent.
+   */
+  {
+    const run = spawnSync("sh", [bootstrapPath], {
+      cwd: deployDir,
+      encoding: "utf8",
+      env: { ...baseEnv, HOME: home },
+      // stdin closed, which is also the `curl | sh` shape: it must refuse on the
+      // placeholder rather than sit waiting on a prompt it cannot ask.
+      input: "",
+    });
+    check("an unsubstituted script refuses", run.status, 2);
+    check("and says how to name a control plane", run.stderr.includes("--url"), true);
+    /*
+     * And says only that. `exec 3</dev/tty 2>/dev/null` does **not** silence a
+     * failed redirection — the shell reports it itself, outside the redirection
+     * that would have caught it — so a host with no controlling terminal printed
+     * `line NN: /dev/tty: Device not configured` above the message it was given.
+     * Measured on a machine with no tty, and the fix is redirecting the group.
+     */
+    check("without a shell error above it", /\/dev\/tty/.test(run.stderr), false);
+  }
+
+  /*
+   * **A flag with no value says so, and on `dash` that took work.** `shift` and
+   * `exec` are POSIX *special builtins*: `shift 2` past `$#` and a failed
+   * redirection on `exec` both terminate a non-interactive shell outright, so
+   * `shift 2 || die` never reaches its `die` and `{ exec 3</dev/tty; } 2>/dev/null`
+   * never reaches its `else`. Measured, `dash` exited with **zero bytes of
+   * output** where bash-as-sh printed the intended message — i.e. green on the
+   * machine this was written on and silently dead on every Debian host, which is
+   * the documented non-interactive path. This runs under whatever `/bin/sh` is,
+   * and on `check.yml`'s `ubuntu-latest` that is `dash`.
+   */
+  for (const flag of ["--url", "--api-key", "--enroll-code", "--label", "--dir", "--ref", "--node"]) {
+    const run = spawnSync("sh", [bootstrapPath, flag], {
+      cwd: deployDir,
+      encoding: "utf8",
+      env: { ...baseEnv, HOME: home },
+      input: "",
+    });
+    check(`${flag} with no value is refused by name`, run.stderr.includes(`${flag} needs a value`), true);
+    check("without installing anything on the way", existsSync(join(home, ".reemoat", "toolchain")), false);
+  }
+
+  /*
+   * **`main` is called once, on the last line.** That is not style: `curl … | sh`
+   * executes bytes as they arrive, so a download cut off half-way runs a prefix
+   * of the file — and `set -e` has nothing to say about it, because nothing
+   * failed. Everything inside a function makes a truncated file define one and
+   * exit. It is a fact about the file's shape rather than about any function in
+   * it, which is why it is asserted here rather than driven.
+   */
+  const nonEmpty = bootstrapLines.filter((line) => line.trim().length > 0);
+  check("everything runs from one call on the last line", nonEmpty.at(-1), 'main "$@"');
+  // `/^main /` and not `/^main\b/`: the declaration is `main() {`, at column 0,
+  // and a word boundary matches it too — which would make this assert "there is
+  // a definition and one call" while reading as "one call".
+  check(
+    "and nothing else calls it",
+    bootstrapLines.filter((line) => /^main /.test(line)).length,
+    1,
+  );
+
+  /*
+   * **`sanitize_label` against the control plane's own two regexes**, read out of
+   * `machines.ts` rather than retyped: `MACHINE_LABEL` is what the route accepts
+   * and `MACHINE_LABEL_RESERVED` is the shape it refuses, and `labelIsWellFormed`
+   * is the one call that cannot check one and forget the other. A local copy of
+   * either would stay green through the day the server's moved.
+   */
+  {
+    const machines = readFileSync(join(repoRoot, "packages/control-plane/src/machines.ts"), "utf8");
+    const readRe = (name: string): RegExp => {
+      const found = new RegExp(`^export const ${name} = /(.+)/;$`, "m").exec(machines)?.[1];
+      if (found === undefined) {
+        failures += 1;
+        process.stdout.write(`  FAIL  machines.ts no longer declares ${name} as a plain literal\n`);
+        return /(?!)/;
+      }
+      return new RegExp(found);
+    };
+    const label = readRe("MACHINE_LABEL");
+    const reserved = readRe("MACHINE_LABEL_RESERVED");
+    /*
+     * The function alone, extracted and run — never the file sourced. Sourcing
+     * `bootstrap.sh` runs `main "$@"`, which is the whole installer: it would
+     * reach the network, and on a substituted copy it would try to add a machine
+     * to somebody's fleet. That is not a hypothetical about a future edit; it is
+     * what the last line of that file is for.
+     */
+    const sanitizeSource = blockIn("bootstrap.sh", bootstrapLines, "sanitize_label", "sanitize_label() {", "}");
+    const sanitize = (input: string): string =>
+      spawnSync("sh", ["-c", `${sanitizeSource}\nsanitize_label "$1"`, "sh", input], {
+        encoding: "utf8",
+        env: baseEnv,
+      }).stdout ?? "";
+    for (const input of [
+      "MacBook-Pro.local",
+      "m_ab12cd34",
+      "m_0123456789abcdef",
+      "-leading-dash",
+      "Ünicode Näme",
+      "x".repeat(90),
+      "",
+      "...",
+    ]) {
+      const out = sanitize(input);
+      check(`${JSON.stringify(input)} sanitizes to a label the route accepts`, label.test(out), true);
+      check(`and one it does not read as a machine id`, reserved.test(out), false);
+    }
+    /*
+     * The negative control, without which every line above is a claim about a
+     * regex rather than about the function: at least one of those inputs has to
+     * be something the route would have refused unsanitised, or `sanitize_label`
+     * could be the identity and this section would still be green.
+     */
+    /*
+     * **A name somebody typed is refused, not rewritten**, and refused *before*
+     * the first request — under `--yes` there is no prompt to correct it at, and
+     * a typo should not cost a round trip. Driven against the same two regexes:
+     * anything `MACHINE_LABEL` rejects, or `MACHINE_LABEL_RESERVED` claims, must
+     * make the script exit non-zero with a sentence naming the value.
+     */
+    const labelRefusal = (value: string): { status: number; err: string } => {
+      const run = spawnSync(
+        "sh",
+        [bootstrapPath, "--url", "http://127.0.0.1:1", "--api-key", "rk_x", "--yes", "--label", value],
+        { cwd: deployDir, encoding: "utf8", env: { ...baseEnv, HOME: home }, input: "" },
+      );
+      return { status: run.status ?? -1, err: run.stderr ?? "" };
+    };
+    for (const bad of ["MacBook Pro.local", "-leading", "m_ab12cd34", "m_0123456789abcdef", "Ünicode"]) {
+      check(`${JSON.stringify(bad)} is refused, and by name`, label.test(bad) && !reserved.test(bad), false);
+      const out = labelRefusal(bad);
+      check(`and the script says so before it asks anything`, [out.status, out.err.includes(bad)], [2, true]);
+    }
+    // The control: a name the route accepts gets past this check and on to the
+    // network, or every line above would pass for a script that refuses all names.
+    check(
+      "while a name the route accepts is not refused here",
+      labelRefusal("laptop").err.includes("machine name"),
+      false,
+    );
+
+    check(
+      "and the inputs were ones the route would have refused",
+      ["m_ab12cd34", "-leading-dash", "Ünicode Näme", ""].filter((raw) => label.test(raw) && !reserved.test(raw)),
+      [],
+    );
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * svc_uninstall — the verb deploy/ was missing
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\ntaking a service away again\n");
+
+/*
+ * Only the refusal is drivable here; the rest boots a supervisor out and belongs
+ * with `svc_start` in the header's uncovered list. The refusal is the half worth
+ * having offline: the control plane is a container with a named volume holding
+ * the key that mints every token in the fleet, and "uninstall" there is
+ * `compose.sh down` plus a decision about that volume — not a decision a
+ * function called from an installer gets to make.
+ */
+{
+  const refused = sh('svc_uninstall control-plane');
+  check("uninstalling a container is refused", refused.status !== 0, true);
+  check("and says what to run instead", refused.err.includes("compose.sh down"), true);
+  check("naming no unit, because there is none", refused.err.includes("LaunchAgents"), false);
 }
 
 process.stdout.write("\nwhat this driver left behind\n");

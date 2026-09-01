@@ -176,6 +176,14 @@ COPY packages/control-plane/src ./packages/control-plane/src
 # files, 6 KB.
 COPY packages/control-plane/scripts ./packages/control-plane/scripts
 
+# The one-line installer, served by `GET /install.sh` with the instance's own
+# origin substituted in. `main.ts` resolves it as `../../../deploy/bootstrap.sh`
+# from its own file URL, which is `/app/deploy/bootstrap.sh` here and
+# `<repo>/deploy/bootstrap.sh` in a checkout — the same relative path in both,
+# which is what makes one COPY line enough. Its twin is `!deploy/bootstrap.sh`
+# in `.dockerignore`; without that this line fails with "not found".
+COPY deploy/bootstrap.sh ./deploy/
+
 COPY --from=web /app/packages/web/dist ./packages/web/dist
 
 # --- state -----------------------------------------------------------------

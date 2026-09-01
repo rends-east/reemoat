@@ -14,6 +14,7 @@ import type {
 } from "../../wire";
 import { Badge, Button, ChoiceRow, DangerButton, Empty, FIELD, Icon, IconButton, Spinner } from "../bits";
 import { copyText } from "../clipboard";
+import { CommandLine } from "../CommandLine";
 import { loginOutcome, rawTranscriptIsOpen, readLoginTranscript, type LoginOutcome } from "../login";
 import {
   harnessName,
@@ -779,7 +780,7 @@ function CredentialSlot({
   stance: AgentStance;
   /** The one thing to read before typing. See `credentialCaveat`. */
   caveat: string | null;
-  /** A command that produces this credential, where one exists. See `SetupTokenCommand`. */
+  /** A command that produces this credential, where one exists. See `CommandLine`. */
   howTo: string | null;
   /** False where nothing typed here could help — see `tokenBlockFor`. */
   editable: boolean;
@@ -852,7 +853,7 @@ function CredentialSlot({
        * be measured: it is a fixed `h-11`, while every other box in this row
        * states a `min-h` and stretches. A 44px Remove therefore drags the field
        * and Save up to 44px on a desktop, where both are 36px — and the field
-       * then no longer lines up with the `SetupTokenCommand` box above it, which
+       * then no longer lines up with the `CommandLine` box above it, which
        * is a height `webcheck` holds to one stated number on purpose. `chip` is
        * 32px, so it sits *inside* the row's existing height and moves no layout
        * at either pointer size, and it reaches 44px through `TAP_GROW_Y`.
@@ -901,7 +902,7 @@ function CredentialSlot({
         * inputs between it and the box it meant. A command belongs against the
         * field it fills.
         */}
-      {howTo !== null && editable && <SetupTokenCommand command={howTo} />}
+      {howTo !== null && editable && <CommandLine command={howTo} />}
 
       {/* Above the input and before the first keystroke — not a tooltip, which a
           phone has none of, and not a toast after saving. */}
@@ -1494,65 +1495,6 @@ function copy(text: string): void {
   });
 }
 
-
-/**
- * A command to run in a terminal, with a control that copies it.
- *
- * **A flex row rather than a button positioned over the field**, which is what
- * this was and what made it hang off the edge: the control was `absolute` inside
- * a `<pre>` whose height came from its own text, so any padding mismatch pushed
- * it out. Two siblings under `items-stretch` cannot disagree about height — there
- * is no second measurement to get wrong.
- *
- * Both glyphs are mounted and swapped by opacity, and the tick reverts on a
- * timer: a confirmation that never leaves is a claim about a clipboard that has
- * long since moved on.
- */
-function SetupTokenCommand({ command }: { command: string }): ReactNode {
-  const [copied, setCopied] = useState(false);
-  useEffect(() => {
-    if (!copied) return;
-    const timer = setTimeout(() => setCopied(false), 1400);
-    return () => clearTimeout(timer);
-  }, [copied]);
-
-  return (
-    /*
-      * **The border is on the wrapper, not on the `<pre>`.** That is what puts the
-      * control inside the field while leaving the two as ordinary flex siblings —
-      * the version before this laid the button over the box with `absolute`, took
-      * its height from the field's own text, and hung off the edge as soon as the
-      * two padding values disagreed. Under `items-stretch` there is no second
-      * measurement to get wrong.
-      */
-    <div className="mt-3 flex min-h-9 items-stretch overflow-hidden rounded-md border border-edge-strong bg-ink [@media(pointer:coarse)]:min-h-11">
-      <pre className="flex min-w-0 flex-1 items-center overflow-x-auto px-3 font-mono text-2xs leading-5 text-fg">
-        {command}
-      </pre>
-      <button
-        type="button"
-        onClick={() => {
-          void copyText(command).then((ok) => {
-            if (ok) setCopied(true);
-          });
-        }}
-        aria-label={copied ? "Copied" : `Copy ${command}`}
-        className="tap press relative flex w-11 shrink-0 items-center justify-center border-l border-edge-strong bg-surface text-muted hover:bg-raised hover:text-fg"
-      >
-        <Icon
-          as={Copy}
-          size={14}
-          className={`absolute transition-opacity duration-300 ${copied ? "opacity-0" : "opacity-100"}`}
-        />
-        <Icon
-          as={Check}
-          size={14}
-          className={`absolute transition-opacity duration-300 ${copied ? "opacity-100" : "opacity-0"}`}
-        />
-      </button>
-    </div>
-  );
-}
 
 
 /**

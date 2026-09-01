@@ -986,6 +986,80 @@ svc_reload() {
   esac
 }
 
+# Stop a unit-backed service and take its unit away, which is the one verb this
+# file was missing. `deploy/bootstrap.sh` is what needs it — an installer people
+# pipe into `sh` with no way back is not something to ship — and it lives here
+# rather than there for the reason stated at the top of this file: this is the
+# only place that knows one machine from another, and a bootstrap issuing
+# `launchctl` directly would be the second.
+#
+# **Refuses a docker-backed service outright.** The control plane is a container
+# with a named volume holding the key that mints every token in the fleet;
+# "uninstall" there is `compose.sh down` plus a decision about that volume, and
+# it is not a decision a function called from an installer gets to make.
+#
+# Idempotent in both directions: booting out a label that is not loaded and
+# removing a unit that is not there are both fine, because the state this is
+# asked to reach is "gone" and it is already there.
+svc_uninstall() {
+  case "$(service_backend "$1")" in
+    docker)
+      echo "$1 runs as a container; there is no unit to remove." >&2
+      echo "  stop it with: $DEPLOY_DIR/compose.sh down" >&2
+      return 1
+      ;;
+    unit)
+      require_init
+      case "$INIT_SYSTEM" in
+        launchd)
+          _svc_label=$(unit_label "$1")
+          # Before the plist is removed, not after: `bootout` resolves the label
+          # through the loaded job rather than through the file, but launchd
+          # re-reads `~/Library/LaunchAgents` at login, so a file left behind
+          # after a successful bootout comes back at the next one.
+          launchctl bootout "gui/$(id -u)/$_svc_label" 2>/dev/null || true
+          # ⚠ **30 seconds, and the timeout is a refusal.** `svc_reload`'s copy
+          # of this loop waits 5s and is followed by a `bootstrap` that reports
+          # the failure for it; there is nothing after this one. The daemon's own
+          # `SHUTDOWN_HARD_LIMIT_MS` is 25s — it stops sessions and closes a
+          # SQLite file — so 5s could return success while it was still running,
+          # and the documented caller then goes on to `--purge` git worktrees out
+          # from under it.
+          _n=0
+          while [ "$_n" -lt 300 ] && launchctl print "gui/$(id -u)/$_svc_label" >/dev/null 2>&1; do
+            _n=$((_n + 1))
+            sleep 0.1
+          done
+          if launchctl print "gui/$(id -u)/$_svc_label" >/dev/null 2>&1; then
+            echo "$_svc_label is still loaded 30s after bootout; not removing its unit." >&2
+            return 1
+          fi
+          ;;
+        systemd)
+          systemctl --user disable --now "$(unit_label "$1").service" >/dev/null 2>&1 || true
+          _n=0
+          while [ "$_n" -lt 300 ] && systemctl --user is-active --quiet "$(unit_label "$1").service"; do
+            _n=$((_n + 1))
+            sleep 0.1
+          done
+          if systemctl --user is-active --quiet "$(unit_label "$1").service"; then
+            echo "$(unit_label "$1").service is still active 30s after disable --now; not removing its unit." >&2
+            return 1
+          fi
+          ;;
+      esac
+      rm -f "$(unit_target "$1")"
+      # A staged unit from an install that never finished is part of "gone" too.
+      # Derived exactly as install.sh derives it, rather than guessed at: it
+      # writes `$(dirname ENV_FILE)/$(basename unit_target).pending`, so a host
+      # with REEMOAT_ENV_FILE pointing elsewhere stages it elsewhere too.
+      rm -f "$(dirname -- "$(env_file "$1")")/$(basename -- "$(unit_target "$1")").pending"
+      case "$INIT_SYSTEM" in systemd) systemctl --user daemon-reload >/dev/null 2>&1 || true ;; esac
+      echo "  removed      $(unit_target "$1")"
+      ;;
+  esac
+}
+
 service_desc() {
   case "$1" in
     daemon) printf 'Reemoat daemon (agent sessions on this host)' ;;
@@ -1331,7 +1405,97 @@ cp_image_fingerprint() {
   command -v "${REEMOAT_DOCKER:-docker}" >/dev/null 2>&1 || return 0
   "${REEMOAT_DOCKER:-docker}" image inspect \
     --format '{{json .RootFS}}{{json .Config}}' \
-    "${REEMOAT_CP_IMAGE:-reemoat/control-plane:current}" 2>/dev/null || true
+    "$(cp_image_ref)" 2>/dev/null || true
+}
+
+# What the *running* container was created from, in `cp_image_fingerprint`'s
+# shape so the two are comparable.
+#
+# Needed only in pull mode, and there it is the only honest "before": the ref
+# points at what we are moving *to*, so comparing it to itself calls every
+# rollback a no-op. Empty when nothing is running, which reads as "moved" and
+# recreates — the safe direction.
+cp_running_fingerprint() {
+  command -v "${REEMOAT_DOCKER:-docker}" >/dev/null 2>&1 || return 0
+  _cid=$(compose ps -aq "$(compose_service "$1")" 2>/dev/null | head -1) || return 0
+  [ -n "$_cid" ] || return 0
+  _img=$("${REEMOAT_DOCKER:-docker}" inspect "$_cid" --format '{{.Image}}' 2>/dev/null) || return 0
+  [ -n "$_img" ] || return 0
+  "${REEMOAT_DOCKER:-docker}" image inspect \
+    --format '{{json .RootFS}}{{json .Config}}' "$_img" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Which image, and whether this host builds it or pulls it
+# ---------------------------------------------------------------------------
+#
+# **One resolver, because two were a silent-green failure.** `compose.sh` had its
+# own `${REEMOAT_CP_IMAGE:-reemoat/control-plane:current}` and so did
+# `cp_image_fingerprint`, and `deploy.sh` calls the second from a process where
+# that variable may be unset while compose's child has it set. The fingerprint
+# would then inspect `reemoat/control-plane:current`, get "" before and "" after,
+# report **"unchanged"**, and recreate nothing after a pull that moved the digest
+# — a deploy that printed success and left the old bytes serving.
+#
+# ⚠ **It also fixes a documented recipe that has never worked.** `deploy/README.md`
+# said to put `REEMOAT_CP_IMAGE=ghcr.io/...` in the control plane's env file. It
+# cannot win: compose gives the *shell environment* precedence over `--env-file`
+# for `${...}` interpolation, and `compose.sh` exported the default before compose
+# ever ran. Measured — `deploy/compose.sh config` with a registry ref in the env
+# file still printed `image: reemoat/control-plane:current`. The env file is
+# consulted here, and only when the environment is silent, which is the
+# precedence everything else in `deploy/` already uses.
+cp_image_ref() {
+  if [ -n "${REEMOAT_CP_IMAGE:-}" ]; then
+    printf '%s' "$REEMOAT_CP_IMAGE"
+    return 0
+  fi
+  # ⚠ **Read, not sourced, and that is the difference between a fallback and an
+  # outage.** `env_value` → `file_value` runs a real `. "$file"`, and this
+  # function is now on `compose.sh`'s path for *every* verb. A control-plane env
+  # file that compose's dotenv grammar accepts and `sh` does not — an unquoted
+  # value with a space is enough — would then kill `logs`, `ps`, `config` and
+  # `down` under `set -eu` before compose ever ran, which is exactly the "stuck at
+  # the moment they need not to be" that `compose.sh` exists to avoid. Measured:
+  # a hand-added `X=hunter2 extra` made the sourcing form exit 127.
+  #
+  # One well-known key whose value is an image reference, so a line reader is
+  # sufficient and cannot be surprised. Last assignment wins, matching what a
+  # shell would have done; surrounding quotes are stripped because `set_env`
+  # writes them.
+  _cpi=$(sed -n "s/^[[:space:]]*REEMOAT_CP_IMAGE=//p" "$(env_file control-plane)" 2>/dev/null | tail -1)
+  _cpi=${_cpi#\'}; _cpi=${_cpi%\'}
+  _cpi=${_cpi#\"}; _cpi=${_cpi%\"}
+  printf '%s' "${_cpi:-reemoat/control-plane:current}"
+}
+
+# `build` or `pull`, derived from the shape of the ref and overridable outright.
+#
+# **Derived, so the one variable stays one variable** — `ci-release.sh` already
+# says `REEMOAT_CP_IMAGE` is what decides built-here against pulled-from-a-
+# registry, and adding a second knob nobody sets would make that false. The rule
+# is docker's own: everything before the first `/` is a registry host if it holds
+# a `.` or a `:`, or is exactly `localhost`. So `reemoat/control-plane:current`
+# builds and `ghcr.io/...` pulls.
+#
+# `REEMOAT_CP_SOURCE` overrides, because the derivation has one genuinely
+# ambiguous case — an image `--load`ed locally under a registry-shaped name — and
+# explicit beats clever when it costs one variable. An unrecognised value is a
+# refusal rather than a default: silently building where somebody asked to pull
+# is the direction that hurts.
+cp_image_source() {
+  case "${REEMOAT_CP_SOURCE:-}" in
+    build | pull) printf '%s' "$REEMOAT_CP_SOURCE"; return 0 ;;
+    '') : ;;
+    *) echo "REEMOAT_CP_SOURCE must be 'build' or 'pull', not \"$REEMOAT_CP_SOURCE\"" >&2; exit 2 ;;
+  esac
+  _ref=$(cp_image_ref)
+  case "${_ref%%/*}" in
+    "$_ref")     printf 'build' ;;
+    localhost)   printf 'pull' ;;
+    *[.:]*)      printf 'pull' ;;
+    *)           printf 'build' ;;
+  esac
 }
 
 # Where the admin API key is kept once the control plane has printed it. Not a

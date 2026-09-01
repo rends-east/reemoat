@@ -559,6 +559,41 @@ const webRoot =
       : fileURLToPath(new URL("../../web/dist", import.meta.url));
 
 /*
+ * `deploy/bootstrap.sh`, which `GET /install.sh` serves with this instance's own
+ * address substituted into it.
+ *
+ * Resolved from this file rather than the working directory, for exactly the
+ * reason `webRoot` above gives. The relative path is the same in a checkout
+ * (`<repo>/deploy/bootstrap.sh`) and in the image (`/app/deploy/bootstrap.sh`),
+ * which is what makes the single COPY line in `deploy/docker/Dockerfile`
+ * sufficient — and that line has a twin in `.dockerignore`, because a file
+ * missing from either passes `typecheck` and every offline driver and breaks
+ * only the image.
+ *
+ * `REEMOAT_CP_INSTALL=0` switches the route off; a path overrides. Existence is
+ * *not* checked here: `app.ts` answers a missing file with a 404, and a control
+ * plane that refused to start because an installer was absent would make the API
+ * depend on a file only the installer needs.
+ */
+const installEnv = (process.env["REEMOAT_CP_INSTALL"] ?? "").trim();
+/*
+ * ⚠ **The affirmative spellings mean "the default", not "a file called 1".**
+ * `REEMOAT_CP_WEB` has the same shape and the same trap, and only the *negative*
+ * spelling is documented anywhere — so `REEMOAT_CP_INSTALL=1` is the natural
+ * thing for somebody to write, and read as a path it resolves to `<cwd>/1`,
+ * ENOENT, and a permanent 404 that looks exactly like a trimmed image. Naming
+ * them costs one line and removes a silent off-switch.
+ */
+const installOff = installEnv === "0" || installEnv === "false" || installEnv === "no";
+const installDefault = installEnv === "1" || installEnv === "true" || installEnv === "yes";
+const bootstrapScript =
+  installOff
+    ? null
+    : installEnv.length > 0 && !installDefault
+      ? (isAbsolute(installEnv) ? installEnv : join(process.cwd(), installEnv))
+      : fileURLToPath(new URL("../../../deploy/bootstrap.sh", import.meta.url));
+
+/*
  * Outgoing mail — the first outbound connection this service has ever made.
  *
  * `socketDialer()` is the only thing in this process that opens one, and the
@@ -617,6 +652,7 @@ const app = createControlPlaneApp({
   relayUrl,
   relay: relayView,
   webRoot,
+  bootstrapScript,
   mail: mailPump,
   trustedProxyHops,
   relayUrls,

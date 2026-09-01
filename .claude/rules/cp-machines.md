@@ -131,11 +131,38 @@ revoked and inert. **Legacy rows are the residue**: a machine predating
 admin machines`), and is adopted with `PUT /v1/admin/machines/:id/owner`, which
 is what puts it under both gates. Q7.95, which this reverses.
 
+**There are three copies of `shellQuote` now, and one of them is on a route.**
+`packages/web/src/enrollment.ts` renders the three `export` lines *and*
+`installCommand`, the one-liner the empty-fleet screens print;
+`packages/control-plane/scripts/cpctl.ts` inlines the same quoting in its own
+`enrollmentLines`; and `packages/control-plane/src/app.ts` has a third for `GET
+/install.sh`, where the value substituted in is `publicUrl(c)` — the caller's
+`Host` header — and an unquoted copy is remote code execution in a script people
+pipe into `sh`. None of them can import another (two packages, and the image's
+runtime stage carries no web `src`), so **`webcheck` reads all three off disk,
+makes them callable and runs them over one hostile table**. The extraction finds
+`function <name>(` at column 0 and reads to the next bare `}` in column 0:
+nesting, renaming or an annotation it cannot strip makes that driver **throw**
+rather than compare two things where it claims three. A fourth copy that joins
+nothing is how the quoting stops agreeing.
+
+**`installCommand` takes the origin the page is already on**, never a constant —
+`packages/web/src/cp.ts` has no base URL at all for the same reason, so a
+self-hosted instance prints a command that joins itself. It is drawn on the rail's
+empty state and on Settings → Machines, **inside the `mayAddMachine` arm on
+both**: a command that adds a machine, printed under the sentence saying there is
+no way to add one, would leave `machineQuotaNotice` literally `null`-iff-true
+while the property that pair exists for was gone. It is deliberately **not** in
+`NewSession.tsx`'s `MachineLine` — a field label in the composer strip on a 390px
+phone, beside a door that already leads to the screen that has it. `webcheck`
+asserts all three placements, because "put it in all three" is what a reader of
+the other two would reasonably do.
+
 ## Layout
 
 | File | Holds |
 |---|---|
-| `packages/web/src/enrollment.ts` | The three lines a daemon is started with, as shell **data**: `controlPlaneUrl` comes from the request's own `Host`, and a backtick survives `URL.origin`. `webcheck` runs `cpctl.ts`'s own `enrollmentLines` body off disk, so the copies are compared by behaviour |
+| `packages/web/src/enrollment.ts` | The three lines a daemon is started with, **and `installCommand`**, as shell **data**: `controlPlaneUrl` comes from the request's own `Host`, and a backtick survives `URL.origin`. `webcheck` runs `cpctl.ts`'s own `enrollmentLines` body off disk, so the copies are compared by behaviour |
 | `packages/web/src/quota.ts` | How many machines *this person* may have, and what to say when they may not. `mayAddMachine` reads the control plane's own `canAddMachine` and **fails open** on absence, `AddMachine` being the only way to create a machine anywhere in this app; `webcheck` pins the pair — a notice is `null` **iff** the door is drawn. Also `machineLimitProblem`, the validator both admin screens call, and `machineLimitChangeNotice`, whose non-`null` **is** the decision to confirm a lowering |
 | `packages/control-plane/src/machines.ts` | The label, the name that cannot collide, create-plus-grant in one transaction, `releaseOwner`, and `isUniqueViolation`, exported so a third caller one file over is not a third copy of a `"UNIQUE"` string match. `MAX_MACHINES_PER_USER` is the **ceiling** and lives here; the limit does not. `createOwnedMachine` takes the limit as a **required** argument, so both call sites are a compile error until they say which limit they mean |
 | `packages/control-plane/src/quota.ts` | **The rank rule and nothing else** — one SQL statement answering owner, position and override together, and the clamp that keeps a row written by a looser release from out-ranking this one's ceiling. `null` from `machineStanding` means *nobody owns it* and every caller must read that as allowed: `?.over ?? true` is the natural spelling and takes every pre-ownership machine offline. Its own statement cache, because the SQL and the rule that reads it are one rule |

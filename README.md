@@ -24,11 +24,43 @@ Several agents at once, each in its own git worktree. Close the lid, drop to LTE
 kill the tab: the daemon is the source of truth, and the agent never notices you
 left.
 
+## Install
+
+On the machine you want agents to run on:
+
+```
+curl -fsSL https://github.com/rends-east/reemoat/releases/latest/download/install.sh | sh
+```
+
+It asks which control plane to join, installs the daemon, asks who you are on
+that control plane — sign in, sign up, or paste a key — adds the machine, and
+starts it. Nothing needs `sudo`, nothing is written to your shell profile, and
+everything it puts on the machine is under `~/.reemoat` and `~/srv/reemoat`. To
+take it off again, `… | sh -s -- --uninstall`.
+
+**Where the software comes from and which fleet it joins are two questions, and
+this command keeps them apart.** It downloads from this repository and joins
+nothing until you say what to join — `--url https://your-control-plane`, or the
+answer to the one question it asks. A control plane is the piece you run
+yourself (`deploy/install.sh control-plane`); the author runs one at
+`app.reemoat.com` for people who would rather not.
+
+**Already have one running?** Its own copy of this installer has its address
+already in it — Settings → Machines prints the command, and there is nothing to
+type. `deploy/README.md` has the rest, including every flag.
+
 ## Self-hosted
 
 Every piece runs on hardware you own — the daemon on your machine, the control
-plane in a container on a box of your own — and there is no hosted service to sign
-up for.
+plane in a container on a box of your own. **Nothing here needs a hosted
+service**: `deploy/install.sh control-plane` is the whole of it, and the fleet it
+makes answers to nobody but you.
+
+There is also a control plane at `app.reemoat.com`, run by the author, for people
+who want the phone screen without a box to run. It is this code — `GET
+/v1/instance` names the repository and the version it is running, which is the
+AGPL section 13 offer — and it is one instance rather than the product. Which one
+the command above joins is decided by which one you fetched it from.
 
 ## How it works
 
@@ -74,10 +106,10 @@ Three pieces, and you can run all of them yourself.
 |---|---|
 | `CLAUDE.md` | The rules as they stand — what you need in order to *change* the code |
 | `.claude/rules/` | The same, per area, loaded when you open a file it covers |
-| `docs/API.md` | The HTTP surface of both services — 114 routes, what each is for, and the conventions every one of them answers in |
+| `docs/API.md` | The HTTP surface of both services — 115 routes, what each is for, and the conventions every one of them answers in |
 | `docs/PLUGINS.md` | Writing a plugin: the manifest, the host API, the drawing vocabulary, and what a plugin is trusted with |
 | `docs/RELEASING.md` | Where the version is written down, when it moves, and what a tag does that a push does not |
-| `docs/DECISIONS.md` | **Why** any of it is that way. 827 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
+| `docs/DECISIONS.md` | **Why** any of it is that way. 838 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
 | `deploy/README.md` | The deployment surface in full |
 | `deploy/RELAYS.md` | Running more than one relay, and the order of operations |
 | `CHANGELOG.md` | What changed in each release, and what a 0.x minor is allowed to break |

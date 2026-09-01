@@ -540,6 +540,54 @@ if (readmeRoutes) {
   check("README.md's route total is both services added up", Number(readmeRoutes[1] ?? -1), daemonRoutes + cpRoutes);
 }
 
+/*
+ * **The installer people paste comes from the repository, and the URL says which
+ * repository.**
+ *
+ * Two facts are written down in three places and none of them is checkable by a
+ * compiler: the repository is `SOURCE_URL` in `app.ts` — the AGPL section 13
+ * offer, which `pincheck` already ties to the workspace manifests — and the
+ * asset name is whatever `deploy/ci-release.sh`'s `publish` verb uploads. A
+ * README pointing at a name no release carries is a 404 for every reader, and a
+ * release renaming its asset breaks the README silently. So both are read from
+ * their own source and the prose is asserted against them.
+ *
+ * ⚠ **The download URL is deliberately *not* `installCommand`'s output any
+ * more.** That function renders the in-app command, which carries a control
+ * plane's own origin — and conflating "where the software is" with "which fleet
+ * this joins" is exactly what putting `app.reemoat.com` in the README did.
+ * `webcheck` pins the function; this pins the neutral URL; they are two
+ * different strings on purpose and neither may become the other.
+ */
+{
+  const appSource = read("packages/control-plane/src/app.ts");
+  const sourceUrl = /^const SOURCE_URL = "([^"]+)";$/m.exec(appSource)?.[1] ?? "";
+  check("app.ts still declares SOURCE_URL as a plain literal", sourceUrl.length > 0, true);
+
+  const release = read("deploy/ci-release.sh");
+  const asset = /\$RELEASE_WORK\/([A-Za-z0-9._-]+)"$/m.exec(release)?.[1] ?? "";
+  check("ci-release.sh uploads a named installer asset", asset.length > 0, true);
+
+  const expected = `${sourceUrl}/releases/latest/download/${asset}`;
+  check("README.md's one-liner downloads that asset from that repository", readme.includes(expected), true);
+  check("and so does deploy/README.md", read("deploy/README.md").includes(expected), true);
+  /*
+   * One `curl … | sh` in the README, so a second hand-written copy cannot sit
+   * beside the checked one and drift away from it.
+   */
+  check("with no second copy beside it", (readme.match(/curl -fsSL/g) ?? []).length, 1);
+  /*
+   * And the hosted instance is not a download source. It may be *named* — the
+   * README says who runs one — but never on the line somebody pipes into a
+   * shell, which is the whole of what this change was about.
+   */
+  check(
+    "and the hosted instance is never what the README tells you to download from",
+    /curl[^\n]*app\.reemoat\.com/.test(readme),
+    false,
+  );
+}
+
 /* One H1: the second was a seam left by the assembly that created this file. */
 check("DECISIONS.md has exactly one H1", (decisions.match(/^# /gm) ?? []).length, 1);
 

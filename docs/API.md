@@ -173,7 +173,7 @@ plugin_failed` for anything the plugin's own code raised.
 
 ---
 
-## The control plane — 59 routes
+## The control plane — 60 routes
 
 Holds the accounts, the machines, the grants and the fleet's signing key.
 `pnpm cpctl` drives it.
@@ -236,6 +236,10 @@ password change is refused all of it by a second positional gate.
 | `GET /v1/admin/fleet` | What every machine is *running*, connected or not — the inventory a protocol change is planned from |
 
 ### The web UI
+
+| Route | What it is |
+|---|---|
+| `GET /install.sh` | The one-line installer — `deploy/bootstrap.sh` with **this instance's own origin** substituted in and shell-quoted, so a self-hosted control plane hands out a script that points at itself. Unauthenticated by path rather than by position: `callerAuth` is mounted on `/v1/*` and has never seen anything outside it. `text/plain`, so it can be read in a browser before it is piped into a shell; `no-store`, because the body varies by `Host`. A missing file is a 404, not a 500. `REEMOAT_CP_INSTALL=0` turns it off |
 
 `GET *` serves `packages/web/dist` with an SPA fallback, from disk, per request.
 `REEMOAT_CP_WEB=0` turns it off — and takes the security headers with it, which

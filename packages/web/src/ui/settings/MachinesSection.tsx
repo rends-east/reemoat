@@ -1,7 +1,7 @@
 import { ChevronRight } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
 import * as cp from "../../cp";
-import { enrollmentExpiryText, enrollmentLines } from "../../enrollment";
+import { enrollmentExpiryText, enrollmentLines, installCommand } from "../../enrollment";
 import { errorText } from "../../http";
 import {
   machineAllowanceText,
@@ -25,6 +25,7 @@ import {
   Spinner,
   reachText,
 } from "../bits";
+import { CommandLine } from "../CommandLine";
 import { OneTimeSecret } from "./OneTimeSecret";
 
 /**
@@ -121,6 +122,33 @@ export function MachinesSection({ state }: { state: AppState }): ReactNode {
        * control goes — `mailUsable`'s pattern on the settings screen next door.
        */}
       {canAdd && <AddMachine onAdded={setPending} />}
+
+      {/*
+       * The other half of the same answer, and it is only drawn where the form
+       * is. In the `!canAdd` state the sentence above says there is no way to add
+       * a machine here — a command that adds one, printed underneath it, would
+       * make that sentence a lie while `machineQuotaNotice` stayed literally
+       * `null`-iff-`mayAddMachine`. The property that pair exists to protect is
+       * "a door, or the sentence saying why there is not one", and a door is a
+       * door whichever control opens it.
+       *
+       * Above the code rather than below: this is the path for a host that has
+       * nothing on it yet, and the code above is the path for one that already
+       * has a checkout. Most people are the first.
+       */}
+      {canAdd && (
+        <div>
+          <p className="text-xs text-muted">Or, on a machine with nothing on it yet:</p>
+          <CommandLine command={installCommand(location.origin)} />
+          <p className="mt-2 text-2xs text-faint">
+            It installs the daemon, asks who you are, and adds the machine itself. Read it first at{" "}
+            <a className="underline" href={`${location.origin}/install.sh`}>
+              {location.origin}/install.sh
+            </a>
+            .
+          </p>
+        </div>
+      )}
 
       {pending !== null && (
         <OneTimeSecret

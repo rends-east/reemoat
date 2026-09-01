@@ -239,7 +239,18 @@ NEW=$("$GIT_BIN" -C "$REPO_ROOT" rev-parse --verify "${REF}^{commit}" 2>/dev/nul
   exit 2
 }
 
-if [ "$OLD" = "$NEW" ] && [ "$FORCE" -eq 0 ]; then
+# ⚠ **A pull host is never idle on the strength of the checkout alone.** This
+# gate asks "did the commit move", which in build mode is the whole of what the
+# image is made from. Against a registry it is the wrong repository: the
+# documented way to take a new image is to edit `REEMOAT_CP_IMAGE` in the env
+# file and run this — and that moves no commit, so the gate answered "already at
+# <sha> — nothing to do" and exited 0 without pulling or restarting anything. It
+# would also have swallowed the very first build→pull switch on any current host.
+# The same argument the pull arm makes further down, applied one level up.
+_idle_ok=1
+[ "$(cp_image_source)" = pull ] && _idle_ok=0
+
+if [ "$OLD" = "$NEW" ] && [ "$FORCE" -eq 0 ] && [ "$_idle_ok" -eq 1 ]; then
   echo "  already at $("$GIT_BIN" -C "$REPO_ROOT" rev-parse --short "$NEW") — nothing to do"
   echo
   # Collected rather than fatal, for the same reason as the restart loop below:
@@ -478,8 +489,23 @@ if [ -n "$_cp_targets" ]; then
   # ran, because `touched` answers true for everything under --force and a message
   # naming a path would then be a plain falsehood in the log of a deploy nobody
   # was watching.
+  # **Built here or pulled from a registry, decided in one place.**
+  # `cp_image_source` derives it from the shape of `REEMOAT_CP_IMAGE` and
+  # `REEMOAT_CP_SOURCE` overrides. Printed on every run rather than inferred from
+  # which branch produced output: a mode switch nobody can see in the log is how
+  # a host ends up in the state `deploy/README.md` used to warn about in prose.
+  _cp_source=$(cp_image_source)
+  echo "  source: $_cp_source ($(cp_image_ref))"
+
   why=""
-  if [ "$FORCE" -eq 1 ]; then
+  if [ "$_cp_source" = pull ]; then
+    # **No diff is consulted, and that is a simplification rather than a gap.**
+    # `CP_IMAGE_INPUTS` is a *guess* at what a build would produce; against a
+    # registry the ref is a name for exact bytes, and asking git whether they
+    # moved is asking the wrong repository. A pull whose digest is already local
+    # is a no-op, so the unconditional form costs nothing.
+    why="pulling"
+  elif [ "$FORCE" -eq 1 ]; then
     why="--force"
   elif touched "$CP_IMAGE_INPUTS"; then
     why="an image input changed"
@@ -490,17 +516,56 @@ if [ -n "$_cp_targets" ]; then
   # the wrapper and answered "moved" for three consecutive cached builds of an
   # unchanged tree. `cp_image_fingerprint` is layers plus config, measured stable
   # across the same three; the reasoning is written at the function.
-  _before_image=$(cp_image_fingerprint)
+  # ⚠ **In pull mode this is read off the running container, not off the ref.**
+  # `cp_image_fingerprint` resolves through `cp_image_ref`, which now reads the
+  # env file — i.e. the image being moved *to*. Rolling back by pointing the
+  # variable at an older tag that is still in the local store therefore
+  # fingerprinted the same value before and after, reported `image: unchanged`,
+  # recreated nothing, and exited 0 with the container still on the newer image.
+  # In build mode the tag is fixed, so the ref really did describe both sides.
+  if [ "$_cp_source" = pull ]; then
+    _before_image=$(cp_running_fingerprint control-plane)
+  else
+    _before_image=$(cp_image_fingerprint)
+  fi
   if [ -n "$why" ]; then
-    echo "  docker build ($why)"
+    if [ "$_cp_source" = pull ]; then
+      echo "  docker pull ($why)"
+    else
+      echo "  docker build ($why)"
+    fi
     # Collected, never a bare statement. `pnpm web:build` used to sit here as
     # one, so under `set -e` a failed bundle aborted the whole script inside the
     # per-service loop — on a host running both, leaving the daemon un-restarted
     # after `git reset --hard` had already moved the tree. That is verbatim the
     # defect the restart loop below was fixed for, and it must not be
     # reintroduced one block up.
-    if ! "$DEPLOY_DIR/compose.sh" build; then
-      echo "  image: BUILD FAILED" >&2
+    #
+    # The pull arm collects the same way and for the same reason: a registry that
+    # is down must cost the control plane's restart, never the daemon's.
+    # A `case` and not an `&&`/`||` chain. Those are left-associative with equal
+    # precedence in sh, so `[ x = pull ] && pull || [ x = build ] && build` runs
+    # the **build** after a successful pull — the `||` short-circuits on the
+    # pull's own success and hands a true left-hand side to the `&&`. Written
+    # once as a one-liner here and caught before it shipped; a `case` cannot say
+    # it.
+    _image_ok=0
+    case "$_cp_source" in
+      pull)  "$DEPLOY_DIR/compose.sh" pull  || _image_ok=1 ;;
+      build) "$DEPLOY_DIR/compose.sh" build || _image_ok=1 ;;
+    esac
+    if [ "$_image_ok" -ne 0 ]; then
+      # **"PULL FAILED", not "BUILD FAILED".** Two distinct outcomes may not
+      # collapse into one message — the rule is written twice in this file
+      # already and once in lib.sh — and here the remedies differ completely: one
+      # is a compiler or a dependency, the other is a registry, a network or a
+      # digest that does not exist yet.
+      if [ "$_cp_source" = pull ]; then
+        echo "  image: PULL FAILED" >&2
+        echo "         $(cp_image_ref) could not be fetched. Nothing has been restarted." >&2
+      else
+        echo "  image: BUILD FAILED" >&2
+      fi
       # Its own list, not FAILED. FAILED is what the health loop appends to, and
       # its final line reads "but these are not answering" — which for a build
       # failure names a container answering perfectly on the old image and sends
@@ -516,6 +581,8 @@ if [ -n "$_cp_targets" ]; then
   fi
 
   if [ -z "$BUILD_FAILED" ]; then
+    # The *ref* on both modes here: after a pull it names exactly what the next
+    # `up -d` will run, which is the other half of the comparison.
     _after_image=$(cp_image_fingerprint)
     # From here a failure leaves an image at NEW and a container at OLD, which is
     # a different remedy from "the checkout moved" — see the EXIT trap.

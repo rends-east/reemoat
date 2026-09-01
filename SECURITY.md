@@ -140,6 +140,29 @@ registry. Install one you would run in your own terminal.
 uid can still read `/proc/<pid>/environ`, the env file and the database. What the
 strip prevents is three accidents, not an attacker.
 
+**The installer is `curl | sh`, and that is code execution by design.** `GET
+/install.sh` serves a shell script people pipe into a shell, so whoever can serve
+that path on that origin runs code as the person installing. What bounds it:
+TLS to an origin the person chose and already trusts with their sign-in; the
+script is served as `text/plain` so it renders in a browser rather than
+downloading, which is what makes "read it first" advice somebody can take;
+nothing in it runs as root or asks for a password; and everything it writes is
+under `~/.reemoat` and the checkout it is told to make. Its one caller-influenced
+input — the origin, which comes from the request's own `Host` header — is
+single-quoted through `shellQuote`, and `imagecheck` sends a hostile `Host`
+through a real container to prove the quoting is on the path a request takes
+rather than merely present in three files.
+
+What does **not** bound it, said plainly rather than argued away: **nothing pins
+the script's content.** There is no signature and no checksum a first-time
+installer could check it against, because the only thing they would check it with
+is the thing being installed. `services/premium`'s cloud-init provisioner has a
+digest because cloud-init verifies it out of band; a one-liner has no equivalent,
+and inventing one that the same origin serves would be theatre. The honest
+statement is that trusting the control plane's origin is a precondition of using
+this at all — it is where the browser client comes from, and it mints every token
+the fleet verifies.
+
 **Git hooks run, deliberately.** `GIT_NO_EXEC_CONFIG` is deleted, so
 `git worktree add` runs the repository's own `post-checkout` and its LFS smudge
 filters, and an agent pushes with your `~/.gitconfig`, your credential helper and
