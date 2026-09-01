@@ -60,7 +60,8 @@ entirely.
 turns up in a `switch` — and compared no **interface** at all. A field added to
 `SessionSnapshot` on the daemon and not copied into `wire.ts` compiles on both
 sides, ships, and is `undefined` at runtime on the screen that reads it. The sweep
-is over every interface declared in both, currently 44, and asserts **`daemon ⊆
+is over every interface declared in both, currently 50 with a floor of 48 that
+`webcheck` moves *with* the corpus, and asserts **`daemon ⊆
 client`, never equality**: a field added after the first release is *optional* on
 this side on purpose, because an older daemon does not send it. What is refused is
 the client knowing *less* than the daemon says. ⚠ Its first run reported two

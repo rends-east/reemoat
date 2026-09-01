@@ -441,9 +441,9 @@ export function AgentBuilder({
          * It also keeps the seed recoverable. The effect below returns before it
          * burns its guard while this is `null`, so a Retry that succeeds still
          * adopts the harness the address named — which `[]` made permanently
-         * impossible, on the one path the seed exists for.
+         * impossible, on the one path the seed exists for. Nothing is set on either
+         * branch, so this catch is deliberately empty rather than guarded.
          */
-        if (cancelled) return;
       });
     void daemon
       .systems()

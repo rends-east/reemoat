@@ -1426,11 +1426,31 @@ export function createApp(options: ServerOptions): AppBundle {
     }
     const draft = await readAssembledAgent(c);
     if (draft instanceof Response) return draft;
-    const one = {
-      id: `ca_${randomBytes(4).toString("hex")}`,
-      ...draft,
-      createdAt: Date.now(),
-    };
+    /*
+     * ⚠ **Minted against the store rather than trusted, and this became load-bearing
+     * when `save` became an upsert.** It was a bare `INSERT`, so a repeated id was a
+     * `SQLITE_CONSTRAINT_PRIMARYKEY` — a loud 500 nobody ever saw. `PATCH` needs the
+     * upsert, and the upsert turns the same collision silent: it would replace an
+     * existing preset's name, harness, system and model, and because
+     * `sessions.custom_agent` is a *reference* re-read at every launch, every session
+     * on that id would come back on a triple nobody chose.
+     *
+     * Four bytes is `s_`'s width and is kept, because the id is read by people and by
+     * `MAX_STRIP_REF_CHARS`; the birthday bound is what the loop replaces. The mint,
+     * the lookup and the write are synchronous with no `await` between them, so on a
+     * single-process daemon this is atomic — the awaits all happened above, in
+     * `readAssembledAgent`.
+     */
+    let id = `ca_${randomBytes(4).toString("hex")}`;
+    for (let attempt = 0; systems.customAgents.get(id) !== null; attempt += 1) {
+      // Bounded so a store that answered every id — a wedged wrapper, never the real
+      // one — is a refusal rather than a spin on the daemon's only thread.
+      if (attempt >= 8) {
+        return jsonError(c, 503, "systems_unavailable", "could not mint an id for this agent");
+      }
+      id = `ca_${randomBytes(4).toString("hex")}`;
+    }
+    const one = { id, ...draft, createdAt: Date.now() };
     systems.customAgents.save(one);
     return c.json({ customAgent: one }, 201);
   });
@@ -1833,12 +1853,13 @@ export function createApp(options: ServerOptions): AppBundle {
     registry.sessionRuntime.forgetAvailability();
     /*
      * ⚠ **And the refused start, which is a separate record and is cleared by
-     * exactly this one of the five `forgetAvailability` call sites.** A key
-     * arriving is the one credential event that is evidence about a harness that
-     * would not start; the other four are a key being *deleted*, a sign-out, a
-     * login run ending and a login cancelled, and none of those is a reason to
-     * believe a harness has started working. Deleting a key must not erase the
-     * record of the refusal that key was pasted against.
+     * three of the six `forgetAvailability` call sites.** A key arriving is one of
+     * them, a login run *finishing* is another, and an explicit
+     * `POST /agent-auth/:agent/recheck` is the third — all three are evidence about
+     * a harness that would not start. The other three are sign-out-ward — a key
+     * being *deleted*, a sign-out, and a login cancelled — and none of those is a
+     * reason to believe a harness has started working. Deleting a key must not
+     * erase the record of the refusal that key was pasted against.
      */
     registry.sessionRuntime.forgetStartRefusal(agent);
     /*
@@ -2385,8 +2406,9 @@ export function createApp(options: ServerOptions): AppBundle {
      * make the caller keep them in step.** A preset already names its harness, so
      * when one is given that is what `agent` becomes — a body sending both and
      * disagreeing cannot produce a session running something neither field named.
-     * `isAgentId` still guards the other arm, and it is still the only door into
-     * the union that a request can reach.
+     * `machineOf().harnessState(agent)` guards the other arm below, and since the
+     * union widened it is the only door into what this machine offers that a
+     * request can reach.
      */
     let customAgent: string | null = null;
     let agent: string | undefined;

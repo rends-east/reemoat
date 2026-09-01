@@ -281,6 +281,22 @@ export class AgentAskRuns {
    */
   private readonly models_ = new Map<AgentId, { at: number; answer: AgentCapabilities }>();
   /**
+   * Bumped by {@link forget}, captured before the read, compared before the write.
+   *
+   * ⚠ **Without it `forget()` is undone by a read that was already in flight.**
+   * The map is cleared synchronously, but `readCapabilities` awaits a real
+   * handshake and a real `providers/list` and only then does `models_.set` — so a
+   * sweep started before a plugin update completes after it and writes the
+   * *pre-update* binary's answer back, freshly stamped, for the whole of
+   * {@link MODELS_TTL_MS}. `probeContributed` runs immediately after
+   * `syncContributions()` and joins `capsInFlight`, so the very probe meant to
+   * exercise the new binary could be answered by the old one's cached reply.
+   *
+   * `LocalRuntime.probeGeneration` is the same counter for the same reason, and
+   * its comment is the shorter version of this one.
+   */
+  private capsGeneration = 0;
+  /**
    * The read already running for this harness, so N callers cost one spawn.
    *
    * ⚠ **A TTL cache without this collapses nothing on a cold start**, which is
@@ -695,6 +711,10 @@ export class AgentAskRuns {
    * completes.
    */
   forget(agent?: AgentId): void {
+    // Before the delete rather than after: a read that settles between the two
+    // would otherwise pass the comparison and write itself back into a map this
+    // call had already emptied.
+    this.capsGeneration += 1;
     if (agent === undefined) this.models_.clear();
     else this.models_.delete(agent);
   }
@@ -713,6 +733,9 @@ export class AgentAskRuns {
      * `capsInFlight` handing it an answer somebody else is fetching, which is the
      * behaviour it always had.
      */
+    // Captured before anything is awaited, so every `forget()` from here on is
+    // visible at the write below.
+    const generation = this.capsGeneration;
     const session = await this.claim(agent, queue);
     try {
       const option = modelOptionOf(session);
@@ -742,7 +765,10 @@ export class AgentAskRuns {
       // agent that cannot be re-pointed is two of the three, not a broken one —
       // so the model list is never lost to a question about providers.
       const answer: AgentCapabilities = { models, routing: await session.routing() };
-      this.models_.set(agent, { at: Date.now(), answer });
+      // Returned either way — the caller asked and this is the answer it got — but
+      // only cached when nothing cleared the map while we were asking. See
+      // {@link capsGeneration}.
+      if (generation === this.capsGeneration) this.models_.set(agent, { at: Date.now(), answer });
       return answer;
     } finally {
       /*

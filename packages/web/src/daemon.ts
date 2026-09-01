@@ -380,7 +380,6 @@ export class DaemonClient {
     });
   }
 
-  /** Stopping is a DELETE. There is no `POST /stop`. */
   /**
    * One session, read in full.
    *
@@ -398,6 +397,7 @@ export class DaemonClient {
     return this.machine.request<{ session: SessionSnapshot }>(`/sessions/${encodeURIComponent(id)}`);
   }
 
+  /** Stopping is a DELETE. There is no `POST /stop`. */
   stopSession(id: SessionId): Promise<{ session: SessionSnapshot }> {
     return this.machine.request<{ session: SessionSnapshot }>(`/sessions/${encodeURIComponent(id)}`, {
       method: "DELETE",

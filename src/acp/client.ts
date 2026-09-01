@@ -467,9 +467,37 @@ export class AcpClient {
     } finally {
       clearTimeout(timer);
     }
-    const first = answer.providers[0];
-    if (first === undefined) return null;
-    return { providerId: first.providerId, supported: first.supported };
+    /*
+     * ⚠ **Read defensively, because nothing above validated this.** The SDK
+     * registers `unstable_listProviders` with a *request* validator and no
+     * response one — `emptyObjectResponse` sits in that slot for its siblings and
+     * is simply absent here — so the raw JSON-RPC `result` arrives as-is, and
+     * since this release a `plugin.json` names the binary that answers. Two
+     * shapes cost differently and both are reachable: `{}` or `null` throw out of
+     * this method, which is outside the `try` above and so escapes `routing()`
+     * altogether; `{"providers":[{}]}` throws nothing and yields
+     * `supported: undefined`, which is *cached for `MODELS_TTL_MS`* and then
+     * indexed by `applySystem` — whose own docblock promises "a
+     * `SystemRoutingError` and never a `TypeError`" — and by the browser's mirror
+     * at `packages/web/src/agents.ts`, which reads this route through a bare cast.
+     *
+     * `null` is the arm every caller already has for "cannot be routed", so a
+     * malformed answer costs a disabled row with a sentence on it, which is what
+     * an agent that answered `-32601` costs too.
+     */
+    const providers: unknown = (answer as { providers?: unknown } | null | undefined)?.providers;
+    if (!Array.isArray(providers)) return null;
+    const first: unknown = providers[0];
+    if (typeof first !== "object" || first === null) return null;
+    const { providerId, supported } = first as { providerId?: unknown; supported?: unknown };
+    if (typeof providerId !== "string" || providerId.length === 0) return null;
+    // ⚠ **The predicate, not a bare `every`.** `Array.isArray` narrows `unknown` to
+    // `any[]`, and `any[]` assigns to `readonly string[]` with no complaint — so a
+    // plain `every` would check at runtime while the compiler proved nothing, which
+    // is the shape of the defect this whole block exists for.
+    if (!Array.isArray(supported)) return null;
+    if (!supported.every((one): one is string => typeof one === "string")) return null;
+    return { providerId, supported };
   }
 
   /**

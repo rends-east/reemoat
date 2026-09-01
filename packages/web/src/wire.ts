@@ -159,8 +159,9 @@ export interface AgentConfigOption {
    *
    * Set only on the snapshot `GET /sessions` returns, where the daemon cuts a long
    * model list to a bounded head — the selected choice always among it. Absent
-   * means the whole list, which is what every agent this repository ships sends and
-   * what an older daemon sends for all of them. A screen wanting the rest reads
+   * means the whole list, which is what an older daemon sends for every agent and
+   * what this one sends for every agent but opencode, whose published list is long
+   * enough to be cut in ordinary use. A screen wanting the rest reads
    * `GET /sessions/:id`.
    */
   truncated?: boolean;

@@ -131,12 +131,21 @@ function Entry({
    * above it — and left the ordinary Install button live. Same doubt, one of them
    * a footnote.
    *
-   * ⚠ **It is read only in the `unreadable` arm** (see {@link canAct}), so a
-   * catalogue poll that moves the entry to a new commit puts the gate back rather
-   * than carrying a decision about one commit onto another. That is why there is
-   * no effect resetting it: the condition already asks about *this* read.
+   * ⚠ **The commit it was paid for, not a boolean — and the boolean was wrong.**
+   * The claim here was that reading it only in the `unreadable` arm was enough,
+   * because a catalogue poll moving the entry to a new commit "puts the gate back".
+   * It does not: {@link canAct} asks about the read's *kind*, `Entry` is keyed on
+   * `entry.id` alone so a commit change does not remount it, and nothing reset the
+   * flag — so when the re-read for the *new* commit also came back `unreadable`,
+   * the stale `true` re-opened the install controls with no fresh press. That is a
+   * consent decision about one commit carried onto another, which is the exact
+   * thing the old sentence said could not happen.
+   *
+   * `consentGap` on the daemon still refuses anything the new commit *declares*
+   * that was not shown, so this was never an escalation — but the gate on this
+   * screen is what somebody is looking at, and it has to mean what it says.
    */
-  const [unpinned, setUnpinned] = useState(false);
+  const [unpinnedAt, setUnpinnedAt] = useState<string | null>(null);
 
   // The head is told what this is, once per plugin. Depending on the three
   // fields rather than on `entry` so that a catalogue re-read returning an equal
@@ -180,7 +189,8 @@ function Entry({
    * with `install={null}` draws *"not installed — this plugin did not come from
    * the market"* on every absent row, which is simply false here.
    */
-  const canAct = consent.kind === "ok" || (consent.kind === "unreadable" && unpinned);
+  const canAct =
+    consent.kind === "ok" || (consent.kind === "unreadable" && unpinnedAt === entry.source.commit);
 
   /*
    * Installing on one machine. Handed to `MachineInstalls`, which decides *when* —
@@ -322,8 +332,8 @@ function Entry({
            * anything beyond what is on screen, and a label implying otherwise would
            * be the second lie on a screen built to stop the first.
            */}
-          {!unpinned && (
-            <DangerButton icon={Download} className="mt-3" onClick={() => setUnpinned(true)}>
+          {unpinnedAt !== entry.source.commit && (
+            <DangerButton icon={Download} className="mt-3" onClick={() => setUnpinnedAt(entry.source.commit)}>
               Install without checking the pin
             </DangerButton>
           )}

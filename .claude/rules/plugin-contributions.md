@@ -56,7 +56,9 @@ round trip.
   what it cannot resolve, so a preset on a plugin's harness would be dropped and its
   sessions demoted to a bare harness, with `autoResume` firing inside the window.
   `daemon.ts` builds it immediately after `openStores`; `PluginHost` keeps it current
-  under its own single-writer gate. **`REEMOAT_PLUGINS=0` builds an empty one** — a
+  under its own single-writer gate. **`REEMOAT_PLUGINS=0` builds one in which every
+  plugin is switched off, never an empty one** — the rows stay, so a refusal names
+  a switch instead of blaming the caller — and a
   contributed harness *is* a program this daemon spawns.
 - **Resolvers, never a widened `Record`.** `noUncheckedIndexedAccess` makes a
   `Record` over a literal union index totally today and an index signature the moment

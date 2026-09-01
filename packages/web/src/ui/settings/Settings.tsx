@@ -299,5 +299,26 @@ function SectionBody({ state, section }: { state: AppState; section: SettingsSec
       return <ServerSection />;
     case "users":
       return <UsersSection me={state.me} config={state.config} />;
+    default:
+      return unsectioned(section);
   }
+}
+
+/**
+ * The arm that makes the exhaustiveness above real.
+ *
+ * ⚠ **The docblock said a fifth member "has to be a compile error here" and it
+ * was not.** This function answers `ReactNode`, `undefined` inhabits `ReactNode`,
+ * and a `switch` that falls off the end returns exactly that — so a fifth
+ * `SettingsSection` would have rendered a blank pane at both call sites and
+ * compiled clean. `noFallthroughCasesInSwitch` does not see it and
+ * `noImplicitReturns` is not set in either `tsconfig`.
+ *
+ * `never` is what actually holds it, and this is the same repair `unglyphed` in
+ * `ui/AgentIcons.tsx` already carries for the harness union, made for the same
+ * reason after the same claim proved false.
+ */
+function unsectioned(section: never): ReactNode {
+  void section;
+  return null;
 }

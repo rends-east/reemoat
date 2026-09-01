@@ -1,7 +1,8 @@
 import { RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { errorText } from "../../http";
+import { errorText, meansRouteAbsent } from "../../http";
 import type { MachineId } from "../../ids";
+import { MACHINE_GONE } from "../../plugins";
 import { store } from "../../store";
 import type { AgentAuthInfo, SystemInfo } from "../../wire";
 import { anyKeySet, unspokenFor } from "../../agents";
@@ -48,18 +49,44 @@ function useSystems(machineId: MachineId): {
    */
   agents: AgentAuthInfo[] | null;
   error: string | null;
+  /**
+   * Whether this daemon has `GET /systems` at all.
+   *
+   * ⚠ **A third state, because "no answer" and "an answer that says this build is
+   * older" need opposite screens** — and the pane below already described that
+   * partition while this hook could not produce it. Every rejection set `error`,
+   * so `systems === null` after a settled read implied `error !== null`, which
+   * made the settled arm unreachable and drew a red triangle with a *Check again*
+   * that asks the same daemon the same question for ever. `MachineAgentsSection`
+   * has the same three states and is where the shape is copied from.
+   */
+  supported: boolean;
   loading: boolean;
   refresh: () => void;
 } {
   const [systems, setSystems] = useState<SystemInfo[] | null>(null);
   const [agents, setAgents] = useState<AgentAuthInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [supported, setSupported] = useState(true);
   const [loading, setLoading] = useState(true);
   const [epoch, setEpoch] = useState(0);
   const daemon = store.daemonFor(machineId);
 
   useEffect(() => {
-    if (daemon === undefined) return;
+    if (daemon === undefined) {
+      /*
+       * `store.daemonFor` answers `undefined` only where the machine is absent from
+       * the listing, so this is a grant revoked in another tab or a machine retired
+       * — never an unreachable host, which keeps its client. `PluginsPanel` carries
+       * the argument in full.
+       */
+      setError(MACHINE_GONE);
+      // Nothing was sent, so nothing is in flight: without this the initial `true`
+      // never comes down, and the screen is a spinner with no way to ask again for
+      // as long as it is open.
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     /*
@@ -73,9 +100,15 @@ function useSystems(machineId: MachineId): {
         if (cancelled) return;
         if (listing.status === "fulfilled") {
           setSystems(listing.value.systems);
+          setSupported(true);
           setError(null);
         } else {
-          setError(errorText(listing.reason));
+          // An envelope-free 404 is this daemon saying it predates the route, which
+          // is a settled answer and not a failure. See {@link meansRouteAbsent} and
+          // the `Empty` below, which has always drawn the two arms differently.
+          const absent = meansRouteAbsent(listing.reason);
+          setSupported(!absent);
+          setError(absent ? null : errorText(listing.reason));
         }
         // Never cleared on failure: a stale harness list beside a fresh provider
         // list is what `STALE_READ` above is already the sentence for.
@@ -89,7 +122,14 @@ function useSystems(machineId: MachineId): {
     };
   }, [daemon, epoch]);
 
-  return { systems, agents, error, loading, refresh: useCallback(() => setEpoch((n) => n + 1), []) };
+  return {
+    systems,
+    agents,
+    error,
+    supported,
+    loading,
+    refresh: useCallback(() => setEpoch((n) => n + 1), []),
+  };
 }
 
 /**
@@ -155,7 +195,7 @@ export function SystemChooser({
    */
   onPickHarness: (agent: string) => void;
 }): ReactNode {
-  const { systems, agents, error, loading, refresh } = useSystems(machineId);
+  const { systems, agents, error, supported, loading, refresh } = useSystems(machineId);
 
   if (loading && systems === null) {
     return (
@@ -179,8 +219,10 @@ export function SystemChooser({
        * rollout — the client knows one by the shape of its refusal rather than by
        * a version, and says the one thing that can be acted on.
        */
-      <Empty failed={error !== null} action={error !== null ? <Recheck onClick={refresh} busy={loading} /> : undefined}>
-        {error ?? "This machine is running a build without systems. Update it to sign in here."}
+      <Empty failed={supported} action={supported ? <Recheck onClick={refresh} busy={loading} /> : undefined}>
+        {supported
+          ? (error ?? "Could not read this machine's systems.")
+          : "This machine is running a build without systems. Update it to sign in here."}
       </Empty>
     );
   }
@@ -313,7 +355,7 @@ export function SystemDetail({
   machineId: MachineId;
   systemId: string;
 }): ReactNode {
-  const { systems, error, loading, refresh } = useSystems(machineId);
+  const { systems, error, supported, loading, refresh } = useSystems(machineId);
 
   if (loading && systems === null) {
     return (
@@ -323,12 +365,16 @@ export function SystemDetail({
     );
   }
   if (systems === null) {
-    // `failed` on both arms here, unlike the chooser's: there is no settled
-    // answer in this branch — either the read threw, or it came back with
-    // nothing this screen could use. Both are the absence of an answer.
+    // `failed` on every arm but one, unlike the chooser's: a read that threw and a
+    // read that came back with nothing this screen could use are both the absence
+    // of an answer. The exception is the same settled answer the chooser draws — a
+    // daemon that predates the route — which is a sentence and no retry, because
+    // this leaf is reachable by a deep link into a machine nobody has updated.
     return (
-      <Empty failed action={<Recheck onClick={refresh} busy={loading} />}>
-        {error ?? "Could not read this machine's systems."}
+      <Empty failed={supported} action={supported ? <Recheck onClick={refresh} busy={loading} /> : undefined}>
+        {supported
+          ? (error ?? "Could not read this machine's systems.")
+          : "This machine is running a build without systems. Update it to sign in here."}
       </Empty>
     );
   }

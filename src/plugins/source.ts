@@ -222,7 +222,9 @@ export function sourceLabel(source: PluginSource): string {
 /**
  * What the plugin turned out to want that nobody agreed to — or `null`.
  *
- * ⚠ **Compare like against like, and compare only these three.** `parseManifest`
+ * ⚠ **Compare like against like.** Three of the four compared fields survive
+ * normalisation untouched; the fourth is built by `addedLines` below.
+ * `parseManifest`
  * **normalises**: it trims `name` and every action title, turns an absent
  * `description` into `null`, and synthesises an absent `contributes` into
  * `{screen: null, settings: false, actions: [], hooks: []}`. A plugin that
@@ -232,7 +234,7 @@ export function sourceLabel(source: PluginSource): string {
  * whole path exists to raise.
  *
  * Scopes, hosts and hooks survive that normalisation as plain string arrays on
- * both sides, which is the other half of why they are the three.
+ * both sides, which is the other half of why those three need no normalising.
  *
  * **One direction only.** A plugin asking for *less* than it was shown is not a
  * breach of anything — it is a person who agreed to more than they had to — so

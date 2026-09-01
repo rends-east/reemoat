@@ -603,7 +603,10 @@ export function withUltracode(config: AgentConfig, agent: AgentId, on: boolean):
  * The one thing that does not survive verbatim is the choice *list*, and only
  * where the agent said two rows are the same thing: see {@link dedupeAliasChoices},
  * which collapses a placeholder onto the concrete row it duplicates and moves the
- * selection with it. Nothing an agent offers uniquely is ever dropped.
+ * selection with it. Two further droppers sit in this pipeline: `narrowToSystem`,
+ * which drops every choice outside a pairing's namespace, and `clipChoices`, which
+ * drops everything past {@link MAX_SNAPSHOT_CHOICES} unless `full`. Both can drop a
+ * choice the agent offers uniquely, which is why `truncated` is on the wire.
  */
 function snapshotConfig(config: AgentConfig, namespace: string | null, full = false): AgentConfig {
   return {
@@ -726,8 +729,10 @@ const MAX_CHOICE_DESCRIPTION_CHARS = 120;
  * `GET /sessions/:id`, which is not paginated and not polled.
  *
  * 40 rather than a rounder number: claude's five, codex's dozen and kimi's list all
- * fit whole, so nothing this repository ships is truncated at all and the flag stays
- * false on every session anybody has today.
+ * fit whole, so the flag stays false for three of the four this repository ships.
+ * **opencode is the exception and is the reason for the bound** — the 362 measured
+ * above are cut to 40 on every polled snapshot, so `truncated` is set in ordinary
+ * use rather than never.
  */
 const MAX_SNAPSHOT_CHOICES = 40;
 

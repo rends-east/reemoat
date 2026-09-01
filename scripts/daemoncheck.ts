@@ -19415,13 +19415,17 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
   const {
     hostable,
     routedModelEnv,
+    routedPairing,
     routingHeaders,
+    BUILTIN_CATALOGUE,
     SYSTEM_IDS,
     SYSTEMS,
     systemSecretFor,
     isBuiltinSystemId,
     ROUTED_MODEL_ENV,
   } = await import("../src/acp/systems.js");
+  type MachineCatalogue = Parameters<typeof hostable>[3] & object;
+  type ContributedHarness = NonNullable<ReturnType<MachineCatalogue["harness"]>>;
   /*
    * ⚠ **This section sweeps what this repository *ships*, and it stays that way.**
    * `AGENT_IDS` and `SYSTEM_IDS` are the built-ins and nothing else, so every
@@ -19560,6 +19564,134 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     authorization: "Bearer sekrit",
   });
   check("and a native system has none to send", routingHeaders("anthropic", "sekrit"), {});
+
+  /*
+   * ⚠ **Which pairings are *routed* at all — the question asked before the spawn,
+   * and the one that decides whether a vendor credential goes into the
+   * environment.** `LocalRuntime.launch` takes the answer as its third argument
+   * and merges `secrets(agent)` only when it is false.
+   *
+   * ⚠ **Nothing drove this function for a release, and the gap was total.**
+   * `routedPairing` reduced to a bare `return false` left every assertion in this
+   * file green while every routed session spawned carrying `ANTHROPIC_API_KEY` and
+   * `CLAUDE_CODE_OAUTH_TOKEN` into a process aimed at somebody else's endpoint —
+   * author-chosen, the moment a plugin may contribute a provider. The rig two
+   * sections down could not see it either: its `launch` override drops the third
+   * parameter, so the flag never reached a merge there.
+   *
+   * All five arms in one array rather than five calls, because what actually
+   * failed was the function collapsing to a constant, and a constant is exactly
+   * what a single-arm assertion cannot distinguish from the truth.
+   */
+  check(
+    "which pairings are routed, arm by arm",
+    [
+      routedPairing("claude", null),
+      routedPairing("claude", "nobody:nothing"),
+      routedPairing("kimi", "moonshot"),
+      routedPairing("kimi", "anthropic"),
+      routedPairing("claude", "moonshot"),
+    ],
+    // A bare harness names no system; a system this machine does not offer resolves
+    // to nothing; a system reached by its own native harness runs on that harness's
+    // own credential; a foreign system with no base URL cannot be reached at all.
+    // Only the last is a session pointed somewhere else on a key this daemon holds.
+    [false, false, false, false, true],
+  );
+
+  {
+    /*
+     * ⚠ **The merge itself, over a real spawn, because the flag above is only half
+     * the property.** The arms say what `routedPairing` answers; this says what
+     * `LocalRuntime.launch` *does* with the answer, and the two fail
+     * independently — deleting `(routed ? {} : this.secrets(agent))` from
+     * `local.ts` leaves every arm above green.
+     *
+     * ⚠ **Both halves are asserted, and the absent half alone would be worthless.**
+     * A rig whose runtime never sets a secret satisfies "the routed launch carries
+     * none" trivially and for the wrong reason. What makes the pair an assertion is
+     * that the *same* runtime, the *same* harness and the *same* injected secret
+     * produce opposite environments across the one flag.
+     *
+     * ⚠ **Driven through a *contributed* harness, and that is forced rather than
+     * chosen.** `launch` resolves its command with `resolveAgent(agent, this.machine)`
+     * and never through `describe`, so overriding `describe` — which is what every
+     * other rig in this file does — changes nothing here: the first attempt spawned
+     * the real `claude-agent-acp`, which waits on stdin for JSON-RPC and hung the
+     * driver. A contributed harness is the one door that puts a command of this
+     * driver's choosing through the real resolver, so the merge under test is the
+     * real one. `node` rather than an absolute path because `findOnPath` joins its
+     * argument onto each PATH entry and cannot take one.
+     *
+     * ⚠ **The pasted names are invented, so an ambient environment cannot answer
+     * for them.** The base is `agentEnv()`, which carries the developer's whole
+     * environment through; a real `ANTHROPIC_API_KEY` exported in somebody's shell
+     * would make the routed half fail for a reason that is not this rule, and —
+     * worse — a machine without one would make the native half pass whatever
+     * `launch` merged.
+     */
+    const probe: ContributedHarness = {
+      id: "probe:env",
+      pluginId: "probe",
+      pluginName: "Probe",
+      name: "Env probe",
+      command: "node",
+      args: ["-e", "process.stdout.write(JSON.stringify(process.env))"],
+      envNames: [],
+      // Non-empty, or `hostable` refuses the pairing one arm early and this
+      // harness could never be routed at all.
+      routedModelEnv: ["PROBE_MODEL"],
+      authHint: null,
+    };
+    const withProbe: MachineCatalogue = {
+      harness: (id) => (id === probe.id ? probe : BUILTIN_CATALOGUE.harness(id)),
+      harnessIds: () => [...BUILTIN_CATALOGUE.harnessIds(), probe.id],
+      harnessState: (id) => (id === probe.id ? "enabled" : BUILTIN_CATALOGUE.harnessState(id)),
+      system: (id) => BUILTIN_CATALOGUE.system(id),
+      systemIds: () => BUILTIN_CATALOGUE.systemIds(),
+      systemState: (id) => BUILTIN_CATALOGUE.systemState(id),
+    };
+    // `secrets` is what somebody pasted for *this harness*, injected the way
+    // `scripts/daemon.ts` injects the real credential store.
+    const rig = new LocalRuntime({
+      machine: withProbe,
+      secrets: () => ({ DAEMONCHECK_PASTED_ONE: "sk-vendor", DAEMONCHECK_PASTED_TWO: "sk-oat" }),
+    });
+    const spawnedWith = async (routed: boolean): Promise<NodeJS.ProcessEnv> => {
+      const child = await rig.launch(probe.id, { PROBE_MODEL: "kimi-k2-thinking" }, routed);
+      let out = "";
+      for await (const chunk of child.stdout) out += String(chunk);
+      await child.waitForExit(5_000);
+      return JSON.parse(out) as NodeJS.ProcessEnv;
+    };
+    const routedEnv = await spawnedWith(routedPairing(probe.id, "moonshot", withProbe));
+    const nativeEnv = await spawnedWith(routedPairing(probe.id, "anthropic", withProbe));
+    /*
+     * ⚠ **The flag is computed rather than written down, so the two halves are
+     * the two answers `routedPairing` actually gives.** Passing `true` and `false`
+     * as literals here would pin the merge and let the function that decides it go
+     * on returning a constant — which is the defect that was live.
+     */
+    check(
+      "a routed launch is spawned with none of the harness's own credentials",
+      [routedEnv["DAEMONCHECK_PASTED_ONE"] ?? null, routedEnv["DAEMONCHECK_PASTED_TWO"] ?? null],
+      [null, null],
+    );
+    check(
+      "while a native launch on the same harness and the same store carries both",
+      [nativeEnv["DAEMONCHECK_PASTED_ONE"] ?? null, nativeEnv["DAEMONCHECK_PASTED_TWO"] ?? null],
+      ["sk-vendor", "sk-oat"],
+    );
+    /*
+     * And what this daemon's own tables produced reaches both, or the routed half
+     * above would also be satisfied by a `launch` that merged nothing at all.
+     */
+    check(
+      "with the model this daemon pinned reaching either way",
+      [routedEnv["PROBE_MODEL"] ?? null, nativeEnv["PROBE_MODEL"] ?? null],
+      ["kimi-k2-thinking", "kimi-k2-thinking"],
+    );
+  }
 
   /*
    * ⚠ **The sixth row, and the two facts about it that only a probe could give.**
@@ -20592,6 +20724,30 @@ process.stdout.write("\nwhat a plugin may add to a machine\n");
     ["unknown", "unknown"],
   );
   check("and a built-in is never either of those", [machine.harnessState("claude"), machine.systemState("anthropic")], ["enabled", "enabled"]);
+  /*
+   * ⚠ **The two namespaces are asked separately, and this is the assertion the
+   * split of `declaredHarnesses` from `declaredSystems` actually rests on.**
+   *
+   * One set held both kinds. `harnessState` then answered `"disabled"` for a
+   * *provider* id belonging to a plugin that is switched **on**, and `POST
+   * /sessions` turns that into `503 harness_unavailable, "this agent comes from a
+   * plugin that is switched off on this machine"` — sending somebody to a switch
+   * already in the position they want.
+   *
+   * ⚠ **Nothing above can see that, which is why this is here rather than folded
+   * into one of them.** The three assertions before this one ask a *disabled*
+   * plugin about its own ids, or ask about an id nobody has ever declared, or ask
+   * about a built-in — and a merged set answers all three identically. The only
+   * question that separates the two implementations is a live plugin asked about
+   * its own id in the *other* table, and `acme` declares one of each.
+   */
+  check(
+    "a live plugin's provider is not a harness it switched off, nor the other way round",
+    [machine.harnessState("acme:groq"), machine.systemState("acme:gemini")],
+    // `unknown`, not `disabled`: this plugin is enabled, and neither id is a
+    // member of the table being asked. There is nothing to switch on.
+    ["unknown", "unknown"],
+  );
 
   /*
    * ⚠ **The two sentences a launch can produce, and neither is "not installed".**
@@ -21513,6 +21669,34 @@ process.stdout.write("\nwhat an assembled session is launched as\n");
     "and the daemon's own thunk hands the harness back beside the pair",
     /setCustomAgents\(\(id\) => \{[\s\S]{0,400}?harness: one\.harness[\s\S]{0,200}?\}\);/.test(wiring),
     true,
+  );
+  /*
+   * ⚠ **And both setters run *before* `restore()`, which is an ordering no
+   * in-process driver can reach.** It lives in the entry script, so it is read off
+   * the same text the assertion above already holds.
+   *
+   * `restore()` rebuilds every persisted session, and `ManagedSession.assembled`
+   * reads `custom_agents` through a resolver that validates the harness and
+   * **drops** the row rather than repairing it. With the catalogue and the preset
+   * thunk still unset at that moment, every preset on a contributed harness is
+   * dropped and every session on one comes back demoted to the bare harness it was
+   * started with — with `autoResume` firing inside the window, so the demotion is
+   * live before anybody looks. Nothing throws and nothing is logged; the rows, the
+   * snapshots and the tiles all go on naming the assembled agent.
+   *
+   * Indices rather than a regex spanning all three, because what is being asserted
+   * is an order and a regex would also have to survive anything anybody puts
+   * between them.
+   */
+  check(
+    "and the catalogue and the presets are both wired before the restore",
+    [
+      wiring.indexOf("registry.setMachineCatalogue(") < wiring.indexOf("registry.restore("),
+      wiring.indexOf("registry.setCustomAgents(") < wiring.indexOf("registry.restore("),
+      // Or two -1s would compare as an order and pass with the calls deleted.
+      [wiring.indexOf("registry.setMachineCatalogue("), wiring.indexOf("registry.setCustomAgents("), wiring.indexOf("registry.restore(")].every((at) => at > 0),
+    ],
+    [true, true, true],
   );
 }
 
@@ -22548,6 +22732,157 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     "and a session naming a preset refuses rather than starting a bare harness",
     (await call(without, "POST", "/sessions", { customAgent: "ca_1", cwd: users })).status,
     503,
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * What each harness offers, and what it will let us point it at
+ *
+ * ⚠ **`GET /agents/capabilities` was driven nowhere, and it is the route that
+ * decides what the builder's model picker offers.** Everything about it is
+ * per-harness and answered rather than thrown, so every failure it has is a row
+ * quietly missing or a pairing quietly permitted — never an error anybody sees.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nwhat each harness says it can be pointed at\n");
+{
+  const { createApp: build } = await import("../src/server.js");
+  const { BUILTIN_CATALOGUE } = await import("../src/acp/systems.js");
+  /*
+   * ⚠ **A contributed harness that names *no* model variable, which is the whole
+   * point of the fixture.** `pinsModel` is `routedModelNaming(id, machine) !== null`,
+   * and among the built-ins it is true for every harness that has an arm — so a
+   * catalogue of built-ins alone cannot tell a correct implementation from one
+   * that returns a constant `true`, which is exactly what the client reads when the
+   * field is absent.
+   */
+  const flat = {
+    id: "acme:flat",
+    pluginId: "acme",
+    pluginName: "Acme",
+    name: "Flat",
+    command: "flat",
+    args: [],
+    envNames: [],
+    routedModelEnv: [] as readonly string[],
+    authHint: null,
+  };
+  const catalogue = {
+    harness: (id: string) => (id === flat.id ? flat : BUILTIN_CATALOGUE.harness(id)),
+    // Deliberately short: `claude`, one harness that will reject, and the flat one.
+    // The sweep below reads every key it returns, so a fifth would only add noise.
+    harnessIds: () => ["claude", "kimi", flat.id],
+    harnessState: (id: string) => (id === flat.id ? "enabled" : BUILTIN_CATALOGUE.harnessState(id)),
+    system: (id: string) => BUILTIN_CATALOGUE.system(id),
+    systemIds: () => BUILTIN_CATALOGUE.systemIds(),
+    systemState: (id: string) => BUILTIN_CATALOGUE.systemState(id),
+  };
+
+  const registry = new SessionRegistry(new MemoryEventStore());
+  registry.setMachineCatalogue(catalogue as never);
+
+  const asks = {
+    capabilities: async (agent: string) => {
+      /*
+       * ⚠ **One harness that *throws*, because per-agent failures are answered
+       * rather than thrown and nothing proved it.** A harness that is not installed
+       * must not take down a picker that could still offer the others, and the
+       * `catch` that guarantees it is one `return` away from being deleted.
+       */
+      if (agent === "kimi") throw new Error("kimi not found on PATH");
+      return {
+        models: [{ id: `${agent}-model`, name: agent, description: null, group: null }],
+        // Non-null on both, or `pinsModel` is never reached: the route spreads it
+        // onto `routing` and answers `null` outright where the agent published none.
+        routing: { providerId: "main", supported: ["anthropic"] },
+      };
+    },
+  };
+
+  const app = build({
+    registry,
+    verifier,
+    instanceId: "i_caps",
+    startedAt: now,
+    asks: asks as never,
+    roots: [users],
+  }).app;
+
+  const read = await app.fetch(
+    new Request("http://d/agents/capabilities", { headers: { authorization: `Bearer ${tokenFor("u_alice")}` } }),
+  );
+  /*
+   * ⚠ **Read defensively, for `answered`'s reason one section up.** Reaching
+   * straight into `.agents` throws out of the driver the moment this route stops
+   * answering one — which is exactly the regression these assertions report — and a
+   * thrown `TypeError` takes every section after it down instead of naming the one
+   * that moved. Measured: with the per-harness `catch` removed the route 500s, and
+   * an unguarded read turned one red line into a stack trace and no summary.
+   */
+  const agents = (((await read.json()) as any)?.agents ?? {}) as Record<string, any>;
+  const rowOf = (id: string): any => agents[id] ?? {};
+
+  check("the route answers", read.status, 200);
+  check("with a row per harness this machine offers", Object.keys(agents).sort(), ["acme:flat", "claude", "kimi"]);
+
+  /*
+   * ⚠ **The pair is the assertion, and neither half is one alone.** `pinsModel`
+   * inverted leaves both halves individually plausible and the pair wrong, and an
+   * inversion is not hypothetical: the field is a boolean the client reads as
+   * *permission*, and it fails **open** — `packages/web/src/agents.ts` refuses the
+   * pairing only on an explicit `false`, because a daemon too old to send the field
+   * has no plugin catalogue and so nothing it could be false for. So a dropped or
+   * inverted field does not break the picker, it silently re-opens the pairing this
+   * field exists to close, and `POST /custom-agents` then refuses what the picker
+   * offered.
+   */
+  check(
+    "which harnesses can be told a model to run on somebody else's system",
+    [rowOf("claude").routing?.pinsModel ?? null, rowOf("acme:flat").routing?.pinsModel ?? null],
+    // claude names two variables in `ROUTED_MODEL_ENV`; the contributed one named
+    // none in its manifest, and a harness that cannot be pointed at a model must
+    // never be offered a foreign system.
+    [true, false],
+  );
+
+  check(
+    "a harness that could not be read answers for itself and not for the others",
+    // `in` rather than `??`, or a `routing` that is legitimately `null` and one that
+    // was never sent read alike — and `null` is the answer being asserted.
+    [rowOf("kimi").models ?? "(absent)", "routing" in rowOf("kimi") ? rowOf("kimi").routing : "(absent)", typeof rowOf("kimi").error],
+    [[], null, "string"],
+  );
+  check(
+    "while the harnesses that answered still carry their rows",
+    [
+      rowOf("claude").models?.length ?? null,
+      rowOf("acme:flat").models?.length ?? null,
+      "error" in rowOf("claude") ? rowOf("claude").error : "(absent)",
+      "error" in rowOf("acme:flat") ? rowOf("acme:flat").error : "(absent)",
+    ],
+    [1, 1, null, null],
+  );
+
+  /*
+   * A daemon built with no capability reader says so, rather than answering an
+   * empty catalogue that a picker would draw as "this harness offers nothing".
+   */
+  const noAsks = build({
+    registry,
+    verifier,
+    instanceId: "i_nocaps",
+    startedAt: now,
+    roots: [users],
+  }).app;
+  const refused = await noAsks.fetch(
+    new Request("http://d/agents/capabilities", { headers: { authorization: `Bearer ${tokenFor("u_alice")}` } }),
+  );
+  check(
+    "a daemon that cannot read capabilities refuses rather than answering nothing",
+    // Same defensive read, and here it is the whole assertion: a route that stopped
+    // refusing answers a body with no `error` at all.
+    [refused.status, ((await refused.json()) as any)?.error?.code ?? null],
+    [503, "model_unavailable"],
   );
 }
 

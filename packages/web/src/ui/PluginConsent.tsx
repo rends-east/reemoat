@@ -240,7 +240,7 @@ export function PluginConsent({
        * says `http` there.
        */}
       {inTheClear && (
-        <p className={names ? "mt-1 text-xs text-fg" : "mt-1 text-xs text-fg"}>
+        <p className="mt-1 text-xs text-fg">
           One provider is reached over http, so a key you save for it is sent unencrypted across that network.
         </p>
       )}

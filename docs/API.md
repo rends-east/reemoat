@@ -72,8 +72,10 @@ Runs on your machine, reachable through the relay. `pnpm client` drives all of i
 ### Systems, and the agents assembled out of them
 
 A *system* is who serves a model and who you sign in to; a *harness* is the CLI
-that runs the loop. Nothing here accepts a URL, a header name or a variable name
-— a request names a system id and `src/acp/systems.ts` resolves it.
+that runs the loop. No request here accepts a URL, a header name or a variable
+name — a request names a system id and the machine's catalogue resolves it. A
+plugin *manifest* does name all three, disclosed in `consent.adds` on
+`POST /plugins/source` below.
 
 | | |
 |---|---|

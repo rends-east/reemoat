@@ -189,6 +189,28 @@ export function meansRestartRefused(error: unknown): boolean {
 }
 
 /**
+ * A daemon that has never heard of this route, as opposed to one that refused.
+ *
+ * ⚠ **Known by the shape of the refusal rather than by a version, which is the
+ * whole reason it can be asked at all.** Nothing sends a version *to* a daemon and
+ * nothing here reads one, so a route added in this release has exactly one
+ * signature on an older host: Hono's own bare 404, with no error envelope, which
+ * `parseBody` turns into `code: "http_404"`. A daemon that *has* the route and
+ * refuses it answers the envelope, so its `code` is a name somebody chose.
+ *
+ * The two need opposite screens. An absent route is a settled answer — the daemon
+ * replied, and what it replied is that it is older — so it takes a sentence naming
+ * the remedy and **no** retry, because pressing one asks the same daemon the same
+ * question. A refusal is an event and takes the triangle and a way to ask again.
+ *
+ * Written out inline at five sites before this existed; `SystemsPanel` is the
+ * first caller and the other four still transcribe it.
+ */
+export function meansRouteAbsent(error: unknown): boolean {
+  return ApiError.isApiError(error) && error.status === 404 && error.code === `http_${error.status}`;
+}
+
+/**
  * A transport failure — DNS, refused, timed out, blocked, TLS.
  *
  * `fetch` rejects with a bare `TypeError` for all of them and the browser

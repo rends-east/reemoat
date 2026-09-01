@@ -231,9 +231,12 @@ try {
     maxBytesPerSession: positiveInt(process.env["REEMOAT_LOG_BYTES"]),
     retainSessionsMs: (positiveInt(process.env["REEMOAT_SESSION_TTL_DAYS"]) ?? 7) * DAY_MS,
     maxSessions: positiveInt(process.env["REEMOAT_MAX_SESSIONS"]),
-    // Nothing in src/ prints. This is the only way an operator hears that the
-    // disk stopped accepting writes and the log has gone lossy.
-    onDegraded: (detail) => console.error(`event store degraded — the log is now lossy: ${detail}`),
+    // Nothing in src/ prints. This is the only way an operator hears that a store
+    // stopped answering — the disk refusing writes, or a row this build cannot read.
+    // ⚠ **One sink, four subjects now**: the event log, a session row, a stored key
+    // and an assembled agent. Each store's own message names its own subject, so the
+    // prefix may not name one — it read "the log is now lossy" over a dropped preset.
+    onDegraded: (detail) => console.error(`store degraded: ${detail}`),
   });
 } catch (error) {
   console.error(

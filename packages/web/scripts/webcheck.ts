@@ -24762,7 +24762,9 @@ process.stdout.write("\nthe way out of the agent builder\n");
 
 process.stdout.write("\nthe agent a pop-up handed back\n");
 {
-  const { rememberPick, rememberRemoval, takePick, takeRemoval } = await import("../src/agentPick.js");
+  const { rememberPick, rememberRemoval, takePick, takeRemoval, keepPick, heldPick, forgetPick } = await import(
+    "../src/agentPick.js"
+  );
   const one = { id: "ca_1", name: "n", harness: "claude", system: "moonshot", model: "m", createdAt: 0 } as never;
 
   check("nothing is waiting to begin with", takePick("m_1" as never), null);
@@ -24853,6 +24855,70 @@ process.stdout.write("\nthe agent a pop-up handed back\n");
     [takeRemoval("m_1" as never), takePick("m_1" as never)],
     [null, null],
   );
+
+  /* ── the third map, whose discipline is the opposite of the two above ── */
+  {
+    /*
+     * ⚠ **This one is *read*, and the two above are *taken*.** Nothing drove it,
+     * and the natural edit — copying the take-pattern from the functions it sits
+     * between — is a regression no other assertion in this file can see.
+     *
+     * The asymmetry is the whole rule. Those two carry an event that happened once
+     * — an agent was assembled, an agent was removed — so consuming one twice
+     * re-applies it long after the fact. This carries a *standing* choice: the tile
+     * somebody tapped, which stays true until they tap another. `NewSession` reads
+     * it from an effect React may run more than once, so a take-on-read clears the
+     * selection on the first render that happens to run twice: no tile draws as
+     * chosen and `Start` is dead until somebody taps again.
+     *
+     * It exists because a pop-up can leave for another pop-up — the strip's gear
+     * opens `/settings/machines/:id/agents`, which unmounts `StartSheet` — and the
+     * choice has to survive that walk.
+     */
+    const tile = { kind: "custom", id: "ca_1" } as never;
+    const harness = { kind: "harness", id: "claude" } as never;
+
+    forgetPick("m_1" as never);
+    forgetPick("m_2" as never);
+    check("nothing is chosen to begin with", heldPick("m_1" as never), null);
+    keepPick("m_1" as never, tile);
+    /*
+     * ⚠ **Two consecutive reads, and the second is the assertion.** One read alone
+     * is satisfied by a take, which is exactly the implementation this must refuse.
+     */
+    check(
+      "a chosen tile comes back every time it is asked for",
+      [heldPick("m_1" as never), heldPick("m_1" as never), heldPick("m_1" as never)],
+      [tile, tile, tile],
+    );
+    // Per machine, and both directions: a second machine's choice must neither
+    // answer for the first nor displace it.
+    keepPick("m_2" as never, harness);
+    check(
+      "and each machine holds its own",
+      [heldPick("m_1" as never), heldPick("m_2" as never)],
+      [tile, harness],
+    );
+    // A standing choice is replaced by tapping another, which is the one way it
+    // changes short of being dropped.
+    keepPick("m_1" as never, harness);
+    check("tapping another replaces it", heldPick("m_1" as never), harness);
+    /*
+     * ⚠ **And the one caller that clears a choice rather than making one.**
+     * Removing the agent a tile stood for has to reach this map, or the next mount
+     * restores a pick naming a row the daemon dropped — the state `rememberRemoval`
+     * prevents one mount earlier, arriving here by the other door. It clears one
+     * machine and only one.
+     */
+    forgetPick("m_1" as never);
+    check(
+      "forgetting one machine's choice leaves the other's standing",
+      [heldPick("m_1" as never), heldPick("m_2" as never)],
+      [null, harness],
+    );
+    // The module outlives this block, so nothing downstream inherits a choice.
+    forgetPick("m_2" as never);
+  }
 }
 
 process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
@@ -29196,9 +29262,16 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
 
 process.stdout.write("\nthe one model list this app reads for itself\n");
 {
-  const { readOpenRouterModels, openRouterNotice, BATCH_VARIANT, OPENROUTER_MODELS_URL, OPENROUTER_SYSTEM_ID } = await import(
-    "../src/openrouter.js"
-  );
+  const {
+    readOpenRouterModels,
+    openRouterNotice,
+    fetchOpenRouterModels,
+    forgetOpenRouterModels,
+    BATCH_VARIANT,
+    OPENROUTER_MODELS_URL,
+    OPENROUTER_SYSTEM_ID,
+    OPENROUTER_TTL_MS,
+  } = await import("../src/openrouter.js");
 
   const model = (over: Record<string, unknown> = {}) => ({
     id: "qwen/qwen3-coder",
@@ -29417,6 +29490,90 @@ process.stdout.write("\nthe one model list this app reads for itself\n");
     ).map(String),
     [],
   );
+
+  /* ── the read this app holds on to, and the one it must not ──────────── */
+  {
+    /*
+     * ⚠ **The stateful half of this module was driven nowhere.** Everything above
+     * is pure and was asserted; the cache around it — a module-level `cached`, a
+     * module-level `inflight` and a TTL — had no assertion at all, and the rule it
+     * exists to keep is the one with a symptom: *a failure is never cached*. A read
+     * that did not land has to be retryable by reopening the screen, so only `ok`
+     * is held. Dropping the `read.kind === "ok"` guard leaves a tab drawing "the
+     * model list could not be read on this device" for ten minutes after a single
+     * blip, with nothing anybody can press.
+     */
+    const realFetch = globalThis.fetch;
+    let calls = 0;
+    /** What the next request answers. Swung per case; every call is counted. */
+    let answer: () => Promise<Response> = async () => new Response("{}");
+    globalThis.fetch = ((): Promise<Response> => {
+      calls += 1;
+      return answer();
+    }) as typeof fetch;
+
+    const body = (models: unknown[]): Response =>
+      new Response(JSON.stringify({ data: models }), { headers: { "content-type": "application/json" } });
+
+    try {
+      // Or this block inherits whatever an earlier one left in the module, which
+      // is the accident `forgetOpenRouterModels` exists for.
+      forgetOpenRouterModels();
+
+      /* (a) A failure, then a success — the assertion the guard is. */
+      answer = async () => new Response("nope", { status: 500 });
+      const failed = await fetchOpenRouterModels();
+      check("a list that answered 500 is unreachable", failed.kind, "unreachable");
+      answer = async () => body([model()]);
+      const recovered = await fetchOpenRouterModels();
+      check(
+        "and the very next read is allowed to succeed, because a failure is never held",
+        [recovered.kind, calls],
+        // Two calls: the failure was not cached, so the second read really went out.
+        ["ok", 2],
+      );
+
+      /* (b) The TTL, both sides of it. */
+      forgetOpenRouterModels();
+      calls = 0;
+      answer = async () => body([model()]);
+      const first = await fetchOpenRouterModels();
+      check("a good read lands", [first.kind, calls], ["ok", 1]);
+      await fetchOpenRouterModels(Date.now());
+      check("a second read inside the window sends nothing", calls, 1);
+      /*
+       * ⚠ **`now` is injected but `cached.at` is written from the module's own
+       * `Date.now()` — two clocks, deliberately not worked around here.** So the
+       * far side of the window is reached by asking about a moment past it rather
+       * than by moving the stored one, which is the only half a caller controls.
+       */
+      await fetchOpenRouterModels(Date.now() + OPENROUTER_TTL_MS + 1);
+      check("and one past it goes back to the network", calls, 2);
+
+      /* (c) One request in the air, however many callers are waiting. */
+      forgetOpenRouterModels();
+      calls = 0;
+      /*
+       * ⚠ **Every resolver is kept, not just the last.** Holding one and releasing
+       * it leaves the *other* request unanswered when the sharing is gone, so a
+       * regression here would hang this driver for its whole timeout instead of
+       * printing a red line. Releasing all of them makes the failure arrive at the
+       * assertion rather than at the clock.
+       */
+      const waiting: ((response: Response) => void)[] = [];
+      answer = () => new Promise<Response>((resolve) => void waiting.push(resolve));
+      const both = Promise.all([fetchOpenRouterModels(), fetchOpenRouterModels()]);
+      check("two callers at once make one request", calls, 1);
+      for (const resolve of waiting) resolve(body([model()]));
+      const [left, right] = await both;
+      check("and both are given the same answer", [left.kind, right.kind, left === right], ["ok", "ok", true]);
+    } finally {
+      globalThis.fetch = realFetch;
+      // The module outlives this block — every later import shares it — so the
+      // cache this block filled must not be what anything downstream reads.
+      forgetOpenRouterModels();
+    }
+  }
 }
 
 process.stdout.write(failures === 0 ? "\nall green\n\n" : `\n${failures} FAILED\n\n`);

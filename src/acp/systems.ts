@@ -9,12 +9,21 @@ import { AGENT_IDS, type AgentId, type CatalogueState, type ContributedHarness, 
  * signing in to was Anthropic. They come apart the moment a harness can be
  * pointed somewhere else, which ACP's `providers/set` is exactly the method for.
  *
- * ⚠ **Fixed, and the fixity is the same security property {@link AGENT_LOGIN}
- * claims.** There is no route, body field or header anywhere that names a base
- * URL, a header name or an environment variable — a request names a
- * {@link SystemId} and this table is what it resolves against. Accepting a URL
- * from the wire would be handing somebody's key to a host of the caller's
- * choosing, over a daemon that is reachable from the internet through the relay.
+ * ⚠ **Fixed against a *request*, which is narrower than it was and is still the
+ * security property {@link AGENT_LOGIN} claims.** No route, body field or header
+ * that starts, resumes or configures a session names a base URL, a header name or
+ * an environment variable — a request names a {@link SystemId} and the machine's
+ * catalogue is what it resolves against. Accepting a URL on *that* wire would be
+ * handing somebody's key to a host of the caller's choosing, over a daemon that is
+ * reachable from the internet through the relay.
+ *
+ * ⚠ **A plugin manifest does name all three, and that is the one door.** A
+ * `systems` contribution carries `baseUrl`, `authHeader.name` and `keyEnv`
+ * (`plugins/manifest.ts`), so this table is *assembled* rather than compiled in —
+ * see `MachineCatalogue`. What keeps the property is that the manifest is
+ * installed under `machine:admin`, disclosed on the consent card before it is
+ * sent, and re-compared by `consentGap` on arrival; `server.ts`'s `GET /systems`
+ * docblock and `.claude/rules/agent-systems.md` carry the argument in full.
  */
 /*
  * ⚠ **The order of this array is a *reading order*, and it is the only place it is
