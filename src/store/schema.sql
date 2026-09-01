@@ -242,14 +242,21 @@ CREATE TABLE IF NOT EXISTS identity (
 -- see migrateCredentialsToV6, and note that this CREATE is a no-op against an
 -- existing v5 table, so the rewrite there is what actually moves it.
 --
--- Retention: `prune()` deletes a row whose `updated_at` predates the session
--- horizon **and** only when no sessions remain at all. Both conditions, because
--- either alone is wrong — age on its own would delete a working credential, since
--- `updated_at` moves only when a new one is pasted, and "nothing left" on its own
--- would delete the token of somebody who pasted it before starting their first
--- session, which is the flow the UI encourages. Without any sweep at all a
--- plaintext token outlives everything, and this daemon can never hear about a
--- revocation.
+-- Retention: **none, deliberately.** A row here goes when the route that wrote it
+-- is asked to remove it, or when a paste replaces it, and at no other time.
+--
+-- ⚠ **There was an age-plus-emptiness sweep in `prune()` and it is a reversal
+-- that it is gone.** It cost a real thing and bought an argued one: `updated_at`
+-- moves only on a paste, so the age half was permanently true of any key in use
+-- and the rule collapsed to "no sessions left" — eight idle days, since unpinned
+-- sessions age out at seven. A machine put down over a holiday came back with its
+-- tokens gone. Against that, deleting a local copy revokes nothing at the vendor,
+-- and `identity.tunnel_key` sits in this same file with no sweep at all, so the
+-- file carries a live secret either way. Q7.124 has the whole argument.
+--
+-- The protection is the one the rest of this file already rests on: a 0700
+-- directory and a 0600 file, which is what `~/.claude/.credentials.json` and
+-- `~/.codex/auth.json` are protected by too, and neither of those self-expires.
 --
 -- A new *table*, so `schema.sql` alone is enough — `migrate()` exists only for
 -- new columns on tables that already exist.
@@ -369,4 +376,104 @@ CREATE TABLE IF NOT EXISTS plugin_data (
   value      TEXT    NOT NULL,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (plugin_id, key)
+);
+
+
+-- A credential for a *system* — Anthropic, OpenAI, Moonshot — as opposed to one
+-- for a CLI.
+--
+-- `agent_credentials` above is keyed on the environment variable a CLI reads its
+-- token from, because that is what a pasted agent credential *is*. This one is
+-- not, and the difference is the whole reason it is a second table rather than a
+-- second key: a system credential is never merged into an environment. It is
+-- handed to ACP's `providers/set` over the agent's stdio, as a header value, so
+-- there is no variable name to store — which is the whole of what this shape
+-- difference buys.
+--
+-- It does NOT buy "no variable to leak", and that sentence stood here for a
+-- release. `claude-agent-acp` 0.63.0 turns those headers back into
+-- `ANTHROPIC_CUSTOM_HEADERS` on the `claude` CLI it spawns, so a routed session's
+-- key is as visible to the agent as a pasted one. Read the note in
+-- `src/acp/systems.ts` before relying on the difference for anything.
+--
+-- One row per system rather than per (system, harness): the point of naming the
+-- thing you sign in to is that one Moonshot key serves `kimi` natively and
+-- `claude` routed, and storing it twice would make "signed in" a question with
+-- two answers.
+--
+-- Stored in the clear, for the same reason and with the same protection as every
+-- other secret here: the 0700 directory and the 0600 file.
+--
+-- Retention follows `agent_credentials` exactly, which since Q7.124 means there
+-- is none: `prune()` names neither table, and a key goes when
+-- `DELETE /systems/:system` is called or a paste replaces it.
+--
+-- A new table, so `schema.sql` alone is enough; `migrate()` is only for columns
+-- on tables that already exist, and `SCHEMA_VERSION` does not move for either.
+CREATE TABLE IF NOT EXISTS system_credentials (
+  system        TEXT    NOT NULL PRIMARY KEY,
+  secret        TEXT    NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+
+
+-- An agent somebody assembled: a harness, a system, and a model.
+--
+-- Per machine, because every ingredient already is. The harness is a binary on
+-- this host, the credential is in the table above on this host, and which models
+-- a harness offers is a fact about the CLI installed here — so a list that
+-- followed a person between machines would be a list of things that may not
+-- exist on the one they are looking at.
+--
+-- `harness` and `system` are stored as text and **validated on the way out**, not
+-- merely cast. That is Q7.31's named precondition: `fromRow` used to cast
+-- `agent` straight to `AgentId`, so a row naming something no longer in the union
+-- restored as a well-typed value and failed later in `resolveAgent`, with a
+-- worktree already made. A custom agent would have been a second such cast, so
+-- the rule is applied to all three.
+--
+-- `model` is not validated against anything and cannot be: for a native pairing
+-- the list belongs to a CLI that updates on its own schedule, and for a routed
+-- one it belongs to somebody else's API. What refuses a stale model is the agent
+-- or the provider, at the moment it is used, by name.
+--
+-- No uniqueness beyond the id: two rows may name the same triple. They are
+-- somebody's own named presets, and refusing a duplicate would be this daemon
+-- having an opinion about what a person calls their own tools.
+CREATE TABLE IF NOT EXISTS custom_agents (
+  id            TEXT    NOT NULL PRIMARY KEY,
+  name          TEXT    NOT NULL,
+  harness       TEXT    NOT NULL,
+  system        TEXT    NOT NULL,
+  model         TEXT    NOT NULL,
+  created_at    INTEGER NOT NULL
+);
+
+-- Which agents the New session strip offers on this machine, and in what order.
+--
+-- A **partial** record, and that is the whole design. It holds a position and a
+-- switch for the things somebody has actually moved or hidden; what the strip
+-- draws is that list merged against what the machine currently offers, so an
+-- agent this table has never heard of appends at the end and is visible. A new
+-- harness must not arrive already switched off.
+--
+-- `ref` is deliberately **not** validated against anything, on the way in or on
+-- the way out — the opposite of `custom_agents.harness` one table up, and for a
+-- reason that is the mirror of that one. There, a row naming something outside
+-- the union restores as a well-typed lie and fails later with a worktree already
+-- made. Here the row *is* the memory: a harness signed out for a week and a
+-- preset this build cannot resolve both keep their positions, and the merge drops
+-- what does not resolve at the moment it draws. Validating here would mean
+-- forgetting an order every time an agent was briefly unavailable, which is
+-- precisely what somebody would notice.
+--
+-- No `machine` column: this database *is* one machine. The strip is per machine
+-- and not per person for the reason the daemon stopped asking who the subject is
+-- — `custom_agents` beside it is shared the same way.
+CREATE TABLE IF NOT EXISTS agent_strip (
+  kind          TEXT    NOT NULL,
+  ref           TEXT    NOT NULL,
+  rank          INTEGER NOT NULL,
+  hidden        INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (kind, ref)
 );

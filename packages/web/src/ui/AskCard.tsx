@@ -1,7 +1,8 @@
-import { ChevronDown, ChevronRight, X } from "lucide-react";
-import { useEffect, type ReactNode } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { optionShortcut } from "../keys";
 import { COLUMN, IconButton, Spinner } from "./bits";
+import { focusWorthKeeping } from "./composing";
 import { currentLayers, decisionShortcutsEnabled, useDismissible } from "./overlay";
 
 /**
@@ -40,6 +41,14 @@ import { currentLayers, decisionShortcutsEnabled, useDismissible } from "./overl
  * parked agent is producing nothing, the transcript was already at its end when
  * the request landed, and one control that folds the whole card away is a better
  * answer than a second control floating over it.
+ *
+ * **It says that it is there, which for four releases it did not.** The panel is a
+ * `role="dialog"` named by its own title, it takes the caret when a request parks
+ * — see the focus effect, and `shouldReleaseComposer`, which is what let go of it
+ * — and a live region on the frame speaks the request once. There is no
+ * `aria-modal`: that would let a screen reader hide the transcript the question is
+ * about, the session list this card is deliberately scoped away from, and the
+ * composer, which in front of a plan is one of the answers.
  */
 
 export interface AskOption {
@@ -207,11 +216,13 @@ const CHOSEN = "border-fg bg-raised text-fg ring-1 ring-fg ring-inset hover:bg-e
 export function AskCard({
   title,
   detail,
+  agent,
   collapsed,
   onToggle,
   onDismiss,
   dismissLabel,
   dismissDisabled = false,
+  dismissBusy = false,
   more,
   options,
   layout = "rows",
@@ -223,14 +234,42 @@ export function AskCard({
 }: {
   /** One line at the top: the question, or the tool being asked about. */
   title: string;
-  /** Under it, when there is something to say — "Question 2 of 3". */
+  /**
+   * Under it, when there is something to say — "Question 2 of 3", "waiting 12m".
+   *
+   * Drawn on the collapsed bar as well as on the open card, because both of the
+   * things that reach it are true of the request rather than of the card: how far
+   * through a form somebody is, and how long the agent has been stopped. A bar
+   * that folds a 40-minute wait down to the same line a 4-second one gets is the
+   * defect this slot was already shaped to fix and nothing was passing into it.
+   */
   detail?: ReactNode;
+  /**
+   * Who is waiting, for the live region below — the agent's own id, as
+   * `PermissionCard` already draws it.
+   *
+   * Optional because a card can genuinely not know: an elicitation carries the
+   * question and not who asked it. The sentence then says "the agent", which is
+   * the word the composer's own placeholder uses for the same subject.
+   */
+  agent?: string;
   collapsed: boolean;
   onToggle: (next: boolean) => void;
-  /** The ✕, and Escape. Always the destructive read of "I am not answering this". */
+  /**
+   * Abandon the request: the agent is told nothing and its tool call ends.
+   *
+   * **Neither Escape nor a ✕ any more, and both of those are corrections.** Escape
+   * folds the card away — `useDismissible` below records why at length — and this
+   * is now a labelled button leading the footer, a whole flex group from the
+   * approvals, instead of a glyph 4px from the collapse control whose meaning
+   * lived only in a `title` a thumb never sees.
+   */
   onDismiss: () => void;
+  /** The cancel button's own words. Drawn, not just spoken — see the footer. */
   dismissLabel: string;
   dismissDisabled?: boolean;
+  /** A cancel in flight. The spinner is overlaid, like every other control here. */
+  dismissBusy?: boolean;
   /** Other requests parked behind this one. */
   more: number;
   /** The numbered answers. May be empty — a form of text fields has none. */
@@ -241,11 +280,20 @@ export function AskCard({
   context?: ReactNode;
   /** Anything under the answers — the agent's own "Other" box lands here. */
   extra?: ReactNode;
-  /** The footer row: Back, Skip, Submit. Never scrolls. */
+  /**
+   * The caller's own footer controls — Back, Skip, Submit. Never scrolls.
+   *
+   * They land *after* the cancel this card always draws, so a caller that wants
+   * the far edge opens with its own `flex-1`, which is what both of them already
+   * did when they were sharing the row with nothing.
+   */
   actions?: ReactNode;
   /** How much room the card may take. See {@link BOX_MAX}. */
   size?: AskSize;
 }): ReactNode {
+  const headingId = useId();
+  const panelRef = useRef<HTMLDivElement | null>(null);
+
   /*
    * The number beside each row, wired.
    *
@@ -314,8 +362,11 @@ export function AskCard({
    * collapsed.
    *
    * Escape means "put this overlay away", which is what it means everywhere else
-   * and is the one reading that is not destructive. Cancelling stays on the ✕,
-   * where it is deliberate and where a keyboard reaches it by tabbing.
+   * and is the one reading that is not destructive. Cancelling is a named button
+   * in the footer, where it is deliberate and where a keyboard reaches it by
+   * tabbing — it was the ✕ in the header when this was written, and moving it did
+   * not weaken the argument: it strengthened it, since the control now says what
+   * it does instead of relying on a `title` nobody on a phone can see.
    *
    * **The rule survived; the listener did not.** All of the above is now
    * `overlay.ts`'s `escapeAction`, and this card is one registered participant in
@@ -329,31 +380,176 @@ export function AskCard({
   useDismissible("ask", () => onToggle(true), !collapsed);
 
   /*
-   * ⚠ **These two were 26px squares two pixels apart, on the one card in this app
-   * that can approve `rm -rf`.**
+   * How many are parked behind this one, readable from a cleanup.
+   *
+   * A ref rather than a dependency because the restore below must fire when the
+   * card *goes* and at no other moment: listed as a dependency, a request landing
+   * behind this one would tear the effect down and hand the caret back with the
+   * card still on screen.
+   */
+  const moreNow = useRef(more);
+  useEffect(() => {
+    moreNow.current = more;
+  });
+
+  /*
+   * Giving the caret back when the card goes, and only when the card had it.
+   *
+   * ⚠ **Declared before the effect that takes it**, which is `Sheet`'s rule and
+   * is kept here even though this card does not need it: the taking below is
+   * deferred a frame, so `previous` could not capture the panel whichever order
+   * these two were written in. What the order buys is that the pair reads the way
+   * the other one in this app reads, so a later edit that removes the deferral
+   * does not silently restore the panel to itself.
+   *
+   * Two guards, and each is a state that is reached in ordinary use:
+   *
+   *   **Focus somewhere else is somebody's own position.** Answering with a digit
+   *   moves nothing, so at unmount the caret may still be in the composer or on a
+   *   tool card somebody opened to read while deciding. React removes the DOM in
+   *   the mutation phase and runs passive cleanups after it, so "this card had it"
+   *   is exactly "it is on `<body>` now".
+   *
+   *   **`more` means another card is taking this one's place.** Answering the
+   *   first of two parked requests unmounts this card and mounts the next in the
+   *   same commit; handing the composer its caret back there would put it in front
+   *   of the new panel's own request for it, which `focusWorthKeeping` would then
+   *   politely decline — so the second question of a pair would be the one nobody
+   *   could reach.
+   *
+   * Where it goes back *to* is usually the composer, which is where a desktop
+   * reader was before the release blurred it. That the destination is a text field
+   * costs nothing on a phone: this runs off the daemon's answer rather than off a
+   * tap, and neither mobile browser raises the soft keyboard for a `focus()` with
+   * no user gesture behind it.
+   */
+  useEffect(() => {
+    const previous = document.activeElement;
+    return () => {
+      const active = document.activeElement;
+      if (active !== null && active !== document.body) return;
+      if (moreNow.current > 0) return;
+      if (previous instanceof HTMLElement && previous.isConnected) previous.focus();
+      else document.body.focus();
+    };
+  }, []);
+
+  /*
+   * **The panel takes the caret when a request parks**, which is the missing half
+   * of `shouldReleaseComposer` and was missing for the whole life of that rule.
+   *
+   * `Composer` blurs its box the moment a request parks, so that the digits beside
+   * the answers are not swallowed by `isTypingInto`. Nothing then took what it let
+   * go: focus fell to `<body>`, and `EventList` draws every event with no render
+   * window — so reaching Approve from a keyboard meant Tab past every tool card,
+   * group header and change row in the conversation. The digit shortcuts work,
+   * which is the whole reason this went unnoticed.
+   *
+   * **One frame later, and that is the subtlety rather than a flourish.** This
+   * card is inside the conversation region and `Composer` is that region's next
+   * sibling, so React flushes this effect *first* — at which point the composer
+   * still holds the caret and `focusWorthKeeping` correctly refuses to take it
+   * away. A frame later the release has run, `document.activeElement` is `<body>`,
+   * and there is nothing left to refuse. Same idiom and the same reason as
+   * `SessionView`'s `remeasure`: read the world after this commit has finished
+   * changing it.
+   *
+   * `focusWorthKeeping` is `composing.ts`'s own and not a second copy of the rule.
+   * It is what keeps this from fighting the composer over the two cases that
+   * matter: a half-written message, which `shouldReleaseComposer` deliberately
+   * leaves alone, and a plan, where the box *is* one of the answers and keeps its
+   * focus because `revising` stands the release down.
+   *
+   * Focus goes to the **panel** and not to the first answer, for `Sheet`'s two
+   * reasons: focusing an option announces that option rather than the request that
+   * has just arrived, and on iOS focusing an interactive element can raise the
+   * soft keyboard over a card that already covers most of the conversation.
+   * `isTypingInto` answers false for a `tabIndex={-1}` div — `Sheet` records that
+   * measurement — so the digit shortcuts above are untouched by this.
+   *
+   * Keyed on `collapsed` as well as on mount, because the fold is the one thing
+   * that can drop the caret on its own: the bar and the open card reconcile as the
+   * same `<div>`, so the panel node and its focus survive, while the controls
+   * inside sit at a different child index and remount — taking a keyboard user's
+   * focus to `<body>` with them. Both guards make that arm a recovery rather than
+   * a grab: it acts only on focus that is already nowhere.
+   */
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (panel === null) return;
+    const frame = requestAnimationFrame(() => {
+      if (panel.contains(document.activeElement)) return;
+      if (focusWorthKeeping(document.activeElement)) return;
+      panel.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [collapsed]);
+
+  /*
+   * What is waiting, spoken — and until now **nothing said it at all**.
+   *
+   * This card carried no `role`, no heading and no live region. The only region on
+   * this screen is `EventList`'s, which speaks the working line and the transcript
+   * notice and has no arm for a parked request. So the agent stopped, the loudest
+   * card in the app appeared over the conversation, and a screen reader was told
+   * nothing whatsoever about the one thing on screen that cannot continue without
+   * an answer.
+   *
+   * **The region is committed empty and the sentence lands on the next render**,
+   * which is the one arrangement that reliably announces: a `role="status"`
+   * inserted into the DOM in the same paint as its content is commonly not spoken
+   * at all, VoiceOver on iOS included — and this app is used from a phone.
+   * `Sheet`, `Toast` and `EventList` all mount theirs unconditionally for that
+   * reason and this card cannot: `SessionView` mounts it only while something is
+   * parked and keys it on the request's own id. An effect buys the same property a
+   * different way, and a second request remounting the card repeats it.
+   *
+   * ⚠ **The elapsed wait is deliberately not in this sentence.** `detail` carries
+   * it, and it changes once a minute off the store's own poll — through here that
+   * would be a screen reader interrupting itself once a minute for the life of the
+   * request. What *does* belong is a request that has changed: an elicitation's
+   * title moves as somebody steps through the form, and each step is a new thing
+   * being asked.
+   */
+  const [spoken, setSpoken] = useState("");
+  const waiting = `${title} — ${agent === undefined || agent.length === 0 ? "the agent" : agent} is waiting for an answer`;
+  useEffect(() => {
+    setSpoken(waiting);
+  }, [waiting]);
+
+  /*
+   * ⚠ **This row held two 26px squares two pixels apart, on the one card in this
+   * app that can approve `rm -rf`. It holds one control now, and both corrections
+   * are worth keeping written down.**
    *
    * `p-1.5` around a 14px glyph is 26px of box, and `gap-0.5` is 2px between them —
    * so the control that folds the card away to read the conversation underneath sat
    * directly against the control that abandons the agent's request. Both are named
    * in this file's own prose as load-bearing: the docblock at the top says "reading
-   * what is underneath is what the collapse control is for", and `onDismiss` is
-   * documented as "Always the destructive read of 'I am not answering this'".
+   * what is underneath is what the collapse control is for", and `onDismiss` is the
+   * destructive read of "I am not answering this".
    *
-   * The standard was already argued 300 lines below, at {@link AskAction}: *"44px —
-   * like every other target in this app… It was `min-h-9`, i.e. 36px, on the one row
-   * in this UI where a mis-tap approves something."* `OptionRow` and `OptionButton`
-   * are both `min-h-11`. These two were missed, and they are the two a thumb reaches
-   * for first on a card that can cover 92% of the conversation.
+   * **First correction, size.** The standard was already argued 300 lines below, at
+   * {@link AskAction}: *"44px — like every other target in this app… It was
+   * `min-h-9`, i.e. 36px, on the one row in this UI where a mis-tap approves
+   * something."* `OptionRow` and `OptionButton` are both `min-h-11`. These two were
+   * missed, and they are the two a thumb reaches for first on a card that can cover
+   * 92% of the conversation. `IconButton size="lg"` is 44px of real box, and it is
+   * deliberately **not** `size="sm"`'s symmetric `after:-inset-2.5`: at this
+   * spacing a grown target would put each control 10px onto its neighbour's *face*,
+   * which is precisely what `TAP_GROW_Y`'s note warns about at a wider gap than
+   * this one.
    *
-   * `IconButton size="lg"` is 44px of real box, and it is deliberately **not**
-   * `size="sm"`'s symmetric `after:-inset-2.5`: at this spacing a grown target would
-   * put each control 10px onto its neighbour's *face*, which is precisely what
-   * `TAP_GROW_Y`'s note warns about at a wider gap than this one. `gap-1` separates
-   * the benign control from the destructive one. It costs the title ~60px of a
-   * 358px header, which it absorbs by wrapping — `wrap-anywhere`, not `truncate`.
+   * **Second correction, and it is the one that actually settles it: they are not
+   * side by side any more.** Two 44px boxes at `gap-1` are still 4px apart, and the
+   * destructive one carried its meaning **only** in `title` and `aria-label` — a
+   * thumb never sees either. So cancelling left this row for the footer, where it
+   * is a button with its words on its face, a whole flex group away from the
+   * approvals; see the footer's own note. `gap-1` survives for the chip beside the
+   * toggle, and the title gets ~44px of a 358px header back.
    *
    * It also retires the fifth hand-rolled copy of the class string `IconButton`
-   * exists to eliminate; `label` there is required, so neither can ship nameless.
+   * exists to eliminate; `label` there is required, so it cannot ship nameless.
    */
   const toggle = (
     <IconButton
@@ -366,23 +562,58 @@ export function AskCard({
     />
   );
 
-  const dismiss = (
-    <IconButton
-      icon={X}
-      size="lg"
-      onClick={onDismiss}
-      disabled={dismissDisabled}
-      title={dismissLabel}
-      label={dismissLabel}
-    />
-  );
-
   const controls = (
     <div className="flex shrink-0 items-center gap-1">
       {more > 0 && <MoreWaiting count={more} />}
       {toggle}
-      {dismiss}
     </div>
+  );
+
+  /*
+   * **Cancelling, with its meaning on its face.**
+   *
+   * It was a ✕ in the header: 4px from the control that folds the card away, and
+   * with nothing but a `title` and an `aria-label` to say that pressing it ends the
+   * agent's request rather than tidying the screen. That is the card's own
+   * positional rule broken at the one place it matters most — the rule says the
+   * refusal is alone on the left and the reversible approval is filled on the
+   * right, and this was neither, sitting instead against the most harmless control
+   * on the card.
+   *
+   * Here it is first in the footer, so it is separated from every answer by at
+   * least the `flex-1` group that pushes the approvals to the right edge, and its
+   * label is the caller's own sentence — "Cancel this request", "Abandon this tool
+   * call" — drawn rather than hidden in an attribute.
+   *
+   * **No colour, and that is a judgement rather than an omission.** This card
+   * carries none at all, and red here would say cancelling is the dangerous act —
+   * on a card whose other buttons run commands and write files, it is the one
+   * control that authorizes nothing. `DangerButton` is documented as the only door
+   * to that look anyway, and this is not it.
+   *
+   * **`quiet` and not the bordered `plain`, because what this has to say is that
+   * it is not an answer.** Drawn `plain` it is a third outlined button sitting
+   * beside the refusal, on the card whose whole legibility rests on *"the refusal
+   * alone on the left, the reversible approval filled on the right"* — two
+   * identical-looking controls where one denies the call and the other abandons
+   * it. Borderless is a **shape** difference rather than a value one, which is the
+   * axis this palette spends everywhere else it has to separate two things without
+   * colour, and it puts this in the same register as `ElicitationCard`'s Back: a
+   * way out of the card, not one of the things it is asking. It is still a 44px
+   * target with its words on it, and where the agent offered no options at all the
+   * prose directly above names it.
+   *
+   * ⚠ **The collapsed bar therefore no longer cancels, and that is deliberate.**
+   * The bar's own note used to claim it did. Escape gave up cancelling for exactly
+   * this reason — *"the same key abandoned a tool call with nothing on screen
+   * explaining what had happened"* — and a ✕ on a one-line bar was the same act
+   * through a different control. Expanding is one tap and puts the request back in
+   * front of whoever is about to end it.
+   */
+  const cancel = (
+    <AskAction tone="quiet" onClick={onDismiss} disabled={dismissDisabled} busy={dismissBusy}>
+      {dismissLabel}
+    </AskAction>
   );
 
   /*
@@ -431,14 +662,26 @@ export function AskCard({
     <div className="pointer-events-none absolute inset-0 flex flex-col justify-end px-3 pb-2">
       {collapsed ? (
         /*
-         * One line, and it keeps both controls.
+         * One line, and it keeps everything a folded request has to keep.
          *
          * Collapsing must not become a way to lose the request: the bar still
-         * says what is being asked, still expands, and still cancels. It is the
-         * same frame at one row high rather than a different component, so the
-         * card cannot come back looking like something else.
+         * says what is being asked, still says how long it has been waiting, and
+         * still expands. It is the same frame at one row high rather than a
+         * different component, so the card cannot come back looking like something
+         * else — and React reconciles the two branches as the same `<div>`, which
+         * is what carries the panel's focus across a fold.
+         *
+         * ⚠ **It no longer cancels, and the sentence saying it did is gone rather
+         * than merely out of date.** The ✕ moved to the footer with its words on
+         * it, and a one-line bar is exactly where cancelling should not be
+         * reachable: it is the same act Escape gave up for the same reason — a tool
+         * call abandoned with nothing on screen explaining what had happened.
          */
         <div
+          ref={panelRef}
+          role="dialog"
+          aria-labelledby={headingId}
+          tabIndex={-1}
           className={`${COLUMN} animate-rise pointer-events-auto flex min-h-11 shrink-0 items-center gap-1 rounded-lg border border-edge-strong bg-surface py-1.5 pr-1 pl-3 shadow-2xl`}
         >
           {/*
@@ -458,7 +701,15 @@ export function AskCard({
            * bar instead of hiding its own end. `py-1.5` is what makes the grown
            * case sit off the edges; the controls are `shrink-0` and unaffected.
            */}
-          <span className="min-w-0 flex-1 text-xs font-medium wrap-anywhere">{title}</span>
+          <span id={headingId} className="min-w-0 flex-1 text-xs font-medium wrap-anywhere">{title}</span>
+          {/* The wait, and it is the one fact this bar was missing. Folding a card
+              away is how somebody goes back to reading, so the bar is where a
+              request that has been parked for forty minutes has to say so — the
+              open card says it under the title and the fold must not be where that
+              is lost. `shrink-0`, because the title beside it already wraps. */}
+          {detail !== undefined && detail !== null && (
+            <span className="shrink-0 text-2xs text-faint">{detail}</span>
+          )}
           {controls}
         </div>
       ) : (
@@ -506,11 +757,15 @@ export function AskCard({
          * outlier and is named so nobody thinks it was missed.
          */
         <div
+          ref={panelRef}
+          role="dialog"
+          aria-labelledby={headingId}
+          tabIndex={-1}
           className={`${COLUMN} animate-rise pointer-events-auto flex ${BOX_MAX[size]} min-h-0 flex-col overflow-hidden rounded-lg border border-edge-strong bg-surface shadow-2xl`}
         >
           <div className="flex shrink-0 items-start gap-1 px-3 pt-2.5 pb-2">
             <div className="mt-1 min-w-0 flex-1">
-              <p className="text-sm font-medium wrap-anywhere">{title}</p>
+              <p id={headingId} className="text-sm font-medium wrap-anywhere">{title}</p>
               {detail !== undefined && detail !== null && (
                 <div className="mt-0.5 text-2xs text-faint">{detail}</div>
               )}
@@ -534,64 +789,100 @@ export function AskCard({
             </div>
           )}
 
-          {(layout === "buttons" ? options.length > 0 : actions !== undefined && actions !== null) && (
-            <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-edge/60 px-3 py-2.5">
-              {/*
-               * Two groups rather than one row with a `flex-1` spacer between the
-               * halves, which is what this was.
-               *
-               * **A spacer only spaces the line it is on.** As long as everything
-               * fits, `[refusal] <spacer> [approvals]` reads as the left/right rule
-               * that replaced the colour on these buttons. The moment the row wraps
-               * — a narrow phone, or an agent sending more than three — the spacer
-               * eats the first line and the rest land wherever they land, so the
-               * rule silently stops holding while still looking deliberate.
-               *
-               * Nesting makes it structural: refusals left, approvals right, each
-               * group wrapping inside itself — so the rule holds at any width and a
-               * wrap costs alignment rather than meaning.
-               *
-               * ⚠ **`permissionLayout` exists now, and this comment is the record of
-               * how long it did not.** It was named here for a release as "the other
-               * half — past a certain size these stop being buttons at all", then
-               * corrected to say there was no such function and there never had
-               * been: `layout` was chosen in `PermissionCard.tsx` by
-               * `asked !== null` with no size input at all. That mattered because
-               * the missing fallback was load-bearing in somebody else's argument —
-               * `drawableOptions` was justified partly by it, and in its absence
-               * grew wide enough to delete a model's own answers.
-               *
-               * It is built. `permissionLayout` reads the rendered labels and
-               * answers `rows` when a button row will not hold them, so an option
-               * is never removed for want of room. The correction stays written
-               * down rather than replaced with a clean sentence, because what it
-               * records is the shape of the mistake: a comment promising a safety
-               * net is worse than no comment, and the way that ends is somebody
-               * building the net.
-               */}
-              {layout === "buttons" && (
-                <>
-                  <div className="flex flex-wrap items-center gap-2">
-                    {options.map((option, index) =>
-                      option.leading === true ? (
-                        <OptionButton key={option.id} option={option} index={index} disabled={busy} />
-                      ) : null,
-                    )}
-                  </div>
-                  <div className="flex flex-1 flex-wrap items-center justify-end gap-2">
-                    {options.map((option, index) =>
-                      option.leading === true ? null : (
-                        <OptionButton key={option.id} option={option} index={index} disabled={busy} />
-                      ),
-                    )}
-                  </div>
-                </>
-              )}
-              {actions}
-            </div>
-          )}
+          {/*
+           * **The footer is unconditional now, because cancelling always is.**
+           *
+           * It used to be drawn only when there was something to put in it — the
+           * decision buttons, or a caller's Skip/Submit — which left a permission
+           * whose options are drawn as *rows* with no footer at all, and therefore
+           * with no way out but the ✕ that has since left the header. A request
+           * with no options at all had the same hole and `PermissionCard` was
+           * patching it by passing its own Cancel into `actions`; that patch is
+           * deleted, and the sentence it drew above the answers ("the only answer
+           * is to cancel it") now points at a control that is always there.
+           */}
+          <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-edge/60 px-3 py-2.5">
+            {cancel}
+            {/*
+             * Two groups rather than one row with a `flex-1` spacer between the
+             * halves, which is what this was.
+             *
+             * **A spacer only spaces the line it is on.** As long as everything
+             * fits, `[refusal] <spacer> [approvals]` reads as the left/right rule
+             * that replaced the colour on these buttons. The moment the row wraps
+             * — a narrow phone, or an agent sending more than three — the spacer
+             * eats the first line and the rest land wherever they land, so the
+             * rule silently stops holding while still looking deliberate.
+             *
+             * Nesting makes it structural: refusals left, approvals right, each
+             * group wrapping inside itself — so the rule holds at any width and a
+             * wrap costs alignment rather than meaning.
+             *
+             * ⚠ **`permissionLayout` exists now, and this comment is the record of
+             * how long it did not.** It was named here for a release as "the other
+             * half — past a certain size these stop being buttons at all", then
+             * corrected to say there was no such function and there never had
+             * been: `layout` was chosen in `PermissionCard.tsx` by
+             * `asked !== null` with no size input at all. That mattered because
+             * the missing fallback was load-bearing in somebody else's argument —
+             * `drawableOptions` was justified partly by it, and in its absence
+             * grew wide enough to delete a model's own answers.
+             *
+             * It is built. `permissionLayout` reads the rendered labels and
+             * answers `rows` when a button row will not hold them, so an option
+             * is never removed for want of room. The correction stays written
+             * down rather than replaced with a clean sentence, because what it
+             * records is the shape of the mistake: a comment promising a safety
+             * net is worse than no comment, and the way that ends is somebody
+             * building the net.
+             */}
+            {layout === "buttons" && (
+              <>
+                <div className="flex flex-wrap items-center gap-2">
+                  {options.map((option, index) =>
+                    option.leading === true ? (
+                      <OptionButton key={option.id} option={option} index={index} disabled={busy} />
+                    ) : null,
+                  )}
+                </div>
+                <div className="flex flex-1 flex-wrap items-center justify-end gap-2">
+                  {options.map((option, index) =>
+                    option.leading === true ? null : (
+                      <OptionButton key={option.id} option={option} index={index} disabled={busy} />
+                    ),
+                  )}
+                </div>
+              </>
+            )}
+            {actions}
+          </div>
         </div>
       )}
+      {/*
+       * The live region, on the frame rather than inside the card.
+       *
+       * The panel is replaced when the card folds and a region that remounts
+       * announces itself again — a fold is not a new request, so it must not read
+       * as one. The frame survives both states, which makes this the one node on
+       * the card whose lifetime is the *request's*.
+       *
+       * ⚠ **`Sheet` puts its region *inside* the panel and that is not a shape to
+       * copy here**, because the reason is a property this card does not have:
+       * `aria-modal="true"` lets a screen reader hide everything outside the
+       * dialog, and a live region it is hiding never fires. This card has no
+       * `aria-modal` and must not gain one — everything outside it is what the
+       * question is *about*: the transcript, the session list it is deliberately
+       * scoped away from, and the composer, which in front of a plan is one of the
+       * answers. `role="dialog"` alone says "a distinct thing, with a name"; the
+       * card is a popup over one session, not a lock on the app.
+       *
+       * `sr-only` is `absolute`, so it takes no part in the frame's flex layout and
+       * the card's own geometry is untouched. `pointer-events-none` on the frame
+       * already stops it swallowing anything.
+       */}
+      <p role="status" aria-live="polite" className="sr-only">
+        {spoken}
+      </p>
     </div>
   );
 }
@@ -605,12 +896,26 @@ export function AskCard({
  * survives the collapse, which the strip did not.
  */
 function MoreWaiting({ count }: { count: number }): ReactNode {
+  const says = `${count} more request${count === 1 ? "" : "s"} waiting after this one`;
   return (
     <span
-      title={`${count} more request${count === 1 ? "" : "s"} waiting after this one`}
+      title={says}
       className="shrink-0 rounded-sm bg-raised px-1.5 py-0.5 text-2xs text-muted tabular-nums"
     >
-      +{count}
+      {/*
+       * ⚠ **`title` on a non-interactive span is exposed inconsistently**, so this
+       * chip — the only thing in the app saying that more agents are parked behind
+       * this one — was sighted-only, and its `+2` reads as "plus two" where it is
+       * read at all. `SessionView` says the same thing in its own words about the
+       * pin on the session title and fixes it the same way: the glyph is hidden
+       * from the tree and the sentence is drawn beside it.
+       *
+       * The visible half is `aria-hidden` rather than left to be read as well,
+       * because "plus 2, 2 more requests waiting after this one" is the count said
+       * twice in two vocabularies for one fact.
+       */}
+      <span aria-hidden={true}>+{count}</span>
+      <span className="sr-only">{says}</span>
     </span>
   );
 }

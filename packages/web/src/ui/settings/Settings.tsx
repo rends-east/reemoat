@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import {
   DEFAULT_SECTION,
-  sectionAllowed,
+  refusedSectionText,
   settingsPaneTitle,
   settingsUp,
   settingsUpLabel,
@@ -10,11 +10,11 @@ import {
 } from "../../settings";
 import type { AppState } from "../../store";
 import { ChevronLeft } from "lucide-react";
-import { navigate } from "../../router";
+import { navigate, useOrigin } from "../../router";
 import { IconButton } from "../bits";
-import { Sheet } from "../Sheet";
 import { AccountSection } from "./AccountSection";
 import { MachineAgentsSection } from "./MachineAgentsSection";
+import { MachineSystemsSection } from "./MachineSystemsSection";
 import { MachineSection } from "./MachineSection";
 import { MachinesSection } from "./MachinesSection";
 import { SettingsNav } from "./SettingsNav";
@@ -49,18 +49,27 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
   const section = route.section;
   /*
    * A typed URL is not a tap: a non-admin who types `/settings/users`, or an admin
-   * whose flag was removed while the tab was open, falls back to the list rather
-   * than to a screen whose every request would answer 403. `requireAdmin` on the
-   * control plane is the guard; this only decides what is offered.
+   * whose flag was removed while the tab was open, falls back to the index — the
+   * section list below `sm`, `DEFAULT_SECTION` above it — rather than to a screen
+   * whose every request would answer 403. `requireAdmin` on the control plane is
+   * the guard; this only decides what is offered.
+   *
+   * ⚠ **The collapse and the sentence explaining it are one value, deliberately.**
+   * They were two expressions over the same `sectionAllowed` call and the second
+   * did not exist, so the pane silently became a different screen from the one the
+   * address bar named. Derived from `refusal` rather than beside it, so a pane that
+   * has fallen back and a pane that says so are the same state by construction and
+   * cannot be half-changed.
    */
-  const active = section !== null && sectionAllowed(section, state.me) ? section : null;
+  const refusal = refusedSectionText(section, state.me);
+  const active = refusal === null ? section : null;
 
   const drilled = active === "machines" && route.machineId !== null;
   /*
    * **Computed once, from the *collapsed* section, and fed to both functions.**
    *
-   * `active` is `section` after `sectionAllowed` has had it, and that narrowing is
-   * load-bearing here rather than incidental: a non-admin who types
+   * `active` is `section` after {@link refusedSectionText} has had it, and that
+   * narrowing is load-bearing here rather than incidental: a non-admin who types
    * `/settings/users` — or an admin whose flag was removed while the tab was open
    * — falls back to the index, so passing the raw `route` would draw a "Users"
    * heading over the list, with no chevron beside it because `settingsUp` (which
@@ -72,30 +81,62 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
   /*
    * ⚠ **What the pane draws, which is not what the chrome computes.** `here`, `up`,
    * `paneTitle` and `upLabel` all keep reading `active` — the section the *URL*
-   * names — and only the body below reads this. Fed to `settingsUp`, the default
+   * names — and the body below is what reads this, together with `paneName`, which
+   * is the body's own name said out loud. Fed to `settingsUp`, the default
    * answers `{path: "/settings", withinNav: true}`: a chevron, `sm:hidden`, on a
    * phone, pointing at the screen it is already on. The two must not be merged.
    */
   const shown = active ?? DEFAULT_SECTION;
-  const up = settingsUp(here);
+  /*
+   * ⚠ **Both take the origin, and handing it to one of them is the failure.** The
+   * chevron is named after where it goes — `Header`'s standing rule and the whole
+   * difference between this control and the history button it must never become —
+   * so a label computed without the origin over a destination computed with it is
+   * the control naming somewhere you are not going. `App.tsx` has the identical
+   * pair one level up, for the builder's own ◀.
+   */
+  const origin = useOrigin();
+  const up = settingsUp(here, origin);
   const paneTitle = settingsPaneTitle(here);
-  const upLabel = settingsUpLabel(here);
+  const upLabel = settingsUpLabel(here, origin);
+  /*
+   * ⚠ **What the rail announces, and it is the *body's* name rather than the
+   * highlighted row's.** `SettingsNav` derived this itself from the `active` it
+   * highlights, which cannot see the branch below: `drilled` is tested **before**
+   * `SectionBody`, so at `/settings/machines/:id`, `…/systems` and `…/agents` the
+   * pane drew a machine's own screen while the live region said "Machines". On a
+   * desktop it said it *beside* the `<h2>` two boxes up, which at those depths
+   * reads "Machine settings" — one chrome contradicting itself in one paint.
+   *
+   * The route this asks about is `here` with `shown` in it: the collapse and the
+   * index default both applied, which is exactly the pair of substitutions the
+   * body makes. Where `active` is non-null that is `here` itself and this is
+   * `paneTitle`, so the announcement and the heading are literally the same
+   * string; where it is null the pane draws `DEFAULT_SECTION` at `sm`+ and this
+   * names that. One function for both, so a seventh depth cannot arrive named in
+   * one place and not the other.
+   */
+  const paneName = settingsPaneTitle({ ...here, section: shown });
 
   return (
     /*
-     * The head names the pop-up and nothing else — see `Sheet`'s own `<h1>`, which
-     * spans the rail as well as the pane. The screen's name is `paneTitle`, drawn
-     * below in the box it is about. Q3.427.
+     * ⚠ **No `<Sheet>` here.** The panel is one element for every route-backed
+     * pop-up, owned by `OverlaySheet` in `App.tsx`, so that moving between two of
+     * them dissolves the contents instead of unmounting a panel and sliding a new
+     * one up from the edge. This component is the *body*. Q3.484.
+     *
+     * The head still names the pop-up and nothing else — `Sheet`'s `<h1>` spans
+     * the rail as well as the pane. The screen's name is `paneTitle`, drawn below
+     * in the box it is about. Q3.427.
      */
-    <Sheet title="Settings">
-      <div className="-mx-4 -my-5 flex min-h-0 flex-1 sm:-mx-5">
+    <div className="-mx-4 -my-5 flex min-h-0 flex-1 sm:-mx-5">
         {/*
          * The section list, beside the section. Hidden below `sm`, where the
          * section takes the whole body and the index renders the list into it —
          * the same list → detail the rest of the app uses, in the same direction.
          */}
         <div className="hidden w-56 shrink-0 overflow-y-auto overscroll-contain border-r border-edge sm:block">
-          <SettingsNav state={state} active={shown} variant="rail" />
+          <SettingsNav state={state} active={shown} paneName={paneName} variant="rail" />
         </div>
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {/*
@@ -157,11 +198,34 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
               {paneTitle !== null && <h2 className="min-w-0 text-base font-semibold">{paneTitle}</h2>}
             </div>
           )}
+          {/*
+           * **Why this pane is not the screen the address bar names.**
+           *
+           * Above the scroller rather than inside it, and that is layout rather
+           * than taste: the index arm below cancels the scroller's own padding
+           * with `-mx-4 -my-4` so the section list sits flush, and a sibling drawn
+           * before it would be pulled 16px back underneath by that negative top
+           * margin. `px-4 pt-4 sm:px-5` is the chevron row's padding, which costs
+           * nothing to share — the two are never both drawn, since a refusal
+           * collapses `here.section` to `null` and `settingsUp` answers `null`
+           * with it.
+           *
+           * ⚠ **No `role="status"`.** `Empty`'s partition is that only a *failure*
+           * is announced — the absence of an answer, something that happened —
+           * and this is a settled fact about authority that was true before the
+           * screen opened. `Sheet` records the other half: a region mounted in the
+           * same paint as its words is commonly not spoken at all, VoiceOver on
+           * iOS included, so the role would be a claim with no delivery. It is
+           * read where it sits, which is the first thing in the pane.
+           */}
+          {refusal !== null && (
+            <p className="shrink-0 px-4 pt-4 text-xs text-muted sm:px-5">{refusal}</p>
+          )}
           <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5">
           {active === null ? (
             <>
               <div className="-mx-4 -my-4 sm:hidden">
-                <SettingsNav state={state} active={null} variant="page" />
+                <SettingsNav state={state} active={null} paneName={paneName} variant="page" />
               </div>
               {/*
                * ⚠ **No neutral state at `sm` and above.** "Pick a setting from the
@@ -182,23 +246,32 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
               </div>
             </>
           ) : drilled && route.machineId !== null ? (
-            /* The machine's own screen, and one level in, its agents. Both parse
-               to the same `machineId`; the segment after it is what tells them
-               apart. There is no plugin leaf here any more — a plugin's settings
-               are on the plugin's page under `/plugins`, and the list on the
-               machine screen links to it. */
-            route.agent === null ? (
+            /* The machine's own screen, and one level in, one of its two leaves:
+               its systems, or the agents its New session strip offers. All three
+               parse to the same `machineId`; the segment after it is what tells
+               them apart. There is no plugin leaf here any more — a plugin's
+               settings are on the plugin's page under `/plugins`, and the list on
+               the machine screen links to it. */
+            route.agents ? (
+              <MachineAgentsSection state={state} machineId={route.machineId} />
+            ) : route.system === null && route.signin === null ? (
               <MachineSection state={state} machineId={route.machineId} />
             ) : (
-              <MachineAgentsSection state={state} machineId={route.machineId} agent={route.agent} />
+              /* Both leaves of the Sign-ins list, and the parser guarantees at most
+                 one of them is set — see `SettingsRoute.signin`. */
+              <MachineSystemsSection
+                state={state}
+                machineId={route.machineId}
+                system={route.system}
+                signin={route.signin}
+              />
             )
           ) : (
             <SectionBody state={state} section={active} />
           )}
-          </div>
         </div>
       </div>
-    </Sheet>
+    </div>
   );
 }
 
@@ -226,5 +299,26 @@ function SectionBody({ state, section }: { state: AppState; section: SettingsSec
       return <ServerSection />;
     case "users":
       return <UsersSection me={state.me} config={state.config} />;
+    default:
+      return unsectioned(section);
   }
+}
+
+/**
+ * The arm that makes the exhaustiveness above real.
+ *
+ * ⚠ **The docblock said a fifth member "has to be a compile error here" and it
+ * was not.** This function answers `ReactNode`, `undefined` inhabits `ReactNode`,
+ * and a `switch` that falls off the end returns exactly that — so a fifth
+ * `SettingsSection` would have rendered a blank pane at both call sites and
+ * compiled clean. `noFallthroughCasesInSwitch` does not see it and
+ * `noImplicitReturns` is not set in either `tsconfig`.
+ *
+ * `never` is what actually holds it, and this is the same repair `unglyphed` in
+ * `ui/AgentIcons.tsx` already carries for the harness union, made for the same
+ * reason after the same claim proved false.
+ */
+function unsectioned(section: never): ReactNode {
+  void section;
+  return null;
 }

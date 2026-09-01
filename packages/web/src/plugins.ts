@@ -264,8 +264,16 @@ export function seedForm(fields: readonly PluginField[]): Record<string, string>
  * to give it".
  */
 export function consentBroken(
-  shown: { scopes: readonly string[]; net: readonly string[]; hooks: readonly string[] },
-  installed: { scopes: readonly string[]; net: readonly string[]; contributes: { hooks: readonly string[] } },
+  shown: { scopes: readonly string[]; net: readonly string[]; hooks: readonly string[]; adds: readonly string[] },
+  installed: {
+    scopes: readonly string[];
+    net: readonly string[];
+    contributes: {
+      hooks: readonly string[];
+      harnesses?: readonly { id: string; command: string; args: readonly string[] }[];
+      systems?: readonly { id: string; baseUrl: string | null }[];
+    };
+  },
 ): string | null {
   const gained = (theirs: readonly string[], ours: readonly string[]): string[] =>
     [...theirs].filter((one) => !ours.includes(one)).sort();
@@ -275,11 +283,40 @@ export function consentBroken(
   const scopes = gained(installed.scopes, shown.scopes);
   const net = gained(installed.net, shown.net);
   const hooks = gained(installed.contributes.hooks, shown.hooks);
-  if (scopes.length === 0 && net.length === 0 && hooks.length === 0) return null;
+  /*
+   * ⚠ **The fourth comparison, and the two largest things on the list.** A harness
+   * is a program this machine will run as its owner, and a provider is where a
+   * pasted key is sent — so a row that came back holding one the screen did not
+   * draw is exactly what this function exists to catch, and it was the one gap the
+   * three above could not see.
+   *
+   * ⚠ **Optional on the installed side, and absent must mean *none*.** A daemon
+   * older than this tab sends no such field, and it also refuses a manifest that
+   * declares one, so "it did not say" and "there are none" really are the same
+   * fact there. Treating absence as *unknown* and refusing would take every
+   * install on every un-updated machine down over a field they cannot send.
+   *
+   * The line is rebuilt here rather than trusted off the row, so what is compared
+   * is what this app would have *drawn* — the same discipline the three above
+   * keep, and the reason `pluginArchive.ts` flattens to the same string.
+   */
+  const adds = gained(
+    [
+      ...(installed.contributes.harnesses ?? []).map(
+        (one) => `harness ${one.id} runs ${[one.command, ...one.args].filter((word) => word.length > 0).join(" ")}`,
+      ),
+      ...(installed.contributes.systems ?? []).map(
+        (one) => `system ${one.id} sends keys to ${one.baseUrl ?? "nowhere"}`,
+      ),
+    ],
+    shown.adds,
+  );
+  if (scopes.length === 0 && net.length === 0 && hooks.length === 0 && adds.length === 0) return null;
   const parts: string[] = [];
   if (scopes.length > 0) parts.push(scopes.join(", "));
   if (net.length > 0) parts.push(`network access to ${net.join(", ")}`);
   if (hooks.length > 0) parts.push(hooks.join(", "));
+  if (adds.length > 0) parts.push(adds.join("; "));
   return `That plugin asked for more than this screen showed: ${parts.join("; ")}. Remove it unless you know why.`;
 }
 
@@ -291,11 +328,14 @@ export function consentBroken(
  * throwing — which is right, because a thrown act lands the row on `failed` and
  * leaves the box unticked, and a ticked box for a plugin this screen has just
  * refused to trust is the one lie the consent step exists to prevent. But a plain
- * `Error` is not an `ApiError`, so {@link pluginFailure} answered **"That did not
- * work. Try again."** — deleting the naming of which scope was gained and
- * inviting the person to install it a second time. The single-machine path in
- * `PluginsPanel` does `toast("error", broken)` and shows it verbatim, so the same
- * check was disclosed in one flow and discarded in the other.
+ * `Error` is not an `ApiError`, so {@link pluginFailure} answered its generic arm
+ * — **"That did not work. Try again."** at the time, and a sentence about the
+ * machine not answering now — which either way throws away the naming of which
+ * scope was gained, and describes a failure that did not happen: the daemon
+ * answered, and its answer is precisely what broke the consent. The
+ * single-machine path in `PluginsPanel` does `toast("error", broken)` and shows
+ * it verbatim, so the same check was disclosed in one flow and discarded in the
+ * other.
  *
  * A class with a static guard rather than a bare `instanceof`, for
  * `ApiError.isApiError`'s reason one module over.
@@ -310,6 +350,47 @@ export class ConsentBrokenError extends Error {
     return error instanceof ConsentBrokenError;
   }
 }
+
+/**
+ * What a plugin screen says when `store.daemonFor` answers nothing.
+ *
+ * ⚠ **One condition was drawing two contradictory sentences.** Every plugin
+ * screen guards on the same `store.daemonFor(id) === undefined` before it sends
+ * anything: `PluginsPanel` and `PluginScreen` said *"That machine is not
+ * reachable right now."*, `MachineInstalls` and `PluginSettings` said *"That
+ * machine is not in your list any more."* — a network diagnosis and an access
+ * diagnosis, for one state, pointing at completely different remedies.
+ *
+ * **The access reading is the true one, so this is not merely the consistent
+ * choice.** `store.ts` writes and deletes `daemons` in step with `connections` —
+ * every connection is given a client on the listing, and `dropMachine` takes both
+ * away together — and `state.machines` is that same map published. So this
+ * answers `undefined` exactly when the machine is absent from the list on screen:
+ * a grant revoked in another tab, or a machine retired. An **unreachable** machine
+ * is the other thing entirely — it keeps its connection and its client and says so
+ * through `machine.reach`, which is what `daemonRead` in `machine.ts` reads. The
+ * reachability sentence therefore named a remedy (wait for it, wake the host) for
+ * a state that waking the host does not change.
+ *
+ * The words are the ones five machine screens already draw on the same fact —
+ * `MachineSection`, `MachineSystemsSection`, `MachineAgentsSection`,
+ * `MachinePluginsSection` and `AgentBuilder`, each on its own
+ * `state.machines.find(…)` coming back empty. A constant rather than a sixth
+ * transcription, so the plugin screens cannot drift from them or from each other.
+ *
+ * ⚠ **The paragraph above was written in the past tense about a wiring that had
+ * not happened.** This shipped exported and imported by nothing — `grep` found one
+ * hit, the definition — while `PluginsPanel` and `PluginScreen` went on
+ * hand-writing the reachability sentence at all four of their `daemonFor` guards,
+ * so the de-duplication described here existed only here. **A constant nothing
+ * imports is not a de-duplication**, and it is worse than the sixth transcription
+ * would have been: the reader who finds it stops looking. Both screens import it
+ * now, which is what makes the rest of this docblock a description rather than a
+ * plan. `MachineInstalls` and `PluginSettings` still transcribe the string — they
+ * were already saying the right words, so that is drift waiting rather than a lie
+ * on screen, and it is why the sentence lives here rather than beside either.
+ */
+export const MACHINE_GONE = "That machine is not in your list any more.";
 
 /** Which scope a `403 insufficient_scope` said it wanted, or `null` if it did not say. */
 function requiredScope(detail: unknown): string | null {
@@ -334,7 +415,34 @@ export function pluginFailure(error: unknown): string {
    * with an invitation to try the install again.
    */
   if (ConsentBrokenError.isConsentBroken(error)) return error.message;
-  if (!(error instanceof ApiError)) return "That did not work. Try again.";
+  /*
+   * ⚠ **Nothing came back at all, which is not a refusal and must not read like
+   * one.** This arm said "That did not work. Try again.", and `MachineInstalls` —
+   * the one place in this client that decides plugin retries — states why
+   * nothing but `plugin_busy` is retried: a `POST` is not replayable, a transport
+   * failure says nothing about whether the daemon acted, and it may be halfway
+   * through unpacking. So the sentence invited exactly the retry the code refuses
+   * to make, and a second install onto a machine that was already unpacking the
+   * first is how a `plugin_busy` and a half-written plugin directory arrive
+   * together.
+   *
+   * ⚠ **A read pays for a caution it does not need, and that is the trade rather
+   * than an oversight.** This takes an `unknown` and serves every plugin route —
+   * a view read, a row's action, an install — and a `TypeError` says which of
+   * them it was nowhere. Over-warning a refresh costs one sentence; under-warning
+   * a write costs a duplicate install, so the asymmetry is settled the safe way
+   * instead of guessed at. An *abort* never reaches here: both install paths test
+   * `controller.signal.aborted` first, because a deliberate cancellation is not a
+   * failure.
+   *
+   * `http.ts`'s `errorText` reaches the same conclusion about the same class of
+   * error and writes it in the lower case its own neighbours use; every sentence
+   * in this function is a capitalised one, so this is that reasoning in this
+   * function's voice rather than an import of its string.
+   */
+  if (!(error instanceof ApiError)) {
+    return "That machine did not answer, and whether it acted is not known. Check before trying again.";
+  }
 
   /*
    * A daemon that predates plugins, recognised by the **shape of its refusal**

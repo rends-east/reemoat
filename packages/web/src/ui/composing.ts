@@ -74,6 +74,27 @@ export function composerPlaceholder(state: {
  *
  * Duck-typed and taking `unknown` for the same reason `isTypingInto` is:
  * `webcheck` has no DOM, and it is the only thing that checks this.
+ *
+ * ⚠ **`AskCard` reads it too now, and that is the rule being shared rather than a
+ * helper being borrowed.** When a request parks, the card takes the caret so that
+ * a keyboard user is not left at `<body>` in front of a transcript with no render
+ * window — and the question it has to ask first is this one, asked in the other
+ * direction: *is anything holding focus that would genuinely be interrupted?* One
+ * predicate rather than two, so the composer and the card cannot come to disagree
+ * about what counts as an interruption.
+ *
+ * ⚠ **That last sentence said *"the two cases that answer yes are the two
+ * {@link shouldReleaseComposer} protects, a half-written message and a plan being
+ * answered in the box"*, and it was false in both halves.** There are **three**
+ * arms below, not two: a contenteditable, a text control, and an open disclosure.
+ * The third belongs to no part of `shouldReleaseComposer` — that function reads
+ * `draftEmpty` about the composer's own box and cannot see a menu at all — and the
+ * two it named are one arm rather than two, since a half-written message and a
+ * plan being revised are both the textarea with something in it. The true pair of
+ * *subjects* is the one the paragraph above already names: a text field somebody
+ * is typing in, and an open disclosure they are reading. `webcheck` sweeps all
+ * three arms plus `aria-expanded="false"` and the bare row button, which is what
+ * made the miscount survivable.
  */
 export function focusWorthKeeping(active: unknown): boolean {
   if (active === null || typeof active !== "object") return false;
@@ -146,6 +167,16 @@ export function shouldFocusComposer(state: {
  * `isTypingInto` exists to protect; taking the caret out from under a
  * half-written message to enable a shortcut would be trading one silent loss for
  * another.
+ *
+ * ⚠ **This lets go and something else has to catch, which for four releases
+ * nothing did.** The caret fell to `<body>`, and `EventList` draws every event
+ * with no render window — so reaching Approve from a keyboard meant Tab past every
+ * tool card in the conversation, on the one screen where the alternative is
+ * leaving an agent stopped. `AskCard`'s panel takes it now, guarded by
+ * {@link focusWorthKeeping} and deferred a frame, because this effect runs *after*
+ * the card's: the composer is a sibling of the conversation region rather than a
+ * child of it. Neither half is much use without the other, so they are named at
+ * each other rather than left to be found.
  */
 export function shouldReleaseComposer(state: {
   blocked: boolean;

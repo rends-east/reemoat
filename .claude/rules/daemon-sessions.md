@@ -31,7 +31,9 @@ left, and a fresh agent worked four minutes later. Q7.103.
 **A session reads as stopped only when somebody stopped it.** Everything else the
 daemon ended it brings back by itself, on the same conversation, at the next boot,
 over ACP's `session/resume` — which restores the agent's own context without
-replaying anything, and which all three agents implement. Q2.1, Q2.106.
+replaying anything, and which all four agents advertise. Q2.1, Q2.106. opencode's
+is read off `initialize` (Q6.105) rather than driven with a real login, which is
+the same standing this claim had for codex before it was exercised.
 
 **The rule is `autoResumable`, a `switch` over `ExitReason` with no `default`
 arm**, so adding a reason is a compile error rather than a silent `false`:
@@ -201,6 +203,36 @@ with no turn end at all is a message that reached no model. Q2.103.
 
 ## After the turn ends
 
+**A session pinned to a system is offered that system's models and no others.**
+opencode is the native side of *two* systems and publishes **one** model control
+holding both catalogues, so an OpenRouter session's own picker carried six
+OpenCode Zen rows at the bottom — and choosing one leaves the session running a
+model its preset does not name, with the chip, the tile and the glyph all still
+saying OpenRouter. `narrowToSystem` filters the **snapshot's** model choices to
+`modelNamespace`, which comes from `assembled` and therefore from the *pairing*
+rather than from whatever model is selected right now: deriving it from the
+current value would trap a session already switched to the wrong system into being
+offered only that one. ⚠ **The selected choice is never removed**, whatever
+namespace it is in — a list missing the value the control is set to makes the chip
+fall back to a raw id and makes `pinNativeModel` refuse the next resume. The
+**log** keeps what the agent said; only the snapshot narrows. Q2.219.
+
+**A turn that ends in an error still ends, and for four releases it did not say
+so.** `Session.prompt` turns a rejected `session/prompt` into an `error` event and
+returns on it exactly as it returns on a `turn_end` — so the turn was over and
+nothing marked the boundary: four prompts, three `turn_end`s, in a log anybody
+could read. `pump` writes one now, `stopReason: "agent_error"`, which is
+`TurnStopReason` widening ACP's closed five (`refusal` is the *model* declining and
+`cancelled` is something a person did — either would be a lie in the row a reader
+trusts). The argument is Q2.103's, made for the cancel path and applying word for
+word. ⚠ **Not every `error` is one**: the turn generator yields `CLOSED` when the
+queue closes under it, which is this daemon disposing the agent, so the predicate
+is `isSessionClosed` by **identity** — blaming the agent for our own teardown is
+the failure the exported guard exists to prevent. What it cost while missing:
+`Tail.taskFloor` counted a failed turn's delegations for ever, the `turn.ended`
+plugin hook never fanned, and the turn's origin claim was never spent, so the
+plugin that started it had the *next* turn's hook suppressed instead. Q2.218.
+
 **The turn ending is not the agent stopping.** `session/prompt` resolves while claude
 drives work it has spawned and `Session.prompt`'s generator returns on `turn_end`, so
 everything the agent emits afterwards goes into an `EventQueue` with no consumer —
@@ -327,6 +359,16 @@ non-goal, with the numbers, at Q7.113.
   read, so it cannot drift from the pending map. `snapshot()` returns a frozen plain
   object with copied arrays — a frame built now and serialized later must describe
   now.
+- **`create` refuses a harness that just would not start, *before* `createWorkspace`.**
+  The same fence the `available` check above it already carries, on the axis it did
+  not cover: an `auth_required` at `session/new` lands after the spawn, so the
+  worktree, the branch and the session row are all made first — the growth inside
+  somebody's own repository that check exists to stop. It fires for a bare or native
+  start always, and for a routed one only when the remembered refusal was itself
+  measured while routed, since `applySystem` runs first and a bare refusal has told
+  nobody anything about a start on another system's key. A plain `Error` carrying the
+  recorded message, so it lands on the same `agent_auth_required` arm the first press
+  did. Q2.221.
 - **`doStop` uses `exitRecord ??=`.** Stopping a restored session must not rewrite
   `daemon_restarted` as `stopped`.
 - **Orphan reaping is fenced by `os.uptime()`.** Pids wrap and a reboot resets them,

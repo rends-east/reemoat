@@ -1,12 +1,13 @@
-import { Suspense, lazy, useEffect, useSyncExternalStore, type ReactNode } from "react";
-import { isSheet, upFrom } from "./nav";
+import { Suspense, lazy, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
+import { isSheet, sheetTitle, sheetUpLabel, upFrom } from "./nav";
 import { navigate, parsePath, useOrigin, useRoute, useUnder, type Route } from "./router";
 import { setTelegramBack } from "./telegram";
-import { store } from "./store";
+import { sessionLists, store } from "./store";
 import { AppShell, NothingSelected } from "./ui/AppShell";
 import { ForcedPasswordChange } from "./ui/ForcedPasswordChange";
 import { Gate } from "./ui/gate/Gate";
-import { NewSession } from "./ui/NewSession";
+import { StartSheet } from "./ui/NewSession";
+import { Sheet } from "./ui/Sheet";
 import { SessionBrowser } from "./ui/SessionBrowser";
 import { SignIn } from "./ui/SignIn";
 import { ToastHost } from "./ui/Toast";
@@ -48,6 +49,17 @@ const PluginScreen = lazy(async () => ({ default: (await import("./ui/PluginScre
  * catalogue reader and the machine picker, and most sessions never open it.
  */
 const PluginsSheet = lazy(async () => ({ default: (await import("./ui/plugins/PluginsSheet")).PluginsSheet }));
+
+/**
+ * What the tab is called with nothing waiting, and the string every badge is
+ * prefixed onto.
+ *
+ * The same words `index.html` ships in its own `<title>`, deliberately restated
+ * rather than read back out of `document.title`: the first thing this app does to
+ * that property is overwrite it, so a value recovered from it at any later moment
+ * is whatever the last render put there, badge and all.
+ */
+const PAGE_TITLE = "Reemoat";
 
 /**
  * Three phases, and — new here — two routes at once.
@@ -98,6 +110,51 @@ export function App(): ReactNode {
     // screen that wanted it.
   }, [up]);
 
+  /*
+   * **The tab says how many sessions are waiting, and it is the only thing this
+   * app can say to somebody who is not looking at it.**
+   *
+   * Every other cross-screen signal — the bell, `WaitingElsewhere`, the count on a
+   * machine tab, the count on a folder header — is drawn in the rail, which is to
+   * say inside a tab that already has the reader's attention. The question this
+   * product is shaped around is *does anything anywhere need me*, and a
+   * backgrounded tab could not answer it at all: there was no `document.title`
+   * write anywhere in this package.
+   *
+   * ⚠ **This is outside Q3.1's "no Electron, no service worker and no push"
+   * non-goal rather than a quiet reversal of it.** A title write is none of those
+   * three: it asks for no permission, installs nothing, reaches nothing once the
+   * tab is closed, and is visible only where the reader has already chosen to keep
+   * this app open. That is exactly the reach the non-goal declines to exceed — and
+   * "with no push notification and no service worker to say otherwise" is the
+   * sentence Q3.94 wrote while arguing the same property one surface down.
+   *
+   * **The count is `sessionLists(...).blocked`, which is the predicate every other
+   * consumer already reads** — through `sessionGroups` for the folder counts,
+   * directly for the bell — so there is one answer to "how many need me" and this
+   * cannot become a second opinion that disagrees with the bell three inches away.
+   * That is Q3.94's own rule about its own badge, applied to the one reader who
+   * cannot see any of them.
+   *
+   * Restored to the plain name at zero *and* on unmount. The cleanup fires on every
+   * change as well as on the last one, which writes `PAGE_TITLE` and then
+   * immediately the new badge: harmless, one extra assignment, and it is what makes
+   * "the badge never outlives the state that put it there" true by construction
+   * rather than by remembering to clear it in the zero arm.
+   *
+   * Above every early return, for the reason the effect above it gives at length:
+   * a render that takes the gate, the signed-out or the forced-password arm must
+   * run the same hooks as the render before it. On those arms `state.sessions` is
+   * empty and the tab is plain, which is correct — a sign-in screen claiming two
+   * sessions are waiting would be claiming to know something it has not been told.
+   */
+  const blocked = sessionLists(state).blocked.length;
+  useEffect(() => {
+    document.title = blocked === 0 ? PAGE_TITLE : `(${blocked}) ${PAGE_TITLE}`;
+    return () => {
+      document.title = PAGE_TITLE;
+    };
+  }, [blocked]);
 
   /*
    * **A URL somebody was mailed, above every phase.**
@@ -161,20 +218,104 @@ export function App(): ReactNode {
       <AppShell state={state} route={background}>
         <Suspense fallback={<Waiting />}>{content(state, background)}</Suspense>
       </AppShell>
+      {overlay && <OverlaySheet state={state} route={route} />}
+      <ToastHost />
+    </>
+  );
+}
+
+
+/**
+ * The one panel, for every pop-up that is a route.
+ *
+ * ⚠ **One `<Sheet>` element for all four, and the alternative was measured.** Each
+ * pop-up used to render its own, so moving from Settings to Plugins *unmounted* a
+ * panel and mounted another: `SHEET_PANEL`'s `animate-sheet` replayed — a bottom
+ * sheet sliding up from off-screen — with a frame in between showing neither.
+ * Reported as the pop-up disappearing for an instant and a different one
+ * appearing. `navMove` made it worse by comparing depths across two stacks, where
+ * a depth means nothing: settings-account (2) → plugins (1) answered `section-pop`
+ * and slid one pop-up's pane rightwards into another's.
+ *
+ * With one element there is nothing to remount, both view-transition groups
+ * already share a box, and the swap is what the default animation does anyway —
+ * a cross-dissolve of the head and the contents over a panel that holds still.
+ * `index.css` only has to pin the root. Q3.484.
+ *
+ * ⚠ **The `Suspense` boundaries are *inside* it**, which is the other half: a
+ * lazy chunk still in flight used to be a `<Waiting/>` that is not a `Sheet` at
+ * all, so the first time anybody opened a pop-up the transition captured a frame
+ * with no panel in it.
+ *
+ * ⚠ **One element is also a bill, and `screen` is it.** A panel that never
+ * remounts never re-runs the effects a mount used to pay for — so the flow
+ * `/new` → `/agent` → `/agent/:step` focused the panel once and announced its
+ * head never, while each step unmounted the control holding focus and dropped it
+ * to `<body>`. `Sheet` keys both on this string; `screenOf` says what a screen is.
+ *
+ * `ImportCode` keeps its own `Sheet` and must: it is a sheet drawn *over* this
+ * one. **`ForcedPasswordChange` is not a `Sheet` at all** — this line said it was,
+ * and it never has been: a sheet carries a ✕ and registers `useDismissible`, so
+ * Escape would take down a wall the control plane is still enforcing, which is the
+ * argument in that file's own docblock. It is a `GateCard`, returned above
+ * `<AppShell>` rather than beside it. The correction matters here rather than
+ * merely being tidy: `Sheet`'s `WaitingHere` reads the fleet's blocked count for
+ * every element that draws one, and this comment is the list of them.
+ */
+function OverlaySheet({
+  state,
+  route,
+}: {
+  state: ReturnType<typeof store.getSnapshot>;
+  route: Route;
+}): ReactNode {
+  const under = useUnder();
+  /*
+   * The plugin screen is the only pop-up whose name is not a constant — it is
+   * whatever the plugin called its view — so it is the only one that reports one.
+   * Held here rather than read from a store because it belongs to the panel's head
+   * and arrives with the body's own fetch. `sheetTitle` answers `null` for exactly
+   * that route.
+   */
+  const [reported, setReported] = useState<string | null>(null);
+  const titled = sheetTitle(route);
+  /*
+   * ⚠ **Both take the origin, and passing it to one of them is the failure.** The
+   * ◀ is named after where it goes, so a label computed without the origin over a
+   * destination computed with it is the control naming somewhere you are not
+   * going — which is exactly what `sheetUpLabel`'s own docblock forbids. The
+   * screen above this one already reads `useOrigin()` for its own ◀.
+   */
+  const origin = useOrigin();
+  const upLabel = sheetUpLabel(route, origin);
+  const up = upLabel === null ? null : upFrom(route, under, origin);
+
+  const spinner = (
+    <div className="flex h-full items-center justify-center">
+      <Spinner />
+    </div>
+  );
+
+  return (
+    <Sheet
+      title={titled ?? reported ?? ""}
+      screen={screenOf(route)}
+      up={up === null ? undefined : () => navigate(up, true)}
+      upLabel={upLabel ?? undefined}
+    >
       {route.name === "settings" && (
-        <Suspense fallback={<Waiting />}>
+        <Suspense fallback={spinner}>
           <Settings state={state} route={route} />
         </Suspense>
       )}
-      {route.name === "new" && (
-        <NewSession state={state} machineId={route.machineId} cwd={route.cwd} />
+      {(route.name === "new" || route.name === "agent") && (
+        <StartSheet state={state} route={route} />
       )}
       {route.name === "plugins" && (
-        <Suspense fallback={<Waiting />}>
+        <Suspense fallback={spinner}>
           {/*
-           * Not keyed: the sheet stays put while the tab and the entry change
-           * under it, which is what makes the section slide read as one pop-up
-           * moving rather than as a pop-up closing and another opening. What each
+           * Not keyed: the pane's contents change under a panel that stays, which
+           * is what makes the section slide read as one pop-up moving. What each
            * screen *inside* it owes instead is its own key — `MarketEntry` keys on
            * the plugin id, for the state that would otherwise be carried across.
            */}
@@ -182,18 +323,96 @@ export function App(): ReactNode {
         </Suspense>
       )}
       {route.name === "plugin" && (
-        <Suspense fallback={<Waiting />}>
+        <Suspense fallback={spinner}>
           {/*
            * Keyed on the pair, so moving from one plugin's screen to another
            * remounts rather than carrying the first one's view and form state into
            * the second's name. `AgentDetail` is keyed for the same reason.
            */}
-          <PluginScreen key={`${route.machineId}:${route.pluginId}`} machineId={route.machineId} pluginId={route.pluginId} />
+          <PluginScreen
+            key={`${route.machineId}:${route.pluginId}`}
+            machineId={route.machineId}
+            pluginId={route.pluginId}
+            onTitle={setReported}
+          />
         </Suspense>
       )}
-      <ToastHost />
-    </>
+    </Sheet>
   );
+}
+
+/**
+ * Which screen inside a pop-up is on, as a string an effect can compare.
+ *
+ * `Sheet` re-focuses its panel and re-speaks its head on this changing and on
+ * nothing else, so what this has to express is *the screen* — and deliberately
+ * **not the whole route**, because several screens in this app keep their own
+ * state in the address. `NewSession`'s folder effect replaces
+ * `/new/:machineId/:cwd` on every step into a directory; `PluginSettings`
+ * rewrites the machine list in its own URL from a control on the screen. Keyed on
+ * the route, the panel would take focus off the picker somebody is walking
+ * through, once per tap — a worse defect than the one being fixed.
+ *
+ * The title is the mirror failure, and is why this is not `sheetTitle`: that
+ * answers "Settings" for every screen under `/settings` and "Plugins" for every
+ * screen under `/plugins`, because a head spanning a section rail names the
+ * pop-up while the pane names the screen (Q3.427). The two pop-ups with the most
+ * screens would then fire on none of them.
+ *
+ * Here rather than in `nav.ts` because it is a rule about *this* panel's effects
+ * rather than about navigation, and nothing offline imports `App.tsx`. If it ever
+ * needs asserting rather than reading, it moves there whole — it takes a `Route`
+ * and touches nothing, which is the only property that migration needs.
+ *
+ * The three screen-shaped routes have arms for exhaustiveness alone — this is
+ * called under `isSheet` and nowhere else — and answer their own name rather than
+ * a shared constant, so nothing can quietly make two of them one screen. No
+ * `default`, so a seventh route shape fails to build here.
+ */
+function screenOf(route: Route): string {
+  switch (route.name) {
+    // Every depth of this sheet is a screen: the index, a section, a machine, and
+    // one of that machine's systems. Nothing under them rides this URL as state.
+    case "settings":
+      // The strip flag is part of the identity, not screen state: it is a
+      // different screen from the machine it hangs under, so arriving on it has
+      // to move focus the way every other depth in this sheet does.
+      return `settings/${route.section ?? ""}/${route.machineId ?? ""}/${route.system ?? ""}/${
+        route.agents ? "agents" : ""
+      }`;
+    // One screen, whichever machine and folder it happens to be pointed at.
+    case "new":
+      return "new";
+    /*
+     * The step is the screen, and `preset` sits beside it because editing an
+     * assembled agent is a different screen from configuring a new one — the same
+     * depth, a different head. The folder is neither: it rides the address so
+     * that leaving the builder and coming back can restore it.
+     */
+    case "agent":
+      /*
+       * The seed is part of the identity beside the preset, and for its reason:
+       * the builder holds it in `useState`, seeded at mount, so two addresses that
+       * differ only in which harness they start from are two screens. Left out,
+       * moving between them would keep the panel's focus where the first one put
+       * it and the second would mount with the first's state still on screen for a
+       * frame.
+       */
+      return `agent/${route.step ?? ""}/${route.preset ?? ""}/${route.harness ?? ""}`;
+    /*
+     * *That* there is a settings screen, never which machines it names — the
+     * screen rewrites that list from a control inside itself, so folding it in
+     * here would re-focus the panel on every tick of a checkbox.
+     */
+    case "plugins":
+      return `plugins/${route.tab}/${route.entry ?? ""}/${route.settings.length > 0 ? "settings" : ""}`;
+    case "plugin":
+      return `plugin/${route.machineId}/${route.pluginId}`;
+    case "home":
+    case "gate":
+    case "session":
+      return route.name;
+  }
 }
 
 /** The one waiting state, shared by the loading phase and by a split chunk in flight. */

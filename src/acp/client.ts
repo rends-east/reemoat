@@ -3,6 +3,7 @@ import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import type { AgentHandle, AgentProcess } from "../runtime/types.js";
 import type { AgentLaunchConfig } from "./agents.js";
+import type { AgentRouting } from "./systems.js";
 
 /** Callbacks a session registers to receive everything addressed to it. */
 export interface SessionHandlers {
@@ -91,6 +92,27 @@ export interface LaunchOptions {
 }
 
 const HANDSHAKE_TIMEOUT_MS = 30_000;
+
+/**
+ * How long `providers/list` may take before this agent counts as un-routable.
+ *
+ * ⚠ **It was unbounded, and it was the only unbounded await on the launch
+ * path.** `applySystem` calls it between the handshake and `session/new`, both of
+ * which are bounded, and `providers/set` three lines below the call site is
+ * bounded too — this was the one request in the sequence with no timer. An
+ * adapter that accepts the call and never answers parks `Session.start` for ever:
+ * `ManagedSession.launch` races its own `START_TIMEOUT_MS` and throws, but
+ * `starting.then(onStarted, onStartFailed)` never fires, so nothing reaches
+ * `client.close()` and a `detached` agent child outlives the daemon holding a
+ * worktree. The second caller is worse: `AgentAskRuns.capabilities` awaits this
+ * inside a `try` whose `finally` releases the slot, so a hang burns one of only
+ * two ask slots for the life of the process.
+ *
+ * The same 15s `session.ts` gives `providers/set`, and the number is written here
+ * rather than shared because `withDeadline` is private to `session.ts` and the
+ * dependency runs `session` → `acp/*`, never back.
+ */
+const LIST_PROVIDERS_TIMEOUT_MS = 15_000;
 const EXIT_GRACE_MS = 3_000;
 const STDERR_RING_SIZE = 20;
 
@@ -390,6 +412,104 @@ export class AcpClient {
       offStartError();
       offExit();
     }
+  }
+
+  /**
+   * What this agent will let us do about which LLM its traffic reaches, or
+   * `null` where it will not let us do anything.
+   *
+   * ⚠ **Two facts, read two ways, and both are needed.** The capability marker
+   * on `initialize` is an empty object — `sessionCapabilities.resume`'s shape,
+   * so it is compared `!= null` and never `=== true` — and it says only that the
+   * methods exist. Which *protocols* an agent accepts, and under which provider
+   * id, is on `providers/list` and nowhere else. Measured 2026-08-25:
+   * `claude-agent-acp` 0.63.0 answers `{providerId: "main", supported:
+   * ["anthropic","bedrock","vertex"]}`, `codex-acp` 1.1.9 answers
+   * `{providerId: "custom-gateway", supported: ["openai"]}`, and `kimi acp`
+   * declares no capability and answers `-32601` to the call.
+   *
+   * ⚠ **Answers `null` rather than throwing, on every failure.** An agent that
+   * cannot be routed is not a broken agent — it is two of the three — and the
+   * only caller that matters turns `null` into a disabled row with a sentence on
+   * it. Throwing here would take a picker down over an agent working perfectly.
+   */
+  async routing(): Promise<AgentRouting | null> {
+    if (this.initializeResult.agentCapabilities?.providers == null) return null;
+    let answer: acp.ListProvidersResponse;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      answer = await Promise.race([
+        this.agent.request(acp.methods.agent.providers.list, {}),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `${this.config.displayName} did not answer providers/list ` +
+                    `within ${LIST_PROVIDERS_TIMEOUT_MS / 1000}s`,
+                ),
+              ),
+            LIST_PROVIDERS_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } catch {
+      // The capability said yes and the call said no — or said nothing at all
+      // until the deadline. Believe the call: a declaration is not a gate, which
+      // is the rule this daemon already applies in the other direction to its own
+      // `fs` capability.
+      //
+      // A timeout lands here rather than propagating, which is deliberate and is
+      // the whole reason the bound can be added without changing a contract: both
+      // callers already treat `null` as "cannot be routed", so a wedged adapter
+      // now refuses the pairing by name instead of parking the launch for ever.
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+    /*
+     * ⚠ **Read defensively, because nothing above validated this.** The SDK
+     * registers `unstable_listProviders` with a *request* validator and no
+     * response one — `emptyObjectResponse` sits in that slot for its siblings and
+     * is simply absent here — so the raw JSON-RPC `result` arrives as-is, and
+     * since this release a `plugin.json` names the binary that answers. Two
+     * shapes cost differently and both are reachable: `{}` or `null` throw out of
+     * this method, which is outside the `try` above and so escapes `routing()`
+     * altogether; `{"providers":[{}]}` throws nothing and yields
+     * `supported: undefined`, which is *cached for `MODELS_TTL_MS`* and then
+     * indexed by `applySystem` — whose own docblock promises "a
+     * `SystemRoutingError` and never a `TypeError`" — and by the browser's mirror
+     * at `packages/web/src/agents.ts`, which reads this route through a bare cast.
+     *
+     * `null` is the arm every caller already has for "cannot be routed", so a
+     * malformed answer costs a disabled row with a sentence on it, which is what
+     * an agent that answered `-32601` costs too.
+     */
+    const providers: unknown = (answer as { providers?: unknown } | null | undefined)?.providers;
+    if (!Array.isArray(providers)) return null;
+    const first: unknown = providers[0];
+    if (typeof first !== "object" || first === null) return null;
+    const { providerId, supported } = first as { providerId?: unknown; supported?: unknown };
+    if (typeof providerId !== "string" || providerId.length === 0) return null;
+    // ⚠ **The predicate, not a bare `every`.** `Array.isArray` narrows `unknown` to
+    // `any[]`, and `any[]` assigns to `readonly string[]` with no complaint — so a
+    // plain `every` would check at runtime while the compiler proved nothing, which
+    // is the shape of the defect this whole block exists for.
+    if (!Array.isArray(supported)) return null;
+    if (!supported.every((one): one is string => typeof one === "string")) return null;
+    return { providerId, supported };
+  }
+
+  /**
+   * Point this agent's traffic at a system before any session exists on it.
+   *
+   * Process-scoped by the adapters' own contract — claude's says the config
+   * "applies to sessions created or loaded after this call" — which is exactly
+   * the lifetime this daemon has, since it spawns one adapter per session. The
+   * scope and the process line up, so nothing has to be undone.
+   */
+  async setProvider(params: acp.SetProviderRequest): Promise<void> {
+    await this.agent.request(acp.methods.agent.providers.set, params);
   }
 
   registerSession(sessionId: string, handlers: SessionHandlers): () => void {

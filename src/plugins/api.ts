@@ -8,7 +8,7 @@ import {
   probeRequestable,
   safeRelPath,
 } from "../changes.js";
-import { isAgentId } from "../acp/agents.js";
+
 import { AgentAskError, type AgentAskRuns } from "../agentask.js";
 import type { GitExec } from "../git.js";
 import type { ElicitationContentValue, ManagedSession, SessionRegistry } from "../registry.js";
@@ -771,13 +771,7 @@ export class PluginApi {
       throw new PluginApiError("model_unavailable", "this daemon cannot run model requests");
     }
     const agent = text(input["agent"], "agent");
-    if (!isAgentId(agent)) {
-      // Refused here rather than passed through, so an id this build has never
-      // heard of is named as such instead of arriving as "no such agent on this
-      // machine" — which reads as *not installed* and sends somebody to install
-      // something that does not exist.
-      throw new PluginApiError("model_agent_unknown", `${JSON.stringify(agent)} is not an agent this daemon knows`);
-    }
+    this.knownAgent(agent);
     const prompt = text(input["prompt"], "prompt");
     /*
      * ⚠ **Optional, and its absence has three spellings that all mean the same
@@ -843,12 +837,7 @@ export class PluginApi {
       throw new PluginApiError("model_unavailable", "this daemon cannot run model requests");
     }
     const agent = text(input["agent"], "agent");
-    if (!isAgentId(agent)) {
-      // Refused here rather than passed through, so an id this build has never
-      // heard of is named as such instead of arriving as "no such agent on this
-      // machine" — which reads as *not installed*.
-      throw new PluginApiError("model_agent_unknown", `${JSON.stringify(agent)} is not an agent this daemon knows`);
-    }
+    this.knownAgent(agent);
     this.spend(this.askBudget, manifest.id);
     try {
       return { models: await ask.models(agent, signal) };
@@ -884,6 +873,34 @@ export class PluginApi {
    * ids that have spent something recently, once per call that is about to buy a
    * request on somebody else's server or a node subprocess.
    */
+  /**
+   * Refuses an agent id this machine does not offer, before anything spawns.
+   *
+   * ⚠ **Named as *unknown* rather than passed through, so it is not reported as
+   * *not installed*** — which reads as "run `npm i -g`" and sends somebody to
+   * install a package that does not exist. It was `isAgentId` over a closed union;
+   * a machine's set of harnesses is now a fact about which plugins are on it, so
+   * the question is asked of the registry.
+   *
+   * ⚠ **And `disabled` is a different sentence from `unknown`.** A plugin
+   * somebody switched off is a request that was correct yesterday, and telling its
+   * author their id is wrong sends them looking for a bug in their own code.
+   */
+  private knownAgent(agent: string): void {
+    const machine = this.options.registry.machineCatalogue;
+    switch (machine.harnessState(agent)) {
+      case "enabled":
+        return;
+      case "disabled":
+        throw new PluginApiError(
+          "model_agent_unknown",
+          `${JSON.stringify(agent)} comes from a plugin that is switched off on this machine`,
+        );
+      default:
+        throw new PluginApiError("model_agent_unknown", `${JSON.stringify(agent)} is not an agent this daemon knows`);
+    }
+  }
+
   private spend(budget: PluginBudget, pluginId: string): void {
     const now = Date.now();
     for (const [id, at] of budget.windows) {

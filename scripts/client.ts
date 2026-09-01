@@ -18,6 +18,7 @@ import type { PendingPermissionSnapshot, SessionSnapshot } from "../src/registry
 import type { AgentAvailability } from "../src/runtime/types.js";
 import { PLUGIN_LIMITS, unpackArchive } from "../src/archive.js";
 import { parseManifest } from "../src/plugins/manifest.js";
+import { addedLines } from "../src/plugins/source.js";
 import type { PluginManifest, PluginSummary } from "../src/plugins/protocol.js";
 import type { WorkspaceStatus } from "../src/worktree.js";
 
@@ -72,6 +73,7 @@ const USAGE = `Reemoat client — drive the daemon from a terminal
 
   list                             every session the daemon owns
   agents                           which agents are installed, and signed in
+  agents recheck <agent>           forget that one refused to start, and ask again
   agentauth [<agent>]              where each agent's credentials go, and whether
                                    they are set
   agentauth <agent> --set <env> [token]
@@ -477,7 +479,9 @@ interface AgentAuthListing {
   loginSupported: boolean;
   agents: (AgentAvailability & {
     credentials: { envName: string; set: boolean; updatedAt: number | null }[];
-    login?: { supported: boolean; needsInput: boolean };
+    // Narrower than `AgentLoginSupport` on purpose — this file reads two of its
+    // fields and a widening import would make it look like it read all four.
+    login?: { supported: boolean; needsInput: boolean; blocked?: string | null };
   })[];
 }
 
@@ -496,14 +500,50 @@ interface AgentAuthListing {
  * agent is missing: `container.ts` sets it to the agent's own `authHint` for
  * `loggedIn === false`, which is precisely the case that has something to say.
  */
-function describeAgent(agent: AgentAvailability): string {
+/**
+ * What `GET /agents` actually answers, which is more than {@link AgentAvailability}.
+ *
+ * The route spreads `login` onto every row — `loginSupportOf` — and this file had
+ * been typed against the runtime's shape rather than the route's, so the field was
+ * there on the wire and invisible here.
+ */
+type ListedAgent = AgentAvailability & {
+  login?: { supported: boolean; needsInput: boolean; blocked?: string | null };
+};
+
+function describeAgent(agent: ListedAgent): string {
+  /*
+   * ⚠ **The same ladder the browser's `agentStance` walks, in the same order.**
+   * Read from the response rather than re-derived, because a fourth hand-rolled
+   * copy of it is what put the wrong word on the browser's own agent tiles for a
+   * release. Four rungs, and the order of the first three is the whole of it:
+   *
+   * - `available` is the adapter, and a harness that is not there cannot have
+   *   refused anything.
+   * - `lastStartRefusal` is a **measurement** — the daemon opened a session and
+   *   the agent declined — so it outranks both arms below, which describe an
+   *   *absence*. "no sign-in needed" printed over a harness that would not start
+   *   is the line this rung exists to stop.
+   * - `login.blocked` and not `hasLoginFlow`, because a harness a plugin added has
+   *   no row in `AGENT_LOGIN` to ask. `no_flow` is the one reason in that
+   *   vocabulary that is a fact about the agent rather than about the host.
+   *
+   * ⚠ **And here the words stay, where the browser's badge is `null`.** Q3.509
+   * deletes that badge because a chip beside a name is not where a sentence
+   * belongs and the settings card has one. This column *is* the sentence, so a
+   * blank one would read as a row that failed to print.
+   */
   const [mark, state] = !agent.available
     ? ["✗", "not installed"]
-    : agent.loggedIn === true
-      ? ["✓", "signed in"]
-      : agent.loggedIn === false
-        ? ["⚠", "not signed in"]
-        : ["?", "status unknown"];
+    : agent.lastStartRefusal != null
+      ? ["⚠", "would not start"]
+      : agent.login?.blocked === "no_flow"
+        ? ["✓", "no sign-in needed"]
+        : agent.loggedIn === true
+          ? ["✓", "signed in"]
+          : agent.loggedIn === false
+            ? ["⚠", "not signed in"]
+            : ["?", "cannot check"];
   return `${mark} ${agent.id.padEnd(8)} ${agent.displayName.padEnd(18)} ${state}`;
 }
 
@@ -1119,7 +1159,30 @@ async function main(): Promise<void> {
     }
 
     case "agents": {
-      const { agents } = await api<{ agents: AgentAvailability[] }>("/agents");
+      /*
+       * ⚠ **One sub-verb, and it is the only thing under `/agents` that writes.**
+       * A harness that refused to open a session loses its tile on New session, and
+       * for one with no sign-in wizard the remedy is off-screen entirely — run its
+       * own program once on the machine. Nothing about that reaches the daemon, so
+       * this is how a terminal says "I did that, look again". It is here rather
+       * than under `agentauth` because what somebody is re-checking is the agent
+       * they just listed, and the credential is not what changed.
+       */
+      if (positionals[1] === "recheck") {
+        const agent = positionals[2];
+        if (agent === undefined) fail("usage: agents recheck <agent>");
+        const answer = await api<{ agent: string; rechecked: boolean; info?: ListedAgent }>(
+          `/agent-auth/${encodeURIComponent(agent)}/recheck`,
+          { method: "POST" },
+        );
+        // The row the daemon now reports, never a claim of our own: the route
+        // answers with what its own lookup saw, and printing anything else would be
+        // this client deciding what a re-check found.
+        if (answer.info) out(describeAgent(answer.info));
+        else warn(`this machine has no agent called ${answer.agent}`);
+        return;
+      }
+      const { agents } = await api<{ agents: ListedAgent[] }>("/agents");
       for (const agent of agents) {
         out(describeAgent(agent));
         if (agent.hint) out(`    ${agent.hint.split("\n")[0]}`);
@@ -1160,7 +1223,16 @@ async function main(): Promise<void> {
             // Per agent, and the daemon-wide line above cannot say this: an
             // agent whose own CLI does not resolve used to get a button and then
             // a 503.
-            out(`    ${"login".padEnd(26)} not available here`);
+            //
+            // ⚠ **And `no_flow` is not that.** It printed "not available here" for
+            // every reason alike, which blames *this host* for an agent that has no
+            // sign-in anywhere — the same inversion `loginBlockedReason` puts
+            // `no_flow` first to prevent.
+            out(
+              `    ${"login".padEnd(26)} ${
+                entry.login.blocked === "no_flow" ? "none needed" : "not available here"
+              }`,
+            );
           }
         }
         return;
@@ -1616,6 +1688,16 @@ async function main(): Promise<void> {
           // session's title, agent and workspace, and every permission an agent
           // raises. That belongs where somebody reading scopes will see it.
           if (declared.contributes.hooks.length > 0) out(`  told of: ${declared.contributes.hooks.join(", ")}`);
+          /*
+           * ⚠ **Beside the scopes for the same reason hooks are, and the two
+           * largest things on this list.** A harness is a program this machine will
+           * run as its owner on every session started with it; a provider is a host
+           * a key pasted here is sent to. Drawn as the same strings the browser's
+           * card draws and the daemon's `consentGap` compares — one value, so a
+           * person reading this terminal and a person reading that screen are being
+           * shown the same thing.
+           */
+          for (const line of addedLines(declared)) out(`  adds:    ${line}`);
         }
 
         /*

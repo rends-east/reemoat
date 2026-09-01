@@ -521,6 +521,26 @@ export function previewOf(entry: CatalogueEntry): ManifestPreview {
     settings: entry.contributes.settings,
     actions: entry.contributes.actions.map((action) => ({ id: action.id, title: action.title, on: action.on })),
     hooks: [...entry.contributes.hooks],
+    /*
+     * ⚠ **Empty, and that is a refusal to guess rather than a gap.** A catalogue
+     * entry's `contributes` is the *service's* summary; the harnesses and providers
+     * a plugin adds are read from the pinned `plugin.json` itself, which is what
+     * `MarketEntry` fetches and what this function is only the fallback for. Adding
+     * them to `CatalogueEntry` would mean this client declaring a field the service
+     * may not send — the one direction `webcheck`'s `client ⊆ service` sweep
+     * refuses, because `readOne` fails closed and an invented name takes the whole
+     * market dark rather than costing one row.
+     *
+     * The consequence is stated rather than hidden, and it lands the safe way: on
+     * the path where the manifest could not be read, this screen discloses no
+     * contribution — and the *daemon* then refuses the install, because
+     * `consentGap` compares what was agreed to against what the archive actually
+     * declares. What somebody sees is a sentence naming what the plugin adds, from
+     * the machine that read it, instead of an install that quietly added a harness
+     * nobody was shown. That is the same layering `pluginArchive.ts` states: a
+     * reader may admit it does not know and may never invent.
+     */
+    adds: [],
   };
 }
 

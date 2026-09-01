@@ -51,6 +51,28 @@ export class ApiError extends Error {
 }
 
 /**
+ * What a dead link says, once, in words rather than in a constructor's name.
+ *
+ * **Two clauses, and the second one is the whole reason this is not "try
+ * again".** A transport failure says *nothing* about whether the daemon acted —
+ * `machine.ts`'s `settleTransport` argues it at length and acts on it, refusing
+ * to replay anything but a `GET` or a `DELETE`, because the timeout that most
+ * often lands here is this client's own `AbortSignal.timeout` firing long after
+ * the daemon accepted the request, appended the event and started the turn. So a
+ * sentence advising a retry would be advising something the code one layer down
+ * has already decided not to do, on a request that may well have landed.
+ *
+ * Neutral about *what* was being reached, because this is also what a control
+ * plane call says: `AccountSection` and `MachineSection` pass the same failures
+ * through here, and "the machine" would be wrong on half of them.
+ *
+ * Lower case and unpunctuated, which is the register of the `ApiError` messages
+ * it sits beside — `you already have a machine called that`, `${name} is not
+ * reachable` — because a caller cannot tell which arm it got.
+ */
+const TRANSPORT_TEXT = "the connection failed, and whether the request arrived is not known";
+
+/**
  * What to put on screen when a call failed.
  *
  * `ApiError.isApiError(cause) ? cause.message : String(cause)` was written out
@@ -60,11 +82,33 @@ export class ApiError extends Error {
  * better than "[object Object]", and a call site that forgets it prints the
  * object.
  *
- * `String(cause)` rather than `cause.message` for the non-`ApiError` arm, which
- * is a faithful extraction rather than an improvement: it yields
- * `"TypeError: Failed to fetch"` for a dead network, as every one of those 23
- * sites already did. Changing that is a change to what people read on 23 screens
- * and belongs in its own edit, not smuggled into a de-duplication.
+ * ⚠ **This is the edit the de-duplication deferred, and the old note said so.**
+ * It read: `String(cause)` "yields `TypeError: Failed to fetch` for a dead
+ * network, as every one of those 23 sites already did. Changing that is a change
+ * to what people read on 23 screens and belongs in its own edit." This is that
+ * edit. What reached those screens verbatim was a constructor name and a Chrome
+ * string — `TypeError: Failed to fetch`, and from `sendWithProgress`'s own
+ * budgets `TypeError: upload stalled` — printed at somebody who is looking at a
+ * settings pane to find out what went wrong. {@link TRANSPORT_TEXT} is the
+ * sentence instead.
+ *
+ * ⚠ **`instanceof Error` is the narrowing, and {@link isTransportFailure} alone
+ * would have been too wide.** That predicate is a *negation* — "not an
+ * `ApiError`" — because the browser deliberately withholds why a `fetch`
+ * rejected, so there is nothing finer to key on. But `errorText` is also handed
+ * things nobody threw as an error at all: `webcheck` pins that a thrown string
+ * renders as itself, that a thrown object renders `[object Object]`, and that
+ * `null` and `undefined` still say something. Those are this client mis-throwing
+ * rather than a link dying, and reporting them as a network failure would hide a
+ * bug behind a sentence about the weather.
+ *
+ * What the narrowing does **not** buy is precision about the rest: a genuine
+ * `TypeError` from a bug in this client is an `Error`, is not an `ApiError`, and
+ * lands on the transport sentence. That is the honest cost of a predicate the
+ * browser will not let anyone write properly, and it is the same trade
+ * `isTransportFailure` already makes for the route memo — where guessing wrong
+ * costs one re-probe. Here it costs one wrong sentence, on a path where the old
+ * sentence was `TypeError: x is not a function`.
  *
  * Deliberately **not** `describe` in `machine.ts`, which prefixes the code
  * (`no_tunnel: …`). That is right for the machine banner, where the code is the
@@ -72,6 +116,7 @@ export class ApiError extends Error {
  * in front of the sentence that answers the question.
  */
 export function errorText(cause: unknown): string {
+  if (cause instanceof Error && isTransportFailure(cause)) return TRANSPORT_TEXT;
   return ApiError.isApiError(cause) ? cause.message : String(cause);
 }
 
@@ -144,11 +189,40 @@ export function meansRestartRefused(error: unknown): boolean {
 }
 
 /**
+ * A daemon that has never heard of this route, as opposed to one that refused.
+ *
+ * ⚠ **Known by the shape of the refusal rather than by a version, which is the
+ * whole reason it can be asked at all.** Nothing sends a version *to* a daemon and
+ * nothing here reads one, so a route added in this release has exactly one
+ * signature on an older host: Hono's own bare 404, with no error envelope, which
+ * `parseBody` turns into `code: "http_404"`. A daemon that *has* the route and
+ * refuses it answers the envelope, so its `code` is a name somebody chose.
+ *
+ * The two need opposite screens. An absent route is a settled answer — the daemon
+ * replied, and what it replied is that it is older — so it takes a sentence naming
+ * the remedy and **no** retry, because pressing one asks the same daemon the same
+ * question. A refusal is an event and takes the triangle and a way to ask again.
+ *
+ * Written out inline at five sites before this existed; `SystemsPanel` is the
+ * first caller and the other four still transcribe it.
+ */
+export function meansRouteAbsent(error: unknown): boolean {
+  return ApiError.isApiError(error) && error.status === 404 && error.code === `http_${error.status}`;
+}
+
+/**
  * A transport failure — DNS, refused, timed out, blocked, TLS.
  *
  * `fetch` rejects with a bare `TypeError` for all of them and the browser
  * deliberately withholds the reason, so there is nothing finer to key on. What
  * matters is only that it is *not* an `ApiError`.
+ *
+ * ⚠ **It is a negation, so it is true of anything that is not an `ApiError`** —
+ * including a thrown string, a thrown object literal, and a bug in this client.
+ * That is harmless where the answer is "drop the route memo and re-probe", which
+ * is what both callers in `machine.ts` do with it. It is not harmless where the
+ * answer is a sentence somebody reads, so {@link errorText} pairs it with
+ * `instanceof Error` rather than taking it neat; see the note there.
  */
 export function isTransportFailure(error: unknown): boolean {
   return !ApiError.isApiError(error);

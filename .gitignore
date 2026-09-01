@@ -46,3 +46,8 @@ id_ed25519*
 # Build output. The control plane serves packages/web/dist when it is there and
 # says how to build it when it is not, so there is nothing to check in.
 dist/
+
+# A packaged plugin. `docs/PLUGINS.md` tells somebody to build one in the
+# repository root — `tar -czf board.tgz -C plugins/board .` — so the documented
+# first step leaves an untracked archive beside the tree it was built from.
+*.tgz

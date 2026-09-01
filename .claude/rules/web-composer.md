@@ -95,10 +95,15 @@ rendering that reads as "it did not send" and invites a duplicate.
   disabled button, not one that toasts.
 
 **Agent controls are drawn from ACP's `category`, never an id**, and the values
-are never hardcoded. `labelFor` reconciles two agents' words for one *control*
-(claude `Effort`, kimi `Thinking`); `choiceOverride` reconciles them for one
-*choice* and gets the **opposite** answer — a label *and* a description for
-effort, only a description for mode. Q3.411. `model_config` is hidden; an unknown
+are never hardcoded. `labelFor` reconciles the agents' words for one *control* —
+claude `Effort` against kimi `Thinking`, and opencode `Session Mode` against `Mode`
+on the other three; `choiceOverride` reconciles them for one *choice* and gets the
+**opposite** answer — a label *and* a description for effort, only a description
+for mode. Q3.411, Q3.516. **`choiceLabel` is the one place a choice is named**, and
+beside the rename it holds the only thing this client may do to a name without
+renaming it: capitalise the first letter of a `mode`, because opencode publishes
+`build` and `plan` where the other three publish `Plan Mode` and `YOLO`. Only the
+first letter, only `mode`, and never the value. Q3.517. `model_config` is hidden; an unknown
 category is only demoted behind `…`. The one exception to "never hardcoded" is
 `ultracode`, and it is the daemon's: `registry.ts` adds that row to the effort
 control on its way to the snapshot, so `packages/web` renders an ordinary choice.
@@ -138,8 +143,9 @@ sizers are `hidden sm:block`**: below `sm` they leave the layout and chips size 
 their content and truncate under pressure. Q3.403.
 
 **A control never leaves the strip, and the model gate is what breaks that.** All
-three agents build the effort list from the **currently selected model's** own
-levels and drop the control entirely when there are none. `holdConfig` merges by
+**four** agents build the effort list from the **currently selected model's** own
+levels; the first three publish the control and drop it when there are none, and
+opencode never publishes one — see the paragraph below. `holdConfig` merges by
 option id rather than replacing; `drawnControls` returns the live set **plus** the
 slots of anything missing from it, named in `unavailable`; and `Absent` draws that
 slot from **`chipParts` and `chipInner`, the same two calls the live chip makes**,
@@ -148,6 +154,23 @@ choose and why (`unavailableHint`, keyed on category — the effort case gets it
 sentence for `contextHint`'s reason). It is deliberately **not** disabled: a dimmed
 inert chip answers "why is this greyed out" with silence on a phone. `unavailable`
 is empty whenever there is no agent at all — that sentence is `stale` instead.
+
+**And the same fact arrives in a second shape, which drew nothing.** claude and
+kimi *withdraw* the effort control; opencode never publishes one for a model with
+no levels, so there was no slot to keep and the right-hand cluster had three chips
+on one session and two on the next. `drawnControls` synthesizes `NO_LEVELS` — an
+empty `thought_level` select, id-namespaced `reemoat:` so it cannot collide with
+something an agent said — and puts it in `unavailable`, so the whole of the
+paragraph above draws it with no second code path. **`thought_level` only**: a
+synthesized `mode` would be found by `splitOptions` as the `NESTED_HOST` and
+`Absent` draws no nested sections, so `collaboration_mode` would nest into a
+placeholder and cease to exist. **The memory gets the slot too** — `held` can only
+hold what a daemon published, so a slot invented on the live branch alone vanished
+for the length of every restart, which is the paragraph above's own bug with a
+different trigger. Not synthesized only where nothing is drawn at all: a live agent
+that published no controls. `unavailable` now also carries **a select the agent
+published with nothing in it**, which is the same absence with a chip in front of
+it. Q3.518.
 
 **The strip never empties while the agent is away.** The daemon drops
 `agentConfig` with the agent, so `holdConfig` in `store.ts` keeps the last set a
@@ -212,6 +235,25 @@ empty `choices` array, so `ChoiceSection` draws a heading with no rows and
 `toEntries` skips booleans too. The partition assertion counts `nested`, because a
 slot missing from that sum is a control that can vanish with the check still
 green.
+
+**A prefix every row repeats is no part of a name — and no heading either.**
+opencode publishes **one** model control holding two providers — 356
+`OpenRouter/<model>` rows and six `OpenCode Zen/<model>` — with `group: null` on
+all 362, so the menu ran two accounts together and the chip spent its whole width
+on `OpenRouter…`. `drawnChoices` takes that repeated word out of every name, and
+all four readers go through it: `chipValue`, `ChoiceSection`, `configChoices`, and
+`CommandMenu`'s `role="group"` runs (a `listbox` may hold only options and groups,
+which is why this menu's own heading is outside it). ⚠ **It lifted the prefix into
+`group` for one release, and that is out**: with the daemon narrowing a session's
+model list to the system it routes through, the derived heading stood over every
+row in the menu and distinguished none of them. Only a `group` the **agent**
+published is drawn — none of the four sends one. ⚠ **The key is not "cut at the
+first `/`", which Q3.507 rejected by name**: only a list the agent *routes* on is
+touched at all, every `value` having to carry a namespace, and then only where
+**every row of the control** agrees on the prefix — which is what makes removing it
+lossless with nothing to put it back into. A vendor-shaped list inside one provider
+disagrees at its second row, so Q3.503 cannot come back; two providers in one
+control leave every name exactly as the agent wrote it. Q3.519, Q3.525.
 
 **A model chip shows the model's own name unless the agent refuses to give one.**
 `chipValue` mines a description only where a separator says the head *is* the model

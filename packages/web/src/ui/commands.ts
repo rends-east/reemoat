@@ -1,5 +1,13 @@
 import type { AgentCommand, AgentConfig, AgentConfigOption } from "../wire";
-import { choiceOverride, choiceRefusal, labelFor, slotFor, type ConfigProse } from "./agentConfig";
+import {
+  choiceLabel,
+  choiceOverride,
+  choiceRefusal,
+  drawnChoices,
+  labelFor,
+  slotFor,
+  type ConfigProse,
+} from "./agentConfig";
 
 /**
  * What a `/` in the composer means, as pure functions.
@@ -273,7 +281,7 @@ export function buildCommands(
           choice.description ??
           modeProse?.choices.get(choice.value) ??
           override?.description ??
-          choice.name,
+          choiceLabel(mode, choice),
         hint: null,
         option: mode,
         value: choice.value,
@@ -543,6 +551,56 @@ export interface ChoiceRow {
   value: string;
   label: string;
   description: string | null;
+  /**
+   * The heading this row sits under, or `null`.
+   *
+   * **The agent's own, and only ever the agent's own.** `drawnChoices` derived one
+   * for a release — the provider prefix opencode repeats on all 362 of its model
+   * rows — and it is out again: with the daemon narrowing a session's model list to
+   * the one system that session routes through, the derived heading stood over
+   * every row in the menu and distinguished none of them. The prefix is still taken
+   * out of the names; what is gone is putting it back as a title.
+   *
+   * It stays on the row because the chip's menu and this one draw the same control,
+   * and one of them grouping while the other ran the rows together would be the
+   * defect `choiceLabel` exists against, one level up from a name. Every agent this
+   * repository has measured answers `null` here.
+   */
+  group: string | null;
+}
+
+/**
+ * Consecutive rows that share a heading.
+ *
+ * A `listbox` may contain `option`s and `group`s and nothing else — which is why
+ * this menu's own heading sits *outside* the box — so a heading between rows has
+ * to arrive as a real `group` rather than as the `<p>` the chip's menu can afford.
+ * This is the shape that makes that a wrapper rather than a stray node.
+ *
+ * ⚠ **Each row keeps its flat position.** The arrow keys, `aria-activedescendant`
+ * and the `scrollIntoView` effect all count in the unwrapped list, so nesting the
+ * markup must not renumber anything — `index` is the position in `choices`, not in
+ * the run.
+ *
+ * One run with `group: null` is the ordinary answer, and — since the derived
+ * heading was taken back out — it is what all four measured agents produce:
+ * nothing is wrapped and the markup is what it always was. This survives for the
+ * agent that groups its own list, which the daemon maps onto `group` off the ACP
+ * config and which nothing here may quietly flatten.
+ */
+export interface ChoiceRun {
+  group: string | null;
+  items: { choice: ChoiceRow; index: number }[];
+}
+
+export function choiceRuns(choices: readonly ChoiceRow[]): ChoiceRun[] {
+  const runs: ChoiceRun[] = [];
+  choices.forEach((choice, index) => {
+    const last = runs[runs.length - 1];
+    if (last !== undefined && last.group === choice.group) last.items.push({ choice, index });
+    else runs.push({ group: choice.group, items: [{ choice, index }] });
+  });
+  return runs;
 }
 
 /**
@@ -562,7 +620,7 @@ export function configChoices(
   prose?: ConfigProse,
   turnRunning = false,
 ): ChoiceRow[] {
-  return option.choices.map((choice) => {
+  return drawnChoices(option).map((choice) => {
     const override = choiceOverride(option, choice.value);
     /*
      * **The refusal outranks every description, so the two doors cannot say
@@ -575,7 +633,11 @@ export function configChoices(
     const refusal = choiceRefusal(option, choice.value, turnRunning);
     return {
       value: choice.value,
-      label: override?.label ?? choice.name,
+      group: choice.group,
+      // `choiceLabel` and not `override?.label ?? choice.name`: the chip, the
+      // control's menu row and this list must name one value one way, and case is
+      // part of that — opencode publishes `build` where the others publish `Plan`.
+      label: choiceLabel(option, choice),
       description:
         refusal ??
         choice.description ??

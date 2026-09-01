@@ -12,11 +12,12 @@ import type {
   AgentId,
   AgentLoginSupport,
 } from "../../wire";
-import { Badge, Button, DangerButton, Empty, FIELD, Icon, IconButton, Spinner } from "../bits";
+import { Badge, Button, ChoiceRow, DangerButton, Empty, FIELD, Icon, IconButton, Spinner } from "../bits";
 import { copyText } from "../clipboard";
 import { loginOutcome, rawTranscriptIsOpen, readLoginTranscript, type LoginOutcome } from "../login";
 import {
-  agentLabel,
+  harnessName,
+  agentBadge,
   agentStance,
   credentialCaveat,
   credentialLabel,
@@ -56,8 +57,29 @@ function useAgentAuth(machineId: MachineId): {
   const [listing, setListing] = useState<AgentAuthListing | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  /*
+   * Which read owns the state — a counter, and deliberately not the `cancelled`
+   * flag `useSystems` uses one file over.
+   *
+   * A flag scoped to the effect is enough there because that hook's only trigger
+   * *is* the effect: its `refresh` bumps an epoch and the effect runs again.
+   * This one is called imperatively — on mount, from `changed()` after every
+   * sign-in, and from every "Check again" tap — so two reads can be in flight
+   * inside a single effect run, and one flag cannot tell them apart.
+   *
+   * What that cost is the worst moment on this screen. You finish a device-code
+   * login, the card says "Signed in to Claude Code", and then a probe that
+   * started *before* the login finished lands carrying the pre-login answer: the
+   * badge reverts to "not signed in", so you sign in again — the one flow in
+   * this product with the least tolerance for being repeated.
+   *
+   * Bumped in the effect's teardown too, so a read still in flight for a machine
+   * that has been navigated away from cannot write into the next one's state.
+   */
+  const epoch = useRef(0);
 
   const refresh = (): void => {
+    const mine = (epoch.current += 1);
     const daemon = store.daemonFor(machineId);
     if (daemon === undefined) {
       setError("That machine is not reachable.");
@@ -68,45 +90,50 @@ function useAgentAuth(machineId: MachineId): {
     void daemon
       .agentAuth()
       .then((next) => {
+        if (mine !== epoch.current) return;
         setListing(next);
         setError(null);
       })
-      .catch((cause: unknown) => setError(errorText(cause)))
-      .finally(() => setLoading(false));
+      .catch((cause: unknown) => {
+        if (mine !== epoch.current) return;
+        /*
+         * Framed here rather than at the two places that draw it, and this one
+         * has to be: `error` is rendered as the *whole* of an `Empty`, where
+         * `errorText`'s answer alone is a lower-case clause with no subject and
+         * no full stop — "the connection failed, and whether the request arrived
+         * is not known", centred in an empty pane, about nothing named. Every
+         * other arm of this state is already a complete sentence.
+         */
+        setError(`Couldn't read this machine's agents — ${errorText(cause)}.`);
+      })
+      .finally(() => {
+        // Only the live read owns the spinner. A stale one clearing it would
+        // report "checked" while the read somebody is waiting on is still out.
+        if (mine === epoch.current) setLoading(false);
+      });
   };
 
-  useEffect(refresh, [machineId]);
+  useEffect(() => {
+    refresh();
+    return () => {
+      epoch.current += 1;
+    };
+  }, [machineId]);
   return { listing, error, loading, refresh };
 }
 
 /**
- * The four states an agent can be in, as a badge.
+ * The badge, off the shared decision.
  *
- * Three of them are not two: `null` is "this agent has no non-interactive way to
- * say", which is kimi, and drawing that as "logged out" would nag somebody whose
- * agent works perfectly.
+ * ⚠ **This used to decide four states inline, where `webcheck` could not reach
+ * it.** The rules it carries — that "cannot check" is not an alarm, and now that
+ * an agent needing no sign-in says so rather than falling into that arm — live in
+ * `agentCard.ts` with everything else this panel decides. See {@link agentBadge}.
  */
-/**
- * Four states, two weights.
- *
- * The two that need something done about them are emphasised; the two that do not
- * are quiet. Note which side "status unknown" falls on and why it is not an
- * alarm: `loggedIn: null` means the CLI's own probe could not tell, which for kimi
- * is the *ordinary* answer rather than a fault — it is emphatically not the same
- * fact as `false`, and drawing it as one would put a warning on every kimi
- * installation in the fleet.
- */
-function statusOf(agent: AgentAuthInfo): {
-  tone: "plain" | "strong";
-  text: string;
-} {
-  if (!agent.available) return { tone: "strong", text: "not installed" };
-  if (agent.loggedIn === true) return { tone: "plain", text: "signed in" };
-  if (agent.loggedIn === false) return { tone: "strong", text: "not signed in" };
-  // "cannot check" and not "status unknown": for kimi this is the permanent,
-  // correct answer — `AGENT_LOGIN.kimi.status` is null — and naming it a fault
-  // would put a warning on every kimi in the fleet.
-  return { tone: "plain", text: "cannot check" };
+function statusOf(agent: AgentAuthInfo): { tone: "plain" | "strong"; text: string } | null {
+  return agentBadge(
+    agentStance(agent.available, agent.loggedIn, agent.login?.blocked, agent.lastStartRefusal != null),
+  );
 }
 
 /**
@@ -133,24 +160,61 @@ export function AgentChooser({
       </div>
     );
   }
-  if (listing === null) return <Empty>{error ?? "Could not read this machine's agents."}</Empty>;
+  if (listing === null) {
+    return (
+      // A read that did not come back, which is what `failed` is for — and the
+      // one branch on this screen that had no way out of itself: "Check again"
+      // lives in the success arm, so a first read that failed left the whole
+      // section inert until somebody navigated away and back.
+      <Empty
+        failed
+        action={
+          <Button size="sm" onClick={refresh}>
+            Try again
+          </Button>
+        }
+      >
+        {error ?? "Could not read this machine's agents."}
+      </Empty>
+    );
+  }
 
   return (
     <div className="mt-4 space-y-2">
+      {/* The read failed and the rows below are the last good answer. The same
+          arm, the same sentence and the same defect as `AgentDetail`'s — see
+          {@link StaleNotice} — and it rendered nowhere here for just as long. */}
+      {error !== null && <StaleNotice />}
       {listing.agents.map((agent) => {
         const status = statusOf(agent);
         return (
-          <button
+          /*
+           * ⚠ **`ChoiceRow`, and the border is the reason.** This was the row's
+           * own class string: `border-edge` with `hover:border-edge-strong`. That
+           * is a decorative 1.31:1 hairline standing as the *sole* identification
+           * of a control on the sheet's white ground, and then a hover that moves
+           * that hairline instead of a fill — the two things `index.css` states
+           * about those tokens, broken in one attribute. A phone has no hover at
+           * all, so what was actually on screen there was three passive-looking
+           * cards.
+           *
+           * `SystemChooser` one file over is the same list with the same badge and
+           * has already made this move; the two sit one tap apart inside pop-ups
+           * meant to read as one app, so they may not differ. The badge goes in
+           * `trailing`, which is what this row could do and the other two copies
+           * of it — `MachinesSection`'s and `InstalledList`'s — cannot: theirs sit
+           * *inside* the title line, and that is a prop `ChoiceRow` does not have.
+           */
+          <ChoiceRow
             key={agent.id}
+            title={agent.displayName}
+            subline={agent.id}
+            /* `null` is a state with nothing to report rather than a state that
+               failed to load — see `agentBadge`. Nothing is drawn, and the row's
+               own name is then the whole of it. */
+            trailing={status !== null ? <Badge tone={status.tone}>{status.text}</Badge> : undefined}
             onClick={() => onPick(agent.id)}
-            className="tap press flex w-full min-h-14 items-center gap-3 rounded-lg border border-edge bg-surface px-3 py-2.5 text-left hover:border-edge-strong"
-          >
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-medium">{agent.displayName}</div>
-              <div className="truncate text-2xs text-muted">{agent.id}</div>
-            </div>
-            <Badge tone={status.tone}>{status.text}</Badge>
-          </button>
+          />
         );
       })}
       <RecheckButton onClick={refresh} busy={loading} />
@@ -175,14 +239,63 @@ function RecheckButton({ onClick, busy }: { onClick: () => void; busy: boolean }
   );
 }
 
+/**
+ * The read failed and what is on screen is the last good answer.
+ *
+ * ⚠ **One sentence for both halves of this screen, and for a release only one of
+ * them drew it at all.** `AgentDetail` records the fix — `error` was rendered
+ * solely inside its `listing === null` branch, so a machine that went unreachable
+ * *after* a successful read froze the card on a stale badge for ever with nothing
+ * saying so — and `AgentChooser` had exactly the same arm with exactly the same
+ * gap. Shared rather than typed out twice, because a second copy is how one of
+ * the two gets reworded and the two screens start disagreeing about the same
+ * failure.
+ *
+ * `text-muted` and not `text-danger`: nothing has failed permanently here. What
+ * is below was true a moment ago, and "Check again" is on screen.
+ */
+function StaleNotice(): ReactNode {
+  return (
+    <p className="text-xs text-muted">
+      Couldn&apos;t reach that machine just now — what&apos;s below may be out of date.
+    </p>
+  );
+}
+
 /** One agent: sign in, credentials, permissions. */
 export function AgentDetail({
   machineId,
   agentId,
+  title,
+  keyEnv,
   onChanged,
 }: {
   machineId: MachineId;
   agentId: AgentId;
+  /**
+   * What to call this card, where the harness's own name is not what the reader
+   * came for.
+   *
+   * The systems screen passes the *system's* name — "Anthropic" over a card that
+   * drives `claude auth login` — because that is what somebody has an account
+   * with. Omitted, it is the harness, which is what `NewSession`'s inline
+   * sign-in wants: there the tile above it says `Claude`, and a card underneath
+   * headed `Anthropic` would read as a different subject.
+   */
+  title?: string;
+  /**
+   * The one credential this card is about, where it is mounted for a **system**.
+   *
+   * ⚠ **A harness's card holds every key that harness reads, and under a system's
+   * name that is somebody else's account.** opencode takes one for OpenRouter and
+   * one for OpenCode Zen, so the screen headed `OpenRouter` drew both boxes, each
+   * under the same repeated sentence about Zen's free models. Given, this card is
+   * about that one variable and says nothing else: no stance sentence, no caveat,
+   * no divider, no "either one will do" — those are all facts about the *harness*,
+   * and the reader is here about an account. `null` keeps the whole card, which is
+   * what the agents screen and `NewSession`'s inline door both want.
+   */
+  keyEnv?: string | null;
   /**
    * Something here changed what another screen already read.
    *
@@ -208,9 +321,25 @@ export function AgentDetail({
       </div>
     );
   }
-  if (listing === null) return <Empty>{error ?? "Could not read this machine's agents."}</Empty>;
+  if (listing === null) {
+    return (
+      // `failed`, and a way out of the branch — see `AgentChooser`'s twin above.
+      <Empty
+        failed
+        action={
+          <Button size="sm" onClick={refresh}>
+            Try again
+          </Button>
+        }
+      >
+        {error ?? "Could not read this machine's agents."}
+      </Empty>
+    );
+  }
 
   const agent = listing.agents.find((candidate) => candidate.id === agentId);
+  // A settled answer rather than a read that did not come back, so no `failed`
+  // and no live region: the machine was asked and it does not have that agent.
   if (agent === undefined) return <Empty>This machine doesn't have that agent.</Empty>;
 
   const status = statusOf(agent);
@@ -226,9 +355,15 @@ export function AgentDetail({
   return (
     <div className="mt-4 space-y-4">
       <div className="flex items-center gap-2">
-        {/* `agentLabel`, so the title is "Codex" rather than "Codex (codex-acp)".
-            The package name is the wall of text in miniature. */}
-        <span className="min-w-0 flex-1 truncate text-sm font-medium">{agentLabel(agent.id)}</span>
+        {/* `harnessName`, so the title is "Codex" rather than "Codex (codex-acp)":
+            the package name is the wall of text in miniature, and the daemon's own
+            `displayName` is the log line that carries it. A harness a plugin added
+            has no row in this product's table and takes its manifest's name — which
+            is the whole reason that name rides its own field rather than reusing
+            `displayName`. */}
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">
+          {title ?? harnessName(agent)}
+        </span>
         {/*
          * ⚠ **While a re-probe is in flight the previous listing is still on
          * screen** — this component early-returns on `loading` only while
@@ -236,7 +371,11 @@ export function AgentDetail({
          * in" *by construction*, since it is what put the button there, so the
          * badge contradicted the wizard for the whole window. It now says nothing.
          */}
-        {loading ? <Badge tone="plain">checking…</Badge> : <Badge tone={status.tone}>{status.text}</Badge>}
+        {loading ? (
+          <Badge tone="plain">checking…</Badge>
+        ) : (
+          status !== null && <Badge tone={status.tone}>{status.text}</Badge>
+        )}
       </div>
 
       {/*
@@ -250,17 +389,16 @@ export function AgentDetail({
        * This line is the arm that rendered nowhere: `error` was drawn only in the
        * `listing === null` branch, so a machine that went unreachable mid-login
        * froze this card on a stale badge for ever with nothing saying so.
+       * `AgentChooser` had the identical gap and now draws the identical
+       * sentence, which is why it is {@link StaleNotice} rather than a `<p>`.
        */}
-      {error !== null && (
-        <p className="text-xs text-muted">
-          Couldn&apos;t reach that machine just now — what&apos;s below may be out of date.
-        </p>
-      )}
+      {error !== null && <StaleNotice />}
 
       <SignIn
         machineId={machineId}
         agent={agent}
         login={login}
+        keyEnv={keyEnv ?? null}
         os={listing.os}
         checking={loading}
         checkFailed={error !== null}
@@ -301,6 +439,7 @@ function SignIn({
   machineId,
   agent,
   login,
+  keyEnv,
   os,
   checking,
   checkFailed,
@@ -309,6 +448,8 @@ function SignIn({
   machineId: MachineId;
   agent: AgentAuthInfo;
   login: AgentLoginSupport;
+  /** The one credential this card is about, or `null` for the whole harness. */
+  keyEnv: string | null;
   /** The daemon's own platform, for the one sentence that has to name it. */
   os: string | undefined;
   /** A re-probe is in flight, so no verdict may be claimed yet. */
@@ -337,9 +478,20 @@ function SignIn({
 
   // The wire type says `credentials` is required, but a daemon predating the
   // field would take this whole panel down on a `.filter` of undefined.
-  const slots = agent.credentials ?? [];
+  const all = agent.credentials ?? [];
+  /*
+   * Narrowed to the system's own key where this card is mounted for one — and
+   * never on an empty result: a daemon too old to send `keyEnv`, or one that
+   * renames a variable, must leave the boxes drawn rather than leave a screen with
+   * no way to paste anything at all.
+   */
+  const scoped = keyEnv === null ? all : all.filter((slot) => slot.envName === keyEnv);
+  const slots = scoped.length > 0 ? scoped : all;
+  const wholeAgent = slots.length === all.length;
   const stored = slots.filter((slot) => slot.set).length;
-  const stance = agentStance(agent.available, agent.loggedIn);
+  // The blocked reason is read here too, so the sentence and the badge cannot
+  // come to disagree about whether this agent has a sign-in at all.
+  const stance = agentStance(agent.available, agent.loggedIn, login.blocked, agent.lastStartRefusal != null);
   /*
    * Two axes, not one. `available` is the *adapter*; `login.supported` is
    * `script` plus the agent's own CLI, a different binary — so "adapter missing
@@ -348,13 +500,16 @@ function SignIn({
    */
   const canSignIn = login.supported && agent.available;
   const block = tokenBlockFor(stance, stored);
-  const line = stanceLine(agent.id, stance, canSignIn, os);
+  // Every one of these is a sentence about the *harness*, so a card scoped to one
+  // of its keys draws none of them: the box's own label and note say what the key
+  // is for, and that is the whole of what somebody opened this screen to read.
+  const line = wholeAgent ? stanceLine(agent, stance, canSignIn, os) : null;
   // Stays true while the wizard runs, or the divider would flip to "Sign in with
   // a key instead" beside a live sign-in.
   const signInAbove = canSignIn && stance !== "signed_in";
-  const divider = dividerWord(signInAbove, block);
-  const caveat = credentialCaveat(agent.id, canSignIn);
-  const choice = multiSlotLine(agent.id, slots.length);
+  const divider = wholeAgent ? dividerWord(stance, signInAbove, block) : null;
+  const caveat = wholeAgent ? credentialCaveat(agent.id, canSignIn) : null;
+  const choice = wholeAgent ? multiSlotLine(agent, slots.length) : null;
 
   return (
     /*
@@ -371,7 +526,7 @@ function SignIn({
         <LoginWizard
           machineId={machineId}
           agent={agent.id}
-          displayName={agentLabel(agent.id)}
+          displayName={harnessName(agent)}
           needsInput={login.needsInput}
           loggedIn={agent.loggedIn}
           checking={checking}
@@ -403,9 +558,46 @@ function SignIn({
       ) : canSignIn ? (
         <Button tone="primary" className="mt-2 w-full" onClick={() => setWizard(true)}>
           <Icon as={LogIn} size={14} />
-          Sign in to {agentLabel(agent.id)}
+          Sign in to {harnessName(agent)}
         </Button>
       ) : null}
+
+      {/*
+       * ⚠ **The card that *states* the refusal is where the control for it has to
+       * be, and for a whole draft it was not.** The strip's own remedy lives in
+       * the machine's agent list, which excludes every harness `startsBare` is
+       * false for — opencode, and every one a plugin added — so
+       * exactly the harnesses that live on presets had a card saying "would not
+       * start" with nothing beside it. `stanceLine` above already named both
+       * remedies; this is the one of them that is a button.
+       *
+       * Below the sign-in block rather than instead of it: a harness with a wizard
+       * can be in this state too, and there the sign-in is the *first* answer —
+       * this is what to press after signing in somewhere this app cannot see.
+       */}
+      {wholeAgent && stance === "start_refused" && (
+        <Button
+          className="mt-2 w-full"
+          onClick={() => {
+            const daemon = store.daemonFor(machineId);
+            if (daemon === undefined) {
+              toast("error", "That machine is not reachable.");
+              return;
+            }
+            void daemon
+              .recheckAgent(agent.id)
+              // Framed rather than dumped, which is this screen's rule for all
+              // five of its writes: `errorText` answers in an `ApiError`'s
+              // register and has no subject of its own.
+              .catch((cause: unknown) =>
+                toast("error", `Couldn't ask ${harnessName(agent)} again — ${errorText(cause)}.`),
+              )
+              .finally(onChanged);
+          }}
+        >
+          Check again
+        </Button>
+      )}
 
       {/* Drawn only when there is something on both sides of it: an "or" with one
           branch missing is a lie. */}
@@ -426,7 +618,7 @@ function SignIn({
             <CredentialSlot
               key={slot.envName}
               machineId={machineId}
-              agentId={agent.id}
+              agent={agent}
               slot={slot}
               stance={stance}
               caveat={caveat}
@@ -488,7 +680,22 @@ function SignOutButton({
         setConfirming(false);
         onChanged();
       })
-      .catch((cause: unknown) => toast("error", errorText(cause)))
+      /*
+       * **Framed, not dumped** — the first of four writes on this screen that
+       * used to hand `errorText`'s answer straight to a toast.
+       *
+       * That function answers in an `ApiError` message's register: lower case,
+       * unpunctuated and with no subject, so that a caller cannot tell which arm
+       * it got. It reads correctly *inside* a sentence, and alone in a toast it
+       * has no subject at all. Since `http.ts` grew its transport arm the point
+       * is unavoidable — a dropped connection here now pops up "the connection
+       * failed, and whether the request arrived is not known" over a screen
+       * carrying a sign-out, two key boxes and a sign-in wizard, naming none of
+       * them. The call site is the only thing left that knows what was tried.
+       */
+      .catch((cause: unknown) =>
+        toast("error", `Couldn't sign ${harnessName(agent)} out — ${errorText(cause)}.`),
+      )
       .finally(() => setBusy(false));
   };
 
@@ -530,7 +737,7 @@ function SignOutButton({
   return (
     <div className={box}>
       <span className="basis-full text-center text-xs text-muted">
-        Sign {agentLabel(agent.id)} out on this machine?
+        Sign {harnessName(agent)} out on this machine?
       </span>
       <DangerButton icon={LogOut} disabled={busy} onClick={run}>
         {busy ? <Spinner /> : "Sign out"}
@@ -556,7 +763,7 @@ function SignOutButton({
  */
 function CredentialSlot({
   machineId,
-  agentId,
+  agent,
   slot,
   stance,
   caveat,
@@ -565,7 +772,9 @@ function CredentialSlot({
   onChanged,
 }: {
   machineId: MachineId;
-  agentId: string;
+  /* The row rather than the id: `storedChip` names the harness in a sentence, and
+     a name is not derivable from an id for one a plugin added. */
+  agent: { id: string; label?: string };
   slot: AgentCredentialSlot;
   stance: AgentStance;
   /** The one thing to read before typing. See `credentialCaveat`. */
@@ -578,6 +787,11 @@ function CredentialSlot({
 }): ReactNode {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
+
+  // Read before `withDaemon` rather than after it, because the failure toast
+  // below names the key it was about and a closure reaching forward into a
+  // `const` is a needless thing to have to reason about.
+  const label = credentialLabel(slot.envName);
 
   const withDaemon = (
     run: (daemon: DaemonClient) => Promise<CredentialWritten>,
@@ -607,11 +821,19 @@ function CredentialSlot({
         toast("ok", credentialToast(removing, answer.restarting));
         onChanged();
       })
-      .catch((cause: unknown) => toast("error", errorText(cause)))
+      // Framed for the reason `SignOutButton` gives at length. Here there is a
+      // second thing only the call site knows: which of two acts, on which of
+      // two keys — a bare "the connection failed…" over a card drawing both
+      // boxes says neither.
+      .catch((cause: unknown) =>
+        toast(
+          "error",
+          `Couldn't ${removing ? "remove" : "save"} the ${label.name} — ${errorText(cause)}.`,
+        ),
+      )
       .finally(() => setBusy(false));
   };
 
-  const label = credentialLabel(slot.envName);
   // Exactly `MAX_CREDENTIAL_CHARS` in `src/server.ts`, not a guess under it: a
   // lower bound would refuse a key the daemon accepts, with a sentence that lies.
   const tooLong = value.length > 8192;
@@ -619,11 +841,36 @@ function CredentialSlot({
     <IconButton
       icon={X}
       tone="destructive"
-      /* The 4px the row's `gap-2` no longer carries, so this button's expanded
-         target still clears the control on its left. See the row's own note. */
+      /*
+       * ⚠ **`chip`, and `lg` was rejected on a measurement rather than on
+       * taste.** This passed no `size` at all, so it took the deleted `md`
+       * default — 36px of box with no growth mechanism of any kind, the one
+       * entry in `ICON_BUTTON_SIZE` that never reached the 44px floor — on the
+       * only irreversible control in this row.
+       *
+       * `lg` is the obvious replacement and is wrong here for a reason that can
+       * be measured: it is a fixed `h-11`, while every other box in this row
+       * states a `min-h` and stretches. A 44px Remove therefore drags the field
+       * and Save up to 44px on a desktop, where both are 36px — and the field
+       * then no longer lines up with the `SetupTokenCommand` box above it, which
+       * is a height `webcheck` holds to one stated number on purpose. `chip` is
+       * 32px, so it sits *inside* the row's existing height and moves no layout
+       * at either pointer size, and it reaches 44px through `TAP_GROW_Y`.
+       */
+      size="chip"
+      /*
+       * 4px on top of the row's `gap-2`, and it is about the eye now rather than
+       * about the target. It used to claim it was the clearance "this button's
+       * expanded target" needed from the control on its left — reasoning about a
+       * growth mechanism `md` did not have, and which `chip` does not have
+       * either: `TAP_GROW_Y` grows the top and bottom edges only and leaves both
+       * sides on the face, so nothing this button can be tapped through ever
+       * reaches Save. What the 12px buys is that the irreversible control does
+       * not sit at the same rhythm as the affirmative one beside it.
+       */
       className="ml-1"
       label={`Remove the saved ${label.name}`}
-      onClick={() => withDaemon((daemon) => daemon.clearCredential(agentId, slot.envName), true)}
+      onClick={() => withDaemon((daemon) => daemon.clearCredential(agent.id, slot.envName), true)}
       disabled={busy}
     />
   );
@@ -639,7 +886,7 @@ function CredentialSlot({
         </span>
         {slot.set && (
           <span className="flex shrink-0 items-center gap-1 text-2xs text-muted">
-            <Icon as={Check} size={11} /> {storedChip(agentId, stance)}
+            <Icon as={Check} size={11} /> {storedChip(agent, stance)}
           </span>
         )}
       </div>
@@ -663,14 +910,19 @@ function CredentialSlot({
       {editable ? (
         <>
           {/*
-            * `gap-2` between the field and Save, and the 12px the Remove button
-            * needs put back on Remove itself.
+            * `gap-2` between the field and Save, and 4px more put on Remove
+            * itself.
             *
-            * The gap used to be `gap-3` for all of it, and the reason was only ever
-            * about Remove: its `after:-inset-2.5` target reaches 10px past its face,
-            * so at 8px spacing it lands 2px onto its neighbour. That argument says
-            * nothing about the field and Save — two ordinary boxes with no
-            * overhanging targets.
+            * The gap used to be `gap-3` for all of it, and the reason given was
+            * only ever about Remove: that its `after:-inset-2.5` target reached
+            * 10px past its face, so at 8px spacing it would land 2px onto its
+            * neighbour. ⚠ **That was never true of this button.** It named no
+            * `size`, so it took the 36px `md` default, which had no growth
+            * mechanism at all — the sentence described `sm`, one entry over. It
+            * is `chip` now, whose growth is vertical only, so the sides of its
+            * target are its own face and the spacing here is a visual one. The
+            * conclusion outlives its premise: the field and Save are two ordinary
+            * boxes with no overhanging targets and need no extra gap.
             *
             * **One row, so the field is narrower than the command box above it by
             * exactly Save plus a gap.** That was tried the other way and taken
@@ -681,7 +933,16 @@ function CredentialSlot({
             <input
               value={value}
               onChange={(event) => setValue(event.target.value)}
-              type="password"
+              /* The same three reasons `SystemsPanel` gives at length: a
+                 `type="password"` here is what makes a browser offer an account
+                 password, `autocomplete="off"` is documented not to stop it, and
+                 this box only ever holds a value somebody has just pasted. */
+              type="text"
+              name="reemoat-agent-key"
+              data-1p-ignore=""
+              data-lpignore="true"
+              autoCapitalize="off"
+              autoCorrect="off"
               autoComplete="off"
               spellCheck={false}
               placeholder={slot.set ? "paste a new key to replace it" : "paste the key"}
@@ -694,7 +955,7 @@ function CredentialSlot({
                  because `sm`'s `px-2.5` around four characters is a button narrower
                  than its own label is long. */
               className="min-w-20 [@media(pointer:coarse)]:min-h-11"
-              onClick={() => withDaemon((daemon) => daemon.saveCredential(agentId, slot.envName, value))}
+              onClick={() => withDaemon((daemon) => daemon.saveCredential(agent.id, slot.envName, value))}
               disabled={busy || value.trim().length === 0 || tooLong}
             >
               {busy ? <Spinner /> : "Save"}
@@ -715,6 +976,28 @@ function CredentialSlot({
 /** Scoped per machine and agent, so two wizards cannot adopt each other's run. */
 function loginKey(machineId: MachineId, agent: string): string {
   return `reemoat.login.${machineId}.${agent}`;
+}
+
+/**
+ * Something went wrong in the wizard, and whether it has given up.
+ *
+ * ⚠ **A state that is still retrying is not a failure, and one `text-danger` for
+ * both said it was.** "Lost contact with that machine. Still trying…" was drawn
+ * in precisely the red of "Cannot reach that machine right now." and of a
+ * recognised, terminal login failure — so a single dropped poll on LTE, in the
+ * middle of the one interaction that *requires* leaving the app and coming back,
+ * looked exactly like the sign-in having died. It has not: the run lives ten
+ * minutes on the daemon, the next poll is already scheduled, and the only
+ * control on screen is Cancel, which is the one thing that would really end it.
+ *
+ * Carried as a field rather than decided at the `<p>` by matching on the
+ * sentence, because a screen that picks its own colour by reading its own words
+ * is one reword away from being wrong about it.
+ */
+interface Trouble {
+  text: string;
+  /** A poll is still scheduled. Drawn `text-muted`; only a give-up is red. */
+  retrying: boolean;
 }
 
 function LoginWizard({
@@ -750,7 +1033,7 @@ function LoginWizard({
   const [output, setOutput] = useState("");
   const [done, setDone] = useState(false);
   const [input, setInput] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [trouble, setTrouble] = useState<Trouble | null>(null);
   const paneRef = useRef<HTMLPreElement | null>(null);
   /*
    * Held in a ref, and deliberately not in the effect's dependency list.
@@ -766,7 +1049,7 @@ function LoginWizard({
   useEffect(() => {
     const daemon = store.daemonFor(machineId);
     if (daemon === undefined) {
-      setError("That machine is not reachable.");
+      setTrouble({ text: "That machine is not reachable.", retrying: false });
       return;
     }
 
@@ -821,7 +1104,7 @@ function LoginWizard({
         .then((page) => {
           if (cancelled) return;
           failures = 0;
-          setError(null);
+          setTrouble(null);
           cursor = page.cursor;
           if (page.chunk.length > 0) setOutput((previous) => previous + page.chunk);
           if (page.done) {
@@ -843,7 +1126,10 @@ function LoginWizard({
             }
             id = null;
             if (restarts >= MAX_RESTARTS) {
-              setError("That machine keeps stopping this sign-in. Try again in a moment.");
+              setTrouble({
+                text: "That machine keeps stopping this sign-in. Try again in a moment.",
+                retrying: false,
+              });
               return;
             }
             restarts += 1;
@@ -857,11 +1143,19 @@ function LoginWizard({
            * sign-in program on your machine cannot do this*; this one means *we
            * lost contact, it may still be fine*. The daemon's own wording moves
            * into the terminal pane, which is where developer detail lives.
+           *
+           * And this channel splits again on the same line that decides whether
+           * to reschedule, which is the only place the two can be guaranteed to
+           * agree: while a poll is still coming the sentence is `retrying`, and
+           * it is drawn quietly. See {@link Trouble}.
            */
-          setError(
+          setTrouble(
             failures < MAX_FAILURES
-              ? "Lost contact with that machine. Still trying…"
-              : "Cannot reach that machine right now. The sign-in may still be running on it.",
+              ? { text: "Lost contact with that machine. Still trying…", retrying: true }
+              : {
+                  text: "Cannot reach that machine right now. The sign-in may still be running on it.",
+                  retrying: false,
+                },
           );
           // Kept alive across a transient failure. Backed off a little so a
           // daemon that is genuinely struggling is not polled harder for it, and
@@ -894,7 +1188,12 @@ function LoginWizard({
           adopt(run.loginId);
         })
         .catch((cause: unknown) => {
-          if (!cancelled) setError(errorText(cause));
+          // Framed for `SignOutButton`'s reason, and terminal: nothing
+          // reschedules a start, so this is the wizard giving up before it had
+          // anything to poll.
+          if (!cancelled) {
+            setTrouble({ text: `Couldn't start the sign-in — ${errorText(cause)}.`, retrying: false });
+          }
         });
     };
 
@@ -926,7 +1225,7 @@ function LoginWizard({
     setOutput("");
     setDone(false);
     setLoginId(null);
-    setError(null);
+    setTrouble(null);
     setAttempt((n) => n + 1);
   };
 
@@ -941,7 +1240,11 @@ function LoginWizard({
     if (daemon === undefined || loginId === null) return;
     const text = input;
     setInput("");
-    void daemon.writeLogin(loginId, text).catch((cause: unknown) => toast("error", errorText(cause)));
+    // Framed for `SignOutButton`'s reason: on this card a bare "the connection
+    // failed…" could be about the sign-in, the sign-out or either key box.
+    void daemon
+      .writeLogin(loginId, text)
+      .catch((cause: unknown) => toast("error", `Couldn't send that — ${errorText(cause)}.`));
   };
 
   const close = (cancel: boolean): void => {
@@ -965,9 +1268,57 @@ function LoginWizard({
   const outcome: LoginOutcome | null =
     view.phase === "done" ? loginOutcome(checking, checkFailed, loggedIn) : null;
 
+  /*
+   * ⚠ **The step numbers are counted off what is actually on screen, because two
+   * blocks wrote "Step 2" and neither could see the other.**
+   *
+   * They were three hardcoded ordinals under three independent conditions:
+   * "Step 1 — open this page" on `view.url !== null`, "Step 2 — enter this code
+   * there" on `view.code !== null`, and "Step 2 — paste what the page gives you
+   * back here" on `needsInput && !done`. Both ways of getting that wrong are
+   * reachable, on the flow in this product with the least tolerance for either.
+   * An agent with `interactiveStdin` during `starting` — claude, before its CLI
+   * has printed anything — drew a spinner and a Step 2 with no Step 1 anywhere.
+   * And `extractCode`'s patterns are declared guesses in `ui/login.ts` matched
+   * against prose any vendor may reword, so one hit on claude's paste flow put
+   * two different Step 2s on screen at once.
+   *
+   * So an ordinal is a position among the blocks actually drawn, in `order` —
+   * this component's own render order, stated once. **Each block's gate below is
+   * the same `const` that puts it in `steps`**, so a block cannot be drawn
+   * without being counted or counted without being drawn; a second expression
+   * mirroring the first is exactly how three ordinals came apart in the first
+   * place. `url` and `code` are read out of `view` for the same reason and one
+   * more: a property access cannot be narrowed inside the code block's callback,
+   * which is why that one needed a `?? ""` that could never fire.
+   *
+   * **And the number is dropped entirely when only one block is drawn.** "Step 1"
+   * with no step 2 anywhere promises a sequence that does not exist, and the
+   * imperative on its own is already the whole instruction. That is also the
+   * `starting` case above, which is the state this was worst in.
+   */
+  const { url, code } = view;
+  const showPage = url !== null;
+  const showCode = code !== null;
+  const showInput = needsInput && !done;
+  const steps = { page: showPage, code: showCode, input: showInput };
+  const order: (keyof typeof steps)[] = ["page", "code", "input"];
+  const stepLabel = (which: keyof typeof steps, imperative: string): string => {
+    const drawn = order.filter((key) => steps[key]);
+    const at = drawn.indexOf(which);
+    if (drawn.length < 2 || at < 0) return imperative;
+    return `Step ${at + 1} — ${imperative}`;
+  };
+
   return (
     <div className="mt-2 space-y-2">
-      {error !== null && <p className="text-xs text-danger">{error}</p>}
+      {trouble !== null && (
+        // Muted while a poll is still coming, red only once the wizard has
+        // stopped trying. See {@link Trouble} for what one red for both cost.
+        <p className={`text-xs ${trouble.retrying ? "text-muted" : "text-danger"}`}>
+          {trouble.text}
+        </p>
+      )}
       {view.message !== null && (
         <p className={`text-xs ${view.phase === "failed" ? "text-danger" : "text-fg font-medium"}`}>
           {view.message}
@@ -985,11 +1336,11 @@ function LoginWizard({
           is a navigation, to another origin in another tab. The value on this
           screen that earns a real fill is the device code below, which is one of
           the three documented exceptions and takes `bg-raised`. */}
-      {view.url !== null && (
+      {showPage && (
         <div>
-          <div className="text-2xs text-muted">Step 1 — open this page</div>
+          <div className="text-2xs text-muted">{stepLabel("page", "open this page")}</div>
         <a
-          href={view.url}
+          href={url}
           target="_blank"
           rel="noreferrer"
           className="tap press flex min-h-11 items-center gap-2 rounded-md border border-edge-strong bg-surface px-3 text-sm font-medium text-fg hover:bg-raised"
@@ -1003,17 +1354,17 @@ function LoginWizard({
       {/* Same argument as `OneTimeSecret`: a device code expires in fifteen
           minutes and is the whole of what this screen is for, so it gets the full
           `raised` step rather than the rail's tone, which is 1.06:1 here. */}
-      {view.code !== null && (
+      {showCode && (
         <div className="rounded-md border border-edge bg-raised p-3">
-          <div className="text-2xs text-muted">Step 2 — enter this code there</div>
+          <div className="text-2xs text-muted">{stepLabel("code", "enter this code there")}</div>
           <div className="mt-1 flex items-center gap-2">
             <code className="min-w-0 flex-1 truncate font-mono text-lg tracking-widest">
-              {view.code}
+              {code}
             </code>
             {/* An `IconButton`, not a `Button` wrapping an `<Icon>` — that was
                 44px tall and ~38px wide, on the one control a person taps to
                 capture a code that is shown once, on a phone. */}
-            <IconButton icon={Copy} label="Copy the code" size="lg" onClick={() => copy(view.code ?? "")} />
+            <IconButton icon={Copy} label="Copy the code" size="lg" onClick={() => copy(code)} />
           </div>
         </div>
       )}
@@ -1069,10 +1420,10 @@ function LoginWizard({
         <p className="text-xs text-danger">Couldn&apos;t reach that machine to check whether it worked.</p>
       )}
 
-      {needsInput && !done && (
+      {showInput && (
         <div>
           <label className="text-2xs text-muted" htmlFor={`login-${agent}`}>
-            Step 2 — paste what the page gives you back here
+            {stepLabel("input", "paste what the page gives you back here")}
           </label>
           <div className="mt-1 flex gap-3">
           <input
@@ -1211,11 +1562,25 @@ function SetupTokenCommand({ command }: { command: string }): ReactNode {
  * entirely, and telling somebody "0 chats" there would be a confident claim about
  * behaviour that daemon does not have. It falls back to the sentence that was
  * always true.
+ *
+ * ⚠ **Every tail was written for a save and then reused for a removal, where
+ * each of them is false.** `credentialToast(true, 2)` read "Removed. 2 chats are
+ * restarting to pick it up." — there is nothing to pick up; they are restarting
+ * for the opposite reason, which is that the key they were holding is gone. And
+ * "Checking whether it works…" is about a key that now exists: after a removal
+ * the refetch is checking what that agent is left with, not whether anything
+ * works. Only the head varied, so only the head was ever right.
  */
 export function credentialToast(removing: boolean, restarting: number | undefined): string {
   const head = removing ? "Removed." : "Saved.";
-  if (restarting === undefined) return `${head} Checking whether it works…`;
-  if (restarting === 0) return `${head} Checking whether it works…`;
+  /*
+   * A removal with nothing to relaunch ends at the full stop. The chip beside
+   * the box going out is the confirmation, and a tail here would have to invent
+   * a claim about a machine that was asked to stop using something.
+   */
+  const quiet = removing ? head : `${head} Checking whether it works…`;
+  if (restarting === undefined) return quiet;
+  if (restarting === 0) return quiet;
   const chats = restarting === 1 ? "1 chat is" : `${restarting} chats are`;
-  return `${head} ${chats} restarting to pick it up.`;
+  return `${head} ${chats} restarting ${removing ? "without it" : "to pick it up"}.`;
 }

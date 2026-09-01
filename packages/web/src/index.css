@@ -575,10 +575,33 @@ body {
   padding-top: max(3.25rem, env(safe-area-inset-top));
 }
 
-/* Tap targets on a phone. 44px is the platform minimum and the approve buttons
-   are the reason it matters here. */
-button {
-  touch-action: manipulation;
+/*
+ * Tap targets on a phone. 44px is the platform minimum and the approve buttons
+ * are the reason it matters here; `manipulation` is what removes the 300ms
+ * double-tap-to-zoom wait on all of them.
+ *
+ * ⚠ **Inside `@layer base`, and it was not — which made `touch-none` a dead class
+ * on every button in this app.** The focus ring's docblock further down states the
+ * rule this broke: Tailwind emits every utility inside `@layer utilities`, an
+ * unlayered rule beats a layered one *regardless of specificity*, and this one was
+ * unlayered. Measured on the built stylesheet: `.touch-none{touch-action:none}` at
+ * byte 18486 inside the utilities layer, `button{touch-action:manipulation}` at
+ * 46097 outside every layer — so the utility lost, the effective value on a
+ * `touch-none` button stayed `manipulation`, and `manipulation` still permits
+ * panning. The agent-strip drag handle could not start a drag on a phone at all:
+ * the browser took the vertical gesture for the scroller and fired `pointercancel`
+ * before a single `pointermove` arrived. On a desktop it worked, because a mouse
+ * is not gated by `touch-action` — which is exactly the shape of bug that ships.
+ *
+ * This is a **default**, not a decision, and base is where a default goes — the
+ * same sentence the cursor rule above makes. Nothing else in this app overrides
+ * `touch-action` today, so moving it changes one control's behaviour and no
+ * other's.
+ */
+@layer base {
+  button {
+    touch-action: manipulation;
+  }
 }
 
 /*
@@ -712,6 +735,102 @@ kbd {
 }
 .no-scrollbar::-webkit-scrollbar {
   display: none;
+}
+
+/*
+ * A bar that is there while you are moving and fades once you stop.
+ *
+ * ⚠ **The fourth answer, and the first one that is this app's own pixels.**
+ * `.no-scrollbar` hid it outright — a phone idiom, and on a desktop that left a
+ * horizontal strip with no way to move it and nothing saying it could be moved.
+ * Taking the class off gave the permanent classic bar the `pointer: fine` rule
+ * draws, a dark rule under a row of tiles, reported the moment it shipped. The
+ * third reserved that bar's thickness and animated only the thumb's colour — and
+ * it **did not fade**, which is the report this rule answers.
+ *
+ * ⚠ **Why a styled native bar cannot fade here.** Since Chrome 121 the standard
+ * properties **override** the pseudo-elements: `scrollbar-width` or
+ * `scrollbar-color` at anything but `auto` and every `::-webkit-scrollbar-*` rule
+ * on that element is ignored. The `pointer: fine` rule above sets **both, on `*`**,
+ * at `thin` and a colour — so a `transition` written on a thumb pseudo-element is
+ * dead on arrival everywhere in this app, not only here. What is left switching is
+ * `scrollbar-color`, and no engine interpolates it: the bar vanished between one
+ * frame and the next.
+ *
+ * So the native bar is hidden and the app draws its own — an ordinary `div` with
+ * an `opacity` transition, which every engine animates and which the
+ * `prefers-reduced-motion` block at the foot of this file already zeroes.
+ * `AgentStrip` sets its width and offset from the box's own scroll metrics; this
+ * file owns only when it is visible.
+ *
+ * ⚠ **Out slowly, in at once, and one declaration does both.** `is-scrolling`
+ * carries the shorter duration with it, so the bar is there with the first notch
+ * and takes half a second to go. A single duration in both directions reads as
+ * lag: the bar arriving after the row has already moved.
+ *
+ * It costs no layout in either state, which is the property the third answer had
+ * and this one keeps. The rail is a sibling **below** the row with a height of its
+ * own, so nothing moves when the thumb appears — the jolt `.scroll-stable` exists
+ * against, avoided here by not putting the bar inside the box at all.
+ */
+.fade-scrollbar {
+  scrollbar-width: none;
+  /* Dragged past its end, this strip does not hand the gesture to the page.
+     `.no-scrollbar` above states the same thing at length, and for the same
+     reason: with no bar of the browser's, the strip's own bounce is the only
+     thing that says you have reached the end. */
+  overscroll-behavior-x: contain;
+}
+.fade-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.fade-thumb {
+  opacity: 0;
+  transition: opacity 500ms ease;
+}
+.fade-thumb.is-scrolling {
+  opacity: 1;
+  transition-duration: 100ms;
+}
+
+/*
+ * The gradient at the cut edge of a strip you drag sideways.
+ *
+ * ⚠ **It answers the one thing the bar above cannot: that there is more, before
+ * anybody has touched anything.** `.fade-thumb` reports a *position* and is
+ * invisible until the row moves, so a first paint says nothing at all — and the
+ * agent strip's contents do not say it either. `.no-scrollbar`'s docblock names
+ * the shape that does: "a strip whose contents already announce that there is
+ * more of them by being cut off at the edge". That is a half-drawn tile. The
+ * agent strip ends in a *fully* drawn control, which reads as the row's
+ * deliberate end, and losing that cue is exactly why the strip stopped using
+ * `.no-scrollbar` in the first place.
+ *
+ * ⚠ **A class rather than the four utilities `SessionView` writes inline, and the
+ * `opacity` is why.** That fade is mounted and unmounted by a condition that
+ * changes rarely; this one changes at the end of every flick, so it transitions —
+ * and `webcheck` asserts the substring `opacity` appears nowhere inside
+ * `AgentStrip`, for a reason about *tiles* that this would otherwise trip. The
+ * gradient itself stays at the call site, because which edge and which ground it
+ * fades to are the caller's.
+ *
+ * ⚠ **Placed after `.fade-thumb.is-scrolling` rather than beside `.fade-scrollbar`
+ * above.** `webcheck` reads this file and slices it between those two selectors by
+ * `indexOf`; a rule inserted between them re-anchors every assertion about the
+ * scrollbar onto this one.
+ *
+ * Out slowly and in at once, which is `.fade-thumb`'s asymmetry and its reason: a
+ * single duration in both directions reads as lag, the gradient arriving after the
+ * row has already moved. It costs no layout in either state — the element is
+ * `absolute` and `pointer-events-none` at its one call site.
+ */
+.edge-fade {
+  opacity: 0;
+  transition: opacity 500ms ease;
+}
+.edge-fade.is-cut {
+  opacity: 1;
+  transition-duration: 100ms;
 }
 
 /*
@@ -981,6 +1100,29 @@ kbd {
 }
 :root[data-nav="sheet-close"]::view-transition-old(scrim) {
   animation: scrim 260ms ease-out both reverse;
+}
+
+/*
+ * **And two different pop-ups swap in place.**
+ *
+ * There is one `[data-sheet-panel]` for every route-backed pop-up (`OverlaySheet`
+ * in `App.tsx`), so Settings → Plugins changes what is *inside* a panel that does
+ * not move. Both named groups therefore have identical old and new boxes, and the
+ * default cross-fade on each is exactly the movement: the head dissolves from
+ * "Settings" to "Plugins" and the body with it. Nothing is declared here for them.
+ *
+ * What has to be declared is the *absence* below: the screen behind the scrim was
+ * there all along and is not arriving, which is the same pin `section-*` and
+ * `sheet-close` take. Without it the root pair slides, because
+ * `:root[data-nav]::view-transition-old(root)` has no default of `none`.
+ *
+ * Before this, the two pop-ups were two panels: one unmounted, the other mounted
+ * and replayed `animate-sheet` from off-screen, with a frame showing neither.
+ * Q3.484.
+ */
+:root[data-nav="sheet-swap"]::view-transition-old(root),
+:root[data-nav="sheet-swap"]::view-transition-new(root) {
+  animation: none;
 }
 
 /*

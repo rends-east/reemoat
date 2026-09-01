@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
 import { resolve } from "node:path";
-import { AGENT_IDS, isAgentId, AgentUnavailableError } from "../src/acp/agents.js";
+import { AGENT_IDS, isBuiltinAgentId, AgentUnavailableError } from "../src/acp/agents.js";
 import { Session } from "../src/session.js";
 import type { SessionEvent } from "../src/events.js";
 
@@ -39,7 +39,10 @@ async function main(): Promise<number> {
     console.log(USAGE);
     return 0;
   }
-  if (!values.agent || !isAgentId(values.agent)) {
+  // The built-ins only, and that is honest rather than a shortfall: this driver
+  // builds a bare `Session` with no store, so there is no `plugins` table to read
+  // a contributed harness out of and nothing that could resolve one.
+  if (!values.agent || !isBuiltinAgentId(values.agent)) {
     console.error(`error: --agent must be one of ${AGENT_IDS.join(", ")}\n\n${USAGE}`);
     return 2;
   }

@@ -1,5 +1,5 @@
 import { machineId, type MachineId } from "./ids";
-import { isAgentId, type AgentId, type Me } from "./wire";
+import type { Me } from "./wire";
 
 /**
  * Which settings screen a URL names, and who may see it.
@@ -43,10 +43,19 @@ export type SettingsGroup = "server";
  */
 export interface SettingsRoute {
   section: SettingsSection | null;
-  /** The machine whose agents or plugins are being configured, if the URL names one. */
+  /** The machine whose systems or plugins are being configured, if the URL names one. */
   machineId: MachineId | null;
   /**
-   * The agent being configured, if the URL names one. Never without a machine.
+   * The **system** being configured, if the URL names one. Never without a machine.
+   *
+   * ⚠ **It was `agent`, and the rename is the whole point rather than tidying.**
+   * What this segment addresses is a screen you sign in on, and what you sign in
+   * to is Anthropic, OpenAI or Moonshot — not `claude`, `codex` or `kimi`. The
+   * two were indistinguishable while each harness spoke only to its own vendor;
+   * they came apart the moment one could be pointed at another system, and a
+   * screen still called "Agents" would be asking which CLI you have an account
+   * with. `…/agents/:agent` still parses, to the machine, which is this
+   * function's standing "fall up to the nearest real screen".
    *
    * ⚠ **There is no `plugin` beside it any more, and its absence is the
    * decision.** A plugin used to have a leaf here — `…/plugins/:pluginId` — which
@@ -61,7 +70,44 @@ export interface SettingsRoute {
    * the same reason `…/agents` does: an address that used to work should land on
    * the nearest real screen rather than on nothing.
    */
-  agent: AgentId | null;
+  system: string | null;
+  /**
+   * The machine's **agent strip** — which agents its New session screen offers,
+   * and in what order. Never without a machine, never together with a system.
+   *
+   * ⚠ **A boolean, where its two siblings are ids, because there is nothing
+   * under it.** A system is a leaf you pick one of from a list drawn on the
+   * machine's screen; this is a single screen holding one list, so the only
+   * thing the address has to say is whether you are on it.
+   *
+   * ⚠ **`…/agents` used to mean something else, and this is the reuse rather
+   * than an addition.** It named *one agent's sign-in* — the screen that became
+   * `…/systems/:system` when a harness and the account it signs in to came
+   * apart — and since then it has parsed to the machine as "fall up to the
+   * nearest real screen". It names the machine's agent *list* now, which is what
+   * a person reading the address would guess, and a leftover fourth segment from
+   * the old shape is dropped rather than redirected: the screen it lands on is
+   * one tap from what that address used to open.
+   */
+  agents: boolean;
+  /**
+   * The **harness** whose credentials are being configured, if the URL names one.
+   * Never without a machine, never together with a system.
+   *
+   * ⚠ **A second leaf under one list, and the asymmetry is deliberate.** The
+   * Sign-ins list holds two kinds of row — a provider you have an account with,
+   * and a harness that reads a key of its own — and they cannot share a segment,
+   * because a plugin may name the same local id in both of its contribution
+   * blocks. `…/systems/:system` therefore keeps its meaning and every address
+   * that ever worked goes on working; this is where the second kind lives.
+   *
+   * ⚠ **Only a harness *no provider speaks for* is ever addressed here.** Every
+   * built-in is named by a system's `loginVia` — Anthropic signs in through
+   * claude, OpenRouter through opencode — and that system's own leaf is where its
+   * card is drawn. Two leaves for one credential is the "two copies and two
+   * answers to *signed in?*" this whole section was built to remove.
+   */
+  signin: string | null;
 }
 
 export interface SectionSpec {
@@ -108,7 +154,7 @@ export const SECTION_SPECS: readonly SectionSpec[] = [
     // Not "Add a machine, …": adding one is not always on offer, and a nav blurb
     // promising it on an instance that hands out none is the same false claim
     // the intro on that screen had to stop making.
-    blurb: "Your machines, their agents, and which are reachable.",
+    blurb: "Your machines, the systems they sign in to, and which are reachable.",
     adminOnly: false,
     group: null,
   },
@@ -187,14 +233,22 @@ export function parseSettingsSection(segment: string | undefined): SettingsSecti
  * 404, which is `parseSettingsSection`'s posture applied one level down:
  *
  *   - a machine id under any section but `machines` is ignored;
- *   - `…/agents/<not an agent>` drops the agent and shows the chooser, because
- *     an unknown id is a stale link and the chooser is where you pick again;
- *   - anything between the machine and `agents` that is not the literal
- *     `agents` drops to the machine's own screen.
+ *   - `…/systems/<not a system>` drops it and shows the chooser, because an
+ *     unknown id is a stale link and the chooser is where you pick again;
+ *   - anything between the machine and `systems` that is not the literal
+ *     `systems` drops to the machine's own screen — `…/agents/:agent`, the
+ *     address this replaced, is exactly that case and is deliberately **not**
+ *     redirected, for the reason `/settings/agents` is not: a redirect would
+ *     have to guess, and the screen it falls to is one tap from the answer.
  *
- * The agent id is validated against `AGENT_IDS`, not merely decoded, because it
- * is handed straight to `PUT /agent-auth/:agent` — the daemon refuses an unknown
- * one, so an unvalidated id would draw a screen whose every control 400s.
+ * ⚠ **The system id is *not* validated against a list here, and that is a change
+ * from the agent segment it replaces.** An agent was one of three compiled into
+ * this client; systems are a table on the daemon, and a machine running a newer
+ * build may know one this client does not. Validating would make that system
+ * unreachable from a client that is merely older — `compatibility.md`'s rule 2,
+ * where an unknown value degrades rather than throws. What refuses an id that is
+ * genuinely wrong is the daemon, by name. It is still *bounded*: a segment longer
+ * than any real id is dropped, so what reaches a request path cannot be an essay.
  */
 export function parseSettingsRoute(
   segments: readonly (string | undefined)[],
@@ -202,9 +256,37 @@ export function parseSettingsRoute(
 ): SettingsRoute {
   const section = parseSettingsSection(segments[0]);
   if (section !== "machines" || segments[1] === undefined) {
-    return { section, machineId: null, agent: null };
+    return { section, machineId: null, system: null, signin: null, agents: false };
   }
   const machine = machineId(decode(segments[1]));
+  /*
+   * ⚠ **Before the `systems` arm, and it takes whatever follows it with it.**
+   * `…/agents/claude` is the address the old one-agent screen had, and it now
+   * lands on the machine's agent list — the nearest real screen, one tap from
+   * what it used to open — rather than on the machine, which is where it landed
+   * while `agents` named nothing. Dropping the tail rather than parsing it is the
+   * same posture the rest of this function keeps: there is no leaf here, so a
+   * segment claiming to be one is a stale link.
+   */
+  if (segments[2] === "agents") {
+    return { section, machineId: machine, system: null, signin: null, agents: true };
+  }
+  /*
+   * The harness leaf, beside `systems/:system` rather than inside it — see
+   * `SettingsRoute.signin`. Bounded by the same number and dropped the same way: a
+   * segment longer than any real id is a stale link, and this parser never decides
+   * *which* ids exist.
+   */
+  if (segments[2] === "signin") {
+    const named = segments[3] === undefined ? "" : decode(segments[3]);
+    return {
+      section,
+      machineId: machine,
+      system: null,
+      signin: named.length > 0 && named.length <= MAX_SYSTEM_ID_CHARS ? named : null,
+      agents: false,
+    };
+  }
   /*
    * ⚠ **`…/plugins` and `…/plugins/:pluginId` both fall to the machine**, which
    * is the "fall up to the nearest real screen" posture this function already
@@ -218,12 +300,27 @@ export function parseSettingsRoute(
    * one tap from the plugin anyway — every row on it is a link to exactly that
    * page.
    */
-  if (segments[2] !== "agents" || segments[3] === undefined) {
-    return { section, machineId: machine, agent: null };
+  if (segments[2] !== "systems" || segments[3] === undefined) {
+    return { section, machineId: machine, system: null, signin: null, agents: false };
   }
   const wanted = decode(segments[3]);
-  return { section, machineId: machine, agent: isAgentId(wanted) ? wanted : null };
+  return {
+    section,
+    machineId: machine,
+    system: wanted.length > 0 && wanted.length <= MAX_SYSTEM_ID_CHARS ? wanted : null,
+    signin: null,
+    agents: false,
+  };
 }
+
+/**
+ * The longest a system id in a URL may be before the segment is ignored.
+ *
+ * Not a check on *which* systems exist — see `parseSettingsRoute` — but a bound
+ * on what this client will carry into a request path at all. Real ids are one
+ * short word.
+ */
+const MAX_SYSTEM_ID_CHARS = 64;
 
 /**
  * The path for a settings screen.
@@ -237,7 +334,7 @@ export function parseSettingsRoute(
 export function settingsPath(
   section?: SettingsSection,
   machine?: MachineId,
-  agent?: AgentId,
+  system?: string,
 ): string {
   if (section === undefined) return "/settings";
   if (machine === undefined) return `/settings/${section}`;
@@ -249,7 +346,39 @@ export function settingsPath(
    * it; this one line is what opens the machine screen. Q3.432.
    */
   const base = `/settings/${section}/${encodeURIComponent(machine)}`;
-  return agent === undefined ? base : `${base}/agents/${encodeURIComponent(agent)}`;
+  return system === undefined ? base : `${base}/systems/${encodeURIComponent(system)}`;
+}
+
+/**
+ * The machine's agent strip.
+ *
+ * ⚠ **Its own function rather than a fourth positional on {@link settingsPath}.**
+ * That signature is positional *and widening* — the three call shapes read as the
+ * index, a section, a machine, one system, and "an agent with no machine is not
+ * expressible" is a property of the signature rather than of a check. A trailing
+ * boolean would break both halves: it is not a widening of `system`, and
+ * `settingsPath("machines", m, undefined, true)` is exactly the skipped
+ * positional that shape exists to make impossible.
+ *
+ * The machine is required, unlike everything in `settingsPath` after the section.
+ * A strip belongs to one daemon's database, so there is no such screen without
+ * one — the same rule that put the machine in the path in the first place.
+ */
+export function agentStripPath(machine: MachineId): string {
+  return `${settingsPath("machines", machine)}/agents`;
+}
+
+/**
+ * One harness's own sign-in, for a harness no provider speaks for.
+ *
+ * ⚠ **Its own function for `agentStripPath`'s reason** — `settingsPath`'s
+ * signature is positional and widening, and this is not a widening of `system`:
+ * the two are different id spaces that a plugin may populate with the same word.
+ * Machine required, for the same reason a strip's is: a credential lives in one
+ * daemon's database.
+ */
+export function harnessSigninPath(machine: MachineId, agent: string): string {
+  return `${settingsPath("machines", machine)}/signin/${encodeURIComponent(agent)}`;
 }
 
 /**
@@ -276,13 +405,63 @@ export function settingsPath(
  * what makes it stable — see `useUnder` in `router.ts` for the other half of that
  * argument, and `Header.tsx` for where it was first made.
  */
-export function settingsUp(route: SettingsRoute): { path: string; withinNav: boolean } | null {
+export function settingsUp(
+  route: SettingsRoute,
+  /**
+   * The pop-up this one was opened from, when it was opened from a different one.
+   *
+   * ⚠ **Read at exactly one screen, and only when it is New session.** The strip's
+   * gear is a *crossing* between two pop-ups, so the parent in the URL — the
+   * machine — is not where anybody came from, and a ◀ walking there strands them
+   * in settings with the sheet they were filling in gone. That was reported.
+   *
+   * It is deliberately not general. Applied at every depth it would break walking
+   * *up* inside this sheet: `originFor` keeps an origin across a move within one
+   * pop-up, so a settings sheet opened from New session would answer `/new` for
+   * its sections and its machines too. And it is narrowed to the New session
+   * pop-up rather than to "any origin" so that the label beside it can never be
+   * wrong — {@link settingsUpLabel} has one name to give, and this is the one
+   * screen that can produce it. Any other crossing falls back to the URL, which is
+   * what makes every other answer here derived rather than remembered.
+   */
+  origin: string | null = null,
+): { path: string; withinNav: boolean } | null {
   if (route.section === null) return null;
+  if (
+    route.agents &&
+    origin !== null &&
+    origin.split("/").filter((part) => part.length > 0)[0] === "new"
+  ) {
+    return { path: origin, withinNav: false };
+  }
   if (route.section === "machines" && route.machineId !== null) {
-    // One agent goes up to its machine — the list is drawn on that screen, so
+    // One system goes up to its machine — the list is drawn on that screen, so
     // there is no list depth in between. `false` because it is not a row the nav
     // draws, which makes the chevron the only way back at every width.
-    if (route.agent !== null) {
+    //
+    /*
+     * The strip is the same shape and the same answer: it is reached from a row on
+     * the machine's screen, and it walks back to that machine at every width.
+     *
+     * ⚠ **The gear on New session is a *crossing*, and nothing in this sheet
+     * answers it — that is the standing rule rather than a gap.** This function is
+     * derived from the URL, which is what makes its answer stable, and `Header.tsx`
+     * argues at length against the alternative. So arriving here from the gear, the
+     * ◀ walks to the machine and the phone's Back button is what returns to New
+     * session — the same deal every crossing into this sheet has always had. The
+     * builder is the one screen that reads `origin` for its ◀, because there the
+     * label and the destination are one control naming where it goes.
+     */
+    /*
+     * ⚠ **All three leaves under a machine, and `signin` was the one that got
+     * missed.** It has a shape, a parse, a path builder and a title arm, and
+     * `MachineSystemsSection` navigates to it — but it was absent here, so its ◀
+     * walked past the machine it was opened from, to the machines *list*, under a
+     * label reading "Back to Machines" beside a pane this file titles "Sign-in".
+     * That is the exact defect the paragraph above records closing for `system`,
+     * reintroduced one leaf over by an `if` that enumerates rather than derives.
+     */
+    if (route.system !== null || route.signin !== null || route.agents) {
       return { path: settingsPath("machines", route.machineId), withinNav: false };
     }
     return { path: settingsPath("machines"), withinNav: false };
@@ -307,13 +486,60 @@ export function settingsUp(route: SettingsRoute): { path: string; withinNav: boo
  * way back. *Where* it is drawn is `withinNav`'s job and stays a class string in
  * the caller, because that is the half no pure function can see.
  *
- * **Both agent depths answer with the machine, on purpose.** The agent is named
- * one rank below by `AgentDetail`, which has its display name; the head used to
- * draw the raw URL segment, so `claude` sat in `text-lg font-semibold` directly
- * above a row reading `Claude (claude-agent-acp)`. Q3.427.
+ * **Every depth under a machine is titled by what its screen *is*, and no two of
+ * them may share a string.** The second half was missing and it cost the chrome
+ * both of its facts at once. A system had no arm here, so
+ * `…/machines/:id/systems/anthropic` fell through to the machine's own "Machine
+ * settings" — while {@link settingsUpLabel} answers with the *parent's* title,
+ * which is also "Machine settings". The pane therefore drew "◀ Back to Machine
+ * settings" immediately beside `<h2>Machine settings</h2>`: one string claiming
+ * to be both where you are and where you are going, with the system you had
+ * drilled into named nowhere in the chrome. Non-injective across a parent and its
+ * child is the general form of that defect, and the system arm below is what
+ * closes it.
+ *
+ * ⚠ **"System settings" rather than the system, and the URL segment is exactly
+ * what it may not be.** `SystemInfo.displayName` is read off the daemon, per
+ * machine; this function is pure and holds a route, so the only string within
+ * reach is the id — lower case, because that is what an id is. Drawing it is the
+ * defect Q3.427 reverted, verbatim: `claude` in `font-semibold` directly above a
+ * row reading `Claude (claude-agent-acp)`, which is precisely what `SystemDetail`
+ * draws one rank below as `title={system.displayName}`. Casing it here would be a
+ * guess, and `openai` guesses to `Openai` above a card reading `OpenAI`. So the
+ * chrome says which *kind* of screen this is and the body says which system —
+ * the division the strip's "Agents" already keeps, and the one
+ * `MachineSystemsSection` falls back on when the daemon cannot be read and there
+ * is no card left to say it. Q3.427, Q3.433.
  */
 export function settingsPaneTitle(route: SettingsRoute): string | null {
   if (route.section === null) return null;
+  /*
+   * **"Agents", and it is what the screen is rather than what it is about** — the
+   * same rule the machine title below states at length. It is not the machine's
+   * name and not "Agents on <machine>": the machine is named by the row you came
+   * through and by the chevron pointing back at it, and a heading restating it
+   * would be the chrome saying what the body already says.
+   *
+   * Above the machine arm, since a strip route carries a machine too.
+   */
+  if (route.section === "machines" && route.machineId !== null && route.agents) {
+    return "Agents";
+  }
+  /*
+   * **The system's own depth, and above the machine arm for the strip's reason:
+   * a system route carries a machine too.** What it may never be is the segment
+   * — see the ⚠ in this function's docblock, which also records what a title
+   * shared with its own parent cost.
+   */
+  if (route.section === "machines" && route.machineId !== null && route.system !== null) {
+    return "Sign-in";
+  }
+  // The other kind of row in the same list, and it says the same word: what the
+  // reader opened is a sign-in either way, and the two leaves differ only in which
+  // of the machine's two catalogues resolved the name.
+  if (route.section === "machines" && route.machineId !== null && route.signin !== null) {
+    return "Sign-in";
+  }
   if (route.section === "machines" && route.machineId !== null) {
     /*
      * **Titled by what the screen is, not by which machine it is about.**
@@ -359,10 +585,26 @@ export function settingsPaneTitle(route: SettingsRoute): string | null {
  *
  * A sibling function rather than a field on {@link settingsUp}'s return, so the
  * six pinned answers that assert where a chevron goes stay pinned. Q3.432.
+ *
+ * ⚠ **It is only as good as {@link settingsPaneTitle} being injective**, and it
+ * was not: a system depth with no arm of its own answered "Machine settings",
+ * which is its parent's answer too, so this drew "Back to Machine settings"
+ * beside a heading reading "Machine settings". Nothing here can detect that —
+ * the label is *correct*, it is the pair that is useless — which is why the rule
+ * is stated and kept over there rather than guarded here.
  */
-export function settingsUpLabel(route: SettingsRoute): string | null {
-  const parent = settingsUp(route);
+export function settingsUpLabel(route: SettingsRoute, origin: string | null = null): string | null {
+  const parent = settingsUp(route, origin);
   if (parent === null) return null;
+  /*
+   * ⚠ **The one destination outside this sheet, named rather than parsed.** The
+   * strip's ◀ walks back to New session when that is where it was opened from, and
+   * everything below parses the parent as a *settings* address — which answers
+   * `null` for `/new/...` and would draw a chevron labelled "Settings" pointing at
+   * a screen that is not it. `settingsUp` only ever returns a `new` path, which is
+   * what keeps this to one arm instead of a table.
+   */
+  if (parent.path.split("/").filter((part) => part.length > 0)[0] === "new") return "New session";
   const parts = parent.path.split("/").filter((part) => part.length > 0);
   /*
    * Every segment here came out of `settingsPath`, so it is `encodeURIComponent`
@@ -381,6 +623,49 @@ export function visibleSections(me: Me | null): readonly SectionSpec[] {
 /** Whether a typed URL may render this section. Separate from the list: a URL is not a tap. */
 export function sectionAllowed(section: SettingsSection, me: Me | null): boolean {
   return visibleSections(me).some((spec) => spec.id === section);
+}
+
+/**
+ * Why the pane is not the section the address bar names, or `null` when it is.
+ *
+ * ⚠ **The fallback was silent, and silence is what made it a defect rather than
+ * a policy.** `Settings.tsx` collapses a section {@link sectionAllowed} refuses
+ * to `null` — which at `sm` and above draws {@link DEFAULT_SECTION} and
+ * highlights that same row in the rail, with the URL still reading
+ * `/settings/users`. So an admin whose flag was taken away in another tab
+ * reloads and lands on Account with nothing on screen saying why, and a
+ * bookmarked address is a different screen depending on who is signed in. This
+ * is the sentence that stops that being a guess.
+ *
+ * **The address is left alone rather than corrected, which is this sheet's
+ * standing posture for one it cannot honour.** {@link parseSettingsSection}
+ * lands an unknown segment on the index and {@link parseSettingsRoute} falls
+ * *up* at three depths, neither redirecting, for the reason written there: a
+ * redirect has to guess. Rewriting it here would also make the bookmark
+ * unrecoverable — regain the flag, reload, and the address it was saved at is
+ * already gone — and it would put a `navigate` inside a render, which is the one
+ * place `router.ts` may not be called from.
+ *
+ * ⚠ **It names admins because {@link visibleSections} filters on nothing else.**
+ * A refusal here is an `adminOnly` refusal by construction, so the word is
+ * derived rather than assumed; a second criterion added to that filter owes this
+ * function a second arm, or it will explain a refusal by naming the wrong one.
+ *
+ * ⚠ **It says nothing about what is drawn instead, because that is a
+ * breakpoint.** The pane draws {@link DEFAULT_SECTION} at `sm` and above and the
+ * section *list* below it, and `AppShell`'s standing rule is that no width is
+ * answered in JavaScript — so a sentence ending "…so this is Account" would be
+ * false on the phone it was read on.
+ */
+export function refusedSectionText(section: SettingsSection | null, me: Me | null): string | null {
+  if (section === null || sectionAllowed(section, me)) return null;
+  /*
+   * `?.title ?? null` is {@link settingsPaneTitle}'s own idiom for this lookup,
+   * and the `null` arm is `find`'s return type rather than a state anything
+   * reaches: `section` is a member of the union {@link SECTION_SPECS} enumerates.
+   */
+  const title = SECTION_SPECS.find((spec) => spec.id === section)?.title ?? null;
+  return title === null ? null : `${title} is for admins, and this account is not one.`;
 }
 
 /**

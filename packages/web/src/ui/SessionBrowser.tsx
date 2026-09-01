@@ -10,6 +10,7 @@ import { humanRequests, needsHuman, resumeStalled } from "../wire";
 import {
   Button,
   Icon,
+  IconButton,
   menuRow,
   Menu,
   Skeleton,
@@ -337,7 +338,34 @@ export function SessionBrowser({
         {folders.length === 0 && everything.length === 0 && state.machines.length > 0 && !probing && (
           <div className="px-4 py-6 text-center">
             {needle.trim().length > 0 ? (
-              <p className="text-sm text-muted">Nothing matches.</p>
+              /*
+               * **The way out, symmetric with the `Show all` three branches
+               * below.** ⚠ It read *one branch below*, and `selectedOwnerDisabled`
+               * and `selectedOverLimit` both sit between the two — a count in a
+               * comment, which is the kind of claim a new arm expires with no
+               * symptom anywhere.
+               *
+               * The needle is module state in `groups.ts` and deliberately not
+               * persisted, so the only other exit is the native clear on a
+               * `type="search"` field — which Firefox and several Android
+               * browsers do not draw at all. A typo therefore emptied the fleet
+               * and left a screen with nothing on it to press, which is the one
+               * shape this empty state exists to refuse: it already refuses it
+               * for the filter, and the search is the same trap one axis over.
+               *
+               * Clearing does not promise rows. It hands the arms below this one
+               * the question, and whichever of them fires makes its own offer —
+               * the filter's `Show all`, or one of the two sentences about a
+               * machine that is not being reached. Two taps to two different
+               * remedies, each named where it applies, rather than one button
+               * guessing which was meant.
+               */
+              <>
+                <p className="text-sm text-muted">Nothing matches.</p>
+                <Button className="mt-3" onClick={() => setQuery("")}>
+                  Clear search
+                </Button>
+              </>
             ) : selectedOwnerDisabled ? (
               /*
                * The sibling of the arm below, and it has to be its own sentence:
@@ -371,7 +399,28 @@ export function SessionBrowser({
                 </Button>
               </>
             ) : (
-              <p className="text-sm text-muted">No sessions here yet.</p>
+              /*
+               * The genuine first run, and the only arm here where the sentence
+               * is the whole truth: no needle, no filter withholding anything,
+               * the machine reachable and it has never run a session.
+               *
+               * **A line rather than a button, and the button it points at is
+               * the reason.** New session already sits at the foot of this
+               * column, and a second copy of it in the middle of the list would
+               * be the app's one create action drawn twice on the one screen
+               * where it cannot be missed. What that button deliberately is not
+               * is loud — `plain` rather than `primary`, argued at length in
+               * `SidebarFoot`, because it is pressed a few times a day — and on
+               * an empty list that de-emphasis leaves it as quiet as the folder
+               * headers it no longer sits under. So the sentence does the
+               * pointing that the fill declines to do.
+               */
+              <>
+                <p className="text-sm text-muted">No sessions here yet.</p>
+                <p className="mx-auto mt-2 max-w-xs text-xs text-muted">
+                  New session, at the bottom of this list, starts one.
+                </p>
+              </>
             )}
           </div>
         )}
@@ -382,7 +431,16 @@ export function SessionBrowser({
   );
 }
 
-/** The logo, the name, and the one number that must never be hidden. */
+/**
+ * The logo, the name, and the one fact that must never be hidden: that something,
+ * somewhere, is waiting on you.
+ *
+ * ⚠ **It said "the one number" and the bell up here draws no number** — the count
+ * reaches `aria-label` and `title` and stops there. The numeral is on the machine
+ * tabs, on `All` and on every folder header that has one, all of them within a
+ * few hundred pixels of this row; what this header carries is that there *is*
+ * one. The bell's own comment records why that is still open rather than settled.
+ */
 function SidebarHeader({ state }: { state: AppState }): ReactNode {
   const waiting = sessionLists(state).blocked;
   return (
@@ -415,46 +473,73 @@ function SidebarHeader({ state }: { state: AppState }): ReactNode {
        * So it is drawn and inert, deliberately, and `disabled` rather than
        * silently doing nothing: a control that answers a tap with no change is
        * one somebody taps again. The bell beside it is the honest comparison —
-       * that one is a real number and a real destination, which is why it is
-       * enabled.
+       * that one has a real answer and a real destination, which is why it is
+       * enabled. (It also has a *number*, and does not draw it; that is the
+       * subject of its own comment and not of this one.)
+       *
+       * ⚠ **`IconButton` and not a fifth hand-rolled `h-9 w-9`**, which is what
+       * this was: 36px of box with no growth mechanism at all, no focus styling
+       * and colour-only hover — the exact string the primitive's docblock names
+       * four copies of. `chip` rather than `sm` because of the neighbour: these
+       * sit `gap-2` apart, and `sm`'s symmetric `after:-inset-2.5` is 10px a side
+       * into an 8px gap, which puts this control's tap target over the bell's
+       * *face*. `chip` grows vertically only, into this row's own `pb-2` and the
+       * safe-area padding above, so 44px is reached without either control
+       * reaching the other. It costs 4px of ink and 2px of glyph against the old
+       * square, which is the trade `md` was deleted to force.
        */}
-      <button
-        type="button"
-        disabled
-        aria-label="Search everything — not built yet"
-        title="Search everything — not built yet"
-        className="tap inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted disabled:pointer-events-none disabled:opacity-40"
-      >
-        <Icon as={Search} size={16} />
-      </button>
+      <IconButton icon={Search} label="Search everything — not built yet" size="chip" disabled />
       {/*
        * The bell is the blocked count, not a stub.
        *
        * A notification glyph that does nothing is a claim this app cannot keep —
        * there is no push and no service worker, and the whole product is the
-       * question "does anything need me". So it says the number and goes to the
-       * session that has waited longest, which `sessionLists` already sorts to the
-       * front. With nothing waiting it is `disabled`, which is the honest drawing
-       * of "nowhere to go" rather than a control that shrugs.
+       * question "does anything need me". So it goes to the session that has
+       * waited longest, which `sessionLists` already sorts to the front. With
+       * nothing waiting it is `disabled`, which is the honest drawing of "nowhere
+       * to go" rather than a control that shrugs.
+       *
+       * ⚠ **It does not say the number, and this comment claimed it did.** What
+       * is drawn is the glyph plus an 8px dot; the count reaches `aria-label` and
+       * `title` and goes no further, and on a phone there is no tooltip — so a
+       * sighted reader here gets "something" and never "three". That is a
+       * docblock describing an intention rather than the render under it, which
+       * is the one thing a comment in this repo may not do.
+       *
+       * **Left as a dot on purpose, and as an open question rather than a settled
+       * trade.** A numeral in this square would be the fourth copy of a count the
+       * screen already draws — on each machine tab, on `All`, and on every folder
+       * header that has one — and the nearest of those is the tab bar
+       * immediately below this row, so nothing is missing from the *screen*. What
+       * is unresolved is whether the count belongs in the one control that is
+       * about nothing else, which is a design call and not a thing a refactor
+       * gets to decide.
        */}
-      <button
-        type="button"
-        disabled={waiting.length === 0}
-        onClick={() => {
-          const first = waiting[0];
-          if (first !== undefined) navigate(sessionPath(first.ref));
-        }}
-        aria-label={
-          waiting.length === 0 ? "Nothing is waiting on you" : `${waiting.length} waiting on you`
-        }
-        title={waiting.length === 0 ? "Nothing is waiting on you" : `${waiting.length} waiting on you`}
-        className="tap relative inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted hover:bg-raised hover:text-fg disabled:pointer-events-none disabled:opacity-40"
-      >
-        <Icon as={Bell} size={16} />
+      {/*
+       * The dot is a sibling of the button rather than a child of it, because
+       * `IconButton` takes no children — so the wrapper is what `absolute` is
+       * measured against, and it is `inline-flex` so that box is exactly the
+       * button's and the dot keeps its 4px inset from the corner, on a square
+       * that is now 32px rather than 36. `pointer-events-none` is
+       * load-bearing in that move: inside the button a press on the dot was a
+       * press on the button, and as a sibling it would otherwise be an 8px hole
+       * in the middle of the one control this header exists for.
+       */}
+      <span className="relative inline-flex shrink-0">
+        <IconButton
+          icon={Bell}
+          label={waiting.length === 0 ? "Nothing is waiting on you" : `${waiting.length} waiting on you`}
+          size="chip"
+          disabled={waiting.length === 0}
+          onClick={() => {
+            const first = waiting[0];
+            if (first !== undefined) navigate(sessionPath(first.ref));
+          }}
+        />
         {waiting.length > 0 && (
-          <span className="absolute top-1 right-1 h-2 w-2 rounded-full bg-fg ring-2 ring-ink" />
+          <span className="pointer-events-none absolute top-1 right-1 h-2 w-2 rounded-full bg-fg ring-2 ring-ink" />
         )}
-      </button>
+      </span>
     </div>
   );
 }
@@ -488,6 +573,27 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
   const lone = tabs.length === 1;
   const selected = tabs.find((tab) => tab.selected)?.id ?? null;
   const stripRef = useRef<HTMLDivElement | null>(null);
+  const scroller = useRef<HTMLDivElement | null>(null);
+  /**
+   * The gradient at the cut edge, and it is the second cue rather than the first.
+   *
+   * ⚠ **The pill's own shape is a cue only when a pill is actually bisected.**
+   * That is the argument `.no-scrollbar` is applied on here and it is half true:
+   * with four machines the last tab inside the box routinely *ends* a few pixels
+   * short of the edge, so the strip draws three whole pills and a gap and reads
+   * as a bar holding three machines. Nothing on screen says the fourth is there,
+   * and the tab carrying a blocked count is exactly the one that can be off the
+   * end — which is the hole `waitingFloor` exists to cover and should not have to.
+   *
+   * So the class stays and this is added beside it: `.edge-fade` is the primitive
+   * `AgentStrip` had built for the identical question one screen over, and its
+   * `index.css` docblock is the argument — it says "there is more" on a first
+   * paint, before anybody has touched anything, which is the one thing a
+   * scroll-position cue cannot. Translucent rather than opaque for that file's
+   * reason too: a solid band would delete the pill under it instead of saying
+   * there is one, and half a pill saying "more" is the cue this is reinforcing.
+   */
+  const fade = useRef<HTMLDivElement | null>(null);
   /*
    * **An effect keyed on the selection, and it was an inline callback ref.**
    *
@@ -513,6 +619,50 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
       ?.querySelector(`[data-machine="${CSS.escape(selected)}"]`)
       ?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [selected, lone]);
+
+  /*
+   * Whether the strip is cut, answered from the box's own scroll metrics — the
+   * same three numbers and the same one-pixel slack `AgentStrip` measures, which
+   * is deliberate: two answers to "is this row cut" that could disagree is two
+   * gradients that blink at different moments.
+   *
+   * `scrollWidth`, `clientWidth` and `scrollLeft` are integers rounded from
+   * fractional layout, so a strip dragged fully to its end routinely reports a
+   * remainder of 1 — without the slack the gradient stays lit at the end of the
+   * bar, saying there is more where there is nothing. `rail > 0` is the
+   * un-laid-out box the `ResizeObserver` really does report on its first call:
+   * with a `clientWidth` of 0 the remainder is the whole row, and the arithmetic
+   * would claim "cut" about a box nobody has measured yet.
+   *
+   * Both boxes are watched because either one moving changes the answer: the
+   * scrollport's width is the rail's (which is a *drag*, `rail.ts`), and the
+   * row's is however many machines this account has a grant on — which arrives a
+   * poll after this effect runs. `ResizeObserver` fires once on `observe`, which
+   * is also where the first layout comes from.
+   *
+   * Keyed on `lone`, not `[]`: the fade is not rendered for a single machine —
+   * there is nothing to be cut — so the ref is `null` until a second machine
+   * appears, and an effect that ran once at mount would never see it.
+   */
+  useEffect(() => {
+    const box = scroller.current;
+    const edge = fade.current;
+    if (box === null || edge === null) return;
+    const layout = (): void => {
+      const rail = box.clientWidth;
+      const room = box.scrollWidth - rail;
+      edge.classList.toggle("is-cut", rail > 0 && box.scrollLeft < room - 1);
+    };
+    const sizes = new ResizeObserver(layout);
+    sizes.observe(box);
+    const row = box.firstElementChild;
+    if (row !== null) sizes.observe(row);
+    box.addEventListener("scroll", layout, { passive: true });
+    return () => {
+      sizes.disconnect();
+      box.removeEventListener("scroll", layout);
+    };
+  }, [lone]);
 
   return (
     <div
@@ -568,61 +718,101 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
        * end of a bar you have to drag to find, which is the same objection
        * `waitingFloor` answers one section up.
        */}
-      <div
-        // `no-scrollbar` only in the many-machine case: this strip is the one box
-        // in the app whose contents already say there is more of them by being cut
-        // off at the edge, so the classic bar under the pills was a permanent
-        // eight-pixel line the rail did not need. With one tab there is nothing to
-        // scroll and nothing to hide.
-        className={`min-w-0 flex-1 ${lone ? "" : "no-scrollbar overflow-x-auto overscroll-x-contain"}`}
-      >
-        <div className={`flex gap-1.5 ${lone ? "w-full" : "w-max"}`}>
-          {tabs.map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => selectMachine(tab.id)}
-              aria-pressed={tab.selected}
-              // Read by the effect above, which is how it finds this node without
-              // a ref per tab that would change identity on every render.
-              data-machine={tab.id}
-              /*
-               * **The selected tab is `raised`, not `bg-fg`, and an unselected one
-               * is `raised/50` rather than nothing.**
-               *
-               * A near-black pill was the loudest object on a page whose whole
-               * palette is three greys within 1.22:1 of each other, and it is a
-               * *selection* — the least eventful state a control can be in.
-               * `bg-fg` in this app means the affirmative action (Send, an
-               * approval), and spending it on "you are looking at this machine"
-               * is what made the rail read as though something were alarming.
-               *
-               * The resting fill is the other half and arrived later: with only
-               * the selected tab filled, every other tab was bare text on the
-               * rail's own ground, so a bar of four machines read as one tab and
-               * three labels — and the shape of the tabs, which is the only thing
-               * saying the strip is draggable, existed only where you already
-               * were. `raised/50` against `raised` is 1.10 against 1.22 on the
-               * rail; the selection is still obvious because it also carries the
-               * weight and the text value.
-               */
-              className={`tap flex min-h-8 items-center gap-1.5 rounded-full px-2.5 text-xs whitespace-nowrap ${
-                lone ? "flex-1 justify-center" : "shrink-0"
-              } ${
-                tab.selected
-                  ? "bg-raised font-medium text-fg"
-                  : "bg-raised/50 text-muted hover:bg-raised hover:text-fg"
-              }`}
-            >
-              {tab.name}
-              {tab.blockedCount > 0 && (
-                <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-fg px-1 text-2xs font-semibold text-ink">
-                  {tab.blockedCount}
-                </span>
-              )}
-            </button>
-          ))}
+      {/*
+       * A containing block for the fade and nothing else: no padding, no margin,
+       * no height of its own. It has to sit *outside* the scroller — an absolute
+       * child of an `overflow-x-auto` box travels with the content it is supposed
+       * to be pinned in front of.
+       */}
+      <div className="relative min-w-0 flex-1">
+        <div
+          ref={scroller}
+          /*
+           * `no-scrollbar` only in the many-machine case, and the classic bar it
+           * hides really is worth hiding: this strip is 32px of pill above a list
+           * of chats, and an eight-pixel rule under it reads as a rendering fault
+           * rather than as an affordance.
+           *
+           * ⚠ **What that class used to be justified by was a cue that is only
+           * sometimes there.** The argument was "this strip's contents already
+           * say there is more of them by being cut off at the edge" — true of a
+           * bisected pill and false whenever the last visible tab happens to end
+           * short of the edge, which with four machines is most positions. The
+           * gradient beside this box is what closes that gap; see the ref it
+           * hangs off.
+           *
+           * With one tab there is nothing to scroll, nothing to hide and nothing
+           * to fade.
+           */
+          className={lone ? "" : "no-scrollbar overflow-x-auto overscroll-x-contain"}
+        >
+          <div className={`flex gap-1.5 ${lone ? "w-full" : "w-max"}`}>
+            {tabs.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => selectMachine(tab.id)}
+                aria-pressed={tab.selected}
+                // Read by the effect above, which is how it finds this node without
+                // a ref per tab that would change identity on every render.
+                data-machine={tab.id}
+                /*
+                 * **The selected tab is `raised`, not `bg-fg`, and an unselected one
+                 * is `raised/50` rather than nothing.**
+                 *
+                 * A near-black pill was the loudest object on a page whose whole
+                 * palette is three greys within 1.22:1 of each other, and it is a
+                 * *selection* — the least eventful state a control can be in.
+                 * `bg-fg` in this app means the affirmative action (Send, an
+                 * approval), and spending it on "you are looking at this machine"
+                 * is what made the rail read as though something were alarming.
+                 *
+                 * The resting fill is the other half and arrived later: with only
+                 * the selected tab filled, every other tab was bare text on the
+                 * rail's own ground, so a bar of four machines read as one tab and
+                 * three labels — and the shape of the tabs, which is the only thing
+                 * saying the strip is draggable, existed only where you already
+                 * were. `raised/50` against `raised` is 1.10 against 1.22 on the
+                 * rail; the selection is still obvious because it also carries the
+                 * weight and the text value.
+                 */
+                className={`tap flex min-h-8 items-center gap-1.5 rounded-full px-2.5 text-xs whitespace-nowrap ${
+                  lone ? "flex-1 justify-center" : "shrink-0"
+                } ${
+                  tab.selected
+                    ? "bg-raised font-medium text-fg"
+                    : "bg-raised/50 text-muted hover:bg-raised hover:text-fg"
+                }`}
+              >
+                {tab.name}
+                {tab.blockedCount > 0 && (
+                  <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-fg px-1 text-2xs font-semibold text-ink">
+                    {tab.blockedCount}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
         </div>
+        {/*
+         * ⚠ **Not rendered at all with one machine**, rather than rendered and
+         * left un-`is-cut`. A lone tab is `flex-1` and fills the strip by
+         * construction, so there is nothing that could ever be cut — and a fade
+         * mounted over it would be one more node the effect has to reason about
+         * on a screen where the answer is already known.
+         *
+         * `pointer-events-none` because it lies over the last pill: a gradient
+         * that swallowed the tap would make the machine you can half-see the one
+         * machine you cannot select. `w-8` is one pill-height of gradient, short
+         * enough that what it dims is the cut edge rather than a whole tab.
+         */}
+        {!lone && (
+          <div
+            ref={fade}
+            aria-hidden="true"
+            className="edge-fade pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-ink/70 to-transparent"
+          />
+        )}
       </div>
 
       {/*
@@ -762,28 +952,64 @@ function ChatSearch({ value }: { value: string }): ReactNode {
       {/*
        * `Menu` and not `Dropdown`, which is the other picker in `bits.tsx` and is
        * the wrong one here: it draws its own bordered pill with a chevron, so the
-       * bare 36px glyph this row is designed around would have become a labelled
+       * bare glyph this row is designed around would have become a labelled
        * control sitting beside the search box competing with it. `Menu` draws
        * nothing and hands the trigger back, which is exactly what an icon needs.
+       *
+       * `MachineInstalls` draws the identical control — the same glyph, the same
+       * `Menu`, the same three-value filter — and this follows it rather than
+       * inventing a second shape for one square of chrome.
        */}
       <Menu
         align="right"
         panelClassName="w-40"
         className="shrink-0"
         trigger={(open, toggle) => (
-          <button
-            type="button"
-            onClick={toggle}
-            aria-haspopup="menu"
-            aria-expanded={open}
-            aria-label={`Showing ${FILTERS.find((item) => item.value === filter)?.label ?? "All"}`}
+          <IconButton
+            icon={ListFilter}
+            label={`Showing ${FILTERS.find((item) => item.value === filter)?.label ?? "All"}`}
             title={`Showing: ${FILTERS.find((item) => item.value === filter)?.label ?? "All"}`}
-            className={`tap inline-flex h-9 w-9 items-center justify-center rounded-md ${
-              filter === "active" && !open ? "text-faint hover:bg-raised hover:text-fg" : "bg-raised text-fg"
-            }`}
-          >
-            <Icon as={ListFilter} size={16} />
-          </button>
+            /*
+             * ⚠ **`chip`, where this was a hand-rolled `h-9 w-9`** — 36px with no
+             * growth mechanism, which is precisely the size `ICON_BUTTON_SIZE`
+             * deleted. `sm` is wrong beside a search box at `gap-1.5`: its
+             * symmetric `after:-inset-2.5` would put this control's tap target
+             * over the field's face, and a thumb aimed at the filter would open
+             * the keyboard. `chip` grows vertically only and so reaches 44px
+             * without reflowing the row, which stays the field's own height.
+             *
+             * At rest it is `ghost`'s `text-muted` where the copy it replaces
+             * wrote `text-faint` — one step less recessive, which is the price
+             * of the tone table being the tone table, and it buys the focus ring
+             * a hand-rolled square in this app has never had.
+             */
+            size="chip"
+            /* `expanded`, not `active`: `aria-pressed` is a toggle that stays
+               pressed, and this is a control that reveals a region.
+
+               `haspopup` says what kind of thing opens, where `expanded` says
+               that it is open — the pair the hand-rolled button carried before
+               this control moved onto the primitive. It was briefly lost in that
+               move and written down here as a ⚠ rather than absorbed; the note
+               named the remedy as a prop on the primitive rather than a fifth
+               hand-rolled button, and that is what this now is. */
+            expanded={open}
+            haspopup="menu"
+            onClick={toggle}
+            /*
+             * Solid when the filter is not where it started — the paragraph above
+             * argues which of the two readings that is.
+             *
+             * ⚠ **The fill is the whole of the lit state, and an appended
+             * `text-fg` would be a dead class.** Tailwind v4 emits utilities
+             * alphabetically, so `.text-fg` is printed *before* the tone's own
+             * `.text-muted` and loses to it however the class attribute reads —
+             * the `menuRow` defect one file over, measured again here. `bg-raised`
+             * has no competitor in `ICON_BUTTON_TONE.ghost`, so it applies, and
+             * `raised` is what this app spends on state anyway.
+             */
+            className={filter === "active" && !open ? "" : "bg-raised"}
+          />
         )}
       >
         {(close) => (
@@ -801,7 +1027,19 @@ function ChatSearch({ value }: { value: string }): ReactNode {
                 }`}
               >
                 {/* A reserved slot, so choosing does not shift the three labels
-                    sideways — the same rule the sheet header's chevron follows. */}
+                    sideways.
+
+                    ⚠ **This cited "the same rule the sheet header's chevron
+                    follows", and that control decided the opposite** — `Sheet`
+                    states *drawn only where there is somewhere to go, and never
+                    reserved* as its decision, because a ◀ against the panel's own
+                    padding has nothing between it and the edge it is measured
+                    against, and the head's title changes between screens anyway.
+                    The rule both of them answer to is `web-shell.md`'s: delete the
+                    mark when it is redundant, reserve its slot when it is the only
+                    copy, move it off the row when it is neither. A check beside a
+                    label is the only copy this menu has, and it has a label on its
+                    right to push. */}
                 <span className="inline-flex w-3 shrink-0 justify-center">
                   {item.value === filter && <Icon as={Check} size={12} />}
                 </span>
@@ -991,16 +1229,29 @@ function FolderSection({
            * Revealed on hover and always present on a coarse pointer, the same rule
            * the row kebab follows and expressed the same way: a *pointer* query in
            * CSS, never a width read in JavaScript.
+           *
+           * ⚠ **`chip`, and it was `h-7 w-7` — 28px, hand-rolled, with no growth of
+           * any kind.** It was never one of the `h-9 w-9` copies, so no earlier scan
+           * reached it; the sweep that did find it weighed two remedies and recorded
+           * the control instead, because both cost something: growing the *box*
+           * makes this header taller than every session row beneath it, and growing
+           * the target symmetrically spends 10px a side onto the face of the folder's
+           * own collapse `<button>`, 4px to the left.
+           *
+           * There is a third, and this repo already built it. `chip` is a 32px box —
+           * which fits the header's `min-h-9` without changing it — grown to 44px by
+           * `TAP_GROW_Y`, which is **vertical only** and therefore spends nothing
+           * horizontally. That is the same adjacency the composer's paperclip has and
+           * the same answer it takes. The target is 32×44 rather than square, which
+           * is what this house standard trades for not landing on a neighbour.
            */}
-          <button
-            type="button"
+          <IconButton
+            icon={Plus}
+            label={`New session in ${folder.name}`}
+            size="chip"
             onClick={() => navigate(newPath(folder.machineId, folder.path))}
-            aria-label={`New session in ${folder.name}`}
-            title={`New session in ${folder.name}`}
-            className="tap ml-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted opacity-0 group-hover/folder:opacity-100 hover:bg-edge hover:text-fg focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-100"
-          >
-            <Icon as={Plus} size={13} />
-          </button>
+            className="ml-1 opacity-0 group-hover/folder:opacity-100 focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-100"
+          />
         </div>
       </h2>
       {!folder.collapsed &&

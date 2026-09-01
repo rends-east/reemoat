@@ -6396,6 +6396,24 @@ process.stdout.write("\nthe web client, and what may be cached\n");
       [connect.includes("raw.githubusercontent.com"), img.includes("raw.githubusercontent.com")],
       [false, false],
     );
+    /*
+     * ⚠ **And the one third-party source that is *not* conditional on anything.**
+     * Every instance compiles in the same table of systems, so every instance's
+     * model picker reads OpenRouter's catalogue straight from the browser —
+     * `packages/web/src/openrouter.ts` says why the daemon does not proxy it.
+     * Asserted here, in the block about an instance with *nothing* configured,
+     * because that is precisely where a source that depends on a setting would
+     * have gone missing. Omit it and the section never fills, with the reason only
+     * in a console nobody has open on a phone.
+     *
+     * `connect-src` alone: this reads JSON and draws no icon, which is the
+     * distinction the market's own pair exists to teach.
+     */
+    check(
+      "and the one model catalogue the picker reads, on an instance with nothing configured",
+      [connect.includes("https://openrouter.ai"), img.includes("openrouter.ai")],
+      [true, false],
+    );
   }
 
   /*
@@ -6434,8 +6452,12 @@ process.stdout.write("\nthe web client, and what may be cached\n");
         connect.includes("https://plugins.example"),
         connect.includes("https://raw.githubusercontent.com"),
         img.includes("https://raw.githubusercontent.com"),
+        // Still there beside the market's three, which is the half a conditional
+        // source would break: the market widens `connect-src` by string
+        // concatenation, and a mistake there drops whatever it was appended to.
+        connect.includes("https://openrouter.ai"),
       ],
-      [true, true, true],
+      [true, true, true, true],
     );
     /*
      * The origin, never the path somebody configured — CSP matches origins, and a

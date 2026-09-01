@@ -74,6 +74,21 @@ const REQUEST_TIMEOUT_MS = 15_000;
  * stacked in front of one request, and those are facts about `src/` rather than
  * about Docker. Lowering it should follow a measurement, because the failure of
  * guessing low is a healthy machine reported unreachable.
+ *
+ * ⚠ **One member is not fully covered by this number, and saying so is better
+ * than implying otherwise.** `GET /agents/capabilities` starts an agent for each
+ * of the **four** harnesses — asked all at once now and metered through
+ * `MAX_CONCURRENT_ASKS` by a queue rather than run one at a time; see the entry in
+ * {@link slowRoute}. Each is bounded by `agentask.ts`'s `ASK_TIMEOUT_MS` at 120s
+ * and the queue by `SLOT_WAIT_MS`, so the worst case is rounds of two rather than
+ * a sum of four. Ninety seconds covers what it actually costs — measured
+ * 2026-08-28, **3061 ms** on a cold cache against 5286 ms when it was serial —
+ * and a harness hung to its full budget still lands on the failure this
+ * table exists to prevent, only three minutes later instead of fifteen seconds
+ * later. Raising the constant for one route would raise it for the eight that do
+ * not need it, and a per-route budget means this predicate stops being a boolean
+ * — which is a shape change with call sites outside this file, so the gap is
+ * written down here rather than half-built.
  */
 const SLOW_ROUTE_TIMEOUT_MS = 90_000;
 
@@ -237,9 +252,71 @@ export function missingRowReason(reach: Reach | null, listed: boolean): MissingR
  *
  * Pure, and beside {@link missingRowReason} rather than inside a component, so
  * `webcheck` walks all four values instead of asserting JSX.
+ *
+ * **Derived from {@link daemonRead} rather than stated a second time.** The two
+ * are one question asked at different resolutions, and a screen branching on this
+ * one while another branches on that one must never be able to disagree about the
+ * same machine.
  */
 export function daemonReadable(reach: Reach): boolean {
-  return reach === "online" || reach === "probing";
+  return daemonRead(reach) === "readable";
+}
+
+/** What a screen may draw about a machine's daemon. See {@link daemonRead}. */
+export type DaemonRead = "readable" | "asking" | "unreachable";
+
+/**
+ * The same question as {@link daemonReadable}, with the "not yet" told apart from
+ * the "no".
+ *
+ * ⚠ **`daemonReadable` answers `false` for `unknown`, and four screens read that
+ * as *offline*.** `MachineSystemsSection`, `MachineAgentsSection`,
+ * `MachineSection` and `AgentBuilder` each draw `` `${machine.name} is not
+ * reachable right now — ${reachText(reach, reason)}` `` on the false branch — and
+ * `unknown` is not a machine that failed to answer, it is a machine nobody has
+ * asked yet.
+ * `bootstrap` promotes to `phase: "ready"` on the *machine list*, and
+ * `resumeMachine` calls `forgetRoute()` on every wake, so `unknown` is the value
+ * for the two or three seconds before the first `/health` lands — over a relay
+ * from a phone, longer. For that whole window those screens asserted a failure
+ * that had not happened, and `reachText`'s `unknown` arm was the bare string
+ * `"…"`, so the sentence rendered as **"laptop is not reachable right now — …."**
+ *
+ * ⚠ **That set said `MachineSystemsSection`, `MachinePluginsSection` and
+ * `MachineAgentsSection`, and it had gone stale in both directions.**
+ * `MachinePluginsSection` draws no reachability line any more — its one caller,
+ * `MachineSection`, states it once for all three of its lists, and `webcheck` pins
+ * that section as saying neither half — while `MachineSection` itself and
+ * `AgentBuilder` had joined the set with nothing naming them. Four, and
+ * `webcheck`'s `REACH_SCREENS` is the list this has to agree with, along with the
+ * copy of this sentence at `reachText` in `ui/bits.tsx`.
+ *
+ * This is {@link missingRowReason}'s fix in the shape that function already
+ * proved out for `SessionView`, one screen over: the arm that was missing is
+ * "still finding out", and it is a value in a partition rather than a fourth
+ * boolean at each call site.
+ *
+ * **`probing` is `readable`, and that is the half that looks wrong.** It is not
+ * a measurement in progress *from nothing* — it is this client re-checking a
+ * route it deliberately forgot, on a machine it already believed in, publishing
+ * twice on every tab switch. `daemonReadable`'s docblock above is entirely about
+ * why taking the screen away for that is a regression, and this partition keeps
+ * that answer rather than reopening it: `unknown` is the never-asked state and is
+ * the only one that gets the new arm. The invariant is exact — `daemonReadable`
+ * is `daemonRead(reach) === "readable"` for all four values, because it is
+ * literally implemented as that.
+ *
+ * Pure, and beside `daemonReadable` for that function's reason: `webcheck` walks
+ * all four `Reach` values here instead of asserting JSX on four screens.
+ */
+export function daemonRead(reach: Reach): DaemonRead {
+  // Never asked. Not an answer, and above all not a failure — the sentence a
+  // screen draws here is about this client, not about the host.
+  if (reach === "unknown") return "asking";
+  // Asked, and did not get one. The only arm that has earned the word "not
+  // reachable", and the only one `reachText`'s `OFFLINE_TEXT` half describes.
+  if (reach === "offline") return "unreachable";
+  return "readable";
 }
 
 export interface MachineState {
@@ -1154,10 +1231,55 @@ export function slowRoute(method: string | undefined, path: string): boolean {
     // `502 agent_config_failed` was unreachable by construction. A client
     // deadline has to sit above the server's, or the server's error is dead code.
     (verb === "POST" && /^\/sessions\/[^/]+\/config$/.test(path)) ||
-    // Both spawn a CLI: `/agents` runs the login probe, and `/agent-auth`
-    // drives a login under a pty.
-    (verb === "GET" && path === "/agents") ||
+    /*
+     * The agent-shaped namespaces, all three matched by **prefix**, and that is
+     * the correction rather than the convenience.
+     *
+     * `/agent-auth` was already here and already a prefix, so that a route added
+     * under it could not reintroduce the gap by being missed. `/agents` was a
+     * literal — and it was a literal when `GET /agents/capabilities` shipped,
+     * which is exactly how that route ended up on the ordinary 15s.
+     *
+     * ⚠ **What 15s bought there.** `/agents` merely runs the login probe;
+     * `/agents/capabilities` starts a whole agent per harness. It used to loop
+     * them **serially**, because a `Promise.all` was measured making the third
+     * harness lose the race against `MAX_CONCURRENT_ASKS` (2) every single time —
+     * codex permanently greyed out of the builder with a sentence about load.
+     * Four harnesses at `ASK_TIMEOUT_MS` (120s) each, one at a time, is up to 480s
+     * of daemon budget behind a client that gave up at 15, so on a cold cache the
+     * abort was not a risk but the norm. And the abort is a *transport* failure:
+     * `forgetRoute`, then `markUnreachable`, and a perfectly healthy machine is
+     * drawn as unreachable everywhere at once — including the New session sheet
+     * the builder was opened from. Then, because a `GET` is replayable, the retry
+     * fires a second `/agents/capabilities`.
+     *
+     * ⚠ **The serial loop is gone and this number is not.** The route asks all
+     * four at once and `admit` **queues** for a slot instead of refusing one, so
+     * the sweep can no longer lose a race against a bound it is itself holding:
+     * measured 2026-08-28, 5286 ms serial against 3061 ms queued. The worst case
+     * is rounds of two rather than a sum of four, and the replayed `GET` is now
+     * served from the ten-minute cache the first attempt filled. 90s still covers
+     * it with room, which is the point of the entry rather than of the arithmetic.
+     *
+     * There is no cheap `GET` under `/agents` and there cannot be one: the only
+     * thing that namespace answers is what the installed CLIs say about
+     * themselves, and nothing but a CLI can say it. So the prefix is not a guess
+     * about future routes, it is the shape of the namespace.
+     *
+     * ⚠ **`/custom-agents` is keyed on the verb instead, and the split is
+     * load-bearing rather than tidy.** Every *write* under it re-validates the
+     * pairing with `hostable()` against `asks.capabilities(harness)` — `POST`
+     * does, `PATCH` does, and one that did not would be storing a preset whose
+     * only button answers 502 days later — so a write there spawns an agent by
+     * construction, on the same cached, bounded path. The reads do not:
+     * `GET /custom-agents` is `systems.customAgents.list()` and the `DELETE` is
+     * a lookup plus a delete, both synchronous SQLite, and both sit on a first
+     * paint where 90 seconds of a screen that cannot say anything is worse than
+     * 15 and a refusal.
+     */
+    (verb === "GET" && path.startsWith("/agents")) ||
     path.startsWith("/agent-auth") ||
+    ((verb === "POST" || verb === "PATCH") && path.startsWith("/custom-agents")) ||
     // Switching a plugin on forks a child and waits for its `ready`, and the
     // daemon's budget for that is `PLUGIN_START_TIMEOUT_MS` (10s) *after* up to
     // `PLUGIN_STOP_DEADLINE_MS` (4s) waiting out a stop already in flight, plus

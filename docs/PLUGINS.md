@@ -558,6 +558,149 @@ holds when you reinstall the version already there — which is how you will spe
 most of your time — and when the plugin is switched off, in which case it is
 started long enough to prove it runs and then switched back off.
 
+## Adding an agent, or a provider
+
+A plugin can put a **harness** — an ACP program — and an **inference provider**
+on a machine, and both then behave as though this product had shipped them. There
+is no code to write for either: they are two blocks in `plugin.json`, your
+`server.js` is never asked about them, and nothing is fetched at runtime.
+
+```jsonc
+{
+  "api": 5,
+  "scopes": ["harness", "system"],
+  "contributes": {
+    "harnesses": [{
+      "id": "gemini",                     // the machine calls it "<your-plugin-id>:gemini"
+      "name": "Gemini",                   // what a tile says. 32 characters
+      "command": "gemini",                // a program on PATH. Not a path, not an argument
+      "args": ["acp"],
+      "envNames": ["GEMINI_API_KEY"],     // variables a pasted key is written to
+      "routedModelEnv": ["GEMINI_MODEL"], // variables it reads a routed model id from
+      "authHint": "…"                     // what to say when it refuses a session
+    }],
+    "systems": [{
+      "id": "groq",
+      "name": "Groq",
+      "apiType": "anthropic",             // or "openai" — the wire shape, nothing else
+      "baseUrl": "https://api.groq.com/anthropic",
+      "authHeader": { "name": "authorization", "prefix": "Bearer " },
+      "models": [{ "id": "llama-4", "name": "Llama 4" }]
+    }]
+  }
+}
+```
+
+Install that and the harness is in the agent builder's harness row and under
+Sign-ins with a paste box; the provider is a heading in the model picker and a key
+box in the same list, beside the built-in ones. Somebody assembles the two into a named agent exactly as they would
+Claude Code on OpenRouter, and **that** is what gets a tile on New session.
+
+⚠ **`envNames` is where your harness's key is pasted, and it gets a row of its own
+under Sign-ins — but only if no provider already speaks for it.** That list is
+per machine, and it holds two kinds of row: a provider you have an account with,
+and a harness that reads a key of nobody else's. Every harness this product ships
+is named by a provider's `loginVia` — Anthropic signs in through Claude Code — so
+those get their box on the provider's card and never a second row. Yours gets one
+unless you also contribute a provider naming it.
+
+If a *provider* of yours is the thing people sign in to, give it `loginVia` and
+put the key there instead; the harness then has no row and no second answer to
+"signed in?". If your harness needs no key at all, leave `envNames` empty and let
+`authHint` send people to a terminal — which is what a harness signed in by
+running its own program once wants.
+
+**Both need `api: 5`, and the daemon refuses the block below it rather than
+ignoring it.** That is deliberate and unlike every other field here: a plugin
+whose whole reason to exist is a harness has no useful degraded form, so an older
+daemon tells its owner to update the machine instead of installing something inert.
+
+### The traps
+
+⚠ **Your plugin adds a harness. It does not add an *agent*.** There is no way to
+say "tapping this on New session is a whole decision", and there was one for a
+release — `standalone`, now removed. The claim is the one thing in this block
+nothing on the machine can check, and getting it wrong the permissive way means
+somebody starts a session, on your suggestion, on whatever model your CLI picks by
+default. A manifest still carrying the key installs unchanged; it is simply not
+read. Your harness is offered everywhere a harness is named — it just has to be
+paired with a model first, which is two taps, and is exactly opencode's position.
+
+⚠ **`command` is a program name on `PATH`, and your plugin does not install it.**
+No slashes, no absolute paths, and not the name of an agent this product already
+ships. A machine that does not have the program says so on the row.
+
+⚠ **A provider may only ever name a harness *you* contribute.** `nativeHarness`,
+`loginVia`, `nativeModelPrefix` and `keyEnv` all take a local harness id from the
+same manifest. You cannot point a provider at Claude Code — a screen that said
+"Sign in to Claude Code" under a heading you chose would be a lie somebody acts on.
+
+⚠ **`envNames` is a list of boxes somebody will paste a secret into, so it may not
+name one another agent reads.** `ANTHROPIC_API_KEY`, `CODEX_API_KEY` and the rest
+are refused, as is anything the daemon strips from an agent's environment on
+purpose.
+
+⚠ **`baseUrl` is `https`, or `http` to this machine or this network.** Ollama at
+`http://127.0.0.1:11434`, vLLM at `http://10.0.0.5:8000` and an
+`https://…` endpoint anywhere are all fine; `http` to a public host is not, and
+neither is a metadata address under either scheme. Where it *is* `http`, the
+consent screen says the key travels in the clear.
+
+⚠ **There is no sign-in flow, and there will not be one in this version.** A
+contributed harness is opencode's shape: no wizard, no sign-out, no status probe —
+a paste box and nothing else. That box is on the harness's **own** row under
+Sign-ins, unless a provider of yours names it in `loginVia`, in which case it is on
+that provider's card and the harness has no row — one credential, one place, one
+answer. Everything a wizard needs is a *measurement about a
+CLI* that nobody but its author can take, and a status pattern from a manifest
+would be somebody else's regular expression running on the daemon's event loop.
+
+⚠ **`routedModelEnv` is what lets your harness run somebody *else's* provider's
+models.** Name the variables your CLI reads a model id from; each is set to the id
+and nothing else — there is no template language. Leave it empty and the daemon
+refuses that pairing rather than starting a session that quietly runs your CLI's
+default model.
+
+### Trying it
+
+`rends-east/reemoat-plugin-byo` is a working one — Gemini CLI as the agent,
+DeepSeek as the provider — and it holds **no scope that gates a method**, so its
+consent card shows the two things it adds and nothing else. Install it from the
+market, or straight from the commit:
+
+```bash
+pnpm client plugin install byo.tgz     # after `tar -czf byo.tgz -C <its checkout> .`
+```
+
+Both of its entries are measured rather than copied from documentation:
+`gemini --acp` is what Gemini CLI 0.53.0's own `--help` names
+(`--experimental-acp` is the same flag, deprecated), it answers ACP `initialize`,
+and it declares no way to be pointed at another provider — which is why its
+manifest names no `routedModelEnv`. `api.deepseek.com/anthropic` answers `401` in
+Anthropic's envelope and reads a key from either header convention.
+
+Nothing has to be installed for it to be worth looking at. With neither `gemini` on
+`PATH` nor a DeepSeek key, the agent's row says *not installed* and the provider's
+models are greyed with *"No DeepSeek key on this machine."* — which is the whole
+disclosure surface working. `npm i -g @google/gemini-cli` and a key make it run.
+
+### What it costs the machine
+
+Each contributed harness is a **process** every time the agent builder is opened:
+that screen asks every harness what it offers, two at a time. Eight per machine is
+the ceiling and it is refused at install rather than trimmed afterwards. Providers
+cost nothing — they are a table row — and the ceiling there is about a picker
+somebody has to scroll.
+
+### What is not built
+
+- **A model catalogue your provider fetches.** `models` is written down. The
+  browser fetches exactly one catalogue in this whole product and its address is
+  compiled into the page's own content policy at deploy time, so a plugin's cannot
+  be added. A provider whose native harness publishes its models needs no list.
+- **An icon.** A contributed harness is drawn as a letter in the app's own weight.
+- **A binary inside the archive.** `PATH` only.
+
 ## What a plugin is trusted with
 
 Said plainly, because the alternative is somebody assuming otherwise.
@@ -566,6 +709,14 @@ Said plainly, because the alternative is somebody assuming otherwise.
 `HOME`, your files and your keys — the same trade an agent already makes on the
 same machine. The scope list and the stripped environment are **hygiene, not a
 fence**: a plugin can `import("node:fs")` and read anything you can.
+
+**A harness you contribute adds no authority you did not already have**, which is
+worth saying because it looks like it does. A plugin can already
+`import("node:child_process")` and spawn whatever it likes; what declaring a
+harness buys is that the program is *named*, shown before anything is installed,
+and switched off with the plugin. A **provider** is the one that adds something
+real — a host the operator's own pasted key is sent to — and that is why its
+address is on the consent screen in full rather than as an origin.
 
 What they do buy is real, and it is three things. The blast radius is *named*,
 shown at install and refused when exceeded, which catches the mistake. A plugin

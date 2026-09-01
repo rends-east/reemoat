@@ -157,6 +157,21 @@ export interface AgentConfigOption {
   value: string | boolean;
   /** Empty for a boolean. */
   choices: AgentConfigChoice[];
+  /**
+   * Whether `choices` is a head rather than the whole list.
+   *
+   * ⚠ **Set only on the snapshot that rides `GET /sessions`**, never on the
+   * `agent_config` event, which carries what the agent actually said. The list
+   * route returns sixty of these on a four-second poll to a phone, and opencode
+   * publishes 362 models in one control — see `MAX_SNAPSHOT_CHOICES` in
+   * `registry.ts`. The selected choice is always present regardless.
+   *
+   * Optional so that every producer that is *not* the snapshot keeps its shape and
+   * an older client reading `undefined` reads it as "the whole list", which is what
+   * it was before this field existed and is still true of every agent this
+   * repository ships. A client wanting the rest reads `GET /sessions/:id`.
+   */
+  truncated?: boolean;
 }
 
 export interface AgentModes {
@@ -609,9 +624,26 @@ export interface StatusEvent {
   exit: SessionExit | null;
 }
 
+/**
+ * ACP's five reasons, plus one of this daemon's own.
+ *
+ * ⚠ **`agent_error` is the turn that ended in an {@link ErrorEvent}**, which ACP
+ * has no reason for because ACP never got that far: `session/prompt` rejected, so
+ * the agent never said why its turn stopped. Nothing existing could stand in —
+ * `refusal` is the *model* declining and `cancelled` is something a person did,
+ * and both would be a lie in the one row a reader trusts about what happened.
+ *
+ * The argument is Q2.103's, which is already written down for the cancel path and
+ * applies here word for word: the daemon writes the `turn_end` itself because the
+ * agent never gets to send one, and **a prompt with no turn end at all is the
+ * shape this codebase calls a message that reached no model**. What it cost while
+ * it was missing is Q2.218.
+ */
+export type TurnStopReason = StopReason | "agent_error";
+
 export interface TurnEndEvent {
   type: "turn_end";
-  stopReason: StopReason;
+  stopReason: TurnStopReason;
   usage: Usage | null;
 }
 
@@ -999,6 +1031,16 @@ export interface PersistedSession {
    * where the machine's own setting decides, which is where every session starts.
    */
   ultracode: boolean | null;
+  /**
+   * The assembled agent this session was started as, or `null` for one started
+   * on a bare harness.
+   *
+   * A *reference* into `custom_agents` rather than a copy of what it said, so
+   * editing a preset changes what its sessions resume as. `agent` beside it
+   * still holds the harness, which is why nothing about a restart, a sign-out or
+   * a relaunch has to read this at all.
+   */
+  customAgent: string | null;
   /**
    * Why the daemon permanently stopped trying to bring this session back, if it
    * has — and `null` for every session where trying again is still worthwhile.

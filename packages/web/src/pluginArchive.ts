@@ -50,6 +50,24 @@ export interface ManifestPreview {
   settings: boolean;
   actions: { id: string; title: string; on: string }[];
   hooks: string[];
+  /**
+   * The harnesses and providers this plugin adds, each as **one string**.
+   *
+   * ⚠ **Flattened here rather than kept as objects, and it is the same string the
+   * daemon compares against.** `consentGap` on the far side is a set difference of
+   * strings — the three fields it already compares are `string[]` on both ends, and
+   * an object shape is where a normalisation mismatch creeps in and the alarm
+   * starts crying wolf on healthy plugins. So the line somebody *reads* and the
+   * line the daemon *checks* are the same value, and there is no second rendering
+   * of the same fact to get wrong.
+   *
+   * ⚠ **The whole base URL, though the sentence around it shows only the origin.**
+   * A plugin showing `https://api.groq.com` and shipping
+   * `https://api.groq.com/../evil` passes an origin comparison; `new URL`
+   * normalises the path away on both sides, so what is compared is the address a
+   * key will actually be sent to.
+   */
+  adds: string[];
 }
 
 /**
@@ -548,8 +566,60 @@ export function readManifestText(json: string): ArchivePeek {
           })
         : [],
       hooks: strings(contributes["hooks"]),
+      adds: [
+        ...readContributedRows(contributes["harnesses"], (one) => {
+          const argv = [text(one["command"]), ...strings(one["args"])].filter((word) => word.length > 0);
+          return `harness ${text(one["id"])} runs ${argv.join(" ")}`;
+        }),
+        ...readContributedRows(contributes["systems"], (one) => {
+          return `system ${text(one["id"])} sends keys to ${normalUrl(one["baseUrl"])}`;
+        }),
+      ],
     },
   };
+}
+
+/**
+ * One line per contributed harness or provider, read leniently.
+ *
+ * ⚠ **Lenient, like everything else in this file, and the daemon is what
+ * refuses.** A row that is not an object is dropped rather than throwing — this
+ * reader's whole contract is that it may fail to describe an archive and may never
+ * invent one, and the way past an archive it cannot read is a separate named
+ * press. What it may not do is *under*-report, which is why a malformed entry is
+ * still counted: `readContributedRows` drops only what carries no shape at all,
+ * and the daemon's own `consentGap` refuses anything the line here did not match.
+ */
+/**
+ * A base URL as the daemon will have stored it, or `"nowhere"`.
+ *
+ * ⚠ **Normalised here because the daemon normalises there, and a disclosure that
+ * renders the same fact differently is not one disclosure.** `parseManifest`
+ * resolves the URL — `new URL` collapses `..` and this drops a trailing slash — and
+ * `consentGap` compares against *that* string. Measured: a manifest writing
+ * `https://api.groq.com/anthropic/`, which is the ordinary way somebody writes a
+ * base URL, produced two different lines and made every such install answer *"that
+ * commit asks for more than was shown"* about a plugin that had asked for exactly
+ * what was shown. An alarm that cries wolf is the one failure the whole consent
+ * path is written against.
+ *
+ * ⚠ **Fails open to the raw string**, like everything else in this file: a value
+ * that is not a URL is one the daemon refuses on arrival, and a reader that threw
+ * here would turn a bad manifest into an unreadable archive.
+ */
+function normalUrl(raw: unknown): string {
+  if (typeof raw !== "string" || raw.length === 0) return "nowhere";
+  try {
+    const url = new URL(raw);
+    return url.origin + url.pathname.replace(/\/+$/, "");
+  } catch {
+    return raw;
+  }
+}
+
+function readContributedRows(raw: unknown, line: (one: Record<string, unknown>) => string): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((one) => (one === null || typeof one !== "object" ? [] : [line(one as Record<string, unknown>)]));
 }
 
 /**

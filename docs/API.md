@@ -45,7 +45,7 @@ auth gate.
 
 ---
 
-## The daemon — 44 routes
+## The daemon — 55 routes
 
 Runs on your machine, reachable through the relay. `pnpm client` drives all of it.
 
@@ -59,14 +59,31 @@ Runs on your machine, reachable through the relay. `pnpm client` drives all of i
 
 | | |
 |---|---|
-| `GET /agents` | What is installed, and which are signed in |
+| `GET /agents` | What is installed, which are signed in, and which have a sign-in at all. **Every harness this machine offers**, which is the four this repository ships plus any a plugin added and has not been switched off |
 | `GET /agent-auth` | Where each agent's credentials go |
 | `PUT /agent-auth/:agent` · `DELETE /agent-auth/:agent` | Set or clear a pasted credential |
 | `POST /agent-auth/:agent/login` | Start a device-code login on a pty |
 | `POST /agent-auth/:agent/logout` | Clears the pasted credential **first**, then runs the CLI's own logout |
+| `POST /agent-auth/:agent/recheck` | Forget that this harness refused to open a session, and answer the fresh row — the **same shape** `GET /agents` answers, `login` included, since `availability()` does not carry that field and a row without it reads as *cannot check* everywhere. **Refuses nothing** where `login` and `logout` answer `503`, because a harness with no sign-in is exactly what it is for: its remedy is to run the CLI once on the machine, which reaches this daemon in no other way |
 | `GET /agent-auth/login/:loginId` | What the pty has printed so far |
 | `POST /agent-auth/login/:loginId/input` | Type into it |
 | `DELETE /agent-auth/login/:loginId` | Abandon it |
+
+### Systems, and the agents assembled out of them
+
+A *system* is who serves a model and who you sign in to; a *harness* is the CLI
+that runs the loop. No request here accepts a URL, a header name or a variable
+name — a request names a system id and the machine's catalogue resolves it. A
+plugin *manifest* does name all three, disclosed in `consent.adds` on
+`POST /plugins/source` below.
+
+| | |
+|---|---|
+| `GET /systems` | Every system, and whether a key is saved. Spawns nothing. The built-ins in their own order, then any a plugin added — each carrying `contributedBy` |
+| `PUT /systems/:system` · `DELETE /systems/:system` | Set or clear that system's key |
+| `GET /agents/capabilities` | What each harness offers and what it can be pointed at. **Starts an agent per harness**, cached ten minutes |
+| `GET /custom-agents` · `POST /custom-agents` · `PATCH /custom-agents/:id` · `DELETE /custom-agents/:id` | The harness+system+model presets on this machine. A `PATCH` carries all four fields — an edit is a replace, so the pairing is never weighed against a merge |
+| `GET /agent-strip` · `PUT /agent-strip` | Which agents this machine's New session strip offers, and in what order. A **partial** record — a position and a hidden flag for what somebody moved or hid — merged by the client against the two listings above, so a `ref` naming something that is gone keeps its place and is simply not drawn. The `PUT` carries the whole list and replaces it; no `ref` is validated against anything |
 
 ### The filesystem the picker sees
 
@@ -117,7 +134,7 @@ inside a hook where there is no caller at all. Neither implies the other. See
 |---|---|
 | `GET /plugins` | What is installed, what each may reach, and the plugin API this daemon speaks |
 | `POST /plugins` | Install **or update** — one verb, because the manifest says which. The archive is the body and `?name=` is the filename it arrived as, sanitized like an upload's and recorded as the row's `source`; it is the sole cause of `400 invalid_name`, and omitting it is one. Streams its body past the 1 MiB bound and cancels it on every refusal; `409 plugin_start_failed` means the tree is unchanged and the old version is still running |
-| `POST /plugins/source` | The same act, for a plugin this daemon fetches itself: `{source: {kind: "github", repo, commit}, consent?}`. The address is **built here** from `repo` and `commit` and is never taken from the caller, the commit must be a full 40-character sha (a tag moves; the pin has to be content-addressed), and redirects are refused. `consent` is what the installer was shown — `{scopes, net, hooks}` — and a manifest exceeding it is `409 plugin_consent_broken`, refused *before the plugin is started*. Answers exactly as `POST /plugins` does, `replaced` included |
+| `POST /plugins/source` | The same act, for a plugin this daemon fetches itself: `{source: {kind: "github", repo, commit}, consent?}`. The address is **built here** from `repo` and `commit` and is never taken from the caller, the commit must be a full 40-character sha (a tag moves; the pin has to be content-addressed), and redirects are refused. `consent` is what the installer was shown — `{scopes, net, hooks, adds}` — and a manifest exceeding it is `409 plugin_consent_broken`, refused *before the plugin is started*. `adds` is one line per contributed harness or provider, carrying the argv and the whole base URL, and a caller that omits it is refused a commit that adds either — which is what makes a client too old to draw those rows safe. Answers exactly as `POST /plugins` does, `replaced` included |
 | `DELETE /plugins/:pluginId` | Uninstall, and drop everything it kept. An update keeps that; this does not |
 | `POST /plugins/:pluginId/state` | `{enabled}`. The state a caller wants rather than the transition, so a lost answer is safe to send again |
 | `GET /plugins/:pluginId/views/:viewId` | `screen` or `settings`. A **read** by contract — `isReplayable` lets the transport repeat it |

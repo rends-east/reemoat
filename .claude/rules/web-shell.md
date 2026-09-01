@@ -87,10 +87,9 @@ have to enter. These are the rules a change here must not break:
   **`Sheet` draws no waiting count**, reversing Q3.201: it is a pop-up over the
   rail now, so that was a second copy of numbers behind the scrim. Q3.434.
 - **`machineSubline` keeps `blocked` above `offline`**, and an unreachable machine
-  is announced **nowhere in the rail** — `machineSubline`/`MachineTab.reach` have
-  no caller outside `webcheck`. Settings → Machines and the New session picker are
-  the only places reachability shows. An open question, not a settled trade.
-  Q3.202.
+  is announced **nowhere in the rail** — it and `MachineTab.reach` have no caller
+  outside `webcheck`. Settings → Machines and the New session picker are the only
+  places reachability shows. An open question, not a settled trade. Q3.202.
 - **Nothing in a row mounts sideways into another control.** Three remedies:
   *delete it* when redundant; *reserve its slot* when it is the only copy (the
   pin, the two spinners); *move it off the row* when it is neither (the context
@@ -99,9 +98,8 @@ have to enter. These are the rules a change here must not break:
 - **Reserve the gutter**, `scrollbar-gutter: stable` as `.scroll-stable`, on the
   **one** box other things are measured against — the transcript — never on `*`,
   which would pad every popover and `<pre>`. `scrollbar-width: thin` takes layout
-  width, so crossing the fit threshold moves everything *centred* by half of it and
-  nothing left-aligned at all. The rail and the content pane are exceptions and
-  neither may take it back. Q3.203.
+  width, so crossing the fit threshold moves everything centred by half of it. The
+  rail and the content pane are exceptions and neither may take it back. Q3.203.
 - **The content pane paints `bg-surface`, the rail `bg-ink`, both explicitly.**
   Neither may fall through to `body`. Q3.204.
 - **The paper is grey with a memory of warmth, and `raised` is spent at two
@@ -136,9 +134,9 @@ have to enter. These are the rules a change here must not break:
   and the reversible approval on the ask card; anything else wearing it becomes the
   loudest object on screen. `raised` means **state**: a tab you are on, a toggle
   that is on, a chosen menu row. Q3.209.
-- **The magnifier in the rail header is the fleet-wide search, which is not built,
-  and is drawn `disabled` rather than doing nothing silently.** The box below it
-  filters *this machine's* chats by title. Q3.211.
+- **The magnifier in the rail header is the fleet-wide search, not built, drawn
+  `disabled` rather than doing nothing silently.** The box below it filters *this
+  machine's* chats by title. Q3.211.
 - **`border-r` on the rail: the rule is the ratio.** Below roughly 1.15:1 a line
   does the dividing and the tone only supports it; at 1.06:1 two panes with no
   line between them read as one pane. Q3.210.
@@ -158,8 +156,7 @@ have to enter. These are the rules a change here must not break:
   subtracts what the view draws, and it draws `pinnedFor`. Q3.11.
 - **Anything that filters the list belongs beside the filter**, in `groups.ts`
   module state. A component `useState` makes `j`/`k` step onto rows the rail is not
-  drawing — the failure `groups.ts` and `keyboard.ts` each claim is structurally
-  impossible. Q3.15.
+  drawing. Q3.15.
 - **Tabs and folders are ordered by name, never by reachability or activity.**
   Both flicker on the four-second poll, and a list that reorders while a thumb is
   travelling is the one thing this cannot do. A machine with no sessions still gets
@@ -195,14 +192,11 @@ have to enter. These are the rules a change here must not break:
   which is also what makes owning `window.Telegram` safe), **no iframe arm** while
   `frame-ancestors 'none'` stands, and a header inset that is a `max()` floor
   rather than an addition to `env()`. Q3.443.
-- **There is no back button, and a pop-up does not add one.** A screen's leading
-  control is a close to a fixed destination, derived from the URL rather than from
-  a history — `useUnder` for a sheet's ✕, `settingsUp` for its ◀. **`Header`'s is
-  drawn as `ChevronLeft` and is still not a back button**: a ✕ on a full-screen
-  phone view reads as "discard this" where the act is "go up", so the glyph
-  changed and `navigate("/")` did not. It must never become `history.back()`,
-  which sent people to a session they had already left, or out of the app on a
-  fresh load.
+- **There is no back button.** Every leading control goes to a fixed destination
+  from the URL, never a history — `useUnder` for a ✕, `upFrom` for a ◀ — which is
+  why one may be *drawn* as `ChevronLeft` without being one. None may become
+  `history.back()`, which sent people to a session they had already left, or out
+  of the app on a fresh load.
 - **The session header carries a kebab below `lg` and nothing above it.** Above it
   Rename, Pin, Resume and Stop sit on the session's row in the rail; below it the
   rail is not on screen, so "it is on the row" means leave, find, act, return.
@@ -246,7 +240,9 @@ have to enter. These are the rules a change here must not break:
   `(0,0,1)` against `(0,2,1)` — so the desktop kept every phone animation. Asserted
   over the file, not on the two that were wrong. Q3.445.
 - **A sheet moves too, and nothing here teleports.** `section-push`/`pop` slide the
-  sheet's **body** with the root pinned; `sheet-close` takes the whole panel down
+  sheet's **body** with the root pinned; `sheet-swap` cross-dissolves two pop-ups
+  over one panel that holds still, and is tested **before** the depths because a
+  depth means nothing across two stacks; `sheet-close` takes the whole panel down
   and fades the scrim. Opening stays CSS (`animate-sheet sm:animate-rise`): on
   mount, on every engine, and a transition too would animate one panel twice.
   ⚠ **A `view-transition-name` does not nest** — a named child is lifted out of its
@@ -266,28 +262,25 @@ have to enter. These are the rules a change here must not break:
 **A machine row carries its id, because the name is not unique.** `nameVisibleTo`
 refuses a duplicate on the five routes that *name* a machine, but `PUT
 /v1/admin/grants` reaches the same state without naming anything;
-`resolveMachineRef` then silently picks the owned one, so the id is on the row and
-on the agents screen. The subline says **"not yours to rename or retire"** rather
-than "not registered to you" — the reader needs the consequence.
+`resolveMachineRef` then silently picks the owned one, so the id is on the row. The
+subline says **"not yours to rename or retire"** rather than "not registered to
+you" — the reader needs the consequence.
 
-**Agent settings live inside a machine, and there is no top-level Agents
-section.** `/settings/machines/:machineId/agents[/:agentId]`: the machine rides
-the URL for `/new/:machineId`'s two reasons, and the **◀** walks one level up
-rather than to the index. Every rule about those segments is in `settings.ts`'s
-`parseSettingsRoute` rather than `router.ts`, so `webcheck` can assert them; a
-stale `/settings/agents` falls to the index and is deliberately not redirected,
-since a redirect would guess which machine. **`Configure agent` sits outside the
-ownership gate** — rename and retire are acts on the registry (404 for anybody but
-the owner) while configuring an agent is an act on the daemon, reached with the
-`session:write` grant a shared machine carries. Q3.415.
+**Systems live inside a machine, and there is no top-level section for them.**
+`/settings/machines/:machineId/systems[/:systemId]`: the machine rides the URL for
+`/new/:machineId`'s reasons, the **◀** walks one level up rather than to the index,
+and the segments are `parseSettingsRoute`'s so `webcheck` can assert them. A stale
+address falls to the index and is not redirected, since a redirect would guess which
+machine. **Configuring one sits outside the ownership gate**: rename and retire are
+acts on the registry (404 for anybody but the owner) while signing in is an act on
+the daemon, reached with the `session:write` grant a shared machine carries. Q3.415.
 
-**A sheet's head names the pop-up; its pane names the screen.** `SHEET_HEAD` is a
-child of `SHEET_PANEL`, so above `sm` it spans the section rail too, and the only
-honest string in it is "Settings". The screen's own name is `settingsPaneTitle`,
-withdrawn with `up.withinNav ? "sm:hidden" : ""` — the same predicate as the
-chevron. The head's `<h1>` holds one **unconditional** text node: it is what
-`aria-labelledby` resolves to, and a name computed from a `display:none` subtree is
-no name at all. Q3.427.
+**A head that spans a section rail names the pop-up; its pane names the screen.**
+Above `sm` settings' head spans the rail too, so "Settings" is the only honest
+string in it; the screen's name is `settingsPaneTitle`, withdrawn with
+`up.withinNav ? "sm:hidden" : ""` — the chevron's own predicate. A railless sheet
+inverts it (Q3.473). Either way the `<h1>` holds one **unconditional** text node:
+it is what `aria-labelledby` resolves to. Q3.427.
 
 **Creating a session asks three things** — machine, agent, folder — and neither
 whether to use a worktree nor the first prompt. Q3.86, Q3.87.
@@ -384,14 +377,14 @@ primitive adds `tap` itself and carries its own entry.
 | `packages/web/src/ui/groups.ts` | Which machine tab is selected, which folders are collapsed, what has been typed into the search box — and every rule that follows: `foldersOf`, `machineTabs`, `waitingFloor`, and `visibleRows`, still the **single** source of render order, deduplicated by key |
 | `packages/web/src/ui/overlay.ts` | Who owns Escape, and what paints above what. A LIFO stack of dismissible layers, one capture-phase listener installed lazily inside `push()`, the `inert` refcount on `#root`, and `LAYER` — the z-order as full class strings, in one table a driver can assert. Also the **two** bare-key predicates |
 | `packages/web/src/ui/rail.ts` | How wide the rail is: the bounds, `clampRailWidth` — the one place a width is bounded, and four ways in — and the module state seeded from `localStorage`. Holds **no DOM**, so `webcheck` can import it. The `--rail-w` custom property is written by `AppShell`, the impure shell; the width travels as that property and must not become a React prop, which would snap back to the start of the drag on every poll |
-| `packages/web/src/ui/Sheet.tsx` | The large route-backed pop-up, portaled to `document.body`. A bottom sheet on a phone and a centred card above `sm`. It draws no waiting count (Q3.434) and takes no `up` (Q3.432): the head holds only what leaves the pop-up. Its **box** is two strings in `bits.tsx`: `SHEET_PANEL` is a **definite** height, never a `max-h` it can shrink under, and `SHEET_BODY` is a **flex column**, without which both callers' `min-h-0 flex-1` children mean nothing. `webcheck` pins both. Q3.223 |
+| `packages/web/src/ui/Sheet.tsx` | The large route-backed pop-up, portaled to `document.body`. A bottom sheet on a phone and a centred card above `sm`. It draws no waiting count (Q3.434). **One element serves every route-backed pop-up**, owned by `OverlaySheet`, so two of them cross-dissolve rather than one unmounting and the next replaying `animate-sheet` (Q3.484); `sheetTitle`/`sheetUpLabel` decide its head, and only a railless pop-up gets a ◀ there (Q3.432, Q3.473). `footer` suits one screen; with several, each draws its bar inside `SHEET_BODY` via `SHEET_SCREEN` or `sheet-body` morphs mid-slide (Q3.472). Its **box** is two strings in `bits.tsx`: `SHEET_PANEL` is a **definite** height, never a `max-h` it can shrink under, and `SHEET_BODY` is a **flex column**, without which both callers' `min-h-0 flex-1` children mean nothing. `webcheck` pins both. Q3.223 |
 | `packages/web/src/ui/ProfileMenu.tsx` | Who you are signed in as, and the two things you can do about it. The sidebar's footer, and the only copy of the name in the chrome |
 | `packages/web/src/ui/AppShell.tsx` | The adaptive layout, decided in CSS. The rail is always the sessions — it does not switch to settings, and it does not scroll: the scroll is inside `SessionBrowser` so the account row can sit at the bottom and its popover can open upward without being clipped |
 | `packages/web/src/ui/SessionBrowser.tsx` | The whole left column: logo, machine tabs, the waiting floor, the chat search, Pinned above the selected machine's folders, orphans, and the footer. Mounted twice — the `lg` aside and the `lg:hidden` screen — with the breakpoint answered only in those two class strings. A pinned row is drawn **once**, in Pinned, carrying its own path |
 | `packages/web/src/nav.ts` | What a navigation moves (`depthOf`, `isSheet`, `navMove` — five values, two stacks never compared) and where "up" goes (`upFrom`, read by Telegram's arrow). Its own module because `router.ts` reads `window.location` in its module body |
 | `packages/web/src/telegram.ts` | The mini-app bridge, hand-written: the injected `TelegramWebviewProxy` only, no SDK, and **no iframe transport** while `frame-ancestors 'none'` stands |
 | `packages/web/src/ui/SessionMenu.tsx` | What you can do to a session — rename, pin, stop, resume — used from the header and every list row, plus `RenameField` |
-| `packages/web/src/ui/settings/` | `SettingsNav` is the 224px column beside the section at `sm` and the whole sheet body below it. One file per section — Account, Machines, **Server settings**, Users, in that order; the last two `adminOnly`. **No neutral state at `sm`+**: the pane draws `DEFAULT_SECTION` and the rail highlights the same constant. `/settings` still parses to `section: null` (below `sm` it *is* the list), so the default feeds what is *drawn*, never `settingsUp`, and is never `adminOnly`. `ServerSection` is the whole admin surface — registration, the machine limit, the provisioning key, the SMTP form and a test send — and carries no delivery log (Q3.225). It is the only thing that can change what `GET /v1/instance` reports, so it calls `store.refreshConfig()` beside its own `setAnswer`. Agents is **not** a section: `MachineAgentsSection` and `AgentsPanel` hang off a machine, two URL depths down |
+| `packages/web/src/ui/settings/` | `SettingsNav` is the 224px column beside the section at `sm` and the whole sheet body below it. One file per section — Account, Machines, **Server settings**, Users, in that order; the last two `adminOnly`. **No neutral state at `sm`+**: the pane draws `DEFAULT_SECTION` and the rail highlights the same constant. `/settings` still parses to `section: null` (below `sm` it *is* the list), so the default feeds what is *drawn*, never `settingsUp`, and is never `adminOnly`. `ServerSection` is the whole admin surface — registration, the machine limit, the provisioning key, the SMTP form and a test send — and carries no delivery log (Q3.225). It is the only thing that can change what `GET /v1/instance` reports, so it calls `store.refreshConfig()` beside its own `setAnswer`. Systems is **not** a section: `MachineSystemsSection` and `SystemsPanel` hang off a machine, two URL depths down |
 | `packages/web/scripts/webcheck.ts` | Offline driver for the browser client. Stubs `window`, uses a real loopback socket. **Every pure function it imports is one this repo promises to keep assertable** |
 
 ## Bounds

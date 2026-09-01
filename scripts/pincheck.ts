@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createRequire } from "node:module";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 /**
@@ -120,8 +120,18 @@ interface Adapter {
   name: string;
   /** Which agent it adapts. Output only. */
   agent: string;
-  /** The CLI it vendors, and which of the two shapes reading its version takes. */
-  cli: { name: string; via: "manifest-beside-entry" | "own-package-json" };
+  /**
+   * The CLI it vendors and which of the two shapes reading its version takes, or
+   * `null` where the package **is** the CLI.
+   *
+   * ⚠ **`null` is a third state and not an omission.** opencode ships no adapter:
+   * `opencode acp` is a subcommand of the same binary a login drives, so there is
+   * no second hop to resolve. Inventing one — pointing this at `opencode-ai`
+   * itself — would be a check that resolves a package to itself and passes by
+   * construction, which this file's own header calls the only outcome worse than
+   * no check at all.
+   */
+  cli: { name: string; via: "manifest-beside-entry" | "own-package-json" } | null;
 }
 
 const ADAPTERS: readonly Adapter[] = [
@@ -134,6 +144,16 @@ const ADAPTERS: readonly Adapter[] = [
     name: "@agentclientprotocol/codex-acp",
     agent: "codex",
     cli: { name: "@openai/codex", via: "own-package-json" },
+  },
+  {
+    // Not an adapter, and pinned here anyway — which is the point. `pincheck`'s
+    // header calls kimi's PATH resolution "the real loss", because nothing records
+    // which build this repository's measurements were taken against. For opencode
+    // there *is* a mechanism, so declining it would be electing that loss rather
+    // than inheriting it.
+    name: "opencode-ai",
+    agent: "opencode",
+    cli: null,
   },
 ];
 
@@ -160,7 +180,7 @@ const ADAPTERS: readonly Adapter[] = [
  * dependency of its adapter rather than an optional platform variant, which is what
  * makes one resolve enough where claude's needs a candidate list at runtime.
  */
-function readCliVersion(adapterPkgPath: string, cli: Adapter["cli"]): string | null {
+function readCliVersion(adapterPkgPath: string, cli: NonNullable<Adapter["cli"]>): string | null {
   const fromAdapter = createRequire(adapterPkgPath);
   let parsed: unknown;
   switch (cli.via) {
@@ -254,7 +274,7 @@ if (!installed) {
       const adapterPkg: unknown = JSON.parse(readFileSync(adapterPkgPath, "utf8"));
       const adapterVersion = (adapterPkg as { version?: unknown }).version;
       installedAdapter = typeof adapterVersion === "string" ? adapterVersion : null;
-      cliVersion = readCliVersion(adapterPkgPath, adapter.cli);
+      cliVersion = adapter.cli === null ? null : readCliVersion(adapterPkgPath, adapter.cli);
     } catch {
       // Left null and asserted on below. Inside the `installed` branch a broken
       // chain is a failure, not a tolerance — that is the whole point of the
@@ -268,7 +288,14 @@ if (!installed) {
     // The CLI hop is kept even with nothing to compare its version *to*, because a
     // broken resolution chain is exactly what an adapter or CLI bump breaks — and
     // `LocalRuntime.resolveLoginBinary` drives the binary it names.
-    check(`the ${adapter.agent} CLI the adapter loads is still resolvable`, cliVersion !== null, true);
+    //
+    // Skipped, loudly, where the package is the CLI: there is no hop, and a line
+    // reporting one would be describing a resolution that never happened.
+    if (adapter.cli === null) {
+      process.stdout.write(`  note  ${adapter.agent} ships no adapter, so there is no CLI hop to resolve\n`);
+    } else {
+      check(`the ${adapter.agent} CLI the adapter loads is still resolvable`, cliVersion !== null, true);
+    }
   }
 }
 
@@ -393,11 +420,21 @@ process.stdout.write("\nthe plugin API, and the one plugin in this repository\n"
  * to drift. Adding a constant there in order to have something to compare would
  * be manufacturing the second copy this whole file exists to argue against.
  *
- * What *can* go quietly wrong is the reference plugin. `plugins/board` is what
- * `docs/PLUGINS.md` walks through and what somebody trying this feature installs
- * first, and it declares an `api` like any other plugin — so the day
+ * What *can* go quietly wrong is a plugin this repository ships. `plugins/board`
+ * is what `docs/PLUGINS.md` walks through and what somebody trying this feature
+ * installs first, and it declares an `api` like any other plugin — so the day
  * `PLUGIN_API_MIN_VERSION` is raised past it, the documented first step stops
  * working, on a machine that is running exactly what the tree says it should.
+ *
+ * ⚠ **Swept over every directory under `plugins/`, though there is one today, and
+ * it was written around the one constant `"board"`.** That is this file's own
+ * recorded mistake one subject over: `ADAPTERS` is a loop *because* the version
+ * check was written around a single constant and therefore pinned the second
+ * adapter nowhere. The same trap was open here, and a second plugin is a thing
+ * this tree has already had once — so the loop goes in while the answer is still
+ * "one", rather than after somebody has found out. A **floor** under the count
+ * comes with it, because finding nothing to check must not read as finding
+ * nothing wrong.
  */
 const protocolTs = read("src/plugins/protocol.ts");
 const apiVersion = capture(protocolTs, /^export const PLUGIN_API_VERSION = (\d+);$/m);
@@ -410,16 +447,33 @@ check(
   true,
 );
 
-const boardManifest = JSON.parse(read("plugins/board/plugin.json")) as { api?: number; id?: string; version?: string };
-check("the reference plugin declares an API version", typeof boardManifest.api === "number", true);
+const shipped = readdirSync(new URL("plugins/", root), { withFileTypes: true })
+  .filter((entry) => entry.isDirectory())
+  .map((entry) => entry.name)
+  .sort();
+check("this repository ships a plugin at all", shipped.length >= 1, true);
+
+const manifests = shipped.map(
+  (name) => [name, JSON.parse(read(`plugins/${name}/plugin.json`)) as { api?: number; id?: string }] as const,
+);
 check(
-  "and this daemon would still install it",
-  apiMin !== null &&
-    apiVersion !== null &&
-    typeof boardManifest.api === "number" &&
-    boardManifest.api >= Number(apiMin) &&
-    boardManifest.api <= Number(apiVersion),
-  true,
+  "every plugin this repository ships declares an API version",
+  manifests.filter(([, one]) => typeof one.api !== "number").map(([name]) => name),
+  [],
+);
+check(
+  "and this daemon would still install each of them",
+  manifests
+    .filter(
+      ([, one]) =>
+        apiMin === null ||
+        apiVersion === null ||
+        typeof one.api !== "number" ||
+        one.api < Number(apiMin) ||
+        one.api > Number(apiVersion),
+    )
+    .map(([name]) => name),
+  [],
 );
 
 /*
@@ -427,7 +481,23 @@ check(
  * `tar -C`, so the two have to agree or the documented command builds an archive
  * the daemon then unpacks under a different name.
  */
-check("the reference plugin's id is the directory it lives in", boardManifest.id, "board");
+check(
+  "and each one's id is the directory it lives in",
+  manifests.filter(([name, one]) => one.id !== name).map(([name, one]) => `${name}: ${String(one.id)}`),
+  [],
+);
+/*
+ * And the entry point, which is the other half of what the daemon refuses at
+ * install (`entry_missing`) and the only part of a shipped plugin a manifest check
+ * cannot see. Cheap here and expensive to find otherwise: a plugin with no
+ * `server.js` parses perfectly, installs nowhere, and says so only on the machine
+ * somebody is trying it on.
+ */
+check(
+  "and each one has an entry point beside its manifest",
+  shipped.filter((name) => !existsSync(new URL(`plugins/${name}/server.js`, root))),
+  [],
+);
 
 process.stdout.write(failures === 0 ? "\nall green\n\n" : `\n${failures} FAILED\n\n`);
 process.exit(failures === 0 ? 0 : 1);

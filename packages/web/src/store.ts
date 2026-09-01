@@ -2159,16 +2159,46 @@ class AppStore implements StreamSink {
   onSnapshot(ref: SessionRef, session: SessionSnapshot): void {
     const key = keyOf(ref);
     const existing = this.rows.get(key);
+    /*
+     * The clock anchor is the poll's, carried forward rather than re-read here.
+     *
+     * ⚠ This wrote `daemonNow: Date.now(), fetchedAt: Date.now()` and said "a
+     * snapshot frame carries no clock, so anchor to ours — it is correct at this
+     * instant by construction". The first half is still true and the conclusion
+     * never was. Substitute `daemonNow === fetchedAt === T` into `elapsedSince`:
+     * `(T - at) + (now - T)` is `now - at`, which is precisely the browser-clock
+     * subtraction the two-term form exists to avoid. It would be correct only if
+     * `at` were a browser timestamp, and it never is — every call site passes
+     * `turnStartedAt` or `raisedAt`, both stamped by the daemon (`wire.ts`). And
+     * this runs on every socket open and rotation (`stream.ts`) and on every action
+     * that folds a returned snapshot in, `/prompt` included — i.e. at the instant a
+     * turn starts, when `turnStartedAt` is newest and the foot is about to draw it.
+     * So a phone whose clock had drifted drew the drift right there, on the one row
+     * somebody was watching, while the polled rows beside it were right.
+     *
+     * Keeping the poll's pair is correct rather than a stale-data compromise: the
+     * pair records an *offset* between two clocks, not a moment. That is what the
+     * second term is for — `daemonNow - fetchedAt` means the same thing however far
+     * `now` has moved past it, so an old anchor is as good as a fresh one and only
+     * a new reading of the daemon's clock, which is the next poll, can better it.
+     *
+     * With no row there is no reading to keep, and this is the honest bound: a
+     * session created from this tab reaches here from `POST /sessions` before any
+     * list has come back. Both halves then fall back to ours, which is the old
+     * arithmetic and is wrong by the whole offset between the two clocks — for at
+     * most one visible poll (`POLL_INTERVAL_MS`), which overwrites the pair with a
+     * real one. One `Date.now()` feeds both, because two reads a millisecond apart
+     * would invent an offset of their own.
+     */
+    const unanchored = Date.now();
     this.rows.set(key, {
       key,
       ref,
       machineName: existing?.machineName ?? this.connections.get(ref.machineId)?.state().name ?? "",
       snapshot: session,
       heldConfig: holdConfig(existing?.heldConfig, session),
-      // A snapshot frame carries no clock, so anchor to ours. It is only used for
-      // elapsed times, and it is correct at this instant by construction.
-      daemonNow: Date.now(),
-      fetchedAt: Date.now(),
+      daemonNow: existing?.daemonNow ?? unanchored,
+      fetchedAt: existing?.fetchedAt ?? unanchored,
       // Kept from the row the poll built. A snapshot frame does not carry the
       // mapping, and dropping it here would make every path on the open session
       // flip back to its host form the moment the agent said anything.

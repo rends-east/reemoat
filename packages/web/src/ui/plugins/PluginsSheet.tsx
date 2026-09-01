@@ -13,7 +13,6 @@ import {
 import { navigate, useOrigin } from "../../router";
 import type { AppState } from "../../store";
 import { Empty, IconButton, tabPill } from "../bits";
-import { Sheet } from "../Sheet";
 import { MarketIcon } from "./MarketList";
 import { MarketNav } from "./MarketNav";
 import { InstalledList } from "./InstalledList";
@@ -99,11 +98,15 @@ export function PluginsSheet({ state, route }: { state: AppState; route: MarketR
 
   return (
     /*
+     * ⚠ **No `<Sheet>` here** — one panel serves every route-backed pop-up, owned
+     * by `OverlaySheet`, so moving between two of them dissolves the contents
+     * rather than replacing a panel. This is the *body*. Q3.484.
+     *
      * The head names the pop-up and nothing else, `Sheet`'s standing rule: it is a
      * child of the panel, so above `sm` it spans everything under it, and the only
      * honest string there is the pop-up's own name.
      */
-    <Sheet title="Plugins">
+    <>
       {/*
        * ⚠ **The settings sheet's box, string for string.** Two rails one tap apart
        * inside sheets that look the same must not measure differently, and the
@@ -262,7 +265,7 @@ export function PluginsSheet({ state, route }: { state: AppState; route: MarketR
       </div>
         </div>
       </div>
-    </Sheet>
+    </>
   );
 }
 

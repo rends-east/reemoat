@@ -12,6 +12,8 @@ import {
   enrollmentIgnored,
   type TokenVerifier,
 } from "../src/auth.js";
+import type { AgentId } from "../src/acp/agents.js";
+import { systemSecretFor } from "../src/acp/systems.js";
 import { AgentAskRuns } from "../src/agentask.js";
 import { AgentLoginRuns } from "../src/agentauth.js";
 import { LocalRuntime } from "../src/runtime/local.js";
@@ -29,6 +31,7 @@ import {
 import { RelayTunnel } from "../src/relay/tunnel.js";
 import { createApp } from "../src/server.js";
 import { openStores, type StoreBundle, type StoredIdentity } from "../src/store/sqlite.js";
+import { Contributions } from "../src/plugins/contributions.js";
 import { PluginHost } from "../src/plugins/host.js";
 import { resolveUploadRoot, Uploads } from "../src/uploads.js";
 import { DEFAULT_BRANCH_PREFIX, resolveWorktreeRoot } from "../src/worktree.js";
@@ -228,9 +231,12 @@ try {
     maxBytesPerSession: positiveInt(process.env["REEMOAT_LOG_BYTES"]),
     retainSessionsMs: (positiveInt(process.env["REEMOAT_SESSION_TTL_DAYS"]) ?? 7) * DAY_MS,
     maxSessions: positiveInt(process.env["REEMOAT_MAX_SESSIONS"]),
-    // Nothing in src/ prints. This is the only way an operator hears that the
-    // disk stopped accepting writes and the log has gone lossy.
-    onDegraded: (detail) => console.error(`event store degraded — the log is now lossy: ${detail}`),
+    // Nothing in src/ prints. This is the only way an operator hears that a store
+    // stopped answering — the disk refusing writes, or a row this build cannot read.
+    // ⚠ **One sink, four subjects now**: the event log, a session row, a stored key
+    // and an assembled agent. Each store's own message names its own subject, so the
+    // prefix may not name one — it read "the log is now lossy" over a dropped preset.
+    onDegraded: (detail) => console.error(`store degraded: ${detail}`),
   });
 } catch (error) {
   console.error(
@@ -351,6 +357,44 @@ if (stores.prunedSessions.length > 0) {
   void uploads.forgetSessions(stores.prunedSessions);
 }
 
+/**
+ * What plugins add to this machine's two tables.
+ *
+ * ⚠ **Built here — immediately after `openStores`, and *before* the runtime, the
+ * registry and `restore()` — for a reason stronger than the one that puts
+ * `setCustomAgents` above `restore()`.** `restore()` rebuilds every persisted
+ * session, and a `ManagedSession`'s `assembled` getter reads `custom_agents`
+ * through a validator that **drops** a row it cannot resolve. With contributions
+ * unknown at that moment, every preset built on a plugin's harness would be
+ * dropped and every session on one would come back demoted to the bare harness it
+ * was started with — a different vendor, with nothing on screen saying so — and
+ * `autoResume` fires inside that window.
+ *
+ * Nothing is started to build it: `stores.plugins.list()` already re-validates
+ * each `manifest_json` through `parseManifest` on the way out, so this is a read
+ * of rows that are already there. `PluginHost` opens much later, after restore,
+ * and keeps this current from then on.
+ *
+ * ⚠ **`REEMOAT_PLUGINS=0` makes it empty, and that is what the switch means.**
+ * The rows stay in the database — the switch is documented as *"an operator who
+ * does not want somebody else's code running as this user should not have to
+ * uninstall anything"* — and a contributed harness **is** a program this daemon
+ * spawns. Listing one on a machine that has switched plugins off would be the
+ * switch not meaning what it says.
+ */
+const pluginsEnabled = process.env["REEMOAT_PLUGINS"] !== "0";
+/*
+ * ⚠ **Switched off means every row is *disabled*, not that the rows are gone.**
+ * Handing an empty list would make `harnessState` answer `unknown` for a harness
+ * that is plainly installed, so `POST /sessions` would say `400 invalid_agent` —
+ * *your request is wrong* — about a request that was correct until somebody set
+ * this variable. `disabled` is the whole reason that answer is three-valued: it
+ * names a switch rather than blaming a caller.
+ */
+const contributions = new Contributions(
+  stores.plugins.list().map((one) => (pluginsEnabled ? one : { ...one, enabled: false })),
+);
+
 /*
  * Where agents run: as children of this daemon, as this user.
  *
@@ -365,6 +409,26 @@ const runtime = new LocalRuntime({
   // The user's own pasted credential, read at launch rather than captured, so
   // replacing a token takes effect on the next session without a restart.
   secrets: (agent) => stores.credentials.envFor(agent),
+  // And the key for a *system*, read the same way. Kept apart from `secrets`
+  // because the destinations are different: that one is merged into an
+  // environment, this one becomes a header on `providers/set` and must never
+  // reach one — an agent can print its own environment into a transcript.
+  // Through `systemSecretFor` rather than off the store, so this and the
+  // `keySet` on `GET /systems` cannot come to disagree about whether a key
+  // exists — the disagreement being a pairing the picker offers and the start
+  // refuses.
+  systemSecret: (system) =>
+    systemSecretFor(
+      system,
+      stores.systemCredentials.get(system),
+      (agent: AgentId) => stores.credentials.envFor(agent),
+      contributions,
+    ),
+  // What this machine offers beyond what this repository ships. Read at every
+  // launch through the object rather than captured as a list, so a plugin
+  // installed while a session slept is offering its harness by the time that
+  // session resumes.
+  machine: contributions,
   // Nothing in src/ prints. A login that cannot be driven is the one an operator
   // most needs to hear about, because the button for it is on a screen.
   onWarning: (detail: string) => console.error(`runtime: ${detail}`),
@@ -413,6 +477,36 @@ const registry = new SessionRegistry(
   // and `agentLogins`' above, for the same reason — nothing in `src/` prints.
   (detail: string) => console.error(`session: ${detail}`),
 );
+/*
+ * How an assembled agent's id becomes a harness, a system and a model.
+ *
+ * ⚠ **Before `restore()`, and that ordering is the whole reason the registry
+ * takes a setter rather than a constructor argument.** `restore()` rebuilds every
+ * persisted session, and a session started as "Claude Code on Kimi K2" that came
+ * back before this was set would resume on a bare harness — same conversation,
+ * different vendor, nothing on screen saying so.
+ *
+ * Read at every launch rather than snapshotted, so editing a preset changes what
+ * its sessions come back as without a daemon restart.
+ *
+ * ⚠ **The whole row goes back, the harness included, and the harness is the one
+ * field nothing downstream *uses*.** `PATCH /custom-agents/:id` accepts a change
+ * of harness and weighs it against the body it was handed, which says nothing
+ * about the sessions already running on that preset; a session's own harness is
+ * immutable, because the agent process is spawned from it. So
+ * `ManagedSession.assembled` compares the two and falls back to the bare harness
+ * when they disagree, and it can only do that if this hands it the harness to
+ * compare.
+ */
+/*
+ * Before `restore()`, for `setCustomAgents`' reason and a stronger one — see
+ * {@link contributions}, which is where the argument is written out.
+ */
+registry.setMachineCatalogue(contributions);
+registry.setCustomAgents((id) => {
+  const one = stores.customAgents.get(id);
+  return one === null ? null : { harness: one.harness, system: one.system, model: one.model };
+});
 // Before the server serves, and only ever after openStores claimed the daemon
 // lock: the orphan reaping in here would otherwise SIGKILL a live daemon's agents.
 const restored = registry.restore({ reapOrphans: process.env["REEMOAT_REAP_ORPHANS"] !== "0" });
@@ -486,7 +580,7 @@ registry.setSessionLimits({
  * start must not hold up a boot `deploy.sh` is polling `/health` for.
  */
 let pluginHost: PluginHost | null = null;
-if (process.env["REEMOAT_PLUGINS"] !== "0") {
+if (pluginsEnabled) {
   try {
     pluginHost = await PluginHost.open({
       root: pluginRoot,
@@ -500,6 +594,38 @@ if (process.env["REEMOAT_PLUGINS"] !== "0") {
         ask: agentAsks,
       },
       onWarning: (detail: string) => console.error(`plugins: ${detail}`),
+      // Kept current from here on: every install, update, remove and enable runs
+      // under the host's own single-writer gate, so this is the only thing that
+      // ever writes to the object built above.
+      contributions,
+      /*
+       * Where an uninstalled plugin's secrets are swept from. Both tables, because
+       * a contributed harness's pasted key and a contributed provider's key are
+       * the same namespaced id in two different stores, and neither is touched by
+       * `prune()`.
+       */
+      secrets: {
+        /*
+         * Swept off the *stores* rather than off the manifest, which is the
+         * difference between removing what a version declared and removing what is
+         * actually there. Two rows this cannot miss and a manifest-driven sweep
+         * would: a slot an earlier release of the plugin declared and this one does
+         * not, and every row belonging to a plugin whose manifest this build cannot
+         * re-validate at all — which is exactly the row `doRemove` is reachable for.
+         *
+         * ⚠ **`systemCredentials.list()` and not a key-by-key guess**, because that
+         * listing is itself shape-validated: a contributed id survives it, which is
+         * what makes this reachable at all.
+         */
+        forgetPrefix: (prefix) => {
+          for (const row of stores.credentials.list()) {
+            if (row.agent.startsWith(prefix)) stores.credentials.remove(row.agent, row.envName);
+          }
+          for (const row of stores.systemCredentials.list()) {
+            if (row.system.startsWith(prefix)) stores.systemCredentials.remove(row.system);
+          }
+        },
+      },
     });
   } catch (error) {
     // Not fatal, and deliberately so: a plugin root that cannot be made is a
@@ -517,6 +643,12 @@ const { app, injectWebSocket } = createApp({
   maxChangedFiles: positiveInt(process.env["REEMOAT_CHANGES_MAX_FILES"]),
   maxDiffBytes: positiveInt(process.env["REEMOAT_DIFF_MAX_BYTES"]),
   credentials: stores.credentials,
+  systems: {
+    credentials: stores.systemCredentials,
+    customAgents: stores.customAgents,
+    strip: stores.agentStrip,
+  },
+  asks: agentAsks,
   logins: agentLogins,
   uploads,
   roots,

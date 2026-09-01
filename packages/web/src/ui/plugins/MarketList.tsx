@@ -1,10 +1,11 @@
 import { ChevronRight, Puzzle, Search } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { CATALOGUE_PATHS, catalogueNotice, fetchCatalogue, readCatalogue, type CatalogueEntry, type CatalogueRead } from "../../catalogue";
+import { installedSummary } from "../../install";
 import { navigate } from "../../router";
 import { groupCatalogue, marketEntryPath } from "../../market";
 import type { AppState } from "../../store";
-import { Badge, Empty, Icon, SEARCH_FIELD, SETTINGS_HEADING, Spinner } from "../bits";
+import { Badge, Button, Empty, Icon, SEARCH_FIELD, SETTINGS_HEADING, Spinner } from "../bits";
 
 /**
  * The official plugins, as a list.
@@ -17,7 +18,16 @@ import { Badge, Empty, Icon, SEARCH_FIELD, SETTINGS_HEADING, Spinner } from "../
  * all drawn, each with its own sentence, by `catalogueNotice`.
  */
 export function MarketList({ state, base }: { state: AppState; base: string }): ReactNode {
-  const read = useCatalogue(base, CATALOGUE_PATHS.list, readCatalogue);
+  /*
+   * ⚠ **A counter rather than a `refetch()` handed back by the hook, because the
+   * effect already owns the read.** {@link useCatalogue} holds a late-write gate
+   * over exactly one in-flight request; a second entry point would need its own,
+   * and two of them is how an answer for the previous attempt lands under the
+   * current one. Bumping a dependency re-runs the effect the hook already has,
+   * with the gate it already has.
+   */
+  const [attempt, setAttempt] = useState(0);
+  const read = useCatalogue(base, CATALOGUE_PATHS.list, readCatalogue, attempt);
 
   if (read === null) {
     return (
@@ -27,7 +37,37 @@ export function MarketList({ state, base }: { state: AppState; base: string }): 
     );
   }
   const notice = catalogueNotice(read);
-  if (read.kind !== "ok" || read.entries.length === 0) return <Empty>{notice}</Empty>;
+  if (read.kind !== "ok" || read.entries.length === 0) {
+    /*
+     * ⚠ **A catalogue that did not come back is not an empty one, and this drew
+     * them identically.** Both were a grey centred sentence — and because `Found`
+     * is what mounts the search box, a failed read took the *only control on the
+     * tab* with it: the Market tab became one grey line with nothing on it to
+     * press, on a state that is very often a phone that dropped to LTE for a
+     * second. `Empty`'s failure variant is the partition said out loud — the
+     * triangle, `text-fg`, and a live region — and the retry is the control that
+     * came back.
+     *
+     * ⚠ **`too_new` is not one of them.** An answer *did* come back and this build
+     * refused to read it; pressing Try again fetches the same document and refuses
+     * it again, which is a button that does nothing about a sentence that already
+     * names the remedy (somebody deploys the control plane). The partition
+     * `Empty` documents is absence against failure, and a settled refusal is an
+     * answer.
+     */
+    const failed = read.kind === "unreachable" || read.kind === "malformed";
+    return (
+      <Empty
+        failed={failed}
+        /* Default `md`, not `sm`: `BUTTON_SIZE` reserves the short one for a
+           confirmation that has replaced the controls on a row and therefore has
+           nothing adjacent to mis-hit. This is the only control on the tab. */
+        action={failed ? <Button onClick={() => setAttempt((one) => one + 1)}>Try again</Button> : undefined}
+      >
+        {notice}
+      </Empty>
+    );
+  }
   return <Found entries={read.entries} state={state} />;
 }
 
@@ -72,9 +112,17 @@ function Found({ entries, state }: { entries: readonly CatalogueEntry[]; state: 
       </div>
 
       {found === 0 ? (
-        // Says what was searched rather than "no results": on a catalogue of a
-        // handful, the useful answer is that this word matched none of them.
-        <Empty>Nothing here is called {JSON.stringify(query.trim())}.</Empty>
+        /*
+         * Says what was searched rather than "no results": on a catalogue of a
+         * handful, the useful answer is that this word matched none of them.
+         *
+         * ⚠ **Real quotation marks, never `JSON.stringify`.** `install.ts` names
+         * this as the defect it declined to copy into `noRowsText` one screen over:
+         * a serialiser is right by accident for every ordinary query and shows
+         * somebody their own input escaped the moment it holds a quote or a
+         * backslash. The two sentences now quote the same way.
+         */
+        <Empty>{`Nothing here is called \u201c${query.trim()}\u201d.`}</Empty>
       ) : (
         groups.map((group) => (
           <section key={group.name} className="mt-4 first:mt-3">
@@ -114,18 +162,17 @@ function Found({ entries, state }: { entries: readonly CatalogueEntry[]; state: 
  */
 function MarketRow({ entry, state }: { entry: CatalogueEntry; state: AppState }): ReactNode {
   /*
-   * How much of the fleet already has it, counted here rather than fetched: the
-   * store already holds every machine's plugin list for the rail's launcher, so
-   * this is a read of something on screen elsewhere rather than a second source.
+   * Where it already is, read here rather than fetched: the store already holds
+   * every machine's plugin list for the rail's launcher, so this is a read of
+   * something on screen elsewhere rather than a second source.
    *
-   * The count is the honest form of the answer, and "installed" alone would not
-   * be: a plugin is installed on a *machine*, and somebody with three machines
-   * and one install needs to be told that rather than left to assume.
+   * ⚠ **`state.machines` is walked rather than the map's keys**, `gather`'s reason
+   * one file over: a plugin sitting on a machine that has dropped out of the grant
+   * list would otherwise be counted under a host this client has no name for.
    */
-  const on = [...state.pluginsByMachine.values()].filter((plugins) =>
-    plugins.some((plugin) => plugin.id === entry.id),
-  ).length;
-  const total = state.machines.length;
+  const on = state.machines.filter((machine) =>
+    (state.pluginsByMachine.get(machine.id) ?? []).some((plugin) => plugin.id === entry.id),
+  );
 
   return (
     <button
@@ -134,10 +181,33 @@ function MarketRow({ entry, state }: { entry: CatalogueEntry; state: AppState })
     >
       <MarketIcon icon={entry.source.icon} />
       <span className="min-w-0 flex-1">
-        <span className="flex min-w-0 items-center gap-1.5">
+        {/*
+         * ⚠ **`flex-wrap`, which is `InstalledRow`'s shape and is what gives the
+         * name priority.** The name was the only child with `min-w-0`, so it was
+         * the only thing that could yield — a flex item's `min-width` is `auto`
+         * otherwise — and at 390px the plugin's identity truncated to keep a badge
+         * about where it is installed. Wrapping puts the name on the line at its
+         * own width and pushes the version and the badge to the next one, so the
+         * thing being identified is the thing that survives.
+         */}
+        <span className="flex min-w-0 flex-wrap items-baseline gap-x-2">
           <span className="min-w-0 truncate text-sm font-medium">{entry.name}</span>
           <span className="shrink-0 text-xs text-muted">{entry.version}</span>
-          {on > 0 && <Badge tone="strong">{on === total ? "on all machines" : `on ${on} of ${total}`}</Badge>}
+          {/*
+           * ⚠ **`installedSummary`, and it is the same symbol `InstalledRow` calls
+           * for the same fact.** This row spelled it `on 1 of 3` while a row one tab
+           * over said `on laptop` — and `InstalledList`'s own docblock claims the
+           * shared symbol exists precisely so two sentences for one fact cannot
+           * happen. It was true only because this caller had never been wired up.
+           * Names answer the question somebody actually has; a count makes them open
+           * the list to find out which.
+           *
+           * ⚠ **`plain` rather than `strong`.** Where a plugin already is, is a
+           * standing state; the strong tone is for news, which is what
+           * `InstalledRow` spends it on ("0.4.0 available"). At `strong` this was
+           * the boldest thing on a row whose subject is the plugin's name.
+           */}
+          {on.length > 0 && <Badge>{installedSummary(state.machines.length, on.map((one) => one.name))}</Badge>}
         </span>
         {entry.description !== null && (
           <span className="block truncate text-2xs text-muted">{entry.description}</span>
@@ -206,6 +276,18 @@ export function useCatalogue(
   base: string | null,
   path: string,
   read: (raw: unknown) => CatalogueRead,
+  /**
+   * Bump this to ask again.
+   *
+   * ⚠ **A dependency rather than a `refetch` handed back**, so a retry goes
+   * through the one effect that already holds the late-write gate. A second entry
+   * point would need a gate of its own, and two of them is exactly how an answer
+   * for the previous attempt gets drawn under the current one — the failure this
+   * hook exists to prevent, reintroduced by the control added to recover from it.
+   *
+   * Defaults to `0`, so the three callers that never retry are unchanged.
+   */
+  attempt = 0,
 ): CatalogueRead | null {
   const [answer, setAnswer] = useState<CatalogueRead | null>(null);
   useEffect(() => {
@@ -230,6 +312,6 @@ export function useCatalogue(
     // deliberately not a dependency — including it would make this effect a
     // function of an identity nothing here controls.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [base, path]);
+  }, [base, path, attempt]);
   return answer;
 }

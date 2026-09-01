@@ -109,8 +109,11 @@ function gather(state: AppState): Row[] {
  * having them in one place is what stops the two disagreeing.
  *
  * The same row shape the market uses, because it is the same kind of thing: a
- * plugin you tap to open. What differs is only the trailing line, which here says
- * where it actually is rather than how much of the fleet has it.
+ * plugin you tap to open — and the same words for where it is, now that the market
+ * row calls {@link whereText}'s own symbol instead of counting hosts itself. What
+ * differs is which line carries that fact: here it is the subline, because a row
+ * about something already installed has no description to draw there, and the
+ * badge is spent on the one thing that is news — a newer version being available.
  */
 function InstalledRow({ state, row, entry }: { state: AppState; row: Row; entry: CatalogueEntry | null }): ReactNode {
   const versions = [...new Set(row.on.map((one) => one.plugin.version))];
@@ -142,11 +145,14 @@ function InstalledRow({ state, row, entry }: { state: AppState; row: Row; entry:
 /**
  * Which machines have it, in the words the market screen uses for the same fact.
  *
- * `installedSummary` rather than a second phrasing: this row is now the **only**
- * caller — the plugin's own page dropped its summary line when the machine table
- * started answering the same question row by row — and it is kept shared because
- * this list and that table are one tap apart. Two sentences for one fact is how
- * they come to disagree about a fleet of one.
+ * `installedSummary` rather than a second phrasing, and ⚠ **this is no longer the
+ * only caller — which is the point, and for a while it was not true.** The
+ * docblock here claimed the symbol was kept shared "because this list and that
+ * table are one tap apart" while the market's own row, one tab away, counted hosts
+ * itself and drew `on 1 of 3` beside this row's `on laptop`. Two sentences for one
+ * fact, with a shared symbol sitting between them that one of the two never
+ * called. `MarketRow` calls it now, so the claim is enforced by a call rather than
+ * by a comment.
  */
 function whereText(state: AppState, row: Row): string {
   return installedSummary(
@@ -267,9 +273,14 @@ function ImportPlugin({ state }: { state: AppState }): ReactNode {
            * ordinary Install below — see {@link unread}. Inside the card rather
            * than in the row below, because from here it reaches a whole fleet: the
            * sentence it is buying past should be the thing directly above it.
+           *
+           * `mt-3` is the gap the market's own unverified-pin card leaves under the
+           * same sentence. `ConsentDoubt` is the shared box but the press is the
+           * caller's, so the spacing has to be stated at both ends or the two cards
+           * come apart by 12px on the one property they exist to keep equal.
            */}
           {!unread && (
-            <DangerButton icon={Upload} onClick={() => setUnread(true)}>
+            <DangerButton icon={Upload} className="mt-3" onClick={() => setUnread(true)}>
               Install without reading it
             </DangerButton>
           )}

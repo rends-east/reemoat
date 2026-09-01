@@ -65,8 +65,25 @@
  * all: the field is optional and an older daemon ignores it, which means the
  * naming quietly runs on the agent's default — worth knowing, and not worth
  * refusing an install over.
+ *
+ * **v5 added a *contribution point* — {@link PluginContributions.harnesses} and
+ * {@link PluginContributions.systems} — and that is a fourth rung shape.** It
+ * looks like v2's (new fields on an existing object) and behaves like v3's, for a
+ * reason worth writing down because the wrong reading ships a plugin that does
+ * nothing. `readContributions` reads the keys it knows and ignores the rest, so
+ * an older daemon takes a manifest declaring `4` with a `harnesses` block,
+ * installs it cleanly, starts it, and contributes **nothing** — and unlike a lost
+ * `refreshMs` there is no degraded version of the feature left over, because the
+ * whole plugin *is* the harness. There is no "can live without it" case, so
+ * declaring `5` is not the author's choice the way `2` was.
+ *
+ * ⚠ Which is why the refusal is not left to the version number alone:
+ * `readContributions` takes `api` and refuses both blocks below 5 outright. That
+ * works for v3's reason — {@link negotiatePluginApi} runs *above* the point where
+ * `contributes` is read — and it is what turns "installed and inert" into a
+ * sentence naming the machine.
  */
-export const PLUGIN_API_VERSION = 4;
+export const PLUGIN_API_VERSION = 5;
 
 /** The oldest `api` an install still accepts. See {@link PLUGIN_API_VERSION}. */
 export const PLUGIN_API_MIN_VERSION = 1;
@@ -105,7 +122,15 @@ export function negotiatePluginApi(declared: number): PluginApiVerdict {
  * catches the mistake rather than the attacker. `SECURITY.md` says so in those
  * words, and this comment exists so nobody restores the stronger claim.
  */
-export type PluginScope = "sessions.read" | "sessions.write" | "files.read" | "store" | "net" | "model";
+export type PluginScope =
+  | "sessions.read"
+  | "sessions.write"
+  | "files.read"
+  | "store"
+  | "net"
+  | "model"
+  | "harness"
+  | "system";
 
 export const PLUGIN_SCOPES: readonly PluginScope[] = [
   "sessions.read",
@@ -133,6 +158,31 @@ export const PLUGIN_SCOPES: readonly PluginScope[] = [
    * prevent.
    */
   "model",
+  /*
+   * ⚠ **The two scopes that gate nothing at call time, and they are here anyway.**
+   * Every other member of this union answers a `SCOPE_OF` lookup when a plugin
+   * calls a method. These two answer nothing: a harness and a system are
+   * *declarations*, validated once at install and then read by this daemon rather
+   * than by the plugin. `SCOPE_OF` does not grow.
+   *
+   * They are scopes because this list is the sentence somebody reads before
+   * agreeing, and these are the two largest things in the table to agree to — one
+   * puts a program of the author's choosing on this daemon's spawn path as the
+   * machine's owner, and the other decides which host the operator's own pasted
+   * key is sent to. A capability that exists only in a form this system can hide
+   * is the one thing `SECURITY.md` says the table exists to prevent, and a
+   * contribution disclosed only under `contributes` would be exactly that:
+   * `contributes.hooks` is already listed *beside* the scopes rather than under
+   * the contributions, for this reason and no other.
+   *
+   * They also degrade in the direction that matters. A browser older than the
+   * daemon draws no row for a contributed harness — its `PLUGIN_SCOPE_TEXT` mirror
+   * falls through to the raw identifier — so it says `harness` rather than nothing
+   * at all. That is not sufficient on its own; see `consentGap`, which is what
+   * makes an old client safe. It is worth having anyway.
+   */
+  "harness",
+  "system",
 ];
 
 /*
@@ -185,7 +235,149 @@ export interface PluginAction {
 }
 
 /**
- * The four places a plugin may appear, and there are no others.
+ * A harness a plugin adds to this machine: an ACP program and how to run it.
+ *
+ * ⚠ **Declarative, and that is the whole of it — no plugin code runs for this.**
+ * What a harness needs from a manifest is the same handful of facts
+ * `resolveAgent` writes down for each of the four built-ins, and nothing about
+ * `Session.start` learns that a plugin supplied them. So this is a table row
+ * somebody else wrote, not an extension point with a callback behind it.
+ *
+ * ⚠ **It adds no authority the plugin did not already hold.** A plugin is a child
+ * process running as this uid and can `import("node:child_process")` — the scope
+ * table has said so since it existed. What declaring a harness buys is that the
+ * program is *named*, shown on the consent screen before anything is installed,
+ * bounded by this daemon's own spawn discipline, and switched off with the
+ * plugin. That is `manifest.scopes`' standing exactly: it catches the mistake
+ * rather than the attacker.
+ *
+ * ⚠ **There is no sign-in flow here and that is deliberate rather than missing.**
+ * `AGENT_LOGIN`'s row carries a login argv, a logout argv, a status probe with
+ * two patterns and a stream, and a credential path — and every one of those is a
+ * *measurement about a CLI* that this repository cannot take on somebody else's
+ * behalf (Q7.31's whole finding). A manifest-supplied status pattern would also
+ * be a regex from an archive, run on the event loop that serves every session:
+ * the hazard `pattern` was already dropped from elicitations for. So a contributed
+ * harness is opencode's shape — `hasLoginFlow` false, stance `no_login`, a paste
+ * box and no button — which is a shipped, measured configuration rather than a
+ * degraded one.
+ */
+export interface HarnessContribution {
+  /** Local; the effective id this daemon uses is `<pluginId>:<id>`. */
+  id: string;
+  /**
+   * What screens call it.
+   *
+   * ⚠ **A label, and deliberately not the daemon's `displayName`.** That string is
+   * a log line — `Claude (claude-agent-acp)`, `Kimi Code CLI` — and the client's
+   * own rule forbids a label naming a package or ending in `CLI`. This is the one
+   * that goes on a 96px tile.
+   */
+  name: string;
+  /**
+   * The program, as a bare name resolved on `PATH`.
+   *
+   * ⚠ **A name and never a path.** `findOnPath` already memoises the walk and
+   * already reports "not installed" the way the four built-ins do, and a path from
+   * a manifest would be a synchronous `accessSync` against a location this daemon
+   * did not create — which `files-paths-git.md` forbids for a reason that is about
+   * a stalled mount blocking every session, not about trust.
+   */
+  command: string;
+  args: readonly string[];
+  /**
+   * Which variables a pasted credential for this harness is written to.
+   *
+   * The paste box on its settings card, and the whole of what a contributed
+   * harness offers in place of a wizard.
+   */
+  envNames: readonly string[];
+  /*
+   * `standalone` used to sit here, and it is gone rather than defaulted.
+   *
+   * ⚠ **A plugin adds a harness and a provider. It does not add an *agent*.** The
+   * field let a manifest claim its harness was a whole answer by itself, which is
+   * the one claim in this block nothing here can check: `startsBare`'s subject is
+   * the **model**, and a harness this repository has never run cannot be known to
+   * be its own. Spelling the default as "no tile" made the wrong answer merely
+   * rarer rather than unsayable — an author writes `true`, and a session is billed
+   * to the operator on a model no tile names.
+   *
+   * So a contributed harness is opencode's shape all the way down: it is a harness
+   * everywhere a harness is named — the builder offers it, `POST /sessions`
+   * accepts it, its settings card shows its credential slots — and what it needs
+   * first is a model, which is two taps away. An agent built on it is something a
+   * person assembled and named, which is the only way an agent has ever been made
+   * here.
+   *
+   * A manifest still carrying the key installs unchanged; the key is simply not
+   * read. Removing it owes no rung, because rung 5 has not shipped in a release.
+   */
+  /**
+   * Variable names this harness reads a *routed* model id from, each set to the id.
+   *
+   * Empty means this harness cannot be pointed at another system's model at all,
+   * which `hostable` folds in as a refusal rather than letting a session start and
+   * quietly run the endpoint's default — the failure with no symptom that
+   * `ROUTED_MODEL_ENV` exists to prevent.
+   *
+   * ⚠ **Names, never a template.** claude's arm sets two variables to the same
+   * string and nothing else; a substitution language here would be a second thing
+   * to get wrong for a case no CLI has.
+   */
+  routedModelEnv: readonly string[];
+  /** What to say when this harness refuses a session. `null` for nothing to add. */
+  authHint: string | null;
+}
+
+/**
+ * A system a plugin adds to this machine: who serves a model, and how to reach it.
+ *
+ * The mirror of a `SYSTEMS` row, written by somebody else. `contributions.ts` is
+ * what turns one of these into that row; this shape exists here because it crosses
+ * to the browser, which draws the consent for it.
+ *
+ * ⚠ **This is the field that moved a stated security property, and the honest
+ * statement is in `agent-systems.md` rather than here.** A base URL still never
+ * arrives on a *request*: it arrives in a `plugin.json`, inside an archive fetched
+ * from one hardcoded host at a full 40-hex commit, after a person read the origin
+ * on a screen and pressed a named button about it, and it is fixed for the life of
+ * that install. What changed is that the set of hosts this daemon can be pointed at
+ * is no longer a compile-time constant of this repository.
+ */
+export interface SystemContribution {
+  /** Local; the effective id is `<pluginId>:<id>`. */
+  id: string;
+  name: string;
+  /** The wire shape, and it is the closed pair rather than ACP's open union. */
+  apiType: "anthropic" | "openai";
+  /**
+   * Where a *routed* session's traffic goes, or `null` for native-only.
+   *
+   * `null` is the `zen` row's shape and is the safest thing a plugin can declare:
+   * nothing is sent anywhere by this daemon, and the credential is the harness's
+   * own. A row with `null` here must name a `nativeHarness`, or its key box would
+   * accept a secret and never spend it.
+   */
+  baseUrl: string | null;
+  authHeader: { name: string; prefix: string } | null;
+  models: readonly { id: string; name: string }[];
+  /**
+   * The harness that reaches this natively, or `null`.
+   *
+   * ⚠ **Only ever one this same plugin contributes.** Naming a built-in would let a
+   * manifest put *"Sign in to Claude Code"* under a heading its author chose, and —
+   * through `nativeModelPrefix` — assert that two model lists are the same models,
+   * which is the equivalence Q3.488 refuses to make without evidence.
+   */
+  nativeHarness: string | null;
+  loginVia: string | null;
+  nativeModelPrefix: string | null;
+  keyEnv: string | null;
+}
+
+/**
+ * The six places a plugin may appear, and there are no others.
  *
  * Closed deliberately. The web client is shaped around one question — *does
  * anything anywhere need me* — and the signals that answer it are computed by
@@ -193,6 +385,15 @@ export interface PluginAction {
  * the session list would open a hole in a property nothing else can see. A
  * transcript card and a slash command are both recorded non-goals with their
  * seams named rather than half-built here.
+ *
+ * ⚠ **The last two were four for three releases, and widening the set did not
+ * weaken the argument — it tested it.** `waitingFloor` subtracts over the *session
+ * list*, and neither a harness nor a system puts a row in one: what they add is an
+ * entry to a picker and a row to a settings screen, both of which are lists of
+ * things this machine can do rather than lists of things waiting for somebody.
+ * They are also the two that are not *drawn* by a plugin at all — the daemon reads
+ * them and answers its own routes with them — which is why `PluginView`'s
+ * vocabulary did not have to grow by one block.
  */
 export interface PluginContributions {
   /** A full screen, reached at `/p/:machineId/:pluginId`. `null` for no screen. */
@@ -201,6 +402,10 @@ export interface PluginContributions {
   settings: boolean;
   actions: readonly PluginAction[];
   hooks: readonly PluginHook[];
+  /** Harnesses this plugin adds. Empty unless `scopes` holds `harness`. */
+  harnesses: readonly HarnessContribution[];
+  /** Systems this plugin adds. Empty unless `scopes` holds `system`. */
+  systems: readonly SystemContribution[];
 }
 
 /** A plugin's `plugin.json`, after validation. Never the raw parse. */

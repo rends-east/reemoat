@@ -15,8 +15,15 @@ import { describe, missingRowReason } from "../machine";
 import { displayCwd, downloadablePath, relativeTo } from "../paths";
 import { navigate } from "../router";
 import { settingsPath } from "../settings";
-import { store, type AppState, type SessionRow } from "../store";
-import { humanRequests, mayStillReport, showsWorking, waitingCount, type SessionSnapshot } from "../wire";
+import { elapsedSince, store, type AppState, type SessionRow } from "../store";
+import {
+  humanRequests,
+  isBuiltinAgentId,
+  mayStillReport,
+  showsWorking,
+  waitingCount,
+  type SessionSnapshot,
+} from "../wire";
 import { agentLabel } from "./agentCard";
 import { Composer } from "./Composer";
 import { EventList } from "./EventList";
@@ -148,6 +155,43 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
 
   const session = row.snapshot;
   const stream = transcript?.stream ?? null;
+  /**
+   * Two questions about one socket, and for one release they were one boolean.
+   *
+   * `reconnecting` is the **banner's**: should this screen announce that the socket
+   * dropped? `waiting` and not `!== "live"`, because `connecting` is the first
+   * attempt and the ordinary state of a session opening — announcing a reconnection
+   * for it would put a banner on every navigation. That argument stands, and
+   * nothing below takes it back.
+   *
+   * ⚠ **`stale` is the transcript foot's question, and this block used to assert
+   * the two were "the same fact" and hand the banner's answer to both.** They are
+   * not: the banner asks *should I announce this*, the foot asks *is what I am
+   * drawing still checkable*. Answering the second with `waiting` left the freeze
+   * with a hole on every single retry. `retryLater` sets `waiting`, arms a timer,
+   * and that timer calls `connect()`, which sets `connecting` before it has so much
+   * as a token — and nothing in `stream.ts` bounds a handshake, so a socket opening
+   * into a network that is gone sits in `connecting` for however long the browser
+   * leaves it pending. The phase therefore loops `waiting → connecting → waiting`
+   * for as long as the network is down, and for the whole of every attempt the foot
+   * went back to blinking `working…` about an agent nobody had heard from, with the
+   * elapsed number reappearing several seconds larger than when it left. The freeze
+   * held only in the gaps between tries.
+   *
+   * `stream === null` is the half that was never covered at all: `primeBlocked`
+   * builds a transcript for a blocked session straight off the list poll, and
+   * `openSession` declines to open a socket for a machine with no connection — so a
+   * foot with nothing behind it asserted work outright.
+   *
+   * So the foot takes **not live**, which is every state in which nothing is
+   * telling this client what the session is doing. It is paid for in the one place
+   * it can be: a session opening on a healthy network reads `last seen working` for
+   * the length of one handshake. That is the trade the banner declines and the foot
+   * has to take — an announcement can afford to wait until it is sure, a claim
+   * about *now* cannot.
+   */
+  const reconnecting = stream?.phase === "waiting";
+  const stale = stream === null || stream.phase !== "live";
 
   return (
     /* `flex-1` and not `h-full`: this stretches inside `AppShell`'s `main`
@@ -255,6 +299,35 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
       </Header>
 
       {/*
+        ⚠ **Both banners sit above the conversation region rather than inside it,
+        and that is a fix rather than a tidy-up.**
+
+        They were the last in-flow children of the region below, which is the region
+        the ask card covers with `absolute inset-0`. The card is drawn last and its
+        own comment said so outright — *"Last, so both paint over everything in this
+        region"* — so a parked permission painted over the one sentence saying the
+        socket was gone, and a tall one (`max-h-[min(88dvh,100%)]`, clamped to the
+        region) covered the exit notice with it. The state that produced it is not
+        exotic: a phone drops to LTE while an approval is waiting, which is most of
+        why this app exists.
+
+        Above the region they are outside the card's bounds by construction rather
+        than by z-order, and the card's `inset-0` keeps meaning exactly what
+        `AskCard` argues it means. They are already `COLUMN`-width banners — the
+        shape a thing that spans the conversation has — so nothing about them had to
+        change to move. What they cost is the region's height, which is the honest
+        price: the card gets a shorter box, and `Transcript`'s `ResizeObserver`
+        already exists for banners appearing from nowhere and still names them.
+      */}
+      {reconnecting && (
+        <p className={`${COLUMN} px-4 py-1 text-center text-2xs text-muted`}>
+          reconnecting{stream.error === null ? "" : ` — ${stream.error}`}
+        </p>
+      )}
+
+      <ExitNotice row={row} machineName={row.machineName} />
+
+      {/*
         `relative`, and this is what scopes the ask card.
         The card's frame is `absolute inset-0` inside here with `justify-end`, so
         it floats at the foot of the conversation — over the last few lines of
@@ -272,19 +345,12 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
         knowledge of how tall the composer currently is.
       */}
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <Transcript sessionRef={sessionRef} state={state} tailRequest={tailRequest} />
-
-        {stream?.phase === "waiting" && (
-          <p className={`${COLUMN} px-4 py-1 text-center text-2xs text-muted`}>
-            reconnecting{stream.error === null ? "" : ` — ${stream.error}`}
-          </p>
-        )}
-
-        <ExitNotice row={row} machineName={row.machineName} />
+        <Transcript sessionRef={sessionRef} state={state} tailRequest={tailRequest} stale={stale} />
 
         {/*
-          Last, so both paint over everything in this region, and out of flow so
-          they move none of it. One slot for both, because from here they are the
+          Last, so it paints over everything left in this region — which is the
+          transcript, and now only the transcript. Out of flow, so it moves none of
+          it. One slot for both kinds of request, because from here they are the
           same fact — the agent is waiting on you — and `AskCard` is the one shape
           they get.
 
@@ -304,26 +370,44 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
           just as wrong: `details` expanded on one request stayed expanded on the
           next, which the comment on that state says it must not.
         */}
+        {/*
+          ⚠ **The permission card is drawn from the snapshot, and it used to be
+          gated on `transcript !== undefined`.**
+
+          The elicitation card beside it never was, which is the tell: one of the
+          two was wrong and it was not the one with no gate. A transcript is created
+          by `openSession`, which returns *before* creating one when the machine has
+          no connection — so a session the rail is drawing as WAITING ON YOU, with a
+          semibold title and a ringed dot, opened to a conversation and no card, no
+          buttons and no sentence saying why. The request is in the snapshot the
+          list poll already delivered; the transcript is only where the card looks
+          for *context*.
+
+          `?? []` is the whole change, because the card already handles an empty
+          window and says so in words: `permissionContext` answers `unavailable`,
+          the `Context` arm draws "No command or diff is available for this request",
+          and the effect beside it calls `loadAll` — so the card fetches its own
+          explanation and fills in the moment it lands. Approving with no context is
+          a decision somebody can decline to make; being shown nothing at all is not.
+        */}
         {asking !== undefined &&
-          (asking.kind === "permission"
-            ? transcript !== undefined && (
-                <PermissionCard
-                  key={asking.permission.permissionId}
-                  sessionRef={sessionRef}
-                  pending={asking.permission}
-                  events={transcript.events}
-                  agent={session.agent}
-                  more={waitingCount(session) - 1}
-                />
-              )
-            : (
-                <ElicitationCard
-                  key={asking.elicitation.elicitationId}
-                  sessionRef={sessionRef}
-                  pending={asking.elicitation}
-                  more={waitingCount(session) - 1}
-                />
-              ))}
+          (asking.kind === "permission" ? (
+            <PermissionCard
+              key={asking.permission.permissionId}
+              sessionRef={sessionRef}
+              pending={asking.permission}
+              events={transcript?.events ?? []}
+              agent={session.agent}
+              more={waitingCount(session) - 1}
+            />
+          ) : (
+            <ElicitationCard
+              key={asking.elicitation.elicitationId}
+              sessionRef={sessionRef}
+              pending={asking.elicitation}
+              more={waitingCount(session) - 1}
+            />
+          ))}
       </div>
 
       <Composer
@@ -408,7 +492,12 @@ function SessionTitle({
  * afterwards it is just a fact, and a short one.
  */
 /**
- * Why this session is not running, in one line under the transcript.
+ * Why this session is not running, in one line **above** the transcript.
+ *
+ * It was under it, as the last in-flow child of the region the ask card covers —
+ * so a parked permission painted over the sentence, which is argued at the call
+ * site. A banner and a conversation are two different things and only one of them
+ * scrolls.
  *
  * Three states and one rule about each, all decided by `sessionNotice` so the
  * copy is assertable with no DOM. The one worth knowing when reading this: a
@@ -452,10 +541,39 @@ function ExitNotice({ row, machineName }: { row: SessionRow; machineName: string
       {notice.action === "sign_in" && (
         <button
           type="button"
-          onClick={() => navigate(settingsPath("machines", row.ref.machineId, row.snapshot.agent))}
+          /*
+           * ⚠ **The machine's systems *list*, not a system named from the agent
+           * id.** This passed `row.snapshot.agent` into the slot that segment used
+           * to be — an agent id — and that slot is a **system** now, so it built
+           * `/settings/machines/:id/systems/claude`, which parses (any id up to 64
+           * characters does, deliberately, so a newer daemon's system stays
+           * reachable) and then asks the daemon about a system called `claude`.
+           *
+           * Mapping the harness to its system is `SYSTEMS[…].nativeHarness`'s
+           * answer and lives on the daemon; this screen would have to fetch
+           * `GET /systems` to build a link. So it goes one level shallower, where
+           * the list names them, rather than guessing — which is the same refusal
+           * `settings.ts` makes for a stale address.
+           */
+          onClick={() => navigate(settingsPath("machines", row.ref.machineId))}
           className="tap rounded border border-edge px-2 py-0.5 text-2xs text-fg hover:bg-raised"
         >
-          Sign in to {agentLabel(row.snapshot.agent)}
+          {/*
+            * ⚠ **The name only where this screen can honestly have one.**
+            * `agentLabel` answers for the four this product ships and falls through
+            * to the raw id for anything else — so a session on a harness a plugin
+            * added would read *"Sign in to acme:gemini"*, which is wrong twice: the
+            * id where a name goes, and a sign-in a contributed harness does not
+            * have. This screen holds a snapshot and no listing, and fetching one to
+            * build a label would be a request on the transcript path.
+            *
+            * So it goes one step shallower, which is the same refusal the docblock
+            * above makes about mapping a harness to its system: the destination is
+            * unchanged and the sentence stops claiming something it cannot check.
+            */}
+          {isBuiltinAgentId(row.snapshot.agent)
+            ? `Sign in to ${agentLabel(row.snapshot.agent)}`
+            : "Open agent settings"}
         </button>
       )}
     </p>
@@ -512,6 +630,7 @@ function Transcript({
   sessionRef,
   state,
   tailRequest,
+  stale,
 }: {
   sessionRef: SessionRef;
   state: AppState;
@@ -526,9 +645,25 @@ function Transcript({
    * as a send.
    */
   tailRequest: number;
+  /**
+   * Nothing is streaming this session, so what is on screen is the last thing that
+   * arrived rather than what is happening — no socket at all, or one whose phase is
+   * not `live`.
+   *
+   * Resolved by `SessionView`, beside the banner's own narrower `reconnecting` and
+   * deliberately wider than it; the whole argument is up there, on the pair. Passed
+   * through to the foot of the transcript, which is the other thing on this screen
+   * that claims the agent is working right now.
+   */
+  stale: boolean;
 }): ReactNode {
   const key = keyOf(sessionRef);
-  const snapshot = state.rowsByKey.get(key)?.snapshot ?? null;
+  /*
+   * The row rather than its snapshot, because an elapsed time is measured against
+   * the *row* — see `turnElapsedMs` below.
+   */
+  const row = state.rowsByKey.get(key) ?? null;
+  const snapshot = row?.snapshot ?? null;
   const root = snapshot?.workspace.root ?? null;
   /** Read here rather than in `EventList`, so what crosses the prop is a value. */
   const working = snapshot !== null && showsWorking(snapshot);
@@ -536,6 +671,22 @@ function Transcript({
   // from it: the state this answers for is the one where the turn has ended and
   // what it delegated has not.
   const reporting = snapshot !== null && mayStillReport(snapshot);
+  const turnStartedAt = snapshot?.turnStartedAt ?? null;
+  /*
+   * How long the running turn has been going — the daemon's own measurement,
+   * extended by however long ago we heard it. `null` when nothing is running.
+   *
+   * ⚠ **`EventList` was handed `turnStartedAt` and subtracted `Date.now()` from
+   * it**, which is precisely the arithmetic `SessionRow` carries `daemonNow` and
+   * `fetchedAt` to prevent: that field is stamped by the daemon, and a phone whose
+   * clock drifted while it slept then reads a turn that started a minute ago as
+   * hours long — or, the other way, prints nothing at all on one that has been
+   * running since breakfast. `elapsedSince` is the single copy of the correct form
+   * and it takes the *row*, not the snapshot, which is why the row is kept above.
+   * The rail ages every session with the same call, so the two screens cannot
+   * disagree about how old anything is.
+   */
+  const turnElapsedMs = row === null || turnStartedAt === null ? null : elapsedSince(row, turnStartedAt);
   const transcript = state.transcripts.get(key);
   /*
    * The message on its way out, from module state rather than from the store.
@@ -844,7 +995,8 @@ function Transcript({
               transcript={transcript}
               working={working}
               reporting={reporting}
-              turnStartedAt={snapshot?.turnStartedAt ?? null}
+              stale={stale}
+              turnElapsedMs={turnElapsedMs}
               onReveal={() => store.revealBeforeClear(sessionRef)}
               onResized={remeasure}
             />
@@ -948,7 +1100,14 @@ function Transcript({
                 : "smooth",
             });
           }}
-          className="tap absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-md border border-edge bg-raised px-3 py-1.5 text-xs shadow-lg"
+          /* `min-h-11`, and the box rather than a grown target for a reason this
+             one control makes obvious: it floats *over* the transcript, so a
+             transparent `::after` reaching past its edge would put its tap area on
+             top of tool cards and download buttons that are themselves aimed at.
+             There is nothing behind a pill that is bigger. 28px before — `text-xs`
+             on `py-1.5` — for the one control whose whole job is being hit from a
+             thumb travelling up a phone. */
+          className="tap absolute bottom-3 left-1/2 flex min-h-11 -translate-x-1/2 items-center gap-1.5 rounded-md border border-edge bg-raised px-3 py-1.5 text-xs shadow-lg"
         >
           <Icon as={ArrowDown} size={12} />
           latest

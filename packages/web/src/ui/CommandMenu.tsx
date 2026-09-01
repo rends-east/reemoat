@@ -1,8 +1,8 @@
 import { Check, SlidersHorizontal } from "lucide-react";
-import { useEffect, useRef, type ReactNode, type RefObject } from "react";
+import { Fragment, useEffect, useRef, type ReactNode, type RefObject } from "react";
 import type { AgentConfigOption } from "../wire";
 import { labelFor } from "./agentConfig";
-import type { ChoiceRow, CommandEntry } from "./commands";
+import { choiceRuns, type ChoiceRow, type CommandEntry } from "./commands";
 import { Icon, MENU_HEADING, MENU_PANEL, menuRow, Spinner } from "./bits";
 
 /**
@@ -119,9 +119,25 @@ export function CommandMenu({
       <div id="composer-command-menu" role="listbox" aria-label={stage === null ? "Commands" : labelFor(stage)}>
       {stage !== null && choices !== null ? (
         <>
-          {choices.map((choice, index) => {
-            const selected = stage.value === choice.value;
-            return (
+          {/*
+           * ⚠ **Grouped where the rows carry a heading, as `role="group"` rather
+           * than as the `<p>` this menu had to move its own heading out of the
+           * listbox to avoid.** The words go on the group's `aria-label` and the
+           * visible copy is `aria-hidden`: one heading, two renderings, neither a
+           * stray node.
+           *
+           * There is something to group only where the **agent** grouped its own
+           * list. A heading derived from opencode's repeated `OpenRouter/` prefix
+           * was drawn here for a release and is gone — see `ChoiceRow.group` — so
+           * in practice every row of every measured agent lands in one unwrapped
+           * run. Kept because the chip's own menu draws the same control the same
+           * way, and the two being drawn differently a keystroke apart is the
+           * defect this pair was reconciled to fix.
+           */}
+          {choiceRuns(choices).map((run) => {
+            const rows = run.items.map(({ choice, index }) => {
+              const selected = stage.value === choice.value;
+              return (
               <button
                 key={choice.value}
                 type="button"
@@ -170,6 +186,17 @@ export function CommandMenu({
                   )}
                 </span>
               </button>
+              );
+            });
+            return run.group === null ? (
+              <Fragment key={`run:${run.items[0]?.index ?? 0}`}>{rows}</Fragment>
+            ) : (
+              <div key={`run:${run.items[0]?.index ?? 0}`} role="group" aria-label={run.group}>
+                <p aria-hidden className="mt-1 px-2 py-0.5 text-2xs text-faint">
+                  {run.group}
+                </p>
+                {rows}
+              </div>
             );
           })}
         </>

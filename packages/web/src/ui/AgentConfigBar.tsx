@@ -13,10 +13,12 @@ import { beginChoice, choicesFor, choicesVersion, endChoice, subscribeChoices } 
 import { LAYER, useDismissible } from "./overlay";
 import { keyOf, type SessionRef } from "../ids";
 import { store } from "../store";
-import type { AgentConfigOption, AgentId, SessionSnapshot, StoredEvent } from "../wire";
+import type { AgentConfigChoice, AgentConfigOption, AgentId, SessionSnapshot, StoredEvent } from "../wire";
 import {
   chipParts,
+  choiceLabel,
   choiceOverride,
+  drawnChoices,
   choiceRefusal,
   configBarShows,
   configProse,
@@ -238,7 +240,73 @@ export function AgentConfigBar({
   useSyncExternalStore(subscribeChoices, choicesVersion);
   const pending = choicesFor(keyOf(sessionRef));
 
-  const { options, stale, unavailable } = controls;
+  const { options: polledOptions, stale, unavailable } = controls;
+
+  /*
+   * ⚠ **The polled snapshot carries a *head* of a long model list, and this is
+   * where the rest is fetched.** `GET /sessions` bounds every option's choices —
+   * sixty records on a four-second poll, over a relay, to a phone, and a keyed
+   * opencode publishes 362 models in one control — and flags what it cut with
+   * `truncated`. `GET /sessions/:id` is not polled and answers complete, so the
+   * moment this bar is asked to draw a cut control it reads the whole thing once
+   * and keeps it.
+   *
+   * Keyed on the session, not on the option: the read is one request for all of
+   * them and re-fetching per control would spend the saving it exists to make. It
+   * runs once per session per mount — a cut list is a property of which agent is
+   * running, and the poll cannot change it without changing the agent.
+   *
+   * **The polled copy is still what draws until this lands**, which is the point:
+   * the head is correct, merely short, and the selected choice is always in it. So
+   * the picker is usable immediately and simply grows, rather than showing a
+   * spinner over a list that is already good enough to read.
+   */
+  const [fullOptions, setFullOptions] = useState<readonly AgentConfigOption[] | null>(null);
+  const sessionKey = keyOf(sessionRef);
+  const anyTruncated = polledOptions.some((one) => one.truncated === true);
+  useEffect(() => {
+    setFullOptions(null);
+  }, [sessionKey]);
+  useEffect(() => {
+    if (!anyTruncated || fullOptions !== null) return;
+    const daemon = store.daemonFor(sessionRef.machineId);
+    if (daemon === undefined) return;
+    let live = true;
+    void daemon
+      .session(sessionRef.sessionId)
+      .then((answer) => {
+        // Nothing is drawn on failure and nothing is said: the head is already on
+        // screen and correct, so the honest cost of not reaching the daemon is a
+        // shorter menu rather than an error over a control that works.
+        if (live) setFullOptions(answer.session.agentConfig?.options ?? null);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [anyTruncated, fullOptions, sessionKey, sessionRef.machineId, sessionRef.sessionId]);
+
+  /*
+   * Merged by id, and only for the controls that were actually cut. Everything
+   * else keeps the polled object by identity — `drawnChoices` memoises on the
+   * `choices` array's identity, so replacing an option that did not change would
+   * throw away that cache on every poll.
+   */
+  const options = useMemo(
+    () =>
+      fullOptions === null
+        ? polledOptions
+        : polledOptions.map((one) => {
+            if (one.truncated !== true) return one;
+            const whole = fullOptions.find((candidate) => candidate.id === one.id);
+            if (whole === undefined) return one;
+            // `value` from the polled copy, never the fetched one: the poll is
+            // newer, and a model changed since this read must not be drawn as
+            // still selected.
+            return { ...whole, value: one.value, truncated: false };
+          }),
+    [polledOptions, fullOptions],
+  );
   const percent = contextPercent(usage);
   // Above the early return because the registration below reads it, and a hook
   // cannot sit under one. Pure, and the same call it was two lines lower.
@@ -766,9 +834,15 @@ function chipInner(option: AgentConfigOption, parts: ChipParts): ReactNode {
  * silence on a phone, where there is no tooltip — so it opens, says its sentence,
  * and sends nothing.
  *
- * The name is always drawn here, whatever `showsCaption` says: that rule drops a
- * caption only where the *value* names the control, and this one's value is a
- * dash.
+ * ⚠ **The name is *not* drawn here for `model` and `thought_level`, and this
+ * docblock said the opposite for four releases.** It was written when the absent
+ * chip drew the control's name where the live one deliberately does not — which
+ * made the chip a word and a gap wider than the one it replaced and shoved the
+ * whole right-hand cluster sideways every time a model dropped the effort levels.
+ * Q3.417 took it out; `chipParts` is called with the same `showsCaption` rule the
+ * live chip uses, and this comment simply never moved. What identifies the chip is
+ * its icon, its position, and its `title`/`aria-label`, which do carry the name;
+ * what opens is a menu headed with it.
  */
 function Absent({ option }: { option: AgentConfigOption }): ReactNode {
   const [open, setOpen] = useState(false);
@@ -863,9 +937,24 @@ function Select({
   const align = slotFor(option) === "left" ? "left-0" : "right-0";
   const [open, setOpen] = useState(false);
   const boxRef = useRef<HTMLDivElement | null>(null);
-  const current = option.choices.find((choice) => choice.value === option.value);
+  const current = drawnChoices(option).find((choice) => choice.value === option.value);
   const currentProse =
     prose?.choices.get(String(option.value)) ?? current?.description ?? null;
+  /*
+   * ⚠ **What the tooltip says when the agent explains nothing**, which used to be
+   * the control's own name and is now the value's.
+   *
+   * `CATEGORY_RESERVE`'s docblock promises that a value too long for the chip
+   * "truncates, with the full text one tap away in the menu **and in the chip's
+   * own `title`**". That was true while a truncated value was rare. opencode
+   * publishes `description: null` on all 362 of its models, so the fallback chain
+   * ran to `labelFor(option)` and the tooltip over a chip reading `Claude Opus 4…`
+   * said, in full, "Model" — the promise inverted exactly where it was needed.
+   *
+   * The control's name is not lost: it is on `aria-label` unconditionally, one
+   * line below, for the reason written there.
+   */
+  const currentName = current === undefined ? null : choiceLabel(option, current);
 
   /*
    * What the chip says its value is.
@@ -930,7 +1019,7 @@ function Select({
         // hover as well as in the open menu.
         title={
           currentProse === null
-            ? (prose?.description ?? option.description ?? labelFor(option))
+            ? (currentName ?? prose?.description ?? option.description ?? labelFor(option))
             : `${labelFor(option)}: ${currentProse}`
         }
         aria-haspopup="listbox"
@@ -1010,7 +1099,19 @@ function ChoiceSection({
   refuses: (option: AgentConfigOption, value: string | boolean) => string | null;
   onChoose: (value: string) => void;
 }): ReactNode {
-  const refusals = option.choices.map((choice) => refuses(option, choice.value));
+  /*
+   * ⚠ **Read once, and everything below reads it** — the refusals, the heading
+   * test and the rows. `drawnChoices` takes a provider prefix every row repeats
+   * out of the names, so opencode's one 362-row control does not spend its width
+   * printing `OpenRouter` 356 times; taking the refusals off `option.choices` and
+   * the rows off this would index one list with the other's positions.
+   *
+   * The heading test below is still here and reads `choice.group` alone: that is
+   * the **agent's** grouping, off the ACP config, and this client no longer
+   * derives one of its own.
+   */
+  const choices = drawnChoices(option);
+  const refusals = choices.map((choice) => refuses(option, choice.value));
   /*
    * **One sentence for the control when it is true of more than one row.**
    *
@@ -1050,9 +1151,25 @@ function ChoiceSection({
           {shared}
         </p>
       )}
-      {option.choices.map((choice, index) => {
-            const heading =
-              choice.group !== null && choice.group !== option.choices[index - 1]?.group;
+      {/*
+        ⚠ **Only reachable when the whole list did not arrive**, which is why it
+        states a fact and names no remedy — this app's standing rule for a refusal,
+        and here there genuinely is none anybody can act on from this panel.
+        `AgentConfigBar` reads the complete control from `GET /sessions/:id` the
+        moment it is handed a cut one, and merges it in with `truncated` cleared;
+        so this line draws in the window before that lands and afterwards only if
+        the machine could not be reached. Saying nothing there would be a menu
+        quietly missing rows — the failure the whole `truncated` flag exists to
+        prevent — and a spinner would be worse, because the rows that *are* here
+        are correct and include the one that is selected.
+      */}
+      {option.truncated === true && (
+        <p className="px-2 pb-1 text-2xs text-muted">
+          Showing the first {choices.length}. The rest of this list has not loaded.
+        </p>
+      )}
+      {choices.map((choice, index) => {
+            const heading = choice.group !== null && choice.group !== choices[index - 1]?.group;
             // The transcript's copy first: the snapshot's is always null for a
             // choice that is not the selected one, because `snapshotConfig` strips
             // prose to keep a sixty-row poll cheap. This is where "Default" says
@@ -1101,7 +1218,7 @@ function ChoiceSection({
                     {/* The same relabelling the chip does, so the menu row and the
                         chip cannot say two different things about one value. */}
                     <span className={`block truncate ${refusal !== null ? "text-muted" : ""}`}>
-                      {rowLabel(option, choice.value) ?? choice.name}
+                      {rowLabel(option, choice)}
                     </span>
                     {/* The refusal takes the second line where there is one to
                         take: what happens if you tap outranks what the value is. */}
@@ -1140,11 +1257,15 @@ function ChoiceSection({
  * menu listing every value with that description printed underneath it. Asking
  * the narrow question narrowly means there is no wrong answer to exclude.
  *
- * `null` means "the agent's own name is fine", which is what the caller falls
- * back to.
+ * **It answers a string now rather than `null` plus a fallback the caller wrote.**
+ * The fallback was `?? choice.name`, and there were three of it — here, in
+ * `chipValue` and in `configChoices` — which is the rule this docblock says lives
+ * in one place, written out in three. `choiceLabel` is that place and it holds the
+ * second rule too: opencode publishes its modes as `build` and `plan` where the
+ * other three agents publish `Build`-shaped names.
  */
-function rowLabel(option: AgentConfigOption, value: string | boolean): string | null {
-  return choiceOverride(option, value)?.label ?? null;
+function rowLabel(option: AgentConfigOption, choice: AgentConfigChoice): string {
+  return choiceLabel(option, choice);
 }
 
 /**

@@ -2,7 +2,14 @@ import { chmodSync, mkdirSync, readFileSync } from "node:fs";
 import { uptime } from "node:os";
 import { dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
-import type { AgentId } from "../acp/agents.js";
+import { isBuiltinAgentId } from "../acp/agents.js";
+import {
+  isBuiltinSystemId,
+  type AgentStripEntry,
+  type CustomAgent,
+  type SystemId,
+} from "../acp/systems.js";
+import { isContributedId } from "../plugins/manifest.js";
 import type { UploadIndex, UploadRow } from "../uploads.js";
 import {
   DEFAULT_MAX_BYTES,
@@ -108,6 +115,7 @@ const EVICT_MAX_ROUNDS = 8;
 const DEFAULT_RETAIN_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_SESSIONS = 200;
 
+
 export interface OpenStoresOptions {
   /** `:memory:` opts out of durability entirely — the old behaviour, on demand. */
   path: string;
@@ -132,6 +140,12 @@ export interface StoreBundle {
   sessions: SqliteSessionStore;
   identity: SqliteIdentityStore;
   credentials: SqliteAgentCredentialStore;
+  /** Keys for the systems a harness can be routed at. */
+  systemCredentials: SqliteSystemCredentialStore;
+  /** The harness+system+model presets somebody named on this machine. */
+  customAgents: SqliteCustomAgentStore;
+  /** Which agents the New session strip offers here, and in what order. */
+  agentStrip: SqliteAgentStripStore;
   uploads: SqliteUploadStore;
   /** What is installed. See `src/plugins/store.ts` for why these are two subjects. */
   plugins: SqlitePluginRecordStore;
@@ -228,7 +242,7 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
   // this build has run against this file".
   stampSchemaVersion(db);
 
-  const sessions = new SqliteSessionStore(db);
+  const sessions = new SqliteSessionStore(db, options.onDegraded);
   const prunedSessions = sessions.prune({
     retainMs: options.retainSessionsMs ?? DEFAULT_RETAIN_MS,
     maxSessions: options.maxSessions ?? DEFAULT_MAX_SESSIONS,
@@ -244,6 +258,9 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
 
   const identity = new SqliteIdentityStore(db);
   const credentials = new SqliteAgentCredentialStore(db);
+  const systemCredentials = new SqliteSystemCredentialStore(db, options.onDegraded);
+  const customAgents = new SqliteCustomAgentStore(db, options.onDegraded);
+  const agentStrip = new SqliteAgentStripStore(db);
   const uploads = new SqliteUploadStore(db);
   const plugins = new SqlitePluginRecordStore(db, options.onDegraded);
   const pluginData = new SqlitePluginDataStore(db);
@@ -254,6 +271,9 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
     sessions,
     identity,
     credentials,
+    systemCredentials,
+    customAgents,
+    agentStrip,
     uploads,
     plugins,
     pluginData,
@@ -398,6 +418,22 @@ function migrate(db: DatabaseSync): void {
   // `SCHEMA_VERSION` does not move, for `resume_gave_up`'s reason above — a
   // nullable column an older daemon never selects is invisible to it.
   if (!hasSession("ultracode")) db.exec("ALTER TABLE sessions ADD COLUMN ultracode INTEGER");
+
+  // Which assembled agent this session was started as, or NULL for one started
+  // on a bare harness — which is every session written before this column.
+  //
+  // ⚠ **`sessions.agent` still holds the harness, and that is what keeps this
+  // change small.** A custom agent names a harness plus a system plus a model;
+  // only the first of those decides which binary `resolveAgent` resolves, which
+  // credentials `signOutSessions` clears, and what a restart relaunches. Storing
+  // the harness where the harness has always been means none of those paths
+  // learn about this column at all.
+  //
+  // It is a *reference*, not a copy of the row: the system and the model are
+  // read back through `custom_agents` at resume, so editing a preset changes
+  // what its sessions come back as. Nullable and never selected by an older
+  // daemon, so `SCHEMA_VERSION` does not move — `resume_gave_up`'s reason.
+  if (!hasSession("custom_agent")) db.exec("ALTER TABLE sessions ADD COLUMN custom_agent TEXT");
 
 
   // The relay fields on `identity`. NULL means "this daemon enrolled with a
@@ -953,7 +989,22 @@ export class SqliteSessionStore implements SessionStore {
   /** Last row written per session, so an unchanged `touchSafe` costs no WAL write. */
   private readonly lastWritten = new Map<string, string>();
 
-  constructor(private readonly db: DatabaseSync) {
+  constructor(
+    private readonly db: DatabaseSync,
+    /**
+     * Where a row this build cannot read gets reported.
+     *
+     * ⚠ **`fromRow` drops rows and said nothing, which is not this file's own
+     * convention.** `SqlitePluginRecordStore` reports the identical class of fact
+     * through this same sink, under a docblock saying "nobody is at the keyboard,
+     * and the alternative is silence". A dropped *session* costs more than a
+     * listing: `registry.restore()` walks `list()`, so the row is never announced,
+     * never marked interrupted, and — the half that is not recoverable — its
+     * recorded agent handle never reaches `runtime.reap`, which is the only reap
+     * in `src/`. An agent that outlived the daemon's death then keeps running.
+     */
+    private readonly onDegraded: ((detail: string) => void) | undefined = undefined,
+  ) {
     // `agent`, `created_at` and the workspace's identity are absent from the DO
     // UPDATE clause on purpose: they are immutable identity, and an upsert that
     // can rewrite them is one that can corrupt a row it was only meant to touch.
@@ -971,13 +1022,13 @@ export class SqliteSessionStore implements SessionStore {
          id, agent, created_at, updated_at, agent_session_id, agent_pid, status, exit_json,
          container_id, agent_pgid, container_started_at,
          turn_counter, last_event_at, perm_seq, perm_salt, resume_gave_up, last_seq, dropped, title, pinned,
-         ultracode,
+         ultracode, custom_agent,
          workspace_json, workspace_mode, workspace_root, workspace_branch, workspace_base
        ) VALUES (
          :id, :agent, :created_at, :updated_at, :agent_session_id, :agent_pid, :status, :exit_json,
          :container_id, :agent_pgid, :container_started_at,
          :turn_counter, :last_event_at, :perm_seq, :perm_salt, :resume_gave_up, :last_seq, :dropped, :title, :pinned,
-         :ultracode,
+         :ultracode, :custom_agent,
          :workspace_json, :workspace_mode, :workspace_root, :workspace_branch, :workspace_base
        )
        ON CONFLICT(id) DO UPDATE SET
@@ -1034,7 +1085,21 @@ export class SqliteSessionStore implements SessionStore {
       const parsed = fromRow(row);
       // A row we cannot parse is a row we cannot honour. Skipping it loses one
       // session; letting it throw would lose every session after it.
-      if (parsed) out.push(parsed);
+      if (parsed) {
+        out.push(parsed);
+        continue;
+      }
+      /*
+       * Said out loud, because the two consequences are not recoverable from a
+       * listing that simply has one fewer row in it: this session is not restored,
+       * and the agent process its row records is never reaped. Named rather than
+       * counted — an operator reading this needs the id to go and look.
+       */
+      this.onDegraded?.(
+        `session ${String(row["id"])} is in the database naming agent ` +
+          `${JSON.stringify(String(row["agent"]))}, which this build does not have: ` +
+          "it will not be restored and its agent process will not be reaped",
+      );
     }
     return out;
   }
@@ -1184,29 +1249,36 @@ export class SqliteSessionStore implements SessionStore {
        */
       this.db.exec("DELETE FROM plugin_data WHERE plugin_id NOT IN (SELECT id FROM plugins)");
       /*
-       * A pasted credential, when there is nothing left here at all.
+       * ⚠ **A pasted credential is deliberately swept by nothing here, and this
+       * is a reversal.** Both credential tables had an age-plus-emptiness sweep;
+       * it is gone, and what is left is the route that put the value there —
+       * `DELETE /agent-auth/:agent` and `DELETE /systems/:system`, plus a paste
+       * that replaces one.
        *
-       * `agent_credentials` had no retention path: the only delete was
-       * `DELETE /agent-auth/:agent`, reachable only while somebody still holds a
-       * working token. So a plaintext OAuth token outlived the last session and
-       * everything else — and this daemon can never be told about a control-plane
-       * revocation, because by design it makes exactly one control-plane request
-       * ever. It is the second recoverable secret in this file after
-       * `identity.tunnel_key`, and unlike that one it arrived from a paste.
+       * The sweep's three stated reasons did not survive being read back:
        *
-       * Both conditions, not either, and both survive the collapse to one person.
-       * Age alone would delete a working credential, since `updated_at` only moves
-       * when a new one is pasted. "No sessions" alone would delete the token of
-       * somebody who pasted it *before* their first session, which is the flow the
-       * Settings screen actually encourages. Together they mean "nothing has run
-       * here in a retention period and there is nothing left", which is the only
-       * state where destroying it is obviously right.
+       *   - *"this daemon can never be told about a revocation"* is true and is
+       *     not addressed by deleting the local copy. A leaked key is with
+       *     whoever took it; revocation happens at the vendor.
+       *   - *"the second recoverable secret in this file"* argues against itself.
+       *     `identity.tunnel_key` is in the same file and there is no `DELETE FROM
+       *     identity` anywhere, so the file holds a live secret regardless — and
+       *     that one lets somebody be this machine on the relay.
+       *   - *"a plaintext token outlived the last session"* couples two unrelated
+       *     lifetimes. How long transcripts are kept is a storage question; how
+       *     long a pasted key lives is "until it is replaced or removed", which is
+       *     what `~/.claude/.credentials.json`, `~/.codex/auth.json` and
+       *     `~/.ssh/id_ed25519` all answer, none of them self-expiring.
+       *
+       * What it cost was concrete. The age clause read `updated_at`, which moves
+       * only on a paste, so it was permanently true of any key in real use and the
+       * rule collapsed to `NOT EXISTS (SELECT 1 FROM sessions)` — eight idle days,
+       * since unpinned sessions age out at seven. A machine put down over a
+       * holiday came back with its tokens gone and nothing on screen saying why.
+       *
+       * The protection here is what it has always been and what the rest of this
+       * file relies on: the 0700 directory and the 0600 file. See Q7.124.
        */
-      this.db
-        .prepare(
-          "DELETE FROM agent_credentials WHERE updated_at < ? AND NOT EXISTS (SELECT 1 FROM sessions)",
-        )
-        .run(cutoff);
       this.db.exec("COMMIT");
       this.reclaim();
       return removed;
@@ -1413,6 +1485,11 @@ function toParams(row: PersistedSession): Record<string, string | number | null>
     // Three-valued, so the same 1/0 conversion with NULL kept as NULL — that is
     // the state, not a missing value: nobody has chosen. See the column.
     ultracode: row.ultracode === null ? null : row.ultracode ? 1 : 0,
+    // Absent from the DO UPDATE above, exactly as `agent` is and for the same
+    // reason: what a session was started as is not something a later touch may
+    // rewrite. Editing the preset changes what it resumes as; it cannot change
+    // which preset it was.
+    custom_agent: row.customAgent,
     workspace_json: JSON.stringify(row.workspace),
     workspace_mode: row.workspace.mode,
     workspace_root: row.workspace.root,
@@ -1495,10 +1572,40 @@ function fromRow(row: Record<string, unknown>): PersistedSession | null {
   try {
     const workspace = JSON.parse(String(row["workspace_json"])) as SessionWorkspace;
     if (typeof workspace?.root !== "string") return null;
+    /*
+     * ⚠ **Validated, where it used to be cast — this is Q7.31's named
+     * precondition and it is reached now.**
+     *
+     * The line was `String(row["agent"]) as AgentId`, while `isAgentId` guarded
+     * the HTTP boundary — so the *only* unchecked door into the union was the
+     * one a restart walks through. A row naming an agent no longer in the union
+     * came back as a well-typed value and failed in `resolveAgent`, at which
+     * point a worktree had already been made. Adding an agent never reached
+     * that; removing or renaming one does, and so does a database written by a
+     * build that knew a fourth.
+     *
+     * Dropped rather than repaired, which is what returning `null` already means
+     * here for a row with no workspace: there is no honest substitute for an
+     * agent, and guessing one would resume somebody's conversation under a
+     * different model.
+     *
+     * ⚠ **Shape, not membership, and the two are not interchangeable here.** A
+     * harness a plugin added passes {@link isContributedId} whether or not that
+     * plugin is currently installed, switched on, or even readable — because this
+     * runs at boot, before anything is on screen, and a membership test would
+     * delete every session on a harness whose plugin somebody switched off an hour
+     * ago. What refuses such a session is `resolveAgent`, at launch, with a
+     * sentence naming the plugin; the conversation is still there when it comes
+     * back. The original rule is untouched for the four this repository ships: a
+     * built-in that is renamed or removed still drops, which is the case Q7.31
+     * named and the only one where there is nothing to come back to.
+     */
+    const agent = String(row["agent"]);
+    if (!isBuiltinAgentId(agent) && !isContributedId(agent)) return null;
     const exitJson = row["exit_json"];
     return {
       id: String(row["id"]),
-      agent: String(row["agent"]) as AgentId,
+      agent,
       createdAt: Number(row["created_at"] ?? 0),
       // `?? null` and not `String(...)`: the column is NULL for every session
       // written before v2, and coercing that would invent an owner named "null".
@@ -1524,6 +1631,8 @@ function fromRow(row: Record<string, unknown>): PersistedSession | null {
       // not have at all, and both mean the same thing here: nobody chose, so
       // this session follows the machine's setting.
       ultracode: row["ultracode"] == null ? null : Number(row["ultracode"]) !== 0,
+      // `== null` covers both NULL and a column an older file does not have.
+      customAgent: row["custom_agent"] == null ? null : String(row["custom_agent"]),
     };
   } catch {
     return null;
@@ -1599,6 +1708,301 @@ export class SqliteAgentCredentialStore {
     this.deleteStmt.run(agent, envName);
   }
 }
+
+/** One system's key, as metadata. The secret itself is never in this shape. */
+export interface SystemCredential {
+  system: SystemId;
+  updatedAt: number;
+}
+
+/**
+ * Keys for the systems a harness can be pointed at.
+ *
+ * ⚠ **`get` exists here where {@link SqliteAgentCredentialStore} deliberately
+ * has no getter, and the asymmetry is the design.** That class refuses one
+ * because the only correct destination for an agent credential is a process
+ * environment, and a `get(agent) -> string` is how it ends up in a response body
+ * instead. A system credential's only correct destination is `providers/set`'s
+ * headers, which is a *value* rather than an environment — so it has to be
+ * readable, and what protects it is that the one caller is `LocalRuntime.
+ * systemSecret` and there is no route that reaches this.
+ *
+ * `list` is what a route may have: metadata, never the secret.
+ */
+export class SqliteSystemCredentialStore {
+  private readonly listStmt: StatementSync;
+  private readonly getStmt: StatementSync;
+  private readonly saveStmt: StatementSync;
+  private readonly deleteStmt: StatementSync;
+  private readonly onDegraded: ((detail: string) => void) | undefined;
+
+  constructor(db: DatabaseSync, onDegraded?: (detail: string) => void) {
+    this.onDegraded = onDegraded;
+    this.listStmt = db.prepare("SELECT system, updated_at FROM system_credentials ORDER BY system");
+    this.getStmt = db.prepare("SELECT secret FROM system_credentials WHERE system = ?");
+    this.saveStmt = db.prepare(
+      "INSERT INTO system_credentials (system, secret, updated_at) VALUES (?, ?, ?) " +
+        "ON CONFLICT(system) DO UPDATE SET secret = excluded.secret, updated_at = excluded.updated_at",
+    );
+    this.deleteStmt = db.prepare("DELETE FROM system_credentials WHERE system = ?");
+  }
+
+  list(): SystemCredential[] {
+    // Validated on the way out for `fromRow`'s reason: the column is plain text
+    // and a row written by a build that knew more systems than this one must not
+    // become a well-typed value naming one this build cannot resolve.
+    return this.listStmt.all().flatMap((row) => {
+      const system = String(row["system"]);
+      // Shape rather than membership, for the reason `readCustomAgent` gives:
+      // a key saved for a provider whose plugin is switched off is still that
+      // person's key, and dropping it from the listing would make the one control
+      // that can delete it disappear at the moment it matters most.
+      if (isBuiltinSystemId(system) || isContributedId(system)) {
+        return [{ system, updatedAt: Number(row["updated_at"] ?? 0) }];
+      }
+      /*
+       * Reported rather than merely dropped, for `SqliteSessionStore.list`'s
+       * reason: "the key disappears from a list" is visible only to somebody who
+       * remembers saving it, and this row is a plaintext secret. `DELETE
+       * /systems/:system` can still remove it — it removes before it validates,
+       * exactly so this state is not a strand — and since Q7.124 that route is the
+       * *only* thing that will: `prune()` names neither credential table, so
+       * nothing ages this row out. The line is what tells an operator it is there.
+       */
+      this.onDegraded?.(
+        `a key is stored for system ${JSON.stringify(system)}, which this build ` +
+          "does not know: it cannot be used, and DELETE /systems/:system will clear it",
+      );
+      return [];
+    });
+  }
+
+  get(system: SystemId): string | null {
+    const row = this.getStmt.get(system);
+    return row === undefined ? null : String(row["secret"]);
+  }
+
+  save(system: SystemId, secret: string): void {
+    this.saveStmt.run(system, secret, Date.now());
+  }
+
+  remove(system: SystemId): void {
+    this.deleteStmt.run(system);
+  }
+}
+
+/**
+ * The agents somebody assembled on this machine.
+ *
+ * ⚠ **Every read validates `harness` and `system`, and a row failing either is
+ * dropped rather than repaired.** Same rule and same reason as `fromRow`: there
+ * is no honest substitute for a harness, and guessing one would start somebody's
+ * session on a different model than its name promises. Dropping is visible — the
+ * preset disappears from a list — where a guess is not.
+ */
+export class SqliteCustomAgentStore {
+  private readonly listStmt: StatementSync;
+  private readonly getStmt: StatementSync;
+  private readonly saveStmt: StatementSync;
+  private readonly deleteStmt: StatementSync;
+  private readonly onDegraded: ((detail: string) => void) | undefined;
+
+  constructor(db: DatabaseSync, onDegraded?: (detail: string) => void) {
+    this.onDegraded = onDegraded;
+    const columns = "id, name, harness, system, model, created_at";
+    this.listStmt = db.prepare(`SELECT ${columns} FROM custom_agents ORDER BY created_at, id`);
+    this.getStmt = db.prepare(`SELECT ${columns} FROM custom_agents WHERE id = ?`);
+    /*
+     * An upsert, and it was a bare `INSERT` for as long as a preset was
+     * write-once — which is why nothing had ever saved the same id twice.
+     * `PATCH /custom-agents/:id` reconstructs the whole row and hands it back
+     * under the id it already had, so against the bare insert every edit came
+     * back `500 internal_error` out of `SQLITE_CONSTRAINT_PRIMARYKEY`. The route
+     * section of `daemoncheck` stands a `Map` in for this port and `Map.set` is
+     * an upsert by construction, so that half saw nothing; only the real store
+     * can say it.
+     *
+     * `created_at` is deliberately absent from the update list. The age of a
+     * preset is the one thing about it that is not somebody's to change, and a
+     * caller of this port that gets it wrong — the route is such a caller by
+     * design, since it rebuilds the row rather than patching columns — must not
+     * be able to move it.
+     */
+    this.saveStmt = db.prepare(
+      `INSERT INTO custom_agents (${columns}) VALUES (?, ?, ?, ?, ?, ?) ` +
+        "ON CONFLICT(id) DO UPDATE SET name = excluded.name, harness = excluded.harness, " +
+        "system = excluded.system, model = excluded.model",
+    );
+    this.deleteStmt = db.prepare("DELETE FROM custom_agents WHERE id = ?");
+  }
+
+  list(): CustomAgent[] {
+    return this.listStmt.all().flatMap((row) => {
+      const one = readCustomAgent(row);
+      if (one !== null) return [one];
+      // Recoverable — somebody can assemble it again — so this is a line rather
+      // than the stronger sentence the session store writes. It is still said,
+      // because "you never made one" and "the row is here and unreadable" look
+      // identical on the screen that lists them.
+      this.onDegraded?.(
+        `assembled agent ${String(row["id"])} names harness ` +
+          `${JSON.stringify(String(row["harness"]))} and system ` +
+          `${JSON.stringify(String(row["system"]))}, and this build cannot resolve both`,
+      );
+      return [];
+    });
+  }
+
+  get(id: string): CustomAgent | null {
+    const row = this.getStmt.get(id);
+    return row === undefined ? null : readCustomAgent(row);
+  }
+
+  save(one: CustomAgent): void {
+    this.saveStmt.run(one.id, one.name, one.harness, one.system, one.model, one.createdAt);
+  }
+
+  remove(id: string): void {
+    this.deleteStmt.run(id);
+  }
+}
+
+/**
+ * A preset, or `null` for a row this build cannot honestly resolve.
+ *
+ * ⚠ **Shape rather than membership, for `fromRow`'s reason and one of its own.**
+ * This runs inside `restore()`, through `ManagedSession.assembled`, on every boot
+ * — so a membership test would mean that installing a plugin and restarting the
+ * daemon in the wrong order silently un-assembles every preset built on it, and
+ * every session on those presets would come back demoted to the bare harness its
+ * `agent` column names. What refuses an unrunnable pairing is the launch, which
+ * has the live catalogue and answers a sentence.
+ *
+ * The refusal that stays is the one Q7.31 asked for: a row naming something with
+ * no possible id at all is dropped rather than cast.
+ */
+function readCustomAgent(row: Record<string, unknown>): CustomAgent | null {
+  const harness = String(row["harness"]);
+  const system = String(row["system"]);
+  if (!isBuiltinAgentId(harness) && !isContributedId(harness)) return null;
+  if (!isBuiltinSystemId(system) && !isContributedId(system)) return null;
+  return {
+    id: String(row["id"]),
+    name: String(row["name"]),
+    harness,
+    system,
+    model: String(row["model"]),
+    createdAt: Number(row["created_at"] ?? 0),
+  };
+}
+
+/**
+ * Which agents the New session strip offers here, and in what order.
+ *
+ * ⚠ **A partial record over a list it does not own.** Nothing here knows what a
+ * harness or an assembled agent is; a row is a `(kind, ref)` somebody moved or
+ * switched off, and what the strip draws is this list merged against what the
+ * machine currently offers. So an agent this table has never heard of is
+ * *visible and last*, which is the only default that cannot surprise anybody —
+ * a new agent arriving pre-hidden reads as the daemon losing it.
+ *
+ * ⚠ **No validation of `ref`, deliberately, and it is the opposite call from
+ * `readCustomAgent` directly above.** That one drops a row naming a harness this
+ * build cannot resolve, because restoring it would produce a well-typed lie that
+ * fails later with a worktree already made. Here the row *is* the memory and
+ * resolving is the reader's job: dropping the position of an agent that happens
+ * to be signed out today would rearrange somebody's screen the moment they signed
+ * out, and put it somewhere else again when they signed back in.
+ */
+export class SqliteAgentStripStore {
+  private readonly db: DatabaseSync;
+  private readonly listStmt: StatementSync;
+  private readonly clearStmt: StatementSync;
+  private readonly insertStmt: StatementSync;
+  private readonly forgetStmt: StatementSync;
+
+  constructor(db: DatabaseSync) {
+    this.db = db;
+    this.listStmt = db.prepare(
+      "SELECT kind, ref, hidden FROM agent_strip ORDER BY rank, kind, ref",
+    );
+    this.clearStmt = db.prepare("DELETE FROM agent_strip");
+    this.insertStmt = db.prepare(
+      "INSERT INTO agent_strip (kind, ref, rank, hidden) VALUES (?, ?, ?, ?)",
+    );
+    this.forgetStmt = db.prepare("DELETE FROM agent_strip WHERE kind = ? AND ref = ?");
+  }
+
+  /**
+   * The remembered order.
+   *
+   * `ORDER BY rank` first, then `kind, ref` — the tie-break is not decoration.
+   * `rank` is the caller's array index and is therefore unique on every list this
+   * daemon writes, but the column carries no constraint saying so, and a file
+   * hand-edited or written by some future build must still come back in *one*
+   * order rather than in whatever order SQLite felt like. An unstable list here
+   * is a strip that shuffles itself between reads.
+   */
+  list(): AgentStripEntry[] {
+    return this.listStmt.all().flatMap((row) => {
+      const kind = String(row["kind"]);
+      // The one thing that *is* checked, because it is this daemon's own
+      // vocabulary rather than somebody's agent id, and a third value would reach
+      // a `switch` in the client that has no arm for it.
+      if (kind !== "harness" && kind !== "custom") return [];
+      return [{ kind, ref: String(row["ref"]), hidden: Number(row["hidden"] ?? 0) !== 0 }];
+    });
+  }
+
+  /**
+   * Replace the whole strip.
+   *
+   * ⚠ **The transaction is for atomicity here, unlike the one in `prune`.** That
+   * one wraps statements that are each already correct on their own and takes the
+   * transaction only to spend one WAL commit; this one empties the table before it
+   * refills it, so a failure part-way through without a `ROLLBACK` is somebody's
+   * order deleted by an act that reported an error. The throw is re-raised rather
+   * than swallowed — the route above turns it into a 500, and the screen restores
+   * what it drew.
+   */
+  replace(entries: readonly AgentStripEntry[]): void {
+    this.db.exec("BEGIN");
+    try {
+      this.clearStmt.run();
+      for (const [rank, one] of entries.entries()) {
+        this.insertStmt.run(one.kind, one.ref, rank, one.hidden ? 1 : 0);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // Nothing to roll back — the BEGIN itself failed.
+        //
+        // ⚠ The other way `BEGIN` can fail is *already inside a transaction*, and
+        // there the `ROLLBACK` would succeed and discard the outer one's work
+        // instead. Not reachable: this method has one caller, `PUT /agent-strip`,
+        // and no route on this daemon opens a transaction around a handler. Said
+        // out loud because the remedy if one ever does is a savepoint rather than
+        // a wider catch.
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Drop one position, for the write that is not the screen.
+   *
+   * Deleting an assembled agent takes its row with it. The merge would ignore the
+   * orphan anyway — it resolves to nothing — so this is not correctness; it is the
+   * only thing standing between this table and unbounded growth on a machine where
+   * presets are made and thrown away and the strip screen is never opened.
+   */
+  forget(kind: AgentStripEntry["kind"], ref: string): void {
+    this.forgetStmt.run(kind, ref);
+  }
+}
+
 
 export interface StoredIdentity {
   machineId: string;

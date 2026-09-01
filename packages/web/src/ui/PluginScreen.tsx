@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { pluginDestination, pluginFailure, pluginPath, readView } from "../plugins";
+import { MACHINE_GONE, pluginDestination, pluginFailure, pluginPath, readView } from "../plugins";
 import { refOf, sessionId, type MachineId } from "../ids";
 import { navigate, sessionPath } from "../router";
 import { store } from "../store";
 import type { PluginOpen, PluginView as PluginViewShape } from "../wire";
-import { Empty, Spinner } from "./bits";
+import { Button, Empty, Spinner } from "./bits";
 import { PluginView } from "./PluginView";
-import { Sheet } from "./Sheet";
 import { toast } from "./Toast";
 
 /**
@@ -24,9 +23,39 @@ import { toast } from "./Toast";
  * to guess from. Pressing something replaces the view with what came back, which
  * is why an action may return a whole view rather than only a sentence.
  */
-export function PluginScreen({ machineId, pluginId }: { machineId: MachineId; pluginId: string }): ReactNode {
+export function PluginScreen({
+  machineId,
+  pluginId,
+  onTitle,
+}: {
+  machineId: MachineId;
+  pluginId: string;
+  /** What the panel's head should say. See the effect at the foot of this file. */
+  onTitle: (title: string) => void;
+}): ReactNode {
   const [view, setView] = useState<PluginViewShape | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  /**
+   * Why there is no board, when there is none.
+   *
+   * ⚠ **`failed` is carried beside the words rather than derived from them**,
+   * because the two arms that write this are different kinds of nothing and
+   * {@link Empty} draws them differently. A read that did not come back is an
+   * *event*: it takes the triangle and the live region, because nothing else on
+   * screen says it happened. A machine this client has no daemon for is a settled
+   * answer about the world, and announcing it would be announcing a state
+   * somebody arrived in rather than something that just occurred.
+   */
+  const [error, setError] = useState<{ text: string; failed: boolean } | null>(null);
+  /**
+   * What the plugin said when it answered a *view* read with a toast.
+   *
+   * ⚠ **Its own state, and never a synthesized `notice` block.** `notice` is the
+   * *plugin's* diagnostic channel — for a plugin with no screen it is the only one
+   * it has — so a sentence this app wrote, drawn in that box, would be
+   * indistinguishable from the plugin's own words. `PluginSettings` states the
+   * same rule where it draws the same kind of line.
+   */
+  const [spoke, setSpoke] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   /*
    * Bumped to ask for a re-read. The interval lives in an effect keyed on the
@@ -35,6 +64,34 @@ export function PluginScreen({ machineId, pluginId }: { machineId: MachineId; pl
    * effect depended on `view`.
    */
   const [round, setRound] = useState(0);
+  /**
+   * A read somebody asked for, as against one the clock asked for.
+   *
+   * ⚠ **Separate from {@link round} precisely because `round === 0` is what
+   * "nothing is on screen yet" is spelled as** — the two guards in the read effect
+   * below both test it, and a Retry that bumped `round` would satisfy neither: the
+   * second failure of a mount would clear the old error and set no new one,
+   * leaving a spinner that never resolves.
+   *
+   * ⚠ **What this said next was "so bumping this re-runs the same effect with
+   * `round` still at 0", and that was true of exactly one of the two screens that
+   * draw a Retry.** The other is the `spoke !== null` one, which keeps the
+   * plugin's `refreshMs` deliberately — so its interval goes on ticking, `round`
+   * goes on climbing, and by the time anybody presses Try again *both* guards are
+   * being skipped: the press cleared nothing and set no error, which is a dead
+   * button on an ordinary path (view loads → poll → plugin answers with a toast →
+   * press). The error screen reaches the same state through a different door: the
+   * `daemonFor` arm below sets an error at any round, so a machine that comes back
+   * into the list leaves a spinner that never resolves — precisely the failure the
+   * paragraph above says this state exists to prevent.
+   *
+   * So the effect asks whether *this* run is the one this counter moved for
+   * ({@link askedFor}) instead of inferring it from `round`, and reports a failure
+   * on that too. `round` is still not touched by a press, and now for a second
+   * reason: resetting it would clear the view, and the view is where the `spoke`
+   * screen keeps its cadence.
+   */
+  const [attempt, setAttempt] = useState(0);
   const refreshMs = view?.refreshMs ?? null;
   /*
    * Which plugin the requests in flight were issued for, and how many view reads
@@ -50,6 +107,16 @@ export function PluginScreen({ machineId, pluginId }: { machineId: MachineId; pl
    */
   const liveRoute = useRef(pluginPath(machineId, pluginId));
   const reading = useRef(0);
+  /**
+   * The {@link attempt} the read effect has already run for.
+   *
+   * A ref for the same reason as the two above — nothing on screen reads it — and
+   * it is the whole of how one effect tells a read a *person* asked for from a
+   * read the clock asked for, which `round` alone cannot do once the clock is
+   * running. Read and written inside the effect rather than during render, so a
+   * render React discards cannot consume a press.
+   */
+  const askedFor = useRef(0);
 
   useEffect(() => {
     if (refreshMs === null) return;
@@ -95,10 +162,30 @@ export function PluginScreen({ machineId, pluginId }: { machineId: MachineId; pl
      * another's name. Same rule `Composer` keeps with `liveKey`, one screen over.
      */
     let live = true;
+    /*
+     * Whether a person asked for this read. `attempt` moving is the only thing
+     * that makes it true, and it is *consumed* here rather than compared down in
+     * the guard because this effect also runs for every tick of the clock, for a
+     * switch of plugin, and — under StrictMode — twice on mount: a press is one
+     * run, and the run after it is the clock's again.
+     */
+    const asked = attempt !== askedFor.current;
+    askedFor.current = attempt;
     const daemon = store.daemonFor(machineId);
     if (daemon === undefined) {
       setView(null);
-      setError("That machine is not reachable right now.");
+      /*
+       * ⚠ **Not "not reachable right now", which is what this said.**
+       * `store.daemonFor` answers `undefined` only where the machine has left the
+       * listing — `store.ts` writes and drops `daemons` in step with
+       * `connections` — so this is a grant revoked in another tab or a machine
+       * retired, and the old sentence named a remedy (wait, wake the host) for a
+       * state that waking the host does not change. An unreachable machine keeps
+       * its client and reports through `machine.reach` instead. See
+       * {@link MACHINE_GONE}, which is also why `failed` stays `false`: a settled
+       * answer about the world rather than an event.
+       */
+      setError({ text: MACHINE_GONE, failed: false });
       return;
     }
     /*
@@ -106,6 +193,19 @@ export function PluginScreen({ machineId, pluginId }: { machineId: MachineId; pl
      * a spinner every few seconds is a screen that flashes; keeping the old one
      * until the new one arrives is what makes a refreshing board readable. `round`
      * moving is the refresh, so it is the one dependency that must not clear.
+     *
+     * `attempt` moving is neither, and it is deliberately still not part of this
+     * test. ⚠ **This said a Retry is "pressed on the error screen, so there is
+     * nothing on screen to keep and `round` is still 0", and there are two screens
+     * that draw one.** On the error screen it holds — the view is already `null`
+     * and the clear is a no-op. On the `spoke !== null` screen it does not: the
+     * poll is still running there, so `round` is past 0, and what a clear would
+     * throw away is the `refreshMs` that screen keeps on purpose. A retry answered
+     * with another toast would then inherit `null` from a blanked view and stop the
+     * clock for the rest of the mount — the exact defect the substitution below
+     * exists to prevent, re-entered through the button that is supposed to be the
+     * way out. So a press keeps the board and the cadence, and says what happened
+     * to it through `asked` in the `catch` instead.
      */
     if (round === 0) setView(null);
     setError(null);
@@ -114,17 +214,55 @@ export function PluginScreen({ machineId, pluginId }: { machineId: MachineId; pl
       .pluginView(pluginId, "screen")
       .then((answer) => {
         if (!live) return;
-        // A plugin that answers a view request with a toast is answering the wrong
-        // question, and drawing nothing is more honest than drawing its sentence
-        // as though it were a screen.
-        setView(answer.result.kind === "view" ? readView(answer.result.view) : { title: null, refreshMs: null, blocks: [] });
+        if (answer.result.kind === "view") {
+          setSpoke(null);
+          setView(readView(answer.result.view));
+          return;
+        }
+        /*
+         * A plugin that answers a view request with a toast is answering the wrong
+         * question, and drawing nothing is more honest than drawing its sentence as
+         * though it were a screen. The blocks go rather than going stale: a view is
+         * the plugin's assertion about its own state, so keeping the old board over
+         * a fresh answer that is not one would be this client holding a second copy
+         * of the truth.
+         *
+         * ⚠ **What is kept is the cadence, and that is the defect this closes.**
+         * `refreshMs` was nulled along with the blocks — and the interval effect is
+         * keyed on `refreshMs`, so one misbehaving answer stopped the clock for the
+         * rest of the mount and the screen stayed frozen after the plugin had
+         * recovered. The title is kept for a smaller reason of the same kind: the
+         * head names the *screen*, and dropping it would flip the head to the raw
+         * plugin id for a whole poll interval over an answer that said nothing
+         * about the name.
+         */
+        setSpoke(answer.result.text);
+        setView((held) => ({ title: held?.title ?? null, refreshMs: held?.refreshMs ?? null, blocks: [] }));
       })
       .catch((cause: unknown) => {
-        // A refresh that fails leaves what is on screen and says nothing: the
-        // machine dropping off LTE for one tick is not news, and a board that
-        // replaced itself with an error every time the train went into a tunnel
-        // would be worse than one that is briefly stale.
-        if (live && round === 0) setError(pluginFailure(cause));
+        /*
+         * A refresh that fails leaves what is on screen and says nothing: the
+         * machine dropping off LTE for one tick is not news, and a board that
+         * replaced itself with an error every time the train went into a tunnel
+         * would be worse than one that is briefly stale.
+         *
+         * ⚠ **`asked` is the exception, and it is the whole of what makes a Retry
+         * mean the same thing on both screens.** A read the *clock* asked for owes
+         * nobody an answer; a read somebody pressed a button for owes one at every
+         * round, or the button is inert — which is what it was on the `spoke`
+         * screen, where the clock keeps running and `round === 0` is therefore
+         * false for every press. Nothing is lost by reporting it: the two screens
+         * that draw the button are the two with no board on them, so the "briefly
+         * stale" this guard protects is not a thing either of them has.
+         *
+         * Where the clock is still running, the error it writes stands until the
+         * next tick clears it by asking again — one refresh interval, and then the
+         * plugin's own last words are back with the button under them. That is the
+         * `setError(null)` above doing what it is for, and the alternative is worse
+         * in the direction that matters: an error only a person can dismiss would
+         * outlive the plugin recovering.
+         */
+        if (live && (round === 0 || asked)) setError({ text: pluginFailure(cause), failed: true });
       })
       .finally(() => {
         /*
@@ -142,10 +280,12 @@ export function PluginScreen({ machineId, pluginId }: { machineId: MachineId; pl
     return () => {
       live = false;
     };
-  }, [machineId, pluginId, round]);
+  }, [machineId, pluginId, round, attempt]);
 
   // A switch of plugin starts a fresh cycle, or the new one inherits the old
-  // one's round and skips its own first clear.
+  // one's round and skips its own first clear. `attempt` is deliberately not
+  // reset with it: it is a monotonic "somebody asked", and putting it back to 0
+  // would issue a second read of the plugin this effect has just switched to.
   useEffect(() => {
     liveRoute.current = pluginPath(machineId, pluginId);
     setRound(0);
@@ -154,6 +294,11 @@ export function PluginScreen({ machineId, pluginId }: { machineId: MachineId; pl
     // without the reset an action still out at the moment of the switch would
     // hold the *new* plugin's board disabled with nothing of its own in flight.
     setBusy(false);
+    // And what the *previous* plugin said instead of drawing a board, for the
+    // same reason: the read effect runs once under the old round before the reset
+    // lands, so without this there is a render where one plugin's message stands
+    // under another plugin's name.
+    setSpoke(null);
   }, [machineId, pluginId]);
 
   /*
@@ -175,7 +320,9 @@ export function PluginScreen({ machineId, pluginId }: { machineId: MachineId; pl
   const act = useCallback((actionId: string, context: { row?: string; form?: Record<string, string> }): void => {
     const daemon = store.daemonFor(machineId);
     if (daemon === undefined) {
-      toast("error", "That machine is not reachable right now.");
+      // The same fact as the read guard above, so the same sentence: the machine
+      // left the listing between the board being drawn and this row being pressed.
+      toast("error", MACHINE_GONE);
       return;
     }
     /*
@@ -245,17 +392,77 @@ export function PluginScreen({ machineId, pluginId }: { machineId: MachineId; pl
     [machineId, pluginId],
   );
 
-  return (
-    <Sheet title={view?.title ?? pluginId}>
-      {error !== null ? (
-        <Empty>{error}</Empty>
-      ) : view === null ? (
-        <div className="flex justify-center py-8">
-          <Spinner />
-        </div>
-      ) : (
-        <PluginView view={view} busy={busy} onAction={act} onOpen={go} />
-      )}
-    </Sheet>
+  /*
+   * ⚠ **The title is reported up rather than rendered here**, because the panel is
+   * one element for every route-backed pop-up now and its head belongs to
+   * `OverlaySheet`. This is the only pop-up whose name is not a constant — it is
+   * whatever the plugin called its view — so it is the only one that has to say
+   * so. One frame late, which costs nothing: the name arrives with the view and
+   * the head shows the plugin's id until it does. Q3.484.
+   */
+  useEffect(() => {
+    onTitle(view?.title ?? pluginId);
+  }, [onTitle, view?.title, pluginId]);
+
+  return error !== null ? (
+    /*
+     * ⚠ **A first read that failed was the terminal state of this mount, and the
+     * Retry is what ends that.** The interval is keyed on `refreshMs`, which is
+     * read off the view — so with no view there is no timer, `round` never moves,
+     * and nothing was ever going to ask again. A phone dropping to LTE for one
+     * second and a plugin that is genuinely dead drew the identical screen, and
+     * the only way out was guessing that closing the sheet and reopening it
+     * remounts this component.
+     *
+     * It bumps `attempt` rather than `round`: see that state's own docblock, where
+     * the difference is the difference between reporting a second failure and
+     * spinning for ever.
+     */
+    <Empty
+      failed={error.failed}
+      action={
+        <Button size="sm" onClick={() => setAttempt((held) => held + 1)}>
+          Try again
+        </Button>
+      }
+    >
+      {error.text}
+    </Empty>
+  ) : view === null ? (
+    <div className="flex justify-center py-8">
+      <Spinner />
+    </div>
+  ) : spoke !== null ? (
+    /*
+     * ⚠ **Not `PluginView`'s "This plugin drew nothing."** That sentence is about
+     * a board with no blocks in it, which is a plugin's own answer about its own
+     * state; this is a plugin that answered the wrong question, and the two send
+     * whoever is holding the plugin to different places. Its words are carried
+     * through rather than dropped, because this read is the only place they
+     * arrive — an action's toast has a `toast` to go to and a view's has none.
+     *
+     * ⚠ **It takes the same Retry, for the case the substitution above cannot
+     * cover.** A *first* read answered this way has no previous `refreshMs` to
+     * keep, so there is no cadence to inherit and the poll never starts — which is
+     * the error screen's terminal state wearing the plugin's own clothes.
+     *
+     * And where there *is* a cadence, the press is still not a no-op: the read it
+     * asks for reports its own failure whatever the round, which it did not — see
+     * {@link attempt}, where the same button on this screen was silent for a
+     * release because the clock had moved `round` past the guard that speaks.
+     */
+    <Empty
+      action={
+        <Button size="sm" onClick={() => setAttempt((held) => held + 1)}>
+          Try again
+        </Button>
+      }
+    >
+      {spoke.length === 0
+        ? "That plugin answered with a message rather than a screen."
+        : `That plugin answered with a message rather than a screen — ${spoke}`}
+    </Empty>
+  ) : (
+    <PluginView view={view} busy={busy} onAction={act} onOpen={go} />
   );
 }

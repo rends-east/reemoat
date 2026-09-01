@@ -81,13 +81,27 @@ export function Mark({ size = 20, className = "" }: { size?: number; className?:
  * so each bar lands back on its declared opacity of 1. The row beside it still
  * carries the *word* `working…`, which is what survives the freeze.
  *
- * **`still` is the same mark with the animation off, and it has exactly one
- * caller**: the row a cancelled turn leaves behind, which lands in this row's own
- * place the instant after it. Three bars breathing is work happening; the same
- * three bars at rest, beside a red word, is the same object having stopped — and
- * reusing the glyph rather than swapping in a different one is what makes it read
- * as a state rather than as an unrelated notice. It is not a second spinner and
- * must not become one: nothing that is *waiting* may draw this.
+ * **`still` is the same mark with the animation off.** Three bars breathing is
+ * work happening; the same three bars at rest, beside a line whose tense has
+ * changed, is the same object having stopped — and reusing the glyph rather than
+ * swapping in a different one is what makes it read as a state rather than as an
+ * unrelated notice.
+ *
+ * ⚠ **It had one caller and a rule that turned out to be a proxy for a different
+ * one.** The caller was the row a cancelled turn leaves behind, and the rule read
+ * *nothing that is waiting may draw this* — written to stop it becoming a second
+ * spinner. `WaitingFoot` is the second caller now, drawing it while the socket is
+ * down, and it is *waiting* by the old wording. It is right anyway, which is what
+ * shows the wording was aimed at the wrong thing: with the stream gone that row is
+ * painting the last snapshot that arrived, so the blink was asserting work is
+ * happening **now** on the strength of a fact that had stopped being checked. The
+ * mark at rest is the honest drawing of exactly that.
+ *
+ * So the boundary is about the row's own subject rather than about the word wait:
+ * draw `still` where the thing this mark is *about* has stopped or can no longer
+ * be stood behind. A row waiting on work that is genuinely still running is not
+ * that, and stays `Dot tone="pending"` — which is the line that keeps this from
+ * becoming the second spinner the old rule was guarding against.
  */
 export function WorkingMark({ still = false }: { still?: boolean } = {}): ReactNode {
   return (

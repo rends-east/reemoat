@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 114 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 72 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 217 | `####` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 117 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 79 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 286 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 44 | `###` |
-| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 106 | `####` |
-| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 64 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 113 | `###` |
-| | | **730** | |
+| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 109 | `####` |
+| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 65 | `###` |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 127 | `###` |
+| | | **827** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 730 rather than the 407
+dividers. So the count is over **both** depths, and it says 827 rather than the 432
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -2783,6 +2783,165 @@ meaning.
 
 
 
+### Q1.622 — A plugin names a program and an endpoint. What is it trusted with?
+
+**What this answers.** `contributes.harnesses` puts a program on this daemon's spawn
+path and `contributes.systems` puts a host on the path a pasted key travels. Both
+read like new authority. Only one of them is.
+
+**A harness adds none, and that is the finding.** A plugin is already a child process
+running as this uid — Q1.612 — and can `import("node:child_process")` and spawn
+whatever it likes. Declaring a harness cannot widen that; what it buys is the same
+thing `manifest.scopes` buys and no more: the program is **named**, shown before
+anything is installed, refused when it is one of this machine's own agents, and
+switched off with the plugin. It catches the mistake rather than the attacker, which
+is the standing this whole subsystem already has.
+
+**A provider does add something, and it is the one field in this feature that
+changes a stated property.** `agent-systems.md` said *"no route, body field or header
+anywhere names a base URL"* and that sentence is still literally true — a request
+names a `SystemId`. What is no longer true is the sentence underneath it: **the set
+of hosts this daemon can be pointed at is no longer a compile-time constant of this
+repository.** The honest restatement is that a base URL now arrives in a
+`plugin.json`, inside an archive fetched from one hardcoded host at a full 40-hex
+commit, over `redirect: "error"`, after `consentGap` compared it against an origin
+somebody read and pressed a named button about — and is then fixed for the life of
+that install. Every link in that chain already existed.
+
+**Which is why the disclosure carries the *value* and not only the verb.** Two scopes
+were added, and their lines say what is at stake — *add an agent that runs a program
+it names*, *add a provider your saved keys are sent to*. But a line in a list is where
+somebody learns a capability exists, not where they can judge one, so the consent card
+also draws the **argv** and the **whole normalised base URL**. These are the only two
+scopes with a second disclosure, because they are the only two where the value matters
+as much as the verb.
+
+**And the compared string is the drawn string.** `addedLines` produces one line per
+contribution; `PluginConsent` draws exactly those, `consentGap` diffs exactly those,
+and `consentBroken` rebuilds exactly those from the row that came back. One value, so
+there is no second rendering of the same fact to drift — and the *whole* path is in
+it, because a plugin showing `https://api.groq.com` and shipping
+`https://api.groq.com/../evil` passes an origin comparison.
+
+**`http` is permitted to this machine and to this network, and refused everywhere
+else.** That is the opposite call from `readNet`'s `LOCAL_HOST` refusal forty lines
+away in the same file, and the difference is whose key is at stake: that one refuses a
+local target in a plugin's *own* outbound list, where it is a mistake somebody is
+approving without reading, while this is where the **operator's** pasted key goes to a
+model they named — and Ollama, vLLM and LM Studio are exactly this and nothing else in
+the product reaches them. `169.254.169.254` and its IPv6 sibling are refused under
+`https` as well, because a base URL pointed at instance metadata is not a self-hosted
+model somebody stood up.
+
+**Status.** Applied.
+
+### Q1.623 — Where a refused start lives, and what clears one
+
+**Question.** Q2.221 gives the daemon a negative it never had. A negative about
+somebody else's machine is exactly the kind of fact this repository has been wrong
+about before. Where does it live, how long is it believed, and what takes it back?
+
+**Decision. In memory, per daemon, per harness, expiring on read after
+`START_REFUSAL_TTL_MS` — and the expiry is the design rather than housekeeping.**
+
+Durability was rejected rather than skipped. Q7.99 is this fact written down and
+believed afterwards: `stop("agent_signed_out")` off one observation, which stranded
+conversations under a notice that was already false, and was reverted. A restart is
+also the moment the machine has most likely changed underneath the record, so
+surviving one would make it most wrong exactly where it was most persistent.
+
+**The budget is `MODELS_TTL_MS`'s number and `MODELS_TTL_MS`'s argument** — ten
+minutes — because that is the other fact here that costs a spawn to re-measure and
+is re-measured by the same spawn. Two different budgets would let the model picker
+and the New session strip disagree about the same harness on the same machine.
+Emphatically **not** `LOGIN_PROBE_TTL_MS`: three seconds is a cache in front of a
+question this daemon may ask whenever it likes, and this is one it can only ask by
+starting a session somebody asked for.
+
+**What the expiry buys is that the list of clearings does not have to be
+exhaustive**, which is the whole reason it is not a control-flow problem. Somebody
+who signs in by running the CLI in a terminal on the machine itself has told this
+process nothing, and no hook, route or watcher can be relied on to notice. An
+observation ages; a verdict does not.
+
+The early clearings, in the order somebody meets them:
+
+1. **A successful start.** `Session.start` and `Session.openResumed` call
+   `forgetStartRefusal` on the success path. Free, and — because the record never
+   reaches `admit` — the capability sweep still spawns the harness for real on every
+   builder open, so this fires by itself the moment the harness works.
+2. **A credential arriving**, which has two doors: `PUT /agent-auth/:agent`, and a
+   login run reaching `done`. **Two of the five `forgetAvailability` call sites, and
+   the other three must not.** Those are a key being deleted, a sign-out and a login
+   abandoned — a credential going *away* — and the first would erase the record of
+   the refusal the deleted key was pasted against.
+
+   ⚠ **The login-run door was missing for a draft, and the cost was the whole flow
+   reading backwards.** `agentStance` puts `start_refused` above `signed_in`, so
+   somebody who signed in *inside the app* kept the badge **would not start**, kept
+   no tile, and lost the sign-in door itself — `signInOffered` wants
+   `loggedIn === false` — while `POST /sessions` went on refusing on the stale
+   message. It clears on the run *ending* rather than on it succeeding: this route
+   has no verdict to read, and a wrongly cleared record costs one start attempt
+   that re-records it, where a wrongly kept one costs ten minutes of a screen
+   contradicting the wizard just finished.
+
+   ⚠ **And `daemoncheck` asserts this per handler rather than by counting the
+   file**, because a count is not an anchor. Measured: moving the call out of the
+   `PUT` handler and into `POST …/logout` — whose parameter is also named `agent`,
+   so the line is textually identical — left the total unchanged and every driver
+   green, while inverting the rule the code beside it argues for.
+   `reloadCredentials`' own pair two blocks away already used the right technique
+   and said why.
+3. **A plugin lifecycle event.** `PluginHost.syncContributions`, which covers
+   install, update, remove, enable and disable — a harness whose command, arguments
+   and environment may all have changed is not the harness that refused.
+4. **Pressing Check again.** `POST /agent-auth/:agent/recheck`, and see Q3.538 for
+   why a control is owed at all.
+
+**Status.** Done.
+
+### Q1.624 — When does the machine find out that a harness will not start?
+
+**Reported, in the same breath as Q3.539**: *"не должно быть такого, что демон
+после добавления плагина не знает о невозможности запустить."*
+
+**Question.** Q2.221 gave the daemon a way to *record* a refused start, and
+`Session.start` writes it. But the only thing that ever started a contributed
+harness was a person pressing Start — so the first press was still the measurement,
+and still paid for it. Is that acceptable?
+
+**Decision. No, and what was missing was an occasion rather than a mechanism.**
+`PluginHost.probeContributed` fires the **existing** capability read — `admit`,
+`claim`, a real handshake and a real `session/new`, the same one the agent builder
+performs — for each harness a plugin contributes, at the three moments the machine
+has just learned about one: install, update and enable. Nothing reads the result.
+Whichever way it goes, `Session.start` has already written or cleared the record,
+so the answer is on `GET /agents` before anybody taps anything. That is the whole
+implementation, and it is small because Q2.221 put the record where a *start* would
+find it rather than where a route would.
+
+**Detached, and that is what makes it affordable.** An install runs under
+`exclusive()`, and a spawn plus a handshake is 627–2260 ms per harness measured
+across the four built-ins. Awaited, `POST /plugins` would hold its answer for the
+length of somebody else's binary starting up, and a plugin whose harness never
+completes a handshake would hold the mutex with it. Bounded by what it calls rather
+than by anything new: `MAX_CONCURRENT_ASKS` meters every one, and a manifest may
+contribute at most `MAX_PLUGIN_HARNESSES`.
+
+**Three occasions, and the three exclusions are the interesting half.** Remove and
+disable have nothing to ask about — the harness is no longer offered, so a spawn is
+work about something nobody can reach. **Boot is the one that is tempting and is
+still refused**: it would put a spawn per contributed harness in front of
+`autoResume`, which is already starting an agent per interrupted session, and Q1.623
+decided the record is in memory precisely so that a restart does not carry a
+measurement across a moment when the machine has most likely changed. So a daemon
+that has just come up is honestly ignorant, and one press is what that costs.
+`daemoncheck` asserts all six occasions, because the call is detached and every
+outcome is swallowed — the *occasion* is the only observable thing about it.
+
+**Status.** Applied.
+
 ## Session lifecycle, questions and attachments
 
 ### Q2.1 — What happens to a live session when the daemon restarts?
@@ -4645,6 +4804,483 @@ title **14**, option name **31**.
 
 **Status.** Reversed an earlier decision
 
+### Q2.215 — An assembled session that had never been prompted came back bare
+
+**Rule.** One option bag for every launch. `ManagedSession.launchOptions` is a
+private getter typed as `SessionOptions`, and all three launch sites read it:
+`start()`, and both arms of `doResume`. A resume adds `agentSessionId` and nothing
+else.
+
+**What was wrong.** `doResume`'s empty-conversation arm wrote its bag out by hand and
+left `...this.assembled` off it. So a session assembled as *Claude Code · Kimi K2*
+came back on claude's own account and claude's default model, while
+`sessions.custom_agent` and the snapshot went on naming the assembled agent — the
+right name on screen and the wrong vendor on the bill.
+
+**Why it was silent, which is the whole entry.** The invariant written to make
+exactly this refuse — *routable and un-pinnable must refuse* — is enforced inside
+`applySystem`, and `applySystem` returns at its first line when `options.system` is
+absent, before `client.routing()`, before `hostable`. `spawnEnvOf` is the same shape:
+no system, no `routedModelEnv`, `{}` returned, no variable set. An omission therefore
+does not produce a *wrong* route for the guard to weigh; it produces **no route at
+all**, which is the one input every check on this path is built to pass straight
+through, because it is what every session started before assembled agents existed
+looks like. `SystemRoutingError` cannot fire on a bag that asked for nothing. **This
+is a guard bypassed by a door it does not sit on**, and no amount of hardening inside
+`applySystem` would have reached it.
+
+**The arm was ordinary, not an edge.** `conversationKnownEmpty()` answers `true` for
+every session at `turnCounter === 0`, so *every created-but-unprompted session* took
+it: a daemon restart, a tap on Resume, an ultracode toggle, `restartAgent`, and the
+clear-then-resume path the arm was actually written for. A preset assembled and
+started from the New session sheet is unprompted by construction until somebody
+types, so this was the first launch of a routed session rather than a rare one.
+
+**Why the bag was hoisted rather than the one arm patched.** The three sites were
+compared field by field first: byte-identical apart from `agentSessionId`. Nothing is
+per-arm, so a shared bag obscures nothing — it removes the only place an omission can
+hide. It is typed `SessionOptions` rather than as an inline shape, so a field added to
+that type is a compile error at one site instead of a silent omission at three. And it
+stays a **getter**: `assembled` goes back to the preset store, `ultracodeWanted` folds
+in the machine default and `elicitations` is a thunk, so a captured bag would
+reintroduce exactly the staleness the resolver exists to prevent.
+
+**What makes a fourth launch site loud: nothing does, and that is worth saying
+plainly.** A fourth site calling `Session.start` with a literal of its own would be
+exactly as silent as the third one was, because the silence is a property of a bag
+with no system rather than of how many bags there are. What was bought is narrower.
+There is now one expression of the bag, and `daemoncheck` drives a real
+`ManagedSession` down **both** arms of `doResume` and asserts the two launches agree
+on the agent, the spawn environment, whether `providers/set` was sent and the model
+pin. A fourth site is caught only if something drives it.
+
+**The driver's first attempt at that assertion was false coverage, and only the
+revert discipline found it.** It compared the ACP `session/new` and `session/resume`
+request params minus `sessionId`, and stayed **green** with the fix reverted: losing
+the system and the model changes none of `cwd`, `mcpServers` or `_meta`. What it
+changes is the spawn environment and whether `providers/set` was sent, and neither of
+those is in the ACP request. An assertion that reads as covering the defect it cannot
+see is worse than no assertion, because it is believed; it compares `shapeOf` now,
+and the reason is written at the helper so it is not simplified back.
+
+**Status.** Current
+
+### Q2.216 — A preset re-pointed at another harness, under a session already on it
+
+**Decision.** `ManagedSession.assembled` **compares** the harness and does not follow
+it. The resolver answers `{harness, system, model}` now, and the getter returns `{}`
+when `one.harness !== this.agent` — the same demotion the deleted-preset arm one line
+above takes, for the same reason: the preset has stopped describing this session, and
+the honest answer is the bare harness `sessions.agent` has named all along. The
+harness travels out of the store to be compared and is used for nothing else.
+
+**Why nothing anticipated it, which is the useful half.** Q7.116 chose a *reference*
+over a copy precisely so that "editing a preset changes what its sessions come back
+as", and Q3.493 built the edit that makes the reference worth its cost. Both were
+reasoning about a **model** change — the same CLI, a different model, resolved at the
+next launch, which is what somebody expects of a preset. But `PATCH
+/custom-agents/:id` is a *replace*, for the reasons Q3.493 gives, so all four fields
+move and the harness is one of them. The reference was bought for a change of model
+and delivered a change of vendor.
+
+**Two repros, and the quiet one is worse.** Preset `{claude, anthropic, opus}` edited
+to `{codex, openai, gpt-5-codex}` left a claude session resuming with
+`system: "openai"`, whose `nativeHarness` is codex, so `applySystem` reached
+`hostable` and every resume from then on answered `502 system_not_routable` —
+permanent, and connected to the edit by nothing on any screen. Edited instead to
+`{kimi, moonshot, kimi-k2-thinking}` it left the **claude** harness routed at Moonshot
+on that model: a triple `hostable` permits, that `POST /sessions` could never have
+produced, that starts and runs and bills somebody's Moonshot key, under a tile saying
+Kimi Code.
+
+**Why a demotion and not a refusal at the route.** `sessions.agent` is immutable
+because the agent *process* is spawned from it, and the transcript, the resume id and
+the credential on the other side all belong to that CLI. So a session whose preset has
+changed harness has exactly two honest outcomes — the bare harness, or a refusal that
+never expires — and the deleted-preset arm had already chosen the first. A refusal at
+`PATCH` would also be the wrong shape: it lets a sleeping session veto an edit to a
+list that is somebody's own scratchpad, on the machine they are looking at.
+
+**Two comments asserted the opposite invariant and are corrected.**
+`CreateSessionOptions.customAgent`'s said the harness and the preset's harness can
+never disagree; it now says they agree *at creation* and names `PATCH` as the thing
+that parts them. `readAssembledAgent`'s said the shared validator exists so that no
+edit "puts the unstartable row into the store by the back door" — true of the row and
+false of the sessions pointing at it, since `hostable` is weighed against the PATCH
+**body**, which says nothing about a session that already exists. Its guarantee is
+scoped to the store now, with `assembled` named as what keeps an existing session
+startable. Prose arguing for what the code no longer does is the failure this
+discipline exists to prevent, and both of these were one edit away from being it.
+
+**A fact about driving it.** The quiet repro's resume **succeeds**. An assertion that
+reads only the outcome stays green against the broken code; only one that reads the
+launch *shape* — no system, no model, no routed variable in the spawn environment —
+goes red. `daemoncheck` pins the shape, and pins the matching-harness case beside it,
+because a guard that demoted every assembled session would pass every other assertion
+in that section.
+
+**What is still dishonest, and it is on screen rather than in the daemon.**
+`SessionSnapshot.customAgent` is a join key, so a session that has degraded is drawn
+under the preset's name, glyph and pairing regardless. This is Q7.120's gap reached
+through a second door, and it is not closed by this.
+
+**Status.** Current
+
+### Q2.217 — A resumed session on a native pairing ran the agent's own default model
+
+**Measured.** A real `Session` driven against a fake ACP peer publishing a
+`category: "model"` select — `currentValue` sonnet, choices sonnet and opus — under
+`{system: "anthropic", model: "opus"}`. `Session.start` sent
+`session/set_config_option` on that option's own id carrying `opus`. The resume sent
+**nothing at all**, and the conversation came back on sonnet while the tile, the
+snapshot and `sessions.custom_agent` all went on naming the preset. That the resume
+*had* the list to weigh the model against is not an inference either: the SDK's
+`ResumeSessionResponse` carries the full `configOptions`, and `claude-agent-acp`
+0.63.0's `getOrCreateSession` populates it, so `modelOption` is already there by the
+time `adopt` returns. Nothing was missing but the call.
+
+**Why it was silent, which is the half worth reading.** For a *native* pairing there
+is no second door. `spawnEnvOf` answers `{}` — there is no `ROUTED_MODEL_ENV` for a
+harness talking to its own vendor — and `applySystem` returns at its first line
+because `SYSTEMS[system].nativeHarness` is the harness already running.
+`session/set_config_option` is therefore the whole mechanism, and skipping it produces
+**no wrong pin for any guard to weigh**: it produces no pin, which is what every
+session started before assembled agents existed looks like and is the one input every
+check on this path is built to wave through. **That is the second post-mortem this
+week on a guard bypassed by a door it does not sit on**, and the first is Q2.215 —
+same shape, one door along. Q2.215 lost the whole option bag at one of three launch
+sites and was caught by hoisting the bag; this lost the one half of it that is applied
+by a *call* rather than by an environment variable, at one of two launch sites, with
+the bag entirely correct at both.
+
+**The asymmetry that made it findable, and it is a fact rather than an aside.** Resume
+accepted a triple create refuses. With the model gone from the agent's published list,
+`Session.start` throws `SystemRoutingError` and `POST /sessions` answers `502
+system_not_routable`; the resume of that identical pairing came back happily on
+whatever the CLI defaults to. A pairing that cannot be created but can be resumed is
+not a state anything here intended, and the two arms disagreeing is what said the pin
+was on one path only.
+
+**Decision.** The resume path pins when it can and reports when it cannot. Three
+options were weighed and two of them are the two failures this file already records.
+*Refusing on resume the way create refuses* strands a conversation for ever the first
+time a CLI retires a model — a permanent 502 on a session that worked yesterday,
+connected to nothing on any screen, which is exactly the stranding shape Q2.216
+deliberately designed away days earlier when it chose a demotion over a refusal that
+never expires. *Demoting silently* is the defect above, relocated. So neither: pin it
+while the agent still offers it, and put a sentence in the transcript when it does
+not.
+
+**The mechanism is one this daemon already has, and that is deliberate.**
+`pinNativeModel` **answers** the refusal sentence rather than throwing it
+(`Promise<string | null>`), because its two callers disagree about what an un-pinnable
+model means and only the *reaction* is theirs — the wording stays in one place.
+`Session.start` wraps the answer in `SystemRoutingError` inside the dispose-and-rethrow
+it already had, so the start path is byte-for-byte what it was, 502 included.
+`Session.openResumed` resumes anyway and pushes one `error` event onto the session's
+own queue, naming the model that was asked for and the one the session is running,
+with `data.code` of `model_not_pinned`. No new event type, no wire field and no
+`registry.ts` change: `error` is the event this daemon already writes about *itself*
+when it carries on after something it could not do — `abandonResume` is the same shape
+— it is already drawn by `EventList`, already sized and truncated in `events.ts`, and
+the registry's `startIdleDrain` already records it, which is the channel
+`session_started` reaches the log by.
+
+**`error` rather than `onWarning`, and the precedent is the point.** `onWarning`
+reaches whoever is reading the daemon's stdout; the person this concerns is holding a
+phone. It is the loud red row on purpose, because the alternative that was actually
+considered was refusing the resume outright. And a `set_config_option` the agent
+*rejects* on a resume is announced the same way rather than thrown — `restoreConfig`
+already swallows exactly this failure, for exactly this reason, since a live
+conversation is not torn down over a config option; what is new is that this one is
+not swallowed silently. On start that call still throws, unchanged.
+
+**How it has to be driven, because the resume succeeds either way.** The sweep is
+{start, resume} × {native, routed} × {model offered, model gone}, and the assertion
+reads the calls made on the wire rather than the outcome — Q2.215's false-coverage
+lesson and Q2.216's quiet repro for the third time. Native/offered on the resume arm
+is the defect's own cell; native/gone on the resume arm asserts the resume did *not*
+throw and that the log carries exactly **one** notice, counted rather than merely
+present, so a second launch may not append a second copy; start/gone stays a 502 with
+the client disposed, and a driver asserting only one of that pair records nothing
+about the asymmetry that is the decision. The mutations that must turn a cell red are
+`pinNativeModel` answering `null` unconditionally and the pin deleted from
+`openResumed`; both left every pre-existing assertion in that section green. The rig's
+fake peer had to publish a model select on **both** responses before any native cell
+was reachable at all — until then every native pairing took the `modelOption === null`
+arm, which is why the sweep could be written and still see nothing.
+
+**What it costs, and neither cost is closed here.** One notice per resume: a session
+whose model has been retired and that is resumed after every daemon restart accrues a
+row each time. That is honest and matches `abandonResume`'s per-give-up shape, and if
+it proves noisy the fix is a dedupe against the last such event, never a demotion back
+to silence. And `SessionSnapshot.customAgent` is still a join key, so a session that
+has just been announced as demoted is still *drawn* under the preset's name, glyph and
+pairing — Q7.120 and Q2.216's own remaining dishonesty, reached through a third door.
+The transcript now disagrees with the chip out loud instead of silently, which is not
+the same thing as closing it.
+
+**Status.** Current
+
+
+### Q2.219 — An OpenRouter session offering OpenCode Zen models
+
+**Question.** Reported twice. Q3.519 divided opencode's one 362-row model control
+into `OpenRouter` and `OpenCode Zen` headings, which is what "separate them" was
+read as. The second report was sharper: *"if the session is through openrouter,
+then the models there are openrouter's, zen is not needed."* A heading was never
+the ask.
+
+**Decision.** `narrowToSystem` filters the **snapshot's** model choices to the
+session's own system, keyed on `nativeModelPrefix`. The log keeps everything the
+agent published.
+
+**Why it is a correctness fix and not tidying.** A session is a
+harness × system × model triple, and the preset names it. Choosing a Zen model in
+an OpenRouter session leaves the session running a model from a system its own
+preset does not describe — while the chip, the tile and the glyph all go on saying
+OpenRouter. That is Q2.216's dishonesty exactly, reached through the model menu
+instead of through a preset edit, and unlike a preset edit there is nothing to
+announce it.
+
+**⚠ The namespace is the *pairing's*, never the current value's** — which is the
+whole reason this is on the daemon rather than in the browser. The browser holds an
+`AgentConfigOption` off a snapshot and knows nothing about systems: it could only
+infer the namespace from whatever model is selected, and a session already switched
+to the wrong system would then be offered **only** that system, for ever. The
+daemon reads it through `assembled`, so a preset re-pointed at another harness
+answers `null` here for the same reason it answers no system there.
+
+**⚠ The selected choice is never removed, whatever namespace it is in.** A list
+missing the value its control is set to makes `chipValue` fall back to a raw id and
+makes `pinNativeModel` refuse the next resume with *"has no model called …"* — so a
+session somebody had already switched by hand keeps a way back to itself instead of
+being cut adrift by the fix.
+
+**Narrow twice, and both exits are by identity.** `category === "model"` only,
+since no other control's values are namespaced; and only where the system sets a
+`nativeModelPrefix`, which is opencode's two and nothing else. Every other agent's
+list is returned as the same object.
+
+**Where it is not.** Not in `toConfigOptions`, which is a faithful ACP flattening,
+and not in the log — the transcript records what the agent said. `snapshotConfig`
+is the right seam and already shapes this payload for a stated reason:
+`dedupeAliasChoices` removes a placeholder from it, and `withUltracode` adds a row.
+
+**Known limitation.** `POST /sessions/:id/config` still *accepts* a model outside
+the namespace; nothing offers one any more, but the route does not refuse it. The
+guard belongs beside `pinNativeModel`'s own refusal and is not built.
+
+**Status.** Current
+
+### Q2.218 — Four prompts, three turn ends
+
+**Question.** A session's log held four `prompt` events and three `turn_end`s. The
+missing one belonged to a turn that ended in an `error` — a provider refusing the
+model, surfaced verbatim. Is a turn that failed a turn that ended?
+
+**Decision.** Yes, and `pump` writes the end itself:
+`turn_end{stopReason: "agent_error"}`, immediately after the error and only when
+the turn actually failed.
+
+**Why.** The argument is Q2.103's, already made a hundred lines up in the same
+file for the cancel path: the daemon writes the end because the agent never gets
+to send one, and **a prompt with no turn end at all is the shape this codebase
+calls a message that reached no model**. `Session.prompt` converts a rejected
+`session/prompt` into an `error` event and returns on it exactly as it returns on
+a `turn_end`, so the turn was over and nothing on the wire said so.
+
+**What it cost, none of it a spinner.** Nothing was stuck — `pump`'s `finally`
+clears `turn`, `showsWorking` reads the snapshot, Stop comes down and the composer
+stays open. Three quieter things broke instead. `Tail.taskFloor` is raised by
+`session_started` or a non-`end_turn` `turn_end` and by nothing else, so a turn
+that failed **mid-delegation** left its pending calls counted for the rest of the
+session under a permanent "waiting for 1 task" — the exact false line that floor
+exists to prevent. The `turn.ended` plugin hook never fanned. And the turn's origin
+claim was never spent, so a plugin that started the failed turn had the **next**
+turn's hook suppressed instead — a bug that outlives the turn it came from.
+
+**`agent_error` is a sixth reason, and none of ACP's five would do.**
+`TurnEndEvent.stopReason` was ACP's closed union; it is `TurnStopReason` now.
+`refusal` is the *model* declining and `cancelled` is something a person did, and
+either would be a lie in the one row a reader trusts about what happened. The
+client needs no change to accept it — `wire.ts` has always typed this field as
+`string` and `stopReasonText` falls through to the identifier — which is this
+wire's standing rule for an unknown value, exercised rather than assumed.
+
+**⚠ And the predicate is not "an `error` was seen", which is where the first draft
+was wrong.** The turn generator yields `CLOSED` — `{type: "error", message:
+"session closed"}` — whenever the queue closes under it, which is this daemon
+disposing the agent on a stop, a restart or a replacement. Writing `agent_error`
+there would blame the agent for a teardown we performed, and fan a plugin hook on
+a path no plugin has seen. `isSessionClosed` is exported from `session.ts` and
+compares by **identity**: the message is prose, and matching it would make an
+agent that happens to say "session closed" indistinguishable from us saying it.
+`drainBetweenTurns` already recognised the sentinel; the turn loop did not.
+
+**Rejected: drawing a row for it.** `showsInTranscript` answers `false` for
+`agent_error` as it does for `end_turn`, and for the opposite reason — the row
+immediately above is the agent's own error in the agent's own words, so a line
+under it saying the turn ended states one fact twice, the second time worse. The
+floor is raised regardless, because `taskFloor` runs before that gate: "nothing is
+drawn for it" and "nothing happened" are different sentences and `webcheck` pins
+both.
+
+**Rejected: fixing `taskFloor` alone, client-side, with no wire change.** It is
+the cheaper repair and it fixes one of the three — the plugin hook and the origin
+claim are on the daemon and cannot be reached from a browser. It would also leave
+the daemon's own log still saying four prompts and three ends, which is the thing
+that was actually wrong.
+
+**Not claimed: that every prompt now has exactly one end.** Four places in this
+codebase say out loud that turns without one exist — an agent that died with its
+turn, a daemon interrupted, a `/clear` that burns no turn number — and each builds
+its own compensation. What closed is the one case where the daemon *watched* the
+turn end and wrote nothing down.
+
+**Measured.** `daemoncheck` drives a stub that answers `session/prompt` with
+`-32603` carrying the upstream's own prose and **no** `errorKind` — the shape read
+off the live log, and the reason `isAuthFailure` correctly ignores it and text
+matching was never an option. It asserts the order (`error` then `turn_end`), the
+reason, one end per prompt, and that no exit is recorded: a bad turn is not a dead
+agent, and `onAgentUnusable` must not fire on one.
+
+**Status.** Current
+
+
+### Q2.220 — "It has no model called X. It is running X."
+
+**Reported from the app, as a screenshot of one row.** A resumed opencode session
+drew the error notice:
+
+> opencode has no model called "opencode/hy3-free" — it offers
+> openrouter/aion-labs/aion-2.0, … and 352 more. The conversation was resumed
+> anyway, running opencode/hy3-free.
+
+Both halves are true. The row is still wrong, and the way it is wrong is the
+interesting part.
+
+**`pinNativeModel` tests the wrong thing, and the two facts it conflates have
+different answers.** It asks whether the model is in `option.choices` — what the
+agent currently *offers* — and refuses when it is not. What the pin is *for* is
+that the session runs the model. `option.value` is what it is running, and it can
+sit outside `choices`: opencode resumed the conversation on the model it was
+started with, while the list it publishes now reflects whichever provider keys the
+machine holds today. So the session was on exactly what its preset named, and the
+daemon announced a demotion that had not happened.
+
+**This daemon already treats that state as normal at the other end**, which is what
+makes the conflation a defect rather than a judgement call. Q2.219 narrows the
+model menu to the session's own system and then says: *"The selected choice is
+never removed, whatever namespace it is in"* — precisely so a session somebody had
+switched by hand keeps a way back to itself. An agent that stopped listing the
+model it is running is the same fact seen from the agent's side.
+
+**Two consequences, and the second is the worse one.** `openResumed` drew a loud
+`error` row — `agent-systems.md` calls it "the loud row on purpose" — about a
+session that was fine, contradicting itself in one sentence. And `Session.start`
+turns the same refusal into `SystemRoutingError`, so **a preset whose model the
+agent is currently running answered a permanent `502`**. That is Q2.216's stranding
+reached from the opposite side: that entry chose a demotion over a 502 that never
+expires, and this produced the 502 anyway, for a pairing that works.
+
+**Fixed by asking the right question first**: `option.value === wanted` returns
+`null` before the list is read. Nothing to do, nothing to say — and one fewer
+`session/set_config_option` round trip on every resume of a session already on its
+model.
+
+⚠ **The driver had a whole column for this and never drove the case.** The pinning
+rig hardcoded `current: "sonnet"` while the pinned model was `"opus"`, so every
+"the model is gone" cell was a genuine demotion — and the assertion *"the demotion
+names both models"* is correct about the fixture and silent about the shape that
+shipped. `current` is a parameter now and the four cells are pinned for
+`current === wanted` too, including `start` answering `(started)` where it used to
+answer `SystemRoutingError`.
+
+**Status.** Fixed.
+
+### Q2.221 — Is a refused `session/new` a fact about the credential?
+
+**Reported from the app, as a screenshot of the New session sheet.** The strip
+drew a tile reading `Gemini / from Bring yo…` — a harness the `byo` plugin adds —
+and pressing Start answered:
+
+> Gemini (gemini) rejected session/new: authentication required. Gemini refused
+> this session. Run `gemini` once in a terminal on this machine to sign in with
+> Google, or paste a GEMINI_API_KEY below.
+
+The sentence is correct and the tile should not have been there. What made it
+persistent is that nothing this daemon knows could have taken it away:
+`readLoginState` answers `pasted ? true : null` for every harness with no status
+command — which is opencode and every harness a plugin adds — so `loggedIn` was
+`null`, `agentStance` answered `no_login`, and `offersTile` draws a tile for that.
+Each press cost a worktree, a branch and a session row before the agent declined,
+because the refusal happens *after* the spawn.
+
+**Question.** The daemon now remembers the refusal. Does it belong on `loggedIn`?
+
+**Decision. No, and the reason is not fastidiousness — it is that writing it there
+closes the only door out.** `AgentAskRuns.admit` refuses on `loggedIn === false`,
+and `admit` guards `claim`, which is what `GET /agents/capabilities` uses to start
+a harness and read what it offers. That sweep is the **one** live re-measurement a
+harness with no status probe ever gets: it performs a real `session/new` and caches
+only successes. Route the refusal through `loggedIn` and the record blocks the
+spawn that would have discovered the harness had been fixed — a lockout closing its
+own last door, and one nothing on any screen could explain.
+
+The narrower argument stands beside it. ACP's `auth_required` is answered by the
+*adapter*, and Q7.65 is this repository's own counterexample: a pasted
+`CODEX_API_KEY` that reached the model's API and was accepted, while `codex-acp`
+went on refusing `session/new`. `loggedIn` answers "is this CLI signed in"; a
+refusal answers "would this harness open a session, configured this way, a moment
+ago". They are different questions and the second one is the one a tile is about.
+
+So `AgentAvailability.lastStartRefusal` is its own field, carrying `at`, `routed`
+and the message. `readLoginState` is untouched, and its own ⚠ now names where the
+negative went — the docblocks at `runtime/types.ts`, `local.ts` and
+`daemoncheck.ts:1525` all say a harness with no probe cannot report itself signed
+out, and all three stay true.
+
+**Two places write it and a third deliberately does not.** `Session.start` and
+`Session.openResumed`, both on `isAuthRequired` — ACP's *typed* code rather than a
+message match. Not the event pump's `errorKind: "authentication_failed"`: Q7.99
+measured that against a session idle 5h36m whose token had 1.4 hours left, where a
+fresh agent worked four minutes later. What is stale there is the process, and
+`onAgentUnusable` carries a comment saying so at the one site that could have
+written this.
+
+**`routed` is what stops one refusal condemning a pairing it never tested.**
+`applySystem` runs before `session/new` and returns whether it actually routed — a
+native pairing configures nothing, because the agent already reaches its vendor on
+its own credential. A refusal measured while routed has survived `providers/set`
+and is evidence about every way of starting the harness. One measured bare is not:
+that is the signed-out Claude Code on OpenRouter this repository documents as
+working, and a fence reading a bare refusal as a fact about every start would have
+deleted it. `registry.create` fences before `createWorkspace` — the same paragraph
+the `available` check above it already carries, applied to the axis it did not
+cover.
+
+⚠ **And `customAgent == null` is not the whole test, which cost a draft.** A
+**native** pairing carries a system and configures nothing: `applySystem` returns
+at `spec.nativeHarness === options.agent`, before `providers/set` and before any
+key is read, so the session runs on the harness's own credential exactly as a bare
+start does — which makes a bare refusal precisely as dispositive. Written as two
+disjuncts, the fence let through the one press that had just been refused, and
+every repeat cost a worktree, a branch and a session row again. It resolves the
+preset and asks the catalogue now. The case needs no plugin: `hostable` accepts
+every native pairing, so a signed-out Claude Code with a native Anthropic preset
+reproduces it.
+
+⚠ **And the route that undoes it must answer the same row shape the listings do.**
+`availability()` carries no `login` object — that is built in `loginSupportOf` and
+spread onto `GET /agents` and `GET /agent-auth` by hand — so `POST
+/agent-auth/:agent/recheck` returning its lookup verbatim dropped the one field
+whose absence makes every reader fall to *cannot check*, which is the permanent
+wrong badge `local.ts` answers `no_flow` to prevent. Measured: `pnpm client agents`
+printed *no sign-in needed* and `pnpm client agents recheck` printed *cannot check*
+for the same harness in the same state.
+
+**Status.** Fixed.
 
 ## The web client
 
@@ -6018,10 +6654,12 @@ inconsistent: `buildCommands` already synthesizes this control as `/effort` on
 both agents off the same category, so on kimi the slash menu said `effort` and the
 chip one tap away said `Thinking`. The command has the stronger claim on the name,
 because a name somebody types has to be portable, which is why it is ours there
-rather than the agent's. Narrow on purpose: `model` is `Model` on both and `mode`
-is `Mode`, so there is nothing to reconcile and the agent's own word stands; an
-unknown category has no second opinion at all. Overriding a name we have no better
-version of is how a client starts inventing vocabulary.
+rather than the agent's. Narrow on purpose: `model` is `Model` on all four agents
+and an unknown category has no second opinion at all, so the agent's own word
+stands. Overriding a name we have no better version of is how a client starts
+inventing vocabulary. **`mode` was in that sentence for four releases and is not
+any more** — a fourth agent disagreed about it too, and Q3.516 is what the table
+does about that.
 
 **Measured.** 2026-08-04 against both live agents: claude calls reasoning effort
 `Effort` and kimi calls the identical control `Thinking` (`id: "thinking"`,
@@ -6159,6 +6797,774 @@ calls it `thinking` with values `off|…`, so a bar keyed on ids renders one age
 controls and none of the other's. claude also drops `bypassPermissions` from its
 mode list when it runs as root without `IS_SANDBOX`, so a fixed list would offer a
 mode the agent rejects.
+
+**Status.** Current
+
+#### Q3.516 — A fourth agent calls the mode control something else. Does the table grow?
+
+**Decision.** Yes. `CATEGORY_LABEL` gains `mode: "Mode"`, so `labelFor` answers one
+word on all four agents and opencode's `Session Mode` is drawn as `Mode` everywhere
+a control names itself — the chip's caption, `Absent`'s heading and `aria-label`,
+`Select`'s title and `aria-label`, `ChoiceSection`'s heading, `Toggle`'s visible
+text, and the `/` menu's second-stage heading. Every one of those already read
+`labelFor`, so the change is the table entry and nothing else.
+
+**Why.** Q3.61 set the bar as "only where the agents disagree", and this is one —
+three against one, which is not itself the argument, since counting agents is
+precisely what this table refuses to decide a name by. The argument is that the
+extra word distinguishes the control from nothing: a session is the only thing a
+mode could belong to here. And `mode` is the one category `showsCaption` leaves its
+caption on, so it is the one chip spending width on its name *and* its value at
+once, on a phone, for the control reached for several times an hour.
+
+**Measured.** 2026-08-27 against the live agents and against `opencode acp`
+1.18.23: claude and kimi publish `name: "Mode"` and opencode publishes
+`name: "Session Mode"`, all three under `category: "mode"`.
+
+**⚠ And the check that could not have caught it.** `webcheck` asserted
+`labelFor(kimi.mode) === "Mode"` under the title "a control the agents already
+agree about keeps its own name" — but kimi's own name *is* `Mode`, so the table and
+the agent produce the same string and the assertion holds either way. Deleting the
+table entry would have left the file green. It drives an opencode-shaped fixture
+now, plus a negative control: the same two words under a category nobody has
+reconciled come back untouched, which is what makes "keyed on the category, never
+on the string" an assertion rather than a claim.
+
+**Status.** Current
+
+#### Q3.517 — The same agent publishes its modes in lower case. Is casing them a rename?
+
+**Decision.** No, and that is the whole permission slip. `choiceLabel` in
+`agentConfig.ts` is now the one place a choice is named, and it upper-cases the
+**first letter only**, of a **`mode` choice only**, and only where that letter is
+not already upper case. `choice.value` is never touched.
+
+**Why.** Q3.62 and Q3.63 set a deliberately high bar for renaming a choice — the
+agent's own name must convey *nothing* — and refused `Manual` on modes for exactly
+that reason. Casing clears the bar by not being a rename: no word changes, so there
+is nothing here that can be wrong about what a value means. The narrowing is the
+shape `chipValue` already uses for `model`: a model's name is a proper noun somebody
+else owns and is not improved by a capital, and every agent publishing an effort
+control — opencode included — already capitalises its levels. `mode` is the one
+category a measurement says they disagree about.
+
+**And it collapsed three copies of one rule, of four surfaces that exist.**
+`override?.label ?? choice.name` was written out in `chipValue`, in `rowLabel` and
+in `configChoices` — the three surfaces `choiceOverride`'s own docblock says must
+not each keep a copy, keeping one each. The fourth is the `/` menu's **first**
+stage, where a mode is lifted to a row of its own and the choice's name is the floor
+under its description; no enumeration of these surfaces had ever counted it.
+`rowLabel` answers a string now instead of `null` and a fallback its caller wrote,
+and `chipValue`'s fallback for a value the agent no longer lists goes through the
+same function — without that, one frame of a mode the agent clamped would print
+`build` on the chip while every menu row printed `Build`.
+
+**Measured.** 2026-08-27: claude publishes `Auto`, `Manual`, `Accept Edits`,
+`Plan Mode`, `Don't Ask`, `Bypass Permissions`; kimi publishes `Default`, `Plan`,
+`Auto`, `YOLO`; opencode publishes `build` and `plan`.
+
+**Rejected.** Title-casing the whole name — `accept edits` would become
+`Accept Edits`, which is a guess about where an agent's words begin, and the first
+letter is the only part of this that cannot be wrong. And `toLocaleUpperCase`, which
+maps `i` to `İ` under a Turkish locale: the string is an identifier an agent
+published, so the reader's locale must not decide what the agent is called.
+
+**Status.** Current
+
+#### Q3.518 — An agent that never published an effort control, against one that withdrew it
+
+**Decision.** Draw the slot anyway. `drawnControls` synthesizes `NO_LEVELS` — an
+empty `thought_level` select whose id is namespaced `reemoat:` — and names it in
+`unavailable`, so `Absent` draws it through `chipParts`/`chipInner` like every other
+withdrawn control and its menu carries `unavailableHint`'s sentence. No second code
+path, no new component, and nothing new on any wire.
+
+**Why.** Q3.404 keeps the slot of a control the agent *drops*, because a button that
+vanishes moves everything beside it and explains nothing. claude and kimi drop it;
+opencode never publishes one. One fact in two shapes, and the strip drew only one of
+them — so the right-hand cluster had three chips on one session and two on the next,
+which is the shape change Q3.402 refuses to allow for a width and had no answer for
+as a count.
+
+**Measured.** 2026-08-27 against `opencode acp` 1.18.23, one OpenRouter key, 362
+models. `session/set_config_option` on the model answers **with** a `thought_level`
+for `openai/gpt-5` (`Minimal/Low/Medium/High`) and for
+`~anthropic/claude-sonnet-latest` (five levels), and **without** one for
+`minimax/minimax-m3`, `deepseek/deepseek-r1` and opencode's own default
+`opencode/big-pickle`. So "The model in use offers no levels here. Another model
+may." is a description of the agent one model apart, rather than a client guessing
+about a control it has never seen.
+
+**⚠ And the premise underneath it was written down wrong, which would have made
+this a lie rather than a description.** Q6.105 recorded opencode's options as
+arriving in two waves — `thought_level` "only in the answer to a
+`set_config_option`, once a model is chosen" — and if that were so, the slot would
+assert a property of the current model at the one moment nothing had been said
+about it. Two adversarial reviews raised exactly that, both as fatal, both citing
+this file. Three probes settle it the other way. An answer is a **full option
+list** rather than a delta about the option that was set: setting the *mode* of a
+session running `openai/gpt-5` returns `thought_level` untouched beside it. With a
+project `opencode.json` naming that model, **`session/new` itself carries the
+control**. And an explicit set to the model wave one is *already* on returns exactly
+what wave one returned. The old row was an inference from a single measurement whose
+default model happens to have no levels; it is corrected in Q6.105 and in
+`.claude/rules/acp-agents.md`.
+
+**`thought_level` alone.** A synthesized `mode` would be found by `splitOptions` as
+the `NESTED_HOST`, and `Absent` draws no nested sections — so codex's
+`collaboration_mode` would nest inside a placeholder and silently cease to exist,
+which is the failure that slot partition is asserted against. `model` is left out
+for a weaker reason and it is worth naming which: nobody asked, and no agent has
+been seen without one. The argument is not symmetric anyway — what earns this slot
+is a measurement saying the absence *means* something.
+
+**⚠ The memory gets the slot too, and the first draft gave it to the live branch
+only.** `holdConfig` can merge only what a *daemon* published, so a slot invented
+inside `drawnControls` never reaches `held` — and a strip falling back to the memory
+during a restart lost the chip, moving every button beside it. That is Q3.418's
+complaint arriving through the fix for Q3.404's. The only case with no slot is the
+one where nothing is drawn at all: a live agent that published no controls, which is
+a fact rather than a gap. The presence test is against the *drawn* set rather than
+the live one, so an agent that withdrew its effort control keeps one row with its
+old levels behind it instead of gaining a second beside it saying there are none.
+
+**And `unavailable` grew a third source while this was being read carefully.** A
+select the agent published with **nothing in it** drew as a live `Select` that
+opened onto a heading with no rows and closed again on the next tap — the dead end
+`buildCommands` refuses to make a command out of, reached through the other door. It
+is `unavailable` now, which also makes the effort slot's own test sound: an empty
+`thought_level` would otherwise have suppressed the placeholder and put that dead
+menu where it should have been.
+
+**It buys a chip and not a command.** `Composer` hands `buildCommands` the raw
+`agentConfig` rather than this, and `buildCommands` skips an empty select anyway —
+so there is no `/effort` row opening onto zero choices. The chip exists to say why;
+a menu entry that only ate what you typed would not.
+
+**⚠ And it found a fixture that was not testing what it said.** `webcheck`'s
+`config()` helper used each option's id as its category, so the test named "a control
+the model dropped keeps its slot" built one with `category: "effort"` — a category
+`agentConfig.ts` has never heard of. The single assertion about the effort control
+was not about the effort control. The helper maps `effort` to `thought_level` now.
+
+**Status.** Current
+
+#### Q3.519 — Two providers in one control, with nothing between them
+
+**Question.** Reported from the app: *"opencode models are for some reason added
+at the bottom to the openrouter models — don't confuse openrouter and opencode,
+check all the places and separate them everywhere."* opencode publishes **one**
+model control holding two providers' catalogues: 356 choices named
+`OpenRouter/<model>` and then six named `OpenCode Zen/<model>`, `group: null` on
+all 362. Two accounts, two keys, one undivided list — and the chip, which has room
+for about eleven characters, spent all of them on `OpenRouter…`.
+
+**Decision.** `drawnChoices` in `agentConfig.ts` lifts a prefix every row repeats
+out of the names and into `group`. All four readers go through it: `chipValue`,
+`ChoiceSection`, `configChoices`, and `CommandMenu`'s second stage.
+
+**Four surfaces, and three of them were wrong in three different ways.**
+`ChoiceSection` *has* drawn a heading on `choice.group` since it existed — but that
+field is populated only by ACP's grouped `SessionConfigSelectOptions` form, which
+no agent sends: zero events in the live database carry a non-null group and every
+`group:` literal in `webcheck` and `daemoncheck` is `null`. The app's one grouping
+mechanism was dead in production and dead in the drivers simultaneously.
+`configChoices` had no `group` field at all, so the grouping was dropped
+structurally one layer before the JSX could have drawn it. And `CommandMenu`
+rendered a flat `choices.map` that would have drawn a *grouped* list flat too. The
+AgentBuilder's picker was the one that was already right — `allModels` divides the
+same published list on `nativeModelPrefix` — which is why the composer being wrong
+read as an inconsistency rather than a missing feature.
+
+**⚠ The key is not "cut at the first `/`", and that matters because Q3.507
+rejected exactly that by name**: *"a strip that cut at the first `/` would survive
+the rename and go on cutting, including a slash that belonged to the model."* It
+keyed on a known constant instead — the system's `displayName`, painted in the
+heading directly above the row. **That key is not available here.** This is the
+composer strip; it holds an `AgentConfigOption` off the snapshot and knows nothing
+about systems, and fetching them would put a request and a blank first paint on the
+session screen for a heading.
+
+So the key is the list's own structure, in two parts:
+
+1. **Grouping is on the `value`'s routing namespace** — the first path segment of
+   what the agent routes on, `openrouter/…` against `opencode/…`. Q3.503's vendor
+   split cannot come back through this door: `openrouter/qwen/…` and
+   `openrouter/openai/…` are one namespace and therefore one group, whatever their
+   names say.
+2. **A name's prefix is cut only where every row of that namespace agrees on it.**
+   A string identical on all 356 rows of one provider is redundant with the heading
+   by construction — Q3.507's own justification, arrived at from the rows instead
+   of from a constant. One row that disagrees, or one carrying no prefix, and the
+   whole control is left exactly as the agent sent it.
+
+**It fails open, which is the property Q3.507 asked for.** Let opencode rename its
+labels or spell one row differently and this stops firing: the list reads as it did
+before the function existed. It can produce an untidied name; it cannot produce a
+wrong one. Measured, no other list is touched — claude publishes `Opus (1M
+context)`, kimi `K3`, codex `GPT-5.6-Sol`, and every mode and effort choice on all
+four is a single word with no separator in the value *or* the name.
+
+**Nothing is lost by cutting.** Two names in the live 362 collide after the cut —
+`Nano Banana 2` and `Nano Banana Pro` each appear twice — and both pairs collide
+*before* it too, under one provider, because opencode published the same label for
+a model and its `-preview`. The head is constant within each pair, so the cut adds
+no ambiguity that was not already there.
+
+**`CommandMenu` gets `role="group"` rather than the `<p>` its neighbour can
+afford.** A `listbox` may contain options and groups and nothing else, which is why
+that menu's own heading already sits outside the box; the words go on the group's
+`aria-label` and the visible copy is `aria-hidden`. `choiceRuns` keeps each row's
+**flat** index, because the arrow keys, `aria-activedescendant` and the
+`scrollIntoView` effect all count in the unwrapped list.
+
+**And one broken promise, found in the sweep and fixed with it.**
+`CATEGORY_RESERVE`'s docblock says a value too long for the chip "truncates, with
+the full text one tap away in the menu **and in the chip's own `title`**". opencode
+publishes `description: null` on all 362, so the tooltip's fallback chain ran to
+`labelFor(option)` and the tooltip over a chip reading `Claude Opus 4…` said, in
+full, "Model". It falls back to the value's own name now; the control's name is
+still on `aria-label` unconditionally.
+
+**Deliberately not changed: `CATEGORY_RESERVE.model`.** It is `GPT-5.6-Luna`,
+measured before the fourth agent, and opencode's ordinary names are wider — so this
+chip truncates on most opencode rows rather than on a rare one. Widening it widens
+the model chip on **every** agent for a value only one of them has, which is what
+Q3.402 refuses; and truncation now degrades correctly, since the tooltip carries
+the full name.
+
+**⚠ And a heading was not what was asked for.** This entry separated the two
+providers and left both in the list; the report came back sharper — an OpenRouter
+session should not be offered Zen models at all. Q2.219 is that fix, on the daemon,
+because the browser cannot know a session's pairing. What survives here is
+everything about *how* a list is drawn once it arrives; what it got wrong was
+believing the list was right.
+
+**⚠ And once that fix landed, the heading had nothing left to separate.** Q3.525
+takes it out and keeps the shortening — read the two together, because the
+condition on the shortening tightened when the heading went.
+
+**Status.** Superseded in part by Q3.525
+
+#### Q3.520 — A model that cannot call a tool, offered as an agent
+
+**Question.** An assembled agent failed on its first turn with OpenRouter's own
+sentence: *"No endpoints found that support tool use. Try disabling `bash`"* —
+`bash` being opencode's own shell tool. The second such report in a row, and the
+first one really was upstream, so this one was read as upstream too.
+
+**It was not.** The model was `nousresearch/hermes-3-llama-3.1-405b`, and its
+entry in OpenRouter's catalogue carries no `tools` in `supported_parameters` at
+all. OpenRouter was right, the catalogue was right, and this app offered it anyway.
+
+**Decision.** `readOpenRouterModels` reports the ids it refused for want of tool
+support as `toolless`, and `allModels` drops a **published** row whose id is in
+that list.
+
+**Why it happened, and it is one sentence: the filter existed and only one of the
+two lists went through it.** A system's models come from the browser's own
+catalogue read — filtered — *or* from the native harness's published list, which
+is whatever that CLI says. opencode is the native side of OpenRouter and publishes
+all 362 of them unfiltered, image models included, and this function merges the
+two. So a model the catalogue had already refused walked back in through the other
+door, won the row (published wins the row, deliberately), and was offered.
+
+**A list of the refused rather than a list of the allowed, so it fails open.** A
+catalogue that could not be read refuses nothing and every published row is offered
+exactly as before — which is this client's rule everywhere it depends on a third
+party. The argument is optional for the same reason.
+
+**And `toolless` is one statement, not "everything left out".** A `:batch` id is
+refused for a reason that says nothing about tool support (Q3.506 — it can call
+them perfectly, in a day), and a malformed row supports no claim at all. Naming
+either would drop a published row over something that was never measured about it;
+`webcheck` asserts both stay out.
+
+**Known limitation.** The *in-session* model menu still offers them. It draws the
+agent's own published list, and neither the browser at that point nor the daemon
+ever has the catalogue in hand — the daemon has no model list of its own and could
+not have one. Switching to such a model mid-session fails the next turn with the
+same accurate sentence.
+
+**Status.** Current
+
+#### Q3.521 — The `+` that could not be scrolled to, and the row that could not be scrolled
+
+**Question.** Reported twice, and the second time both halves at once: *"this panel
+should scroll right (it does not now), and the `+` should be the rightmost item
+when scrolling, rather than just being on the right."* Q3.510 measured the same
+strip, concluded it scrolled, and **rejected** moving the `+` inside on two
+arithmetic grounds.
+
+**Both halves were real, and the first one Q3.510 could not have seen.** Every
+number there was taken at 390px — under a thumb. On a desktop this strip has no
+input at all: `.no-scrollbar` deletes the classic bar that the app's own
+`@media (pointer: fine)` rule gives every other container, a wheel scrolls vertically and that is
+consumed by the sheet's legitimate vertical scroller above it, drag-to-scroll is
+not a mouse gesture, the container cannot take focus, and shift+wheel is
+undiscoverable. "It scrolls" was true and "you can scroll it" was not.
+
+**Decision, in three parts, and the third replaced a wrong second one.** The class
+comes off this strip — the machine tabs keep it, since their overflow cue is still
+a half-cut pill while this row's last item is now a fully drawn dashed box that
+reads as an ending. The `+` is the track's last item, **plain**. And a `wheel`
+listener moves the row, because on a desktop nothing else can.
+
+**⚠ `sticky right-0` shipped first and was the same refusal wearing a different
+hat.** It is inside the track, so on paper it is the row's last item — and it
+paints at the scrollport's right edge at *every* scroll position, which is
+pixel-for-pixel where the pinned sibling was. It was reported a third time, in the
+same words as the first two. Verified against the running container rather than
+argued about: the deployed bundle contains the literal `sticky right-0` and no
+`addEventListener("wheel"`, so both halves of the report described exactly what was
+shipped. **The lesson is not about CSS.** Twice this component answered a request
+by protecting somebody from an arithmetic they had already been told and had
+already accepted. The arithmetic is real, it is written in the docblock, and it was
+never this component's to weigh.
+
+**The wheel listener is the half that was actually missing.** The layout always
+scrolled; a mouse has no gesture for a horizontal box — no drag on a scroll
+container, no focus (Chrome's keyboard-focusable-scroller feature excludes a
+container holding focusable children, and these are `<button>`s), and shift+wheel
+that works and is known to nobody. `addEventListener` with `{ passive: false }` and
+**not** a JSX `onWheel`, whose `preventDefault` React swallows because it attaches
+that listener passive. It consumes a notch only when the row can absorb one in that
+direction, so at either end the page goes on scrolling under a cursor that happens
+to be resting over a 64px strip; a horizontal `deltaX` is left alone entirely,
+since a trackpad already does the right thing with it.
+
+**Q3.510's arithmetic is still true and is accepted rather than answered.** As an
+ordinary item the button begins two pixels past a 390px screen on a first run —
+three tiles are 352px, the gap and the button add 52, the window is 358 — and it is
+the **only** door to the builder in this app. What changed is not the number but
+who it is for: it is one short drag or one wheel notch away, and the row can now be
+moved at all, which it could not be with a mouse when that refusal was written.
+
+**`scroll-pr-13` went with the sticky button** — it existed only to keep
+`scrollIntoView` from parking the chosen tile underneath it, and there is nothing
+overhead any more.
+
+**Rejected: narrowing the tile to 96px instead**, which would let the `+` sit as an
+ordinary last item inside a 390px first run with no sticky, no overlap and no
+`scroll-pr-13`. It is the cheaper shape and it was refused on two measurements
+already in this file: the tile's content box is 112 − 20 of padding − 2 of border,
+and `cannot check` alone is 71px of that, so 96px leaves three pixels of slack on a
+string that has already forced this width up once (Q3.509, Q7.119); and it buys the
+first run only — one preset and the `+` is off screen again, sticky or not. What it
+would trade is 16px off every preset name, for ever, on tiles that carry model ids.
+
+**⚠ And a third revision, because the second one was reported too.** Taking
+`.no-scrollbar` off gave this strip the classic bar the app's own `pointer: fine`
+rule draws on every other container — which under a row of tiles is a permanent
+dark rule, and was reported the moment it shipped. `fade-scrollbar` is the answer:
+**the thickness is reserved always and only the thumb's colour changes**, so the
+strip cannot change height when the bar appears — animating `scrollbar-width` or
+`::-webkit-scrollbar` would move everything below it on every flick, which is the
+jolt `.scroll-stable` exists against one rule up in the same file. `is-scrolling`
+goes on from the element's own scroll handler and comes off a second later, which
+is what a macOS overlay bar does; it is a `classList` toggle rather than React
+state because it fires on every frame of a flick.
+
+**Known limitation.** `SessionBrowser`'s machine tabs keep `.no-scrollbar` and
+therefore keep the same desktop defect, latent: they need about eleven machines to
+overflow, and nothing has reported it. The two idioms have forked and this entry is
+where that is written down.
+
+**Q3.510's other objection is answered by the class change rather than argued
+with.** It said the cue would collapse from a sliver of ink to nothing; with the
+bar back on a fine pointer the cue is a scrollbar, and on a coarse one the tiles
+are cut by an opaque control 8px earlier than by the scroller's edge.
+
+**Nothing pinned any of this, which is how one report arrived twice.** `webcheck`
+asserted the strip's colours and its refusals and said nothing about where the
+button sits or whether the row can be moved. It reads the source for both now.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.522 — A harness with no tile
+
+**Question.** *"Remove opencode from the defaults — it is not a standalone agent,
+you have to pick a model for it."*
+
+**Decision.** `startsBare` in `agentCard.ts`, false for opencode alone. It closes
+all three doors on the new-session screen with one predicate: the tile row, the
+auto-default, and a per-machine pick restored through `offeredHere` — the last of
+which is the seam `webcheck` can drive, and the reason the rule lives inside it.
+
+**"Not a standalone agent" is not quite the accurate statement, and the accurate
+one is better.** opencode is in fact the most self-sufficient of the four: it
+completes a turn against an empty `XDG_DATA_HOME` (Q6.105), which is why it has no
+sign-in at all (Q3.504). Neither of those becomes false here. What is true is
+narrower and is about the **model**: three of the four harnesses *are* the model
+they run — Claude Code runs Claude, Kimi Code runs Kimi, Codex runs GPT — so
+tapping one is a whole decision. opencode is a router. Started bare, `pinNativeModel`
+returns at its first line and it picks `opencode/big-pickle` off its own free tier:
+*a model nobody on the screen chose*, under a tile that names none.
+
+**And a saved key does not fix it**, which is the measurement that settles it: the
+spawn merges saved secrets, so a machine with `OPENROUTER_API_KEY` on opencode's
+card gets a bare session publishing **362** models that still starts on
+`big-pickle`. The key widens the catalogue and moves the default not one row.
+
+**⚠ A different rule from "an unavailable harness stays, disabled, saying why."**
+That one — quoted in this very component — is about an agent the machine *cannot
+run*, where hiding the tile answers "where did claude go" with silence. This
+harness runs perfectly; what it has no answer for is which model, and the control
+that does is the `+` at the end of the same row. A disabled tile would be a control
+you have to tap to learn is not one.
+
+**Two caveats, both accepted rather than answered.** The predicate is a string
+literal in the browser — `agent !== "opencode"` — where the daemon is otherwise the
+source of every fact about a harness. Nothing on the wire says "this one is a
+router", and the nearest derivable proxy (being the native side of more than one
+system) is a coincidence of today's table rather than the fact being asserted; the
+literal is at least visibly a product decision. And the builder, which is where
+this now sends you, needs `GET /agents/capabilities` — the read that spawns a
+process per harness and is deliberately kept off this screen — so a failure there
+now costs opencode entirely rather than costing it a model list.
+
+**It is removed from one screen and nowhere else.** `GET /agents` still lists it,
+`POST /sessions` still accepts it — narrowing that would refuse every *assembled*
+opencode agent and strand sessions already started — the CLI still starts one, the
+settings card still shows it (the only place `OPENROUTER_API_KEY` and
+`OPENCODE_API_KEY` can be saved at all), and the agent builder still offers the
+harness, which is where this sends you.
+
+**Status.** Current
+
+#### Q3.523 — A screen that waited for four cold agent spawns to draw a name field
+
+**Question.** *"Why does the create-an-agent page take SO long to load?"*
+
+**Measured.** `GET /agents/capabilities` starts an agent per harness and reads what
+each publishes. Driven against the real harnesses with the real saved credentials,
+2026-08-28: claude 1162 ms, kimi 627 ms, codex 2260 ms, opencode 1237 ms —
+**5286 ms** serially. `AgentBuilder` rendered the **entire screen** as one spinner
+until that answered.
+
+**Decision.** It waits for `GET /systems` — a table, milliseconds — and not for
+that. The model row is the one control that is pending, and it says so.
+
+**What makes it safe, and it is a property rather than a promise.** The catalogue
+memo answers `[]` while `capabilities` is `null`, so `current` is `null`; with no
+model chosen `harnessRowRefusal` returns at its first line for every row,
+`choiceRefusal` is never asked, and Save is already gated on `current === null`.
+There is no state in which a half-read screen draws a pairing as possible, or as
+refused, on evidence it does not have. `hostable` over an empty map *would* say
+"only runs its own models" about every harness — which is exactly why the empty map
+is never reached with a model in hand.
+
+**⚠ `null` and `{}` are different answers and the first draft conflated them.**
+Passing `capabilities ?? {}` everywhere would have made "still reading" and "this
+machine offers nothing" the same state. `reading` is the flag; `caps` is only for
+the two readers typed against a non-null map, whose sentences are unreachable while
+the catalogue is empty.
+
+**⚠ And "Choose" is a claim.** The model row's title fell back to it, which on the
+**edit** path drew a stored preset's filled Model field as empty — inviting a
+second pick on the one screen where that silently rewrites what somebody came to
+edit. It reads `Reading models…` while the answer is out.
+
+**The addressable sub-screen has its own guard.** `/agent/:id/llm` is reachable by
+address as well as by a tap, so the row's `disabled` is not the whole of it: an
+empty picker beside no reason reads as "this machine offers no models", which is
+the sentence `ModelPicker` reserves for a machine that really does.
+
+**Status.** Current
+
+#### Q3.524 — The capability sweep queues for a slot instead of taking turns
+
+**Question.** Q3.490 records the serial loop as measured and deliberate: a
+`Promise.all` over the harnesses made the third lose the race against
+`MAX_CONCURRENT_ASKS` (2) every time, so codex was permanently greyed out of the
+builder under a sentence about load. Serial was safe. It was also **5286 ms**.
+
+**Decision.** The route asks every harness at once again, and `admit` **queues**
+for a slot instead of refusing one. The cap is untouched and still 2: this is four
+requests metered through it, not four spawns.
+
+**Because the loop was never the bug.** `admit` threw when full, so any caller that
+needed more slots than the cap had could not wait for one — and the sweep is
+exactly such a caller, holding the bound it was losing to. Queueing removes the
+failure structurally; the serial loop only avoided approaching it.
+
+**Measured, 2026-08-28.** 5286 ms serial → **3061 ms** queued at a cap of two.
+
+**⚠ And then the question "why is it still that slow, are we asking for it wrong?"
+found the larger half.** Timed per phase, the answer is in hand long before the
+call returns:
+
+| | `Session.start` | dispose | answered at | returned at |
+|---|---:|---:|---:|---:|
+| claude | 916 ms | 18 ms | 917 ms | 935 ms |
+| kimi | 549 ms | 28 ms | 549 ms | 577 ms |
+| codex | 383 ms | **2011 ms** | 383 ms | 2394 ms |
+| opencode | 1001 ms | 24 ms | 1001 ms | 1025 ms |
+
+codex's model list is complete at **383 ms** and the caller was made to wait
+**2394** — 84% of it spent tearing down a process whose answer had already been
+read, and it is the `session/close` deadline almost exactly: codex does not answer
+that call, so the close waits its full budget before the kill. The other three
+disappear in tens of milliseconds, which is what made this one harness the critical
+path of the whole sweep.
+
+So `readCapabilities` no longer **awaits** the teardown. **The slot is still held
+until it finishes** — that is the number the cap is about, and `release` returns it
+when the child is actually gone — so nothing here can put more processes on the
+machine than before. What changed is only who waits. `shutdown` is unaffected: the
+session is in `live` until the teardown settles, and `dispose` is memoised, so a
+drain arriving mid-teardown settles rather than killing a child twice. `ask` still
+waits for its own, deliberately: its caller is a plugin holding a budget.
+
+**5286 ms → 3061 ms → 2159 ms**, measured at each step. All four at once with no
+cap at all was 2531 ms *when the teardown was still on the path*; the bound now
+costs nothing worth naming, and the floor is what the CLIs take to start.
+
+**Rejected: raising `MAX_CONCURRENT_ASKS` to four**, which buys that 530 ms. The
+number is a bound `docs/PLUGINS.md` publishes to plugin authors, and doubling it
+would let one plugin hold four concurrent 120-second model turns. It would also not
+remove the failure — four harnesses plus one plugin ask is still five against four —
+so it trades a published guarantee for a rarer version of the bug the queue closes
+outright.
+
+**⚠ The queue is opt-in per *call*, not per entry point, and the first draft got
+that wrong.** A plugin's `model.list` reaches the same reader; parking it inside its
+own ten-second invocation would make `model_busy` unobservable and turn a load
+message into a timeout. Only the sweep asks to wait. A plugin call that *joins* a
+sweep already in flight still waits — but that is `capsInFlight` handing it an
+answer somebody else is fetching, which it always did.
+
+**⚠ `admit`'s "one tick" invariant is kept by re-testing rather than by holding a
+place.** The `await` is outside the test-and-reserve pair: control returns to the
+top of the loop and the test happens again in the same tick as the increment it
+guards, so a release that wakes three waiters admits one and parks the other two.
+A queue that reserved on being woken is the over-admission that comment exists
+against. `SLOT_WAIT_MS` bounds the park, and `shutdown` wakes it — without that, a
+caller waiting on a slot that will never be handed out waits for the life of the
+process.
+
+**Known limitation, stated because the old comment claimed otherwise.** The route
+still passes the caller's signal, and it protects less than it did: fanned out, all
+four run their one `stopIfGone` in the same tick, so an abandoned sweep runs its
+handshakes to completion. That is bounded and it is not a leak — no prompt, no
+quota, and the answers land in the ten-minute cache, so the `GET` the transport
+replays is served from it rather than paying for the spawn again. The serial loop's
+abandoned tail was neither spawned nor cached, and its retry paid twice.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.525 — The heading a prefix became, one release later
+
+**Question.** Reported from the app, of the model menu Q3.519 produced: *"take out
+the `OpenCode Zen` line and the other ones in this menu — the reader can see what
+those models are."* The heading was drawn exactly as designed, over a list whose
+every row sat under it.
+
+**Decision.** `drawnChoices` still takes a repeated provider out of the names and
+no longer puts it back as a heading. Only a `group` the **agent** published is
+drawn — which is none of the four, measured — and the function behind it is
+`stripProvider` now, because one that groups nothing should not be named for
+grouping.
+
+**Because `narrowToSystem` landed in the same release and changed what reaches the
+menu.** Q3.519 was written against opencode's raw 362 rows, two providers in one
+control, where a heading was the thing separating two accounts. The daemon now cuts
+a session's model list down to the system that session actually routes through, so
+what the menu holds is **one** provider's catalogue — and a heading that every row
+sits under distinguishes no row from any other. It is the same redundancy as a
+prefix on every row, one line higher up. Two answers were live at once for a
+release and this is the older one being retired by the newer, rather than a
+reversal on its merits.
+
+**⚠ The condition had to tighten, and dropping the heading alone would have been a
+bug.** With a heading, a prefix agreed across one *namespace* could be cut, because
+the heading put it back. With nowhere to put it back, the only text that may be
+removed is text that told the reader nothing — so the rule is now **every row of
+the control agrees on one prefix**, not every row of a namespace. Cut per namespace
+with no heading, opencode's raw list would draw `Big Pickle` among 356 OpenRouter
+models under nothing at all, which is Q3.519's own report arriving back through the
+other door. A control holding two providers is now left exactly as the agent wrote
+it: long names, and no two rows that can be read for each other.
+
+**What is kept from Q3.519.** The four readers still go through one function, so
+the chip and its two menus cannot name one value two ways. The `value` is still
+never touched. The key is still the list's own structure rather than a constant:
+only a list the agent *routes* on is touched at all — every `value` must carry a
+namespace — which is what keeps Q3.507's "cut at the first `/`" and Q3.503's vendor
+split out. A vendor-shaped list inside one provider disagrees at its second row.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.526 — A picker that reported statuses instead of offering agents
+
+**Question.** Reported from the app: *"take `signed in` off Claude Code, Kimi Code
+and the rest. They should not show in the agent picker on the new session screen if
+they are not signed in."* The strip drew a tile for every harness the daemon listed
+and explained the dead ones on a second line, so a machine with one working agent
+showed three tiles, two of which were labels — and the tile that did work spent its
+only line saying `signed in`.
+
+**Decision.** `offersTile` in `agentCard.ts` is the second half of the row's gate,
+beside `startsBare`: `not_installed` and `signed_out` get no tile, `signed_in`,
+`unchecked` and `no_login` do. The harness tiles carry **no status line at all**
+now. One predicate, `shownHere`, is what the row, the auto-default and `offeredHere`
+all ask, because a pick the row no longer draws is `Start` live over a row with
+nothing selected in it — the failure family `offeredHere` exists for, arriving
+through a new door: an agent can go stale under a tab that is already open.
+
+**The two halves are one rule.** With every visible tile startable, `signed in` is a
+fact true of everything on screen, and a fact true of everything identifies nothing.
+The settings card still draws all five states with all five badges, because that
+screen is *about* the states; a picker is not.
+
+**⚠ `unchecked` stays, and it is the load-bearing arm.** It is kimi's **permanent**
+answer — `AGENT_LOGIN.kimi.status` is null, so `loggedIn` is never anything else —
+and it is what claude answers when a probe times out. Hiding on it would delete kimi
+from this screen on every machine in the fleet and make a slow probe look like an
+uninstall. `no_login` stays for the reason Q3.509 gives: an agent with nothing to
+sign in to is not signed out.
+
+**⚠ This hides a door, and the screen owes one back.** The sign-in wizard under the
+strip was reached by tapping the tile that said why. With no such tile it hangs off
+*no tile at all* — `!agents.some(shownHere)` rather than the old "nothing
+installed", which called a machine whose only harness is installed and signed out
+*startable* — and it names the first agent `signInOffered` answers true of. That
+predicate is now one function called in both places: the fallback naming an agent
+the wizard's own gate then declines to draw for is an empty row, no door, and
+nothing saying why. `webcheck` pins both call sites as source text.
+
+**And an empty row says which kind of empty it is.** It had one sentence because it
+had one cause — the daemon listed nothing. A machine can now list three agents and
+draw none of them, so *"this machine reports no agents"* over a machine that
+reported three is a false line that sends somebody to the wrong screen.
+
+**⚠ And the blank line had to be *reserved*, which rendering an empty span does
+not do.** The tile keeps three children so that a harness tile and a preset tile
+beside it centre the same content column — the row is `items-stretch` and each tile
+is `justify-center`. An empty `<span>` generates no line box and is **0px** tall,
+so the third child bought back only the 4px `gap-1`: measured against the built
+stylesheet in headless Chrome, the harness tile's glyph and name each landed **9px**
+below the preset's next to it, which is exactly the drift the empty string was added
+to prevent. The height is held by a `min-h` on the span, keyed to the same custom
+property `text-2xs` sets its own line-height from. After: both tiles 84px, both
+sublines 18px, both glyphs at 11px, both names at 33px. Found by review rather than
+on screen, and the comment claiming otherwise was the only thing anybody would have
+read.
+
+**Not the "an unavailable harness stays, disabled, saying why" rule**, which stands
+everywhere else and which this replaces on this one screen. A preset is exempt
+deliberately: an assembled agent starts on the **system's** saved key, a different
+credential in a different table and the one the daemon actually checks, so hiding it
+for a signed-out CLI would hide the agents that need a CLI sign-in least.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.527 — A scrollbar that could not be made to fade, in any browser
+
+**Question.** Reported, of the bar Q3.510 and Q3.521 arrived at: *"make the slider
+under the models on the new-session screen fade out smoothly instead of
+disappearing."* It was already written to fade — the thickness reserved always, a
+`transition: background-color` on the thumb — and it vanished between two frames.
+
+**Measured, 2026-08-28.** Since **Chrome 121** the spec properties **override** the
+pseudo-elements rather than sitting beside them: `scrollbar-width` or
+`scrollbar-color` at any value but `auto`, and every `::-webkit-scrollbar-*` rule on
+that element is ignored. This app's `@media (pointer: fine)` rule sets **both, on
+`*`**, at `thin` and a colour. So every transition written on a thumb
+pseudo-element was dead on arrival, in this app, everywhere — not only on this
+strip. What was left switching is `scrollbar-color`, which no engine interpolates.
+The documented escape is `@supports not (scrollbar-color: auto)`, which buys back
+the pseudo-elements on Chrome ≥ 121 by hiding the standard properties from it — a
+trade this app has no use for, since what it wants is a bar that fades and neither
+mechanism has one.
+
+**Decision.** The strip hides the browser's bar and the app draws its own: a `div`
+under the row, `aria-hidden` and `pointer-events-none`, its width and offset written
+from the scrollport's own metrics by the same handler that already existed, and an
+`opacity` transition — a property every engine animates, and one the
+`prefers-reduced-motion` block at the foot of `index.css` already zeroes without
+naming it.
+
+**Out slowly, in at once, and one declaration does both.** `is-scrolling` carries
+the shorter duration with it, so the bar is there with the first notch and takes
+half a second to go. A single duration in both directions reads as lag: the bar
+arriving after the row has already moved.
+
+**It costs no layout in either state**, which is the property Q3.510's answer had
+and this one keeps for a different reason: the rail is a sibling **below** the row
+with a height of its own, so nothing moves when the thumb appears. A row that fits
+gets a **zero-width** thumb rather than a hidden rail — there is nothing to say
+about a strip that does not scroll, and the screen must not be a few pixels shorter
+on a machine with two agents than on one with five.
+
+**⚠ Both boxes are observed.** The scrollport's width is the window's; the row's is
+however many agents the machine reported, which lands a round trip *after* the
+effect runs. Observing only the scrollport leaves a thumb sized for an empty row
+with nothing to re-measure it. `ResizeObserver` fires once on `observe`, which is
+also where the first layout comes from.
+
+**The fourth answer to one question, and the record of the other three is the
+point.** `.no-scrollbar` hid it outright — a phone idiom that left a desktop with no
+cue and no gesture (Q3.510). Taking the class off gave the permanent classic bar,
+a dark rule under a row of tiles, reported the moment it shipped (Q3.521). The third
+reserved that bar's thickness and animated its colour, which the measurement above
+says could never have worked. A bar that must fade is not a scrollbar in this app;
+it is a `div`.
+
+**⚠ And the fade was pinned by nothing for a day, which review found by mutating
+a copy of the tree.** The driver asserted that `.fade-thumb` carries a `transition`
+on `opacity` and no layout property — a rule that *animates* a property, which is
+not the same claim as a rule with two values to animate between. Deleting
+`opacity: 0` gives the permanent dark rule the third answer was reported for;
+deleting `opacity: 1` gives a bar that never appears, which is the first answer;
+turning the idle timeout's `remove` into an `add` gives one that never fades, which
+is this report. All three left `webcheck` green. The three states this rule exists
+to tell apart — always on, never on, on-then-fading — each fail an assertion now,
+and that was checked the same way it was found.
+
+**It reports a position and does not offer one.** A native bar can be dragged and
+this cannot, so `pointer-events-none` keeps a press off a control that would do
+nothing. The row is moved with a wheel, a trackpad, a finger, or the tiles' own
+focus ring scrolling them into view — Q3.521's half of this.
+
+**Status.** Current
+
+#### Q3.528 — The wait was at the top of the form, and the free question underneath it
+
+**Question.** Asked for by name: *"on the agent configuration screen swap the
+harness and the agent, so the agents finish loading while the harness is being
+chosen."* The builder drew **Model** and then **Harness**, and the model row is the
+one control on that screen that waits — `GET /agents/capabilities` starts an agent
+per harness, 2159 ms measured after Q3.524. So the first thing anybody met was a
+row reading *Reading models…* that could not be opened, above a row that was ready
+the moment the screen was.
+
+**Decision.** The two rows are swapped. Harness is first and the order is asserted,
+because nothing but the order says which comes first — two sibling JSX blocks, no
+type, no prop and no route that would notice a later edit putting them back.
+
+**The harness list needs no read at all.** It is `AGENT_IDS`, and `HarnessPicker`
+has never been behind the `reading` gate that `step === "llm"` has: with no model
+chosen `harnessRowRefusal` answers `null` for every row, so the picker is complete
+and correct while the catalogue is still out. Opening it, tapping and coming back
+is the wait, spent.
+
+**And it is the order the model list is built for.** With a harness chosen,
+`ModelPicker` collapses every provider that harness cannot be pointed at into one
+greyed line — so the refusals now arrive *before* the choice they are about instead
+of after it. That was already the design; the rows were simply stacked against it.
+
+**Neither field is required first, and that is what makes this safe to reorder.**
+Both have a `Clear`, a bad pair is refused on the harness row and at the foot rather
+than being prevented, and `Save` is gated on the model alone. What changed is which
+question is on top, not what the form accepts.
+
+**Known limitation, unchanged by this.** On the *edit* path the harness picker can
+be opened while the catalogue is still out, and `current` is looked up in that
+catalogue — so every harness draws pressable for a beat even where the stored model
+makes one impossible. It resolves on the way back: the pair's refusal is on the
+harness row and `Save` is disabled. That was true with the rows the other way up
+too, since the harness row has never been disabled while reading.
 
 **Status.** Current
 
@@ -8350,8 +9756,10 @@ full text in the menu and the `title`; `null` for an unknown category, which is
 drawn in the overflow popover where every chip is on its own row with nothing beside
 it to move.
 
-**Measured.** The reserved strings are `Accept Edits`, `GPT-5.6-Sol` and `Adaptive`,
-each beside `—`.
+**Measured.** The reserved strings are `Accept Edits`, `GPT-5.6-Luna` and
+`Adaptive`/`Ultracode`, each beside `—`. The model one was `GPT-5.6-Sol` for one
+revision, which is a *shorter* name from the same family — proof that this list is a
+measurement rather than a first look.
 
 **Status.** Current
 
@@ -9743,7 +11151,7 @@ with their addresses, so widening later is an addition rather than a rewrite.
 machine's agents. Its **screen** is at `/p/:machineId/:pluginId`, a route-backed
 sheet of its own.
 
-**Why the settings are inside a machine.** `MachineAgentsSection`'s argument,
+**Why the settings are inside a machine.** `MachineSystemsSection`'s argument,
 unchanged: what is configured lives in one daemon's database and on one host's
 disk, so a fleet-wide screen would have to open with a machine dropdown — a screen
 asking a question its own copy answers. A plugin's code and its stored data are
@@ -10929,6 +12337,3120 @@ other family collision anywhere in the package.
 
 **Status.** Current
 
+#### Q3.472 — New session folded away downwards when it went one screen deeper
+
+**Rule.** A pop-up with several screens is **one** `Sheet` for all of them, and any
+screen carrying an action bar draws it *inside* `SHEET_BODY` (`SHEET_SCREEN` +
+`SHEET_SCROLL`) rather than through `Sheet`'s `footer`.
+
+**Why.** Reported as *"переход на создание агента: страница new session как будто
+сворачивается вниз"* — the screen you were on collapsing rather than being replaced.
+Two independent causes, both invisible to every driver in this repo, and each on its
+own is enough to produce it.
+
+**The first is a remount.** `/new` and `/agent` were siblings in `App.tsx`, each
+rendering its own `Sheet`. Navigating between them unmounts one panel and mounts
+another — so `SHEET_PANEL`'s `animate-sheet` runs again, sliding a bottom sheet up
+from off-screen its full height, *inside* a `section-push` view transition that was
+already moving the pane sideways. Q3.442 states the rule this violates in the other
+direction: opening a sheet is CSS's job and a transition as well would animate one
+panel twice. It said nothing about a *second* panel, because until now no pop-up had
+one. `/agent` was also `lazy`, so the first navigation had a frame with no `Sheet` in
+the tree at all — the fallback was a bare spinner, and `::view-transition-old(sheet)`
+had no `new` to pair with.
+
+**The second is the footer, and it survives the first being fixed.** `SHEET_PANEL`
+is a definite height (Q3.223), so the *panel* never moves — but `SHEET_BODY` is what
+is left after the head **and the footer**, and `New session` has a footer while `New
+agent` does not. That box is the one carrying `view-transition-name: sheet-body`,
+and a group whose old and new boxes differ morphs between them for the length of the
+animation. Measured at 390px: the pane's top edge travelled 57px downwards over the
+220ms slide — the footer's height — while the arriving screen came in from the right.
+Downwards, on a bottom-anchored sheet, is exactly "folding away".
+
+**Decision.** One `StartSheet` renders the panel for both routes and dispatches the
+body; the `Suspense` boundary moves inside it, so a chunk in flight is a spinner in
+the pane rather than a frame with no pop-up. And the action bar becomes part of the
+screen: `SHEET_SCREEN` cancels the body's padding, `SHEET_SCROLL` restores it on the
+part that scrolls, and the bar sits between them. The body's box is then identical on
+every screen of the sheet, so the group has nothing to morph — and the bar slides
+with the screen it belongs to, which is the truthful animation anyway, since the
+action *is* part of the screen rather than of the pop-up.
+
+**Rejected — pinning the groups in CSS.** `::view-transition-group(sheet)` and
+`(sheet-body)` at `animation: none` for `section-*` would freeze the morph without
+touching the tree. It fixes the symptom in one place and leaves the remount, the
+double `animate-sheet` and the sheet-less Suspense frame all standing — and it makes
+"the panel holds still" a fact about a stylesheet rather than about the panel being
+the same element.
+
+**Rejected — keeping two `Sheet`s and hoisting `NewSession`'s state.** The footer
+needs `cwd`, `busy` and `create`, so the owner would have to hold everything the
+screen holds. That is the whole component moved up one level to serve a prop.
+
+**Cost, stated.** `Sheet`'s `footer` now has two shapes of caller — pop-ups with one
+screen use it, pop-ups with several do not — and nothing enforces which. What is
+asserted is the property that matters: `SHEET_SCREEN` exists, and `webcheck`'s
+call-site sweep still refuses a composed utility on it.
+
+**Status.** Current
+
+#### Q3.473 — The way back said where it went, on a screen that had already said it
+
+**Rule.** `Sheet` takes an `up` again — and the **settings** sheet still passes none.
+A pop-up whose head names the *pop-up* draws its chevron in the pane; a pop-up whose
+head names the *screen* draws it in the head, as a glyph with no label.
+
+**Why.** Q3.432 moved this control out of the head, and the argument was about width:
+`SHEET_HEAD` is a child of `SHEET_PANEL`, so above `sm` the settings head spans the
+224px section rail *and* the pane beside it, and a ◀ there points at something the
+rail is already listing. That argument is entirely about a sheet with a rail.
+
+The New session pop-up has no rail at any width. It is one column, and it now has
+four screens in a chain — session, agent, and the two choices. So the ◀ was drawn in
+the pane, under a head that said "New agent", reading `‹ New session`: a whole 44px
+row of a phone's sheet spent on one glyph and a destination the chevron already
+means. Reported as *"кнопка назад должна быть просто в заголовке, без отображения,
+куда юзер вернется"*.
+
+**Decision.** The head names the screen here — "New session", "New agent", "Choose
+LLM", "Choose harness" — and the ◀ sits at its left at `size="sm"`, which is 24px of
+ink reaching 44 through `after:-inset-2.5`: the same object the settings pane draws,
+in a different place. The **label** still names the destination and is still derived
+from `upFrom`, so a chevron whose name disagrees with its target is not expressible;
+it is simply not painted.
+
+**Not a reversal of Q3.432.** That decision's subject was the settings sheet and its
+conclusion holds there unchanged. `webcheck` asserts the narrowing rather than the
+prose: the settings pane still draws a `ChevronLeft`, `Settings.tsx` passes no `up`,
+and the head draws one only when a caller hands it somewhere to go.
+
+**Rejected — an empty head with the name in the body.** It would have removed the one
+duplication this leaves: the builder's head says "New agent" while the name below it
+also reads "New agent" until a model is picked. But `aria-labelledby` then resolves
+to a heading inside the screen that slides, and `webcheck` pins exactly one
+unconditional element carrying that id.
+
+**Cost, stated.** The head's left edge moves between screens, since `/new` draws no
+chevron and the three below it do. Q3.432 deleted a reserved slot on the grounds that
+a slot held for a control that may not mount is worse than the movement; the same
+answer applies here, and this head's *title* changes between screens anyway.
+
+**Status.** Current
+
+#### Q3.474 — "Codex accepts openai systems, and Moonshot is anthropic"
+
+**Rule.** Every refusal a person reads names the harness and the system by the names
+already on the screen, and uses no word from the wire. `apiType`, `supported` and
+`providerId` stay in the code, which is the only place they mean anything.
+
+**Why.** That sentence shipped, on a phone, under a greyed-out row. Every noun in it
+is a protocol identifier; two of them are also company names, so it reads as though
+Moonshot were Anthropic; and none of the three appears anywhere else in the product.
+Its neighbour was worse — *"Kimi names this model its own way — pick it from the list
+above"* — which was true, said nothing, and pointed at a list that had by then moved
+to another screen. Reported, accurately, as saying nothing at all.
+
+**Decision.** Five refusals, each a sentence:
+
+| State | Says |
+|---|---|
+| The system is reached only by its own CLI | `Only Kimi can run Moonshot models.` |
+| …and no CLI ships for it | `Moonshot cannot be reached from this machine.` |
+| The harness will not be re-pointed at all | `Kimi only runs its own models.` |
+| The harness does not speak this system | `Codex cannot run Moonshot models.` |
+| The id belongs to the other route into the system | `Kimi lists this model under another name.` / `Only Kimi can run this model.` |
+
+The first is its own sentence because it is the only one with a remedy on the screen
+below it — the CLI it names is one of the three rows in the harness picker. The
+middle two share a remedy and are still two strings, because "this harness refuses
+everything foreign" and "this harness refuses *this* one" are different facts.
+
+`webcheck` asserts the strings themselves plus a `noJargon` predicate over each, so a
+future edit cannot quietly put `supported.join(", ")` back. The daemon's mirror in
+`src/acp/systems.ts` drops the same vocabulary and keeps "This agent" as its subject
+— it has no display name for a harness and will not keep a second copy of one.
+
+**Status.** Current
+
+#### Q3.475 — Two dropdowns for a list that is not a dropdown's worth of rows
+
+**Rule.** Choosing a model or a harness is a **screen** at its own route
+(`/agent/:machineId/:step/:cwd`), not a popover anchored to a control.
+
+**Why.** `bits.tsx` puts the picker threshold at "about five options" and names
+unboundedness as the reason. The model list is every model of every system a daemon
+can reach — five systems today, one of which publishes whatever its CLI decided this
+week — and the screen it is chosen from asks for the model *first*, so nothing may be
+filtered out of it: an unusable pairing is greyed and labelled, never removed. That
+is a list with a search box and a provider filter over it, which is a screen.
+
+**Decision.** Three screens in one pop-up, and the draft lives above all three. The
+route carries the step *before* the folder — `/agent/m1/llm/%2Fhome%2Fme` — which
+works with both segments optional and no placeholder because a `cwd` is an absolute
+POSIX path and can never decode to `llm` or `harness`. `depthOf` answers 3, so the
+transition and the ◀ are the ones every other depth in this app already has, and
+Android's Back works with no code.
+
+The harness screen deliberately has **no** search and no filter: `AgentId` is a closed
+union of three (Q7.31 declines to open it), and a box that filters three rows can only
+hide two of them.
+
+**Rejected — keeping `Dropdown` and putting the search inside its panel.** A popover
+anchored to a control cannot hold a filter menu without stacking a second dismissible
+layer inside the first, and on a phone it opens over the control it belongs to.
+
+**Cost, stated.** A route change unmounts the screen, so no picker may hold the
+answer — `AgentBuilder` owns the harness, the model and the name, and a picker reports
+through `onPick`. That is also what makes the two expensive reads happen once:
+`GET /agents/capabilities` starts an agent per harness on the daemon's host, and a
+picker that fetched for itself would pay for it on every walk in and out.
+
+**Status.** Current
+
+
+#### Q3.476 — "New agent" in the head, over a thing called "New agent"
+
+**Rule.** A sheet head names the **act**; the screen's first line is the **value**.
+So the builder's head says *Configure agent*, and the agent's name — which is what
+that screen is mostly about — is drawn as text with a pencil beside it, becoming an
+input only when the pencil is pressed.
+
+**Why.** Three reports about the same 40px of screen.
+
+The head said "New agent" and the unnamed agent below it is *called* "New agent",
+so the same two words appeared twice, and editing the name left a head still
+claiming the old one. Naming the act instead makes the head chrome and the line
+below it content, and only one of them ever changes.
+
+The name then opened as `FIELD` — the bordered, filled box every *form* field in
+this app wears — which made the heading jump into a control the moment the pencil
+was pressed. That reads as a different thing having opened rather than as this
+thing becoming editable, which is the whole difference between editing in place
+and filling in a form. It is borderless and transparent now, same size and weight
+and position as the `<h2>` it replaces; what says it is live is the caret and the
+selection. `FIELD` could not be composed to get there — it decides the border, the
+fill *and* `text-sm`, and appending three utilities to a shared class string is
+the trap `bits.tsx` documents and `webcheck` sweeps for.
+
+**And a rename that changed nothing must not count as one**, which is a defect the
+first two hid. `open()` seeds the draft from what is on screen, so opening the
+pencil and tapping away reported the model's own name straight back — read as
+"somebody named this", freezing it. Pick a different model afterwards and the
+preset is saved under the *previous* model's name, silently. `commit` compares
+trimmed and reports nothing when nothing changed.
+
+**Cost, stated.** Escape has to out-race the blur, and it cannot do that in state:
+unmounting a focused input is a `focusout`, so `onBlur` may run on the way out of
+a cancel with the draft still holding what was typed. A ref carries the answer, and
+is cleared on the way *in* — a browser is free not to fire the blur at all, and a
+flag left set would poison the next edit.
+
+**Status.** Current
+
+#### Q3.477 — "Claude" is a model. The program is Claude Code
+
+**Rule.** `agentLabel` names the **program each vendor ships**: Claude Code, Kimi
+Code, Codex, Opencode. Not the company, not the model family, and still never the
+adapter package.
+
+**Why.** It read "Claude", "Kimi", "Codex" for several releases and nothing was
+wrong with that while each harness spoke only to its own vendor — the program, the
+company and the model were one thing. Assembling an agent is precisely the act of
+pulling them apart, and the first screen that did it drew a row reading **Claude**
+beside a model reading **Kimi K2 Thinking**, which says the opposite of what is
+true. Anthropic's program is Claude Code; "Claude" is what it usually runs.
+
+**Why none of them ends in "CLI".** `agentCard.ts` exists to keep developer
+vocabulary off a card somebody reads on a phone, and `webcheck` sweeps every
+sentence that module can produce against the words the deleted wall was made of —
+`CLI` among them. "Kimi CLI" and "Codex CLI" fail that sweep, which is how the
+first attempt at this was caught. Each vendor's own product name is the shorter one
+anyway, and `~/.kimi-code`, `managed:kimi-code` and the `kimi-code/…` model ids
+this daemon reads are all the evidence needed for the middle one.
+
+⚠ **And the fourth is capitalised while its binary is not.** opencode's vendor
+writes it lowercase everywhere it is a name for a *machine* — the executable, the
+npm package, the `agentInfo.name` it answers `initialize` with, and every id this
+app stores and sends — and none of those changed. `AGENT_LABEL` is the one place
+it is read as a **word**: it opens sentences (`stanceLine`, `choiceRefusal`,
+`hostable`'s client half), where a lowercase first letter reads as a typo rather
+than as a brand, and it sits in a row beside three product names, where it was the
+only entry that looked like an unformatted id. The daemon's `Opencode CLI` row
+title moved with it, for the same reason and no further; `pnpm client`, the hints
+and every document still say `opencode`, because there the subject really is the
+binary.
+
+It also cost the table a coincidence worth losing. `AGENT_LABEL` falls back to
+`?? id`, so for a release the chosen label and the fallback were the same six
+letters and a missing entry would have been invisible — which is exactly what the
+"named on purpose rather than falling through" check exists to catch and could not,
+for that one row.
+
+**Status.** Current
+
+#### Q3.478 — A harness nobody chose, on a row that could not be pressed
+
+**Rule.** The builder opens with **no** harness. `Add agent` wants both halves and
+says which one is missing.
+
+**Why.** It opened on `claude`, which reads as an answer already given: the row
+said "Claude", and picking the harness you were already on is not a choice anybody
+makes. It also quietly weighed every model on the screen above against a harness
+nobody had named, which is where Q3.479's corner came from. Starting empty puts
+the two rows in the order the screen states them — the model, then what runs it.
+
+**And the harness screen has a search box over three rows**, which `bits.tsx`'s own
+"about five" threshold argues against. Two choosing screens of one flow differing
+in their *chrome* is worse: somebody who has just typed into one arrives at the
+other, finds nothing to type into, and has to work out whether the screen is
+different or broken. It costs one row and stops being decorative the day `AgentId`
+grows, which is Q7.31's subject. There is no filter beside it, and that absence is
+not an oversight either — the model screen filters by provider and a harness has
+none.
+
+**Status.** Current
+
+#### Q3.479 — Two pickers that disabled each other into a corner
+
+**Rule.** The **model** screen refuses nothing about a pairing. It greys a row only
+for a fact about the *model* — an id that can only be reached by routing, on a
+system with no key saved — whose remedy is another screen. The **harness** screen is
+where a pairing is weighed, and the button is the gate. ⚠ **This said "a fact about
+the *system*" until Q3.499**, which is one level too far up: a system's key says
+nothing about a row, because a system reachable natively is not reachable natively at
+every spelling.
+
+**Why.** Both screens greyed rows against the other's value, which reads as helpful
+and is a trap. Reported: pick Claude Sonnet, then decide you want GPT‑5. Every
+OpenAI row on the model screen is disabled ("Only Codex can run this model");
+walk back and Codex is disabled on the harness screen ("Only Claude Code can run
+Anthropic models"). Neither half of the pair can be changed and the only way out is
+to abandon the draft.
+
+**Decision.** The screen you are on is about its own subject, so picking always
+works. The model screen's subject is the model; the harness screen's is what runs
+it, weighed against the model already chosen — which is where "disabled and
+labelled, never hidden" earns its keep, because it shows all three and says why the
+others cannot. It cannot grey all of them **for a pairing reason**: every model
+offered comes either from a harness's own published list or from a routable
+endpoint, so at least one row always survives that test. A missing key is not a
+pairing reason and can grey the last of them — see Q3.497, which is where that
+became reachable.
+
+**Rejected — letting a disabled row clear the other choice when tapped.** It ends
+the deadlock and deletes a choice somebody made, which is the failure this app
+avoids everywhere else. **Rejected — a "clear the harness" control on the model
+screen.** A control that exists only to undo a constraint this screen invented.
+
+**Cost, stated.** A conflicting pair can now be assembled on screen. That was
+always the design — the builder's own docblock says the pair stays, says why beside
+the button, and the button refuses — and the greying was a second gate duplicating
+it badly.
+
+**Status.** Current
+
+#### Q3.480 — Seven rows of "Moonshot", and no harness could run more than four
+
+**Rule.** The model list is grouped on `(system, source)`, not on the system.
+Where a system is reachable two ways the heading says which way; where there is
+only one it says the system's name and nothing else.
+
+**Why.** Reported as *"я выбрал kimi k2, а harness kimi выбрать не могу, это
+как?"* — picked Kimi K2, cannot pick Kimi. Both halves of that were true and the
+list gave no way to see it. Moonshot is reachable natively by Kimi Code and by
+routing anything else at its endpoint, and each way has its own names for what are
+broadly the same models. Under one heading that is seven rows of "Moonshot" of
+which no harness can run more than four.
+
+**Re-measured 2026-08-26, because the repository disagreed with itself.**
+`agentask.ts` said kimi publishes no model control at all; `agents.ts` said it
+publishes `kimi-code/k3` and `kimi-code/kimi-for-coding`. Driven against the
+installed kimi 0.29.x through this daemon's own `AgentAskRuns.capabilities`:
+
+- **models** — `kimi-code/kimi-for-coding`, `kimi-code/kimi-for-coding-highspeed`,
+  `kimi-code/k3`, `kimi-code/k3-256k`. Four, so the second comment was closer and
+  neither was right.
+- **routing** — `null`. It answers `-32601` to `providers/list`, which is the half
+  that was never in doubt.
+
+The two are independent questions, and the stale sentence folded them — which cost
+a refusal telling people Kimi Code "lists this model under another name" while
+claiming it listed none.
+
+**Decision.** `groupModels` splits on the pair and labels the heading
+`Moonshot · Kimi Code only` / `Moonshot · other harnesses`. The refusal stops
+asserting that a counterpart row exists (it may not: `kimi-k2-turbo-preview` has no
+opposite number) and says what is true of the whole group instead — *Kimi Code runs
+Moonshot's models under its own names* — with the other heading on the same screen.
+
+**Status.** Current
+
+#### Q3.481 — The browser offered an account password for an API key
+
+**Rule.** A key box is `type="text"`, named for what it holds, and carries the two
+`data-` opt-outs the password managers publish.
+
+**Why.** Reported from the Z.ai row: the browser offered to fill a saved *account
+password* into it, and to save the key as one afterwards. Both boxes already had
+`autoComplete="off"`, which Chrome ignores on a password field by design — so the
+only thing that stops the offer is not being one.
+
+Nothing is lost. Neither box ever holds a *stored* value: they are write-only, the
+placeholder says so, and the only thing ever in one is a key somebody has just
+pasted and wants to see landed. That is the same argument `AccountSection` already
+makes for the one-time secret and the device code, which take a real fill for the
+same reason. `name` is what the heuristics read after the type, so it names this
+thing rather than borrowing a word from a login form.
+
+**Status.** Current
+
+#### Q3.482 — A machine change kept the last machine's answers
+
+**Rule.** Everything a machine answered is cleared when the machine changes, the
+requests carry a cancel flag, and the chosen tile is recorded **against the machine
+it was chosen on**.
+
+**Why.** Four defects from one adversarial review of the work in Q3.472–Q3.475,
+none of them reachable by any driver here and all four introduced by it.
+
+- **`touched` was one boolean for the component's whole life**, while the effect it
+  guarded re-runs per machine. Before, every machine change re-defaulted the tile
+  to a harness the new machine actually has; after, the first tap suppressed that
+  for every machine after it — leaving a tile drawn selected *and* `opacity-40` at
+  once, over a harness the new machine cannot start, with Start still enabled. It
+  is `touchedOn: MachineId | null` now, so a choice belongs to a machine.
+- **Only `agents` was cleared.** The assembled-agent list, the system table and the
+  `+` gate kept the previous daemon's answer until a *second* request resolved, so
+  the strip drew machine A's presets under machine B's name and tapping one posted
+  a `customAgent` id that does not exist there. And neither request carried a
+  cancel flag, so a slow answer for the machine you left could land after the one
+  you are on and win permanently — the two sibling effects in that file already had
+  one.
+- **The chosen tile did not survive the agent flow.** `NewSession` unmounts for the
+  whole of `/agent`, so opening the builder and leaving it by ◀ with nothing
+  assembled put the strip back on the first available harness and said nothing.
+  `picked` moved up into `StartSheet`, which is mounted for both routes — which is
+  what Q3.472 made possible and is the first thing it buys beyond the animation.
+- **"Sign in to …" pointed at a system named from an agent id.** The rename in
+  Q7.117 turned that URL segment from an agent into a system, and one caller still
+  passed `row.snapshot.agent` — building `/settings/machines/:id/systems/claude`,
+  which parses (any id up to 64 characters does, so a newer daemon's system stays
+  reachable) and asks the daemon about a system nobody has. It goes to the
+  machine's list now: mapping a harness to its system is `nativeHarness`'s answer
+  and lives on the daemon, and guessing is what `settings.ts` already refuses for a
+  stale address. `webcheck` asserts the *absence* of the guess as well as the
+  presence of the link.
+
+**And one from the same review that Q3.472 caused directly.** With the action bar
+moved inside `SHEET_BODY`, that box no longer overflows — so the column above the
+bar is `min-h-0 flex-1` of something with nowhere to scroll, and anything the fixed
+rows cannot fit escapes and paints over the bar. The inline sign-in reaches it in
+one tap. The column scrolls now; the folder list keeps its `min-h-32` floor, so it
+only moves when there is genuinely nowhere left to shrink to.
+
+**Status.** Current
+
+#### Q3.483 — "Codex cannot run Moonshot models", under a model called K3
+
+**Rule.** A pairing failure says one thing and both of its nouns are on the
+screen: `<harness> cannot run <model>.` On a row already titled with the harness,
+that shortens to `Cannot run <model>.` — the same sentence on every greyed row.
+
+**Why.** Three versions of this sentence shipped and all three were reported as
+meaningless. Reading the third off a phone, on the harness screen, with a Kimi Code
+model chosen:
+
+```
+✳  Claude Code
+   Only Kimi Code can run this model.
+🌙 Kimi Code                          ✓
+>_ Codex
+   Codex cannot run Moonshot models.
+```
+
+Neither noun that matters is anywhere on that screen. **"this model"** was chosen
+on the *previous* screen and is not drawn on this one. **"Moonshot"** was never on
+screen at all — the row that was tapped said `K3`. And two rows in the same
+situation got two different explanations, so the pair reads as arbitrary rather
+than as informative: one names a harness that is not the row it is on, the other
+names a company the reader has not seen.
+
+**Decision.** Say the fact, in the words that are on the screen. The *why* is
+dropped, and it was never actionable here — the row that is **not** greyed is the
+answer, and on the builder the harness row sits directly above the sentence. What
+survives is the one refusal that is not about a pairing at all: a system with no
+key, which has to name the system because its remedy is a different screen.
+
+**The two functions now answer different questions, and only one of them is
+prose.** `hostable` is "can this harness be pointed at this system", and its words
+are the daemon's own for a start it refuses — a `502 system_not_routable` body.
+`choiceRefusal` is "can this harness run this model", which is what a row says. It
+calls `hostable` for the *answer* and drops its sentence; forwarding one as the
+other is exactly how "Codex cannot run Moonshot models" ended up under K3.
+
+**Rejected — naming which harness *can*.** `Only Kimi Code can run K3` is one more
+true thing per row, and it is the row below with no caption on it. Two sentences
+where the screen already answers with an absence.
+
+**Rejected — putting the chosen model in the harness screen's head.** It gives
+every sentence a referent without changing any of them, and it is a line of chrome
+on a screen whose whole brief was less text. Naming the model inside the refusal
+puts it where it is actually read.
+
+**Status.** Current
+
+#### Q3.484 — One panel for every pop-up, because two of them cannot cross-fade
+
+**Rule.** There is **one** `<Sheet>` element in this app for every route-backed
+pop-up — Settings, Plugins, a plugin's screen, New session and the agent flow —
+owned by `OverlaySheet` in `App.tsx`. Each of those screens is a *body*.
+`ImportCode` and `ForcedPasswordChange` keep their own and must: one is drawn
+*over* this panel, the other is not a route.
+
+**Why.** Reported as *"при переходе из настроек в плагины попап пропадает на
+мгновение и появляется попап плагинов"* — and there were three causes stacked on
+one navigation.
+
+- **Two panels.** Each pop-up rendered its own `Sheet`, so the move unmounted one
+  and mounted another. `SHEET_PANEL` carries `animate-sheet sm:animate-rise`, which
+  runs *on mount* — so the arriving panel slid its full height up from off-screen,
+  260ms, over a scrim that had already been dark. That is the disappear-and-reappear.
+- **A depth compared across two stacks.** `navMove` tested `depthOf` before asking
+  *which* pop-up: Settings → a section is 1 → 2, a Plugins tab is 1, so
+  settings-account → plugins answered `section-pop` and slid one pop-up's pane
+  rightwards into another's. A depth is a position inside one stack and means
+  nothing between two, which is a rule `depthOf`'s own docblock already states about
+  the screen/sheet pair and did not state about two sheets.
+- **A `Suspense` fallback that is not a sheet.** Three of the four are `lazy`, and
+  the boundary was *outside* the panel — so the first time anybody opened one, the
+  transition captured a frame with `<Waiting/>` in the tree and no panel at all.
+
+**Decision.** One element fixes all three at once. Nothing remounts, so
+`animate-sheet` cannot replay; both view-transition groups (`sheet` and
+`sheet-body`) have identical old and new boxes, so the **default** cross-fade on
+each *is* the movement — the head dissolves from "Settings" to "Plugins" and the
+contents with it; and the boundaries move inside the panel, so a chunk in flight is
+a spinner in the pane. `navMove` gains `sheet-swap`, tested **before** the depths,
+and `index.css` declares one thing for it: pin the root, because the screen behind
+the scrim was there all along.
+
+**It generalises Q3.472** rather than sitting beside it. That decision made one
+panel serve `/new` and `/agent` for exactly these reasons and scoped the argument to
+one pair; the third pop-up made the scope arbitrary.
+
+**What moved with it.** The head's two decisions became pure functions over a
+route — `sheetTitle` and `sheetUpLabel` in `nav.ts` — so the rule that a head
+spanning a section rail may only carry the pop-up's name (Q3.427, Q3.432) and a
+one-column head names the screen (Q3.473) is asserted over *every* pop-up instead
+of grepped out of the one screen that must not ask for a chevron.
+
+**Cost, stated.** The plugin screen's name is not a constant — it is whatever the
+plugin called its view — so it is the one body that reports its title up, one frame
+late. That costs nothing in practice: the name arrives with the view, and the head
+shows the plugin's id until it does.
+
+**Status.** Current
+
+#### Q3.485 — Kimi's models could not be used with Claude Code, and the UI said nothing
+
+⚠ **The placement is reversed by Q3.497 and the rule itself by Q3.499.** Q3.497 took
+the key box off the builder, so the carve-out below — whose premise was the box's own
+presence rather than anything about the row — went with it, and the harness row *is*
+greyed for a missing key. Q3.499 then reversed the third state of the rule: a key is
+needed if and only if the model's id came from the table, so the model screen greys a
+keyless row rather than staying quiet, and nothing consults the system's native
+harness for this question any more. **What this entry found is unchanged and is why it
+is kept whole** — the defect below is the reason a key is weighed anywhere at all.
+Read the rule's third clause and the last two paragraphs of the decision as history.
+
+**Rule.** A pasted key is a property of the **pairing**, not of the system. A
+native pairing needs none; a routed one always needs one; ~~with no harness chosen
+yet, only a system nothing reaches natively is knowably stuck~~ (Q3.499: with no
+harness chosen the *model* decides, and a table-spelled id is knowably stuck). And
+the box that fixes it is mounted **on the builder**, not four taps away.
+
+**Why.** Reported as simply not being able to use Kimi's models with Claude Code
+from the interface — which was exactly true, and was the headline pairing this
+whole feature exists for.
+
+The one predicate the model list called asked "does this system have a key" and
+answered `null` for anything with a `nativeHarness`, on an argument its own docblock
+stated and which is only half right: *Kimi Code* reaches Moonshot with whatever `kimi login` wrote and needs
+nothing pasted. **Claude Code routed at Moonshot signs with the pasted key and
+nothing else.** So with no key saved — `system_credentials` empty, which is every
+fresh install — the flow was green the whole way: the model offered, the harness
+offered, `Add agent` enabled, the preset written. `POST /sessions` then refused
+with *"No key is saved for Moonshot on this machine, so nothing can sign these
+requests"*, **after** `registry.create` had made a worktree.
+
+Every layer was individually defensible and the composition was not: the daemon
+checks at the only moment it can be sure, `hostable` is about protocols and says
+so, and that predicate was about systems. Nothing was about the pair.
+
+**Decision.** `keyMissing`, taking the harness alongside the system — three states,
+of which the first two are still the rule. ⚠ **The third is reversed by Q3.499**: it
+stayed quiet with no harness chosen, on the argument that nobody yet knows which of
+the other two it will be, and the harness-less predicate became its arm under its own
+old name so the model list could keep greying a system no harness here can reach.
+Both are gone. A model id is not portable, so `source` answers the question before a
+harness is chosen — and the old arm shipped two rows of one list, equally keyless,
+behaving differently.
+
+**And the fix is reachable.** Saying "no key" and stopping is a dead end: the
+remedy is Settings → Machines → *machine* → Systems → *system*, and walking there
+unmounts the builder and loses the half-assembled agent. So `KeyOnly` is exported
+and mounted inline under the pair it is about — the same move, and the same
+argument, that put `AgentDetail` inline in the New session strip rather than behind
+a `navigate`. Its copy lost the words "the sign-in **above**" with it: there is no
+sign-in on the builder, and a sentence pointing at one that is not there is the
+defect Q3.483 was about, one screen over.
+
+**The harness row is deliberately *not* greyed for a missing key.** It is the one
+blocker somebody can clear without changing either choice — so greying the row that
+leads to the fix would hide the only screen that can unblock it. `pairable` is the
+predicate that stays greyed (a protocol nothing changes, a model id belonging to
+the other route); `choiceRefusal` folds the key back in, so `Add agent` is still
+the gate.
+
+**Rejected — refusing the pairing at `POST /custom-agents`.** A preset is a
+legitimate thing to have written down before the key exists, and keys come and go;
+refusing there would make the daemon's own table depend on a credential's presence
+at one instant.
+
+**Status.** Reversed in its placement by Q3.497 and in its third state by Q3.499.
+The first two states — a native pairing needs no key, a routed one always does —
+are current, and `keyMissing` still answers them; it just reads them off the model
+now instead of off the harness and the system
+
+#### Q3.486 — The heading answered a question about rows, and I had never read the names
+
+**Rule.** One heading per **provider**. Which harnesses can run a model is drawn on
+the **row**, as their own glyphs, with `Supports <harness>` on hover.
+
+**Why.** Q3.480 split the heading on the route — `Moonshot · Kimi Code only` beside
+`Moonshot · other harnesses` — because one system is reachable two ways with a
+different set of names on each, and seven undifferentiated rows of "Moonshot" hid
+that no harness can run more than four of them. That was the right problem and the
+wrong place to answer it. A heading is where somebody looks for *whose model this
+is*; a route pushed into it invents a category nobody asked about, and it still
+leaves every row silent about itself. `supportingHarnesses` answers per row, which
+is more precise, needs no vocabulary, and reads at a glance.
+
+**And the naming underneath it was wrong, which the same report caught.** Asked
+whether Kimi K2 really cannot run in Kimi Code, I re-drove the probe printing the
+**names** as well as the ids — something no earlier pass had done:
+
+| id | name |
+|---|---|
+| `kimi-code/kimi-for-coding` | **K2.7 Coding** |
+| `kimi-code/kimi-for-coding-highspeed` | K2.7 Coding Highspeed |
+| `kimi-code/k3` | K3 |
+| `kimi-code/k3-256k` | K3-256k |
+
+**Kimi Code runs a K2 perfectly well.** What it will not take is the *string*
+`kimi-k2-thinking`, which is Moonshot's API name for a different build and is not
+among the four values its config option publishes. Every sentence I had written
+from the ids alone — "Kimi Code runs Moonshot's models under its own names", the
+two headings, the summaries — was literally true about names and read as a claim
+about models, which is the thing it is not. `ModelChoice.source` now says so in as
+many words: it is about **names**, never about models.
+
+That is the second time reading identifiers instead of driving the thing produced a
+confident wrong answer here — Q3.480 was the first, and the adapter-source reading
+recorded in `agent-systems.md` was the one before that. The rule that keeps
+surviving contact: **print what a person would see, not what the wire carries.**
+
+**Cost, stated.** The glyphs are unreadable to anybody who has not learned them, so
+each carries a `title` and the group carries the same sentence as one `aria-label`
+— a `title` on a `<span>` is announced by nothing. They also ignore the key
+deliberately: they say what a model is *for*, and whether a harness is ready is
+`keyMissing`'s answer one screen later, on the harness row (Q3.485, and Q3.497 for
+where the key is actually pasted).
+
+**Status.** Current
+
+#### Q3.487 — "Are you sure Kimi Code cannot?" — driven, and the plate stopped waiting
+
+**Rule.** A greyed row in the model picker states a fact about the *harness*, and
+the label that explains its glyph appears on the **frame** the pointer arrives —
+no `title`, no transition.
+
+**Why, the first half.** Asked a second time whether Kimi K2 really cannot run in
+Kimi Code. Everything said so far had been *inferred* from what its config option
+publishes, which is exactly the shape of reasoning that had already been wrong
+twice here (Q3.480, Q3.486). So it was driven instead: a live `kimi acp` session,
+`session/set_config_option` on the real option id.
+
+```
+option id=model choices=["kimi-code/kimi-for-coding","…-highspeed","kimi-code/k3","kimi-code/k3-256k"]
+kimi-k2-thinking:      REFUSED -> RequestError: Internal error
+kimi-k2-0905-preview:  REFUSED -> RequestError: Internal error
+```
+
+Confirmed, and now for a better reason than before: the greying is **kimi's own
+refusal**, not a bound this daemon invented. Which is what the question deserved as
+an answer — a picker whose whole job is to say what will and will not run owes a
+measurement rather than an inference. The two names being similar is the confusing
+part and stays true: `kimi-k2-thinking` is Moonshot's **API** build and "K2.7
+Coding" is Kimi Code's own K2. Two products, similar names, and only one of them is
+that row.
+
+**Why, the second half.** The glyphs' explanation was the `title` attribute — the
+*browser's* tooltip. Reported as simply not appearing, which is right: it is about
+a second of delay, and a second is long enough that nobody waits, so the label may
+as well not exist. It is also unstyleable and, on a `<span>`, announced by nothing.
+
+Now it is a plain `group-hover` reveal with **no transition** — a fade is another
+way of being late. It opens to the **left** of the glyph and vertically centred,
+which is what keeps it out of the list's clip: the scroller is `overflow-y-auto`
+and setting one axis makes the other compute to `auto`, so anything reaching past
+the row is cut at the top and bottom of the list. Inside its own row it can only
+overlap that row's own label, which is what an opaque plate is for, and no
+`z-index` is involved.
+
+**Cost, stated.** A pointer is the only way to it. On a phone the glyphs are
+learnable, the group's `aria-label` carries the sentence for a screen reader, and
+the harness screen answers the same question in words one tap later — but there is
+no touch gesture that reveals the plate, and inventing one (a long-press inside a
+row that is itself a button) would fight the tap that chooses the model.
+
+**Status.** Current
+
+#### Q3.488 — Are the two K2s the same K2? No: they are two products
+
+**Rule.** The published list and the table list are **not** merged, and no row
+carries two ids. Nothing on any wire asserts that a `kimi-code/…` name and a
+`kimi-k2-…` name are the same model, so an equivalence would have to be
+hand-written — and a wrong one silently runs a model the row does not name.
+
+**Why.** Asked to merge them *if they are really the same*, and to re-check. The
+check is `~/.kimi-code/config.toml`, which the CLI writes and which answers it
+outright:
+
+```toml
+[providers."managed:kimi-code"]
+base_url = "https://api.kimi.com/coding/v1"
+
+[models."kimi-code/kimi-for-coding"]
+provider = "managed:kimi-code"
+model    = "kimi-for-coding"      # display_name = "K2.7 Coding"
+```
+
+Kimi Code talks to **`api.kimi.com/coding/v1`** — Moonshot's coding *subscription*,
+addressed by plan-scoped names (`kimi-for-coding`, `k3`). `SYSTEMS.moonshot` routes
+at **`api.moonshot.ai/anthropic`** — the pay-as-you-go API, addressed by public
+model ids (`kimi-k2-thinking`, `kimi-k2-0905-preview`). Different host, different
+API surface, different billing, different names, and version strings that do not
+line up either: "K2.7 Coding" against "K2 Thinking" and a `0905` snapshot, with
+`k3` a generation past all of them.
+
+So they are not two spellings of one thing. They are two ways to buy from one
+vendor, and the overlap between them is unknown to this repository and unknowable
+from anything it can read.
+
+**What merging would cost.** A merged row would hold `{ published?, table? }` and
+resolve the id from the harness at save time — which is buildable, and would be
+*right* if the mapping existed. It does not: the only source for "these two are the
+same weights" would be a table written from a guess. A wrong entry there does not
+error — it starts, looks correct, and runs somebody else's model under a name you
+chose. That is the exact failure `hostable` already folds `ROUTED_MODEL_ENV` in to
+prevent, and it is why the same-model claim needs a source rather than a
+resemblance.
+
+**What is real, and is not this.** If somebody wants Claude Code to use their Kimi
+Code *subscription* rather than the metered API, that is a different endpoint —
+`api.kimi.com/coding/v1` — and would be its own row, measured with a real key like
+every other routed row. It is not a merge of two existing ones.
+
+**Cost, stated.** Two rows under one **Moonshot** heading still look like siblings,
+because they are filed under the harness's native system rather than under the
+endpoint each actually reaches. The glyph and its plate carry the distinction, and
+Q3.486 records why a route in the heading was worse than a mark on the row.
+
+**Status.** Current
+
+#### Q3.489 — "Kimi Code cannot run K2", and the assertion that agreed with it
+
+**Rule.** A settled pairing fails **two** ways and they may not share a sentence.
+`pairFailure` answers a kind where it answered a boolean — `"host"`, the harness
+cannot be pointed at the system, or `"name"`, it can and that spelling belongs to
+the other route in. `"host"` keeps `cannotRun`'s `<harness> cannot run <model>.`;
+`"name"` gets `noModelCalled`'s `<harness> has no model called <model>.`, dropping
+the harness on a row already titled with it.
+
+**Why.** Q3.483 collapsed three failed sentences into one, and that was right about
+the *screen* and wrong about the *fact*: the two failures it merged are not one
+fact. With Kimi K2 Thinking chosen, the builder's harness list read
+
+```
+✳  Claude Code                        ✓
+🌙 Kimi Code
+   Cannot run K2.
+>_ Codex
+   Cannot run K2.
+```
+
+Codex will never speak `anthropic`, so its line is true and nothing anybody does
+changes it. **Kimi Code's line is false.** It is the one CLI that reaches Kimi's
+models natively; what it will not take is the *string* `kimi-k2-thinking`, which is
+Moonshot's API name for a different build and is absent from the four values its own
+config option publishes — `K2.7 Coding` is in that list (Q3.486, Q3.487). The
+sentence claimed a capability was missing where a **spelling** was, and it claimed
+it about the only harness on the screen that had the capability.
+
+**And `webcheck` was holding it shut.** Two checks, and neither could have failed:
+
+```ts
+check(
+  "a pairing failure names the harness and the model, and nothing else",
+  [choiceRefusal("kimi", tabled, null), choiceRefusal("claude", published, claude)],
+  ["Kimi Code cannot run K2.", "Claude Code cannot run K3."],
+);
+check(
+  "a harness row says only what it cannot run",
+  [harnessRowRefusal("kimi", tabled, null), harnessRowRefusal("codex", tabled, codex)],
+  ["Cannot run K2.", "Cannot run K2."],
+);
+```
+
+**Why a test here was worse than no test.** Three costs, and the third is the one
+that generalises past this feature:
+
+- **It was derived the way the sentence was.** Both operands of the first check are
+  *name* collisions, and both expected strings were transcribed from what the
+  function answered. The assertion and the defect came out of one reading of the
+  model ids, so the check agreed with itself. An expected value copied off the
+  code's own output is not a second opinion; it is the first one written down twice,
+  and it converts a claim nobody has checked into a claim that now takes an argument
+  to change.
+- **It reported coverage it did not have.** With both operands being name
+  collisions, `cannotRun`'s arm was reachable from `choiceRefusal` and asserted by
+  **nothing** — the one arm that was actually correct. A re-merge of the two kinds
+  passed the entire section.
+- **The second check went past transcription and into doctrine.** Its comment called
+  the two identical strings *the point*, so the identity was not an observation that
+  happened to hold but a property under test, and correcting the string meant
+  arguing with the driver before arguing with the screen.
+
+**And the driver contradicted itself, in one file, fifty-six lines apart.** The
+comment over the `supportingHarnesses` checks already said it outright — that
+`kimi-code/kimi-for-coding` is named "K2.7 Coding", *"so Kimi Code runs a K2
+perfectly well… The refusal is about a name and never about a model"* — and then
+the section below it asserted `Kimi Code cannot run K2.` as an expected value. The
+measurement had been taken, written down, and left beside the assertion it
+falsifies. Nobody read the two together, which is exactly what an expected value
+transcribed from the code's own output makes unnecessary: nothing in a check like
+that ever asks what the string *claims*.
+
+**What the rewrite had to keep, and where it now lives.** Rows in the *same*
+situation reading identically was always the rule and still is — it is asserted two
+checks further down, on a fixture codex that speaks `anthropic`, where two rows can
+genuinely be in one situation at once. The other property, that a refusal uses no
+word from the wire, is unchanged and stricter: `noJargon` gained
+`modelId|modelName|nativeHarness|published|table|source`, because splitting one
+refusal into two put `ModelChoice`'s own field names one substitution away from the
+screen.
+
+**Decision — one sentence for *both directions* of a name collision.** A native CLI
+handed the endpoint's spelling and a routed harness handed the CLI's are one fact
+seen from either end, and the remedy is identical from either end: the harness whose
+own list holds that spelling is a row on the same screen, and it is the one that is
+not greyed. Two strings there would be two ways of saying one thing about rows in
+the same situation — the exact defect Q3.483 was written about. `hostable`'s third
+string earns its separateness by having a remedy the other two lack; these two do
+not differ in anything a reader can act on.
+
+**"has no model *called*" is load-bearing in both halves of the line.** Drop
+`called` and it claims the harness has no such model, which is the false half.
+Replace it with what the harness calls the model instead — *"Kimi Code calls this
+K2.7 Coding"* — and it asserts the equivalence Q3.488 established that no wire, no
+config and no list anywhere carries.
+
+**`hostable` is asked first**, so a harness that fails both — codex handed
+`kimi-code/k3`, an unspoken protocol *and* an unknown spelling — says the protocol
+half. That is the more fundamental of the two and the one `hostable` already owns
+the prose for.
+
+**Rejected — two sentences, one per direction.** A routed harness handed the native
+CLI's spelling has its remedy on the same screen, which was the argument for
+splitting further. So does the other direction: with a table id chosen the un-greyed
+row is the routed harness, with a published id chosen it is the native one. The two
+are symmetric in everything a reader can act on.
+
+**Rejected — deleting the checks rather than rewriting them.** Every property they
+were protecting is real. What was wrong was the *values*, not the questions, and a
+deleted check is how the next wrong string gets in.
+
+**Status.** Current
+
+#### Q3.490 — Two routes that start an agent went out on the 15-second budget
+
+**Rule.** `GET /agents/capabilities`, `POST /custom-agents` and
+`PATCH /custom-agents/:id` are `slowRoute` entries, so they get
+`SLOW_ROUTE_TIMEOUT_MS` (90s) rather than `REQUEST_TIMEOUT_MS` (15s). `/agents` is
+matched by **prefix**; `/custom-agents` by **verb plus prefix**.
+
+**Why the miss happened, which is more useful than the miss.** `/agent-auth` was
+already a prefix, written that way so a route added under it could not reintroduce
+the gap. `/agents` was a literal — and it was a literal on the day
+`GET /agents/capabilities` shipped, so the new route under it inherited nothing.
+The correction is to make the namespace the unit rather than to add a second
+literal: the only thing under `/agents` is what the installed CLIs say about
+themselves, and nothing but a CLI can say it, so there is no cheap `GET` there and
+there cannot be one.
+
+**What 15 seconds bought.** `/agents/capabilities` starts a whole agent per harness,
+and `server.ts` looped the three **serially** on purpose — a `Promise.all` was
+measured making the third lose the race against `MAX_CONCURRENT_ASKS` (2) every
+time, so codex was permanently greyed out of the builder under a sentence about
+load. Three harnesses at `ASK_TIMEOUT_MS` (120s) each, one at a time, is up to 360s
+of daemon budget behind a client that gave up at 15, so on a cold cache the abort
+was the norm rather than a risk. (⚠ **The serial loop is gone — Q3.524.** The route
+asks all four at once and the *cap* queues rather than refusing, so the sum becomes
+rounds of two. The 90s entry is unaffected and is why it is still in this table.) And the abort is a **transport** failure:
+`forgetRoute` drops the memo, `markUnreachable` follows, and a perfectly healthy
+machine is drawn "not reachable right now" *everywhere at once* — including the New
+session sheet the builder was opened from. Then, because a `GET` is replayable, the
+retry fires a second `/agents/capabilities`, which either spawns three more
+processes or trips `model_busy`.
+
+**Why the writes are in and the reads are not.** Every write under `/custom-agents`
+re-validates the pairing with `hostable` against `asks.capabilities(harness)` — one
+that did not would be storing a preset whose only button answers 502 days later — so
+a write spawns an agent by construction. The reads do not: `GET /custom-agents` is a
+`list()` and the `DELETE` is a lookup plus a delete, both synchronous SQLite, and
+both sit on a first paint where 90 seconds of a screen that cannot say anything is
+worse than 15 and a refusal. `(POST|PATCH)` plus the prefix covers a write route
+that does not exist yet without covering the two reads that do.
+
+**Stated rather than fixed: 90s does not bound the new worst member.** 360s does,
+and `SLOW_ROUTE_TIMEOUT_MS` governs eight other routes whose docblock says a move
+should follow a measurement. Ninety seconds covers what the route actually costs —
+three spawns and a handshake each, then ten minutes of cache — and a harness hung to
+its full budget still lands on the failure this table exists to prevent, three
+minutes later instead of fifteen seconds later. The honest fix is a per-route budget,
+which stops `slowRoute` being a boolean and is a shape change with call sites outside
+the file; the gap is written into the constant's own docblock instead of implied
+away.
+
+**The structural hazard is not fixed and is recorded as Q7.123**: `slowRoute` lives
+in `packages/web` and the routes it is about live in `src/`, so nothing fails when
+one moves without the other. Both misses this run were that.
+
+**Status.** Current
+
+#### Q3.491 — A disabled control was washed to 40%, and the wash landed on the refusal
+
+**Rule.** A control that carries its own refusal may not be dimmed with an opacity
+utility. Disabled steps the ink **up** through the existing tokens — title to
+`muted`, glyph to `faint` — and the subline stays exactly where it was.
+
+**Why, measured over `surface` (#FFFFFF).** `disabled:opacity-40` composites the
+whole control, subline included, and on these rows **the subline is the refusal**:
+why this harness cannot run that model, which system has no key on this machine.
+
+| Token | Full | At 40% |
+|---|---:|---:|
+| `--color-fg` (the title) | 17.37:1 | **2.51:1** |
+| `--color-faint` (the subline) | 6.23:1 | **1.83:1** |
+
+`--color-faint`'s floor exists precisely because almost every use of it is 12px,
+which is small text and therefore wants 4.5:1 rather than 3:1. The wash put the one
+line somebody has to read at 1.83 — **less** legible than the label it refuses,
+which is backwards. Stepping the title down to `muted` instead costs 7.75:1, still
+above the floor, and leaves the reason at full strength.
+
+**Where opacity survives, and why that is not an inconsistency.** `BUTTON_TONE`'s
+ghost tone keeps it: bare text with no boundary to lose and no subline to
+composite, which is the case its own docblock exempts. The rule is about a control
+that is *saying something* while it is unpressable, not about dimming as such.
+
+**The same defect, the other way up.** `BUTTON_TONE.plain` and `.destructive`, and
+`Dropdown`'s trigger, each carried `disabled:border-edge` — three copies of a
+boundary being **deleted** on disable, from 4.40:1 to 1.31:1, under a docblock
+arguing against exactly that. Q3.492 is the rule they were breaking.
+
+**Status.** Current
+
+#### Q3.492 — `edge-strong` was already the rule, and the new rows were drawn `edge`
+
+**Rule.** `edge` is a decorative hairline and **may never be the sole identification
+of a control**; `edge-strong` is a control's own boundary and is held at ≥3:1 on all
+three surfaces (4.14 / 4.40 / 3.59) because WCAG 1.4.11 asks that of a non-text
+control with no fill. The consequence, stated in the same place: **hover moves a
+fill, never a border.**
+
+**This is not a new rule. It is a rule that existed and was not applied**, which is
+the only reason it is worth an entry. `index.css` states both halves verbatim,
+against the tokens themselves, with the numbers. The rows added for the agent
+builder and the systems chooser were written `border-edge` with
+`hover:border-edge-strong` over the top — a hairline at 1.31:1 doing the whole job of
+saying a control is there, and a hover jumping #E3E1DD → #7B7873, louder than the
+press it accompanies. One class string, both halves broken, on a screen whose
+controls sit on `bg-surface` and therefore have nothing *but* the border.
+
+**Why it happened, and what changes so it does not happen again.** The rule lives in
+a stylesheet comment and the violation lives in a `.tsx` class string, so nothing
+connects them: six byte-identical copies of the row existed across the app and each
+was a fresh chance to get it wrong. The remedy is `ChoiceRow` in `bits.tsx` — one row
+primitive that owns the boundary, the disabled treatment of Q3.491, the reserved
+check slot and the truncation — so the rule lands once instead of six times.
+Three of the six are migrated; of the three left, two put a `Badge` inside the
+title line and so cannot adopt a `title: string`. They are named in the primitive's
+docblock as a known remainder, with the one prop that would close them, rather than
+closed today with a prop nothing uses.
+
+**Selection moved off the border with it.** The old row moved the border on
+selection as well, which is the same border-moving state change the hover rule
+rules out. Selection is `bg-raised` plus `font-medium` plus the check now, so the box
+a pointer travels over is one shape from first paint to last.
+
+**The `+` tile went with them, dashed and all.** Dashed or not, that border is the
+whole of what says the control is there.
+
+**Status.** Current for a control that can be acted on; narrowed by Q3.498 for one
+that refuses, where the sweep's missing `disabled` arm made a greyed row read as
+pressable
+
+#### Q3.493 — A preset could be made and deleted, and Q7.116 had already argued for editing it
+
+**Decision.** `PATCH /custom-agents/:id`, at `/agent/:machineId/edit/:presetId`,
+which is the assembly screen with a stored row loaded into it. An edit is a
+**replace**: all four of name, harness, system and model are required, exactly as on
+create, and one shared `readAssembledAgent` answers both routes.
+
+**Why this is a correction rather than a feature.** Q7.116 chose a *reference* over
+a copy, and its whole argument was that "editing a preset changes what its sessions
+come back as, which is what somebody expects of a preset". Nothing could edit one.
+The reference had been paid for — a resolve at every launch, a degrade path for a
+deleted row — and the capability it was bought for did not exist, so the only way to
+change a preset was to remove it and lose every session's reference to it.
+
+**Why a replace and not a merge.** The pairing is a fact about the row, so a partial
+body forces `hostable` to be weighed against the merge of body and stored row, and
+the failure mode is a handler that weighs it against the body alone:
+`{"system":"moonshot"}` on a codex preset is refused at create and saved at edit.
+With nothing to merge there is nothing to get wrong, and it costs the client nothing
+— the edit screen is the assembly screen, so all four fields are in hand.
+
+**One validator, because the drift that matters is silent and one-directional.** An
+edit that accepts what a create refuses puts the unstartable row into the store by
+the back door. `id` and `createdAt` are read off the stored row rather than off the
+path or the body, so "a client cannot set either" is a property of the shape rather
+than an argument about which keys nothing happens to read; a body carrying them is
+answered 200 with the stored values, since there is no field to refuse. The 404 is
+decided **before** the body is read: somebody holding a list a second out of date
+should be told there is no such agent rather than have a field complained about.
+
+**What a Remove says before it is tapped.** *"Chats you started with it are not
+deleted — the next time one comes back it runs on Claude Code with its own model
+rather than this one."* Three things in that sentence are decisions. The harness is
+read off the **stored** row, not off the picker the person may have just changed on
+their way to deleting the thing — what happens to their chats is decided by what is
+on the machine. *"the next time"* is the truth `ManagedSession.assembled` actually
+implements: a running agent keeps the system and model it was spawned with, and the
+demotion lands at the next start or resume. And the name is nowhere in the
+destructive pair — the question is *"Remove it?"* and the button is *"Remove agent"*,
+because a name is 80 characters at the bound, neither control has a `truncate` to
+give it, and the screen's own first line is what "it" refers to.
+
+**Two one-line dependencies, and both are invisible to the route's own driver.**
+`daemoncheck` stands a `Map` in for the custom-agent store, and `Map.set` is an
+upsert by construction, so every route assertion passes while
+`SqliteCustomAgentStore.save` is a bare `INSERT` that answers
+`UNIQUE constraint failed` — 500 on a real daemon, for the one verb that needs it.
+And `CORS_ALLOW_METHODS` had no `PATCH`, so the route preflight-fails in every
+browser while working from curl, which is the same failure `PUT /agent-auth/:agent`
+caused and which the containment assertion beside it was written after. Both are
+now driven: a real-store upsert assertion that the route section cannot reach, and
+the pre-existing verb-containment check, which went red the moment the route was
+registered. Until both land, `Save agent` answers 500 on a real daemon and is
+unreachable from a browser, with every route assertion green.
+
+**Status.** Built, and red on two one-line changes outside the route.
+
+#### Q3.494 — The head said LLM and every sentence under it said model
+
+**Rule.** The visible word is **model**. The address segment stays `llm`.
+
+**Why the word moved.** It was the one string in the flow that used an acronym for
+the thing beside it. Every refusal on that screen already said *model* —
+`choiceRefusal` and `keyMissing` both do — and `defaultAgentName` names a preset
+after the model it runs, so the head was the only place the reader met a different
+vocabulary for the row they were about to tap. `agentCard.ts` carries the standing
+rule and why it is swept at all: a reader who has never seen an environment variable
+must not meet an acronym either.
+
+**Why the segment did not.** It is an address. A link written down last week has to
+keep opening this screen, and the naming rule is about what the address *shows*,
+which `llm` still says truthfully. Only one of the two is read by a person, so only
+one had to move.
+
+**The contrast with Q7.117 is the useful half.** There the segment moved as well —
+`…/agents/:agent` became `…/systems/:system` — because it named the wrong *thing*, a
+harness standing in for a vendor, so every link built on it was built on the
+conflation and the old address is deliberately not redirected. Here the segment
+names the right thing in a word nobody reads. Whether an address moves is decided by
+what it is wrong about, never by the word above it having changed.
+
+**The sweep could not have caught this, and that is the argument for writing the
+rule down at the code.** `webcheck`'s `noJargon` is a closure over `hostable`'s
+return values; it reads no `.tsx` and it does not read `nav.ts`, so a head string
+was never in its corpus. `AgentStep`'s docblock now carries the permission for the
+two to differ, at the type that holds the segment.
+
+**Status.** Current
+
+#### Q3.495 — A delete that worked, answered 404 because the answer was lost
+
+**Rule.** `DELETE /custom-agents/:id` answers `200 {removed, id}` for every id it is
+given. There is no 404.
+
+**Why, and it is a transport argument rather than a preference about REST.**
+`isReplayable` whitelists `GET` and `DELETE`, and `slowRoute` deliberately leaves
+this route off — its own docblock calls it "a lookup plus a delete", so it runs on the
+ordinary 15-second budget, which is exactly the budget `settleTransport` names as the
+one a phone dropping to LTE earns. The failure is therefore neither hypothetical nor
+about a mistyped id: the delete lands, the answer is lost on the wire, the client
+replays, the second send finds nothing, and `AgentBuilder` draws `errorText` over an
+act that did precisely what was asked. `removed` is what tells the two sends apart for
+a client that wants to know.
+
+**And the consistency argument, which is the one that decides it.**
+`DELETE /plugins/:pluginId` in this same daemon already answers this way, with this
+argument, and `daemoncheck` already pinned it that way. Two conventions for one verb
+in one daemon is how one of them rots, and the one that rots is the one whose failure
+is invisible offline — which is this one. A 404 here is correct on every developer
+machine and wrong only over a relay.
+
+**The cost, stated the way that route stated it.** A mistyped id is no longer refused.
+That is one confusing line for somebody who typed an id by hand, weighed against a
+delete that reads as having failed for anybody who hit a dropped packet.
+
+**One dishonest answer survives, and it is written at the code.** `removed` is what
+the lookup said and the `remove` runs either way, because `SqliteCustomAgentStore.get`
+drops a row whose harness or system this version cannot parse — a preset written by a
+newer daemon and read after a downgrade — and gating the delete on the lookup would
+make exactly those rows undeletable, which is the failure the plugin route avoids by
+removing rather than finding. Such a row is deleted and reported `false`. The store
+port returns `void`, so this line has nothing better to read; `remove` answering
+`changes > 0` is the one-line fix and is deliberately not taken in the same change as
+the route.
+
+**What the driver had to change, and what it must not.** The assertion that pinned the
+404 verbatim is flipped, both halves — a 200 alone does not tell a replay from a delete
+that did nothing — and the replay itself is driven now: the same `DELETE` sent twice,
+which is the request an LTE drop produces and which no assertion reached before. The
+no-store row stays as it was, because `503 systems_unavailable` must still precede the
+idempotence: a daemon with no store cannot claim a row is absent. And `webcheck`'s
+`slowRoute` table must keep this route at `false` — that budget is the premise of the
+argument above rather than an oversight, so a row flipping to `true` means revisiting
+the route rather than the pin.
+
+**Status.** Current
+
+#### Q3.496 — The same opacity, one screen over, on the machine picker's own reason
+
+**Rule.** Q3.491's rule, unchanged: a control that carries its own refusal may not be
+dimmed with an opacity utility. What is new is that it is enforced over the whole of
+`bits.tsx` with three named exemptions, rather than over the three controls it had
+already been applied to.
+
+**The instance the first pass missed.** `Dropdown`'s option row carried
+`disabled:opacity-40 disabled:hover:bg-transparent` while rendering
+`item.description`, and `MachinePicker` is a live caller passing
+`unusableReason(machine)` as that description together with `why !== null` as
+`disabled`. So an offline or read-only machine drew its **name** at 2.51:1 (13px) and
+the whole of **why it cannot be reached** at 1.83:1 (12px) over the panel's own
+`bg-surface` (#ffffff), against a 4.5:1 floor — and this menu is the only place a
+non-selected machine's reason appears anywhere in the app.
+
+**Why the standing exemption did not reach it.** `BUTTON_TONE.ghost` keeps its
+opacity on a stated condition: a control with no boundary to lose *and no subline to
+composite*. This row has a subline and the subline is the refusal. The fix is the
+three steps `ChoiceRow` already takes — label to `text-muted` (7.75:1), description
+left exactly where it was at `text-faint` (6.23:1), nothing at all on the row itself.
+The hover fill is granted by state rather than reclaimed with a `disabled:` variant,
+because `:hover` still matches a disabled `<button>`; the `Dot` adornment is left
+alone deliberately, since it draws from its own tokens and is the one mark on the row
+already saying "off".
+
+**The mechanism is the finding, not the row.** The sweep asserted the rule on
+`choiceRow`, on the agent tile and on the strip — three slices, each a control the
+rule had already been applied to — so the fourth control in the same file shipped
+carrying the exact thing the rule forbids, with the driver green. It is a count over
+the file now: exactly three `opacity` occurrences in stripped `bits.tsx`, none outside
+`BUTTON_TONE.primary`, `BUTTON_TONE.ghost` and `IconButton`, which are the three that
+render a label and nothing else. A fourth anywhere in the vocabulary file is the
+defect.
+
+**A measurement corrected while sweeping.** `border-danger/45` over `surface` is
+**2.27:1**, not the 2.11:1 two comments had been agreeing with each other about:
+`--color-danger` #7e362b at 45% over #ffffff composites per channel to
+196.95 / 164.55 / 159.6 → #C5A5A0, relative luminance 0.41316, contrast
+1.05 / 0.46316. Nothing is reversed by it — 2.27 is still well under the 3:1 WCAG
+1.4.11 asks of a non-text control with no fill, so Q3.492's argument stands — and the
+driver computes it from the two tokens now rather than quoting a number.
+
+**An exemption that is one measurement from being a defect.** `AgentConfigBar`'s three
+chips keep `opacity-40` and sit on the exempt side only because their reason rides a
+`title` tooltip, which no opacity composites **and which a phone cannot reach**. Named
+here rather than changed, because the fix there is to move the reason rather than to
+delete the dimming.
+
+**Status.** Current
+
+#### Q3.497 — The key box came off Configure agent, and the row it was protecting greys now
+
+**Rule.** **There is no authorization on the Configure agent screen.** Nothing on it
+takes a credential; it assembles a harness, a model and a name, and that is all. A
+pairing whose key is missing is refused in the **picker** — `harnessRowRefusal` greys
+the harness row and puts the missing key on it as the subline — and the key is pasted
+under Settings → Machines → *system*, which is where a machine is configured.
+
+**Why, in the order the argument runs.** Authorization is a property of a **machine**,
+not of a draft. `system_credentials` is per machine, it outlives every preset written
+against it, and a credential typed into a screen whose whole subject is one
+half-assembled agent is filed in the wrong place whatever it does afterwards. Second,
+an option nobody can enter must not be drawn as enterable: a row offered live, taken,
+and then refused by the button under it is strictly worse than a row that says up
+front it cannot be taken, and once the box is gone there is no way in from that
+screen at all. Third — and this is what makes it a narrowing rather than an overrule —
+Q3.485's carve-out (*"greying the row would hide the only screen that leads to the
+fix"*) was a fact about the **box**, never about the row. It was true exactly as long
+as the fix was mounted there. It fell with the box.
+
+**This is not the state Q3.485 found, and the difference is two screens.** Before the
+inline box a keyless pairing was green the whole way to `POST /sessions`, which
+refused **after** `registry.create` had already made a worktree, and the remedy was
+four taps away behind a `navigate` that unmounted the builder and lost the draft.
+The refusal now lands in the **picker**: the row is greyed, `Add agent` is off, and
+the sentence names what is missing — before anything is created and before there is a
+draft to lose. Nothing is built, so nothing can be lost by walking away to fix it.
+That is stronger than the inline box and stronger than what preceded it; it is not a
+return to either.
+
+**Cost, stated.** A first routed pairing needs a trip to settings before it can be
+assembled at all. Once per system per machine — the key is a machine's, so every
+preset and every session on that machine is covered by the one paste, and a system
+already keyed costs nothing.
+
+**The sentence states a fact and refuses to state a route**, which was weighed rather
+than assumed. `keyMissing`'s string is taken **verbatim** on the row: the other two
+sublines drop the harness because the row is already titled with it, and this one
+never named the harness, so there is nothing to drop. It names the *system* — the one
+refusal here that does, because its remedy is a different screen. It does not say
+which screen, for three reasons. A `ChoiceRow` subline is a single `truncate`d line,
+so an appended instruction is precisely the half that gets clipped. The remedy is four
+levels deep, and "in Settings" points at a screen with several sections without saying
+which, which is a plausible wrong instruction rather than no instruction. And neither
+"Settings" nor "Machines" is a word on the screen the sentence is drawn on, which is
+the bound every refusal in `agents.ts` is held to. The same string is also drawn
+untruncated beside the disabled button, where an embedded instruction would read
+differently in the two places one string is supposed to guarantee it cannot.
+
+**Both screens weigh the settled failure first and the key last.** `harnessRowRefusal`
+and `choiceRefusal` now order `pairFailure` ahead of `keyMissing`. A key cannot rescue
+a pairing refused for a protocol or for a spelling, so naming it there sells a trip to
+settings that ends at the same greyed row. `choiceRefusal` had the opposite order and
+its only justification was the box — a missing key was the one of the three somebody
+could act on *from that screen*, and with the box gone that is no longer true of any
+of them. Leaving the two functions ordered differently would have given one pair two
+different reasons on two screens, which is the thing `harnessRowRefusal` exists to
+prevent.
+
+**And a harness screen where all three rows are greyed is reachable now**, which
+Q3.479 says cannot happen. Measured: a table-spelled model on a system with no key
+greys Claude Code with *"No Moonshot key on this machine."*, Codex with *"Cannot run
+K2."* and Kimi Code with *"No model called K2."* — three rows, three different and
+true reasons, and the one that can be acted on sitting on the row it belongs to. The
+claim that survives is narrower: no *pairing* can grey all three, because every model
+offered comes from a harness's own list or from a routable endpoint. A missing key
+can, and honestly — with no key on the machine, nothing on it runs that spelling.
+
+**Rejected — greying the model row too.** It is knowable one screen earlier that no
+harness can run a given model right now (the harnesses that support it, intersected
+with the ones that have a key, is empty). It is not done, because the model list's
+glyphs deliberately ignore the key — they say what a model is *for* — and greying a
+row the glyphs still call supported makes the row disagree with itself. Q3.479's
+division holds: the model screen's subject is the model.
+
+⚠ **Reversed by Q3.499, on the strength of the second half of that sentence rather
+than against it.** The model screen's subject *is* the model, and whether a key is
+needed turns out to be a fact about the model — its id came from the table or it did
+not — so greying the row is the screen staying on its own subject rather than
+reaching onto the next one. What survives is the intersection argument, which is
+still not what is computed: the row is not greyed by asking which harnesses have a
+key. The disagreement between the greying and the glyphs was accepted and written
+down where it lives, in `supportingHarnesses`.
+
+**Rejected — putting the key box somewhere else on the builder**, in a disclosure or
+behind the refusal. It moves the same credential onto the same screen and keeps the
+same filing error; the objection was never the box's size.
+
+**Status.** Current — reverses the placement decided at Q3.485 and keeps its refusal.
+Its one rejected alternative is reversed by Q3.499, and the key arm it added to
+`harnessRowRefusal` is a guard rather than a step of the flow from there on.
+
+#### Q3.498 — Two right changes, and the pair made a refused row look pressable
+
+**Rule.** The ≥3:1 boundary is the rule for a control that can be **acted on**. A
+control that refuses hands the boundary back and takes `edge`, and WCAG 2.2 SC 1.4.11
+says so in its own words: 3:1 is asked of *"visual information required to identify
+user interface components and states, **except for inactive components** or where the
+appearance of the component is determined by the user agent and not modified by the
+author"*. An inert row is the exempted case, so `edge` there is **correct** rather
+than tolerated — and `edge-strong` there is wrong, because in this app that border is
+the whole of what says a thing is pressable.
+
+**The failure is the useful part, and it is a failure of composition.** Q3.491 took
+`disabled:opacity-40` off the rows that carry their own refusal, because the wash
+landed on the refusal and put it at 1.83:1. Q3.492 swept `edge-strong` onto rows that
+had been drawn `edge`, because a 1.31:1 hairline was doing the whole job of saying a
+control was there. Both were right, each was measured, and neither weighed the other:
+the wash had been the only thing separating a row you can take from one you cannot,
+and the sweep — written with no `disabled` arm — had just given both the same border.
+Reported from a screenshot, which is the only way this was ever going to be caught;
+every number in both entries stayed true the whole time.
+
+**Measured over `surface` (#FFFFFF), per channel.**
+
+| Row | Border | Ratio | Verdict |
+|---|---|---:|---|
+| Live | `edge-strong` #7B7873 | **4.40:1** | passes 1.4.11 |
+| Live and selected, against its own `bg-raised` | `edge-strong` | **3.59:1** | passes |
+| Refused | `edge` #E3E1DD | **1.31:1** | *exempt* — inactive component |
+| Refused and selected, inside the fill | `edge` | **1.07:1** | exempt |
+
+The ink is unchanged and stays where Q3.491 put it: title `muted` at 7.75:1, glyph
+`faint` at 6.23:1, and the subline — the refusal — at full `faint`, still the most
+legible thing on a greyed row, which is the property the whole arrangement protects.
+
+**`disabled` is asked before `selected`, and that ordering is the assertion.** A
+selected-and-refused row keeps its fill and its check, because those say *which one
+is chosen* and that is still true; only the boundary is withdrawn. Asking `picked`
+first is the exact bug — a restored preset naming a harness the machine no longer has
+takes the strong border and reads as pressable — and both builder pickers reach that
+pair, so it is handled rather than assumed unreachable.
+
+**`BUTTON_TONE` still points the other way, and it is one rule seen from two sides.**
+A button is a **lone** control: nothing beside it is pressable, so its border answers
+*is there a control here at all*, which is what the `Add agent` regression measured.
+A picker row is one of a run of siblings differing only in whether they can be taken,
+so its border answers *which of these can I press* — and a strong edge on the ones
+that cannot is a false answer to the question the run itself poses. The second half of
+the split: those rows carry their own refusal as a subline and a button carries none.
+`IconButton` composites a glyph and nothing else and its border lands at ~1.65:1
+under the opacity it keeps, so it already hands the boundary back by another route.
+
+**`Dropdown`'s option row is exempt by construction, and that is written down rather
+than swept.** `menuRow` emits no border in either state — a row inside the menu panel
+is identified by the panel's own box and 44px of hover fill — so there is no strong
+edge there making a false claim, and adding one to the live rows would be a new
+decoration rather than an identification. Its three signals already exist: the label
+down to `muted`, the refusal `DropdownItem` obliges its caller to pass, and the
+caller's own adornment. The finding lives in the row's comment so the next sweep does
+not add the border it just declined to add. The trigger keeps `edge-strong` in both
+states and is the one judgement call here: it is a lone control and, uniquely, a
+control that is also a value display — its box is where the current answer lives — and
+no caller in the app passes it `disabled` today.
+
+**Status.** Current — narrows Q3.492 for inactive controls. Q3.491's ink rule is
+untouched, and the opacity count over `bits.tsx` still stands at three.
+
+#### Q3.499 — Two models with no key, two different flows, and the picker was asking about the system
+
+**Rule.** **A model needs a pasted key if and only if its id came from the table.**
+Nothing else decides it — not which harness is chosen, not whether one has been
+chosen at all, and not whether the system has a native harness. `keyMissing` takes
+the model and nothing else, and both pickers call that one function.
+
+**Why.** Reported from a screenshot of the model picker, on a machine with no key
+saved for anything: *"у к2 нет ключа, и у нижних нет ключа. Но флоу разный …
+Такого быть не должно — если нужен ключ, то модель нельзя выбрать."* Moonshot's
+`Kimi K2` and `Kimi K2 Turbo` were pressable and refused one screen later, on the
+harness picker; Z.ai's `GLM-4.6` and `GLM-4.5 Air`, four rows down the same list,
+were greyed on the spot with *"No Z.ai (GLM) key on this machine."* Two rows in the
+same state, behaving differently, with nothing on screen to explain why.
+
+**The arm that did it, and the argument it rested on.** Q3.485's third state:
+
+```ts
+if (harness !== null && system.nativeHarness === harness) return null;
+if (harness === null && system.nativeHarness !== null) return null;   // ← this one
+return system.keySet ? null : `No ${system.displayName} key on this machine.`;
+```
+
+With no harness chosen you cannot know whether the pairing will turn out native (no
+key) or routed (key) — so, the reasoning went, only a system *nothing* reaches
+natively is knowably stuck. Moonshot has Kimi Code, so every Moonshot row passed;
+Z.ai has no CLI of its own, so every Z.ai row was refused.
+
+**It is a category error rather than an oversight, and that is why it is worth an
+entry.** `nativeHarness` was standing in for *"could this be reached natively"* —
+a true and useful fact about a **system**, and the wrong question about the **row**
+a picker draws. A model id is not portable, which Q3.486 measured and `source`
+exists to record, so the honest question one level down is *"can **this id** be
+reached natively"* — and that one has an answer before any harness is chosen.
+
+**The replacement is total, and both halves fall out of `pairable`.**
+
+- `source === "table"` — the native harness is refused that id for the *name*
+  (`native && source === "table"`), so the only pairing that can ever run it is a
+  routed one, and a routed pairing signs with the pasted key and nothing else. A
+  key is **always** needed.
+- `source === "published"` — every non-native harness is refused it for the name
+  (`!native && source === "published"`), so the only pairing that can ever run it is
+  the native one, and that signs with whatever its own CLI's login wrote. A key is
+  **never** needed.
+
+Two cases, no third, and no exception in either direction. Which is why the harness
+argument could be **deleted** rather than defaulted: with a harness chosen,
+`pairFailure` has already refused native+table and routed+published, so the only
+pairings that reach the key question are native+published and routed+table — the
+two the model alone already answers.
+
+**The two rows in the screenshot are identical because they *are* identical.**
+"Kimi K2" is Moonshot's pay-as-you-go spelling; Kimi Code publishes "K2.7 Coding",
+"K2.7 Coding Highspeed", "K3" and "K3-256k" and nothing else (measured 2026-08-26,
+Q3.480), so `kimi-k2-thinking` reaches nothing natively and the only door into it is
+a routed harness — exactly GLM's situation, drawn exactly the way GLM's is now.
+**And the other half must not regress**: "K2.7 Coding" is published by Kimi Code
+itself, so it stays offered on a machine with no Moonshot key. That is the headline
+pairing this whole feature exists for, and it is precisely what a key check written
+against the system rather than the model takes out.
+
+**Measured — the whole 32-cell grid, driven rather than reasoned.** The module was
+imported under `tsx` and both refusals printed for every combination of native
+harness, key, `source` and chosen harness. Exactly one cell moves: no key, table id,
+no harness chosen — `null` becomes *"No Moonshot key on this machine."* The safety
+property was checked across the grid rather than at that cell: **wherever the model
+screen refuses, every harness row refuses too**, so nothing pressable was hidden;
+and wherever some harness row is live, the model screen says nothing. In each of the
+two refusing cells the three harness rows read *"No Moonshot key on this machine."*,
+*"Cannot run K2."* and *"No model called K2."* — three different true reasons, and no
+usable option among them.
+
+One cell breaks the biconditional and is unreachable by construction: no native
+harness, published id — the model screen quiet while all three harness rows refuse.
+`allModels` cannot produce it, because a `published` choice only exists where
+`nativeHarness` is set: that list is read off the native harness's own capabilities.
+Fixture-only, and it was fixture-only before this change too.
+
+**How it was found is the useful part.** Not by a driver. Every assertion in this
+area passed throughout and most of them still pass unchanged — including one that
+pinned the defect verbatim, `keyMissing(null, unkeyed)` expected to be `null`, with a
+comment above it restating the harness-less argument word for word. They pinned the
+**arms of the predicate**, and the predicate was asking the wrong question. An
+assertion written from the same misunderstanding as the code is not a check on it;
+it is the misunderstanding restated so that it cannot drift. What caught it was a
+person looking at two rows and noticing that two identically-keyless models behaved
+differently — the same shape as Q3.498 one entry earlier, where two individually
+correct and individually measured changes composed into something only a screenshot
+showed.
+
+**The harness-less predicate the model list used to call is deleted rather than
+corrected.** It had no product caller — only `webcheck` imported it — and after this
+change its meaning cannot even be expressed through `keyMissing`, which no longer
+takes a bare system. A corrected version would have to be hand-written as *"no native
+harness and no key"*, which is a fact nothing on any screen draws: the model screen's
+subject is a row. Keeping it would leave a predicate whose only consumer is the
+driver that pins it, which is an assertion about the existence of the thing it
+asserts.
+
+**The harness screen's key refusal stays, and it is a guard now rather than a step
+of the flow.** Q3.497 put it there one entry ago; with the model row greyed and
+`disabled` it can no longer be reached by walking the two pickers against a fresh
+listing. It is kept on a worked-out reachability rather than on a guess. Two paths
+still arrive there. The **edit** screen sets the harness and the model straight from
+`GET /custom-agents` and draws the picker over a pair no picker chose — including one
+that was legal when it was saved and whose key has since been revoked. And the
+listing goes stale: `GET /systems` is read once when the builder mounts, so a key
+revoked on another device, or in the settings sheet on this one, leaves a model that
+genuinely was pressable when it was pressed. A deep link alone does not reach it —
+the model draft is component state rather than a URL segment, so
+`/agent/:machineId/harness/:cwd` entered cold has no model and the function returns
+at its first line. And the arm guards the **write** as well as the row:
+`choiceRefusal` puts the same sentence beside the disabled button, so a preset whose
+key has gone cannot be saved from the edit screen either.
+
+**Rejected — widening `keyMissing` to take the harness as well as the model.** The
+harness is an input that provably cannot change the answer, per the two-case argument
+above. Keeping it would leave a second way to ask one question, which is a second way
+for two screens to disagree — which is the defect.
+
+**Rejected — moving the case into `choiceRefusal` and leaving the harness screen
+alone.** It leaves `harnessRowRefusal` calling a *different* thing, and `webcheck`'s
+identity assertion — the row, the button and the rule say one sentence — stops
+meaning anything the moment the two sides are computed differently.
+
+**Rejected — two named predicates, one per screen.** Two names for one rule, which is
+what was just taken out.
+
+**Rejected — folding `routable` in**, and the corner where that shows is written down
+rather than patched. A table id only exists where the daemon has somewhere to route:
+`GET /systems` answers `routable` as `spec.baseUrl !== null`, and every `SYSTEMS` row
+carrying models carries a `baseUrl`, so on a current daemon "came from the table"
+already implies "there is a routed door". Against a daemon too old to send the field
+it falls back to `false` while the models still arrive, and there the row is greyed
+with a sentence whose remedy is wrong — pasting a key will not make an old daemon
+route. It is still the right *answer* (nothing on that machine runs that spelling)
+and it is strictly better than what that state used to do, which was offer the row
+and refuse it a screen later. Folding the field in would put a fact about the system
+back inside a rule about the model, which is the exact shape being corrected here;
+`hostable` owns that fact and says it in words that fit, one screen along.
+
+**Cost, stated.** The model screen and the glyph row now disagree on one kind of row:
+a table-spelled model on an unkeyed system is greyed while `supportingHarnesses`
+still draws Claude Code's glyph on it. That is Q3.479's division held rather than
+broken — a glyph says what a model is *for*, which is a settled fact about a
+spelling, and the greying says what is missing — but the *argument* for it had to be
+rewritten, because it used to be that the key answered `null` in that state anyway,
+and it no longer does.
+
+**Status.** Current — reverses the third of Q3.485's three states, the harness-less
+one; its other two are unchanged and are what the iff-rule reads off the model
+instead of off the pair. Narrows Q3.479's rule from the system to the model, and
+reverses Q3.497's one rejected alternative.
+
+#### Q3.500 — The bar under the builder told you to do the thing you were looking at
+
+**Reported from a screenshot**: the Configure agent screen's action bar reading
+`pick a model`, alone, over an empty panel. "Убери эту подпись и все подписи в
+этом месте."
+
+**Decision.** The slot carries **news or nothing**. A refusal and a daemon failure
+stay; the two prompts — `pick a model`, `pick a harness` — are gone, and their
+absence is asserted rather than merely done.
+
+**Why the rule that put them there was right and still did not reach here.** The
+rule is `MachinePicker`'s: a disabled control with nothing beside it leaves
+somebody stuck at a 40%-opacity button with no statement of what it is waiting
+for. It holds wherever the missing half is *not* already on screen. On this screen
+it is on screen twice and larger — the two `ChoiceRow`s above say **Choose**, each
+with a chevron, in the order the screen asks them. So the line restated at 12px
+`muted` what the screen had just said at 14px with an affordance attached, on the
+one screen where the missing half is the most visible thing there is. A rule
+applied where its precondition is false is how a screen acquires furniture.
+
+**What is left is what the rows cannot say.** `conflict` is a pairing this screen
+refuses — reachable now only by editing a saved preset or by a key revoked on
+another device, since both pickers grey the rest (Q3.497, Q3.499). `error` is a
+request that was made and answered. Neither is legible from the rows above, and
+both are why the slot exists at all.
+
+**The span stays mounted unconditionally with only its text swapping**, unchanged
+and load-bearing: a `role="status"` inserted in the same paint as its content is
+commonly not spoken at all, VoiceOver on iOS included. Emptying the text is not
+unmounting the region.
+
+**The sibling slot on New session was left alone, and the difference is the
+precondition rather than taste.** Its four arms are `this can take up to 45
+seconds` (the daemon blocks that long, and without it the button reads as hung),
+the folder it will create in, `choosing a folder…` while the picker has not
+reported, and `choose an agent` — which fires only when the listing *has* loaded
+and nothing is selected, a state the strip reaches when every harness is
+uninstalled or a preset was deleted under it. Nothing on that screen says
+"choose" the way a `ChoiceRow` does, so the precondition that voided the prompts
+here is not met there.
+
+**Status.** Current. Narrows the prompt half of `MachinePicker`'s rule to "where
+the reason is not already on screen"; the refusal half is untouched.
+
+#### Q3.501 — One provider's model list is read by the browser
+
+**Question.** OpenRouter is 417 models and changes weekly. `SystemConfig.models`
+is a compiled-in table, and the two existing ways to fill a picker are that table
+or the native harness's published list. Neither fits: a table goes stale in days,
+and the published list only exists once somebody has keyed the harness.
+
+**Decision.** `SYSTEMS.openrouter.models` is **empty**, and the browser reads
+`openrouter.ai/api/v1/models` itself — `packages/web/src/openrouter.ts`.
+
+**Two measurements make it legal.** The endpoint needs no credential, and it
+answers `access-control-allow-origin: *` with `cache-control: public,
+max-age=300, stale-while-revalidate=3600, stale-if-error=3600`. So the browser
+can read it directly, and gets a stale-copy policy this client does not have to
+implement.
+
+**And one rule makes it necessary.** `compatibility.md` states the count of
+`fetch` calls in `src/` **as the property**. A proxy route would make that four,
+and would also put the daemon's own reachability in front of a list that has
+nothing to do with it. This is the plugin market's shape rather than a new idea:
+a catalogue on its own host, read by the browser.
+
+**Substituted into the *listing*, before `allModels` sees it** — not carried
+beside the choices, and emphatically not given a third `source`. A fetched row is
+a table spelling in every sense that matters: it is what the endpoint answers to
+when a harness is routed at it. So `keyMissing`'s biconditional stays true of it
+word for word, `pairFailure`'s two `source` arms keep their meaning, and
+`agents.ts` learns nothing about where the names came from. A third member would
+have made an eight-cell sweep twelve, and left both of `pairFailure`'s arms with
+a value that falls through them.
+
+**Sizes, measured**: 687 KiB raw, 348 kept after the `tools` filter, 23.5 KiB as
+`{id, name}`. The filter is not a preference — a model that cannot call tools
+fails on the first turn of any coding session.
+
+⚠ **The document's `connect-src` has to name it, unconditionally.** Every
+instance compiles in the same `SYSTEMS`, so every instance's picker makes the
+request; without the source the browser refuses its own request before a byte
+leaves, as a bare `TypeError` with no status. `relaycheck` asserts it in **both**
+instance shapes, because the market widens that directive by concatenation.
+
+#### Q3.502 — One system's two model lists are the same models
+
+**Question.** `ModelChoice.source` exists because a model id is not portable
+across harnesses even within one system: kimi publishes `kimi-code/k3` while
+Moonshot's endpoint wants `kimi-k2-thinking`, and offering one under the other
+produced a list that looked complete and failed at the provider (Q3.486). Does
+that hold for OpenRouter?
+
+**Measured: no, and it is the first system where it does not.** opencode
+publishes `openrouter/qwen/qwen3-coder` for exactly what the endpoint claude is
+routed at calls `qwen/qwen3-coder` — one catalogue, one account, related by a
+constant prefix. Left alone, the picker drew every OpenRouter model **twice**,
+once per spelling, each greyed for the harness that did not supply it.
+
+**Decision.** `SystemConfig.nativeModelPrefix`, and it is the only place a stored
+id is ever respelled.
+
+- Everything stored, sent and shown is the endpoint's own spelling, so
+  `custom_agents.model` says one thing whichever harness runs it, and an edit
+  that swaps the harness need not rewrite the model.
+- `pinNativeModel` puts the prefix back at the last moment before the agent is
+  asked, and is **idempotent** — an id that already carries it pins rather than
+  doubling.
+- `allModels` strips it off a published id, which is what makes the two lists
+  dedupe to one row.
+- `pairFailure` reports no name failure at all where a prefix relates them —
+  **both** arms suppressed, not one.
+
+**Published wins the dedupe, and that is the right way round.** Its presence
+*proves* the native harness is keyed (Q6.105: six models signed out, 362 keyed),
+so `keyMissing` reads `published` and asks for no key. The same model arriving
+only from the table means nothing on this machine can run it without one, which
+is exactly what the row then says. `keyMissing` is untouched.
+
+⚠ **Not a general "names may differ" mechanism.** Moonshot's two lists are
+different products on different endpoints with different billing (Q3.488). No
+prefix relates them, that row leaves the field `null`, and a refusal there is
+still the right answer — asserted as an absence, so a later tidy-up cannot
+quietly claim an equivalence nothing carries.
+
+#### Q3.503 — A provider large enough splits again, on the vendor — built, shipped, taken back out
+
+**Question.** Q3.486 removed a heading that split on the **route** —
+`Moonshot · Kimi Code only` beside `Moonshot · other harnesses` — on the grounds
+that a heading is where somebody looks for *whose model this is*, and a route
+pushed into it invents a category nobody asked about. Then OpenRouter arrived
+with 356 rows under one heading, on a phone.
+
+**Decision, since reversed.** Split on the vendor, which is that same question
+asked one level finer. What made the old split wrong was its *subject*, not its
+existence.
+
+**Two conditions, and each was a guard rather than a tuning knob.**
+
+- **Every id under the provider carries a `vendor/` prefix — not some.** A
+  provider with one bare id would otherwise split into "the ones with a vendor"
+  and a remainder: the old objection returning by the back door. This is also
+  what keeps Moonshot whole, and that is not incidental — kimi really does
+  publish `kimi-code/…`, so a split reading the prefix alone would draw
+  `Moonshot · kimi-code` the moment a search left only those rows.
+- **More than a dozen of them.** Below that a split trades one heading for
+  several carrying two rows each, which is furniture rather than a list.
+
+Measured against the live catalogue: 38 groups, largest 89. A leading `~` was
+folded for the heading only — OpenRouter spells its moving pointers
+`~anthropic/claude-sonnet-latest` — while the ids stayed verbatim, because they
+are what is stored and sent.
+
+**Status.** Reversed. `groupModels` groups on the system alone again, `vendorOf()`
+and its `VENDOR_SPLIT_MIN = 12` threshold are deleted, and the heading is
+`group.system.displayName` and nothing else — which is Q3.486's rule, unqualified.
+Cited with a call and a value rather than bare, because this file's own rule is
+that a name in it must `grep` to source and these two deliberately no longer do.
+
+**Why it lost, and it is not the objection above.** The argument in the
+`**Decision**` still holds: a vendor genuinely *is* "whose model is this" asked one
+level finer, so the category was not invented. It lost on the screen. Three things,
+watched on a real device rather than reasoned about:
+
+- **One list to scroll became 38 lists to scroll past.** The complaint the split
+  was built for is *"there are too many rows"*, and 38 sticky sub-headings do not
+  answer it — they add furniture between the reader and every row after the first
+  vendor. The flat form is longer and shorter to get through.
+- **A model's own variants read as different products.** `~anthropic/…` and
+  `anthropic/…` were folded together deliberately, but `qwen/…` sitting under a
+  heading of its own, three screens from `google/…`, made a catalogue of one
+  account look like a rack of separate providers.
+- **The search already does this, better.** Every use of this picker past a dozen
+  rows goes through the box at the top, and `searchModels` matches the id — so
+  typing `qwen` produces exactly the group the heading was drawing, on demand,
+  without costing anything to the reader who did not want it.
+
+**And the arithmetic that argued for it moved underneath it.** 356 rows was 348
+tool-capable plus opencode's published extras; dropping the `:batch` tier
+(Q3.506) takes the catalogue side to 289. That did not decide this — 289 under one
+heading is still a long list — but it is why the number in the question above no
+longer names anything.
+
+**Kept rather than deleted**, per this file's own convention: the split is an
+obvious-looking idea, it will be proposed again, and the only record of why it does
+not work is that it was built and lived on a phone for a day.
+
+**And one sentence is hoisted off a group.** `choiceRefusal(null, …)` on this
+screen can only be the no-key refusal, which is a fact about the *provider*: on
+356 rows it was one sentence repeated 356 times. It **survives the reversal** —
+with one group per provider it is if anything more plainly a fact about the
+provider than it was. The hoist requires the group to
+be **unanimous** and uses the same call, which is what stops it becoming a hole
+in "every row is greyed by that same refusal, unconditioned".
+
+⚠ **`noJargon` may never be handed a live model name.** It forbids `anthropic`
+and `openai` as words, and a third of the catalogue's names contain one —
+`Anthropic: Claude Sonnet 5`, `OpenAI: GPT-5.6 Luna`. It also forbids `/`, and
+while no *catalogue* name carries one, opencode's published names all do — it
+renders every model as `OpenRouter/<name>`. That is what settles which of the two
+names a **merged** row keeps: the table's, because the published form says the
+provider twice under a heading that already names it. What it does not settle is a
+row the table has never heard of, which is Q3.507. `noJargon` is a predicate over
+this app's *templates*; the values put into them are somebody else's prose, and
+always were.
+
+#### Q3.504 — An agent that needs no sign-in has to say so, not stay quiet
+
+**Question.** opencode runs with no credential (Q6.105), so it has no sign-in and
+the wizard button is not drawn. What does the screen say instead?
+
+**What it said before this entry, and why each was wrong.** With no key,
+`loggedIn` is `null` and the badge read **"cannot check"** — a sentence about a
+probe that failed, under an agent that had just completed a turn. The line below
+it read *"This machine couldn't check whether opencode is signed in… macOS can't
+run opencode's own sign-in either, so a saved key is the only way in"* — three
+claims, all false: nothing was checked and failed, nothing about macOS is the
+obstacle, and a key is not the way *in* because there is no door.
+
+**Decision.** A fifth `AgentStance`, `no_login`, which **outranks the credential
+axis**: a stored key changes what such an agent can *reach* and never whether it
+runs, so the badge reads `no sign-in needed` in both states rather than flipping
+to "signed in" when a key is pasted. The sentence is the only one on this screen
+that is not an apology — it says nothing is missing, and names what the box below
+it is for.
+
+**The key box stays**, and this is the one state where it is not a remedy.
+Hiding it would hide the only control the agent has; its caveat carries the
+purpose instead — the free models work without it, a key opens up the rest. That
+caveat is deliberately the *inverse* of codex's (Q2.200), because the two agents
+sit next to each other and codex's sentence would otherwise read as the rule.
+
+**`agentBadge` moved out of the panel to make any of this assertable.** It decided
+four states inline in `AgentsPanel.tsx`, where `webcheck` drives nothing — so the
+rule it carried (that "cannot check" is *not* an alarm) was held by a comment.
+The fifth state is what forced the move: it would have fallen into that arm.
+
+⚠ **`no_flow` is read and the other three blocked reasons are not.** `no_script`,
+`no_cli` and `interactive_pty` are the *host's* limitations, and each still leaves
+an agent that would sign in if it could — folding them in would draw
+`no sign-in needed` on a claude that simply cannot be signed in from this machine.
+Driven as a sweep over all five values, absent included.
+
+#### Q3.505 — One harness is the native side of two systems
+
+**Question.** OpenCode Zen is opencode's own gateway and OpenRouter is somebody
+else's catalogue, both reached by the same CLI, which publishes them in **one**
+list: `openrouter/qwen/qwen3-coder` beside `opencode/big-pickle`. `allModels`
+takes a system's published models from `capabilities[system.nativeHarness]`, so
+both systems took all 362.
+
+**What that drew.** 362 rows under OpenRouter including six that are not its
+models, and 362 under Zen including 356 that are not — every wrong row unrunnable,
+and none of them saying so, because `pairFailure` sees a published id on its
+native harness and correctly reports no failure at all.
+
+**Decision.** `nativeModelPrefix` divides the list: a system with one takes only
+the ids that carry it. A system **without** one takes everything, which is every
+other row here and is exactly what they did before — those harnesses serve one
+system each, so there is nothing to divide and nothing may be dropped.
+
+The field already existed for a different question (Q3.502, respelling a stored
+id), and this is the same fact read the other way: a prefix says *whose model this
+is*. Both readings are driven, and the no-prefix arm is driven too — that one is
+the regression risk, since a division that dropped unprefixed ids would empty
+Moonshot's published list without touching a single assertion about OpenRouter.
+
+**Why Zen is `baseUrl: null` when its endpoint is real.** Naming it would offer
+claude the routed arm, which passes the protocol test and dies on the pinning one:
+`ROUTED_MODEL_ENV` has no OpenAI-shaped door. `anthropic` and `openai` are `null`
+for exactly this reason. What reaches Zen is the CLI it belongs to.
+
+**And `loginVia: null` for a reason no other row has.** Everywhere else it means
+no CLI ships for this system. Here one does, and it needs no sign-in.
+
+⚠ **`jargonIn` had to be narrowed, and narrowly.** Its rule is that a refusal
+about a *system* may not name a *harness* — developer vocabulary leaking into a
+sentence. But this vendor named its gateway after its CLI, so *"OpenCode Zen can
+only be reached by the CLI it ships with."* necessarily contains `opencode`. The
+subject's own display name is now removed from the sentence before the harness
+scan, and nothing else is: a refusal about Moonshot that says `opencode`, or one
+about Zen that says `claude`, both still fail. Driven as three cases, two of them
+negative.
+
+#### Q3.506 — Half the price, none of the models: the `:batch` rows
+
+**Question.** OpenRouter's catalogue carries 59 tool-capable ids ending `:batch`,
+each one sitting beside the model it is a variant of. Read as a list of names it
+looks like duplication; the question is whether they are rows at all.
+
+**Behaviour, measured 2026-08-27.** They are not a routing variant. OpenRouter
+documents seven of those — `:free`, `:extended`, `:exacto`, `:thinking`,
+`:online`, `:nitro`, `:floor` — each with a page of its own, and there is no page
+for this one. `:batch` is the catalogue row for the **Batch API**'s pricing tier:
+`POST /api/beta/batches`, whose *only* supported completion window is 24 hours,
+whose submission answers `202 Accepted` with `status: "validating"`, and which
+takes a bare slug rather than the suffix. Priced at half the base, one exception
+aside (`thinkingmachines/inkling:batch` is 1.05×, which is what a bookkeeping row
+looks like rather than a product).
+
+**Decision.** The reader drops them, on the line below the `tools` filter, because
+it is the same rule: a row whose only possible outcome is a confusing failure at
+somebody else's endpoint. Both doors this app has are synchronous — `/v1/messages`
+for a routed pairing, `/v1/chat/completions` for opencode's — nothing here can
+submit a batch, nothing here can poll one, and a turn that ends in a day has no
+representation in the event union at all. 348 tool-capable becomes **289**.
+
+**Why not grey them instead**, which is this app's rule everywhere else: that rule
+governs a *pairing* refusal, where the option works for some other harness and the
+sentence names a remedy. A `:batch` row has no working pairing, no remedy, and no
+sentence this app could write without explaining an asynchronous batch endpoint on
+a phone. The `tools` filter is the precedent and it deletes rather than greys.
+
+**Measured, on what is lost.** 58 of the 59 duplicate a base already in the list.
+The one that does not, `openai/gpt-5-codex:batch`, is the batch tier of a model
+whose synchronous tier has **no serving endpoint at all** — `GET
+/models/openai/gpt-5-codex/endpoints` answers an empty array — and five successors
+of it are present and tool-capable. Nothing reachable is lost.
+
+**`endsWith(":batch")` rather than an allow-list of understood variants.** Over
+the whole live list an id carries at most one colon and never one before the `/`,
+and `batch` and `free` are the only two suffixes in existence — so a model
+genuinely called batch (`deepseek/batch`) survives, having no colon. An allow-list
+would drop `:free`'s 16 usable rows unless enumerated and would go dark on the next
+*synchronous* variant; a deny-list goes dark only on the next asynchronous one,
+which is the rarer event. It will not catch a future `:async` or `:flex`, and that
+is accepted rather than guessed at.
+
+**Rejected: teaching the daemon.** `MAX_MODEL_CHARS` stays its only model
+validation. A `:batch` id already stored in an assembled agent goes on being sent
+rather than being retroactively broken — the tolerance the `tools` filter has
+always granted — and `agentask.ts`'s standing rule is that this daemon has no model
+list of its own and could not have one.
+
+**And the published side needs nothing.** opencode's model database is
+`models.dev`, whose `openrouter` provider lists 356 models with **zero** `:batch`
+ids. The filter is the catalogue's alone, which is exactly the scope
+`agent-catalogue.md` already claims for the `tools` filter.
+
+#### Q3.507 — `OpenCode Zen/Big Pickle`, under a heading reading `OpenCode Zen`
+
+**Question.** Q3.503 settled which name a **merged** row keeps: the table's,
+because the harness's form says the provider twice. Zen has no table list at all —
+`SYSTEMS.zen.models` is `[]` and the browser fetches nothing for it — so nothing
+was there to prefer, and all six rows a keyless opencode publishes (93 with a key)
+read `OpenCode Zen/<name>` under a heading already saying `OpenCode Zen`.
+
+**Decision.** `withoutProviderLabel` takes the system's own `displayName` off the
+front of a **published** name. It applies in the push branch only; the dedupe
+branch has a better name in hand and cuts nothing, so the two rules never both
+fire.
+
+**This is not the surgery `openrouter.ts` refuses, and the difference is the key
+rather than the act.** That file refuses a *pattern* — `"<Vendor>: "` over a vendor
+half that is unknown, absent on 19 of its names and spelled two ways by four
+vendors — because it infers structure out of somebody else's prose. This removes
+**one known constant**: the string `AgentBuilder` paints in the heading directly
+over the row. The justification is redundancy with that heading, so the heading's
+own string is the only correct key.
+
+**Rejected: deriving it from `nativeModelPrefix`**, which looks like the same fact
+and is not. That field is the provider key in the *id* namespace (`opencode/`,
+`openrouter/`); a published name carries the provider *label* (`OpenCode Zen/`,
+`OpenRouter/`). They coincide for OpenRouter and do **not** for Zen — so keying on
+it would do nothing at all for the one system that motivated this, while appearing
+to work. Two strings, two sources.
+
+**It fails open, and that is what keying on a constant buys.** Let opencode rename
+its label — `opencode Zen/`, `Zen/`, none at all — and this stops firing: the row
+reads exactly as it did before the function existed. It can never produce a *wrong*
+name, only an untidied one. A strip that cut at the first `/` would survive the
+rename and go on cutting, including a slash that belonged to the model.
+
+**Case is folded and nothing else is.** A label differing only in case still
+repeats the heading, which is the whole claim being made; it asserts nothing about
+two models being one, which is the equivalence Q3.488 forbids. No fuzzy match, no
+normalised punctuation, no separator but `/` — a space before it is a format
+nobody measured. Never a `RegExp`: `Z.ai (GLM)` is a live `displayName` and every
+character in it but one is a metacharacter.
+
+**It also reaches OpenRouter's published-only rows**, the ~68 opencode publishes
+that the `tools` filter drops, which is a second change and a wanted one — those
+were the reason the old rule's "kept as it is" sentence read badly under a heading
+that already said OpenRouter.
+
+**The remainder is a *stored* value, not only a label.**
+`defaultAgentName(modelName)` seeds a new preset's name, which is written to
+`custom_agents.name`, and the save button does not weigh the name — so a blank one
+reaches the daemon and comes back `400`. Hence: trimmed, and an empty remainder
+keeps the original. Presets already saved are **not** migrated: the edit path
+freezes a loaded name, so one assembled before this reads `OpenCode Zen/Big Pickle`
+for ever. Two rows, same model, different names, and the only difference is the
+date — accepted, because a name is somebody's and rewriting one they may have kept
+on purpose is worse than the inconsistency.
+
+**It does not make a model name safe for `noJargon`.** The catalogue's names still
+carry `anthropic` and `openai` as words. Q3.503's last paragraph stands.
+
+#### Q3.508 — The tiles that pick an agent had a vocabulary of their own
+
+**Question.** Q3.504 gave an agent with no sign-in a fifth stance and a badge
+reading `no sign-in needed`, and asserted it exhaustively. The New session tiles
+went on saying **`state unknown`** under opencode.
+
+**What was actually wrong.** `NewSession.tsx` held a private four-state ladder,
+`agentStatusText`, written before `agentCard.ts` existed and never joined to it. It
+read `available` then `loggedIn` and nothing else, so it could not have a fifth
+state; and its fourth word was `state unknown` where the settings card two taps
+away said `cannot check` — the wording `agentBadge` explicitly rejects, because for
+kimi that null is the permanent correct answer and naming it a fault puts a warning
+on every kimi in the fleet. Two screens, one machine, one agent, two different
+sentences, one of them forbidden.
+
+**Why nothing caught it.** `agentCard.ts` is driven exhaustively *because* nothing
+reads `AgentsPanel.tsx` (Q3.431) — and the copy was in a third file no driver read
+for its vocabulary at all. `webcheck` now asserts, as source text, that
+`agentStatusText` is gone, that `state unknown` appears nowhere, and that the tile
+calls `agentStance(candidate.available, candidate.loggedIn, candidate.login?.blocked)`.
+A placement is not a value; reading the file off disk is the only way to hold one.
+
+**Decision.** The fact travels on `GET /agents`. `login` moves from
+`AgentAuthInfo` up to `AgentInfo`, and `src/server.ts` builds the object once, in
+`loginSupportOf`, for both routes.
+
+**Rejected: a new `hasLogin` boolean on `AgentAvailability`.** It was the first
+shape and it is wrong three ways. `/agent-auth` spreads the same availability row,
+so the response would carry two fields for one fact and two screens would read
+different ones — the drift `AgentLoginSupport.supported` is documented as
+`blocked === null` *and nothing else* precisely to prevent. A boolean can only
+answer one of `blocked`'s four values, so the day `no_cli` becomes interesting on a
+tile the exercise repeats. And `hasLogin === false ? "no_flow" : null` at the call
+site is a hand-derivation of a wire value, in the file whose hand-derivation is the
+defect. Cost of carrying `login` instead: four memoised `findOnPath` calls on a
+route that already spawns a CLI per agent.
+
+**And a real inversion fell out of doing it in one place.** The `/agent-auth`
+handler read `blocked: logins === null ? "no_script" : support.blocked`, which
+**overwrote `no_flow`** — the one reason that is not a limitation — with an apology
+about the host, on any daemon with no login-run store. That is exactly what
+`loginBlockedReason` puts `no_flow` first to prevent, reintroduced one layer up
+where nothing was looking. It is `support.blocked ?? (logins === null ?
+"no_script" : null)` now, and `supported` is derived from the result rather than
+computed beside it.
+
+**`hasLoginFlow` is the predicate, exported once.** `AGENT_LOGIN[agent].args !==
+null` had been written out inline in the runtime, in `daemoncheck` and in `pnpm
+client`; three spellings of one fact is how one of them comes to disagree.
+`loginBlockedReason` lost the `hasFlow = true` **default** with it — a defaulted
+"this agent has a sign-in" is a wrong answer that arrives silently at the next
+caller.
+
+**Two more surfaces said the wrong thing and were fixed with it.** `pnpm client
+agents` printed `status unknown` from a *fourth* copy of the ladder, and `pnpm
+client agentauth` printed `login  not available here` for opencode — blaming this
+host for an agent that has no sign-in anywhere.
+
+**And the tile got wider for a day.** `no sign-in needed` is 7.95em of advance; at
+`--text-2xs` (0.75rem) that is 5.96rem against a `w-28` content box of 112px − 20 of
+`p-2.5` − 2 of border = **5.625rem**. Both sides are rem, so no browser font size
+rescued it — it always clipped, to `no sign-in ne…`. `w-32` gives 6.625rem and 11%
+of slack. Shortening the string was refused, because it is shared with the settings
+card and that is the drift `agentCard.ts` was made to end. **Q3.509 deleted the
+string instead**, and the width went back to `w-28` with it — which is the better
+outcome and was not available until the badge itself was questioned.
+
+#### Q3.509 — The badge that reported the absence of a state
+
+**Question.** Q3.504 gave an agent with no sign-in a fifth stance and a badge
+reading `no sign-in needed`, and Q3.508 put it on the New session tiles too. Under
+a tile, in a row where the other three agents each reported something, it read as
+an answer to a question nobody had asked — and it was the one string in the
+vocabulary that did not fit the tile.
+
+**Decision.** `agentBadge` answers `null` for `no_login`. Nothing is drawn: not a
+shorter word, not a quieter tone. **The status of an agent with nothing to report
+is nothing.** Every other badge here names a state somebody may have to act on —
+install it, sign in, or "I could not tell". This one named the absence of one.
+
+**And whether the state *could* have been probed is deliberately not
+distinguished.** That was the reflex — if `loggedIn` is `null` because
+`AGENT_LOGIN.opencode.status` is `null`, surely the reader should be told the
+difference between "nothing to check" and "checked and could not tell". They should
+not. `unchecked` stays a badge because an agent that *has* a sign-in and cannot be
+asked about it is a real gap with a real consequence; `no_login` has neither, and a
+reader looking at a tile is deciding which agent to start, not auditing the probe.
+It is the **only** stance that draws nothing, and `webcheck` asserts exactly that,
+so "say nothing" cannot spread to the state it is one word away from.
+
+**The explanation did not go with it.** `stanceLine` still says, in the settings
+card where there is room for a sentence, that nothing is missing and what the key
+box below is for. A badge was never where that belonged: it is a chip beside a
+name, and this was a sentence compressed into one.
+
+**Two things fell out.** The tile went back to `w-28` — `no sign-in needed` was the
+only string that did not fit, so the 16px Q3.508 spent out of the strip's range
+(Q7.119) is returned. And the tile's `subline` renders as the empty string rather
+than being dropped: the tiles are `items-stretch` with `justify-center`, so a tile
+with two children instead of three centres them and puts its *name* on a different
+baseline from every neighbour's.
+
+**Rejected: drawing it only in settings and not on the tile.** That is two
+vocabularies again, which is the entire defect Q3.508 exists to have fixed. If the
+badge is not worth printing under a tile it is not worth printing in a row either,
+and the settings card has the sentence.
+
+#### Q3.510 — Six pixels of ink, and a strip that reads as not scrolling
+
+**Question.** The agent strip was reported as not scrolling, with the fourth
+harness "hidden behind the `+`" and still colliding with it after being selected.
+
+**Measured, and it is one number.** The scroller has a definite width bound, an
+inner track at `max-content`, and no ancestor steals the axis — it scrolls, and
+always did. At 390px its window is 390 − 32 of page padding − **112 for the `+`** −
+8 of gap = **238px**. Tiles sit at 0–112 and 120–232, so the third begins at 240
+and **six pixels** of it are visible. Six pixels of ink, eight pixels from a fully
+drawn 112px dashed box that reads as the row's deliberate end, is the entire cue
+that there is more.
+
+**And that is a licence violation rather than a nitpick.** `.no-scrollbar` is
+granted in `index.css` to exactly one shape — *"a strip dragged sideways whose
+contents announce there is more of them by being cut off at the edge"* — and its
+own docblock says *"The machine tab bar is the only one"*, which this strip made
+false. It is the second user of that class and the one where the cue does not
+exist.
+
+**Decision.** The `+` is a 44px pill: the row's height and shape, **not** an
+item's width. The window becomes 306px, **66px** of the third tile shows, and the
+licence is true here again rather than merely claimed. `BUTTON_SIZE`'s floor is
+44px, so the target is untouched.
+
+**This is the correction the machine tabs already carry**, and it was the outlier
+that had drifted: `SessionBrowser`'s `+` deliberately takes `px-6` — the row's
+shape and not a tab's width — with the reason written beside it. The strip copied
+that file "down to the class strings" and copied the wrong one here.
+
+**⚠ Reversed by Q3.521, and one half of this was measured in the wrong place.**
+Every number below was taken at 390px, under a thumb; on a desktop the strip has no
+scroll input at all, which "it scrolls, and always did" could not see. The `+` is
+inside the track now and `sticky right-0`, which answers the arithmetic rather than
+overruling it. What follows is the refusal as it stood.
+
+**Rejected: moving the `+` inside the scroller**, which is what was asked for. Two
+measurements refuse it. Without the pinned button the window is the full 358px and
+three tiles are 3 × 112 + 2 × 8 = **352px**, so the remaining 6px is all *gap* —
+the cue goes from a sliver of ink to **nothing at all**, which is the reported
+symptom made worse. And with four harnesses and **no** presets — the first run, the
+one moment the feature has to be found — the row is 592px and the button starts at
+480px in a 358px window, so the **only** door to the builder in this app is off
+screen the first time it is needed. Q7.119 already decided what to do past about
+six presets, and it is not a longer strip.
+
+**A stale measurement went with it.** The scroll-into-view effect claimed *"408px
+of tiles in a 294px box"* and *"overflows at four tiles"*; neither number was
+reachable from the constants and the overflow is at **three**. Corrected in place.
+
+#### Q3.511 — The third read was starting last, always
+
+**Question.** OpenRouter's models arrived in the picker after the picker was
+already drawn — the list filling in under somebody twice, once by the notice's
+height and once by 289 inserted rows.
+
+**What was actually wrong, and it was not the third party.** The builder's two
+daemon reads were one `Promise.all`, so `systems` was set only when **both** legs
+landed — and the OpenRouter effect is gated on `openRouterListed`, which is derived
+from `systems`. `GET /systems` is a table read; `GET /agents/capabilities` starts
+one agent per harness — serially at the time, all at once since Q3.524 — on a
+route whose own budget is
+`SLOW_ROUTE_TIMEOUT_MS`. So a 672 KiB read of somebody else's catalogue did not
+begin until the render in which the spinner left. It was queued behind four cold
+agent spawns and was then, necessarily, the last thing on screen.
+
+**Decision.** Split the two reads. The table read lands in milliseconds, the third
+read runs *concurrently* with the agent spawns, and in every realistic case its
+rows are in the catalogue before the screen draws at all. No new request — the
+fetch already dedupes on a module-level promise — and no new state. Both catches
+still set both values, which is what keeps *"an empty picker beside a stated reason
+is honest; a spinner that never stops is not"* true.
+
+**Rejected: waiting for it, which is what was asked for.** The rule is written on
+the effect itself: a host neither this daemon nor this control plane owns may not
+hold up the two reads that they do. Gating the render buys a **15-second** spinner
+wherever `openrouter.ai` is blackholed — on *every* open, since a failed read is
+deliberately not cached — over a screen whose harness, name and buttons have
+nothing to do with that provider. And `openRouterListed` is false both on a daemon
+too old to list the system and on the failure path where nothing ever sets the
+read: gating on it there is a spinner that never stops, three lines under the
+comment that exists to prevent one. It would also make `openRouterNotice`'s
+"Reading…" arm undrawable while a check went on asserting it.
+
+#### Q3.512 — A pairing is refused on the provider, never on the row
+
+**Question.** opencode could be chosen and then Opus (1M context) chosen after it.
+The pair was accepted, the button went dead, and the only sign was a sentence at
+the bottom left of the sheet. Q3.479 had refused to weigh the harness on the model
+screen at all.
+
+**Why Q3.479 was right and is not any more.** Its objection was a deadlock: grey
+the rows here as well as on the harness screen and neither half of a bad pair can
+be changed, so the only way out is to abandon the draft. Two things answer it now.
+Each field carries a `Clear` beside its label, so a pair can be taken apart one
+field at a time — which is the escape that objection lacked. And the refusal lands
+on the **provider** rather than on the row.
+
+**That second half is the whole difference, and it is arithmetic.** Greying row by
+row was driven against the live catalogue and the four real harnesses, 463 rows:
+
+| chosen harness | rows greyed, row by row | with the provider collapsed |
+|---|---:|---|
+| opencode | 14 | 5 headings, 449 rows live |
+| claude | 104 | 2 headings, 359 live |
+| codex | **461** | 6 headings, **2** live |
+| kimi | **462** | 6 headings, 1 live |
+
+A picker somebody scrolls 463 disabled lines through to reach two is not a picker.
+Six greyed headings and two rows is a shorter and more honest screen than the one
+this replaces.
+
+**Decision.** For each provider group, `hostable(harness, system, routing)`. Where
+it refuses, the heading is drawn faint with that sentence and a count of what is
+not shown, and the rows are not drawn at all. Where it does not, every row is
+weighed exactly as before — `choiceRefusal(null, choice, null)`, unchanged.
+
+**`hostable`'s own prose, and never `choiceRefusal`'s.** *Can this harness be
+pointed at this provider* is the one question here that is genuinely about the
+provider, so "Codex cannot run OpenRouter models." is right over a heading — while
+`choiceRefusal` deliberately drops those words because, as Q3.486 records, that
+same sentence over a row called K3 is how it went wrong the first time.
+
+**Two things the row-level version would also have broken.** The hoist: `cannotRun`
+names the *model*, so a large group's sublines would all differ, the unanimity test
+would fail and OpenRouter's rows would draw 356 individual sentences — the exact
+thing the hoist exists to prevent. And `supportingHarnesses`: Q3.497 rejected
+greying a model row partly because the glyphs still call it supported, and Q3.499
+accepted that disagreement on **six** rows; row-level greying makes it 372.
+
+**The caption did not go, and refusing to delete it is the other half of this
+entry.** What was asked for was the sentence at the bottom left removed. It is
+`{error ?? conflict}`, and `error` carries three things no row can ever hold: a
+refused `POST /custom-agents`, a failed delete, and a failed capability read.
+`conflict` is also reachable in states no picker can prevent — a stored preset
+opened for edit, a key revoked on another device since this screen was read, a
+harness uninstalled under it — and Q3.500 already adjudicated this exact request
+and granted the half that was safe. What moved instead is the **placement**:
+`conflict` is now drawn on the harness row, which is this app's own rule (*"a
+reason belongs beside the control it refuses"*), and stays at the foot as well,
+because a row's subline is one `truncate`d line and the bar's is `wrap-anywhere` —
+the pair of renderings Q3.497 required.
+
+**Clear is on the builder's rows and never in a picker.** In a picker it is the
+alternative Q3.479 rejected in as many words — a control that exists only to undo
+a constraint that screen invented — and it would teach that a greyed list is
+normal. It empties its own field and nothing else: one press emptying two fields
+makes it implicit again for whichever the reader did not aim at. It is a labelled
+text button beside the field's heading rather than a trailing control, because
+`ChoiceRow` renders a `<button>` and a nested interactive element inside one is
+invalid HTML that browsers resolve by breaking the outer control — measured
+separately by `SessionBrowser`, `MachinesSection` and this file's own `Supports`.
+The slot is reserved on both fields whether filled or not, for the reason the glyph
+hole already exists.
+
+**And clearing the model clears a name it derived.** The heading falls back to the
+model's name until somebody types one, so a derived value following its source out
+is the value behaving as defined rather than the form forgetting. A typed name has
+`named` and stays.
+
+#### Q3.513 — A harness's card under a system's name, and three sentences too many
+
+**Question.** Settings → Machines → **OpenRouter** mounts opencode's card under the
+system's name, which is right: what somebody has an account with is OpenRouter, not
+a CLI. What it drew was a stance sentence about opencode's sign-in, a divider
+reading `Sign in with a key instead`, an "either one will do" line, **two** key
+boxes — OpenRouter's and OpenCode Zen's — and the same caveat repeated under each.
+
+**Three separate defects, and each is one line of code.**
+
+**`instead` needs a first option.** The divider's other arm is `or`, drawn between
+two things and guarded against exactly this since it was written; this arm was not,
+because until there was a fourth agent there was always a sign-in above it.
+`dividerWord` takes the stance now and answers `null` for `no_login` — swept over
+every block state, so it cannot come back through `stored_only`.
+
+**A card scoped to a system draws that system's key and nothing else.** `SYSTEMS`
+gained `keyEnv`, set on the two rows opencode is native to and `null` on every
+other, where the harness reads one variable and there is nothing to narrow. Without
+it the screen headed `OpenRouter` offered a box for an OpenCode Zen account — and
+under the *other* heading, the reverse. Scoped, the stance line, the caveat, the
+divider and the multi-slot line all go with it: every one of them is a fact about
+the **harness**, and the reader is there about an account. What is left is the
+key's own label, its note, and the box.
+
+⚠ **It narrows on a match and never on an empty result.** A daemon too old to send
+the field, or one that renames a variable, leaves every box drawn — because the
+alternative is a screen with nothing to paste into and no way to tell why.
+`daemoncheck` asserts each name is a variable its own harness actually reads, since
+the symptom of a typo there is this bug silently restored.
+
+**And the caveat was deleted rather than reworded.** opencode's said a key was not
+needed to get started — true, measured, and exactly what the stance line says one
+line higher on the same card. It is drawn **per slot**, so on the one agent with
+two it appeared twice, under two different keys, saying the same thing about
+neither. A caveat is for what must be read *before typing*; "you may not need to
+type anything" is a fact about the agent, and it now lives there alone, in two short
+sentences rather than four long ones.
+
+**Naming a variable in a response is not what `SYSTEMS` being fixed protects.**
+That rule is about a *caller* naming one — a request that could point somebody's key
+at a host of its own. This is the daemon saying which of two boxes it already draws
+is which, and `GET /agent-auth` has carried `envName` per slot since the first
+release.
+
+#### Q3.514 — Two keys called OpenRouter, and the screen asked for neither
+
+**The report.** *"No key is saved for OpenRouter on this machine, so nothing can
+sign these requests"* — from `applySystem`, at `POST /sessions`, on a machine with
+an OpenRouter key visibly saved.
+
+**Both halves were true.** The daemon's store, read directly:
+
+```
+agent_credentials   opencode | OPENROUTER_API_KEY | 73 bytes
+system_credentials  (empty)
+custom_agents       claude | openrouter | qwen/qwen3-coder-next
+```
+
+Two credentials with one name. The **agent** one is merged into opencode's spawn
+environment and is what opencode signs with natively; the **system** one travels in
+`providers/set` headers and is the only thing that signs a *routed* pairing — Claude
+Code pointed at OpenRouter, which is what was assembled. The key that was saved is
+not the key that pairing needs, and the settings screen for OpenRouter draws boxes
+for both.
+
+**Why the client offered it, which is the actual defect.** Q3.499's biconditional —
+*a model needs a key **iff** its id came from the table* — rests on a premise stated
+in its own text: a published id can only ever run natively, **because every other
+harness is refused it for the name**. That was true of every system in the table
+until one related its two spellings. `nativeModelPrefix` makes `pairFailure` drop
+both name arms (Q3.505), so on OpenRouter a published id is runnable routed — and
+`keyMissing`, reading `source` alone, answered "no key needed" for a pairing that
+needs one.
+
+The chain, measured end to end: the agent key was saved, so opencode published all
+356 OpenRouter rows; published wins the dedupe, so every row arrived `source:
+"published"`; `keyMissing` read that and returned `null`; `pairFailure` returned
+`null` because the prefix relates the spellings; so **Claude Code was pressable**,
+`POST /custom-agents` accepted the pair, and the refusal landed at the one place
+that reads the store — the start.
+
+**Decision.** `keyMissing` takes the harness. With one chosen, the question is the
+**pairing** and the source is not consulted: routed needs `keySet`, native never
+does. With none chosen it is unchanged, because "could *any* pairing run this" is
+still what the model screen is asking.
+
+**This narrows Q3.499 rather than reversing it.** That entry moved the question from
+the *system* to the *row*, which was right and stays; what expired is the row being
+a complete proxy for the pairing, and it expired the day a system gained a prefix.
+The no-harness matrix it generates is asserted unchanged, and the new rule is driven
+beside it on the reported shape.
+
+**Why the native side still reads `source`.** A native pairing signs with the
+harness's own credential, which this screen cannot see — `GET /agents/capabilities`
+does not report it. A **published** id is the proof: the list came back, so the
+harness is keyed. A table id it did not publish is the same evidence read the other
+way, and on every system without a prefix that branch is unreachable because
+`pairFailure` has already refused the name.
+
+**And then the second box stopped being needed at all**, which is the better half
+of the answer and is Q3.515.
+
+#### Q3.515 — One account, two boxes: the key answers for both
+
+**Question.** Q3.514 stops a routed pairing being offered without a system key. But
+the two keys it distinguishes are *the same string from the same OpenRouter account
+spent at the same host* — one travels in `providers/set` headers, the other is
+merged into opencode's environment. Somebody who has pasted "my OpenRouter key"
+once has answered the question. Why ask twice?
+
+**Decision.** They do not have to. `systemSecretFor(system, stored, agentEnv)` is
+the single answer to *is there a key for this system*: the stored system row where
+there is one, and otherwise the key this system's **native harness** already holds,
+named by `keyEnv`. One direction only — a stored system key always wins, and nothing
+here ever puts a system secret into a spawn environment.
+
+**`keyEnv` is the gate, and it is what makes this true of exactly the rows it is
+true of.** Moonshot is the counter-example the table has documented at length:
+`KIMI_API_KEY` is a Kimi Code **subscription** at `api.kimi.com/coding`, while
+`system_credentials.moonshot` is a pay-as-you-go key at `api.moonshot.ai` —
+different product, different host, different billing (Q3.488). Lending one to the
+other would send the wrong secret to the wrong endpoint and answer 401 with nothing
+on screen to explain it. Its `keyEnv` is `null`, so the function returns at its
+second line. `daemoncheck` sweeps the whole table for a row that would borrow one it
+was never offered, rather than asserting the one that must not.
+
+**It is one function because two readers of one question is the defect it fixes.**
+`applySystem` reads it at the start and `GET /systems` reports `keySet` from it, so
+they cannot come to disagree — which is precisely how Q3.514 happened, with the
+picker asking a store and the start asking another.
+
+**Borrowed is a third state on the screen, not a shade of "saved".** `keySet` is
+true while `keyUpdatedAt` is `null`, and that pair can mean nothing else, because a
+stored key always carries a timestamp. So the routing block draws a sentence instead
+of a box — *"The key saved above covers this too, so there is nothing to add"* — and
+no **Remove**, because removing a row that is not there would report the same `key
+saved` straight back from the fallback. A `Use a different key here` button opens the
+box for the one case the sentence does not cover: a different account for the routed
+path than for the CLI.
+
+**No new exposure, and this is worth stating rather than assuming.** Both stores
+live in the same SQLite, on the same machine, read by the same uid; the secret moves
+from a store into headers, which is exactly where a system secret already goes. What
+would have been a change in kind is the *other* direction — a system credential into
+a child's environment — and that is not built.
+
+#### Q3.529 — The strip is a listing, and a listing is not a preference
+
+**Question.** The New session strip drew every harness that could be started
+followed by every agent somebody had assembled — `AGENT_IDS` order, then
+`ORDER BY created_at, id`. Nothing anywhere stored a position and nothing could
+take a tile out. Somebody who uses one agent out of six has their answer wherever
+the daemon happened to put it, which on a 390px phone is usually past the right
+edge of a row you have to drag. Where should the order live?
+
+**Decision.** On the daemon, per machine, in a new `agent_strip` table, and merged
+into the live listing by the client.
+
+**Per machine and not per browser**, which is the half that decides the rest. The
+strip is about what one host can start; `custom_agents` beside it is already shared
+by everybody with a grant on that machine, and the daemon stopped asking who the
+subject is. A preference held in a tab is one that vanishes the first time a phone
+discards the page — which it does on its own, and which is why `AgentCard` already
+keeps a `sessionStorage` reattach key.
+
+**A partial record, and the merge is the design rather than an optimisation.** The
+table holds `(kind, ref, rank, hidden)` for what somebody actually moved or hid.
+`orderStrip` applies it over what the machine reports right now, in three clauses:
+stored entries in rank order keeping only what the listing still holds; then
+everything the store has never heard of, in natural order, at the end; and unknown
+means **visible**. The third is the one that would have produced a bug report — an
+agent arriving already switched off is indistinguishable from the daemon having lost
+it.
+
+**`ref` is never validated, on the way in or on the way out.** This is the opposite
+call from `custom_agents.harness` one table up, where a row naming something outside
+the union is dropped by `readCustomAgent` because restoring it produces a well-typed
+lie that fails later with a worktree already made. Here the row *is* the memory: a
+harness signed out for a week and a preset a rollback cannot resolve both keep their
+positions, and what drops them is the merge, at the moment it draws. Validating
+would forget an order every time an agent was briefly unavailable, and rearranging
+somebody's screen by itself is the one behaviour they would certainly notice. It is
+bounded instead — `MAX_STRIP_REF_CHARS`, 64 — so an unknown id cannot be an essay.
+
+**`PUT` and not `PATCH`, because the body is the whole list.** A reorder is a
+statement about every position at once, so a per-row verb would need a rule for the
+rows the body did not mention and no caller has one. `SqliteAgentStripStore.replace`
+therefore empties before it refills, inside a transaction — for atomicity, unlike
+`prune()`'s transaction, which takes one only to spend a single WAL commit. And the
+route reads the *whole* body before touching the store: a validator that ran inside
+the write loop would answer 400 on the eighth row of a fourteen-row body with the
+first seven stored and the rest gone. `daemoncheck` asserts that second half against
+every refusal.
+
+**No `SCHEMA_VERSION` bump.** It is a whole new table, so `schema.sql`'s
+`CREATE TABLE IF NOT EXISTS` is the entire migration and `migrate()` needs nothing —
+its own docblock says so. A table an older daemon never selects is invisible to it,
+which is `resume_gave_up`'s standing reason, and bumping the version would make
+`refuseNewerSchema` refuse a rollback to buy that nothing.
+
+**And the *provider* order is `SYSTEM_IDS`, which is the same kind of fact one level
+down.** `GET /systems` maps over that array and `groupModels` groups by first
+appearance rather than sorting, so the order somebody scrolls through in the model
+picker begins there. Two vendors, the widest router, then the single-vendor
+endpoints, then the fallback gateway: Anthropic and OpenAI are what most choices are
+between; OpenRouter next, as the widest catalogue and the commonest reason to scroll
+at all; Moonshot, Z.ai and MiniMax after it — Moonshot needs no key at all with kimi
+signed in, and the other two are endpoints far fewer people hold a key for; OpenCode
+Zen last, being the free tier one harness falls back to when nothing is configured.
+(It read "vendors first, then routers" until OpenRouter moved into the middle of
+them, which that framing no longer describes.) Nothing branches on a position — a system's meaning is entirely in
+`SYSTEMS[id]` — which is what makes the order safe to change and worth writing down.
+
+⚠ **That sentence said "decided there and nowhere else" and it is now the *default*
+half of the answer.** Q3.535 floats every provider this machine can run above every
+provider it cannot; this array orders each of those two halves. It also said
+"Anthropic, OpenAI and Moonshot", which was the order before OpenRouter moved above
+Moonshot in that same entry.
+
+#### Q3.530 — Hiding a harness, which is not a refusal
+
+**Question.** Ordering the strip is uncontroversial. Taking a tile *out* is not:
+this app's standing rule is that an agent which cannot run is drawn and labelled
+rather than filtered out, because filtering answers *"where did claude go"* with
+silence. Does hiding contradict that?
+
+**Decision.** No, and the distinction is who did it. Every rule of that kind is
+about the app concealing a **fact about the machine** — not installed, not signed
+in, no model. Hiding is somebody's own act on their own list, undone on the screen
+that did it, and the screen names it in a sentence when it empties the row: *"Every
+agent on this machine is hidden."*
+
+**One removal per row, and it is called the same thing on both kinds.** This was the
+opposite at first — "a harness is hidden and never removed, because there is nothing
+to delete about a harness" — and it was wrong about whose distinction it is. From
+the picker's side the two acts are one: *this stops being offered*. A built-in row is
+only an agent whose vendor picked the model, and a screen where everything but the
+harnesses can be removed makes the reader ask what is special about them. The answer
+— that one is a row in SQLite and the other is a binary on the host — is the app's
+business and not theirs.
+
+⭐ **And the rule that came out of getting this wrong three times: the row's *kind*
+may decide a lookup or a destination, never a presentation.** The kebab was
+`disabled` on a harness; then Edit was absent from it; then Remove carried `danger`
+on everything *else*. Each was defensible on its own — a harness has nothing to
+edit, and one of the two really is a `DELETE` — and each was the app showing the
+reader an internal difference they have no use for. `danger` was the last of them,
+and it was overclaiming on its own terms as well: it is for an act nothing brings
+back, and this one is rebuildable from the bar at the foot of the same screen, which
+is also why it has no confirmation. `webcheck` sweeps for a `harness` branch inside
+a `danger=` or a `className=` rather than pinning the place it last went wrong.
+
+**What still differs is what a removal *does* afterwards, and that is unavoidable
+rather than a signal.** A built-in row stays, dimmed, offering *Add back*, because a
+flag is all there is to undo. An assembled agent is `DELETE /custom-agents/:id`, so
+there is no row left to dim.
+
+**And both verbs are on both kinds, which is the same correction one step
+further.** `Edit` was absent from a built-in row because a harness has nothing
+stored to `PATCH` — true, and again the app's own distinction rather than anybody
+else's. This list holds *agents*; the built-in one is the one that exists by
+default. So editing a harness means what it can mean — **start from it** — and the
+builder opens already pointed at it via a second address marker,
+`/agent/:machineId/from/:harness`, saving as an assembled agent. The default row
+stays, and Remove is one item below for somebody who wanted theirs instead.
+
+`edit` and `from` are read at **one** position, so a route naming both is
+unexpressible rather than checked; a harness this build cannot resolve opens the
+ordinary new-agent screen, which is `compatibility.md`'s rule 2 and the direction
+`edit` already fails in. And the seed joins `preset` in `screenOf`, because the
+builder reads it once at mount: two addresses differing only in where they start
+are two screens.
+
+**The labels are one word each — `Edit`, `Remove`, `Add back`.** They were
+`Edit agent`, `Remove from the list` and `Add back to the list`: a menu row is read
+in a glance beside three others, and the list it acts on is named by the screen the
+menu is on.
+
+**There is no two-tap confirmation, which reverses the settings-row rule on
+purpose.** That rule is for acts nothing brings back — retiring a machine, deleting
+a person, uninstalling a plugin with its data — and every one of those is either a
+different person's access or bytes with no other copy. This one is rebuildable from
+the screen it was removed on, in the flow the screen's own bar opens, so a
+confirmation was a tax on the act somebody performs most often here. Removing it
+also removed the only state a row could be in that changed its *height*, which is
+what the drag measures.
+
+**It is weighed in `offeredHere`, which is where it is easy to leave it out.**
+Hiding is not an availability failure — the daemon would start the thing perfectly
+well — so nothing downstream refuses it, and a pick that survived that call would be
+`Start` live over a row with nothing drawn as chosen. That is the exact family of
+three bugs `offeredHere` already exists for, arriving through a fourth door.
+
+**And the *default* had to move with it, which is the half that was missed once.**
+`defaulted` was `agents.find(shownHere)` — the first harness in `AGENT_IDS` order —
+recorded as state inside `GET /agents`'s own `.then`. Weighing the hidden set at
+`offeredHere` alone therefore fixed nothing: hiding `claude` left the default naming
+it, `offeredHere` refused it, and New session drew *no* chosen tile with `Start`
+disabled until somebody tapped one. It is derived now, and it is **the first row the
+strip draws that a session can actually be started on** (Q3.534, which narrowed it —
+this entry recorded it as the first row drawn, full stop, and a preset on an
+uninstalled harness *is* drawn) — which is also the better answer on its own terms,
+since somebody who dragged an agent to the front meant it to be first. Deriving it closes
+a second defect for free: the `.then` needed `picksRef` to read the choice at answer
+time rather than at request time, and a value computed in the render that draws it
+has no capture to be stale.
+
+**The settings list is deliberately wider than the row it configures.** The strip
+filters by `shownHere`, so a harness nobody is signed in to has no tile; a settings
+screen that filtered the same way would answer "show Codex" with a row that changes
+nothing visible. Every harness that can *ever* have a tile is listed, with its badge
+saying why it has not got one. `startsBare` is the single exclusion and it is not a
+status — opencode is a router and has no tile in any state, so a row you could order
+that can never appear would be a lie rather than a warning.
+
+**A hidden row is dimmed in place, and it took two goes.** It keeps its position —
+that is the thing somebody came to set, and taking it out of the list would take
+away the only way to bring it back — so what says it is switched off has to be the
+row itself. The first attempt moved the name to `muted` and nothing else, and was
+reported as not looking hidden at all; it is `bg-raised/60` under `text-faint` now,
+a ground *and* an ink. Not `opacity`, for `index.css`'s standing reason: it
+composites the whole row including the line explaining what the row is, and this
+one still has to be read and pressed.
+
+**And the line under a built-in row is the vendor, not `signed in`.** It was
+`agentBadge`'s word unconditionally, which on a healthy machine printed the same
+thing under every row — the same noise the strip's own tiles had already been
+reported for, arriving one screen over. It is `harnessSubline`'s answer now: which
+system serves the model, read off `GET /systems` by `nativeHarness` so it is the
+daemon's name rather than a fourth vendor table. The badge is *not* dropped: this
+list is wider than the strip precisely so a harness that is not installed or not
+signed in has a row, so a `strong`-toned badge displaces the vendor and the two
+`plain` ones do not.
+
+#### Q3.531 — The `+` became a gear, and only the destination changed
+
+**Question.** Where the trailing control of the strip sits was settled twice, both
+times by report: pinned outside the scroller it overlapped the last tile; `sticky
+right-0` inside the track it painted at the scrollport's right edge at every scroll
+position and therefore still read as pinned. It is an ordinary item you scroll to.
+Adding a screen for the order needs a door — does it need a new control?
+
+**Decision.** No. It is the same slot, the same 44px dashed pill, and a gear instead
+of a `+`. Adding an agent turned out to be one of four things somebody does to this
+list — the others are ordering it, hiding from it and editing a row — so a door
+straight into the builder was the narrowest of the four wearing the shape of all of
+them. The `+` is on the screen the gear opens, at the foot of the list it adds to.
+`webcheck` pins the *placement* and never the glyph, which is what was reported
+twice.
+
+**The `Edit <preset>` control under the picker went with it.** Its argument is
+unchanged and this is not a reversal of it: a kebab *on* a 112px tile inside a strip
+you drag sideways puts a target on another target's face, which is what `TAP_GROW_Y`
+exists to prevent. Editing moved to a row on the Agents screen, where the thing it
+is about is a full-width row with nothing to mis-tap. What it cost while it was here
+was a line that appeared and disappeared as you tapped along the row, moving the
+folder picker and the footer with it — on the one screen where what is below the
+strip is what you came to choose.
+
+**Leaving `/new` for another pop-up is affordable now and was not before.** That
+navigation is exactly what put the sign-in wizard inline: a pop-up replacing a
+pop-up, discarding a folder somebody had walked several levels into, so the dialog
+appears to have wandered off. Two things changed. The folder is in the address —
+`/new/:machineId/:cwd`, added for the builder — so the way back restores it. And the
+chosen tile now survives in `agentPick.ts` as a **standing** map, read rather than
+taken, which is the opposite discipline from the two hand-offs beside it: those
+carry an event that happened once, this carries a choice that stays true until
+somebody taps another.
+
+**`…/agents` names a screen again.** It meant *one agent's sign-in* until a harness
+and the account it signs in to came apart, and then it meant nothing and fell to the
+machine. `/settings/machines/:machineId/agents` is the machine's agent **list** now,
+and `…/agents/claude` lands there with the tail dropped — still "fall up to the
+nearest real screen", and the screen it falls to is one tap from what that address
+used to open.
+
+**The Agents screen's own ◀ reads `origin` too, and only there.** It walked to the
+machine — the parent in the URL — which is right when you arrived from the machine's
+own row and wrong when you arrived from the gear: it strands somebody in settings
+with the New session sheet they were filling in gone. Reported. It is deliberately
+*not* general, and the reason is that `originFor` keeps an origin across a move
+**within** one pop-up: applied at every depth, a settings sheet opened from New
+session would answer `/new` for its sections and its machines too, and walking up
+inside the sheet would stop working. It is narrowed further, to an origin that is
+the New session pop-up, so that `settingsUpLabel` has exactly one name to give — a
+`/plugins` parent would parse as no settings route at all and draw a chevron reading
+"Settings" over a screen that is not it.
+
+**A crossing costs the builder an `origin`, and a *removal* may not be gated on
+it.** The builder now has two ways in, so its ◀ and its save both read `origin` —
+the market's shape — and `sheetUpLabel` reads the same value, because a label
+computed without it over a destination computed with it is the chevron naming
+somewhere you are not going. What must **not** follow that pattern is the removal
+hand-off. `rememberPick` is rightly gated on the way out being the strip: a
+hand-off left behind fires on some later visit, and a pick is a thing somebody would
+then be given without asking. `rememberRemoval` is the only thing that ever clears
+the *standing* pick, so gating it left `heldPick` naming a deleted row for the life
+of the tab — and a stale pick outranks the default, so New session drew nothing
+chosen and kept `Start` disabled on every later visit. A removal can be left behind
+safely for the reason the pick cannot: an id that has been deleted can never be a
+choice made again.
+
+#### Q3.532 — A row that is cut should look cut
+
+**Question.** The agent strip hides the browser's scrollbar and draws its own,
+which fades in when the row moves and out a second after it stops. On a first paint
+— which is every arrival at New session — there is nothing at all saying the row
+continues past the right edge. `.no-scrollbar`'s own docblock names the shape that
+does not need one: *"a strip whose contents already announce that there is more of
+them by being cut off at the edge"*. That is a half-drawn tile. This row ends in a
+**fully** drawn dashed control, which reads as its deliberate end, and losing that
+cue is precisely why the strip stopped using `.no-scrollbar`.
+
+**Decision.** A gradient at the right edge, on while `scrollLeft < scrollWidth −
+clientWidth − 1`. It is the transcript's own fade at the top of a conversation with
+its measurement intact: **two stops and no middle one**, starting at 70% and falling
+to nothing, `pointer-events-none`, and a **sibling of the scroller rather than a
+`mask-image` on it** — a mask on a scroll container applies to that container's
+scrollbar, which here is this app's own bar one sibling down.
+
+**The one-pixel slack is not decoration.** `scrollWidth`, `clientWidth` and
+`scrollLeft` are integers rounded from fractional layout, so a strip scrolled fully
+to its end routinely reports a remainder of 1 — without the slack the gradient stays
+on at the end of the row, saying there is more where there is nothing. It is the
+opposite call from `scrolledDown` in `SessionView`, which takes no slack and says
+why: there the question is "is a line cut off by the header", and one pixel of
+scroll is already one cut line.
+
+**Toggled inside the existing `layout()`.** That function already holds all three
+numbers and already runs on exactly the two events that can change the answer, a
+scroll and a resize, and it already writes to the DOM directly rather than through
+state because it fires on every frame of a flick. A second handler reading the same
+box would be the same arithmetic twice, and the failure of that shape is silent: the
+two disagree for one frame and the gradient blinks at the end of every flick.
+
+**`.edge-fade` is a class in `index.css` and not four utilities at the call site**,
+where the transcript's equivalent is inline. Two reasons, and neither is style. It
+transitions, because it changes at the end of every flick rather than rarely — and
+`webcheck` asserts the substring `opacity` appears nowhere inside `AgentStrip`, for
+a reason about tiles (Q3.510's `disabled:opacity-40` compositing a refusal down to
+1.83:1) that this would otherwise trip. It is placed **after**
+`.fade-thumb.is-scrolling` rather than beside `.fade-scrollbar`, because `webcheck`
+slices the stylesheet between those two selectors by `indexOf` and a rule inserted
+between them re-anchors every assertion about the scrollbar onto the new one.
+
+#### Q3.533 — Reordering with no library, and a handle that answers to a keyboard
+
+**Question.** `packages/web` has no drag-and-drop dependency and no reorder anywhere
+to borrow from. The only pointer-drag in the app is `AppShell`'s rail handle. What
+does a reorderable list cost?
+
+**Decision.** No dependency. The handle is a `<button>` that takes
+`setPointerCapture` — `RailHandle`'s rule, because the gesture belongs to the
+control it started on and the capture survives the pointer leaving the row, which it
+does at once since the row is what is moving — and the same button answers
+`ArrowUp`, `ArrowDown`, `Home` and `End`. A pointer gesture that is the only way to
+reorder is a control a keyboard cannot reach at all.
+
+**Per-frame work goes to the DOM and per-row work goes to React.** The dragged row's
+offset changes on every pointer event and is written straight onto its node; the
+*target index* changes once per row crossed and is state, because every other row's
+shift is a function of it. Offset in state would be a render per frame; target in a
+ref would leave the neighbours standing still.
+
+**⭐ `touch-none` was a dead class, and that is why a phone could not drag at all.**
+Reported twice, and the second report is what forced the stylesheet to be read
+rather than the component. `index.css` carried `button { touch-action: manipulation }`
+**unlayered**; Tailwind emits every utility inside `@layer utilities`; and an
+unlayered rule beats a layered one *regardless of specificity*. Measured on the built
+sheet: `.touch-none{touch-action:none}` at byte 18486 inside the layer, the button
+rule at 46097 outside every layer. So the effective value on the handle stayed
+`manipulation`, which still permits panning, and the browser took every vertical
+gesture for the scroller and fired `pointercancel` before one `pointermove` arrived.
+A mouse is not gated by `touch-action` at all, which is exactly why it worked on a
+desktop and was reported as impossible on a phone.
+
+The rule is now inside `@layer base`, which is where a *default* goes — the same
+sentence this file's cursor rule already makes, and the same hazard its focus-ring
+docblock already describes at length. A bare-element declaration left unlayered
+silently kills the matching utility everywhere, and nothing was asserting it.
+
+**A second guard that does not share that cause**, because a cascade fault that
+shipped once can ship again: a non-passive `touchmove` listener on the handle that
+`preventDefault`s only while a drag is live. React attaches `onTouchMove` passively —
+the fact `AgentStrip`'s wheel handler is written out of — so it can only be an
+`addEventListener`, and it is registered for the component's life rather than the
+gesture's, because some engines decide at `touchstart` from whether such a listener
+*exists*.
+
+**And three more, all of which were also true and none of which was the cause:**
+
+- **The handle is 44px square.** At `w-8` it was a 32px strip at the left edge of a
+  row inside a sheet that scrolls, so a miss moved the sheet instead.
+- **`.press` came off it.** That class puts `transform: scale(0.97)` on a button for
+  as long as it is `:active`, which on a drag is the whole gesture — a control that
+  shrinks under the finger and stays shrunk reads as broken.
+- **The glyph is `pointer-events-none`.** `touch-action` is not inherited, so a
+  touch beginning on the `<svg>` is one the engines may hand to the scroller before
+  they have walked up to the element carrying `touch-none`. Making the button the
+  only hit target removes the question.
+
+**And the row under the finger is never transitioned.** It was, and that was the
+whole of "it moves very unsmoothly": the transform is rewritten on every pointer
+event, so a 150ms `transition-transform` restarted the interpolation from wherever
+the last had reached and the row crawled after the finger. Only the *neighbours*
+animate, and only while a drag is live — which is also what stops the overshoot at
+the drop, where the transform clear and the keyed reorder land in one commit.
+`will-change-transform` is added for the length of the gesture and taken off again,
+because a layer per row held for as long as the screen is open is a different cost
+entirely.
+
+**The arithmetic is pure and lives in `agentStrip.ts`.** `moveRow` splices and never
+swaps — a swap leaves the list in an order nobody asked for the moment a drag crosses
+more than one row, and makes the pointer and the keyboard disagree about what "move
+down" means — and `dropIndex` **rounds** rather than truncating, so the swap happens
+when the dragged row is more than half over its neighbour rather than a full row
+late, which reads as the list resisting.
+
+**A refused write puts back what the daemon last confirmed**, not what was on screen
+one edit ago. Several writes can be in flight — the keyboard emits one per key — so
+undoing just the failed one leaves a list that is neither what somebody asked for nor
+what is stored.
+
+**Two counters, because that is two questions.** "May this answer repaint?" is about
+the newest write *issued*; "is this now what is stored?" is about the newest one
+*confirmed*, and one counter serving both was destructive in the second direction:
+with A confirmed and B in flight, A's success advanced nothing and B's failure then
+repainted the list as it stood **before A**, while the daemon held A — the screen
+and the store disagreeing with no error saying so, and a reload jumping.
+
+**And the writes are sent one after another**, because ordering the answers is not
+ordering the requests. `PUT` replaces rather than merges, so order is the whole of
+its meaning; two in flight over a relay can be applied either way round, and the
+loser is the one this client believes was superseded.
+
+#### Q3.534 — The default is marked, and "first" is not the top row
+
+**Question.** The whole point of dragging an agent to the top of this list is that
+it is the one you start, and the list said nothing about that. The behaviour was
+already there — `defaulted` on New session took the first row the strip draws — but
+it existed only as the *result* of a selection one screen away, so the order read as
+a display order and the fact that position 1 decides what a new session opens on was
+something to be found out by trying it.
+
+**Decision.** A `default` badge on the row a new session opens on, drawn by the
+**same call** that opens it: `defaultRow` in `agentStrip.ts`, over the same
+`orderStrip` merge, handed the same predicate. Not a second rule that happens to
+agree — a badge naming a different row from the one that gets selected is worse than
+no badge, because it is a confident claim about another screen that the reader
+cannot check from where they are standing.
+
+⭐ **"First" is two narrowings past index 0, and each of them was a state that
+reaches this screen.** A **hidden** row is one somebody took off New session; it
+keeps its place here, because that place is the thing they came to set and removing
+the row would remove the only way back (Q3.530). So the list's first entry is
+routinely one that is not drawn at all. An **unstartable** row is the same failure
+through the other door, and it is the one that outlived the fix for the first: the Agents list is
+deliberately wider than the strip — every harness that can *ever* have a tile is
+listed so its badge can say why it has not got one, Q3.530 again — so a signed-out harness
+is routinely first, and so is an assembled agent whose harness was uninstalled.
+
+**The second narrowing was a live defect on New session, not a concern invented for
+the badge.** `defaulted` was `orderStrip(…).find((row) => !row.hidden)`. The harness
+half of that merge is filtered by `shownHere` on the way in, so a signed-out harness
+was never a candidate — but a **preset** is listed whatever state its harness is in,
+and it draws a disabled tile saying so. First in somebody's order, that tile was the
+default: `offeredHere` refused it one line down, and the screen drew nothing as
+chosen with `Start` dead until somebody tapped. That is precisely the failure the
+hidden case had already produced through the other door, and the fix for that one
+did not generalise because it was written as `!row.hidden` rather than as *the row
+this screen will land on*.
+
+**So the membership rule moved out of the screen and `offeredHere` lost half its
+body.** It is `startableHere` in `agents.ts` now — a harness has to be a whole answer
+by itself and in a state the row draws; a preset is weighed through its harness, and
+that harness has to be **installed** rather than signed in, because an assembled
+agent runs on the system's saved key. `offeredHere` is that plus one test, and the
+split falls exactly at `hidden` because hiding is the half that is not about
+startability at all: the daemon would run a hidden agent perfectly, it simply has no
+tile. New session asks the one with the hidden test; the Agents screen, which draws
+hidden rows on purpose, asks the other. There is one body, so they cannot disagree
+about anything else.
+
+**`shownHere` went with it, as `offersStripTile`.** It was a local function for as
+long as one screen asked; the moment a second one needed the same five-state ladder
+about the same harness, a private copy in a second `.tsx` was exactly the shape
+`webcheck` already had an assertion against — "the New session tiles hold no
+vocabulary of their own", written when that screen kept a four-state ladder of its
+own and told kimi two different things two taps apart. That check follows the call
+to `agents.ts` and gains a half it could not have before: this screen now computes a
+stance in **no** spelling at all.
+
+**The badge costs no height, and on this list that is correctness rather than
+polish.** A drag measures **one** row at `pointerdown` and applies that single number
+to every neighbour's shift, so a row taller than the rest makes every step of a drag
+past it wrong. `Badge` is `text-2xs leading-tight` with `py-0.5` — 15 + 2 + 2 = 19px
+against the name's 22px line box — so the flex line is the name's either way and the
+row's content box stays 60px whether the badge is drawn or not. (`offsetHeight`, which
+is what the drag actually reads, is 61 on every row but the last: the `<li>` carries
+`border-b`.)
+
+**`tone="strong"`, which is that component's own word for "this one is not like the
+others".** Exactly one row in the list can carry it, which is the condition the tone
+exists for. It is deliberately not a border or a fill: a third box inside a row that
+is already bounded reads as something to press, and this is a statement rather than a
+control.
+
+**Decided one level up and handed down, never `index === 0`.** That is the answer a
+row can reach on its own, and it is wrong in both of the states above — which is why
+the negative is a ratchet in `webcheck` rather than a comment. `opensOnKey` is a key
+rather than an index for the same reason the rest of this screen is keyed: an index
+is a second thing to keep in step with the `.map`, and the two drifting is a badge
+one row off.
+
+**A machine with nothing to start is marked nowhere, and `defaultRow` answers
+`null` rather than pointing at row 0 anyway.** Inventing a default there would put
+the badge on a row whose own subline says `not signed in` on the line directly under
+it. New session has an `Empty` for two of the three ways to reach that state — every
+agent hidden, and a machine reporting none at all — and **not** for the third: a
+machine whose only agent is a preset on an uninstalled harness draws one disabled
+tile, `Start` dead, said only by that tile's own `not installed` subline. That gap is
+older than this entry and is not closed by it; what this closes is the case where
+such a tile is not the *only* one and was being selected over a working neighbour.
+
+#### Q3.535 — The picker floats what this machine can run
+
+**Question.** The model picker draws one heading per provider in `SYSTEM_IDS`
+order, which is a fact about the table and not about the machine. So a laptop with
+one key saved scrolled past two or three headings of models it cannot start —
+every row greyed with *"No Z.ai (GLM) key on this machine."* — to reach the
+provider it actually uses. The order was right in the abstract and wrong on every
+concrete machine.
+
+**Decision.** Two changes, and only the second is new machinery. The default order
+moves OpenRouter above Moonshot: it is the widest catalogue and the commonest
+reason to scroll at all, and below Moonshot it sat under one vendor's four models.
+And the client floats — `readyFirst` in `agents.ts` lifts every provider this
+machine can run above every provider it cannot, each half keeping the daemon's
+order. `SYSTEM_IDS` is still the only place the default is written down; it is now
+the order *within* each half rather than the whole of the answer.
+
+⭐ **"Ready" is `keyMissing`'s own answer, which is the function that greys the
+rows.** A provider floats exactly when the picker will not write "No <provider> key
+on this machine." under its models, so the order and the greying cannot disagree:
+what is at the top is what is not struck through. The obvious predicate —
+`system.keySet` — is wrong, and wrong on the commonest machine there is: a
+**published** id proves the native harness holds its own credential, so a laptop
+running Claude Code every day can start Anthropic's models with no
+`ANTHROPIC_API_KEY` saved anywhere. Floating on `keySet` would sink that provider
+beneath whichever key-only endpoint somebody once pasted a key for.
+
+**`some`, not `every`.** A provider is ready when *one* of its models is, because
+that is what somebody scrolling wants to know — is there anything here I can start.
+OpenRouter with no key of its own but a keyed opencode publishing 356 of its rows
+is ready, and demoting it for the handful of catalogue-only rows that would still
+ask for a key would put the order at odds with 356 of its own ungreyed lines.
+
+**Inside `allModels` rather than in `groupModels`, and the filter menu is why.**
+`groupModels` is where a reader looks for the heading order and it is the wrong
+place to sort: `AgentBuilder` draws headings off it *and* a provider filter menu
+off the flat catalogue in first-appearance order. Sorting the groups alone leaves
+that menu naming the same seven providers in an order the list beside it no longer
+uses, with nothing on screen to explain the difference. Sorting the catalogue is
+one change rather than two that have to agree.
+
+**Stable, and a provider's own rows may not move.** `allModels` builds each
+provider's list out of the published half and the table half with a dedupe between
+them — an order this function has no opinion about. Two rows of one provider
+compare equal and `Array.prototype.sort` has been stable by specification since
+ES2019. The rank is one number rather than a two-level comparator for the same
+reason: `(ready ? 0 : N) + position` cannot accidentally compare two rows of one
+provider by anything at all.
+
+**OpenCode Zen is not exempt, and it was the one candidate.** Q3.529 put it last as
+"the free tier one harness falls back to when nothing is configured", and a machine
+holding an `OPENCODE_API_KEY` is precisely a machine where that is no longer true.
+An exception would have meant the one provider you have configured sitting at the
+bottom, which is the behaviour this entry exists to remove. It is last **by default
+only**.
+
+**What is deliberately not floated.** The Systems settings screen still lists
+providers in `SYSTEM_IDS` order. That is a list somebody learns by position and
+returns to in order to *add* a key — floating the configured ones would move the
+rows somebody came to change, and the picker's argument (put what you can run
+first) is an argument about choosing, not about configuring.
+
+#### Q3.536 — A harness with no glyph, no label and no vendor
+
+**Where this came from.** Every per-harness fact this client draws was a table keyed
+on four literals: `AGENT_LABEL` for the name, `AgentGlyph` for the mark,
+`harnessSubline` for the line under a tile. A harness a plugin adds has a row in none
+of them, and the fall-throughs each produce a different kind of wrong.
+
+**The name is the one that looked solved and was not.** `agentLabel` already answers
+`?? id`, and the obvious fix — fall through to the daemon's `AgentInfo.displayName` —
+is wrong for a reason this file already writes down twice: that field is a *log line*
+and carries the program. It is literally `Claude (claude-agent-acp)` and
+`Kimi Code CLI`, and `agentCard.ts`'s own rule forbids a label naming a package or
+ending in `CLI`, which `webcheck` sweeps for. So the manifest's name rides its own
+field, `AgentInfo.label`, and `harnessName` is the pair: this product's table, then
+that, bounded.
+
+**Bounded, never filtered, and the distinction is the rule.** `noJargon` forbids
+*wire vocabulary in this app's templates*; it is not a content filter over the nouns
+substituted into them, which are and always were somebody else's prose — a provider
+legitimately called "Anthropic-Compatible Gateway" is truthful, and `CREDENTIAL_LABELS`
+already draws "Anthropic API key". What has to be bounded is the **shape**, because
+these strings land in one-line `truncate`d sublines, in an `aria-label` built by
+joining with commas, and in headings on a phone: `boundedName` trims, collapses
+whitespace, strips C0/C1 and bidi controls, and cuts. The driver adds a hostile-name
+arm and says out loud that `noJargon` is deliberately *not* asserted over it, or the
+next person closes the gap by widening the predicate.
+
+**The glyph is a monogram, and one generic mark was the obvious answer.** It is wrong
+at eight: a machine may hold eight contributed harnesses, the tile is 96px and its
+title `truncate`s, so eight identical shapes is a row that says nothing about which is
+which — the failure the four distinct shapes exist to prevent. A letter in this app's
+own weight is not a mark and cannot be mistaken for one, which is the property those
+four are careful about. **Derived from the id's local half**, so the element keeps its
+two props and `webcheck`'s two pinned JSX call sites are untouched.
+
+⚠ **And the narrowing is what keeps `AgentGlyph`'s `never` arm real.** A `switch` over
+a string has no exhaustiveness to check, so widening `AgentId` without
+`isBuiltinAgentId` would have deleted the only mechanism in this fleet that makes
+adding a harness loud — silently, while the docblock went on claiming it. That is
+exactly what this function shipped for four releases before Q7.125.
+
+**The subline falls back to the plugin's name.** Empty was right while every harness
+with a row had a vendor; a contributed harness paired only with built-in providers is
+native to none, so the blank line is its **common** case — a tile with a title and
+nothing under it, beside tiles that have one. *"from Acme Tools"* is not a vendor and
+is not pretending to be; it answers the question somebody actually has about a row
+they do not recognise.
+
+**`standalone` was spelled so that absent means no tile — and is gone entirely; see
+Q3.539.** `startsBare` is about the *model*: getting it wrong the permissive way is
+Q3.522's failure with somebody else's binary — a session billed to the operator on a
+model nobody chose, under a tile that names none, and unlike opencode nothing on this
+side could find out afterwards what it ran. Getting it wrong the other way is
+opencode's own position, which this repository already argues is not a demotion.
+
+**Status.** Applied.
+
+#### Q3.537 — A sixth stance, or a reordered ladder?
+
+**Question.** Q2.221 puts a refused start on the wire. `agentStance` tests
+`blocked === "no_flow"` **before** the credential axis, so a harness with no
+sign-in can never be `signed_out`. The one-line fix is to move the `loggedIn ===
+false` test above it. Is that right?
+
+**Decision. No. It is a sixth member, `start_refused`, inserted below
+`not_installed` and above `no_flow`.** A reorder makes three sentences false, and
+none of the three has a driver that would have caught it — `webcheck` drives no
+`agentStance(true, false, "no_flow")` at all, so all three would have shipped.
+
+- `stanceLine`'s signed-out arm reads *"macOS can't run Claude Code's own sign-in,
+  so a saved key is the only way in"*. For a harness with no wizard that blames the
+  host for an absence that exists on every platform, and it forecloses the remedy
+  the daemon's own hint offers **first** — run the program once on the machine.
+- `dividerWord` would draw *"Sign in with a key instead"* with nothing above it for
+  the key to be instead *of*, which is Q3.513's recorded defect arriving again by
+  the next door.
+- `storedChip` would say *"still isn't signed in"* about a probe that never ran.
+
+The badge is **"would not start"** rather than "not signed in": it reports what was
+observed and diagnoses nothing, because for every harness that can reach this state
+there is no status to probe, and naming a sign-in would name only one of the two
+remedies. `tokenBlockFor` answers `editable`, where the box is the strongest thing
+on the card rather than — as under `no_login` — the least urgent.
+
+⚠ **And `offersTile` had to stop being a negative allowlist first.** It was
+`stance !== "not_installed" && stance !== "signed_out"`, which answers a silent
+`true` for anything it has not heard of — so the sixth member would have kept its
+tile while that function's own docblock claimed *"a sixth state has to arrive here
+as a decision"*. It is a `switch` with a `never` arm now. This is `AgentGlyph`'s
+lesson in another file: a default that reads as safe is not the same thing as a
+default that was taken.
+
+⚠ **One thing found on the way, unrelated to the refusal and shipped for as long as
+contributed harnesses have existed.** Every sentence in `agentCard.ts` named the
+agent with `agentLabel`, which answers the bare id for anything this product does
+not ship — so a harness a plugin added has been drawing **`byo:gemini` needs no
+sign-in.** on its own settings card. `stanceLine` and `storedChip` take the listing
+row now and go through `harnessName`, which is the same repair `hostable` and
+`choiceRefusal` already took.
+
+**Status.** Fixed.
+
+#### Q3.538 — Hiding a tile is concealing a fact about the machine. Why is this one allowed?
+
+**Question.** `agent-strip.md` states the standing posture: *"Every other 'this
+agent is not on the row' rule in this app is the app concealing a **fact about the
+machine**, and the standing answer is don't — an unavailable harness is drawn and
+labelled, because filtering answers 'where did claude go' with silence."* Q2.221
+hides a tile. Why is that not that mistake?
+
+**Decision. Because it is `offersTile`'s established rule rather than a new one,
+and because the doors it owes are paid.** That function already hides two states of
+five, and its docblock argues the trade in full and names what it costs: *"With
+every signed-out harness out of the row, the sign-in wizard under the strip is no
+longer reached by tapping the tile that says why."* `offersStripTile`'s docblock
+says the settings list is *deliberately wider* for exactly this. Concealment would
+be hiding it **everywhere**; this hides it in the picker, which is a list of things
+you can start.
+
+Three doors, and the third is the one this feature had to build:
+
+- **The row survives, and its badge is the fault.** Settings → Machines → agents
+  keeps the harness in its stored position and draws *would not start* where the
+  vendor line goes — the "a fault displaces the vendor" rule that list already has.
+- **The paste box is still typeable.** `tokenBlockFor` answers `editable`.
+- **`POST /agent-auth/:agent/recheck`, from that row's kebab *and* from the card
+  that states the refusal.** This is the new one, and it exists because the
+  commonest remedy for a harness with no wizard is entirely off-screen: run its own
+  program once on the machine. Nothing about that reaches this daemon, so without a
+  control the only way back is to wait out the budget. It refuses nothing — unlike
+  `login` and `logout`, which answer `503` for exactly the harnesses this is for.
+
+  ⚠ **Two copies, because one could not reach every harness.** The machine's agent
+  list excludes everything `startsBare` is false for — opencode, and any a plugin
+  added without `standalone` — and that exclusion is deliberate and defended. Those
+  are precisely the harnesses that live on presets, whose refusals are the routed
+  ones, and whose card in `AgentDetail` said *would not start* with nothing beside
+  it. The list's copy also had to stop keying on the harness row, which is `null`
+  on a preset row, and it patches the single agent the route answers rather than
+  re-reading: `attempt` refetches `GET /agent-strip`, which is drawn optimistically
+  and may have a `PUT` in the air, so a blanket re-read would put the pre-write
+  order back under a finger that had just moved a row.
+
+⚠ **And the empty arm on New session gained a sentence — with two endings.** *"No
+agent on this machine is ready to start."* was drawn bare on the argument that the
+sign-in door below says the rest, and that door hangs off `signInOffered`, which
+answers `false` for every harness with no wizard. Those are precisely the harnesses
+this state can now hide, so on a machine whose only harness came from a plugin it
+was one sentence with nothing under it. It names the gear now — and only for what
+the gear will actually show: on a machine holding nothing `startsBare` answers true
+for, that screen lists no rows at all, so "lists them all" would have been two
+screens answering one question with one of them wrong. The second ending names the
+bar at its foot, which is drawn either way.
+
+**Status.** Done.
+
+#### Q3.539 — May a plugin add an *agent*?
+
+**Reported, after the first fix shipped**: *"убери возможность добавлять агента
+плагином, только харнесс и провайдера."* A plugin adds a harness and a provider,
+and it was also adding an agent — the Gemini tile on New session.
+
+**Question.** `HarnessContribution.standalone` let a manifest say *tapping this on
+New session is a whole decision*. Absent meant no tile, which is the safe
+direction. Is a safe default enough?
+
+**Decision. No. The field is removed**, and `startsBare` answers a flat `false`
+for every contributed id.
+
+**A safe default makes a wrong answer rarer without making it unsayable, and this
+is the one claim in that block nothing on either side can check.** `startsBare`'s
+subject is the **model**, not the CLI: the three built-ins that get a tile *are*
+their own model, and opencode does not get one because a bare session there starts
+on `opencode/big-pickle` — a model nobody on the screen chose. A harness this
+repository has never run cannot be known to be the first kind, and an author writes
+`standalone: true` because their harness feels like a whole answer *to them*.
+Getting it wrong the permissive way is Q3.522's failure with somebody else's
+binary: a session billed to the operator, on a model no tile names, and — unlike
+opencode — a client cannot even find out afterwards what it ran.
+
+**It is not a demotion, which is the whole of what this repository already argues
+about opencode.** The harness is offered everywhere a harness is named: the
+builder's harness row, `POST /sessions`, its own settings card with its paste box,
+Settings → Machines. What it needs first is a model. An agent built on it is
+something a person assembled and named — which is the only way an agent has ever
+been made here, and the difference between the two words this feature had blurred.
+
+**Removed rather than ignored, and it owes no rung.** `PLUGIN_API_VERSION` 5 has
+not shipped in a release, so there is no manifest in the world whose behaviour this
+changes except the example's own. A manifest still carrying the key installs
+unchanged and the key is simply not read, which is what "removed" has to mean for a
+plugin somebody already published — `daemoncheck`'s fixture declares
+`standalone: true` for exactly that reason, and `webcheck` reads `agentCard.ts` to
+assert the word appears in it nowhere at all. That second one matters because a
+flat `false` is the shape that can be re-derived by accident: with the field gone
+from the wire, a reader reaching for `agent.standalone` gets `undefined` — falsy,
+therefore green, therefore silent.
+
+⚠ **And it moved a contract that lives in two repositories, which the *removal*
+direction hides.** `services/plugins` mirrors `parseManifest` by hand, and deleting
+the field here left it validating one there — so the catalogue refused
+`standalone: "yes"` and `standalone: null` while every daemon accepted them, an
+unknown key being ignored. That is Q4.105's asymmetry with the cheap and expensive
+sides swapped: not a screen telling somebody to update their machine, but a plugin
+the market calls malformed. Its own driver caught it — two failures, the field list
+and the verdict comparison — and the mirror moved with the daemon. The coupling
+reads as though it were about additions; it is not, and the order is unchanged:
+daemons, then the control plane, then the catalogue, with the last two out
+together.
+
+**Status.** Applied.
+
+#### Q3.540 — A list of providers, when a harness also takes a key
+
+**Reported, as a question**: *"почему Gemini не появился в списке авторизаций — он
+что, открытый?"* No — Gemini was signed in on that machine with Google since July.
+It was not in the list because the list was of **providers**, and a harness is not
+one.
+
+**The defect underneath it was worse than the missing row.** A paste box for a
+harness's own `envNames` is drawn by `AgentDetail`, and for a harness with no
+sign-in wizard the only screen that mounted it was a **system's** card, gated on
+`system.loginVia !== null`. Every harness this product ships is named that way —
+Anthropic through claude, OpenAI through codex, Moonshot through kimi, OpenRouter
+and OpenCode Zen both through opencode — so all four have a card, one tap into a
+row a person already understands. Nothing requires a plugin to contribute such a
+provider: `parseManifest` refuses a system with **no** `baseUrl` and no `loginVia`
+(*"its key box would store a secret and never send it"*) and has no mirror-image
+rule. So a plugin declaring only routed providers — which is the example plugin's
+own shape — left `envNames` a slot the daemon accepts over `PUT /agent-auth/:agent`
+and **no screen anywhere offered**. `docs/PLUGINS.md` promised the box in as many
+words, and the rule file said "a paste box" flatly.
+
+**Question.** Refuse the shape, build a screen, or widen the list?
+
+**Decision. Widen the list, on the owner's call, and the word with it.** *"Лучше
+включить харнесс в список с провайдерами. И в целом абстрагировать список
+провайдеров, авторизоваться можно не только для инференса."* The heading is
+**Sign-ins**: what a reader is looking at either way is a thing they have or have
+not given a credential to, and naming the list after the half that came first is
+what left the other half homeless.
+
+**Membership is "no provider speaks for it", never "it is contributed",** and that
+is the whole of what keeps this from being a regression. `unspokenFor` in
+`agents.ts` — pure, so `webcheck` drives it — answers the harnesses with at least
+one credential slot that no system names in `loginVia`. On a machine with no
+plugins it answers nothing and the list is byte-for-byte what it was. Adding every
+harness instead would put claude beside Anthropic: two rows, one credential, two
+answers to *signed in?* — which is the exact shape `MachineSystemsSection` was
+built to remove, in its own docblock, in those words.
+
+**Two leaves under one list, and they cannot share a segment.** A plugin may name
+the same local id in both of its contribution blocks, so one string reaching the
+router could not say which catalogue resolves it. `…/systems/:system` therefore
+keeps its meaning — every address that ever worked goes on working — and the
+harness leaf is `…/signin/:agent`. Both are titled **Sign-in**: which catalogue
+resolved the name is an internal difference, and a row's kind may decide a lookup
+or a destination and never a presentation.
+
+**Three smaller decisions, each with its own reason.** The badge says *key saved*
+rather than *signed in*, because these are precisely the harnesses with no wizard
+and `loggedIn` is `null` for all of them. A harness with `envNames: []` gets no
+row: an author saying a key is not how this is configured, and a row opening an
+empty card is a control that is not true in the state it is drawn in. And the rows
+come **after** every provider — they are the newest and least familiar thing on the
+screen, so a group appears rather than a group moving under a reader's thumb.
+
+⚠ **It costs a second read on a screen that had one.** `GET /systems` is a table
+and spawns nothing; `GET /agent-auth` runs the login probe, a CLI per agent. It is
+unavoidable — no cheaper route carries the harnesses' credential slots — and it is
+issued *beside* the first rather than after it, so the screen pays one round trip.
+The two failures are not symmetric: a refused `GET /agent-auth` leaves the
+providers exactly as they were, while a refused `GET /systems` must draw no harness
+rows at all, since without the providers there is no way to know which harnesses
+are already spoken for.
+
+**Rejected: refusing the shape in `parseManifest`** — a mirror-image rule making a
+harness with unreachable slots unsayable. Symmetric with the rule two lines away,
+and it would have made the documentation true by deleting the case. It is the
+smaller change and it answers the wrong question: the slots were reachable in
+principle all along, and what was missing was a place to draw them. It would also
+have invalidated an already-published plugin over a screen this product could
+simply have.
+
+**Status.** Applied.
 
 ## Deployment, packaging and code layout
 
@@ -11624,7 +16146,7 @@ direction would turn a layering rule into a runtime dependency.
 | `packages/web/src/ui/AgentConfigBar.tsx` | The composer's control strip: mode left, model/effort/context right, everything else behind `…`. Drawn from ACP's `category`, never from an id. One height and one radius for everything in it, the paperclip included; the context readout is a ring you press for the numbers, and it holds its slot whether or not there is anything to report |
 | `packages/web/src/ui/agentConfig.ts` | Its rules as pure functions — slotting, labelling (`labelFor` for two agents' words for one *control*, `choiceOverride` for two agents' words for one *choice*, plus the two values named `Default` that no agent explains), the context readout (the percentage, what the popover says in words, and the thresholds the ring changes colour at), and the prose the snapshot strips — so `webcheck` can assert them with no DOM |
 | `packages/web/src/ui/Bubble.tsx` | The user's own messages, right-aligned and hugging their content. One component, three call sites, so they cannot diverge again |
-| `packages/web/src/ui/settings/` | Settings as a list and a detail, since it stopped being one flat scroll: `SettingsNav` (the rail at `lg`, the whole screen below it, and the blocked count it owes the list it replaces), and one file per section — `AgentsSection`/`AgentsPanel` is what `ui/Settings.tsx` became, a wizard that drives an agent's own login under a pty plus a paste box for a token minted elsewhere; then Machines, Account and Users |
+| `packages/web/src/ui/settings/` | Settings as a list and a detail, since it stopped being one flat scroll: `SettingsNav` (the rail at `lg`, the whole screen below it, and the blocked count it owes the list it replaces), and one file per section — Account, Machines, Server settings and Users. `AgentsPanel` is what `ui/Settings.tsx` became: the wizard that drives an agent's own login under a pty, plus a paste box for a token minted elsewhere. Signing in is **not** a section of its own any more — it is a property of a machine, so `MachineSystemsSection` and `SystemsPanel` hang two depths down inside one, and `AgentsPanel`'s wizard is mounted from there and from the New session strip alike |
 | `packages/web/src/ui/SessionBrowser.tsx` | The fleet: a Pinned group above one collapsible section per machine, at two densities. A pinned row is in both — pinning is a second way to reach a session, not a relocation. Blocked rows say so on their own status dot and are counted on their machine's header — where the count replaces the live count rather than mounting beside it — so a closed section cannot hide one. No search box, and the comment where it was says why one must not come back as component state |
 | `packages/web/src/ui/SessionMenu.tsx` | What you can do to a session — rename, pin, stop, resume — as one menu, used from both the session header and every list row, plus the `RenameField` they share |
 | `packages/web/src/ui/groups.ts` | Which sections are collapsed, `visibleRows` — the **single** source of render order, shared with `keyboard.ts` so `j` cannot land on a row nobody can see, and deduplicated by key because a pinned session is drawn twice and must be stepped through once — and `machineSubline`, the one trailing slot on a machine header and the precedence that decides a waiting session cannot be hidden behind a live count |
@@ -14012,6 +18534,168 @@ have shown anybody, and a route that refused it would break every script.
 
 **Status.** Decided
 
+#### Q5.112 — The daemon's own refusals were held to no vocabulary rule at all
+
+**Rule.** Every sentence `hostable` can return in `src/acp/systems.ts` is pinned by
+exact text; the whole matrix is swept into a partition of four templates by
+`templateOf`; and each is run through `jargonIn` — a full stop, no wire vocabulary,
+and, the half that is a relation rather than a word list, **a refusal about one system
+may name that system and no other**, harnesses included.
+
+**What was missing, which is the entry.** Q3.474 made the vocabulary a rule after
+*"Codex accepts openai systems, and Moonshot is anthropic"* reached somebody's phone
+under a greyed-out row, and `webcheck` grew a `noJargon` closure over the client's
+mirror. The daemon's own strings got the rule written into their comments and nothing
+else: `daemoncheck` asserted the routing *behaviour* and never the sentences. So that
+exact string could have been put back into `hostable` and shipped, and all eight
+offline drivers would have stayed green while it was drawn on a phone. **A gap in a
+driver is worth an entry here for the same reason a gap in the code is** — a rule
+enforced nowhere is a rule that is already half-broken, which is Q3.492's finding
+stated about a checker instead of about a stylesheet.
+
+**Why the predicate is duplicated rather than shared, which is the decision.** The two
+drivers are separate processes over separate packages and neither can import the
+other, so sharing means a third module written for two callers — and the honest reason
+not to build one is that the *rules differ*. `webcheck`'s forbids the words
+`anthropic` and `openai` outright, which this side cannot: they are the `displayName`
+of two systems here, and *"Anthropic can only be reached by the CLI it ships with."*
+is a correct sentence naming a company somebody has heard of. And this side has a rule
+the client's cannot state — a refusal may not name a **harness**, because the daemon
+has no display name for one and its id is a wire word, which is why `hostable`'s own
+comment says the harness's name "is a name this side does not have" while the client's
+mirror puts "Codex" or "Kimi Code" in front of the same sentence. A shared predicate
+would have to be widened until it permitted both, which is weaker than either. This
+repository's view that a copy is a second chance to be wrong is about tables that must
+agree — `hostable`'s matrix is the one right here — and two predicates that are
+*supposed* to differ are not that.
+
+**Why the shared half is stated as a relation.** "Names a system other than the one it
+is about" is case-insensitive, catches the recorded failure by construction (that
+sentence named Moonshot **and** anthropic **and** openai), and does not have to guess
+which spelling of a protocol name somebody reaches for next.
+
+**And the predicate is driven against the string that really shipped**, because every
+arm of the sweep is green today and a predicate that tested nothing would read exactly
+the same.
+
+**Status.** Current
+
+#### Q5.113 — Four of five write routes in the systems section had no scope gate asserted
+
+**Rule.** Every route the assembled-agents section serves is one row of
+`sectionRoutes` — `(method, path shape, scope)` — read by **two** sweeps: the scope
+gate, and the no-store 503. A route in one and not the other is the gap this closes,
+and the table is what stops the next route arriving with no gate at all.
+
+**What was missing, and how it was proved.** The scope gate was asserted at exactly
+one route, `PATCH /custom-agents/:id`, in the middle of the editing block. `PUT
+/systems/:system`, `DELETE /systems/:system`, `POST /custom-agents` and `DELETE
+/custom-agents/:id` had none — each could be downgraded from `write` to `read` in
+`src/server.ts`, singly or all four at once, with `daemoncheck` green. Not argued:
+mutated and watched. The costliest of them is `PUT /systems/:system`, because that is
+the route somebody pastes a vendor API key into — a read-only grant able to reach it
+can replace the key every routed session on the machine signs its requests with, and
+the `DELETE` beside it can take the key away. **A gap in a driver earns an entry here
+for the same reason a gap in the code does**, which is Q5.112's finding about a
+different section of the same file.
+
+**What the sweep asserts, and all three halves are load-bearing.** It creates a preset
+that really exists, then drives all seven routes with `tokenWith("u_reader",
+["session:read"])` carrying bodies that would really land — a token on the `PUT`, the
+four accepted fields on both preset writes — and asserts that the five write verbs
+answer `403 insufficient_scope`, that both listings still answer `200`, and that
+neither the preset store nor the key store moved. The positive half is not decoration:
+a `write` that drifted onto either listing would take the assembly screen away from
+every read-only grant on the machine while all five refusals went on passing. The
+"nothing moved" half is what makes the first a claim about a write that was *refused*
+rather than one that was malformed.
+
+**What is still unswept, stated here because it is larger than what was fixed.**
+`src/server.ts` serves 52 routes. `GET /health` is deliberately ungated —
+unauthenticated liveness — and of the remaining 51, **15** have a scope assertion
+anywhere in this repository, seven of them added by this work. No other driver covers
+any of them: `webcheck`'s 403 pins are about how the *client* draws one. The sharpest
+of the 36 left: `DELETE /sessions/:id/workspace`, the only `machine:admin` route
+outside the plugin family, where a silent downgrade to `write` would let any grant
+that can drive a session destroy somebody's worktree and the uncommitted work in it;
+`PUT /agent-auth/:agent`, which is the same paste as `PUT /systems/:system` for a
+different credential, and the seven `/agent-auth` routes beside it, one of which
+spawns a pty as you and another types into it; `POST
+/sessions/:id/permissions/:permissionId`, which is how an approval is granted, so a
+read-only grant reaching it approves a command on somebody else's behalf; and `GET
+/sessions/:id/stream`, which is a *second* code path for the same question because it
+takes its token from the query string rather than the header, and where a read gate
+failing open leaks a whole transcript. The shape that closes all 36 at once is this
+one widened — one table of `(method, path, scope)` for the whole app, driven with a
+reader, a writer and an admin, asserting a 403 for every token below a route's scope
+and a non-403 for every token at or above it. That would also catch a route added with
+no gate at all, which nothing catches today.
+
+**Status.** Current for this section; the whole-app sweep is **not built**.
+
+#### Q5.114 — Several assertions in `webcheck` did not assert
+
+**Rule.** An assertion is evidence only once it has been **watched to fail**. Every
+repair below was proved by mutating the product until the check went red and restoring
+the file byte-identically afterwards, and the reason to state it as a rule rather than
+as four repairs is that all four classes are available to every driver in this
+repository.
+
+Four ways a green check meant nothing, all in one file, all green against broken code:
+
+- **An `indexOf` ordering comparison with no found-guard.** `refWrite < stateWrite`
+  over `NewSession.tsx`, pinning that the ref is written before the state. Deleting
+  `picksRef.current = updated;` outright — the edit that costs the most — makes the
+  left side `-1`, which is less than every real position: the check printed `ok`,
+  `typecheck` was clean, and the ref held its initial empty map for the component's
+  whole life. Both operands are `>= 0` now. A missing needle must land on the *right*
+  of the `<` or be guarded, and a sweep of all 23 such comparisons in the file found
+  two more of the wrong shape — the `aria-modal` ordering in `Sheet.tsx`, which
+  nothing else asserted the existence of, and `mayAddMachine(` before `<AddMachine`,
+  which printed `ok (-1 < 1477)` the moment the identifier was renamed away.
+- **`\b` written inside a double-quoted string.** In a JS string literal `\b` is the
+  backspace escape, U+0008, not a word boundary — so `new RegExp("\bpicks\b")` asks
+  for a control character no source slice can hold and matches nothing, ever. Two of
+  the five forbidden identifiers in the closure-capture sweep were dead, and they were
+  the two that mattered: the bare `picks` and `picked` a stale closure would capture.
+  They are regex **literals** now, one escape layer closer to what they mean, with
+  `.map(String)` so a failure names the offending pattern; a sweep of all 11
+  `new RegExp` sites in the file found no other dead one.
+- **A predicate with no negative control.** `noJargon` was only ever called where it
+  answers `true`; replacing both of its character classes with `(?!)` — patterns that
+  match nothing — left the whole section green. Three controls now, the discipline
+  `daemoncheck` already keeps: the sentence `agents.ts`'s own docblock records as
+  having shipped, one exercising only the second arm, and `null`. Of the file's four
+  other local predicates, three were already driven both ways; this was the one that
+  was not.
+- **A comment block promising an assertion nobody wrote.** Nineteen lines of argument
+  for a property, and beneath it the next comment block. The property is pinned two
+  ways now — a behavioural pair over `sheetUpLabel` and `upFrom` for six pop-up
+  routes, plus one narrow text pin on the ternary in `App.tsx`, because a composition
+  inside a component body is unreachable from a driver with no DOM and neither pin
+  catches the other's mutation. A script found 19 places where one comment block is
+  immediately followed by another; the other 18 are stacked argument for the code
+  below them.
+
+And a fifth of the same family, arriving from a rename rather than from an operator:
+two settings-route fixtures written `as never` still carried `agent: "claude"` after
+that field became `system`, so `depthOf` read `undefined !== null`, answered the right
+depth for the wrong reason, and would have gone on doing so through any further rename.
+The cast is there because the literals are partial on purpose, and it suppresses
+exactly the compiler error that would have said so. The repair is a parser-driven twin:
+the four depths read off `parseSettingsRoute`'s own output rather than off a hand
+literal, which is the only reading a cast cannot fake.
+
+**And one proposed assertion was removed rather than repaired**, which is the other
+half of the discipline. A junk route asserting depth 3 went red against *correct*
+product code — `depthOf` reads `route.system !== null`, and `undefined !== null` is
+true — but `parseSettingsRoute` writes that key unconditionally, so the state is
+unreachable outside a hand-built literal in the driver itself. Keeping it would have
+demanded defensive product code against a state the type forbids. A driver may not buy
+its own coverage with a change to the product that nobody needs.
+
+**Status.** Current
+
 
 ## Measured behaviour of the agents and the tools
 
@@ -15085,6 +19769,79 @@ stopped happening" is not evidence this was fixed.
 
 **Status.** Known limitation
 
+### Q6.105 — What `opencode acp` actually is, measured
+
+**Question.** A fourth harness was asked for. Upstream issue #31750 — "ACP:
+support per-session model selection via `session/set_config`" — is closed **as not
+planned**, and the method really does answer `Method not found`. Read at face
+value that says opencode cannot be told which model to run, and the design that
+follows is a new environment-based door, a new arm in `hostable`, a skip in
+`pinNativeModel`, and a system credential in a spawn environment.
+
+**Measured instead, 2026-08-27, against the vendored `opencode-ai@1.18.23`, and
+almost all of that is wrong.**
+
+| Probe | Answer |
+|---|---|
+| `initialize` | `agentInfo` `OpenCode` 1.18.23; `sessionCapabilities` `close`, `fork`, `list`, `resume`; `promptCapabilities` `embeddedContext`, `image`; one `authMethod`, `opencode-login` |
+| `agent/providers/list` | `-32601`, and no `providers` marker on `agentCapabilities` |
+| `session/new` → `configOptions` | **a `category: "model"` select**, plus `mode` — and `thought_level` too when the current model has levels. ⚠ This row first read "(once a model is picked)", which was an inference from one model; Q3.518 re-measured it |
+| `session/set_config` | `-32601` — the closed issue, and a method this daemon has never sent |
+| `session/set_config_option` `{sessionId, configId, value}` | **works** — the exact call `pinNativeModel` already makes |
+| `auth list` | **stdout**, 171 bytes; and *three* wordings, not two — `0 credentials`, `1 credentials` for a written file, and a separate `1 environment variable` section for a key in the environment |
+| `session/new` + `session/prompt`, **no credential at all** | both succeed — six OpenCode Zen models, `stopReason: "end_turn"`. Their free tier is anonymous |
+| `auth login --provider <id>` | goes straight to a masked `Enter your API key`; no method selection, so `--method` is a guess nothing needs |
+| `auth logout [provider]` | exists, and the positional is what makes it non-interactive |
+
+**Decision.** No new mechanism. The distinction the issue hides is that
+`session/set_config` and `session/set_config_option` are **different methods**;
+this daemon has always sent the second, which is the one opencode implements. The
+whole of the harness is the five edits Q7.31 predicted.
+
+**And the second measurement is the one that shaped the product.** With
+`OPENROUTER_API_KEY` in its environment — a *bogus* value is enough, since the
+catalogue is enumerated before it is authenticated — `session/new` publishes
+**362** models where a signed-out opencode publishes **6**, and 356 of them are
+`openrouter/…`. So the pasted key is not merely how the provider authenticates,
+it is what makes the provider's catalogue exist at all; and because
+`LocalRuntime`'s availability probe already spawns with `secrets(agent)` merged,
+that list reaches `GET /agents/capabilities` with nothing else built.
+
+**The opposite of codex, and said out loud on the card for that reason.** Q2.200
+records that a pasted `CODEX_API_KEY` reaches the API and still leaves
+`session/new` answering -32000. Here a pasted key is a complete path on its own,
+with nothing written to disk. The two agents sit next to each other on the same
+screen, so codex's sentence would otherwise be read as the house rule.
+
+**And the last row is why this agent has no sign-in at all.** `auth login` exists;
+nothing here runs it. An agent that completes a turn against an empty
+`XDG_DATA_HOME` needs no wizard, and a wizard in front of it is a control that
+fixes nothing — so `AGENT_LOGIN.args` gained a fourth state, `null`, and
+`loginBlockedReason` a fifth reason, `no_flow`, ordered **first** because it is the
+only one that is not a limitation. Q3.504 is what the screen then says.
+
+**The same row is why it has no status probe.** `auth list` works and
+was read in full; using it would let opencode answer `loggedIn: false`, and
+`AgentAskRuns.admit` refuses on exactly that value — so the model list would have
+been unreadable on any machine without a key, for an agent that had just answered
+a prompt without one. Q7.99 records reading `null` as "no"; this is the mirror,
+manufacturing the "no" in the first place. `status` is `null` and `credentialPath`
+carries the honest half: presence proves a provider was configured, absence proves
+nothing. Removing the probe also takes 389 ms off every `GET /agents`, which is a
+consequence rather than the reason.
+
+⚠ **Found by driving the real binary, twice, and neither pass was optional.** The
+first pass wrote the probe from the measured output and shipped a pattern that
+reported a working machine as signed out — `0 credentials` and
+`1 environment variable` appear *together*, and `readLoginAnswer` tests
+`signedOut` first. The second pass asked the question the first had not: whether
+the agent needs a credential at all. It does not.
+
+**What is still unmeasured**, and is written down rather than guessed: what
+opencode exports into a session's own environment, which is what
+`SESSION_SCOPED_ENV` would need; and whether `auth logout` behaves with a
+provider that is not configured. Neither is reachable without a real key.
+
 ## Open questions and deliberate non-goals
 
 ### Q7.1 — Was keeping full session history on disk an optimisation?
@@ -15651,7 +20408,7 @@ coverage of it is what stands in the meantime.
 
 ### Q7.31 — Should the agent union become an agent registry?
 
-**Position.** `AgentId` is `["claude", "kimi", "codex"] as const` in
+**Position.** `AgentId` was `["claude", "kimi", "codex"] as const` in
 `src/acp/agents.ts` with a `switch` in `resolveAgent`, and the product thesis is
 "remote control regardless of the agent" — so the obvious next move is a registry
 of declarative launch configs plus a `REEMOAT_AGENTS` for externally configured
@@ -15692,6 +20449,14 @@ row naming an agent that no longer exists restores as a well-typed value that
 not reach that; removing or renaming one does.
 
 **Status.** Deferred, and the reason is now weaker than it was. Not blocked.
+
+⚠ **The precondition named above is reached and closed, and by work that was not
+this entry.** Assembling agents out of a harness, a system and a model (Q7.116)
+put a second string into the same shape — a `harness` column read back from
+SQLite — and `fromRow` was still casting `agent` without validation. All three
+are validated on the way out now, and a row failing any is dropped rather than
+repaired. What this entry asks for is still a *fourth agent*; what it can no
+longer cite as the concrete thing standing in the way is that cast.
 
 ### Q7.32 — Does the control plane's audit table have a retention bound?
 
@@ -18382,7 +23147,7 @@ published **before any I/O**, then `online` again up to 1.5s later. Everything
 keyed on `reach` therefore changed twice for a question whose answer never
 changed.
 
-**On one screen that was not a repaint but an unmount.** `MachineAgentsSection`
+**On one screen that was not a repaint but an unmount.** `MachineSystemsSection`
 tested `reach !== "online"` and replaced the panel with "not reachable right now",
 so the return trip *remounted* it: `useAgentAuth` restarted from `listing: null`,
 drew its spinner, issued a second `GET /agent-auth` — which shells out to every
@@ -18912,3 +23677,577 @@ update. Neither exists, and neither is ours to add.
 
 **Status.** Deliberate non-goal
 
+
+### Q7.114 — How does a harness reach a model its own vendor does not serve?
+
+**Decision.** ACP's `providers/set`, called between `initialize` and
+`session/new`, with the credential in its headers. Not an environment variable,
+not a config file under somebody's home.
+
+**Measured 2026-08-25** against the pinned adapters, by spawning each and asking
+`providers/list`:
+
+| Adapter | `agentCapabilities.providers` | `providerId` | `supported` |
+|---|---|---|---|
+| `claude-agent-acp` 0.63.0 | `{}` | `main` | `anthropic`, `bedrock`, `vertex` |
+| `codex-acp` 1.1.9 | `{}` | `custom-gateway` | `openai` |
+| `kimi` 0.29.x | absent | — | `-32601 Method not found` |
+
+Three things fall out and all three are load-bearing.
+
+**`providerId` is the agent's own and the two disagree.** `main` against
+`custom-gateway`. Written down, a daemon configures one agent and hands the other
+an `invalid_params` naming a provider it has never heard of. So it is read off
+`providers/list` — `acp-agents.md`'s "found by `category`, never by `id`" rule,
+in a second place.
+
+**The matrix is smaller than it looks, and honestly so.** codex accepts `openai`
+alone, so Claude-in-Codex does not go through this door. What *does* work is the
+direction that matters: Claude Code accepts `anthropic`, and Moonshot, Z.ai and
+MiniMax all serve Anthropic-compatible endpoints — so Kimi K2 inside Claude Code
+is real. GPT inside Claude Code is not, and cannot be without a translating proxy
+this product does not run; it is a disabled cell with a sentence on it.
+
+**kimi answers nothing and must not be treated as broken.** It reaches Moonshot
+natively and is refused every other system — which `hostable` decides *before*
+consulting routing at all, so the native branch never touches a capability kimi
+does not have.
+
+**Why not the environment.** Setting the base URL and auth token as variables
+would have worked and were rejected on one ground: an agent runs as this uid and
+can print its own environment into a transcript that is appended to the log and
+rendered in a browser — the exact accident `agentEnv`'s strip exists to prevent,
+with somebody's Moonshot key in it. Over stdio the key never touches the process
+table. The model id, which is not a secret, does go in the environment (Q7.115).
+
+**Why not `~/.codex/config.toml`.** `acp/agents.ts` already refuses to write
+settings files under somebody's home, for `ultracode`. That reason did not expire.
+
+**Status.** Built.
+
+### Q7.115 — How is a model named to a harness that has never heard of it?
+
+**The question is the whole cost of the feature, and reading the adapter's source
+answers it wrong three times.** `applyAvailableModelsAllowlist` in
+`claude-agent-acp` 0.63.0 visibly synthesizes an entry for an id it cannot match
+— `result.push({ value: effective, displayName: trimmed, description: "" })` —
+so `availableModels` looks like the mechanism. Driven, 2026-08-25, against the
+pinned adapter:
+
+| Door | What the published model control became |
+|---|---|
+| `CLAUDE_MODEL_CONFIG={"availableModels":["kimi-k2-thinking"]}` | `["default"]` |
+| `_meta.claudeCode.options.settings.availableModels` | `["default"]` |
+| `ANTHROPIC_CUSTOM_MODEL_OPTION=kimi-k2-thinking` | built-ins **+** the id, current stays `opus[1m]` |
+| `ANTHROPIC_MODEL=kimi-k2-thinking` | built-ins **+** the id, **current is the id** |
+
+The first two are plainly *read* — the built-in aliases disappear — and drop the
+unknown id anyway. The baseline for comparison is
+`["default","opus[1m]","claude-fable-5[1m]","sonnet","haiku"]`.
+
+**Decision.** Set both of the last two. `ANTHROPIC_MODEL` is the one measured to
+do the whole job; `ANTHROPIC_CUSTOM_MODEL_OPTION` is the *documented* way to put
+a row in the picker, and the two were measured to compose rather than conflict.
+Relying on the undocumented half alone is how a CLI update removes the feature
+with nothing failing.
+
+**The second door, for a native pairing, is unchanged**: ACP
+`session/set_config_option` under `category: "model"`, validated against what the
+agent just published. Which door applies is the table's decision and never a call
+site's — and a pairing that can be routed but cannot be pinned is **refused**, in
+`hostable`, because it would otherwise start, look correct, and run the
+endpoint's default model under somebody else's name.
+
+**Status.** Built. The routed rows are derived from published endpoints and are
+not yet driven with a real key; a row that has not been run can still be wrong
+about a header name.
+
+### Q7.116 — Where does an assembled agent live, and what does a session record?
+
+**Decision.** `custom_agents` on the daemon, per machine. `sessions.agent` keeps
+holding the **harness**; `sessions.custom_agent` is a nullable *reference*
+resolved at every launch.
+
+**Why per machine.** Every ingredient already is: the harness is a binary on that
+host, the key is in that daemon's database, and which models a harness offers is
+a fact about the CLI installed there. A list that followed a person between
+machines would be a list of things that may not exist on the one they are looking
+at.
+
+**Why the harness stays where it was.** Only the harness decides which binary
+`resolveAgent` resolves, which credentials `signOutSessions` clears and what a
+restart relaunches. Storing it where it has always been means none of those paths
+learn the new column exists.
+
+**Why a reference and not a copy.** Editing a preset changes what its sessions
+come back as, which is what somebody expects of a preset. A copy would freeze the
+model at creation and diverge silently. The cost is that a deleted preset has to
+degrade, and it does: the session resumes on the bare harness its `agent` column
+already names, rather than becoming unrecoverable.
+
+**`registry.setCustomAgents` is a setter and is called before `restore()`**, which
+is `elicitationAllowed`'s argument exactly — `restore()` rebuilds every persisted
+session, and one that came back before the resolver was set would resume against
+a different vendor with nothing on screen saying so.
+
+**Q7.31's named precondition is reached and closed by this work.** `fromRow` cast
+`String(row["agent"]) as AgentId` with no validation while `isAgentId` guarded the
+HTTP boundary — so the only unchecked door into the union was the one a restart
+walks through. A custom agent would have been a second such cast. All three
+(`agent`, `harness`, `system`) are validated on the way out of SQLite now, and a
+row failing any is **dropped rather than repaired**: there is no honest substitute
+for a harness, and guessing one resumes somebody's conversation on a different
+model.
+
+**Status.** Built.
+
+### Q7.118 — Is assembling an agent a pane inside New session, or a pop-up?
+
+**Decision.** A pop-up of its own, at `/agent/:machineId/:cwd`.
+
+**It shipped inline first, and the argument for that was real**: `NewSession`'s
+own docblock records why the *sign-in* flow was pulled inline — from inside a
+pop-up, navigating is "a pop-up replacing a pop-up", and it discards the folder
+already chosen. The builder has the same exposure.
+
+**What changes the answer is that the folder can be made not to live in component
+state.** `/new/:machineId/:cwd` already had a segment for it — it was seeded from
+there and never written back. `NewSession` now replace-navigates on every folder
+change, so the address is the folder; `upFrom` rebuilds `/new/:machineId/:cwd`
+from the builder's own two segments; and a reload or a shared link lands on the
+same folder, which the inline version never did.
+
+**Three things had to come with it**, and each was a defect in the first attempt:
+
+- **`upFrom` may not answer `under`.** That value carries forward what the *first*
+  pop-up was drawn over, so the ◀ would have closed the whole stack. The same trap
+  `marketUpFrom` needed `origin` in `history.state` for — avoided here because the
+  address holds both halves already.
+- **The new agent needs a way back to a component that is unmounted.**
+  `agentPick.ts`, a module `Map` in `echo.ts`'s shape, **taken** rather than read:
+  a hand-off left in place re-selects the same agent the next time somebody opens
+  New session. A route segment was considered and rejected — it would put a
+  transient hand-off into every New session address, where a reload would
+  re-select for a reason nobody could see.
+- **`GET /agents` un-picked it.** That listing answers a beat after mount and moves
+  the selection to the first available harness — a good default for a cold open,
+  and a clobber for a screen that has just adopted a hand-off. A `touched` ref
+  gates it. Found by driving the round trip in a browser; nothing typed catches it.
+
+**Status.** Built.
+
+### Q7.117 — Why is the login screen called Systems now?
+
+**Decision.** `/settings/machines/:id/agents[/:agent]` became
+`…/systems[/:system]`, and the section heading with it.
+
+**What you sign in to is Anthropic; `claude` is a program that reaches it.** The
+two were indistinguishable while each harness spoke only to its own vendor, and
+the old screen recorded the coincidence rather than the fact. They have one
+consequence now: a single Moonshot key serves `kimi` natively **and** Claude Code
+routed, so filing it under an agent means two copies and two answers to "signed
+in?".
+
+**The wizard is still per harness, and that is not an inconsistency.** A
+device-code login is a *program being run* — `claude auth login`, `codex login
+--device-auth` — and a program belongs to a CLI. `SystemInfo.loginVia` is which
+CLI drives a given system's flow and is `null` for a system no CLI ships for,
+which draws a key box and no wizard. It is the same nullable-capability shape
+`AGENT_LOGIN.logoutArgs` already has for kimi.
+
+**Two asymmetries worth writing down.** A system with a CLI does **not** answer
+"signed in" from `keySet`: whether `claude` is signed in is `GET /agent-auth`'s
+answer, arrived at by running a probe, and `keySet` knows only whether a *pasted*
+key is stored — which for a native system is the weaker of two paths. Saying "not
+signed in" from that field would contradict a working agent. And the **system id
+in the URL is not validated against a list**, where the agent segment it replaces
+was: systems are a table on the daemon, so a machine on a newer build knows some
+this client does not, and validating would make them unreachable from a client
+that is merely older. It is bounded by length instead, and the daemon refuses a
+wrong one by name.
+
+**The old address falls to the machine and is deliberately not redirected**, for
+the reason `/settings/agents` is not: a redirect would have to guess which system
+a harness stood for, which is exactly the conflation this rename ends.
+
+**Status.** Built.
+
+### Q7.119 — The agent strip is the wrong control past about six presets
+
+**Position.** New session picks an agent from one horizontally scrolling row of
+128px tiles — the harnesses this machine has, then every assembled agent, then the
+`+`. That is right for the shape the feature shipped with, which is three harnesses
+and one or two presets, and it is the only control there is however many presets
+exist.
+
+**Where it bites, re-measured at 390px after Q3.510 narrowed the `+`.** The row is
+`w-28` tiles with `gap-2`. (Q3.521 has since moved the `+` inside the track as a
+sticky 44px pill, so the scrollport is the full **358px** and the last 44 of it is
+covered while scrolling — the usable window is the same ~306px and the arithmetic
+below is unchanged.) It was: 390 − 32 of page padding − 44 − 8 leaves a **~306px
+window**. Fifteen tiles is
+15 × 112 + 14 × 8 = **1792px of content** inside it, so **just under six** screens
+of horizontal swiping, with **no count, no search and no ordering beyond `ORDER BY
+created_at, id`** — which is creation order, i.e. the order in which they stop
+being memorable. A tile carries a name truncating at 90px, a harness glyph and a
+subline, so scanning for one is reading truncated names one and a half at a time.
+(It was 238px and seven and a half screens while the `+` was a 112px tile.)
+
+⚠ **The tile was 128px for a day, and what took it back is worth keeping.** A fifth
+agent status, `no sign-in needed`, did not fit 112px, so the width went up and this
+control's range went down — nine swipes instead of seven and a half, for one string.
+Then that badge was deleted outright (Q3.509): an agent with nothing to report draws
+no status. The lesson is the one this entry is about — the strip has no slack, so
+anything that widens a tile is spending range that is already short.
+
+**If it stays undone.** Nothing breaks; the screen degrades continuously and
+silently. Somebody with a dozen presets scrolls for the one they want on every new
+session, and the failure looks like their own disorganisation rather than like a
+control that ran out of range. Nothing on screen says how many there are, so there
+is no moment at which the app admits it.
+
+**What it would take.** Not a bigger strip — which is now literally true, since one
+briefly got bigger for an unrelated reason and cost range rather than buying it,
+and since the one thing that *did* buy range back was making a control smaller
+rather than the row longer (Q3.510). A count is the cheap half — the strip knows
+`presets.length` and says nothing — and past the threshold the honest control is the
+one the model picker already has: a list with `SearchBox` over it, in the pop-up the
+`+` already opens. The threshold is worth measuring rather than guessing: six tiles
+is 712px, which is still over two swipes of the 306px window.
+
+⚠ **And putting the `+` *inside* the strip is not a step towards it but away from
+it** — Q3.510 has the arithmetic: it costs the last of the scroll cue and puts the
+only door to the builder off screen on first run.
+
+**Status.** Not built — deferred at the 2026-08-26 design review
+
+### Q7.120 — A session never names the preset it is running on
+
+**Position.** `SessionSnapshot.customAgent` is on the wire — an id, deliberately not
+a copy of the row (the docblock argues that a snapshot fanned out per client on every
+output token is a copy that goes stale exactly where it would be read) — and
+`grep -rn "\.customAgent" packages/web/src/ui` returns **nothing**. The join key is
+sent, the strip already fetches `GET /custom-agents`, and no screen joins them. A
+session started as *"Claude Code · Kimi K2"* is drawn as `claude`, everywhere.
+
+**Where it bites hardest, and it is not the header.** The exit notice's remedy button
+is `Sign in to {agentLabel(row.snapshot.agent)}` — the **harness**. A routed session
+dies because the *system* has no key, and the button offers to sign in to Claude
+Code, which is already signed in and is not what failed. That button already lands
+one level shallower than it would like — its own comment records that mapping a
+harness to its system is `SYSTEMS[…].nativeHarness`'s answer and lives on the daemon,
+so it goes to the machine's systems *list* rather than guessing a system — and the
+preset id would have answered it without a guess.
+
+**And it compounds with editing.** Q7.116 chose a reference over a copy so that
+editing a preset changes what its sessions come back as — which is the intended
+behaviour and is now reachable (Q3.493). The cost it did not name is that **nothing
+on screen says so**: a sleeping session's model changes when somebody edits the
+preset three taps away, and the only place the two are connected is a column in
+SQLite. Deleting one is the same shape and is at least *asked about* — the confirm
+copy states the consequence in words — while editing one states nothing at all.
+
+**If it stays undone.** The most likely report is "my chat is on the wrong model",
+raised against a session that is behaving exactly as designed, with no way to see
+from the session which preset decided it.
+
+**What it would take.** Two things and they are independent: the session header
+resolving the id against the listing it already has, and the exit notice choosing its
+sentence from the *pairing* rather than from the harness. The first is a join; the
+second needs the system, which means the notice has to know more than
+`snapshot.agent`.
+
+**Status.** Not built — deferred at the 2026-08-26 design review
+
+### Q7.121 — Two identical presets are indistinguishable, on both sides
+
+**Position.** Nothing anywhere refuses or flags a duplicate. `custom_agents` has
+`id TEXT PRIMARY KEY` and no other unique constraint; `readAssembledAgent` bounds the
+name's length and refuses it empty and never compares it to anything;
+`AgentBuilder`'s `Add agent` does not read the listing it has already fetched. So
+three rows with the same name, harness, system and model are three legitimate rows,
+and the strip draws them as three tiles that are identical down to the pixel —
+truncated name, same glyph, same subline from `customAgentSubline`.
+
+**Where it bites.** It is a tap away from happening: the builder is reached from the
+`+`, `defaultAgentName` names a preset after the model it runs, and somebody who
+assembles the same pairing twice gets the same default name twice. Then editing one
+of them is a coin flip, and removing "the extra one" is a coin flip with a
+consequence — the confirm copy is honest about what a removal does to sessions, and
+cannot tell you *which* sessions, because it cannot tell you which row this is.
+
+**If it stays undone.** Not a data-loss bug; a screen that cannot answer "which one
+is this". The worst realistic case is somebody editing the duplicate and concluding
+the edit did not save.
+
+**Why it is not simply a unique constraint.** Two presets differing only in name are
+legitimate and useful, and a uniqueness rule over all four fields would refuse the
+half-finished state a rename passes through. The cheaper and more honest half is on the client: the
+builder can see the listing, so `Add agent` can say *"You already have an agent
+called X"* — a warning rather than a refusal, which is what the daemon should not be
+deciding for a table that is somebody's own scratchpad.
+
+**Status.** Not built — deferred at the 2026-08-26 design review
+
+### Q7.122 — Neither picker has keyboard list navigation, and the control above them does
+
+**Position.** `useListKeys` exists in `bits.tsx` and does the whole job — focus into
+the panel on open, arrow keys down the rows, `revealWithin` to scroll the focused row
+into view, focus restored to the trigger on close, with a documented guard about the
+`body` case. It is used by exactly two components, `Menu` and `Dropdown`, and one of
+them is the provider filter that sits in the **same row** as the model picker's
+search box. So on the agent flow, the little filter menu is fully keyboard-navigable
+and the list of models directly under it — the actual subject of the screen — is a
+plain stack of buttons reached by tabbing through every one of them.
+
+**The harness picker is the same, and shorter, which makes it worse rather than
+better**: three rows that could be arrow-keyed in two presses instead of tabbed
+past.
+
+**And a second question was not answered.** `ChoiceRow` marks the chosen row with
+`aria-pressed`, borrowed from `IconButton`'s `active` idiom. That is the toggle
+semantic — each row independently on or off — where these lists are **single-select**
+and exactly one row is the answer. `role="radiogroup"` with `aria-checked`, or a
+listbox with `aria-selected`, says the thing that is true; `useListKeys` already
+looks for `aria-selected` when it decides which row to focus first, so the two
+questions meet. Neither was decided, and `aria-pressed` shipped because it was the
+idiom already in the file.
+
+**If it stays undone.** The lists remain usable — every row is a real `<button>` and
+tab reaches it — so this is a cost paid entirely by keyboard and screen-reader users,
+which is the category of cost that gets discovered late and by somebody who is not in
+the room.
+
+**What it would take.** `useListKeys` is written against a panel ref and a
+`focusableRows` sweep rather than against a popover, so pointing it at a scroller is
+plausible rather than certain: its effect is keyed on `open` going true and returns
+focus to whatever held it, and these lists are open from first paint with no trigger
+to return to. Taking the `aria-pressed` question first is the right order, because
+the semantics decide what the keys should do.
+
+**Status.** Not built — deferred at the 2026-08-26 design review
+
+### Q7.123 — `slowRoute` is a hand-maintained list in a different package from the routes it is about
+
+**Position.** Which calls get 90 seconds instead of 15 is a predicate in
+`packages/web/src/machine.ts`, matching on verb and path. The routes are registered in
+`src/server.ts`. Nothing connects the two: adding a route that spawns an agent
+compiles, typechecks, passes `daemoncheck`, passes `webcheck`, and goes out on a
+budget it cannot meet.
+
+**Found twice in one review.** `GET /agents/capabilities` shipped under a
+`path === "/agents"` **literal** and inherited nothing from it;
+`POST /custom-agents` and `PATCH /custom-agents/:id` were added with no entry at all.
+Q3.490 records what that costs — the abort is a *transport* failure, so a healthy
+machine is drawn "not reachable right now" across the whole app over a call that is
+very likely still succeeding on the far side. Both misses were found by reading, not
+by a check.
+
+**Why the same defect keeps arriving.** Every entry in the predicate is a comment
+explaining a daemon-side budget — `ASK_TIMEOUT_MS`, `PLUGIN_START_TIMEOUT_MS`, the
+45s agent start, the 120s `worktree add` — so the file is a **transcription of
+constants that live in the other package**, kept in step by whoever remembers. The
+prefix matches are the local mitigation and they only cover namespaces that are
+uniformly expensive; `/custom-agents` is deliberately not one, because two of its
+four verbs are synchronous SQLite.
+
+**If it stays undone.** The third miss is a matter of time, and its symptom is the
+one this repository most dislikes: a failure that reads as somebody's network rather
+than as a bug.
+
+**What it would take, and why none of it is free.** A driver-side sweep is the
+cheapest honest option — enumerate `src/server.ts`'s registrations, and fail any that
+spawns a process and is not in the predicate — but "spawns a process" is not a
+property a regex can read off a route registration, so it would need a marker on the
+daemon side, which is a second hand-maintained list wearing a different hat. Putting
+the budget *on the wire* (the daemon answering how long it intends to take) is the
+version with no second copy, and it is a protocol change with a compatibility story,
+which is `compatibility.md`'s subject rather than this one's. The realistic near-term
+step is the smallest: a comment at each expensive route in `src/server.ts` naming
+`slowRoute`, so the grep exists in the direction somebody actually edits.
+
+**Status.** Not built — deferred at the 2026-08-26 design review
+
+### Q7.124 — Should a pasted secret expire on its own?
+
+**Decision.** No. Both credential sweeps are removed from `prune()`, and a row in
+`agent_credentials` or `system_credentials` now goes when the route that wrote it is
+asked to remove it — `DELETE /agent-auth/:agent`, `DELETE /systems/:system` — or when
+a paste replaces it, and at no other time. This reverses the sweep the
+`agent_credentials` table shipped with.
+
+**How it surfaced.** Not as a bug report. `schema.sql` claimed `system_credentials`
+retention "follows `agent_credentials` exactly — see `prune()`" over a table
+`prune()` never named, and five review passes found it the same way: read the
+sentence, grep for the statement, find nothing. That is a disagreement between a
+comment and the code with two honest repairs — write the statement, or delete the
+claim — and writing the statement was tried first.
+
+**What the sweep actually did, read back.** Both halves had to be true: `updated_at`
+older than a horizon, **and** no sessions left at all. `updated_at` moves only when a
+key is *pasted* — nothing touches it on read, and neither `envFor` nor
+`SqliteSystemCredentialStore.get` writes — so the age half is permanently true of any
+key in real use. What was left binding was `NOT EXISTS (SELECT 1 FROM sessions)`,
+which unpinned sessions reach after seven days. **Eight idle days and a restart, and
+the paste is gone**, with nothing on any screen connecting the two. The horizon was
+also the *session* horizon, so "how long to keep transcripts" and "how long a secret
+may sit unused" were one number by accident.
+
+**The three reasons it carried, and why none survives.** *"This daemon can never be
+told about a revocation"* is true — it makes exactly one control-plane request ever —
+and is not addressed by deleting the local copy: a leaked key is with whoever took it,
+and revocation happens at the vendor. *"The second recoverable secret in this file
+after `identity.tunnel_key`"* argues against itself; there is no `DELETE FROM identity`
+anywhere in `src/`, so that one lives for ever in the same file and lets somebody be
+this machine on the relay. *"A plaintext token outlived the last session"* couples two
+unrelated lifetimes: a pasted key's natural span is "until replaced or removed", which
+is what `~/.claude/.credentials.json`, `~/.codex/auth.json` and `~/.ssh/id_ed25519` all
+answer, none of them self-expiring.
+
+**Tried and taken back out.** A separate thirty-day horizon for credentials, split
+from the session one. It fixed exactly one row of the table — a key pasted recently on
+a machine that then went quiet — and left the row that matters untouched, because a key
+pasted six months ago satisfies any age clause counted from the paste. Removed with the
+rest.
+
+**Considered and not built.** A `last_used_at` column, touched at spawn, with the sweep
+reading it instead. That would make the rule mean what it says — "unused for N days and
+no sessions" — and it is small and additive. It is not built because it makes an honest
+version of a sweep whose benefit had already been argued away; the cost would be paid
+for a property nobody could name.
+
+**What protects a secret here instead.** What protects everything else in this file:
+the 0700 directory and the 0600 file, which is also why the directory is chmodded and
+not only the database, since SQLite writes `-wal` and `-shm` beside it. The same
+posture as the neighbours on disk.
+
+**Driven.** `daemoncheck` asserts the reversal in the state the old sweep was written
+to fire in — every row aged past every horizon and not one session left — and the three
+survival assertions were proven by putting a `DELETE` back into `prune()` and watching
+them go red.
+
+**Status.** Applied, 2026-08-27
+
+### Q7.125 — The fourth agent arrived, and it did not justify a registry
+
+**What this answers.** Q7.31 declined to turn `AgentId` into a registry and named
+its own precondition: *"a fourth agent, to show the pattern is a pattern rather
+than two coincidences."* opencode is that fourth agent (2026-08-27).
+
+**It cost the five edits Q7.31 predicted, and two it did not.** The five:
+`AGENT_IDS`, an `AGENT_LOGIN` row, a `resolveAgent` arm, a `vendoredCli` arm, and
+a `pincheck` entry. The two:
+
+- `packages/web/src/wire.ts`, the hand mirror — still the one seam with no
+  compiler help, and still the one that has to be remembered.
+- `AgentGlyph`, whose docblock claimed for four releases that a missing arm was a
+  **compile error** and was wrong. The function answers `ReactNode`, `undefined`
+  inhabits `ReactNode`, and a `switch` that falls off the end returns exactly
+  that — so a fourth harness would have drawn a blank tile and compiled clean:
+  the failure the comment was written to prevent, undetectable by the thing it
+  named. It now ends in a `never` arm, negative-controlled by deleting a case.
+
+**Decision: still no registry, and the reason has changed.** Q7.31's argument was
+that the cost is empirical rather than structural. That held — everything
+expensive about opencode was a fact about a CLI (Q6.105), and two of them were
+things a plausible reading of the upstream issue tracker got exactly backwards.
+But the *structural* half is now weaker than Q7.31 assumed in one specific way:
+four of the seven edit sites are compiler-enforced, a fifth is now enforced that
+was only claiming to be, and the two that remain are a string list and an npm
+pin. A registry would replace seven small edits with one table and one loader,
+and would not have caught a single thing that was actually wrong.
+
+**What would justify one is unchanged in kind and different in size**: an agent
+this repository does not vendor and cannot measure — `REEMOAT_AGENTS`, an
+operator's own ACP binary. That is a different feature from a tidier union, and
+Q5.85's gate still applies to it.
+
+**Status.** Q7.31's precondition is met and its answer is unchanged. Applied,
+2026-08-27.
+
+### Q7.126 — A plugin adds the agent, and the registry is still not built
+
+**What this answers.** Q7.31 declined to turn `AgentId` into a registry; Q7.125 met
+its precondition and kept the answer, and named the one thing that would change it:
+
+> an agent this repository does not vendor and cannot measure — `REEMOAT_AGENTS`, an
+> operator's own ACP binary. That is a different feature from a tidier union.
+
+That feature is built. It is not `REEMOAT_AGENTS`.
+
+**Why a plugin is the better door, and it is not a matter of taste.** Q7.31's whole
+argument against a registry was that the per-agent cost is *empirical* — which
+environment variable authenticates a CLI, which stream its status probe answers on,
+what its permission payload omits — and that a mechanism letting somebody add an agent
+*without* taking those measurements would produce exactly those failures on their
+machine with nothing to read. That is still true, and it is why a contributed harness
+is **opencode's shape rather than claude's**: no wizard, no sign-out, no status probe,
+a paste box and nothing else. Every field an `AGENT_LOGIN` row carries is a measurement
+nobody but the CLI's author can take, so the feature declines to ask for any of them.
+What is left is what a manifest genuinely knows: a program name, an argv, which
+variables it reads a key from, and whether it is its own model.
+
+**And a plugin brings four things an environment variable does not.** It is *chosen*
+— installed under `machine:admin` by somebody holding the archive. It is *disclosed*
+before anything is sent, with the argv on screen. It is *switched off* with one
+control, and switching it off is a different answer from uninstalling it — `503`
+naming the plugin against `400` naming the request. And it is *bounded*: eight
+harnesses a machine, refused at install, because each is a process on
+`GET /agents/capabilities` and a sweep holds both ask slots while it runs.
+
+**What it cost, against Q7.125's own accounting.** That entry counted seven edit
+sites for a fourth built-in and observed that four were compiler-enforced. Opening
+the union moved the count rather than the kind: `noUncheckedIndexedAccess` turned
+every `SYSTEMS[…]` and `AGENT_LOGIN[…]` read into an error the moment `SystemId` and
+`AgentId` widened, which is twenty-four decisions the compiler *demanded* — and the
+sharpest of them, `pinNativeModel`, would otherwise have been a `TypeError` on the
+resume path, the one path designed never to refuse (Q2.217). Resolvers rather than a
+widened `Record` is what makes each of those a visible `null` arm.
+
+**The one thing that had to be decided rather than derived** is where membership is
+checked. `POST /sessions` and `POST /custom-agents` ask the live catalogue, because
+nothing has been created yet and a refusal is free. `fromRow` and `readCustomAgent`
+ask only the *shape*, because they run at boot — before the plugin host has opened, so
+"is that plugin installed" is not a question that read can answer — and a membership
+test there would delete every session, preset and saved key belonging to a plugin
+somebody switched off an hour ago. That is `custom_agents.harness` (validated) against
+`agent_strip.ref` (never validated), applied to the case that sits between them.
+
+**Decision: still no registry, and now for a third reason.** The first was that the
+cost is empirical (Q7.31). The second was that four of seven edit sites are
+compiler-enforced (Q7.125). The third is that the feature a registry was being asked
+to enable **exists without one**: `AGENT_IDS` and `SYSTEMS` are still the four and the
+seven this repository ships, measured and pinned, and what a machine *offers* is those
+merged with what somebody installed on it. A registry would have made the built-ins
+look like the contributions, which is the opposite of true — this repository can drive
+`hostable` over its own four because it measured them, and can drive it over a
+contributed pair only as a *property*, because there is nothing to transcribe.
+
+**Status.** Q7.125's named condition is spent. Applied.
+
+### Q7.127 — Declined: let a manifest say the harness needs a key
+
+**Question.** Q2.221's record is an observation, kept for ten minutes, cleared five
+ways. A declarative alternative exists: let `HarnessContribution` carry
+`requiresKey: true`, and hide the tile whenever the harness declares credential
+slots and none is stored. No memory, no expiry, no clearing rules.
+
+**Decision. Declined as the mechanism, kept as a named seam.**
+
+It is the more elegant design and it does not fix the machine the defect was
+reported from: the installed plugin declares no such field, so the tile stays until
+its author republishes and every daemon in the fleet updates. It is also *wrong*
+for the case it looks right for — a harness signed in by running its own program on
+the machine has no stored key here and starts perfectly, which is exactly what the
+example plugin's own `authHint` tells somebody to do. Hiding it would be this
+daemon inferring a credential state from the absence of one of two credentials.
+
+What it would cost on top: a new manifest field, a new bound, a new refusal, a
+`protocol.ts` rung, a mirror in `wire.ts` and an edit to the catalogue that
+publishes plugins — for a claim weaker than the one an observation already makes.
+
+The seam is `HarnessContribution` and it stays open. If a plugin author ever wants
+the stronger, earlier claim, that is where it goes — and it would narrow the tile
+*before* a first refusal rather than replacing what happens after one.
+
+**Status.** Declined.

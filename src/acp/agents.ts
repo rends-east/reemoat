@@ -1,12 +1,101 @@
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const AGENT_IDS = ["claude", "kimi", "codex"] as const;
-export type AgentId = (typeof AGENT_IDS)[number];
+/**
+ * The harnesses this repository ships, vendors, pins and measures.
+ *
+ * ⚠ **Still exactly four, and it stays that way — this is not the list of what a
+ * machine offers.** Everything that makes a built-in a built-in is written down
+ * here and nowhere else: a `resolveAgent` arm, an `AGENT_LOGIN` row, a
+ * `vendoredCli` arm, a `pincheck` entry, and a glyph. A machine may also offer
+ * harnesses a plugin added — see {@link HarnessCatalogue} — and those have none of
+ * those things and cannot: `pincheck` pins an adapter version this repository
+ * depends on, and a program somebody named in a manifest is not one it can pin.
+ *
+ * Keeping this array meaning *built-in* is what keeps every sweep written against
+ * it honest. `AGENT_IDS.every((id) => AGENT_LOGIN[id] !== undefined)` is a real
+ * assertion because both halves are this list; re-pointing it at what a machine
+ * currently offers would make that vacuous on the day it mattered.
+ */
+export const AGENT_IDS = ["claude", "kimi", "codex", "opencode"] as const;
 
-export function isAgentId(value: string): value is AgentId {
+/** One of the four. Exhaustive `switch`es narrow to this and keep their `never` arms. */
+export type BuiltinAgentId = (typeof AGENT_IDS)[number];
+
+/**
+ * A harness id, which is a string.
+ *
+ * ⚠ **It was `BuiltinAgentId` and the widening is the feature, so the two rules
+ * that replaced the compiler are worth stating together.** A closed union meant
+ * every door into the set was checked by `tsc`; now exactly two predicates stand
+ * in, and they answer different questions on purpose:
+ *
+ *   - **Membership** — is this a harness this machine offers *right now* — is asked
+ *     where nothing has been created yet (`POST /sessions`, `POST /custom-agents`),
+ *     so a refusal costs nothing and no worktree is made for a harness that cannot
+ *     run. It needs a {@link HarnessCatalogue}.
+ *   - **Shape** — could this ever have been one — is asked where the row *is* the
+ *     memory (`fromRow`, `readCustomAgent`). `isContributedId` in
+ *     `plugins/manifest.ts` is that test, and it needs no catalogue, which is the
+ *     whole point: a plugin switched off for an hour must not delete every
+ *     conversation on its harness.
+ */
+export type AgentId = string;
+
+/** Whether this is one of the four this repository ships. */
+export function isBuiltinAgentId(value: string): value is BuiltinAgentId {
   return (AGENT_IDS as readonly string[]).includes(value);
+}
+
+/** Whether a machine currently offers a harness, and if not, which kind of not. */
+export type CatalogueState = "enabled" | "disabled" | "unknown";
+
+/**
+ * A harness a plugin added to this machine.
+ *
+ * The resolved form of `HarnessContribution` in `plugins/protocol.ts`: local ids
+ * namespaced, the owning plugin carried so a refusal can say whose it is.
+ */
+export interface ContributedHarness {
+  /** Namespaced — `<pluginId>:<localId>`. */
+  id: string;
+  pluginId: string;
+  /** What the plugin calls itself. Drawn where somebody has to be told where this came from. */
+  pluginName: string;
+  /** The label. Never `AgentLaunchConfig.displayName`, which is a log line. */
+  name: string;
+  command: string;
+  args: readonly string[];
+  envNames: readonly string[];
+  routedModelEnv: readonly string[];
+  authHint: string | null;
+}
+
+/**
+ * What a machine offers, as opposed to what this repository ships.
+ *
+ * ⚠ **An interface rather than a module-level table, and read through rather than
+ * indexed.** `tsconfig` sets `noUncheckedIndexedAccess`, so a `Record` over a
+ * literal union indexes totally today and would silently become an index signature
+ * the moment the union widened — turning every `SYSTEMS[id]` and `AGENT_LOGIN[id]`
+ * into a `| undefined` a cast could quietly swallow. Going through a resolver makes
+ * each of those a visible `null` arm with a decided answer, which is the difference
+ * between a `TypeError` on the resume path and a sentence naming the plugin.
+ */
+export interface HarnessCatalogue {
+  /** A harness a plugin added, or `null` for a built-in and for anything unknown. */
+  harness(id: string): ContributedHarness | null;
+  /** Every harness this machine offers: the built-ins in order, then the contributed. */
+  harnessIds(): readonly string[];
+  /**
+   * ⚠ **Three answers, because `unknown` and `disabled` need opposite sentences.**
+   * Unknown is *fix your request*; disabled is *this was correct yesterday and
+   * somebody switched the plugin off* — a `503` naming the plugin and the switch,
+   * never the `400` that tells an operator their own address is wrong.
+   */
+  harnessState(id: string): CatalogueState;
 }
 
 export interface AgentLaunchConfig {
@@ -60,7 +149,7 @@ const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", ".."
  * a list: `CODEX_HOME` has to survive, and a prefix with an exception is a prefix
  * somebody will later "simplify".
  */
-const SESSION_SCOPED_ENV = [
+export const SESSION_SCOPED_ENV = [
   "AI_AGENT",
   "CLAUDECODE",
   "CLAUDE_CODE_ENTRYPOINT",
@@ -100,7 +189,7 @@ const SESSION_SCOPED_ENV = [
  * variable nobody thought of — the same argument the git environment allowlist
  * in `src/git.ts` makes, one level down.
  */
-const DAEMON_ENV_PREFIX = "REEMOAT_";
+export const DAEMON_ENV_PREFIX = "REEMOAT_";
 
 /**
  * Exported because a login is a spawn too.
@@ -161,7 +250,7 @@ export const ULTRACODE_SETTING = "ultracode";
  * agent that has to parse it; absence is not.
  */
 export function sessionMetaFor(
-  agent: AgentId,
+  agent: string,
   flags: { ultracode: boolean },
 ): Record<string, unknown> | undefined {
   // Every other agent, and claude with nothing to ask for. Deliberately not a
@@ -251,10 +340,24 @@ export type LoginStatusProbe = {
  * perfectly and `claude` was not on PATH.
  */
 export const AGENT_LOGIN: Record<
-  AgentId,
+  BuiltinAgentId,
   {
     command: string;
-    args: string[];
+    /**
+     * How this CLI is signed *in*, or `null` where there is nothing to sign in to.
+     *
+     * ⚠ **Nullable for {@link logoutArgs}'s reason and one stronger.** That field
+     * is `null` where a CLI offers no sign-out verb; this is `null` where an agent
+     * needs no sign-in at all. Measured on opencode 1.18.23 against an empty
+     * `XDG_DATA_HOME` with no provider variables of any kind: `session/new`
+     * succeeds and `session/prompt` completes, because its own gateway has an
+     * anonymous free tier. A wizard there would be a button that fixes nothing,
+     * in front of an agent that already works.
+     *
+     * `loginBlockedReason` reads it first, so the client is told *why* rather
+     * than being left to infer it from a disabled control.
+     */
+    args: string[] | null;
     /**
      * Whether this login flow ever reads stdin.
      *
@@ -403,10 +506,97 @@ export const AGENT_LOGIN: Record<
     // the status command above asks the CLI, which knows where its own home is.
     credentialPath: null,
   },
+  opencode: {
+    command: "opencode",
+    /*
+     * ⚠ **`null`: there is nothing to sign in to.** opencode reaches its own
+     * gateway anonymously — measured — and every other provider it knows is one
+     * you hand a key to, which is what `envNames` below is. `auth login` exists
+     * and is an arrow-key provider picker this wizard could not drive anyway, but
+     * that is not why it is absent: a wizard here would be a control that fixes
+     * nothing in front of an agent that already runs.
+     */
+    args: null,
+    // No flow, so nothing reads stdin and no pty is allocated.
+    interactiveStdin: false,
+    /*
+     * `null`, and not for kimi's reason. `auth logout <provider>` exists and is
+     * non-interactive. It is not offered because a *sign-out* button next to no
+     * sign-in button is a control whose whole meaning is the pair — and what it
+     * would remove is a key this daemon did not put there. The paste box has its
+     * own clear, which is the one this product is entitled to offer.
+     */
+    logoutArgs: null,
+    // Two, like claude — and they are two *providers* rather than two forms of one
+    // credential. `OPENCODE_API_KEY` is opencode's own gateway, whose free tier
+    // needs nothing at all; `OPENROUTER_API_KEY` is somebody else's catalogue.
+    // Measured: with the second set, the published list goes from six to 362.
+    envNames: ["OPENROUTER_API_KEY", "OPENCODE_API_KEY"],
+    /*
+     * ⚠ **`null`, and the measurement that argued for a probe is the same one
+     * that rules it out.** `opencode auth list` works and its output was read in
+     * full — stdout, and all four states driven: `0 credentials` with nothing
+     * configured, `1 credentials` for a written `auth.json`, and a separate
+     * `1 environment variable` section for a key in the environment, which is why
+     * a naive `0 credentials` pattern reported a working machine as signed out.
+     *
+     * None of that matters, because **opencode runs with no credential at all.**
+     * Measured 2026-08-27 against an empty `XDG_DATA_HOME` and no provider
+     * variables of any kind: `session/new` succeeds, publishes six OpenCode Zen
+     * models, and `session/prompt` completes with `stopReason: "end_turn"`. Their
+     * free tier is anonymous.
+     *
+     * So `false` is not a fact this probe can produce honestly. `admit` refuses on
+     * `loggedIn === false`, so a probe answering it would have put "not signed in"
+     * in front of an agent that had just answered a prompt, and refused to read
+     * its model list at all — Q7.99's mistake, arriving from the opposite side:
+     * that one read `null` as "no", this one would have manufactured the "no".
+     *
+     * `credentialPath` below answers the half that *is* honest — somebody
+     * configured a provider — and everything else falls to "cannot tell", which is
+     * what `readLoginState` does with a missing file. The 389 ms this saves on
+     * every `GET /agents` is a consequence rather than the reason.
+     */
+    status: null,
+    // No adapter, so no second binary and nothing for a variable to override.
+    // `resolveAgent` and `resolveLoginBinary` resolve the *same* file here, which
+    // `vendoredCli`'s opencode arm is what guarantees.
+    executableEnv: null,
+    /*
+     * Presence proves a provider was configured; absence proves nothing, which is
+     * kimi's shape and is the whole of what is claimed.
+     *
+     * ⚠ **It moves with `XDG_DATA_HOME` — measured, by redirecting it — and that
+     * is survivable here where it would not be for codex.** codex has a status
+     * command to prefer, so a HOME-relative path there would be the *worse* of two
+     * answers; here there is nothing behind it, and a relocated directory reads as
+     * a missing file and falls to `pasted ? true : null`. Never a false "signed
+     * out", which is the only answer that would cost anything.
+     */
+    credentialPath: ".local/share/opencode/auth.json",
+  },
 };
 
+/**
+ * Whether this agent has a sign-in to run at all.
+ *
+ * ⚠ **`args === null` is the whole of the fact and this is the only place it is
+ * read as one.** opencode authenticates nowhere — it runs on OpenCode Zen's free
+ * models the moment it is installed, and a key only widens what it can reach — so
+ * there is no wizard, no sign-out and nothing for a status probe to answer. That
+ * is a property of the *program*, unlike the other three reasons a sign-in cannot
+ * be run here, which are all the host's.
+ *
+ * Extracted because it had been written out inline in three places — the runtime,
+ * the daemon's own driver and `pnpm client` — and a predicate spelled three times
+ * is how one of them comes to disagree.
+ */
+export function hasLoginFlow(agent: BuiltinAgentId): boolean {
+  return AGENT_LOGIN[agent].args !== null;
+}
+
 /** Which environment variables carry a pasted credential for this agent. */
-export function credentialEnvNames(agent: AgentId): readonly string[] {
+export function credentialEnvNames(agent: BuiltinAgentId): readonly string[] {
   return AGENT_LOGIN[agent].envNames;
 }
 
@@ -492,6 +682,40 @@ export function findOnPath(name: string): string | null {
 }
 
 /**
+ * The `opencode` binary this repository vendors, or `null`.
+ *
+ * ⚠ **Exported because two callers must agree on it and nothing else could make
+ * them.** `resolveAgent` picks the program a *session* runs; `LocalRuntime`'s
+ * `vendoredCli` picks the one a *login* drives. For claude and codex those are
+ * honestly different files — an adapter and the CLI underneath it — so each side
+ * resolves its own. opencode ships no adapter: `opencode acp` and
+ * `opencode auth login` are subcommands of one binary, and two independent
+ * lookups that happened to disagree would write credentials for a build no
+ * session runs, reporting success the whole way.
+ *
+ * Resolved through the manifest rather than `node_modules/.bin`, which is
+ * `vendoredCodex`'s shape and is the sturdier of the two: `bin.opencode` points
+ * at a platform executable the package's own postinstall puts there (measured on
+ * 1.18.23 — a 144 MB Mach-O, not a script), so this answers with the real file
+ * rather than a shim whose layout is the package manager's business.
+ */
+export function vendoredOpencode(): string | null {
+  try {
+    const manifestPath = createRequire(import.meta.url).resolve("opencode-ai/package.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+      bin?: string | Record<string, string>;
+    };
+    const entry = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.["opencode"];
+    if (entry === undefined) return null;
+    const resolved = join(dirname(manifestPath), entry);
+    return isExecutable(resolved) ? resolved : null;
+  } catch {
+    // Not installed, or a layout that moved. `findOnPath` is the fallback.
+    return null;
+  }
+}
+
+/**
  * How each agent is started in ACP mode.
  *
  * Claude: `claude-agent-acp` with no arguments — it speaks ACP on stdio
@@ -517,7 +741,21 @@ export function findOnPath(name: string): string | null {
  * measurement in this file that decides daemon behaviour was taken against the
  * vendored pair, because that is what runs.
  */
-export function resolveAgent(id: AgentId): AgentLaunchConfig {
+export function resolveAgent(id: string, machine?: HarnessCatalogue): AgentLaunchConfig {
+  /*
+   * ⚠ **Contributed first, and the order is not arbitrary.** A contributed id
+   * carries a colon and a built-in never does, so the two sets cannot overlap and
+   * either order would resolve the same thing — but asking the catalogue first is
+   * what makes the *refusals* right. A plugin whose harness is gone falls out of
+   * this branch into the throw below, which says so; reaching the `switch` first
+   * would put an unknown id through four arms it can never match on the way to the
+   * same place, and would tempt somebody to add a `default` that reports it as a
+   * missing binary.
+   */
+  const contributed = machine?.harness(id) ?? null;
+  if (contributed !== null) return contributedLaunchConfig(contributed);
+  if (!isBuiltinAgentId(id)) throw new AgentUnavailableError(unknownHarness(id, machine ?? null));
+
   switch (id) {
     case "claude": {
       const vendored = join(PACKAGE_ROOT, "node_modules", ".bin", "claude-agent-acp");
@@ -604,5 +842,94 @@ export function resolveAgent(id: AgentId): AgentLaunchConfig {
           "refuses session/new with -32000 until a real login has been written to disk.",
       };
     }
+    case "opencode": {
+      // No adapter package: `opencode acp` is a subcommand of the same binary a
+      // login drives, so there is one file here where claude and codex have two —
+      // and {@link vendoredOpencode} is that one file, shared with `vendoredCli`.
+      const command = vendoredOpencode() ?? findOnPath("opencode");
+      if (!command) {
+        throw new AgentUnavailableError(
+          "opencode not found. It is a dependency of this repo — run `pnpm install` " +
+            "in the project root (or install it globally with `npm i -g opencode-ai`).",
+        );
+      }
+      return {
+        id,
+        // Capitalised, like `Kimi Code CLI` beside it: this string is drawn as a
+        // row title in the settings agent list, so it is a word rather than the
+        // name of a binary. The binary, the package and the id stay lowercase.
+        displayName: "Opencode CLI",
+        command,
+        args: ["acp"],
+        env: agentEnv(),
+        // ⚠ **This one may not offer a sign-in, because there is none.** opencode
+        // runs with no credential at all — its own gateway has an anonymous free
+        // tier — so a refusal here is never "you are signed out"; it is a model
+        // whose provider wants a key. The remedy is the key box, and naming a
+        // wizard the screen does not draw would send somebody looking for it.
+        authHint:
+          "opencode refused this session. It needs no signing in — with nothing configured it " +
+          "runs on OpenCode Zen's free models — so this is a model whose provider wants a key. " +
+          "Add one under Settings → Machines → this machine (OPENROUTER_API_KEY for OpenRouter's " +
+          "catalogue, OPENCODE_API_KEY for the rest of Zen's), or pick one of the free models.",
+      };
+    }
+  }
+}
+
+/**
+ * How a contributed harness is launched.
+ *
+ * The four built-in arms above each resolve a *different* file — an adapter this
+ * repository vendors, a CLI on PATH, a subcommand of one binary — because each was
+ * a measurement. There is exactly one shape here, and that is the honest
+ * difference: what a manifest names is a program on PATH and nothing else, so
+ * `findOnPath` is the whole of the resolution and `pincheck` has nothing to pin.
+ *
+ * ⚠ **`displayName` carries the program and the label does not.** This string is
+ * the log line and the settings-list row title, where naming the binary is the
+ * point; `ContributedHarness.name` is what a tile draws, and the client's own rule
+ * forbids a label naming a package. Collapsing the two is how `Kimi Code CLI`
+ * would end up on a 96px tile.
+ */
+function contributedLaunchConfig(harness: ContributedHarness): AgentLaunchConfig {
+  const command = findOnPath(harness.command);
+  if (command === null) {
+    throw new AgentUnavailableError(
+      `${harness.name} needs ${harness.command} on this machine's PATH, and it is not there. ` +
+        `It was added by the ${harness.pluginName} plugin, which does not install it.`,
+    );
+  }
+  return {
+    id: harness.id,
+    displayName: `${harness.name} (${harness.command})`,
+    command,
+    args: [...harness.args],
+    env: agentEnv(),
+    authHint:
+      harness.authHint ??
+      `${harness.name} refused this session. It was added by the ${harness.pluginName} plugin, ` +
+        `which did not say what it needs — a key pasted under Settings → Machines → this machine ` +
+        `is the control this daemon has.`,
+  };
+}
+
+/**
+ * What to say about a harness id that resolves to nothing.
+ *
+ * ⚠ **Three sentences, because "not installed" is the wrong one twice.** A row
+ * naming a plugin's harness after the plugin was removed is not a missing `npm i
+ * -g`, and sending somebody to install a package that does not exist is worse than
+ * saying nothing. `harnessState` is what tells the three apart, and it is the only
+ * caller that needs it here.
+ */
+function unknownHarness(id: string, machine: HarnessCatalogue | null): string {
+  const plugin = id.indexOf(":") > 0 ? id.slice(0, id.indexOf(":")) : null;
+  if (plugin === null) return `${id} is not an agent this machine knows about.`;
+  switch (machine?.harnessState(id) ?? "unknown") {
+    case "disabled":
+      return `This agent comes from the ${plugin} plugin, which is switched off on this machine.`;
+    default:
+      return `This agent came from the ${plugin} plugin, which is no longer installed on this machine.`;
   }
 }

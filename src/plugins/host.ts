@@ -7,7 +7,7 @@ import { containedIn, resolved } from "../paths.js";
 import type { ManagedSession, SessionRegistry } from "../registry.js";
 import { probeExists } from "../stall.js";
 import { PluginApi, PluginApiError, type PluginApiOptions } from "./api.js";
-import { parseManifest } from "./manifest.js";
+import { contributedId, parseManifest } from "./manifest.js";
 import { PluginOrigins } from "./origin.js";
 import {
   consentGap,
@@ -250,6 +250,58 @@ export interface PluginHostOptions {
    * variable for it.
    */
   timeouts?: { start?: number; invoke?: number };
+  /**
+   * The registry of what plugins add to this machine, rebuilt on every mutation.
+   *
+   * ⚠ **Handed in rather than owned, because it has to exist before this does.**
+   * `daemon.ts` builds it immediately after `openStores` and hands it to
+   * `LocalRuntime` and `SessionRegistry` too — `restore()` reads `custom_agents`
+   * through a validator that drops what it cannot resolve, and the plugin host
+   * opens *after* restore. What this owns is keeping it current: every install,
+   * update, remove and enable runs under `exclusive()` or `mutating`, so there is
+   * exactly one writer and no ordering to reason about.
+   *
+   * Optional, because `daemoncheck` drives this class without one and every
+   * contribution path then simply contributes nothing.
+   */
+  contributions?: { refresh(installed: readonly InstalledPlugin[]): void };
+  /**
+   * Where a removed plugin's secrets are swept from.
+   *
+   * ⚠ **Optional for the drivers' sake and load-bearing in production.** A
+   * contributed harness's pasted key lands in `agent_credentials` under
+   * `<pluginId>:<id>`, and a contributed provider's key in `system_credentials`
+   * under the same shape. Neither table is touched by `prune()` — by design, since
+   * Q7.124 — so without this an uninstall leaves a third party's API key in a
+   * plaintext column that nothing lists and nothing sweeps. `plugin_data` is
+   * dropped in the same block and for a *weaker* reason than this one: a board's
+   * cards outliving the board are litter, and a key outliving the plugin is a
+   * secret.
+   *
+   * On `remove` only, never on update — which it is by construction, since the
+   * update path never calls `doRemove`. That is what keeps "an update keeps what
+   * the plugin kept" true of a saved key as well as of a board.
+   */
+  secrets?: {
+    /**
+     * Forget every credential belonging to ids under this prefix.
+     *
+     * ⚠ **A prefix rather than a list of ids, and the list was the defect.** The
+     * ids were read off `records.get(id)`, which routes through `parseManifest`
+     * and answers `null` for a row this build cannot re-validate — while
+     * `installed()` deliberately asks `records.has`, so `doRemove` proceeds for
+     * exactly that row and swept nothing. A daemon downgraded under a plugin
+     * declaring a newer `api`, or a release that adds a built-in whose name the
+     * manifest had claimed, both reach it: the row and the data go, and the keys
+     * are left where nothing can ever list or collect them.
+     *
+     * The prefix needs no manifest, so it cannot be defeated by one being
+     * unreadable — and it is strictly more complete: a slot an *earlier* version
+     * of that plugin declared and this one does not is exactly as much of a
+     * secret as the current one.
+     */
+    forgetPrefix(prefix: string): void;
+  };
 }
 
 export class PluginHost {
@@ -338,6 +390,16 @@ export class PluginHost {
     for (const record of options.records.list()) {
       host.live.set(record.id, new LivePlugin(record, host));
     }
+    /*
+     * ⚠ **Synced here as well, even though `daemon.ts` built the catalogue from
+     * this same list before `restore()` — because the *sweep above* can change
+     * it.** `sweepStaleStaging` runs first and a downgrade's `toRecord` drops a
+     * row it cannot validate, so what `records.list()` answers here is not
+     * guaranteed to be what it answered at boot. One line, and it makes "the
+     * catalogue is whatever the records say" true at every point rather than at
+     * most of them.
+     */
+    host.syncContributions();
     /*
      * Watched before anything is started, so a plugin coming up during the boot
      * pass cannot miss the sessions that pass is resuming.
@@ -551,6 +613,23 @@ export class PluginHost {
         if (gap !== null) return refuse("plugin_consent_broken", gap);
       }
 
+      /*
+       * ⚠ **The machine-wide ceiling, here rather than in `parseManifest`,
+       * because only this class knows what else is installed.** `manifest.ts`
+       * bounds one plugin; this bounds the sum, and the number that costs
+       * something is the sum: `GET /agents/capabilities` spawns one process per
+       * harness under `MAX_CONCURRENT_ASKS` of 2, and holds both ask slots for the
+       * whole sweep — so past a point the builder's own screen makes every plugin
+       * `model.complete` on the machine answer `model_busy`.
+       *
+       * ⚠ **Refused rather than silently dropped**, for `ClampedView.substituted`'s
+       * reason: a contribution that installs and never appears is a plugin whose
+       * author cannot tell a bug from a bound. Answered before anything is moved,
+       * so the incumbent is untouched.
+       */
+      const over = this.contributionsOver(manifest);
+      if (over !== null) return refuse("plugin_too_many_contributions", over);
+
       existing = this.live.get(manifest.id) ?? null;
       const replaced = existing?.record.version ?? null;
       const wanted = existing?.record.enabled ?? true;
@@ -643,11 +722,10 @@ export class PluginHost {
         }
         if (existing !== null) {
           this.live.set(existing.record.id, existing);
-          // The budget is returned before it is started again: being stopped so
-          // that somebody else's update could be tried is not one of this
-          // plugin's three failures, and spending one here would mean a person
-          // pushing three broken updates ends up with a working plugin that will
-          // no longer start.
+          // The catalogue is rebuilt from the *records*, which this arm never
+          // wrote to — so what it offers is already the incumbent's set and there
+          // is nothing to put back. Said here rather than left as an absence,
+          // because every other restore in this block is explicit.
           existing.resetBudget();
           void existing.ensureStarted("supervised");
         } else {
@@ -669,8 +747,42 @@ export class PluginHost {
 
       // Before the write that makes the question unanswerable. See its declaration.
       hadRow = this.options.records.has(manifest.id);
+      /*
+       * ⚠ **What an update *stopped* contributing is reported, and deliberately
+       * not refused.** Retiring a harness is a legitimate thing for an author to
+       * do, so this may not stand in the way of it — and `consentGap` cannot see
+       * it either, since that compares one direction on purpose (what was
+       * *gained*) and a lost contribution is not a consent problem.
+       *
+       * But it is not nothing: every preset built on that harness stops
+       * resolving, every session on it refuses at launch, and the credential
+       * sweep in `doRemove` never fires because nothing was removed. Somebody who
+       * loses three presets to an update is owed a sentence saying which update.
+       */
+      if (existing !== null) {
+        const before = new Set(contributedIdsOf(existing.record));
+        for (const id of contributedIdsOf(record)) before.delete(id);
+        if (before.size > 0) {
+          this.options.onWarning?.(
+            `${manifest.id} ${record.version} no longer provides ${[...before].join(", ")}; ` +
+              `anything on this machine that named one will stop resolving`,
+          );
+        }
+      }
       this.options.records.put(record);
       wrote = true;
+      // The catalogue follows the row, and only after it: a refresh over a list
+      // that does not yet hold this plugin would answer the old set to anything
+      // that asked in between.
+      this.syncContributions();
+      /*
+       * ⚠ **Here rather than inside `syncContributions`, which also runs on
+       * remove, disable and boot.** What this moment is, and those are not, is the
+       * machine having just been told about a harness — so it asks whether the
+       * harness starts, instead of leaving the answer to whoever presses Start
+       * first and pays a worktree for it.
+       */
+      this.probeContributed(this.contributedHarnesses(manifest.id));
       if (replaced !== null && replaced !== record.version) {
         await this.discard(join(this.root, manifest.id, replaced));
       }
@@ -792,6 +904,15 @@ export class PluginHost {
            */
           if (!hadRow) this.options.data.dropPlugin(planted.record.id);
         }
+        /*
+         * ⚠ **The catalogue follows the row here too, and it has to be inside
+         * `wrote`.** Everything above restores the durable row; this restores the
+         * thing derived from it. Left out, an install that wrote a row and then
+         * threw would leave the machine offering a harness whose tree the lines
+         * below are about to discard — a tile that starts nothing, until the next
+         * mutation happened to correct it.
+         */
+        this.syncContributions();
       }
       if (published !== null) await this.discard(published);
       /*
@@ -985,6 +1106,127 @@ export class PluginHost {
     }
   }
 
+  /**
+   * Rebuild what this machine offers from what is installed now.
+   *
+   * Called after every write to `records`, all of which happen under `mutating`
+   * or `exclusive()`, so there is one writer and no ordering to reason about.
+   * Reads the store rather than being handed a delta, for `AgentStripPort.replace`'s
+   * reason: the caller always holds the whole list, so a per-plugin patch would
+   * need a second decision about the plugins it did not mention.
+   *
+   * ⚠ **And what the runtime remembered about those harnesses goes with it.** A
+   * plugin switched off and on again, updated, or reinstalled is a harness whose
+   * binary, arguments and environment may all be different — so a refusal measured
+   * against the old one is a fact about something that is not there any more.
+   * Cleared wholesale rather than per plugin for the reason this method reads the
+   * whole store: the delta is exactly what nobody here holds. The availability
+   * cache goes too, because `harnessIds()` has just changed underneath it and its
+   * three seconds would otherwise draw the old machine.
+   */
+  /**
+   * Ask a harness this plugin just added whether it will actually start.
+   *
+   * ⚠ **Because "the daemon does not know until somebody presses Start" is not an
+   * acceptable state for a machine that has just been told about a harness.** The
+   * record of a refused start is written by `Session.start` on ACP's typed
+   * `auth_required` and cleared by it on success, so this needs no interpretation
+   * of its own: it fires the *existing* capability read — a real handshake and a
+   * real `session/new`, the same one the agent builder performs — and whichever
+   * way that goes, the answer is on `GET /agents` before anybody has tapped
+   * anything. That is why nothing here reads the result.
+   *
+   * ⚠ **Detached, and that is the whole reason it can be here at all.** An install
+   * runs under `exclusive()`, and a spawn plus a handshake is seconds per harness —
+   * 627 ms to 2260 ms measured across the four built-ins. Awaited, `POST /plugins`
+   * would hold its answer for the length of somebody else's binary starting up,
+   * and a plugin that never completes its handshake would hold the mutex with it.
+   *
+   * ⚠ **On install, update and enable — never on remove, disable or boot.** The
+   * first three are the moments the machine learned about a harness; the next two
+   * are the moments it stopped offering one, where a spawn is work about something
+   * nobody can reach. Boot is the interesting exclusion: it is tempting, and it
+   * would put N spawns in front of `autoResume`, which is already starting an agent
+   * per interrupted session. What the daemon knew before a restart is deliberately
+   * not carried across one — see `SessionRuntime.noteStartRefusal` — so a machine
+   * that has just come up is honestly ignorant, and one press is what it costs.
+   *
+   * Bounded by what it calls rather than by anything here: `admit` meters every
+   * one of these through `MAX_CONCURRENT_ASKS`, and a manifest may contribute at
+   * most `MAX_PLUGIN_HARNESSES`.
+   */
+  private probeContributed(ids: readonly string[]): void {
+    const ask = this.options.api.ask;
+    if (ask === undefined || ids.length === 0) return;
+    for (const id of ids) {
+      // Re-tested per harness rather than once above the loop: these are detached,
+      // so a shutdown can begin between two of them, and starting an agent this
+      // daemon is about to kill is the same waste the boot resume pass refuses.
+      if (this.shuttingDown) return;
+      /*
+       * Every outcome swallowed, including the refusal this exists to produce.
+       * There is nobody to report it to — no request is waiting — and the refusal
+       * has already been recorded against the harness by the time it is thrown.
+       * `onWarning` would put a line about somebody else's unconfigured CLI into
+       * the daemon's log on every install.
+       */
+      void ask.capabilities(id).catch(() => undefined);
+    }
+  }
+
+  /** The harness ids one installed plugin contributes, namespaced as they are offered. */
+  private contributedHarnesses(id: string): readonly string[] {
+    const record = this.options.records.get(id);
+    return record === null ? [] : record.manifest.contributes.harnesses.map((one) => `${id}:${one.id}`);
+  }
+
+  private syncContributions(): void {
+    this.options.contributions?.refresh(this.options.records.list());
+    this.options.registry.sessionRuntime.forgetStartRefusal();
+    this.options.registry.sessionRuntime.forgetAvailability();
+    /*
+     * ⚠ **The third cache, and the two above could not reach it.** `AgentAskRuns`
+     * holds what each harness last said its models and routing were, behind a
+     * ten-minute TTL that was the *only* thing that ever emptied it — so an install
+     * followed by an update inside that window, or a disable followed by an enable,
+     * cleared the two records above and then served the previous binary's answer
+     * from this one. `probeContributed` below fires a capability read that would
+     * have returned the stale entry without ever spawning, which makes the probe's
+     * whole claim — *"a real handshake and a real `session/new`"* — false on two of
+     * the three occasions it is made for.
+     *
+     * Optional-called because a driver may stand a bare `{ capabilities }` in for
+     * the ask runner; the production wiring in `daemon.ts` always has the method.
+     */
+    this.options.api.ask?.forget?.();
+  }
+
+  /**
+   * Why this manifest would put the machine over its ceiling, or `null`.
+   *
+   * ⚠ **Counts what *would* be installed, which means the incumbent's own
+   * contributions come out first.** Reinstalling a plugin that already provides
+   * two harnesses must not be refused for the two it is replacing — that is the
+   * same class of mistake as clearing a target directory before the new build is
+   * proven, arrived at through arithmetic.
+   */
+  private contributionsOver(manifest: PluginManifest): string | null {
+    let harnesses = manifest.contributes.harnesses.length;
+    let systems = manifest.contributes.systems.length;
+    for (const row of this.options.records.list()) {
+      if (row.id === manifest.id) continue;
+      harnesses += row.manifest.contributes.harnesses.length;
+      systems += row.manifest.contributes.systems.length;
+    }
+    if (harnesses > MAX_CONTRIBUTED_HARNESSES) {
+      return `this machine already has ${MAX_CONTRIBUTED_HARNESSES} agents added by plugins, which is as many as it will run`;
+    }
+    if (systems > MAX_CONTRIBUTED_SYSTEMS) {
+      return `this machine already has ${MAX_CONTRIBUTED_SYSTEMS} providers added by plugins`;
+    }
+    return null;
+  }
+
   private async doRemove(id: string): Promise<boolean> {
     const plugin = this.live.get(id);
     if (plugin !== undefined) {
@@ -1019,6 +1261,28 @@ export class PluginHost {
     // finished, and a board whose cards outlive the board is litter nothing will
     // ever collect.
     this.options.data.dropPlugin(id);
+    /*
+     * ⚠ **And its secrets, which is the same block for a stronger reason.** A
+     * contributed harness's pasted key sits in `agent_credentials` under
+     * `<pluginId>:<id>`, and a contributed provider's in `system_credentials`
+     * under the same shape. Neither table is swept by `prune()` — deliberately,
+     * since Q7.124 — and once the row is gone neither id is listed anywhere, so
+     * the one control that could delete it is not drawn. What is left behind by
+     * skipping this is not litter: it is a third party's API key in a plaintext
+     * column that nothing lists and nothing collects.
+     *
+     * ⚠ **Swept by *prefix*, never by the manifest's own list** — see
+     * `PluginHostOptions.secrets`, where the defect that argument comes from is
+     * written out. The short version is that this method is reachable for a row
+     * whose manifest cannot be read, which is precisely the row whose ids nothing
+     * could enumerate.
+     *
+     * `doRemove` only, never the update path, which never calls this — and that
+     * is what keeps "an update keeps what the plugin kept" true of a saved key as
+     * well as of a board.
+     */
+    this.options.secrets?.forgetPrefix(`${id}:`);
+    this.syncContributions();
     /*
      * ⚠ **The one caller that may not carry on past a failed `rm`.** The row and
      * the data are gone by this line, so answering `true` over a tree that is
@@ -1079,10 +1343,24 @@ export class PluginHost {
     if (plugin === undefined) return null;
     plugin.record.enabled = enabled;
     this.options.records.setEnabled(id, enabled, this.clock());
+    /*
+     * ⚠ **Before the start, and before the stop.** What this changes is whether
+     * the machine *offers* the plugin's harnesses and providers, and switching one
+     * off has to take them off `GET /agents` in the same tick — otherwise there is
+     * a window in which a tile is drawn for a harness `POST /sessions` will refuse.
+     * The reverse matters as much: enabling it lists the harness whether or not
+     * the child comes up, which is right, because "installed and switched on" is
+     * what the listing is about and a start that fails has its own row.
+     */
+    this.syncContributions();
     if (enabled) {
       // Switching it back on is new information, exactly as a restart is for
       // auto-resume, so the budget it exhausted is returned.
       plugin.resetBudget();
+      // And the same information reaches the harness question: a machine that has
+      // just started offering one should not be waiting for somebody to find out
+      // whether it runs. Only on the way *on* — switching off has nothing to ask.
+      this.probeContributed(this.contributedHarnesses(id));
       await plugin.ensureStarted("supervised");
     } else {
       await plugin.stop();
@@ -2561,3 +2839,36 @@ function clip(value: string, max: number): string {
 }
 
 export type { LivePlugin };
+
+
+/**
+ * How many harnesses and providers one *machine* will take from plugins.
+ *
+ * ⚠ **The sum, where `manifest.ts` bounds one plugin — and the sum is the number
+ * that costs something.** `GET /agents/capabilities` spawns one agent process per
+ * harness, fanned with `Promise.all` under `MAX_CONCURRENT_ASKS` of 2. Measured
+ * 2026-08-28, the four built-ins take 2531 ms overlapped (627–2260 ms each), so a
+ * sweep is roughly `(N + 4) / 2 × 1.3 s` and the builder opens it on every visit.
+ * At eight contributed that is twelve harnesses and about eight seconds.
+ *
+ * ⚠ **And the wait is not the whole cost.** A sweep holds *both* ask slots for its
+ * length, while `model.complete` and `model.list` deliberately do not queue —
+ * `MAX_CONCURRENT_ASKS` is a refusal `docs/PLUGINS.md` publishes to plugin authors.
+ * So for as long as anybody has the builder open, every plugin model call on the
+ * machine answers `model_busy`, and a documented refusal becomes indistinguishable
+ * from a broken machine. Redo the arithmetic against the 2531 ms above before
+ * moving either number.
+ *
+ * Providers cost no process at all — they are a table row — so their ceiling is
+ * about a picker somebody has to scroll rather than about a machine.
+ */
+export const MAX_CONTRIBUTED_HARNESSES = 8;
+export const MAX_CONTRIBUTED_SYSTEMS = 24;
+
+/** Every namespaced id one installed plugin owns, harnesses and providers alike. */
+function contributedIdsOf(record: InstalledPlugin): string[] {
+  return [
+    ...record.manifest.contributes.harnesses.map((one) => contributedId(record.id, one.id)),
+    ...record.manifest.contributes.systems.map((one) => contributedId(record.id, one.id)),
+  ];
+}

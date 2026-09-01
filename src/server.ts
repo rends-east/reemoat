@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { open as openFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -11,13 +12,19 @@ import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import type { WSContext } from "hono/ws";
 import type { WebSocket as RawWebSocket } from "ws";
+import { AgentUnavailableError, type AgentId } from "./acp/agents.js";
 import {
-  AGENT_IDS,
-  AgentUnavailableError,
-  credentialEnvNames,
-  isAgentId,
-  type AgentId,
-} from "./acp/agents.js";
+  hostable,
+  routedModelNaming,
+  systemSecretFor,
+  type CustomAgent,
+  type SystemId,
+  type AgentStripEntry,
+  type SystemStores,
+} from "./acp/systems.js";
+import { AgentAskError, type AgentCapabilityReader } from "./agentask.js";
+import type { AgentLoginSupport } from "./runtime/types.js";
+import { isAuthRequiredMessage, SystemRoutingError } from "./session.js";
 import { type AgentCredentialStore, type AgentLoginRuns } from "./agentauth.js";
 import { AUTH_LEEWAY_MS, hasScope, type Principal, type Scope, type TokenVerifier } from "./auth.js";
 import {
@@ -183,6 +190,66 @@ const MAX_PROMPT_CHARS = 100_000;
  * neither has any business being megabytes.
  */
 const MAX_CREDENTIAL_CHARS = 8_192;
+
+/**
+ * Ceiling on a model id in an assembled agent.
+ *
+ * Nothing validates the *content* — for a native pairing the list belongs to a
+ * CLI that updates on its own schedule, for a routed one to somebody else's API
+ * — so a bound on the length is the only thing this route can honestly assert.
+ * Real ids are tens of characters; this is room for an ARN.
+ */
+const MAX_MODEL_CHARS = 256;
+
+/** Ceiling on what somebody calls an agent they assembled. */
+const MAX_AGENT_NAME_CHARS = 80;
+
+/**
+ * Ceiling on how many positions the agent strip may remember.
+ *
+ * Not a limit on how many agents a machine may have. It is the bound on what a
+ * *body* may ask this daemon to write in one statement, which is a different
+ * question and the only one a route can answer.
+ *
+ * ⚠ **It has to sit clear of what the client always sends, and at 200 it did
+ * not.** `custom_agents` is deliberately unbounded and the strip screen writes the
+ * **whole** list on every action — that is what makes the next read stable — so a
+ * machine holding 198 assembled agents would have had every drag, every hide and
+ * every removal answered `400`, leaving that screen permanently read-only with an
+ * error line and no way out of it. A thousand is past any plausible fleet and
+ * still far short of a transaction worth noticing.
+ */
+const MAX_STRIP_ENTRIES = 1_000;
+
+/**
+ * Ceiling on one remembered `ref`.
+ *
+ * The strip stores an id it never validates — that is the whole design, see
+ * `AgentStripEntry` — so this is the only thing standing between an unknown id
+ * and an essay in a row. Real ones are `ca_` plus eight hex, a one-word harness
+ * id, or a harness a plugin added.
+ *
+ * ⚠ **It was 64 and that is one short of the longest legal id.** A contributed
+ * harness is `<pluginId>:<localId>` and `manifest.ts` bounds each half at 32, so
+ * the longest is 65 — which this route would have refused with `400 bad_request`,
+ * on the one write the whole strip screen makes, leaving it permanently unable to
+ * save an order. The number is not derived from the manifest's bound because that
+ * bound is somebody else's subject; what this is, is comfortably past every id
+ * shape that exists.
+ */
+const MAX_STRIP_REF_CHARS = 96;
+
+/**
+ * How long a write route may spend asking a harness what it accepts.
+ *
+ * ⚠ **Under the client's own budget on purpose.** `packages/web/src/machine.ts`
+ * gives `POST`/`PATCH /custom-agents` `SLOW_ROUTE_TIMEOUT_MS`, 90s; `agentask.ts`
+ * would let one of these run for `ASK_TIMEOUT_MS`, 120s. A handler outliving its
+ * caller on a route that *creates* a row is how a retry makes a duplicate preset,
+ * and `custom_agents` has no uniqueness constraint to catch one. Refusing at 60s
+ * leaves room for the answer and for the refusal to get back.
+ */
+const CAPABILITY_READ_BUDGET_MS = 60_000;
 /** A single path segment. Generous next to any filesystem's own limit. */
 const MAX_DIR_NAME_CHARS = 255;
 /** A whole path. `PATH_MAX` is 4096 on Linux and 1024 on macOS; this is neither
@@ -288,6 +355,29 @@ export interface ServerOptions {
    */
   credentials?: AgentCredentialStore;
   /**
+   * Where a system's key is kept, and where assembled agents live.
+   *
+   * One option rather than two because the two are one screen and one absence:
+   * a daemon with no database can neither hold a key nor hold a preset, and
+   * splitting them would let half the feature answer 503 while the other half
+   * looked live. Absent, every route below answers `503 systems_unavailable`
+   * **except `GET /systems`**, whose table is compiled in rather than stored:
+   * it answers honestly with `keySet: false` everywhere rather than refusing,
+   * and `daemoncheck` skips it by name in the no-store sweep for that reason.
+   * A client on a store-less daemon therefore sees a 200 here beside a 503
+   * from `GET /custom-agents`, which is the pair the New session strip reads.
+   */
+  systems?: SystemStores;
+  /**
+   * Where a sessionless agent question runs, or nothing.
+   *
+   * Needed by `GET /agents/capabilities`, which spawns an agent to read what it
+   * offers. Absent — every offline driver — that route answers 503 and the
+   * screen that assembles an agent says the machine cannot be asked, rather than
+   * drawing an empty picker that looks like an answer.
+   */
+  asks?: AgentCapabilityReader;
+  /**
    * Interactive agent logins in progress.
    *
    * Optional for the same reason. Note what it is not: this is only the run
@@ -332,6 +422,8 @@ export interface AppBundle {
 export function createApp(options: ServerOptions): AppBundle {
   const { registry, verifier, instanceId, startedAt } = options;
   const credentials = options.credentials;
+  const systems = options.systems ?? null;
+  const asks = options.asks ?? null;
   const logins = options.logins ?? null;
   const uploads = options.uploads ?? null;
   const roots = options.roots ?? [homedir()];
@@ -610,6 +702,19 @@ export function createApp(options: ServerOptions): AppBundle {
   const admin = requireScope("machine:admin");
 
   /**
+   * What this machine offers, read at every request rather than captured.
+   *
+   * ⚠ **A thunk for `elicitationAllowed`'s reason and one of its own.** `createApp`
+   * runs once, at boot, and `PluginHost` replaces the registry's catalogue on every
+   * install, update, remove and enable — so a value captured here would go on
+   * refusing a harness that had been installed twenty minutes ago, over a screen
+   * that was already offering it. `registry.machineCatalogue` is the one copy.
+   */
+  const machineOf = () => registry.machineCatalogue;
+  /** Whether this machine offers this harness right now. Never a shape test. */
+  const offeredHarness = (id: string): boolean => machineOf().harnessState(id) === "enabled";
+
+  /**
    * Whether an import is already unpacking. See `POST /fs/import`.
    *
    * Per app rather than per module, so two daemons in one driver process do not
@@ -765,9 +870,850 @@ export function createApp(options: ServerOptions): AppBundle {
    * else can — whether the agent is signed *in*, which used to be discovered at
    * the first prompt with a `502` after a worktree had already been made.
    */
+  /**
+   * Whether *this* agent's login can be driven here, in one place for both routes.
+   *
+   * ⚠ **It is on `GET /agents` as well as `GET /agent-auth`, and that is the whole
+   * of what an agent needing no sign-in cost.** The screens that pick an agent read
+   * the cheap route; the one that configures a credential reads the expensive one.
+   * With the fact on only the second of them, the New Session tile had nothing to
+   * say about opencode but "state unknown" — a sentence about a probe that failed,
+   * under an agent that runs perfectly — and so it grew its own four-state
+   * vocabulary and said the wrong thing in it for a release. The cost is four
+   * `findOnPath` calls on a route that already spawns a CLI per agent.
+   *
+   * ⚠ **`supported` and `blocked` are one answer written twice and must not drift**
+   * — `AgentLoginSupport.supported` is documented as `blocked === null` and nothing
+   * else. The daemon-wide half (`logins === null`: there is nowhere to record a
+   * run, which is a fact about this process rather than about the agent or the
+   * platform) is folded in as `no_script`, the closest of the existing reasons,
+   * rather than by inventing a fourth code the client would have to be taught.
+   *
+   * ⚠ **It is folded in *underneath* the agent's own reason, and the order is
+   * load-bearing.** This read `logins === null ? "no_script" : support.blocked`,
+   * which overwrote `no_flow` — the one reason that is not a limitation — with an
+   * apology about the host, on a daemon with no login store. That is precisely the
+   * inversion `loginBlockedReason` puts `no_flow` first to prevent, reintroduced
+   * one layer up, where nothing was looking.
+   */
+  const loginSupportOf = (agent: AgentId): AgentLoginSupport => {
+    const support = registry.sessionRuntime.loginSupport(agent);
+    const blocked = support.blocked ?? (logins === null ? "no_script" : null);
+    return {
+      supported: blocked === null,
+      blocked,
+      needsInput: support.needsInput,
+      canSignOut: support.canSignOut,
+    };
+  };
+
   app.get("/agents", read, async (c) =>
-    c.json({ agents: await registry.sessionRuntime.availability() }),
+    c.json({
+      agents: (await registry.sessionRuntime.availability()).map((agent) => ({
+        ...agent,
+        login: loginSupportOf(agent.id),
+      })),
+    }),
   );
+
+  /* ---------------------------------------------------------------- *
+   * Systems, and the agents assembled out of them
+   *
+   * A *system* is who serves a model and who you sign in to; a *harness* is the
+   * CLI that runs the loop. They were the same thing while each of the three
+   * agents spoke only to its own vendor, and `acp/systems.ts` is where they come
+   * apart.
+   *
+   * ⚠ **Nothing here accepts a URL, a header name or a variable name.** A request
+   * names a `SystemId` and a table resolves it — the same property
+   * `AGENT_LOGIN` claims about the program a login runs, and for the same reason:
+   * this daemon is reachable from the internet through the relay, and a caller
+   * able to name an endpoint could point somebody's key at a host of its own.
+   *
+   * ⚠ **And the table is now assembled rather than compiled in, which is a real
+   * change to that property and is stated rather than glossed.** A base URL still
+   * never arrives on a *request*. It arrives in a `plugin.json`, inside an archive
+   * fetched from one hardcoded host at a full 40-hex commit, after somebody read
+   * the origin on a consent screen and pressed a named button about it — and it is
+   * then fixed for the life of that install. Every link in that chain already
+   * existed. What is no longer true is that the set of hosts this daemon can be
+   * pointed at is a compile-time constant of this repository; `agent-systems.md`
+   * carries the argument in full.
+   * ---------------------------------------------------------------- */
+
+  const systemIdParam = (c: Context<AppEnv>): SystemId | null => {
+    const value = c.req.param("system") ?? "";
+    return registry.machineCatalogue.systemState(value) === "enabled" ? value : null;
+  };
+
+  /**
+   * What a path parameter naming a system this machine does not offer earns.
+   *
+   * {@link noSuchHarness}'s rule, one table over: a provider a plugin added and
+   * somebody switched off is a `503` naming the switch, never a `400` naming the
+   * caller. Reached only where `systemIdParam` already answered `null`.
+   */
+  const noSuchSystem = (c: Context<AppEnv>): Response =>
+    registry.machineCatalogue.systemState(c.req.param("system") ?? "") === "disabled"
+      ? jsonError(
+          c,
+          503,
+          "system_unavailable",
+          "this provider comes from a plugin that is switched off on this machine",
+        )
+      : jsonError(c, 400, "invalid_system", "unknown system");
+
+  /**
+   * Every system this daemon knows, and whether a key is saved for each.
+   *
+   * ⚠ **Cheap on purpose — it spawns nothing.** The picker that draws a strip of
+   * agents reads this on every open, and the question "which systems are there"
+   * is answered by a table. What *does* cost a process is
+   * `GET /agents/capabilities` below, and keeping them apart is what stops the
+   * New session sheet paying for a screen nobody opened.
+   *
+   * The secret is never in this answer and there is no route that returns one.
+   */
+  app.get("/systems", read, (c) => {
+    const machine = registry.machineCatalogue;
+    const saved = new Map((systems?.credentials.list() ?? []).map((one) => [one.system, one]));
+    return c.json({
+      /*
+       * ⚠ **The built-ins in `SYSTEM_IDS` order, then whatever plugins added, and
+       * a *disabled* plugin's provider is not here at all.** This array is the
+       * reading order: `groupModels` groups by first appearance rather than by
+       * sorting and `readyFirst` orders each of its two halves by position, so
+       * contributed rows appearing *after* every built-in is a group appearing
+       * rather than a group moving under somebody's thumb. `Contributions` sorts
+       * by plugin id so the order does not depend on what was installed when.
+       */
+      systems: machine.systemIds().flatMap((id) => {
+        const spec = machine.system(id);
+        // Unreachable — `systemIds()` is where these ids came from — and answered
+        // rather than asserted, because the alternative is a `TypeError` on a
+        // polled route to satisfy a claim the type system already makes.
+        if (spec === null) return [];
+        const held = saved.get(id);
+        return [{
+          id,
+          displayName: spec.displayName,
+          apiType: spec.apiType,
+          /*
+           * Whether anything can be *pointed* at it, said outright rather than
+           * inferred from the model list being non-empty — which is what the
+           * client did, and which conflates "no endpoint to route to" with "no
+           * models written down yet".
+           */
+          routable: spec.baseUrl !== null,
+          nativeHarness: spec.nativeHarness,
+          loginVia: spec.loginVia,
+          // Empty for a natively-reached system, where the *agent* publishes the
+          // list. Not a gap — see `SystemConfig.models`.
+          models: spec.models,
+          /*
+           * The prefix the native harness puts on a model id, or `null`. Sent
+           * because the client reads *two* lists for this system — the endpoint's
+           * own catalogue and whatever the native harness published — and without
+           * it the same model appears twice under one heading, once per spelling.
+           * A prefix is not an endpoint, a header name or a variable name, so the
+           * rule this section opens with is untouched.
+           */
+          nativeModelPrefix: spec.nativeModelPrefix,
+          keyEnv: spec.keyEnv,
+          /*
+           * ⚠ **The *effective* answer, off the same function the start reads.**
+           * A system whose native harness already holds its key needs no second
+           * one — `systemSecretFor` says so, and this asking the store directly is
+           * how the picker came to offer a routed pairing that `applySystem` then
+           * refused, over a machine that plainly had a key saved.
+           */
+          keySet:
+            systemSecretFor(
+              id,
+              systems?.credentials.get(id) ?? null,
+              (agent: AgentId) => credentials?.envFor(agent) ?? {},
+              /*
+               * ⚠ **The catalogue, and leaving it off is the same defect Q3.485
+               * records arriving through a new door.** `systemSecretFor` is one
+               * function precisely so that this answer and the one `applySystem`
+               * reads at the start cannot disagree — and it resolves the row
+               * through whatever catalogue it is handed. Defaulted, it would answer
+               * `null` for every provider a plugin added, so a machine holding the
+               * key on that provider's own harness would draw "No <provider> key on
+               * this machine" under models the start would run perfectly.
+               */
+              machine,
+            ) !== null,
+          /*
+           * Only ever the *system* row's own timestamp, so `null` beside a
+           * `keySet` of `true` is the client's way of reading "this one is
+           * borrowed" — which is what stops the screen offering a Clear for a
+           * secret that is not stored here.
+           */
+          keyUpdatedAt: held?.updatedAt ?? null,
+          /*
+           * Which plugin added this, or absent for a row this repository ships.
+           *
+           * Sent so the settings screen can say where a provider came from and so
+           * a refusal can name the plugin rather than the id. It is a *label*
+           * beside the row and nothing branches on it — the same standing
+           * `DAEMON_VERSION` has.
+           */
+          ...(spec.contributedBy === undefined ? {} : { contributedBy: spec.contributedBy }),
+        }];
+      }),
+    });
+  });
+
+  app.put("/systems/:system", write, async (c) => {
+    if (systems === null) {
+      return jsonError(c, 503, "systems_unavailable", "this daemon has no durable store for systems");
+    }
+    const system = systemIdParam(c);
+    if (system === null) return noSuchSystem(c);
+    const body = await readJsonObject(c);
+    const token = body?.["token"];
+    if (typeof token !== "string" || token.trim().length === 0) {
+      return jsonError(c, 400, "bad_request", "token is required and must be non-empty");
+    }
+    // The same bound a pasted agent credential gets, and deliberately the same
+    // constant: what is being pasted is the same *kind* of thing, and two limits
+    // for one act is two numbers to keep in step.
+    if (token.length > MAX_CREDENTIAL_CHARS) {
+      return jsonError(c, 400, "bad_request", `token exceeds ${MAX_CREDENTIAL_CHARS} characters`);
+    }
+    systems.credentials.save(system, token.trim());
+    /*
+     * ⚠ **No `forgetAvailability`, and no restart sweep — unlike the agent
+     * credential routes one section down, which do both.**
+     *
+     * Those two exist because an agent credential is injected at *spawn*, so a
+     * token saved under a running agent reaches it never and the badge would
+     * turn green over a chat still failing to authenticate. A system key is not
+     * in any environment: it is handed to `providers/set` during a launch, so a
+     * session started after this save picks it up with nothing to invalidate,
+     * and one already running was routed with the key it was given. There is no
+     * stale cache here to drop.
+     */
+    return c.json({ saved: true, system });
+  });
+
+  app.delete("/systems/:system", write, (c) => {
+    if (systems === null) {
+      return jsonError(c, 503, "systems_unavailable", "this daemon has no durable store for systems");
+    }
+    /*
+     * ⚠ **Removed before it is validated, which `DELETE /custom-agents/:id` below
+     * already argues at length and this route did the other way round.**
+     * `SqliteSystemCredentialStore.list` drops a row naming a system this build
+     * cannot resolve — a key written by a newer daemon, read after a downgrade —
+     * so gating the delete on `isSystemId` made exactly those rows undeletable:
+     * unlistable, unreadable, and — since Q7.124 removed the sweep — unswept for
+     * ever, which is what makes the ordering here load-bearing rather than tidy. A
+     * plaintext third-party key with no code path able to end it is the one
+     * outcome worth bending the input rule for, and the id never reaches anything
+     * but a parameterized `DELETE`.
+     *
+     * `removed` is what the *listing* could see, so a caller still learns that it
+     * named something this build does not know — the same honest-but-narrow answer
+     * the preset route gives, and the same reason: a `404` here would break the
+     * replay this verb is whitelisted for.
+     */
+    const named = c.req.param("system") ?? "";
+    const system = systemIdParam(c);
+    systems.credentials.remove(named as SystemId);
+    // Presets naming this system are deliberately left alone. A key can be
+    // replaced in the next minute, and deleting somebody's named agents because
+    // they rotated a token would be this daemon destroying their work to keep a
+    // list tidy. Starting one without a key refuses by name, before a worktree.
+    return c.json({ removed: system !== null, system: named });
+  });
+
+  /**
+   * What each harness offers, and what each will let us point it at.
+   *
+   * ⚠ **This starts an agent per harness.** No prompt is sent, so no quota is
+   * spent, but it is a subprocess plus an ACP handshake — which is why it is a
+   * route of its own rather than a field on `GET /agents`, and why only the
+   * screen that assembles an agent calls it. `AgentAskRuns` bounds and caches
+   * it: ten minutes, two at a time for the whole daemon.
+   *
+   * Per agent failures are answered rather than thrown: one harness that is not
+   * installed must not take down a picker that could still offer the other two.
+   */
+  app.get("/agents/capabilities", read, async (c) => {
+    if (asks === null) {
+      return jsonError(c, 503, "model_unavailable", "this daemon cannot read agent capabilities");
+    }
+    /*
+     * ⚠ **Asked all at once, and the bound is kept by the queue rather than by
+     * the order.**
+     *
+     * This was a serial loop, and a `Promise.all` before that. The `Promise.all`
+     * was measured wrong: `MAX_CONCURRENT_ASKS` is 2 for the whole daemon and
+     * `admit` **threw** when full, so the *third* harness always lost the race and
+     * `GET /agents/capabilities` on a cold cache answered "codex: this machine is
+     * already running 2 model requests" every time — codex permanently greyed out
+     * in the builder with a sentence about load that had nothing to do with it.
+     * Serial was the workaround, and it could not trip the bound because it never
+     * approached it.
+     *
+     * ⚠ **What it cost was measured too, and it is not "a second or two".** Driven
+     * against the real harnesses with the real saved credentials, 2026-08-28:
+     * claude 1162 ms, kimi 627 ms, codex 2260 ms, opencode 1237 ms — **5286 ms**
+     * serially, against **2531 ms** with all four overlapped, which is codex's own
+     * start-up and nothing else. Per-harness cost is the same either way; there is
+     * no contention to pay for.
+     *
+     * The fix is in `admit`, not here: the capability path **queues** for a slot
+     * instead of being refused one, so the sweep cannot lose a race against a
+     * bound it is itself holding. The cap is unchanged and still 2 — this is four
+     * requests metered through it rather than four spawns at once.
+     */
+    /*
+     * ⚠ **What this machine offers, not `AGENT_IDS`** — the four this repository
+     * ships plus whatever plugins added, and a *disabled* plugin's harness is not
+     * in it. The bound on how long the sweep can get is
+     * `MAX_CONTRIBUTED_HARNESSES`, refused at install rather than trimmed here:
+     * a partial read would need a third wire state, because an empty
+     * `{models: [], routing: null, error: null}` is indistinguishable from an
+     * agent that answered nothing — which `hostable` reads as a real refusal.
+     */
+    const machine = machineOf();
+    /**
+     * Whether this harness can be told which model to run on somebody else's
+     * system.
+     *
+     * ⚠ **Sent because the client cannot work it out and had been guessing by
+     * omission.** `hostable` has four arms and the browser's mirror could only
+     * express three: `ROUTED_MODEL_ENV` is a table in `src/`, and the client had a
+     * paragraph saying nothing on the wire stood for it. So the picker offered a
+     * pairing `POST /custom-agents` then refused — harmless while the one harness
+     * that could be routed was also the only one with an arm, and not harmless the
+     * moment a plugin contributes a harness that names no model variable.
+     *
+     * On `routing` rather than beside it, so `hostable`'s signature — and every
+     * fixture built on it — is untouched; and **absent means `true`** on that side,
+     * which is safe for the one reason that matters: a daemon too old to send it
+     * has no plugin catalogue, so it has no harness this could be false for.
+     */
+    const pinsModel = (id: string): boolean => routedModelNaming(id, machine) !== null;
+    const entries = await Promise.all(
+      machine.harnessIds().map(async (id): Promise<readonly [string, unknown]> => {
+      try {
+        /*
+         * ⚠ **The caller's signal, and it protects less than it did — said here
+         * rather than left reading as though it still did.** When this was a
+         * serial loop the signal stopped the harnesses the loop had not reached
+         * yet. Fanned out, all four run their one `stopIfGone` in the same tick,
+         * so what it can still refuse is only a spawn that has not begun *at
+         * that instant*; a sweep abandoned a moment later runs its handshakes to
+         * completion.
+         *
+         * That is bounded and it is not a leak: no prompt is sent and no quota is
+         * spent, `SLOT_WAIT_MS` bounds any queued member, and the answers land in
+         * the ten-minute cache — so the `GET` the transport replays is served from
+         * it rather than paying for the spawn a second time, which is strictly
+         * better than the serial loop, whose abandoned tail was neither spawned
+         * nor cached.
+         */
+        const answer = await asks.capabilities(id, c.req.raw.signal, true);
+        return [
+          id,
+          {
+            models: answer.models,
+            routing: answer.routing === null ? null : { ...answer.routing, pinsModel: pinsModel(id) },
+            error: null,
+          },
+        ] as const;
+      } catch (error) {
+        // Per agent, never thrown: one harness that is not installed must not
+        // take down a picker that could still offer the other three.
+        return [
+          id,
+          { models: [], routing: null, error: error instanceof Error ? error.message : String(error) },
+        ] as const;
+      }
+      }),
+    );
+    return c.json({ agents: Object.fromEntries(entries) });
+  });
+
+  app.get("/custom-agents", read, (c) => {
+    if (systems === null) {
+      return jsonError(c, 503, "systems_unavailable", "this daemon has no durable store for systems");
+    }
+    return c.json({ customAgents: systems.customAgents.list() });
+  });
+
+  /**
+   * The four fields somebody chose, checked, or the refusal to hand straight back.
+   *
+   * ⚠ **One function because two routes decide the same predicate.** Creating a
+   * preset and editing one differ only in what happens to the answer — one mints
+   * an id, the other keeps the stored row's — and every check before that point
+   * is the same question asked of the same body. Written out twice they drift the
+   * first time one of the bounds moves, and the drift is silent in the direction
+   * that matters: an edit that accepts what a create refuses puts the unstartable
+   * row into the store by the back door. `requestedPath` above was merged out of
+   * two copies for exactly this, and the copies there had already been confirmed
+   * identical rather than assumed to be.
+   *
+   * ⚠ **All four are required on both paths: an edit is a replace, not a merge.**
+   * A subset body is the friendlier-looking shape and it is the one that can be
+   * wrong. The pairing is a fact about the *row*, so it would have to be weighed
+   * against the merge of body and stored row — and a handler that weighs it
+   * against the body alone accepts `{ "system": "moonshot" }` on a codex preset,
+   * refusing at creation and saving at edit, which is the failure this daemon
+   * already refuses `POST` to have. With nothing to merge there is nothing to get
+   * that wrong. It costs the caller nothing either: the edit screen is the
+   * assembly screen with a stored row loaded into it, so it holds all four before
+   * anybody touches anything.
+   *
+   * `Omit<CustomAgent, "id" | "createdAt">` rather than a shape of its own: those
+   * two are precisely the fields the wire may not name, and saying it in the type
+   * means a sixth field added to `CustomAgent` fails to compile here instead of
+   * being quietly dropped by whichever route was not updated.
+   *
+   * ⚠ **What this predicate weighs is the *row*, and the sessions already
+   * pointing at it are not in it.** "An edit cannot put an unstartable row into
+   * the store" is the claim, and it is the whole claim: `PATCH` can still move
+   * `harness` out from under a live session, whose `sessions.agent` column does
+   * not move with it, and that is answered by demoting the session rather than by
+   * refusing the edit — see the `PATCH` docblock below and
+   * `ManagedSession.assembled` for where it lands. Reading this as "no edit can
+   * leave anything broken" is the reading that stopped being true.
+   */
+  const readAssembledAgent = async (
+    c: Context<AppEnv>,
+  ): Promise<Omit<CustomAgent, "id" | "createdAt"> | Response> => {
+    const body = await readJsonObject(c);
+    /*
+     * ⚠ **The list is no longer written into the sentence, and that is a bound
+     * rather than a style choice.** It was `one of ${AGENT_IDS.join(", ")}` — four
+     * short words — and a machine may now offer any number of harnesses under
+     * names a manifest chose, so the sentence grew without limit and landed on a
+     * phone. What a caller needs is which of the two things is wrong; `offers`
+     * carries the list in the error's own detail, where it is not prose.
+     */
+    /*
+     * ⚠ **Two states, not one, and `offeredHarness` is the helper that erases the
+     * difference.** `harnessState` and `systemState` are three-valued because
+     * *unknown* and *disabled* need opposite sentences — the interface's own
+     * docblock states it, and `POST /sessions` splits them. Collapsing both into
+     * `400` here is reachable from a screen rather than theoretical:
+     * `readCustomAgent` validates a stored preset by *shape*, so one naming a
+     * contributed harness stays in `GET /custom-agents` after its plugin is
+     * switched off — the edit screen loads it, and a pure rename came back blaming
+     * the caller for a machine state one toggle fixes.
+     */
+    const harness = body?.["harness"];
+    if (typeof harness !== "string" || machineOf().harnessState(harness) === "unknown") {
+      return jsonError(c, 400, "invalid_agent", "harness must be one this machine offers", {
+        offers: machineOf().harnessIds(),
+      });
+    }
+    if (!offeredHarness(harness)) {
+      return jsonError(
+        c,
+        503,
+        "harness_unavailable",
+        "this agent comes from a plugin that is switched off on this machine",
+      );
+    }
+    const system = body?.["system"];
+    if (typeof system !== "string" || machineOf().systemState(system) === "unknown") {
+      return jsonError(c, 400, "invalid_system", "system must be one this machine offers", {
+        offers: machineOf().systemIds(),
+      });
+    }
+    if (machineOf().systemState(system) !== "enabled") {
+      return jsonError(
+        c,
+        503,
+        "system_unavailable",
+        "this provider comes from a plugin that is switched off on this machine",
+      );
+    }
+    const model = body?.["model"];
+    if (typeof model !== "string" || model.trim().length === 0) {
+      return jsonError(c, 400, "bad_request", "model is required and must be non-empty");
+    }
+    if (model.length > MAX_MODEL_CHARS) {
+      return jsonError(c, 400, "bad_request", `model exceeds ${MAX_MODEL_CHARS} characters`);
+    }
+    const name = body?.["name"];
+    if (typeof name !== "string" || name.trim().length === 0) {
+      return jsonError(c, 400, "bad_request", "name is required and must be non-empty");
+    }
+    if (name.length > MAX_AGENT_NAME_CHARS) {
+      return jsonError(c, 400, "bad_request", `name exceeds ${MAX_AGENT_NAME_CHARS} characters`);
+    }
+    /*
+     * ⚠ **The pairing is refused here, not only in the picker.**
+     *
+     * The client greys out an impossible combination, and that is a courtesy
+     * rather than the gate: these routes are reachable from the internet and a
+     * saved preset that cannot start is a row whose only button answers 502
+     * every time it is pressed, days after anybody could connect the two. That
+     * is as true of an edit as of a create — more so, since an edit can take a
+     * row that started fine yesterday and leave it in that state.
+     *
+     * ⚠ **And the routing half is read from the agent rather than assumed.**
+     * `hostable` needs to know which protocols this harness accepts, which only
+     * the harness can say — so this spawns one, through the same cached, bounded
+     * path `GET /agents/capabilities` uses. `null` from a failed read is passed
+     * through as "cannot be routed", which refuses a cross-system preset and
+     * leaves a native one alone.
+     */
+    /*
+     * ⚠ **A machine that is busy is not a pairing that is impossible, and this
+     * folded the two.** The rejection arm was `() => null`, so `model_busy` from
+     * the two-slot bound — or a spawn timeout, or a shutdown — became
+     * `routing: null`, which `hostable` turns into "This agent only runs its own
+     * models." That is a false statement about `claude`, delivered as a `400` on
+     * the screen the design calls the gate, with no retry offered. Two plugin
+     * model calls in flight were enough to produce it.
+     *
+     * `null` is now reserved for a harness that *answered* and answered nothing,
+     * which is the state `hostable` was written to read. Anything else is this
+     * daemon's own condition and answers `503`, which is retryable and says so.
+     *
+     * ⚠ **Bounded below the client's budget.** `ASK_TIMEOUT_MS` is 120s and the
+     * client's `SLOW_ROUTE_TIMEOUT_MS` is 90s, so a slow cold read let the phone
+     * abort while this handler went on to write the row — and `POST` mints a fresh
+     * id, so the obvious retry made a second preset with no uniqueness constraint
+     * to catch it. Refusing first is the honest half of that pair.
+     */
+    let routing: Awaited<ReturnType<AgentCapabilityReader["capabilities"]>>["routing"] = null;
+    if (asks !== null) {
+      try {
+        routing = (await asks.capabilities(harness, AbortSignal.timeout(CAPABILITY_READ_BUDGET_MS)))
+          .routing;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return jsonError(
+          c,
+          503,
+          error instanceof AgentAskError ? error.code : "model_failed",
+          `${harness} could not be asked what it can be pointed at right now: ${detail}`,
+        );
+      }
+    }
+    /*
+     * ⚠ **`machineOf()`, and leaving it off made every contributed pairing
+     * unsaveable.** `hostable`'s fourth parameter defaults to `BUILTIN_CATALOGUE`,
+     * whose `system()` answers `null` for every `<plugin>:<local>` id — so a
+     * preset on a provider a plugin added was refused *"This provider is no longer
+     * on this machine."* about a provider `GET /systems` was listing two lines
+     * above, and one on a contributed harness was refused for a routed-model
+     * variable `ROUTED_MODEL_ENV` was never going to hold. Both checks above this
+     * one already read the live catalogue, and `session.ts` passes it at launch, so
+     * the create-time and launch-time gates disagreed about the same pairing: what
+     * would start could not be stored. This is the same defect Q3.485 records
+     * arriving through a new door, which `GET /systems` warns about by name.
+     */
+    const refusal = hostable(harness, system, routing, machineOf());
+    if (refusal !== null) {
+      return jsonError(c, 400, "incompatible_pairing", refusal, { harness, system });
+    }
+    return { name: name.trim(), harness, system, model: model.trim() };
+  };
+
+  app.post("/custom-agents", write, async (c) => {
+    if (systems === null) {
+      return jsonError(c, 503, "systems_unavailable", "this daemon has no durable store for systems");
+    }
+    const draft = await readAssembledAgent(c);
+    if (draft instanceof Response) return draft;
+    /*
+     * ⚠ **Minted against the store rather than trusted, and this became load-bearing
+     * when `save` became an upsert.** It was a bare `INSERT`, so a repeated id was a
+     * `SQLITE_CONSTRAINT_PRIMARYKEY` — a loud 500 nobody ever saw. `PATCH` needs the
+     * upsert, and the upsert turns the same collision silent: it would replace an
+     * existing preset's name, harness, system and model, and because
+     * `sessions.custom_agent` is a *reference* re-read at every launch, every session
+     * on that id would come back on a triple nobody chose.
+     *
+     * Four bytes is `s_`'s width and is kept, because the id is read by people and by
+     * `MAX_STRIP_REF_CHARS`; the birthday bound is what the loop replaces. The mint,
+     * the lookup and the write are synchronous with no `await` between them, so on a
+     * single-process daemon this is atomic — the awaits all happened above, in
+     * `readAssembledAgent`.
+     */
+    let id = `ca_${randomBytes(4).toString("hex")}`;
+    for (let attempt = 0; systems.customAgents.get(id) !== null; attempt += 1) {
+      // Bounded so a store that answered every id — a wedged wrapper, never the real
+      // one — is a refusal rather than a spin on the daemon's only thread.
+      if (attempt >= 8) {
+        return jsonError(c, 503, "systems_unavailable", "could not mint an id for this agent");
+      }
+      id = `ca_${randomBytes(4).toString("hex")}`;
+    }
+    const one = { id, ...draft, createdAt: Date.now() };
+    systems.customAgents.save(one);
+    return c.json({ customAgent: one }, 201);
+  });
+
+  /**
+   * Renaming an assembled agent, or pointing it somewhere else.
+   *
+   * ⚠ **Without this a preset is write-once, and `sessions.custom_agent` was
+   * built on the assumption that it is not.** That column holds a *reference*
+   * rather than a copy, and `ManagedSession.assembled` re-reads it at every
+   * launch, deliberately — so that editing a preset changes what its sessions
+   * come back as, which is what anybody expects of a preset. For one release the
+   * only way to change one was to delete it and create another, which the
+   * reference design turns into the worst available outcome: every session on the
+   * old id silently drops to the bare harness at its next resume, with no system
+   * and no model pin, while a new row that looks identical sits beside it.
+   *
+   * ⚠ **Three of the four fields reach those sessions. `harness` does not, and
+   * the demotion is deliberate.** `sessions.agent` is written when the session is
+   * created and never moves — it names the CLI whose transcript this is, whose
+   * resume id this is, and whose process would be spawned again — so a preset
+   * re-pointed from `claude` to `codex` would otherwise resume an existing
+   * conversation against a harness that has never heard of it, which is a 502 on
+   * every resume rather than a changed model. `ManagedSession.assembled` weighs
+   * the resolved preset's harness against the session's own column and answers
+   * `{}` when they differ: the same honest demotion the deleted-preset arm
+   * already takes, and for the same reason — a session whose preset no longer
+   * describes it comes back as the bare harness it has always been rather than as
+   * a pairing nobody chose. Nothing is refused here. A preset is somebody's to
+   * re-point, and the row this writes is startable for everything started after
+   * the edit; what it stops being is a description of the sessions started before.
+   *
+   * ⚠ **`PATCH` with every field required.** See `readAssembledAgent` for why an
+   * edit is a replace. It is not a `PUT` because the body is not the whole
+   * resource: `id` and `createdAt` are the daemon's and are taken from the stored
+   * row below rather than from anything a caller sent, so a body that names either
+   * is answered with them unchanged rather than refused — there is no field to
+   * refuse, only a key nothing reads.
+   *
+   * The 404 comes before the body is read: a preset deleted from another phone a
+   * second ago should be answered "no such agent" rather than a complaint about a
+   * field, and the two answers are indistinguishable to somebody holding a stale
+   * list.
+   */
+  app.patch("/custom-agents/:id", write, async (c) => {
+    if (systems === null) {
+      return jsonError(c, 503, "systems_unavailable", "this daemon has no durable store for systems");
+    }
+    const stored = systems.customAgents.get(c.req.param("id") ?? "");
+    if (stored === null) {
+      return jsonError(c, 404, "custom_agent_not_found", "no such agent");
+    }
+    const draft = await readAssembledAgent(c);
+    if (draft instanceof Response) return draft;
+    // `stored.id` rather than the path parameter, which is equal to it by
+    // construction: taking both immutable fields off the row is what makes "a
+    // client cannot set either" a property of the shape rather than an argument
+    // about the fields nothing happens to read.
+    //
+    // `save` is an upsert keyed on the id — `SqliteCustomAgentStore` writes
+    // `ON CONFLICT(id) DO UPDATE`, and leaves `created_at` out of the SET list so
+    // that the age of a preset cannot move even if a caller of this port gets it
+    // wrong. It was a bare `INSERT` while nothing could edit a row, and this route
+    // is what makes the difference observable.
+    /*
+     * ⚠ **Looked up again, because `save` is an upsert and the gap is wide.**
+     * `readAssembledAgent` above awaits a capability read that can spawn an agent,
+     * so seconds pass between the 404 check and this write — and
+     * `ON CONFLICT(id) DO UPDATE` means an `INSERT` of a row deleted in that window
+     * succeeds and puts it back, under its original `createdAt`. Two phones, one
+     * deleting while the other edits, and the delete silently loses. The second
+     * lookup is cheap and the window after it is one statement.
+     */
+    if (systems.customAgents.get(stored.id) === null) {
+      return jsonError(c, 404, "custom_agent_not_found", "no such agent");
+    }
+    const one = { id: stored.id, ...draft, createdAt: stored.createdAt };
+    systems.customAgents.save(one);
+    return c.json({ customAgent: one });
+  });
+
+  /**
+   * Wanting the row gone, and being able to say so twice.
+   *
+   * ⚠ **An id with nothing under it is `200 {removed: false}` and never a 404,
+   * because this is a `DELETE` and the transport replays those.** `isReplayable`
+   * in `packages/web/src/machine.ts` whitelists `GET` and `DELETE` on a stated
+   * property this route is inside, and `slowRoute` deliberately leaves the verb
+   * off — its own docblock calls this "a lookup plus a delete", so it runs on the
+   * ordinary 15s budget, which is precisely the budget `settleTransport` names as
+   * the one a phone dropping to LTE earns. The failure a 404 makes is a removal
+   * that *worked* and whose answer was lost on the wire: the replay lands after
+   * the row is already gone, and `AgentBuilder` draws `errorText` over an act that
+   * did exactly what was asked. `removed` is what tells the two sends apart.
+   *
+   * ⚠ **`DELETE /plugins/:pluginId` in this same daemon already answers this way,
+   * with this argument, and `daemoncheck` already pins it.** Two conventions for
+   * one verb in one daemon is how one of them rots — and the one that rots is the
+   * one whose failure is invisible offline, which is this one: a 404 here is
+   * correct on every developer machine and wrong only over a relay.
+   *
+   * The cost is the same trade that route already took: a mistyped id is no
+   * longer refused. A wrong id costs a person one confusing line; a 404 costs
+   * whoever hit a dropped packet a delete that reads as having failed.
+   *
+   * ⚠ **`removed` is what the lookup said, and the `remove` runs either way.**
+   * `SqliteCustomAgentStore.get` drops a row whose `harness` or `system` this
+   * version cannot parse — a preset written by a newer daemon, read after a
+   * downgrade — so gating the delete on the lookup would make exactly those rows
+   * undeletable, which is the failure the plugin route avoids by removing rather
+   * than finding. Such a row is deleted and reported `false`, the one dishonest
+   * answer here and the smaller of the two: the store port returns `void`, so
+   * this line has nothing better to read.
+   */
+  app.delete("/custom-agents/:id", write, (c) => {
+    if (systems === null) {
+      return jsonError(c, 503, "systems_unavailable", "this daemon has no durable store for systems");
+    }
+    const id = c.req.param("id") ?? "";
+    const removed = systems.customAgents.get(id) !== null;
+    /*
+     * Sessions started on it are left alone and keep resuming: `sessions.agent`
+     * holds the harness, so the conversation comes back on that with no system
+     * and no model pin. Ending somebody's chats because they tidied a list would
+     * be the worse of the two surprises.
+     *
+     * ⚠ **That demotion is what the confirm on the other side has to say, and it
+     * is a claim about `ManagedSession.assembled` rather than about this line.**
+     * That getter resolves `sessions.custom_agent` through `customAgents` at every
+     * launch and returns `{}` for an id it cannot find — so the loss lands at the
+     * *next* start or resume and not here. An agent already running keeps the
+     * system and model it was spawned with until something restarts it, which is
+     * why the honest sentence is about what a session comes back as rather than
+     * about what it is doing now.
+     *
+     * `PATCH` above is the *less* destructive half of the same intent rather than
+     * the non-destructive one, and that sentence used to overclaim: re-pointing a
+     * preset's name, system or model reaches every session on it through the same
+     * getter with nothing to demote, but re-pointing its `harness` lands those
+     * sessions on this same `{}` — see that route's docblock. A delete is for
+     * wanting the row gone; a harness edit demotes without being asked to.
+     */
+    systems.customAgents.remove(id);
+    /*
+     * And its position in the strip goes with it.
+     *
+     * Not correctness — `orderStrip` in the client drops a `ref` that resolves to
+     * nothing, so an orphan row is invisible either way. It is the only thing
+     * standing between `agent_strip` and unbounded growth on a machine where
+     * presets are assembled and thrown away and the strip screen is never opened,
+     * and it is one statement.
+     *
+     * Unconditional on `removed`, like the remove above it and for the same
+     * reason: a row this build cannot resolve is not found by `get` and must
+     * still be deletable.
+     */
+    systems.strip.forget("custom", id);
+    return c.json({ removed, id });
+  });
+
+  /* ---------------------------------------------------------------- *
+   * The strip
+   *
+   * Which agents the New session screen offers on this machine, and in what
+   * order. Two routes and no third: the screen that writes this holds the whole
+   * list, so a reorder is one `PUT` rather than a verb per row.
+   *
+   * ⚠ **This daemon does not merge and does not resolve.** It stores
+   * `(kind, ref, rank, hidden)` and hands it back; which of those refs is a
+   * harness that is installed, an assembled agent that still exists, or neither,
+   * is decided by the client against `GET /agents` and `GET /custom-agents` —
+   * the two lists it already reads to draw the row. Deciding it here would mean
+   * a third read on every strip fetch and a rule written down twice, and the
+   * rule is not this daemon's: what may have a tile is `shownHere`'s answer, and
+   * `shownHere` is a screen.
+   * ---------------------------------------------------------------- */
+
+  app.get("/agent-strip", read, (c) => {
+    if (systems === null) {
+      return jsonError(c, 503, "systems_unavailable", "this daemon has no durable store for systems");
+    }
+    return c.json({ entries: systems.strip.list() });
+  });
+
+  /**
+   * The whole strip, checked, or the refusal to hand straight back.
+   *
+   * ⚠ **`PUT` and not `PATCH`, because the body is the whole list.** `POST`/
+   * `PATCH /custom-agents` are about one row each and their verbs carry the
+   * difference between adding and editing; here there is one resource — the
+   * order — and every write replaces it. That also makes the route idempotent,
+   * which matters more than it looks: `isReplayable` in `packages/web/src/
+   * machine.ts` whitelists GET and DELETE only, so a lost answer is *not* resent
+   * — but a person tapping twice on a flaky link should not be able to produce a
+   * shape a merge would have to decide about.
+   *
+   * ⚠ **The duplicate check is here rather than left to the primary key.** Two
+   * entries naming the same `(kind, ref)` is a client bug, and SQLite would
+   * report it as `SQLITE_CONSTRAINT_PRIMARYKEY` out of the middle of a
+   * transaction — a `500 internal_error` on a body this route can see is wrong at
+   * a glance. It is the same lesson `SqliteCustomAgentStore`'s upsert records
+   * from the other direction: a constraint reaching a caller as a 500 is a
+   * refusal that was never written down.
+   *
+   * What is *not* checked is whether a `ref` names anything. See
+   * `AgentStripEntry`: the row is the memory, and forgetting a position because
+   * an agent is signed out today is the one behaviour somebody would notice.
+   */
+  const readStripEntries = async (c: Context<AppEnv>): Promise<AgentStripEntry[] | Response> => {
+    const body = await readJsonObject(c);
+    if (body === null) return jsonError(c, 400, "bad_request", "expected a JSON object body");
+    const raw = body["entries"];
+    if (!Array.isArray(raw)) return jsonError(c, 400, "bad_request", "entries must be an array");
+    if (raw.length > MAX_STRIP_ENTRIES) {
+      return jsonError(c, 400, "bad_request", `entries exceeds ${MAX_STRIP_ENTRIES} items`);
+    }
+    const entries: AgentStripEntry[] = [];
+    const seen = new Set<string>();
+    for (const item of raw) {
+      if (typeof item !== "object" || item === null || Array.isArray(item)) {
+        return jsonError(c, 400, "bad_request", "each entry must be an object");
+      }
+      const one = item as Record<string, unknown>;
+      const kind = one["kind"];
+      if (kind !== "harness" && kind !== "custom") {
+        return jsonError(c, 400, "bad_request", 'kind must be "harness" or "custom"');
+      }
+      const ref = one["ref"];
+      if (typeof ref !== "string" || ref.length === 0) {
+        return jsonError(c, 400, "bad_request", "ref must be a non-empty string");
+      }
+      if (ref.length > MAX_STRIP_REF_CHARS) {
+        return jsonError(c, 400, "bad_request", `ref exceeds ${MAX_STRIP_REF_CHARS} characters`);
+      }
+      const hidden = one["hidden"];
+      if (typeof hidden !== "boolean") {
+        return jsonError(c, 400, "bad_request", "hidden must be a boolean");
+      }
+      const key = `${kind}:${ref}`;
+      if (seen.has(key)) {
+        return jsonError(c, 400, "bad_request", `entries names ${key} twice`);
+      }
+      seen.add(key);
+      entries.push({ kind, ref, hidden });
+    }
+    return entries;
+  };
+
+  app.put("/agent-strip", write, async (c) => {
+    if (systems === null) {
+      return jsonError(c, 503, "systems_unavailable", "this daemon has no durable store for systems");
+    }
+    const entries = await readStripEntries(c);
+    if (entries instanceof Response) return entries;
+    systems.strip.replace(entries);
+    /*
+     * The saved list is echoed rather than answered `{ saved: true }` alone, and
+     * it is what the store now holds rather than what arrived: they are the same
+     * today, and a caller that reads the answer instead of trusting its own copy
+     * keeps being right if that ever stops being true.
+     */
+    return c.json({ saved: true, entries: systems.strip.list() });
+  });
 
   /* ---------------------------------------------------------------- *
    * Logging an agent in
@@ -780,10 +1726,43 @@ export function createApp(options: ServerOptions): AppBundle {
    * is nicer when it does, and `loginSupported` says which.
    * ---------------------------------------------------------------- */
 
+  /**
+   * The harness a route names, or `null`.
+   *
+   * ⚠ **Membership in what this machine offers, not shape** — the opposite call
+   * from `fromRow`, and both are right. Nothing has been created yet at any of
+   * these call sites, so a refusal costs nothing; and a route that accepted a
+   * harness this machine does not have would store a credential under a name
+   * nothing will ever read.
+   */
   const agentIdParam = (c: Context<AppEnv>): AgentId | null => {
     const value = c.req.param("agent") ?? "";
-    return isAgentId(value) ? value : null;
+    return registry.machineCatalogue.harnessState(value) === "enabled" ? value : null;
   };
+
+  /**
+   * What a path parameter naming a harness this machine does not offer earns.
+   *
+   * ⚠ **Three answers collapsed into two is what this exists to undo.**
+   * `harnessState` is three-valued on purpose — see its own docblock, which states
+   * the rule: *unknown* is "fix your request", *disabled* is "this was correct
+   * yesterday and somebody switched the plugin off", and the second may never be
+   * answered with the `400` that tells an operator their own address is wrong.
+   * `agentIdParam` answers `null` for both, so every route reading it said the
+   * wrong one. `POST /sessions` has always split them; these had not.
+   *
+   * Reached only where `agentIdParam` already answered `null`, so the `enabled`
+   * arm is unreachable and the two states left are the two this chooses between.
+   */
+  const noSuchHarness = (c: Context<AppEnv>): Response =>
+    registry.machineCatalogue.harnessState(c.req.param("agent") ?? "") === "disabled"
+      ? jsonError(
+          c,
+          503,
+          "harness_unavailable",
+          "this agent comes from a plugin that is switched off on this machine",
+        )
+      : jsonError(c, 400, "invalid_agent", "unknown agent");
 
   app.get("/agent-auth", read, async (c) => {
     const availability = await registry.sessionRuntime.availability();
@@ -816,10 +1795,9 @@ export function createApp(options: ServerOptions): AppBundle {
        */
       os: process.platform,
       agents: availability.map((agent) => {
-        const support = registry.sessionRuntime.loginSupport(agent.id);
         return {
           ...agent,
-          credentials: credentialEnvNames(agent.id).map((envName) => {
+          credentials: registry.sessionRuntime.credentialSlots(agent.id).map((envName) => {
             const row = stored.find(
               (entry) => entry.agent === agent.id && entry.envName === envName,
             );
@@ -836,28 +1814,11 @@ export function createApp(options: ServerOptions): AppBundle {
            * facts that field cannot carry: an agent whose CLI does not resolve
            * used to get an enabled button and a `503` after the tap, and every
            * agent got an input box whether or not anything reads one.
+           *
+           * The same object `GET /agents` carries — see `loginSupportOf`, which is
+           * where both of them are decided.
            */
-          login: {
-            supported: logins !== null && support.supported,
-            /*
-             * **`supported` carries one condition this reason does not**, and the
-             * two must not be allowed to drift apart silently: `logins === null`
-             * means there is nowhere to record a run, which is a fact about the
-             * daemon rather than about the agent or the platform. It is reported
-             * as `no_script` — the closest of the three and, like it, "this host
-             * cannot drive a login at all" — rather than by inventing a fourth
-             * code the client would have to be taught.
-             *
-             * Forwarded at all because it was not, at first: the field existed on
-             * the runtime and stopped here, so the client saw `supported: false`
-             * with `blocked: null` and drew neither a button nor a reason. That is
-             * the exact disagreement `supported = blocked === null` exists to make
-             * impossible, reintroduced one layer up.
-             */
-            blocked: logins === null ? "no_script" : support.blocked,
-            needsInput: support.needsInput,
-            canSignOut: support.canSignOut,
-          },
+          login: loginSupportOf(agent.id),
         };
       }),
     });
@@ -868,14 +1829,14 @@ export function createApp(options: ServerOptions): AppBundle {
       return jsonError(c, 503, "credentials_unavailable", "this daemon has no durable store for credentials");
     }
     const agent = agentIdParam(c);
-    if (agent === null) return jsonError(c, 400, "invalid_agent", "unknown agent");
+    if (agent === null) return noSuchHarness(c);
 
     const body = await readJsonObject(c);
     const envName = body?.["envName"];
     const token = body?.["token"];
-    if (typeof envName !== "string" || !credentialEnvNames(agent).includes(envName)) {
+    if (typeof envName !== "string" || !registry.sessionRuntime.credentialSlots(agent).includes(envName)) {
       return jsonError(c, 400, "bad_request", "envName must be one this agent reads", {
-        envNames: credentialEnvNames(agent),
+        envNames: registry.sessionRuntime.credentialSlots(agent),
       });
     }
     if (typeof token !== "string" || token.trim().length === 0) {
@@ -890,6 +1851,17 @@ export function createApp(options: ServerOptions): AppBundle {
     // Dropping it costs one probe on the next read and is the difference between
     // the UI updating and the UI insisting you are still logged out.
     registry.sessionRuntime.forgetAvailability();
+    /*
+     * ⚠ **And the refused start, which is a separate record and is cleared by
+     * three of the six `forgetAvailability` call sites.** A key arriving is one of
+     * them, a login run *finishing* is another, and an explicit
+     * `POST /agent-auth/:agent/recheck` is the third — all three are evidence about
+     * a harness that would not start. The other three are sign-out-ward — a key
+     * being *deleted*, a sign-out, and a login cancelled — and none of those is a
+     * reason to believe a harness has started working. Deleting a key must not
+     * erase the record of the refusal that key was pasted against.
+     */
+    registry.sessionRuntime.forgetStartRefusal(agent);
     /*
      * **And the conversations already running on this agent, which the save alone
      * does not reach.** Secrets are injected at spawn, so a token saved while an
@@ -907,15 +1879,39 @@ export function createApp(options: ServerOptions): AppBundle {
     if (credentials === undefined) {
       return jsonError(c, 503, "credentials_unavailable", "this daemon has no durable store for credentials");
     }
-    const agent = agentIdParam(c);
-    if (agent === null) return jsonError(c, 400, "invalid_agent", "unknown agent");
+    /*
+     * ⚠ **`DELETE /systems/:system`'s shape, and taking half of it was worse than
+     * taking none.** That route removes before it validates *and answers `200` with
+     * what the lookup saw* — never an error — precisely so a row this build can no
+     * longer place is still deletable. Removing first and then answering `400` is
+     * the shape with neither property: the row is gone, the caller is told its
+     * request was wrong, and the two invalidation steps below are skipped — leaving
+     * a cached `loggedIn: true` over a harness whose only credential has just been
+     * deleted, and a running session still holding the secret in its environment.
+     *
+     * A harness a plugin added stops being offered the moment somebody switches
+     * that plugin off, and `GET /agent-auth` stops listing it in the same tick. So
+     * the one control that can reach its saved key must not be the one that
+     * disappears with it.
+     *
+     * The slot is still checked where the harness *does* resolve, because there a
+     * name it does not read is a caller's mistake worth naming. Where it does not,
+     * there is nothing to check against and nothing to be right about: the row is
+     * removed and `removed` says whether there was one.
+     */
+    const named = c.req.param("agent") ?? "";
     const envName = c.req.query("envName") ?? "";
-    if (!credentialEnvNames(agent).includes(envName)) {
+    if (named.length === 0 || envName.length === 0) {
+      return jsonError(c, 400, "bad_request", "envName is required");
+    }
+    const agent = agentIdParam(c);
+    if (agent !== null && !registry.sessionRuntime.credentialSlots(agent).includes(envName)) {
       return jsonError(c, 400, "bad_request", "envName must be one this agent reads", {
-        envNames: credentialEnvNames(agent),
+        envNames: registry.sessionRuntime.credentialSlots(agent),
       });
     }
-    credentials.remove(agent, envName);
+    const had = credentials.list().some((one) => one.agent === named && one.envName === envName);
+    credentials.remove(named, envName);
     registry.sessionRuntime.forgetAvailability();
     /*
      * Removing one is the same fact as saving one *for the sessions still
@@ -929,8 +1925,8 @@ export function createApp(options: ServerOptions): AppBundle {
      * authenticate with. Deleting a credential is a sign-out's second half, not
      * its reversal.
      */
-    const restarting = registry.reloadCredentials(agent, false);
-    return c.json({ removed: true, agent, envName, restarting });
+    const restarting = registry.reloadCredentials(named, false);
+    return c.json({ removed: had, agent: named, envName, restarting });
   });
 
   /**
@@ -954,7 +1950,7 @@ export function createApp(options: ServerOptions): AppBundle {
    */
   app.post("/agent-auth/:agent/logout", write, async (c) => {
     const agent = agentIdParam(c);
-    if (agent === null) return jsonError(c, 400, "invalid_agent", "unknown agent");
+    if (agent === null) return noSuchHarness(c);
     if (!registry.sessionRuntime.loginSupport(agent).canSignOut) {
       return jsonError(
         c,
@@ -965,7 +1961,7 @@ export function createApp(options: ServerOptions): AppBundle {
     }
 
     let cleared = 0;
-    for (const envName of credentialEnvNames(agent)) {
+    for (const envName of registry.sessionRuntime.credentialSlots(agent)) {
       if (credentials?.list().some((row) => row.agent === agent && row.envName === envName) === true) {
         credentials.remove(agent, envName);
         cleared += 1;
@@ -998,6 +1994,66 @@ export function createApp(options: ServerOptions): AppBundle {
     });
   });
 
+  /**
+   * Ask this harness again, after somebody has fixed it somewhere this daemon
+   * cannot see.
+   *
+   * ⚠ **This is what the New session strip owes for hiding a tile.** A harness
+   * that refused to open a session loses its tile — `offersTile`'s established
+   * trade, argued in `agentCard.ts` — and the settings row it keeps is where the
+   * badge says why. But the commonest remedy for a harness with no sign-in wizard
+   * is *not* on any screen: it is running the CLI once in a terminal on the
+   * machine itself, which is exactly what a contributed harness's own `authHint`
+   * asks for. Nothing about that reaches this process, so without a control the
+   * only way back would be waiting out `START_REFUSAL_TTL_MS`.
+   *
+   * ⚠ **And it may not refuse where `login` and `logout` do, which is why it is
+   * not modelled on either.** Both of those answer `503` for a harness with no
+   * such verb — and a harness with no such verb is precisely the one this exists
+   * for. It asks nothing of the agent and takes nothing away: it drops what this
+   * daemon remembered and answers the fresh row, so the next listing is a real
+   * measurement rather than a recollection.
+   *
+   * ⚠ **Under `/agent-auth/` rather than beside `/agents`, and that placement is
+   * load-bearing rather than tidy.** This route calls `availability()`, which runs
+   * the login probe — a CLI spawn per harness. The browser's `slowRoute` matches
+   * `/agent-auth` by **prefix** (and `/agents` only on `GET`), so a `POST` here
+   * inherits the 90s budget; named anywhere else it would have taken the ordinary
+   * 15s, and an abort there is a *transport* failure, which is `forgetRoute` and a
+   * perfectly healthy machine drawn as unreachable everywhere at once. That is the
+   * defect `GET /agents/capabilities` shipped with, recorded in `machine.ts` at
+   * the predicate itself.
+   */
+  app.post("/agent-auth/:agent/recheck", write, async (c) => {
+    const agent = agentIdParam(c);
+    if (agent === null) return noSuchHarness(c);
+    registry.sessionRuntime.forgetStartRefusal(agent);
+    registry.sessionRuntime.forgetAvailability();
+    const found = (await registry.sessionRuntime.availability()).find((one) => one.id === agent) ?? null;
+    /*
+     * The row rather than `{ok: true}`, and the lookup rather than an assumption:
+     * this is `DELETE /systems/:system`'s shape — do the thing, then answer with
+     * what the listing now says — so a screen that redraws from this response
+     * cannot disagree with the one that redraws from `GET /agents`.
+     *
+     * ⚠ **Including `login`, which `availability()` does not carry and which is
+     * therefore the field this shape drops by default.** It is built in
+     * `loginSupportOf` and spread onto the two listings by hand, so a third route
+     * answering an agent row has to spread it too — and the cost of not doing so
+     * is measured and specific: with no `login` object, `no_flow` is gone and both
+     * this client's ladder and the browser's fall to *cannot check*, which is the
+     * permanent-wrong-badge failure `local.ts` returns `no_flow` to prevent. The
+     * sentence above would then have been false of the very first field a reader
+     * of this response looks at.
+     */
+    return c.json({
+      agent,
+      ...(found === null
+        ? { rechecked: false }
+        : { rechecked: true, info: { ...found, login: loginSupportOf(found.id) } }),
+    });
+  });
+
   app.post("/agent-auth/:agent/login", write, async (c) => {
     if (logins === null) {
       return jsonError(
@@ -1008,7 +2064,7 @@ export function createApp(options: ServerOptions): AppBundle {
       );
     }
     const agent = agentIdParam(c);
-    if (agent === null) return jsonError(c, 400, "invalid_agent", "unknown agent");
+    if (agent === null) return noSuchHarness(c);
 
     try {
       const run = await logins.start(agent);
@@ -1034,7 +2090,28 @@ export function createApp(options: ServerOptions): AppBundle {
     // signed in" is stale — and this is the exact moment the client learns it,
     // so it is the moment to make the next answer fresh. Without it the badge
     // beside a successful login kept reading "not signed in".
-    if (chunk.done) registry.sessionRuntime.forgetAvailability();
+    if (chunk.done) {
+      registry.sessionRuntime.forgetAvailability();
+      /*
+       * ⚠ **And the refused start, because a finished sign-in is a credential
+       * arriving through the other door.** The rule this route is an exception to
+       * — that only `PUT /agent-auth/:agent` clears the record — was written
+       * against the four *sign-out-ward* events, and a wizard that has just run to
+       * completion is not one of them. Without this the whole flow ends wrong:
+       * `agentStance` puts `start_refused` above `signed_in`, so somebody who
+       * signed in inside the app kept the badge *would not start*, kept no tile,
+       * and lost the sign-in door itself — `signInOffered` wants
+       * `loggedIn === false` — with `POST /sessions` still refusing on the stale
+       * message for the rest of the budget.
+       *
+       * Cleared on the run *ending* rather than on it succeeding, deliberately:
+       * this route has no verdict to read, and the two failure modes are not
+       * symmetric. A wrongly cleared record costs one start attempt, which
+       * re-records it; a wrongly kept one costs ten minutes of a screen
+       * contradicting the wizard the reader just finished.
+       */
+      registry.sessionRuntime.forgetStartRefusal(chunk.agent);
+    }
     return c.json(chunk);
   });
 
@@ -1322,9 +2399,96 @@ export function createApp(options: ServerOptions): AppBundle {
     const body = await requireJson(c);
     if (body instanceof Response) return body;
 
-    const agent = body["agent"];
-    if (typeof agent !== "string" || !isAgentId(agent)) {
-      return jsonError(c, 400, "invalid_agent", `agent must be one of ${AGENT_IDS.join(", ")}`);
+    /*
+     * The harness, and where it comes from.
+     *
+     * ⚠ **`customAgent` and `agent` are not alternatives, and this route does not
+     * make the caller keep them in step.** A preset already names its harness, so
+     * when one is given that is what `agent` becomes — a body sending both and
+     * disagreeing cannot produce a session running something neither field named.
+     * `machineOf().harnessState(agent)` guards the other arm below, and since the
+     * union widened it is the only door into what this machine offers that a
+     * request can reach.
+     */
+    let customAgent: string | null = null;
+    let agent: string | undefined;
+    const namedPreset = body["customAgent"];
+    if (namedPreset !== undefined && namedPreset !== null) {
+      if (typeof namedPreset !== "string" || namedPreset.length === 0) {
+        return jsonError(c, 400, "bad_request", "customAgent must be a non-empty string");
+      }
+      if (systems === null) {
+        return jsonError(c, 503, "systems_unavailable", "this daemon has no durable store for systems");
+      }
+      const preset = systems.customAgents.get(namedPreset);
+      /*
+       * ⚠ **Its own code, because `not_found` already means something else on this
+       * route.** A `cwd` that does not exist reaches the `PathError` arm below and
+       * answers `400 not_found`; this is `404 not_found`. `docs/API.md` says read
+       * the code and never the status, so two refusals sharing a code with
+       * opposite remedies — "pick a different folder" against "that preset was
+       * deleted on another device" — is the one thing that convention cannot
+       * absorb. Every other 404 in this daemon is already `*_not_found`.
+       */
+      if (preset === null) {
+        return jsonError(c, 404, "custom_agent_not_found", "no such agent");
+      }
+      customAgent = preset.id;
+      agent = preset.harness;
+      /*
+       * ⚠ **The preset's *system* is weighed here, on the axis the fence below
+       * does not cover.** `create` already refuses a harness that would not start
+       * before `createWorkspace`, and the reason it gives is the one that applies
+       * word for word here: an `applySystem` failure lands *after* the worktree,
+       * the branch and the session row are made, so every press on a preset whose
+       * provider is switched off was permanent growth inside somebody's own
+       * repository followed by a `502`. Nothing upstream caught it — `startableHere`
+       * in the browser weighs only the harness, so the tile draws enabled and can
+       * be the machine's default, and `readCustomAgent` keeps the row by *shape*,
+       * so the preset survives its plugin being switched off exactly as designed.
+       *
+       * Only for a preset, and only for a *contributed* system: a built-in always
+       * answers `enabled`, and a bare start names no system at all. `503` rather
+       * than `400` for the reason the paragraph below gives — this is the machine's
+       * state and one toggle fixes it.
+       */
+      if (machineOf().systemState(preset.system) !== "enabled") {
+        return jsonError(
+          c,
+          machineOf().systemState(preset.system) === "disabled" ? 503 : 400,
+          machineOf().systemState(preset.system) === "disabled"
+            ? "system_unavailable"
+            : "invalid_system",
+          machineOf().systemState(preset.system) === "disabled"
+            ? "this agent is assembled on a provider that comes from a plugin switched off on this machine"
+            : "this agent is assembled on a provider this machine no longer offers",
+          { system: preset.system },
+        );
+      }
+    } else {
+      const named = body["agent"];
+      agent = typeof named === "string" ? named : undefined;
+    }
+    /*
+     * ⚠ **Three answers rather than two, because "switched off" and "never
+     * existed" have opposite remedies.** A `400` says *fix your request*, which is
+     * the truth for an id nobody has ever offered and a lie for one that worked
+     * yesterday and whose plugin somebody disabled this morning — that is the
+     * machine's state, not the caller's mistake, and it is the shape
+     * `system_not_routable` already has.
+     */
+    if (typeof agent !== "string" || machineOf().harnessState(agent) === "unknown") {
+      return jsonError(c, 400, "invalid_agent", "agent must be one this machine offers", {
+        offers: machineOf().harnessIds(),
+      });
+    }
+    if (machineOf().harnessState(agent) === "disabled") {
+      return jsonError(
+        c,
+        503,
+        "harness_unavailable",
+        "this agent comes from a plugin that is switched off on this machine",
+      );
     }
     const cwd = body["cwd"];
     if (typeof cwd !== "string" || cwd.length === 0) {
@@ -1354,7 +2518,7 @@ export function createApp(options: ServerOptions): AppBundle {
       //
       // It is now the tenant id rather than the raw subject, so it is never null
       // — the shared secret writes `local`. That matters because the owner is
-      const managed = await registry.create({ agent, cwd, worktree, branch });
+      const managed = await registry.create({ agent, customAgent, cwd, worktree, branch });
       return c.json({ session: managed.snapshot() }, 201);
     } catch (error) {
       if (error instanceof PathError) {
@@ -1364,6 +2528,16 @@ export function createApp(options: ServerOptions): AppBundle {
       }
       if (error instanceof WorktreeError) {
         return worktreeError(c, error);
+      }
+      if (error instanceof SystemRoutingError) {
+        /*
+         * 502 and its own code, beside `agent_auth_required` rather than among
+         * the 400s: the request was well formed and named a preset this daemon
+         * holds — what failed is the agent, or a key that is not there. The
+         * remedies are "save a key" and "pick a different pairing", and neither
+         * is "fix your request".
+         */
+        return jsonError(c, 502, "system_not_routable", error.message);
       }
       if (error instanceof SessionLimitError) {
         /*
@@ -1388,9 +2562,17 @@ export function createApp(options: ServerOptions): AppBundle {
         });
       }
       const message = describeError(error);
-      const code = /authentication required/i.test(message)
-        ? "agent_auth_required"
-        : "agent_launch_failed";
+      /*
+       * ⚠ **Through `isAuthRequiredMessage`, which is where that concession is
+       * supposed to live and where its own docblock already claims it does.** The
+       * rewrap in `session.ts` throws a plain `Error`, so reading the sentence is
+       * all any caller can do — and this was the fourth hand-written copy of the
+       * pattern, uncounted by the docblock that says there are two. It matters
+       * more now: `registry.create` re-throws a *remembered* refusal so a second
+       * press costs no worktree, and that answer has to land on this same arm with
+       * the same code, or the two presses report the same failure differently.
+       */
+      const code = isAuthRequiredMessage(message) ? "agent_auth_required" : "agent_launch_failed";
       return jsonError(c, 502, code, message);
     }
   });
@@ -1437,8 +2619,17 @@ export function createApp(options: ServerOptions): AppBundle {
     });
   });
 
+  /*
+   * ⚠ **The one read that carries the *whole* model list**, and the browser
+   * depends on it. `GET /sessions` cuts the choices of every option to
+   * `MAX_SNAPSHOT_CHOICES` because sixty of those records ride a four-second poll
+   * to a phone; a keyed opencode publishes 362 models, so without the cut the list
+   * response is dominated by menus nobody is looking at. This route is one session,
+   * asked for on purpose, and is not polled — so it answers in full, and
+   * `truncated` on the polled copy is what tells a picker to come here.
+   */
   app.get("/sessions/:id", read, withSession((c, managed) => {
-    return c.json({ session: managed.snapshot() });
+    return c.json({ session: managed.snapshot({ fullConfig: true }) });
   }));
 
   app.delete("/sessions/:id", write, withSession(async (c, managed) => {
@@ -1606,9 +2797,16 @@ export function createApp(options: ServerOptions): AppBundle {
      * daemon* ends the conversations itself (`signOutSessions`). A credential
      * that went away some other way — revoked elsewhere, or expired — is reported
      * by the agent, at the only moment that cannot be stale: `isAuthFailure` on
-     * the event pump ends the session with the same reason, so the second message
-     * is refused by `session_terminal` and the client draws the sentence and its
-     * Sign in button.
+     * the event pump, which puts a **fresh agent** under the same conversation and
+     * leaves the error in the transcript for somebody to read and send again.
+     *
+     * ⚠ **This said the pump "ends the session with the same reason", and that
+     * has been false since Q7.99.** It described `stop("agent_signed_out")`, which
+     * was removed for being wrong about what it had measured — a token with 1.4
+     * hours left on it, under a conversation that could never come back. The
+     * sentence mattered because it is the argument for there being no probe here:
+     * the argument survives, and it is `restartAgent` rather than a terminal
+     * status that carries it. See `onAgentUnusable`.
      */
     await managed.whenRestarted();
 
@@ -2045,9 +3243,12 @@ export function createApp(options: ServerOptions): AppBundle {
    * Names a session, or pins it to the top of the list.
    *
    * `POST` on a sub-resource rather than `PATCH` on the session, following
-   * `/config` directly above. `PATCH` would mean adding a verb to
-   * `CORS_ALLOW_METHODS` — which the relay imports and answers preflights with —
-   * for no gain over a `POST` that already reads naturally.
+   * `/config` directly above, for no gain over a `POST` that already reads
+   * naturally. The cost that used to be half this argument is spent: `PATCH` is
+   * in `CORS_ALLOW_METHODS` now — `PATCH /custom-agents/:id` put it there — so
+   * the verb no longer buys a preflight failure in every browser. What is left is
+   * only that this route names a sub-resource rather than editing the session,
+   * and a `PATCH` on `/sessions/:id` would have to.
    *
    * `write` and not `admin`: a rename destroys nothing. `machine:admin` guards
    * `DELETE /sessions/:id/workspace`, which deletes files.

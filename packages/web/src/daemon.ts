@@ -5,9 +5,14 @@ import type { SessionId } from "./ids";
 import type { MachineConnection } from "./machine";
 import type {
   AgentAuthListing,
+  AgentCapabilities,
   AgentCommand,
   AgentConfig,
+  AgentId,
   AgentInfo,
+  AgentStripEntry,
+  CustomAgent,
+  SystemInfo,
   DirListing,
   ElicitationField,
   EventsPage,
@@ -39,6 +44,178 @@ export class DaemonClient {
 
   agents(): Promise<{ agents: AgentInfo[] }> {
     return this.machine.request<{ agents: AgentInfo[] }>("/agents");
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Systems, and the agents assembled out of them
+   *
+   * ⚠ **`systems()` and `customAgents()` are cheap; `agentCapabilities()` is
+   * not.** The first two are a table and a table; the third starts an agent per
+   * harness on the daemon's host to read what each offers. That is why the New
+   * session strip calls the first two on every open and only the builder calls
+   * the third.
+   * ---------------------------------------------------------------- */
+
+  systems(): Promise<{ systems: SystemInfo[] }> {
+    return this.machine.request<{ systems: SystemInfo[] }>("/systems");
+  }
+
+  saveSystemKey(system: string, token: string): Promise<{ saved: true; system: string }> {
+    return this.machine.request(`/systems/${encodeURIComponent(system)}`, {
+      method: "PUT",
+      body: JSON.stringify({ token }),
+    });
+  }
+
+  /**
+   * ⚠ **`removed` is a `boolean`, not a `true`** — the same point
+   * {@link removeCustomAgent} makes below, and this method had it wrong.
+   * `DELETE /systems/:system` answers `removed: system !== null`, so a key naming
+   * a system this build cannot resolve — one written by a newer daemon, or a
+   * contributed id whose plugin is switched off — comes back `false`. `DELETE` is
+   * on `isReplayable`, so a replayed delete whose first answer was lost is
+   * *expected* to answer `false`. A `true` literal here narrows `if
+   * (!result.removed)` to `never` and deletes that branch at compile time.
+   */
+  removeSystemKey(system: string): Promise<{ removed: boolean; system: string }> {
+    return this.machine.request(`/systems/${encodeURIComponent(system)}`, { method: "DELETE" });
+  }
+
+  agentCapabilities(): Promise<{ agents: Record<string, AgentCapabilities> }> {
+    return this.machine.request<{ agents: Record<string, AgentCapabilities> }>(
+      "/agents/capabilities",
+    );
+  }
+
+  customAgents(): Promise<{ customAgents: CustomAgent[] }> {
+    return this.machine.request<{ customAgents: CustomAgent[] }>("/custom-agents");
+  }
+
+  /**
+   * Save an agent somebody assembled, and overwrite one they had already saved.
+   *
+   * ⚠ **Two routes carrying the same four fields, and a `PUT` is what neither of
+   * them is.** Half of the stored row is the daemon's own — `id` is minted there
+   * and `createdAt` is when it was — so a route that took a whole agent would
+   * either invite this client to send an id it did not mint, or accept one and
+   * drop it. The body is the same either way and the *verb* is the whole
+   * difference between adding an agent and editing one.
+   *
+   * ⚠ **`signal` is not decoration, and the failure it prevents was measured one
+   * screen over.** `installPluginFromSource` shipped without it and was the only
+   * install in this client that could not be called off — invisibly, because a
+   * closure that omits a trailing parameter is still assignable to the type that
+   * declares it. `request` already composes a caller's signal with its own
+   * deadline (`withTimeout(timeout, init.signal)`), so the whole cost here is a
+   * spread, and it is declared **before** the screen grows a Cancel rather than
+   * after: the missing parameter is what makes the control unbuildable.
+   *
+   * Neither is replayable and neither has to say so: `isReplayable` in
+   * `machine.ts` is GET/DELETE only, so a POST or a PATCH that times out is
+   * never sent a second time and cannot save two copies of one agent. Both do
+   * need `slowRoute`'s budget, and for a reason that is not obvious from the
+   * body — the daemon re-weighs the pairing against what the harness accepts,
+   * which means starting that harness on its host before it can answer.
+   */
+  addCustomAgent(
+    body: {
+      name: string;
+      harness: AgentId;
+      system: string;
+      model: string;
+    },
+    signal?: AbortSignal,
+  ): Promise<{ customAgent: CustomAgent }> {
+    return this.machine.request<{ customAgent: CustomAgent }>("/custom-agents", {
+      method: "POST",
+      body: JSON.stringify(body),
+      ...(signal === undefined ? {} : { signal }),
+    });
+  }
+
+  updateCustomAgent(
+    id: string,
+    body: {
+      name: string;
+      harness: AgentId;
+      system: string;
+      model: string;
+    },
+    signal?: AbortSignal,
+  ): Promise<{ customAgent: CustomAgent }> {
+    return this.machine.request<{ customAgent: CustomAgent }>(
+      `/custom-agents/${encodeURIComponent(id)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(body),
+        ...(signal === undefined ? {} : { signal }),
+      },
+    );
+  }
+
+  /**
+   * Drop a stored preset, and be able to say so twice.
+   *
+   * ⚠ **`removed: boolean`, not `true`, and the difference is the whole point of
+   * the type.** `isReplayable` in `machine.ts` whitelists `DELETE`, and this route
+   * is deliberately not on `slowRoute` — so it runs on `REQUEST_TIMEOUT_MS`, the
+   * budget `settleTransport` names as the one an ordinary drop to LTE earns, and
+   * a lost *answer* is resent as an identical request. The second send finds
+   * nothing under the id because the first one worked. A daemon answering `404`
+   * there would put `errorText` on the builder's screen over an act that
+   * succeeded; the daemon answers `200 {removed: false}` instead, exactly as
+   * {@link removePlugin} already does, and `false` is what tells a replay from a
+   * mistyped id.
+   *
+   * Nobody reads it yet — `AgentBuilder` navigates away on either value, which is
+   * right: the row is gone in both cases and there is nothing different to say.
+   * The field is typed honestly anyway, because a `true` literal here is a
+   * promise the wire stopped making and the way it would be discovered is a
+   * screen quietly narrowing an answer it never checked.
+   */
+  removeCustomAgent(id: string): Promise<{ removed: boolean; id: string }> {
+    return this.machine.request(`/custom-agents/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  /**
+   * Which agents this machine's New session strip offers, and in what order.
+   *
+   * A partial record: it holds a position only for what somebody moved or hid.
+   * `orderStrip` in `agentStrip.ts` is what turns it into a row, against the two
+   * listings the screen already has — so a `ref` naming something that is gone is
+   * dropped there rather than here, and an agent this list has never heard of is
+   * appended, visible.
+   *
+   * Cheap, like `customAgents()` beside it: a table read that spawns nothing, so
+   * it is deliberately **not** on `slowRoute` and sits on the ordinary budget the
+   * strip's first paint deserves.
+   */
+  agentStrip(): Promise<{ entries: AgentStripEntry[] }> {
+    return this.machine.request<{ entries: AgentStripEntry[] }>("/agent-strip");
+  }
+
+  /**
+   * Write the strip back, whole.
+   *
+   * ⚠ **The whole list on every write, and that is the route's shape rather than
+   * this client being lazy.** A reorder is a statement about every position at
+   * once; a per-row verb would need a rule for the rows the body did not mention,
+   * and no caller has one. The screen always holds the full list — it is what it
+   * just drew.
+   *
+   * `isReplayable` is GET/DELETE only, so a `PUT` whose answer is lost is never
+   * resent. That is safe here in the way it is not for `POST /custom-agents`:
+   * this route replaces rather than appends, so a resend could not have made a
+   * duplicate anyway. What a lost answer costs is one error line and a screen
+   * that puts the old order back — see the caller.
+   */
+  saveAgentStrip(
+    entries: readonly AgentStripEntry[],
+  ): Promise<{ saved: true; entries: AgentStripEntry[] }> {
+    return this.machine.request("/agent-strip", {
+      method: "PUT",
+      body: JSON.stringify({ entries }),
+    });
   }
 
   /* ---------------------------------------------------------------- *
@@ -109,6 +286,21 @@ export class DaemonClient {
     });
   }
 
+  /**
+   * Drop what the daemon remembers about this harness having refused to start.
+   *
+   * ⚠ **The one control on this screen whose subject is outside the app.** A
+   * harness with no sign-in wizard is fixed by running its own program once on the
+   * machine itself, and nothing about that reaches the daemon — so without this
+   * the only way back from a refusal is to wait for it to age out. It asks nothing
+   * of the agent and takes nothing away.
+   */
+  recheckAgent(agent: string): Promise<{ agent: string; rechecked: boolean; info?: AgentInfo }> {
+    return this.machine.request(`/agent-auth/${encodeURIComponent(agent)}/recheck`, {
+      method: "POST",
+    });
+  }
+
   cancelLogin(loginId: string): Promise<{ cancelled: boolean }> {
     return this.machine.request(`/agent-auth/login/${encodeURIComponent(loginId)}`, {
       method: "DELETE",
@@ -168,7 +360,16 @@ export class DaemonClient {
   }
 
   createSession(body: {
+    /**
+     * The harness, or — when `customAgent` is given — ignored.
+     *
+     * The daemon fills it in from the preset rather than making the caller keep
+     * the two in step, so a body sending both cannot produce a session running
+     * something neither field named.
+     */
     agent: string;
+    /** An assembled agent's id, for a session that is not on a bare harness. */
+    customAgent?: string | null;
     cwd: string;
     worktree?: boolean | "auto" | "require" | "never";
     branch?: string;
@@ -177,6 +378,23 @@ export class DaemonClient {
       method: "POST",
       body: JSON.stringify(body),
     });
+  }
+
+  /**
+   * One session, read in full.
+   *
+   * ⚠ **The only read that carries the whole model list.** `GET /sessions` bounds
+   * every option's choices, because sixty of those records ride a four-second poll
+   * to a phone and a keyed opencode publishes 362 models — so the polled copy is a
+   * head, flagged `truncated`. This route is not polled and answers complete. A
+   * picker that finds `truncated` on the option it is about to draw comes here for
+   * the rest; nothing else should, or the saving is spent.
+   *
+   * `GET`, so `isReplayable` allows the retry — the same reason `sessions()` may be
+   * replayed, and it reads rather than writes.
+   */
+  session(id: SessionId): Promise<{ session: SessionSnapshot }> {
+    return this.machine.request<{ session: SessionSnapshot }>(`/sessions/${encodeURIComponent(id)}`);
   }
 
   /** Stopping is a DELETE. There is no `POST /stop`. */
@@ -374,7 +592,7 @@ export class DaemonClient {
    */
   installPluginFromSource(
     source: { kind: "github"; repo: string; commit: string },
-    consent: { scopes: readonly string[]; net: readonly string[]; hooks: readonly string[] } | null,
+    consent: { scopes: readonly string[]; net: readonly string[]; hooks: readonly string[]; adds: readonly string[] } | null,
     signal?: AbortSignal,
   ): Promise<PluginInstalled> {
     return this.machine.request<PluginInstalled>("/plugins/source", {

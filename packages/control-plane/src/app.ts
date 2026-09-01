@@ -627,13 +627,25 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   const catalogueOrigin = originOf(pluginCatalogueUrl);
   const marketOrigins = catalogueOrigin === null ? "" : ` ${catalogueOrigin} ${PLUGIN_MANIFEST_ORIGIN}`;
   const marketImages = catalogueOrigin === null ? "" : ` ${PLUGIN_MANIFEST_ORIGIN}`;
+  /*
+   * ⚠ **The one third-party origin that is not conditional on a setting.** Every
+   * instance compiles in the same `SYSTEMS`, so every instance's model picker
+   * reads this one list — `packages/web/src/openrouter.ts` says why the daemon
+   * does not proxy it. An instance that omitted it would draw a provider whose
+   * section never fills, with the reason only in a console nobody has open on a
+   * phone; that is the market's `img-src` failure again, one directive over.
+   *
+   * `connect-src` only, and the contrast with the market above is the reason: this
+   * reads JSON with `fetch` and draws no icon, so `img-src` is untouched.
+   */
+  const MODEL_CATALOGUE_ORIGIN = "https://openrouter.ai";
   const csp = [
     "default-src 'self'",
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
     `img-src 'self' blob:${marketImages}`,
     "font-src 'self'",
-    `connect-src 'self'${relayOrigins}${marketOrigins}`,
+    `connect-src 'self'${relayOrigins}${marketOrigins} ${MODEL_CATALOGUE_ORIGIN}`,
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
