@@ -1909,7 +1909,21 @@ process.stdout.write("\nwhether a login can be driven\n");
              * not read. Take it out of this fixture and the assertion below stops
              * saying anything.
              */
-            { id: "gemini", name: "Gemini", command: "gemini", args: ["acp"], envNames: ["GEMINI_API_KEY"], standalone: true },
+            /*
+             * ⚠ **`node` rather than `gemini`, and the command is the hermetic part
+             * of this fixture.** `contributedLaunchConfig` resolves a manifest's
+             * command with `findOnPath` and *throws* when it is not there, and
+             * `availability()` answers that throw with `displayName: contributed.name`
+             * — the label. So a fixture naming a real third-party program asserts one
+             * thing on a machine that happens to have it installed and the opposite on
+             * one that does not: this block was green on a laptop with the Gemini CLI
+             * on PATH and red on `ubuntu-latest`, on "and its log line is not its
+             * label", for two runs. `node` is the one program this driver cannot be
+             * running without, so the resolved arm is reachable everywhere. The
+             * unresolvable arm is pinned on its own, below, against a command nothing
+             * can have.
+             */
+            { id: "gemini", name: "Gemini", command: "node", args: ["acp"], envNames: ["GEMINI_API_KEY"], standalone: true },
           ],
           systems: [
             {
@@ -1986,8 +2000,66 @@ process.stdout.write("\nwhether a login can be driven\n");
      */
     check(
       "and its log line is not its label",
-      added === null ? "absent" : added.displayName !== added.label,
-      true,
+      added === null ? "absent" : [added.displayName, added.label ?? null],
+      ["Gemini (node)", "Gemini"],
+    );
+    /*
+     * ⚠ **The other arm, and it is the one that used to be reached by accident.**
+     * A manifest names a program on PATH and nothing installs it, so "the plugin is
+     * here and its binary is not" is the ordinary state, not the exotic one — and
+     * `availability()` has a deliberate answer for it: still call the harness what
+     * its manifest calls it, because falling back to the bare id would put
+     * `acme:gemini` in the settings list beside `Kimi Code CLI`.
+     *
+     * Asserted here rather than left to whichever machine happens to lack the
+     * binary. `displayName` collapsing onto the label is *correct* in this arm —
+     * there is no program to name — which is exactly why the assertion above cannot
+     * be allowed to reach it: the two arms want opposite answers, so a fixture that
+     * does not decide which one it is in asserts nothing on either.
+     */
+    const unbuilt = parseManifest(
+      JSON.stringify({
+        id: "acme",
+        name: "Acme Tools",
+        version: "1.0.0",
+        api: PLUGIN_API_VERSION,
+        scopes: ["harness"],
+        contributes: {
+          harnesses: [{ id: "gemini", name: "Gemini", command: "definitely-not-installed-anywhere", args: [] }],
+        },
+      }),
+    );
+    if (!unbuilt.ok) throw new Error(unbuilt.message);
+    const absent = await new LocalRuntime({
+      machine: new Contributions([
+        {
+          id: "acme",
+          version: "1.0.0",
+          manifest: unbuilt.manifest,
+          enabled: true,
+          installedAt: 1,
+          updatedAt: 1,
+          source: null,
+        },
+      ]),
+    }).availability();
+    const missing = absent.find((one) => one.id === "acme:gemini") ?? null;
+    check(
+      "a harness whose program is not on this machine is named, not available, and not a bare id",
+      missing === null
+        ? "absent"
+        : [missing.displayName, missing.label ?? null, missing.available],
+      ["Gemini", "Gemini", false],
+    );
+    check(
+      "and its hint names the program it wanted and the plugin that added it",
+      missing === null
+        ? "absent"
+        : [
+            (missing.hint ?? "").includes("definitely-not-installed-anywhere"),
+            (missing.hint ?? "").includes("Acme Tools"),
+          ],
+      [true, true],
     );
     const slots = ((await get("/agent-auth"))["agents"] as { id: string; credentials: { envName: string }[] }[]).find(
       (one) => one.id === "acme:gemini",
