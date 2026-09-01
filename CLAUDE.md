@@ -344,6 +344,18 @@ An empty `catch` always carries a comment saying why. **Comments explain *why*,
 often naming the empirical behaviour that motivated the code** — and a correction
 belongs at the code it is about, not in this file.
 
+**The comment layer is the specification, and no shortening pass owns it.** There
+is no test framework here, so what a change was *supposed* to do lives in the
+drivers and in these docblocks and nowhere else. An invariant stated in prose that
+the code quietly stopped holding is how five of one review's heaviest findings were
+found — `systems.ts`'s fixity claim, `Settings.tsx`'s "has to be a compile error",
+`MarketEntry`'s consent reset, `Toast.tsx`'s live-region measurement. A tool or a
+mode asking for the shortest diff, *deletion over addition*, or *no boilerplate
+nobody asked for* is talking about **code**, and may not be read as licence to
+compress a docblock. What may still go is a comment that is *wrong*: stale,
+orphaned by the function it used to describe, or a second copy of a measurement
+`docs/DECISIONS.md` already holds.
+
 ## Next
 
 Deferred work, open decisions and the inventory of what is asserted are group
