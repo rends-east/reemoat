@@ -25,6 +25,74 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-01
+
+### Added
+
+- **One command puts a machine in the app.** `curl -fsSL <release asset> | sh`
+  installs the daemon, asks which control plane to join and who you are on it —
+  sign in, sign up, or paste a key — creates the machine and starts the service.
+  No `sudo`, nothing written to a shell profile, and nothing outside `~/.reemoat`
+  and the checkout, which is what makes `--uninstall` complete rather than
+  approximate. It hands the last third to `deploy/install.sh daemon
+  --non-interactive` rather than reimplementing unit rendering, PATH computation
+  and the health probe.
+
+  **Where the software comes from and which fleet it joins are two questions,
+  and the command keeps them apart.** The README downloads from a release asset
+  on this repository; a control plane serves the same file at `GET /install.sh`
+  with its own origin substituted in, which is what Settings → Machines prints
+  and why there is nothing to type there; `--url` or `REEMOAT_CONTROL_PLANE`
+  says it outright. Fetched from anywhere neutral it **asks**, with no default —
+  letting a download URL also decide which fleet a machine joins is how somebody
+  who wanted their own control plane arrives in one they do not run.
+
+  Three things about it are load-bearing rather than tidy. Everything runs from
+  one `main "$@"` on the last line, because `curl … | sh` executes bytes as they
+  arrive and a truncated download otherwise runs a *prefix* of the file with
+  `set -e` silent. Every question is asked on `/dev/tty`, because stdin is the
+  download. And the origin substituted into the served copy is shell-quoted: a
+  `Host` of ``a`id`b`` reaches `URL.origin` intact, and `imagecheck` sends one
+  through a real container to prove the quoting is on the path a request takes.
+
+- **A host can pull the control-plane image instead of building it.**
+  `REEMOAT_CP_IMAGE` decides — a registry-qualified ref pulls, a bare one builds
+  — and `deploy.sh` prints which on every run. `REEMOAT_CP_SOURCE` overrides the
+  derivation, and an unrecognised value is refused rather than defaulted.
+
+  In pull mode `CP_IMAGE_INPUTS` does not apply: a git diff is a guess at what a
+  build would produce, and a registry ref names exact bytes. Everything
+  downstream is untouched — `cp_image_fingerprint` inspects the local image
+  either way, so `CP_IMAGE_MOVED` and the `RELAY_INPUTS` rule that decides
+  whether the fleet's tunnels drop behave exactly as they do after a build.
+
+### Fixed
+
+- **The documented way to run the published image had never worked.**
+  `deploy/README.md` said to put `REEMOAT_CP_IMAGE=ghcr.io/…` in the control
+  plane's env file. It could not win: compose gives the shell environment
+  precedence over `--env-file` for `${…}` interpolation, and `compose.sh`
+  exported its own default before compose ever ran — measured, `compose.sh
+  config` with a registry ref in that file still printed
+  `image: reemoat/control-plane:current`.
+
+  The half with no symptom is worse. `deploy.sh` calls `cp_image_fingerprint`
+  from a process where that variable may be unset while compose's child had it
+  from the file, so the fingerprint would inspect a *different name*, answer
+  empty on both sides, conclude the image had not moved, and recreate nothing —
+  a deploy that printed success while the old bytes kept serving. There is one
+  resolver now (`cp_image_ref`), every script reads it, and `deploycheck`
+  asserts no script holds a second copy of the default.
+
+- **`GET /install.sh` answers with the scheme a browser actually used.**
+  `publicUrl` takes it from `socket.encrypted`, and the service runs plain HTTP
+  behind a proxy that terminates TLS — so it answered `http://`, and the plain
+  form of a deployed origin is a `301` the installer deliberately does not
+  follow. `x-forwarded-proto` is read, gated on `trustedProxyHops` exactly as
+  `callerAddressOf` is. ⚠ The same defect on `controlPlaneUrl` (four
+  code-minting routes) is known and **not** fixed here: changing `publicUrl`
+  itself changes what every enrollment paste has said since the first release.
+
 ## [0.4.0] - 2026-09-01
 
 ### Fixed

@@ -1,6 +1,6 @@
 {
   "name": "@reemoat/web",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "The reemoat web UI: supervises a fleet of coding-agent sessions from a phone.",
   "license": "AGPL-3.0-only",
   "author": "rends-east",
