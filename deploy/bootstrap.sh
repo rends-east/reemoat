@@ -174,21 +174,112 @@ tty_secret() {
   printf '%s' "$_value"
 }
 
+# ---------------------------------------------------------------------------
+# Choosing with the arrow keys
+# ---------------------------------------------------------------------------
+#
+# **Nothing here is typed that can be picked.** A one-shot installer that makes
+# somebody read four options and then type `3` has turned two keystrokes into a
+# reading exercise, and a mistyped digit into a wrong fleet. Up/down and Enter.
+#
+# Raw mode, one byte at a time through `dd`, because POSIX `read` has no `-n1` —
+# that is a bashism and the floor here is `dash`. The byte is converted to a
+# **number** by `od` rather than read as a character, and that is what makes
+# Enter readable at all: command substitution strips trailing newlines, so
+# reading the character would return an empty string for the one key that
+# matters most.
+_key() { dd bs=1 count=1 2>/dev/null <&3 | od -An -tu1 | tr -dc '0-9'; }
+
+# The terminal as it was before a menu touched it. A global rather than a trap
+# inside `menu`, because traps in `sh` are process-wide: one set inside a
+# function replaces the script's own, and losing the EXIT trap here would leave
+# the enrollment code unrevoked. The main traps call this instead.
+#
+# ⚠ **Do not verify this with `stty -g` before and after.** Measured on macOS
+# through a real pty: the two strings differ by `lflag` gaining `0x20000000`,
+# which is `PENDIN` — a transient kernel bit meaning "input was pending when the
+# mode changed", not a setting anybody chose. Everything a person can feel is
+# restored exactly (`echo icanon icrnl isig opost`, compared field for field).
+# A `-g` comparison reads as a leak and is not one.
+TTY_SAVED=""
+restore_tty() {
+  [ -n "$TTY_SAVED" ] || return 0
+  stty "$TTY_SAVED" <&3 2>/dev/null || true
+  TTY_SAVED=""
+  printf '\033[?25h' >/dev/tty 2>/dev/null || true
+}
+
+# menu "Title" "option" "option" … → prints the 1-based index chosen.
+#
+# ⚠ **The first option is the default**, because Enter takes it. Order matters
+# wherever one of the choices is a decision somebody should not arrive at by
+# pressing Enter — the hosted control plane is second for exactly that reason.
+menu() {
+  _t="$1"; shift
+  [ "$TTY_OPEN" = 1 ] || die "no terminal to choose on."
+  _n=$#; _sel=1
+  printf '\033[?25l' >/dev/tty
+  [ -n "$_t" ] && printf '%s\n' "$_t" >/dev/tty
+  _menu_draw "$@"
+  TTY_SAVED=$(stty -g <&3 2>/dev/null || printf '')
+  stty raw -echo <&3 2>/dev/null || true
+  while :; do
+    _k=$(_key)
+    case "$_k" in
+      10 | 13) break ;;
+      # In raw mode the terminal stops turning Ctrl-C into a signal and hands
+      # over byte 3, so the only thing that can honour it is this.
+      3) restore_tty; printf '\n' >/dev/tty; exit 130 ;;
+      27)
+        [ "$(_key)" = 91 ] || continue
+        case "$(_key)" in
+          65) _sel=$((_sel - 1)); [ "$_sel" -lt 1 ] && _sel=$_n ;;
+          66) _sel=$((_sel + 1)); [ "$_sel" -gt "$_n" ] && _sel=1 ;;
+        esac ;;
+      107) _sel=$((_sel - 1)); [ "$_sel" -lt 1 ] && _sel=$_n ;;
+      106) _sel=$((_sel + 1)); [ "$_sel" -gt "$_n" ] && _sel=1 ;;
+      "") break ;;
+      *) continue ;;
+    esac
+    printf '\033[%dA' "$_n" >/dev/tty
+    _menu_draw "$@"
+  done
+  restore_tty
+  # The list is replaced by the answer. Four lines of options that have been
+  # answered are four lines of scrollback saying nothing.
+  printf '\033[%dA' "$_n" >/dev/tty
+  _i=1
+  for _o in "$@"; do
+    [ "$_i" = "$_sel" ] && printf '\033[K  %s\n' "$_o" >/dev/tty
+    _i=$((_i + 1))
+  done
+  _i=1
+  while [ "$_i" -lt "$_n" ]; do printf '\033[K\n' >/dev/tty; _i=$((_i + 1)); done
+  [ "$_n" -gt 1 ] && printf '\033[%dA' "$((_n - 1))" >/dev/tty
+  printf '%s' "$_sel"
+}
+
+_menu_draw() {
+  _i=1
+  for _o in "$@"; do
+    if [ "$_i" = "$_sel" ]; then
+      printf '\033[K\033[7m  %s  \033[0m\n' "$_o" >/dev/tty
+    else
+      printf '\033[K  %s\n' "$_o" >/dev/tty
+    fi
+    _i=$((_i + 1))
+  done
+}
+
 tty_confirm() {
   [ "$ASSUME_YES" = 1 ] && return 0
-  # ⚠ **Checked here rather than left to `tty_ask`.** `tty_ask`'s `die` runs
-  # inside `$( … )`, so its `exit 2` kills only the command substitution and the
-  # loop below spins forever printing two messages a second. Reproduced with
-  # `--uninstall --purge` and no terminal.
+  # ⚠ **Checked here rather than left to `menu`.** `menu`'s `die` runs inside
+  # `$( … )`, so its `exit 2` would kill only the command substitution.
+  # Reproduced with `--uninstall --purge` and no terminal.
   [ "$TTY_OPEN" = 1 ] || die "$1
-  There is no terminal to ask on. Re-run with --yes if you mean it."
-  while :; do
-    case "$(tty_ask "$1 [y/n]")" in
-      y | Y | yes | YES) return 0 ;;
-      n | N | no | NO)   return 1 ;;
-      *) warn "  answer y or n." ;;
-    esac
-  done
+  No terminal to ask on. Re-run with --yes if you mean it."
+  # No first, because every caller is asking about something irreversible.
+  [ "$(menu "$1" "No" "Yes")" = 2 ]
 }
 
 # ---------------------------------------------------------------------------
@@ -285,7 +376,7 @@ resolve_control_plane() {
     case "$CONTROL_PLANE_DEFAULT" in
       '@'*'@' | "") : ;;
       *) CP="$CONTROL_PLANE_DEFAULT"
-         note "joining      $CP (the control plane this installer came from)" ;;
+         note "control plane $CP" ;;
     esac
   fi
   if [ -z "$CP" ]; then
@@ -299,14 +390,14 @@ resolve_control_plane() {
   A control plane is the piece you run yourself; deploy/install.sh
   control-plane sets one up. The author runs one at https://app.reemoat.com."
     say ""
-    say "Which control plane should this machine join?"
-    say "  That is the piece that holds your account and relays to this machine."
-    say "  You run one with deploy/install.sh control-plane, or use the one the"
-    say "  author runs at https://app.reemoat.com."
-    while [ -z "$CP" ]; do
-      # No default. Enter here must not mean "the author's".
-      CP=$(tty_ask "address")
-    done
+    # ⚠ **The hosted one is second, and that is the decision.** Enter takes the
+    # first row, so putting it there would make "join the author's fleet" the
+    # thing that happens to somebody who did not read. Named, never default.
+    if [ "$(menu "Which control plane?" "My own" "app.reemoat.com  (run by the author)")" = 2 ]; then
+      CP="https://app.reemoat.com"
+    else
+      while [ -z "$CP" ]; do CP=$(tty_ask "  address"); done
+    fi
   fi
   case "$CP" in
     https://* | http://127.0.0.1* | http://localhost*) : ;;
@@ -411,16 +502,16 @@ ensure_node() {
     _m=$(node_major "$(command -v node)")
     if [ -n "$_m" ] && [ "$_m" -ge "$NODE_MAJOR" ]; then
       NODE_BIN=$(command -v node)
-      note "node:        $NODE_BIN (v$_m, already here)"
+      note "node          v$_m"
       return 0
     fi
-    note "node:        v${_m:-?} is too old — the daemon needs $NODE_MAJOR (node:sqlite)"
+    note "node          v${_m:-?} is too old, need $NODE_MAJOR"
   fi
   if [ -x "$TOOLCHAIN/bin/node" ]; then
     _m=$(node_major "$TOOLCHAIN/bin/node")
     if [ -n "$_m" ] && [ "$_m" -ge "$NODE_MAJOR" ]; then
       NODE_BIN="$TOOLCHAIN/bin/node"
-      note "node:        $NODE_BIN (v$_m, from an earlier run)"
+      note "node          v$_m"
       return 0
     fi
   fi
@@ -446,8 +537,7 @@ verify_sha256() {
 }
 
 install_node() {
-  say ""
-  say "installing node $NODE_MAJOR into $TOOLCHAIN (about 50 MB, nothing outside your home directory)"
+  note "node          installing $NODE_MAJOR (~50 MB, into $TOOLCHAIN)"
   _plat="$PLATFORM"; [ "$_plat" = darwin ] && _plat=darwin
   _dist="https://nodejs.org/dist/latest-v$NODE_MAJOR.x"
   mkdir -p "$TMP/node"
@@ -458,18 +548,16 @@ install_node() {
     || die "cannot reach $_dist — check the network, or install node $NODE_MAJOR yourself and use --node."
   _tar=$(sed -n "s/^[0-9a-f]*  \(node-v[0-9.]*-$_plat-$ARCH\.tar\.gz\)\$/\1/p" "$TMP/node/SHASUMS256.txt" | head -1)
   [ -n "$_tar" ] || die "nodejs.org publishes no $_plat-$ARCH build for v$NODE_MAJOR."
-  note "downloading   $_tar"
   curl -fsSL "$_dist/$_tar" -o "$TMP/node/$_tar" || die "the node download failed."
   verify_sha256 "$TMP/node/$_tar" "$TMP/node/SHASUMS256.txt" "$_tar" \
     || die "the node download does not match its published checksum. Nothing has been installed."
-  note "checksum      ok"
   rm -rf "$TOOLCHAIN"
   mkdir -p "$TOOLCHAIN"
   tar -xzf "$TMP/node/$_tar" -C "$TOOLCHAIN" --strip-components=1 || die "could not unpack $_tar."
   : > "$TOOLCHAIN_MARKER"
   NODE_BIN="$TOOLCHAIN/bin/node"
   [ -x "$NODE_BIN" ] || die "node unpacked but $NODE_BIN is not executable."
-  note "node:        $NODE_BIN ($("$NODE_BIN" --version))"
+  note "node          $("$NODE_BIN" --version)"
 }
 
 pnpm_version_of() { "$1" --version 2>/dev/null; }
@@ -477,12 +565,12 @@ pnpm_version_of() { "$1" --version 2>/dev/null; }
 ensure_pnpm() {
   if command -v pnpm >/dev/null 2>&1 && [ "$(pnpm_version_of "$(command -v pnpm)")" = "$PNPM_VERSION" ]; then
     PNPM_BIN=$(command -v pnpm)
-    note "pnpm:        $PNPM_BIN ($PNPM_VERSION, already here)"
+    note "pnpm          $PNPM_VERSION"
     return 0
   fi
   if [ -x "$TOOLCHAIN/bin/pnpm" ] && [ "$(pnpm_version_of "$TOOLCHAIN/bin/pnpm")" = "$PNPM_VERSION" ]; then
     PNPM_BIN="$TOOLCHAIN/bin/pnpm"
-    note "pnpm:        $PNPM_BIN ($PNPM_VERSION, from an earlier run)"
+    note "pnpm          $PNPM_VERSION"
     return 0
   fi
   _npm="$(dirname -- "$NODE_BIN")/npm"
@@ -492,7 +580,6 @@ ensure_pnpm() {
   [ -n "$_npm" ] || die "no npm beside $NODE_BIN, so pnpm cannot be installed."
   mkdir -p "$TOOLCHAIN"
   : > "$TOOLCHAIN_MARKER"
-  say "installing pnpm $PNPM_VERSION into $TOOLCHAIN"
   # Not corepack. It downloads pnpm at first use, which turns `pnpm install`
   # into a network dependency at exactly the moment somebody is counting
   # seconds — the reason services/premium's provision.sh gives, in production.
@@ -501,7 +588,7 @@ ensure_pnpm() {
     || die "could not install pnpm $PNPM_VERSION."
   PNPM_BIN="$TOOLCHAIN/bin/pnpm"
   [ -x "$PNPM_BIN" ] || die "pnpm installed but $PNPM_BIN is not executable."
-  note "pnpm:        $PNPM_BIN ($PNPM_VERSION)"
+  note "pnpm          $PNPM_VERSION"
 }
 
 # git cannot be installed without a package manager, so this refuses with the
@@ -562,16 +649,16 @@ probe_instance() {
   REG_EMAIL=$(json_path registration.requiresEmail "$INSTANCE_JSON")
   SOURCE_URL=$(json_path source.url "$INSTANCE_JSON")
   SOURCE_VERSION=$(json_path source.version "$INSTANCE_JSON")
-  note "control plane $CP (reemoat ${SOURCE_VERSION:-?})"
+  note "control plane $CP (${SOURCE_VERSION:-?})"
 }
 
 # `POST /v1/login` answers one thing for an unknown name, an unconfirmed
 # address, a wrong password and an account with no password row — deliberately,
 # so this cannot tell them apart either and must not pretend to.
 sign_in() {
-  _name=$(tty_ask "username or email")
+  _name=$(tty_ask "  username or email")
   [ -n "$_name" ] || die "no username given."
-  _pass=$(tty_secret "password")
+  _pass=$(tty_secret "  password")
   [ -n "$_pass" ] || die "no password given."
   _body=$("$NODE_BIN" -e 'process.stdout.write(JSON.stringify({name: process.argv[1], password: process.argv[2]}))' "$_name" "$_pass")
   http_request POST "$CP/v1/login" "$_body"
@@ -593,12 +680,11 @@ sign_in() {
 wait_for_confirmation() {
   _name="$1"; _pass="$2"; _email="$3"
   say ""
-  say "  We sent a confirmation link to $_email. Open it, then come back here."
-  say "  The link is good for 24 hours."
+  say "  Link sent to $_email. Open it, then press Enter."
   _tries=0
   while [ "$_tries" -lt 5 ]; do
     _tries=$((_tries + 1))
-    tty_ask "press Enter once you have opened the link" "" >/dev/null
+    tty_ask "  Enter when done" "" >/dev/null
     _body=$("$NODE_BIN" -e 'process.stdout.write(JSON.stringify({name: process.argv[1], password: process.argv[2]}))' "$_name" "$_pass")
     http_request POST "$CP/v1/login" "$_body"
     case "$HTTP_STATUS" in
@@ -617,15 +703,15 @@ wait_for_confirmation() {
 }
 
 register() {
-  _name=$(tty_ask "choose a username")
+  _name=$(tty_ask "  username")
   [ -n "$_name" ] || die "no username given."
   _email=""
   if [ "$REG_EMAIL" = true ]; then
-    _email=$(tty_ask "email address")
+    _email=$(tty_ask "  email")
     [ -n "$_email" ] || die "this control plane confirms sign-ups by mail, so it needs an address."
   fi
-  _pass=$(tty_secret "choose a password")
-  _again=$(tty_secret "again")
+  _pass=$(tty_secret "  password")
+  _again=$(tty_secret "  again")
   [ "$_pass" = "$_again" ] || die "the two passwords are not the same."
   _body=$("$NODE_BIN" -e '
     const [name, password, email] = process.argv.slice(1);
@@ -637,7 +723,7 @@ register() {
       # No mail configured on this instance, so the account exists now and the
       # response already carries a session. Nothing to wait for.
       SESSION_TOKEN=$(json_path token "$HTTP_BODY"); AUTH="$SESSION_TOKEN"
-      say "  account created."
+      note "account       created"
       return 0 ;;
     200) wait_for_confirmation "$_name" "$_pass" "$_email"; return 0 ;;
     403) die "this control plane is not taking sign-ups. Ask whoever runs it for an account." ;;
@@ -658,28 +744,24 @@ choose_credential() {
       REEMOAT_API_KEY=rk_... sh -c \"\$(curl -fsSL $CP/install.sh)\""
   fi
   say ""
-  say "How should this machine join $CP?"
-  say "  1) I have a setup code from Settings -> Machines"
-  say "  2) I have an API key"
-  say "  3) Sign in"
+  # Most-common-first now that Enter takes the top row: signing in is what
+  # almost everybody does, and a setup code is the expert path. The row that
+  # cannot work is **absent** rather than present-and-refusing — a menu whose
+  # options are not all real is a menu you have to read twice.
   if [ "$REG_ENABLED" = true ]; then
-    say "  4) Create an account"
+    _pick=$(menu "Who are you on it?" "Sign in" "Create an account" "API key" "Setup code")
   else
-    say "     (this control plane is not taking sign-ups — ask whoever runs it for an account)"
+    _pick=$(menu "Who are you on it?" "Sign in" "API key" "Setup code")
+    [ "$_pick" -ge 2 ] && _pick=$((_pick + 1))
   fi
-  while :; do
-    case "$(tty_ask "choose")" in
-      1) ENROLL_CODE=$(tty_secret "setup code (ec_...)"); [ -n "$ENROLL_CODE" ] && return 0 ;;
-      2) API_KEY=$(tty_secret "API key (rk_...)")
-         # Used to mint one enrollment code and then dropped. It is never
-         # written to the env file, and nothing on this host keeps it.
-         [ -n "$API_KEY" ] && { AUTH="$API_KEY"; return 0; } ;;
-      3) sign_in; return 0 ;;
-      4) [ "$REG_ENABLED" = true ] && { register; return 0; }
-         warn "  sign-ups are closed on this control plane." ;;
-      *) warn "  answer with a number." ;;
-    esac
-  done
+  case "$_pick" in
+    1) sign_in ;;
+    2) register ;;
+    # Used to mint one enrollment code and then dropped: never written to the
+    # env file, and nothing on this host keeps it.
+    3) API_KEY=$(tty_secret "  API key"); AUTH="$API_KEY" ;;
+    4) ENROLL_CODE=$(tty_secret "  setup code") ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
@@ -742,7 +824,7 @@ create_machine() {
   if [ "$TTY_OPEN" = 1 ] && [ "$ASSUME_YES" != 1 ]; then
     # Typed at the prompt is typed: checked, and asked again rather than rewritten.
     while :; do
-      _typed=$(tty_ask "what should this machine be called" "$LABEL")
+      _typed=$(tty_ask "  machine name" "$LABEL")
       if ( check_label "$_typed" ) 2>/dev/null; then LABEL="$_typed"; break; fi
       ( check_label "$_typed" ) 2>&1 | head -1 >&2 || true
     done
@@ -759,14 +841,14 @@ create_machine() {
         _url=$(json_path controlPlaneUrl "$HTTP_BODY")
         [ -n "$_url" ] && CP="$_url"
         [ -n "$ENROLL_CODE" ] || die "the control plane created $MACHINE_ID but sent no enrollment code."
-        note "machine:     $LABEL ($MACHINE_ID)"
+        note "machine       $LABEL"
         return 0 ;;
       409)
         case "$(api_code "$HTTP_BODY")" in
           machine_exists)
             [ "$TTY_OPEN" = 1 ] || die "you already have a machine called \"$LABEL\". Pass --label <other>."
             warn "  you already have a machine called \"$LABEL\"."
-            LABEL=$(sanitize_label "$(tty_ask "another name")") ;;
+            LABEL=$(sanitize_label "$(tty_ask "  another name")") ;;
           # Never retried. The server writes both sentences, including the one
           # for a limit of zero, and a retry would be asking a settled question
           # again.
@@ -840,13 +922,12 @@ clone_or_fetch() {
     [ "$_origin" = "$REPO_URL" ] || die "$CHECKOUT is a checkout of $_origin, not $REPO_URL.
 
   Pass --dir <somewhere-else>, or move that directory."
-    note "checkout:    $CHECKOUT (updating)"
+    note "checkout      $CHECKOUT"
     git -C "$CHECKOUT" fetch --tags --quiet origin || die "could not fetch $REPO_URL."
   else
     [ ! -e "$CHECKOUT" ] || [ -z "$(ls -A "$CHECKOUT" 2>/dev/null)" ] \
       || die "$CHECKOUT exists and is not empty. Pass --dir <somewhere-else>."
-    say ""
-    say "cloning $REPO_URL into $CHECKOUT"
+    note "checkout      $CHECKOUT"
     mkdir -p "$(dirname -- "$CHECKOUT")"
     # `--filter=blob:none` rather than `--depth 1`: deploy/deploy.sh fetches and
     # resets later, and a shallow clone makes that a special case.
@@ -854,7 +935,7 @@ clone_or_fetch() {
   fi
   if [ -n "$GIT_REF" ]; then
     git -C "$CHECKOUT" checkout --detach --quiet "$GIT_REF" || die "no such ref in $REPO_URL: $GIT_REF"
-    note "version:     $GIT_REF"
+    note "version       $GIT_REF"
   else
     # With no tag to check out, an *existing* checkout would otherwise be fetched
     # and then left exactly where it was — an "update" that moved nothing.
@@ -864,13 +945,12 @@ clone_or_fetch() {
     if [ -n "$_head" ]; then
       git -C "$CHECKOUT" checkout --detach --quiet "$_head" || die "could not check out $_head."
     fi
-    note "version:     $(git -C "$CHECKOUT" rev-parse --short HEAD) (default branch)"
+    note "version       $(git -C "$CHECKOUT" rev-parse --short HEAD)"
   fi
 }
 
 install_dependencies() {
-  say ""
-  say "installing dependencies (about 750 MB, a few minutes — the agent CLIs are in here)"
+  note "deps          installing (~750 MB, a few minutes)"
   ( cd "$CHECKOUT" && PATH="$(dirname -- "$NODE_BIN"):$(dirname -- "$PNPM_BIN"):$PATH" \
       "$PNPM_BIN" install --frozen-lockfile ) || die "pnpm install failed. Nothing has been started."
 }
@@ -910,7 +990,7 @@ write_env_file() {
   ' "$CHECKOUT/deploy/lib.sh" "$CP" "$ENROLL_CODE" > "$TMP/envpath" \
     || die "could not write the daemon's environment file."
   ENV_FILE=$(cat "$TMP/envpath")
-  note "settings:    $ENV_FILE"
+  note "settings      $ENV_FILE"
 }
 
 # **Writing the env file first is what makes this non-interactive**, and it is a
@@ -919,8 +999,7 @@ write_env_file() {
 # file in place it renders the unit, starts it and probes it. services/premium's
 # provision.sh does exactly this, in production.
 hand_off() {
-  say ""
-  say "installing the service"
+  note "service       installing"
   # PATH prefixed for this one call so `resolve_bin node` finds ours and
   # `runtime_path` bakes its directory into the unit — which is why nothing had
   # to be appended to a shell profile. </dev/null so nothing downstream can read
@@ -951,9 +1030,9 @@ verify_running() {
     . "$0"
     _ok=1
     if svc_installed daemon && [ -n "$(svc_pid daemon || true)" ]; then
-      echo "  running:     yes"
+      echo "  running       yes"
     else
-      echo "  running:     NO — the supervisor has no live process for it" >&2; _ok=0
+      echo "  running       NO — the supervisor has no live process" >&2; _ok=0
     fi
     # ⚠ **`wait_healthy`, not `http_ok` on a raw `health_probe_target`.** That
     # function answers `ok <url>` or `skip <reason>` — a *prefixed* answer — and
@@ -965,26 +1044,25 @@ verify_running() {
     # same daemon on the line above.
     if wait_healthy daemon; then :; else _ok=0; fi
     if svc_log_lines daemon 300 2>/dev/null | grep -q "enrolled as m_"; then
-      echo "  enrolled:    $(svc_log_lines daemon 300 | sed -n "s/.*\(enrolled as m_[0-9a-f]*\).*/\1/p" | tail -1)"
+      echo "  enrolled      $(svc_log_lines daemon 300 | sed -n "s/.*enrolled as \(m_[0-9a-f]*\).*/\1/p" | tail -1)"
     else
-      echo "  enrolled:    NO — the daemon has not exchanged its code yet" >&2; _ok=0
+      echo "  enrolled      NO — the code has not been exchanged" >&2; _ok=0
     fi
     # A note rather than a failure: a machine that enrolled and got no relay is
     # unreachable from a phone, and the daemon redials on its own backoff.
     svc_log_lines daemon 300 2>/dev/null | grep -qi "relay" \
-      || echo "  relay:       nothing in the log yet — it dials with backoff" >&2
-    echo "  logs:        $(log_hint daemon)"
+      || echo "  relay         not up yet — it dials with backoff" >&2
+    echo "  logs          $(log_hint daemon)"
     exit $(( 1 - _ok ))
   ' "$CHECKOUT/deploy/lib.sh"
 }
 
 summary() {
   say ""
-  say "done — \"$LABEL\" is on $CP"
-  note "open $CP/ and it is there."
+  say "\"$LABEL\" is on $CP — open it."
   say ""
-  note "update:      $CHECKOUT/deploy/deploy.sh"
-  note "uninstall:   curl -fsSL $CP/install.sh | sh -s -- --uninstall"
+  note "update        $CHECKOUT/deploy/deploy.sh"
+  note "uninstall     curl -fsSL $CP/install.sh | sh -s -- --uninstall"
 }
 
 # ---------------------------------------------------------------------------
@@ -1001,28 +1079,20 @@ existing_install() {
   _bound=$(sed -n "s/^REEMOAT_CONTROL_PLANE='\{0,1\}\([^']*\)'\{0,1\}.*/\1/p" "$_env" | tail -1)
   [ -n "$_bound" ] || return 1
   say ""
-  say "there is already a daemon set up here, joined to $_bound"
-  note "settings:    $_env"
-  [ -d "$CHECKOUT/.git" ] && note "checkout:    $CHECKOUT"
   if [ "$TTY_OPEN" != 1 ]; then
-    die "re-run from a terminal to choose what to do, or:
-      $CHECKOUT/deploy/deploy.sh                     # update it
-      curl -fsSL $CP/install.sh | sh -s -- --uninstall  # remove it"
+    die "already set up here, joined to $_bound.
+      $CHECKOUT/deploy/deploy.sh                        # update
+      curl -fsSL $CP/install.sh | sh -s -- --uninstall  # remove"
   fi
-  say ""
-  say "  1) Update it (fetch, reinstall dependencies, restart)"
-  say "  2) Join it to $CP as a new machine"
-  say "  3) Leave it alone"
-  while :; do
-    case "$(tty_ask "choose" "3")" in
-      1) update_existing || die "the update did not finish. Nothing else was changed."
-         exit 0 ;;
-      2) warn "  this adds a second machine to your list and spends one of your machine slots."
-         tty_confirm "  go on?" && return 1 ;;
-      3) say "  nothing changed."; exit 0 ;;
-      *) warn "  answer with a number." ;;
-    esac
-  done
+  # Leaving it alone is first: this runs on a machine that already works, and
+  # Enter must not be the key that changes it.
+  case "$(menu "Already joined to $_bound." "Leave it" "Update" "Add as a second machine")" in
+    1) exit 0 ;;
+    2) update_existing || die "the update did not finish. Nothing else changed."
+       exit 0 ;;
+    3) tty_confirm "Adds a second machine and spends a slot." && return 1
+       exit 0 ;;
+  esac
 }
 
 update_existing() {
@@ -1111,8 +1181,8 @@ main() {
   TMP=$(mktemp -d "${TMPDIR:-/tmp}/reemoat-install.XXXXXX") || die "cannot make a temporary directory."
   # The session is revoked here as well as on the happy path, so an interrupt
   # between minting one and finishing does not leave a live credential behind.
-  trap 'revoke_session; rm -rf "$TMP"' EXIT
-  trap 'revoke_session; rm -rf "$TMP"; exit 130' INT TERM
+  trap 'restore_tty; revoke_session; rm -rf "$TMP"' EXIT
+  trap 'restore_tty; revoke_session; rm -rf "$TMP"; exit 130' INT TERM
 
   detect_platform
   # A name somebody typed is checked here, before a single request: a typo should
@@ -1124,8 +1194,6 @@ main() {
   if [ "$UNINSTALL" = 1 ]; then do_uninstall; return 0; fi
   resolve_control_plane
 
-  say "Reemoat — setting this machine up to run agents you can reach from anywhere."
-  say ""
   ensure_git
   check_script_binary
   ensure_node
@@ -1146,8 +1214,6 @@ main() {
   write_env_file
   hand_off
 
-  say ""
-  say "checking"
   verify_running || die "
   the service is installed but did not come up. The log is where the reason is."
   summary

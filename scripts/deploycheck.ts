@@ -2987,18 +2987,56 @@ process.stdout.write("\nthe one-line installer\n");
    * somewhere they did not choose. So the test is not "is the host mentioned"
    * but "is it on a line that could act on it".
    */
-  const acting = bootstrapLines.filter(
-    (line) =>
-      !/^\s*#/.test(line) &&
-      // A real URL with a real authority. Anchoring on the scheme is what keeps
-      // this off `process.stdin`, `source.url` and `registration.enabled`; the
-      // `[a-z0-9]` after the slashes is what keeps it off `https://<placeholder>`
-      // and `$CP/…`, neither of which names a host.
-      /https?:\/\/[a-z0-9][a-z0-9.-]*\.[a-z]{2,}/i.test(line) &&
-      !/nodejs\.org/.test(line) &&
-      /(=|\bcurl\b|\bhttp_request\b)/.test(line),
+  const namesHost = (line: string): boolean =>
+    !/^\s*#/.test(line) &&
+    // A real URL with a real authority. Anchoring on the scheme is what keeps
+    // this off `process.stdin`, `source.url` and `registration.enabled`; the
+    // `[a-z0-9]` after the slashes is what keeps it off `https://<placeholder>`
+    // and `$CP/…`, neither of which names a host.
+    /https?:\/\/[a-z0-9][a-z0-9.-]*\.[a-z]{2,}/i.test(line) &&
+    !/nodejs\.org/.test(line);
+
+  /*
+   * ⚠ **This asked the wrong question once and had to be narrowed, and the
+   * narrowing is the interesting part.** It used to refuse a control-plane host
+   * on any line that could *act* on one — an `=`, a `curl`. That was right while
+   * the hosted instance was only ever named in prose, and became wrong the day
+   * the question turned into a menu: choosing "app.reemoat.com" from a list has
+   * to assign it to something. The check went red on correct code.
+   *
+   * The property was never "the string does not appear in an assignment". It is
+   * **"nothing arrives there without being chosen"** — so the assignment is
+   * allowed, and what is pinned instead is that it is unreachable except through
+   * a menu answer, and that the menu cannot answer it by default.
+   */
+  const resolveBody = blockIn(
+    "bootstrap.sh",
+    bootstrapLines,
+    "resolve_control_plane",
+    "resolve_control_plane() {",
+    "}",
+  ).split("\n");
+  check(
+    "the only lines naming a control-plane host are in resolve_control_plane",
+    bootstrapLines.filter(namesHost).filter((l) => !resolveBody.includes(l)),
+    [],
   );
-  check("no control-plane host is written into the script as a value", acting, []);
+  // Found by the host *name*, not by `namesHost`: a menu option is a label and
+  // carries no scheme, which is exactly why it is a label and not a value.
+  const menuLine = resolveBody.find((l) => /\bmenu\b/.test(l) && /app\.reemoat\.com/.test(l)) ?? "";
+  const optionsAfter = menuLine.slice(menuLine.indexOf("menu "));
+  /*
+   * **Enter takes the first row**, so the hosted instance being anywhere but
+   * first is the whole of the "named as an option, never a default" decision.
+   */
+  check("the hosted instance is offered, and never first", /"My own"[\s\S]*app\.reemoat\.com/.test(optionsAfter), true);
+  // And the assignment happens only on that menu having answered with that row.
+  check(
+    "and it is assigned only behind that menu's answer",
+    /= 2 \]; then\s*$/.test(menuLine.trim()) &&
+      namesHost(resolveBody[resolveBody.indexOf(menuLine) + 1] ?? ""),
+    true,
+  );
   // And the sieve is not simply dropping everything: the one host the script may
   // *fetch* from is still seen, on a line that acts on it.
   check(
