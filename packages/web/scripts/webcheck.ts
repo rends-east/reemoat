@@ -36,6 +36,7 @@ import type { StoredEvent, SystemInfo } from "../src/wire.js";
  */
 
 let failures = 0;
+let skipped = 0;
 
 function check(name: string, got: unknown, want: unknown): void {
   if (JSON.stringify(got) === JSON.stringify(want)) {
@@ -44,6 +45,30 @@ function check(name: string, got: unknown, want: unknown): void {
   }
   failures += 1;
   process.stdout.write(`  FAIL  ${name}\n        got  ${JSON.stringify(got)}\n        want ${JSON.stringify(want)}\n`);
+}
+
+/**
+ * Work this run did not do, said as itself.
+ *
+ * ⚠ **A skip is not a pass, and `report(name, true, "skipped: …")` made it one.**
+ * The one caller reads a file out of a *different* repository — the catalogue
+ * service's own `catalogue.ts`, four levels above this checkout in the private
+ * `reemoat-prod` tree — so on a developer box the mirror is compared and in CI,
+ * which checks out this repository alone, it cannot be. That much is deliberate
+ * and argued at the call site. What was not deliberate is that the absent case
+ * printed `ok` and counted toward the pass tally, so **the assertion CI runs on
+ * every push checks no bytes at all** while reading as green. The call site's own
+ * docblock names that hazard — "a skip that says nothing is a green tick about
+ * work nobody did" — and this is the other half of the fix it describes.
+ *
+ * Counted rather than only printed, and surfaced in the summary line, so a run
+ * that skipped something cannot be mistaken for a run that checked everything.
+ * It does **not** fail the driver: the file's absence in CI is the ordinary state
+ * and a red build over it would be a driver crying wolf on every push.
+ */
+function skip(name: string, detail: string): void {
+  skipped += 1;
+  process.stdout.write(`  skip  ${name}  (${detail})\n`);
 }
 
 function report(name: string, ok: boolean, detail: string): void {
@@ -23840,10 +23865,9 @@ process.stdout.write("\nthe one mirror whose other half is in a different reposi
   }
 
   if (service === null) {
-    report(
+    skip(
       "the catalogue service is not on this disk, so its mirror is unchecked",
-      true,
-      "skipped: services/plugins/src/catalogue.ts — expected in CI, a problem on the box",
+      "services/plugins/src/catalogue.ts — expected in CI, a problem on the box",
     );
   } else {
     const clientSrc = readFileSync(new URL("../src/catalogue.ts", import.meta.url), "utf8");
@@ -29576,5 +29600,10 @@ process.stdout.write("\nthe one model list this app reads for itself\n");
   }
 }
 
-process.stdout.write(failures === 0 ? "\nall green\n\n" : `\n${failures} FAILED\n\n`);
+// ⚠ **The skip count rides the summary, or the primitive buys nothing.** A run
+// that skipped the cross-repository mirror and a run that compared it print the
+// same "all green" otherwise, which is the state this counter exists to tell
+// apart — see {@link skip}.
+const tail = skipped === 0 ? "" : ` (${skipped} skipped)`;
+process.stdout.write(failures === 0 ? `\nall green${tail}\n\n` : `\n${failures} FAILED${tail}\n\n`);
 process.exit(failures === 0 ? 0 : 1);

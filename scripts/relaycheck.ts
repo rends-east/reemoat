@@ -186,6 +186,35 @@ import { tmp } from "./tmp.js";
  *   pnpm relaycheck
  */
 
+/*
+ * ⚠ **Every setting name is cleared out of the environment before a single
+ * fixture runs, and this is a *hermeticity* guard rather than tidiness.**
+ * `readSetting` resolves database → environment → unset, so a block that opens a
+ * fresh `:memory:` database and writes no row falls straight through to whatever
+ * the operator running this driver happens to have exported. Measured: with
+ * `REEMOAT_CP_REGISTRATION_ENABLED=true` in the shell three assertions go red
+ * ("registration is closed unless somebody opened it" and the two under it);
+ * with `REEMOAT_CP_MACHINES_PER_USER=10`, "the last slot is usable" goes red;
+ * with the `REEMOAT_CP_SMTP_*` names set, "without mail the account exists at
+ * once" goes red. All of them on unmodified source, and all of them only for the
+ * one person most likely to run this — whoever also runs `pnpm cp` locally, since
+ * the control plane has no dotenv loader and exporting these names is the only
+ * way to configure it.
+ *
+ * `ubuntu-latest` carries none of them, so CI never saw any of it. That is the
+ * mirror of the defect `daemoncheck`'s contributed-harness fixture had, where the
+ * host decided the verdict in the other direction — and the rule that closes both
+ * is the same: a driver asserts what its fixture decided, never what the machine
+ * happens to be configured for.
+ *
+ * Swept over `SETTING_KEYS` through `envNameFor` rather than a hand-written list,
+ * so a setting added later is covered on the day it is added. The two blocks that
+ * genuinely want a value in the environment — `envNameFor`'s own round trip and
+ * the `source: "environment"` pair — set it themselves and restore afterwards,
+ * which is unaffected: they save `undefined` now and delete on the way out.
+ */
+for (const key of SETTING_KEYS) delete process.env[envNameFor(key)];
+
 let failures = 0;
 
 function check(name: string, got: unknown, want: unknown): void {
