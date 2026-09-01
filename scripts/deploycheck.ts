@@ -2936,6 +2936,42 @@ process.stdout.write("\nthe one-line installer\n");
    * and nothing else in this tree looks at these two lines. `pincheck` compares
    * the six *version* sites to each other and has never heard of this file.
    */
+  /**
+   * One `bootstrap.sh`, driven with **no controlling terminal**.
+   *
+   * ⚠ **`detached: true` is the whole point of this helper.** Every question in
+   * that script is asked on fd 3, opened from `/dev/tty` — deliberately, because
+   * stdin is the `curl` download — and a `spawnSync` child inherits its parent's
+   * controlling terminal no matter what `stdio` says. Measured both ways through
+   * a real pty: inherited, `sh bootstrap.sh` with no arguments **draws the
+   * "Which control plane?" menu into the developer's own terminal and blocks
+   * there for ever** — `pnpm deploycheck` hangs mid-run, and not even
+   * `spawnSync`'s `timeout` gets it back; detached, the same run refuses with
+   * status 2 and the sentence below. So the assertions here were true only
+   * because CI and agents happen to have no tty, which is the shape of a test
+   * that passes for a reason it does not state. `detached` calls `setsid`, the
+   * child leads its own session, `/dev/tty` cannot be opened, and `TTY_OPEN=0`
+   * is a fact rather than an accident of who ran the driver.
+   */
+  const runBootstrap = (args: string[], env: Record<string, string> = {}): Run => {
+    // Held in a variable rather than written inline, and that is the cast: the
+    // option is honoured by the implementation and missing from
+    // `SpawnSyncOptions`, so a fresh object literal fails the excess-property
+    // check while an assignable variable does not. Measured working; if a future
+    // node drops it, the symptom is this driver hanging on a developer's
+    // terminal and the fix is a `setsid`, not deleting the line.
+    const options = {
+      cwd: deployDir,
+      encoding: "utf8" as const,
+      env: { ...baseEnv, HOME: home, ...env },
+      detached: true,
+      // stdin closed, which is also the `curl | sh` shape.
+      input: "",
+    };
+    const run = spawnSync("sh", [bootstrapPath, ...args], options);
+    return { status: run.status ?? -1, out: run.stdout ?? "", err: run.stderr ?? "" };
+  };
+
   const rootManifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as {
     packageManager: string;
     engines: { node: string };
@@ -3080,16 +3116,9 @@ process.stdout.write("\nthe one-line installer\n");
    * literal — because this is the one branch where being wrong is silent.
    */
   {
-    const run = spawnSync("sh", [bootstrapPath], {
-      cwd: deployDir,
-      encoding: "utf8",
-      env: { ...baseEnv, HOME: home },
-      // stdin closed, which is also the `curl | sh` shape: it must refuse on the
-      // placeholder rather than sit waiting on a prompt it cannot ask.
-      input: "",
-    });
+    const run = runBootstrap([]);
     check("an unsubstituted script refuses", run.status, 2);
-    check("and says how to name a control plane", run.stderr.includes("--url"), true);
+    check("and says how to name a control plane", run.err.includes("--url"), true);
     /*
      * And says only that. `exec 3</dev/tty 2>/dev/null` does **not** silence a
      * failed redirection — the shell reports it itself, outside the redirection
@@ -3097,7 +3126,7 @@ process.stdout.write("\nthe one-line installer\n");
      * `line NN: /dev/tty: Device not configured` above the message it was given.
      * Measured on a machine with no tty, and the fix is redirecting the group.
      */
-    check("without a shell error above it", /\/dev\/tty/.test(run.stderr), false);
+    check("without a shell error above it", /\/dev\/tty/.test(run.err), false);
   }
 
   /*
@@ -3201,14 +3230,8 @@ process.stdout.write("\nthe one-line installer\n");
      * anything `MACHINE_LABEL` rejects, or `MACHINE_LABEL_RESERVED` claims, must
      * make the script exit non-zero with a sentence naming the value.
      */
-    const labelRefusal = (value: string): { status: number; err: string } => {
-      const run = spawnSync(
-        "sh",
-        [bootstrapPath, "--url", "http://127.0.0.1:1", "--api-key", "rk_x", "--yes", "--label", value],
-        { cwd: deployDir, encoding: "utf8", env: { ...baseEnv, HOME: home }, input: "" },
-      );
-      return { status: run.status ?? -1, err: run.stderr ?? "" };
-    };
+    const labelRefusal = (value: string): { status: number; err: string } =>
+      runBootstrap(["--url", "http://127.0.0.1:1", "--api-key", "rk_x", "--yes", "--label", value]);
     for (const bad of ["MacBook Pro.local", "-leading", "m_ab12cd34", "m_0123456789abcdef", "Ünicode"]) {
       check(`${JSON.stringify(bad)} is refused, and by name`, label.test(bad) && !reserved.test(bad), false);
       const out = labelRefusal(bad);
@@ -3227,6 +3250,96 @@ process.stdout.write("\nthe one-line installer\n");
       ["m_ab12cd34", "-leading-dash", "Ünicode Näme", ""].filter((raw) => label.test(raw) && !reserved.test(raw)),
       [],
     );
+  }
+
+  /*
+   * **Taking it off again, driven — both halves of `--uninstall` are destructive
+   * and neither had a witness.**
+   *
+   * A fixture per case: a home holding the toolchain and the marker
+   * `install_node` writes, a `reemoat.db` standing in for every session's
+   * history, a checkout, and optionally the `deploy/lib.sh` the uninstall stops
+   * the service *through* and a worktree the purge would take. The stub is what
+   * keeps this offline — its `svc_uninstall` prints nothing and succeeds — so
+   * what is measured is `do_uninstall`'s own decisions rather than launchd's.
+   */
+  {
+    interface Fixture {
+      home: string;
+      toolchain: string;
+      checkout: string;
+      db: string;
+    }
+    const fixture = (name: string, opts: { lib: boolean; worktree: boolean }): Fixture => {
+      const h = join(sandbox, `uninstall-${name}`);
+      rmSync(h, { recursive: true, force: true });
+      mkdirSync(join(h, ".reemoat", "toolchain", "bin"), { recursive: true });
+      writeFileSync(join(h, ".reemoat", "toolchain", ".installed-by-bootstrap"), "");
+      writeFileSync(join(h, ".reemoat", "reemoat.db"), "");
+      mkdirSync(join(h, "co"), { recursive: true });
+      if (opts.lib) {
+        mkdirSync(join(h, "co", "deploy"), { recursive: true });
+        writeFileSync(join(h, "co", "deploy", "lib.sh"), "svc_uninstall() { return 0; }\n");
+      }
+      if (opts.worktree) mkdirSync(join(h, ".reemoat", "worktrees", "branch-a"), { recursive: true });
+      return {
+        home: h,
+        toolchain: join(h, ".reemoat", "toolchain"),
+        checkout: join(h, "co"),
+        db: join(h, ".reemoat", "reemoat.db"),
+      };
+    };
+    const uninstall = (f: Fixture, ...args: string[]): Run =>
+      runBootstrap(["--dir", f.checkout, "--uninstall", ...args], { HOME: f.home });
+
+    /*
+     * ⚠ **The toolchain may not go while the unit is still there.** `hand_off`
+     * prefixes it onto PATH, so `runtime_path` bakes its `bin` into the unit's
+     * own `@PATH@`; removing it under a unit still on disk leaves launchd's
+     * `KeepAlive` — or systemd's `Restart=always` — restarting a wrapper that
+     * exits 127 with `node: not found`, every ten seconds, for ever. The way in
+     * is an install made with `--dir`, whose checkout this run cannot find, and
+     * it used to delete the toolchain anyway and **exit 0** over it, which a
+     * provisioning script reads as a clean removal.
+     */
+    {
+      const f = fixture("no-lib", { lib: false, worktree: false });
+      const run = uninstall(f);
+      check("an uninstall that could not stop the service leaves the toolchain", existsSync(f.toolchain), true);
+      check("and does not report success", run.status !== 0, true);
+      check("and says which checkout would have worked", run.err.includes(f.checkout), true);
+    }
+    // The control, without which the three above pass for a script that never
+    // removes anything: given a lib.sh to stop the service through, it does.
+    {
+      const f = fixture("with-lib", { lib: true, worktree: false });
+      const run = uninstall(f);
+      check("while a confirmed stop does remove it", existsSync(f.toolchain), false);
+      check("and reports success", run.status, 0);
+      check("with the data left alone, because that is what --uninstall promises", existsSync(f.db), true);
+    }
+    /*
+     * ⚠ **`--purge` asks, and the question is not gated on there being
+     * worktrees.** It used to sit inside that guard, so a daemon which had never
+     * opened a session — no `worktrees/` at all — had `~/.reemoat` and the
+     * checkout deleted with nothing printed and nothing asked, on a host with no
+     * terminal and no `--yes`. `usage` says "read the list it prints first"; this
+     * is what makes that sentence true.
+     */
+    {
+      const f = fixture("purge-empty", { lib: true, worktree: false });
+      const run = uninstall(f, "--purge");
+      check("--purge with no worktrees still asks", run.status !== 0, true);
+      check("and takes nothing when it cannot ask", [existsSync(f.db), existsSync(f.checkout)], [true, true]);
+      check("having named what it was about to take", run.err.includes("reemoat.db"), true);
+    }
+    // And `--yes` is still the way through, because provisioning has no terminal
+    // either and this must not become a flag nobody can automate.
+    {
+      const f = fixture("purge-yes", { lib: true, worktree: false });
+      const run = uninstall(f, "--purge", "--yes");
+      check("--yes purges", [run.status, existsSync(f.db), existsSync(f.checkout)], [0, false, false]);
+    }
   }
 }
 

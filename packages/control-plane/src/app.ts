@@ -2412,7 +2412,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         machine: { id: created.id, name: named.label },
         owner: { id: ownerId, name: String(user["name"]) },
         enrollment: { code: enrollment.code, expiresAt: enrollment.expiresAt },
-        controlPlaneUrl: publicUrl(c),
+        controlPlaneUrl: installOrigin(c, trustedProxyHops),
         // Said out loud because it changed something outside this request, and an
         // admin reading Settings → Users should not find a number they did not set
         // and cannot explain.
@@ -3246,7 +3246,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         // The address the daemon will dial, from the server rather than from the
         // browser's own origin: in dev that origin is Vite's port, which proxies
         // /v1 and would be pasted onto a machine that cannot reach it.
-        controlPlaneUrl: publicUrl(c),
+        controlPlaneUrl: installOrigin(c, trustedProxyHops),
       },
       201,
     );
@@ -3363,7 +3363,10 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     }
     ensureSigningKey(db);
     const minted = mintEnrollmentCode(db, owned.id, c.get("caller").userId, ENROLLMENT_CODE_TTL_MS);
-    return c.json({ code: minted.code, machineId: owned.id, expiresAt: minted.expiresAt, controlPlaneUrl: publicUrl(c) }, 201);
+    return c.json(
+      { code: minted.code, machineId: owned.id, expiresAt: minted.expiresAt, controlPlaneUrl: installOrigin(c, trustedProxyHops) },
+      201,
+    );
   });
 
   /**
@@ -5116,7 +5119,10 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     const minted = mintEnrollmentCode(db, machineId, c.get("caller").userId, ENROLLMENT_CODE_TTL_MS);
 
     // Shown once. Only the hash was stored, so this cannot be recovered later.
-    return c.json({ code: minted.code, machineId, expiresAt: minted.expiresAt, controlPlaneUrl: publicUrl(c) }, 201);
+    return c.json(
+      { code: minted.code, machineId, expiresAt: minted.expiresAt, controlPlaneUrl: installOrigin(c, trustedProxyHops) },
+      201,
+    );
   });
 
   /**
@@ -6068,11 +6074,22 @@ function shellQuote(value: string): string {
  * instance. At zero hops the header is ignored and `publicUrl` stands, which is
  * exactly the behaviour on a host with no proxy.
  *
- * ⚠ **Scoped to this route on purpose.** `publicUrl` also feeds
- * `controlPlaneUrl` on the four code-minting routes, which have the same latent
- * defect — but changing it there changes what every enrollment paste has said
- * since the first release, and that is a decision with its own blast radius
- * rather than a fix to make in passing. Recorded rather than smoothed over.
+ * ⚠ **It feeds `controlPlaneUrl` on the four code-minting routes as well, and
+ * that scoping was deferred once too long.** The name is the route it was
+ * written for; the question — "what origin does this service advertise for
+ * itself" — is the same one those four answer. Leaving them on raw `publicUrl`
+ * put `http://<host>` into the `REEMOAT_CONTROL_PLANE` of every daemon enrolled
+ * through `POST /v1/machines`, into the panel's `export …` paste and into
+ * `cpctl`'s. **Measured on the live deployment**: `POST` to the plaintext origin
+ * answers `308`, which preserves the method and the body, so enrollment
+ * succeeded anyway and the only cost was the enrollment code crossing the first
+ * hop in the clear — the defect paid for itself in silence. On a deployment
+ * whose plaintext port does not answer at all it is fatal instead: measured
+ * against a stand where it does not, the daemon's enrollment `POST` failed at
+ * the connection, `fetch failed`, every ten seconds under `KeepAlive`, and the
+ * one-shot installer reported `health: FAILED after 30s` for a machine that had
+ * been created and would never enroll. Behind no declared proxy nothing changes:
+ * at zero hops the header is ignored and `publicUrl` stands.
  */
 function installOrigin(c: Context, trustedHops: number): string {
   const base = publicUrl(c);

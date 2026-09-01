@@ -2774,6 +2774,54 @@ process.stdout.write("\nsigning in, sessions and passwords\n");
    * refused by doing nothing, which is the opposite of the four exact-path
    * `app.use` lines this replaced.
    */
+  /*
+   * ⚠ **What the daemon is told to dial, behind a TLS proxy.**
+   *
+   * `publicUrl` takes the scheme from `socket.encrypted`, and this service runs
+   * plain HTTP behind a proxy that terminates TLS, so it answers `http://` for a
+   * request a browser made over `https://`. `GET /install.sh` has corrected that
+   * with `x-forwarded-proto` since Q1.627; the four code-minting routes did not,
+   * and what they answer is written verbatim into a daemon's
+   * `REEMOAT_CONTROL_PLANE`, into the panel's `export …` paste and into
+   * `cpctl`'s. Measured: on a stand whose plaintext port does not answer, the
+   * daemon's enrollment `POST` failed at the connection and it never enrolled.
+   *
+   * Both routes, because the panel pastes from the second and the one-shot
+   * installer reads the first — and the same header, so a fix on one that missed
+   * the other would read as green here.
+   */
+  {
+    const proxied = { ...admin, "x-forwarded-proto": "https" };
+    const created = (await (await post("/v1/machines", { name: "proxied-origin" }, proxied)).json()) as {
+      machine?: { id?: string };
+      controlPlaneUrl?: string;
+    };
+    check(
+      "a created machine's controlPlaneUrl honours a trusted x-forwarded-proto",
+      created.controlPlaneUrl?.startsWith("https://"),
+      true,
+    );
+    const minted = (await (
+      await post(`/v1/machines/${created.machine?.id ?? "m_missing"}/enrollments`, {}, proxied)
+    ).json()) as { controlPlaneUrl?: string };
+    check("and so does a code minted for it afterwards", minted.controlPlaneUrl?.startsWith("https://"), true);
+    /*
+     * The negative control, and the reason this is two apps rather than one
+     * assertion: the header is caller-supplied. Believing it with no proxy
+     * declared would let anybody make this route hand out an `https://` default
+     * for an instance that is plaintext all the way down.
+     */
+    const bare = createControlPlaneApp({ db, issuer: ISSUER, tokenTtlSeconds: 300, relayUrl, relay: registry });
+    const forged = (await (
+      await bare.request("/v1/machines", {
+        method: "POST",
+        headers: { ...proxied },
+        body: JSON.stringify({ name: "forged-origin" }),
+      })
+    ).json()) as { controlPlaneUrl?: string };
+    check("while an undeclared proxy's header moves nothing", forged.controlPlaneUrl?.startsWith("http://"), true);
+  }
+
   check("but /v1/jwks is still public", (await send("/v1/jwks")).status, 200);
   check("and /v1/enroll still takes a bare code", (await outcome(await post("/v1/enroll", { code: "nope" }, { "content-type": "application/json" })))[1], "code_unusable");
   check("and /health needs nothing", (await send("/health")).status, 200);

@@ -3031,17 +3031,33 @@ is exactly right for a host with no proxy. Both halves are asserted in
 `imagecheck`, from a real container, because a header this service reads only
 under a condition is not something an offline driver can pose the question to.
 
-**⚠ Scoped to this route, and the wider defect is recorded rather than fixed in
-passing.** `publicUrl` also feeds `controlPlaneUrl` on the four code-minting
-routes, which have the same latent problem: an enrollment paste generated on a
-proxied instance names `http://`, and `enroll.ts`'s `fetch` follows the 301 —
-which for a `POST` means most implementations re-issue it as a `GET`. Changing
-`publicUrl` itself changes what every enrollment paste has said since the first
-release, and that is a decision with its own blast radius rather than a fix to
-make while adding a route.
+**⚠ It was scoped to this route once, and the scoping is what let the rest of it
+survive.** `publicUrl` also feeds `controlPlaneUrl` on the four code-minting
+routes, and what they answer goes verbatim into a daemon's
+`REEMOAT_CONTROL_PLANE`, into the panel's `export …` paste and into `cpctl`'s.
+This entry used to guess the consequence, and guessed it wrong — it said
+`enroll.ts`'s `fetch` follows the 301 and that a `POST` is re-issued as a `GET`.
+**Measured against the live deployment**: `GET http://app.reemoat.com/v1/instance`
+answers `301`, but `POST http://app.reemoat.com/v1/enroll` answers **`308`**,
+which preserves the method and the body. Enrollment therefore succeeded every
+time, and the only cost was the single-use enrollment code crossing the first hop
+in the clear on a machine whose operator had typed `https`. The redirect paid the
+bill, which is why nobody saw it.
 
-**Status.** Applied to `/install.sh`. The same defect on `controlPlaneUrl` is
-**open**.
+**What it costs where the plaintext port does not answer at all.** Measured on a
+stand serving 443 and not 80: the one-shot installer created the machine, took
+`http://…` from the 201 and wrote it into the env file, and the daemon's
+enrollment `POST` then failed at the *connection* — `could not reach the control
+plane at http://…: fetch failed` — exiting 2 into launchd's `KeepAlive` twelve
+times over, while `wait_healthy` reported `health: FAILED after 30s` for a machine
+that had been created and would never enroll. The setup-code path was untouched
+throughout, because `create_machine` returns before it reads `controlPlaneUrl`;
+that is the other half of why this stayed invisible.
+
+**Status.** Applied to `/install.sh` and to all four code-minting routes.
+`relaycheck` pins both directions on `POST /v1/machines` and on the enrollments
+route beside it; `imagecheck` still pins the installer's half from a real
+container.
 
 ## Session lifecycle, questions and attachments
 

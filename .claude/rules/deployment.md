@@ -81,7 +81,10 @@ scheme from `socket.encrypted`, and this service runs plain HTTP behind Traefik 
 so it answers `http://`, and `http://app.reemoat.com/v1/instance` is a **301**
 that `bootstrap.sh` deliberately does not follow. `installOrigin` reads
 `x-forwarded-proto`, gated on `trustedProxyHops` exactly as `callerAddressOf` is.
-⚠ The same defect on `controlPlaneUrl` (four routes) is **open** — Q1.627.
+The four code-minting routes answer `controlPlaneUrl` through the same function
+now — Q1.627. `relaycheck` pins both directions offline; on a stand whose
+plaintext port did not answer, the raw `publicUrl` was a daemon that could never
+enroll.
 
 ⚠ **The substituted value is caller-influenced and is shell-quoted for a measured
 reason.** A `Host` of ``a`id`b`` reaches `URL.origin` intact; unquoted, sourcing
