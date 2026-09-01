@@ -25,6 +25,8 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-01
+
 ### Fixed
 
 - **A pasted key no longer expires on its own, and a machine left alone over a
