@@ -6,6 +6,7 @@ paths:
   - src/store/*
   - scripts/daemon.ts
   - scripts/daemoncheck.ts
+  - scripts/daemoncheck.*.ts
   - scripts/harness.ts
 ---
 
@@ -408,7 +409,7 @@ non-goal, with the numbers, at Q7.113.
 | `src/registry.ts` | Session lifecycle, derived status, the permission state machine, the turn pump and how a turn is stopped |
 | `scripts/daemon.ts` | Entry point: env, signals, logging |
 | `scripts/harness.ts` | Pre-daemon CLI that drives `Session` directly. Keep it working: the regression test for the untouched default paths |
-| `scripts/daemoncheck.ts` | Offline driver for the daemon's HTTP surface and durable state |
+| `scripts/daemoncheck.ts` | Offline driver for the daemon's HTTP surface and durable state. The runner only — the assertions are in the nineteen `daemoncheck.<subject>.ts` beside it, and what they share is in `daemoncheck.env`/`.fixtures`/`.bodies` |
 
 ## Bounds
 
