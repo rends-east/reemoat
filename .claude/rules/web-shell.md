@@ -25,6 +25,7 @@ paths:
   - packages/web/src/App.tsx
   - packages/web/src/main.tsx
   - packages/web/scripts/webcheck.ts
+  - packages/web/scripts/webcheck.*.ts
 ---
 
 **Client-side it is four pure predicates in `wire.ts`, asserted as a partition:**

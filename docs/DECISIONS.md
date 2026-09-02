@@ -1031,7 +1031,7 @@ variable reading `http://ab`, so the person pasting sees a plausible URL and
 nothing else.
 
 **How the two copies are kept agreeing.** By running one of them.
-`packages/web/scripts/webcheck.ts` reads `cpctl.ts` off disk, slices
+`webcheck.shell-and-enrollment.ts` reads `cpctl.ts` off disk, slices
 `enrollmentLines`'s body out (header line to a bare `}` in column 0), strips the
 one TypeScript annotation in it, and hands it to `new Function` — then compares
 five value pairs against the web copy and asserts that `|| BASE_URL` is the *only*
@@ -16321,7 +16321,7 @@ direction would turn a layering rule into a runtime dependency.
 | `scripts/relaycheck.ts` | Offline regression driver for the relay: framing, flow control, authorization ordering, the CORS preflight, a WebSocket through the tunnel |
 | `scripts/pincheck.ts` | Same, for the ACP adapter's version: exact in `package.json`, agreed with `pnpm-workspace.yaml`, and — the only assertion here that reads disk rather than text — matching what is *actually installed* |
 | `scripts/deploycheck.ts` | Same, for `deploy/` — the only driver whose subject is shell. Sources `lib.sh` under `sh -c` from the one directory it resolves from, against a `mkdtempSync` `HOME`. What it drives is **enumerated in its own header** rather than described, because "everything derivable" was already false when it was written: `sq`'s round trip, `set_env`'s two arms and its two refusals, `file_value`'s guard in the assignment form callers use, `runtime_path`'s ordering *and* its group-writable warning, `service_origin` on a wildcard bind and a kernel-assigned port, `resolve_bin`, `INIT_SYSTEM=none`, and a unit rendered for **both** init systems from whichever this is |
-| `packages/web/scripts/webcheck.ts` | Offline regression driver for the browser client: the rotation cursor, replay, the close-code table, the permission context. Stubs `window`, uses a real loopback socket |
+| `packages/web/scripts/webcheck.ts` | Offline regression driver for the browser client: the rotation cursor, replay, the close-code table, the permission context. Stubs `window`, uses a real loopback socket. The runner only — the assertions are in the twenty-eight `webcheck.<subject>.ts` beside it, and what they share is in `webcheck.env`/`.modules`/`.ws`/`.source`/`.rows` |
 | `packages/control-plane/src/app.ts` | Routes: tokens, machines, grants, enrollment, admin |
 | `packages/control-plane/src/main.ts` | Its entry point: env, the two listeners, the relay wiring, and where the built web client is served from |
 | `packages/control-plane/src/relay/authorize.ts` | May this caller reach this machine at all. Verify, then read `aud`, then check live user/machine/grant rows |

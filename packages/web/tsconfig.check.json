@@ -1,8 +1,9 @@
 {
   // The driver's config, and only the driver's.
   //
-  // `scripts/webcheck.ts` is the one file in this package that is *not* browser
-  // code: it runs under `tsx` and needs `@types/node`. It cannot go in
+  // `scripts/webcheck*.ts` — the driver's runner and the thirty-three modules
+  // beside it — is the code in this package that is *not* browser code: it runs
+  // under `tsx` and needs `@types/node`. It cannot go in
   // `tsconfig.json`, whose `types: []` is load-bearing — with `@types/node`
   // present, `setInterval` returns `NodeJS.Timeout` instead of `number` and
   // `process` becomes a global in code that ships to a phone.
