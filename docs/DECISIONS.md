@@ -59,17 +59,17 @@ bug in the file.
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 120 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 79 | `###` |
 | [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 287 | `####` |
-| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 51 | `###` |
+| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 53 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 109 | `####` |
-| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 65 | `###` |
+| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 66 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 127 | `###` |
-| | | **838** | |
+| | | **841** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 838 rather than the 442
+dividers. So the count is over **both** depths, and it says 841 rather than the 445
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -3149,7 +3149,12 @@ an agent that refuses once is not asked again in that pass. Full jitter
 rather than ±20%, because the attempts start together and a narrow band keeps
 them synchronised.
 
-**Status.** Current
+**Status.** Current, with two amendments from Q4.114. The pass has a second
+caller — the completion of every agent update — so `autoResume` queues a pass
+behind one still in flight rather than running two over one session; and a
+harness with no CLI on the machine is `agent_missing`: no attempt spent, no
+verdict, the reason on the snapshot as `waiting`, and the daemon nudges the
+installer to run now and starts the next pass when it completes.
 
 ### Q2.5 — What happens when a session's workspace is missing or unresponsive?
 
@@ -4379,16 +4384,20 @@ out, indistinguishable from a network fault.
 
 **Rule.** `resolveLoginBinary` reads the agent's `executableEnv` first, from the
 `AGENT_LOGIN` table rather than from a name written out at the call site, and
-falls back to `vendoredCli` — a `switch` with no `default` arm. `daemoncheck`
-pins the pair by name.
+falls back to `findOnPath` on the same table's `command`. It used to fall back to
+the vendored resolver — a `switch` with no `default` arm — and that went with the
+vendored copies (Q4.114). It answers only whether a binary exists at all; which
+copy a login, a logout, the probe or a session actually runs is `agentCli`'s answer
+(Q6.106, Q4.114). `daemoncheck` pins the pair by name.
 
 **Why.** The lookup used to be an `agent === "claude"` test, and **two** of the
-three agents have such a variable: `CLAUDE_CODE_EXECUTABLE` and codex's
+four agents have such a variable: `CLAUDE_CODE_EXECUTABLE` and codex's
 `CODEX_PATH`, both read by the adapter's own `startAcpServer()` and therefore
 deciding which binary *sessions* run. Under that test codex's override picked the
 session's binary while the login and the probe went on resolving the vendored
 copy — a login that appears to work and changes nothing, arriving through the very
-door the vendored preference exists to close. What made it survive review is that
+door the vendored preference existed to close — and that one resolver, `agentCli`,
+still closes. What made it survive review is that
 the thing which looked right was the count, which is why the driver asserts the
 pair by name. The wider rule underneath is that `available` is about the adapter
 while `loggedIn` and `login` are about the CLI under it; conflating the two made a
@@ -16985,6 +16994,367 @@ pressing Enter.
 
 **Status.** Applied. Reverses this feature's original download source.
 
+### Q4.113 — The daemon keeps the agent CLIs current itself, and that is a change in posture
+
+**Question.** A model released last week was absent from the picker with no error.
+The list is whatever the harness's binary publishes, and on a machine that runs its
+agents only through this daemon that binary never moves.
+
+**Measured, 2026-09-03.** Not one of the four CLIs self-updates when a daemon
+drives it over ACP; every vendor's updater is gated on a terminal an ACP-spawned
+agent never has — claude's is an Ink component mounted only by TUI screens, codex
+only prints a nag, opencode's `checkUpgrade` is reached from its TUI command
+handler and never from `acp`, kimi's preflight runs only from its main command. On
+the machine this was written on: kimi 0.29.2 against 0.40.1 upstream, codex 0.146.1
+against 0.153.0, both months behind and never run in a terminal there; claude, which
+is, was current. And `kimi upgrade` without a TTY prints the manual command and
+**exits 0 without installing anything** — a timer that checked its status would
+report success for ever.
+
+**Decision.** `deploy/agents.sh` installs what is missing with each vendor's own
+installer and refreshes what is there; `deploy/bootstrap.sh` runs it once, and
+`src/agentupdate.ts` runs it five minutes after start and then daily with full
+jitter, **on by default**. `REEMOAT_AGENT_UPDATES=off` (or `0`) arms nothing. The
+vendored copies in `node_modules` stay as the floor [⚠ no longer true — Q4.114
+removed the floor: `pnpm install` brings no CLI now, this script is the only
+source of all four, and a vendor that cannot be reached leaves its harness
+*absent* until the next run rather than stale; a machine behind a firewall runs
+it with `--source npm`].
+
+**What bounds it — each a measurement or a rule `deploycheck` asserts.** No `sudo`
+and no system package manager. No shell profile edited: the vendors' own directories
+are put on PATH, which is what their profile writers test, and **appended** rather
+than prepended, or `curl`, `sh` and `npm` would resolve from a user-writable
+directory daily as the daemon's uid — the rule `MANAGED_CLI_DIRS` states. The script
+runs under `updateEnv()`, `agentEnv()` plus `HOME`, never the daemon's own
+environment: it was the one child spawn that did not, and `REEMOAT_TOKEN` reached
+three vendors' installers. An installer is **downloaded to a file with a deadline and
+then run**, never piped — POSIX `sh` has no `pipefail`, so `curl | bash` executes a
+truncated prefix and reports success. kimi, which `npm i -g` writes in place, lands
+in `$TOOLCHAIN/kimi-<version>` with `$TOOLCHAIN/bin/kimi` repointed by rename, and
+the build it replaced is pruned only on a run the daemon does not mark `--skip kimi`
+— a live session keeps the tree it started from, and that is the whole of what
+`--skip` means now. The run is `detached` and its process group is killed at the
+deadline, because `execFile`'s own timeout reached `sh` alone and left the installers
+running past the guard that keeps two runs from overlapping. Exit status is 0
+whatever the vendors answered; the daemon forwards stderr as a warning, so a fleet
+with every vendor blocked does not read as updated. Not at boot: five minutes,
+because `restore()` is starting an agent per interrupted session and ~700 MB racing
+it makes the slowest part of a restart slower, on the screen a fresh install is
+watching.
+
+**What it narrows.** `bootstrap.sh` promised nothing outside `~/.reemoat` and the
+checkout. The CLIs now go into `~/.local/bin`, `~/.local/share/claude`, `~/.codex`
+and `~/.opencode`, because none of the installers is relocatable, and `--uninstall`
+leaves them: they hold sign-ins of their own. An operator's own kimi — Homebrew, a
+global npm — is left alone and said so, since a managed copy beside it could never
+be the one that runs. A harness whose binary is named in `CLAUDE_CODE_EXECUTABLE` or
+`CODEX_PATH` is left alone too: the override wins outright, so a copy refreshed
+beside it would be a download nothing runs.
+
+**Why this is not Q7.42.** `src/version.ts`: a daemon does not update itself and is
+never told to, because a restart interrupts every turn in flight and drops every
+pending approval. What moves here is a program the daemon spawns fresh at each
+session start, out of tree; nothing in this repository is replaced, no `pnpm
+install` runs, no restart happens. Fleet rollout of the daemon is as much a non-goal
+as before.
+
+**Rejected.** Bumping the vendored pins as the whole answer — right in the
+repository and a machine takes it only when a human runs `deploy.sh`, so it moves
+the floor and not the fleet; the bump is still owed and is a separate change [it
+is no longer owed: the pins went with the floor, Q4.114].
+Skipping every harness with a live agent — only kimi writes in place, and a session
+that lives for days held its harness stale for ever. `curl | bash` with the vendors'
+own `main` wrapper trusted — three vendors, three scripts, and the property has to
+hold for the fourth. A registry — Q7.31 and Q7.125 stand.
+
+**Status.** Current. `deploycheck` executes the script (`--check`, `--skip`, a bad
+flag, an operator's own kimi, an override) and asserts the shape above as text;
+`daemoncheck` drives the schedule, `updateEnv`, the group kill and the stderr
+forwarding through injected seams. Q6.106 is what the daemon does with the result,
+as amended by Q4.114 — which is also where the floor this entry says stays went.
+
+### Q4.114 — The vendored CLIs are gone, and a machine behind a firewall installs them from npm
+
+**Question.** Somebody asked whether the copies of `claude`, `codex` and `opencode`
+that `pnpm install` brought under `node_modules` did anything but duplicate
+`deploy/agents.sh`. They did not. Three of the four were pinned there — claude and
+codex as *optional* platform packages under their ACP adapters, one build per OS and
+architecture of which pnpm installs the matching one, opencode as the package
+itself — and every one was exactly as old as the release. Measured 2026-09-03 on
+this repository's own darwin-arm64 checkout they were **689 MB of a 907 MB
+`node_modules`**: 245 MB the claude platform package, 307 MB codex, 137 MB
+`opencode-ai`. Once Q4.113 had put a vendor's copy on the machine none of the three
+was the copy that ran — the resolver in Q6.106 weighed `--version` and the fresher
+side won — so what a release shipped was a download nothing executed, already
+behind on the day it was measured (vendored claude 2.1.220 against 2.1.259,
+vendored codex 0.145.0 against 0.153.0), plus the treadmill that came with it: a
+CLI release was a pin to bump, a lockfile to move and a release to cut before any
+machine saw it, and Q4.113 had already said what that bought — *it moves the floor
+and not the fleet*.
+
+**Measured, 2026-09-03, pnpm 11.17.0, darwin-arm64.**
+- `node_modules` on this checkout: 907 MB before, 217 MB after.
+- `pnpm.overrides` in `package.json` is **ignored** by pnpm 11.17.0: the packages
+  came back on every install with no warning. `overrides:` at the workspace level,
+  in `pnpm-workspace.yaml`, with `'-'` as the version removes the fourteen platform
+  packages — eight `@anthropic-ai/claude-agent-sdk-*`, six `@openai/codex-*` — from
+  the lockfile and from disk while both adapters still resolve. A `.pnpmfile.cjs`
+  readPackage hook deleting them from each adapter's optional dependencies works
+  too.
+- With the platform package absent and the variable unset, **neither adapter runs
+  a CLI**, and the two fail differently: `claude-agent-acp`'s `claudeCliPath()` is
+  `CLAUDE_CODE_EXECUTABLE`, else a `require` of its SDK's platform package, else a
+  throw — never PATH; `codex-acp`'s `startAcpServer()` has the same two branches
+  over `CODEX_PATH`, and its second does not throw but spawns the `@openai/codex`
+  shim `pnpm install` still brings, which exits complaining about the platform
+  package it cannot find. So the variable is the
+  only door, and a spawn with it unset dies with a stack trace about a package that
+  is deliberately not there.
+- All four CLIs are on the npm registry: `@anthropic-ai/claude-code` 2.1.259,
+  `@openai/codex` 0.153.0, `opencode-ai` 1.18.27 and `@moonshot-ai/kimi-code`
+  0.40.1 at the time — the programs the vendors' own installers fetch, one `npm i
+  -g --prefix` each, which is how kimi has always arrived here (Q4.113).
+- pnpm writes into `pnpm-workspace.yaml` by itself: an install that meets a package
+  with a build script and no verdict under its `allowBuilds:` list appends
+  `<name>: set this to true or false` to that list, unasked. It did, for
+  `opencode-ai` — the package this same change had just removed — and the
+  placeholder shipped in a draft of it. The list holds `esbuild: true` alone now,
+  over a comment saying how a line nobody wrote can appear there.
+
+**Decision.** Nothing under `node_modules` runs a coding agent any more, and where
+the four come from is a choice made once per machine.
+- `opencode-ai` is removed from `package.json`; the fourteen platform packages are
+  excluded through `overrides` in `pnpm-workspace.yaml`, one line each, and
+  `pincheck` asserts that list is exactly what the two installed adapters declare —
+  a platform the vendor adds is a package that would ride back in with every check
+  green, and a line left after one is dropped is a pin on nothing. The adapters
+  (`@agentclientprotocol/claude-agent-acp` 0.63.0, `@agentclientprotocol/codex-acp`
+  1.1.9) stay pinned and installed: they are the ACP half, and they do not move
+  daily.
+- `deploy/agents.sh` installs and refreshes all four and takes `--source
+  vendor|npm`. `vendor`, the default, is each vendor's own installer as Q4.113 built
+  it — for three of the four: kimi has always come from the npm registry, since its
+  native installer refuses musl outright and needs a glibc floor the npm package
+  does not. `npm` installs the same four from the npm registry through
+  `ensure_npm`, which is kimi's arm generalised — `<agent> <package> <pad>` — into
+  `~/.reemoat/toolchain/<agent>-<version>` with `~/.reemoat/toolchain/bin/<agent>`
+  repointed by rename, using the node the bootstrap already installed. Any other
+  value, or a bare `--source`, exits 2. Under `--check` the header says which source
+  and each npm arm prints the exact command it would run and whether that is an
+  install or a refresh.
+- ⚠ **`--source` decides how an *absent* harness is installed, and nothing about
+  one that is present: a copy is refreshed through the door it came in by.** Before
+  the script read provenance, both directions of a switch went wrong: under `npm` a
+  claude the vendor arm had put in `~/.local/bin` read as *installed outside
+  reemoat* and was never refreshed again — on exactly the machine `npm` is for, one
+  whose vendor hosts went dark after a vendor install — and under `vendor` the
+  native updaters were run against copies npm had put under the toolchain.
+  `provenance` in the script classifies `command -v` by where the file is, since
+  none of the vendors' directories is relocatable and the place is the proof:
+  `toolchain` (under `~/.reemoat/toolchain/bin`), `vendor` (under `~/.local/bin` or
+  `~/.opencode/bin`), `outside` (anywhere else), or empty for none. Each of
+  `ensure_claude`, `ensure_codex` and `ensure_opencode` then reads the same table —
+  for the two with a variable, an override set in `CLAUDE_CODE_EXECUTABLE` or
+  `CODEX_PATH` → *left alone*, whatever the flag; opencode has none — a toolchain copy → `ensure_npm`, whatever the flag; a copy in
+  the vendors' directories → the vendor's own updater (`claude update`, `codex
+  update`, `opencode upgrade --method curl`) under `vendor`, and under `npm` — the
+  one thing a switch cannot do, since the registry cannot refresh a build the
+  vendor's installer wrote — `vendor_copy_stays`: a warning on stderr naming the
+  copy, its version and its path, counted in `failed` so the daemon warns daily,
+  with the remedy said: *remove it and the next run installs from the npm
+  registry*; a copy anywhere else → `outside_note`, *installed outside reemoat, not
+  updated from here*, and it is not moved, for the reason `ensure_npm` gives —
+  `findOnPath` walks PATH first, so a managed copy beside it could never be the one
+  that runs; absent → `ensure_npm` under `npm`, else the vendor's installer,
+  downloaded whole and then run. `ensure_kimi` is `ensure_npm` under either flag,
+  and `ensure_npm`'s own three-way read is the same shape: absent → install,
+  toolchain → refresh, anything else → `outside_note` — a vendor-installed kimi
+  lands there too, since `kimi upgrade` lies and there is no vendor arm to hand it
+  to.
+- A failure is a warning that says what is true afterwards, and the exit status is
+  0 whatever the vendors answered: a failed npm *refresh* leaves the previous build
+  linked and says so — *refresh failed; keeping <version>* — and only a failed
+  *install* says *this machine has no copy of it until the next run*. The version
+  an npm build is filed under is read off the manifest npm wrote with `node -p`,
+  the node beside the npm that ran, because a published `package.json` may be one
+  line and a `sed` anchored on the line start answered nothing — so every run
+  landed in a directory named by the clock, nothing was ever "already the build on
+  disk", and every nightly run repointed and pruned over an unchanged version; an
+  unanchored `sed` is the second try and the date the last. The summary line counts
+  what was neither installed nor refreshed, out of four, and points at the lines
+  above it. `--skip <agent>` withholds only the pruning of the previous versioned
+  build, for any npm-installed harness — kimi always, all four under `npm`.
+- The daemon reads `REEMOAT_AGENT_SOURCE` once at start, through `agentSourceFrom`
+  in `src/agentupdate.ts` — the spelling rule, pure and exported: `npm`, trimmed and
+  lower-cased, is `npm`; unset, empty or `vendor` is `vendor` with nothing said;
+  anything else is exactly one warning naming the spelling and the two words it
+  could have been, then `vendor` — because a typo must not leave a machine with no
+  agents and must not pass in silence either. `scripts/daemon.ts` passes it
+  `console.error` and hands the answer to `AgentUpdates.start`. It is exported so a
+  driver can hold the spellings, and `daemoncheck` does: every spelling above, and
+  that the unknown one is exactly one line naming what it saw and `vendor or npm`. The updater's `runOnce` passes `--source npm`
+  ahead of the `--skip` list. It is a flag rather than an inherited variable
+  because the script runs under `updateEnv()`, which strips every `REEMOAT_*` name.
+- `deploy/bootstrap.sh` takes `--agent-source vendor|npm`, validated in
+  `parse_flags` and refused otherwise, runs `deploy/agents.sh --source` with it in
+  `install_agents` — before `hand_off`, where the daemon starts, and in a subshell
+  with the toolchain's own node in front of PATH, since `ensure_npm` needs an `npm`
+  and a `node` and with `--node` naming one off PATH there would be neither — and
+  `write_env_file` writes `REEMOAT_AGENT_SOURCE=npm` only when it is npm, so the run
+  that installs and the run that refreshes never disagree about where from. On a
+  machine that is already set up the flag is refused rather than accepted and
+  ignored: `existing_install` dies when `AGENT_SOURCE_GIVEN` is set, naming
+  `REEMOAT_AGENT_SOURCE` in the env file and the script to run now, because
+  neither the install nor the write happens there — "Update" is `deploy.sh`.
+  `install_node` no longer does `rm -rf "$TOOLCHAIN"` before unpacking: that
+  directory holds the npm-installed CLIs — kimi always, all four under `npm` — each
+  in a versioned directory with a symlink under `bin/`, and a live session may be
+  on one, so a re-run that found node missing or too old took the agents with it.
+  It removes node's own top-level files, by name off the tarball, and nothing
+  else. Its deps line says ~220 MB now.
+- `deploy/deploy.sh`'s daemon arm runs the same script **before** it decides the
+  restart — `deploy/agents.sh --source <value>` with the source read off the
+  daemon's env file by `file_value`, `vendor` unless it says `npm`, and `--skip` for
+  all four. Three more things are read off that file or this shell so the run is
+  the one the daemon would make: `REEMOAT_AGENT_UPDATES` in any of the daemon's
+  spellings of off skips the step, saying so (a machine with no outbound network,
+  or CLIs somebody else manages, is not one a deploy should reach into);
+  `CLAUDE_CODE_EXECUTABLE` and `CODEX_PATH` are exported to the script when the
+  file names them, since `agentEnv` hands them to the daily run and without them a
+  deploy would install a ~200 MB copy beside an override nothing runs; and node's
+  directory leads PATH, as the bootstrap puts it, so the npm arm finds an `npm`.
+  Two limits are said rather than closed: `provenance` reads the deploying shell's
+  PATH, which is the daemon's only for the daily run; and a refresh with no restart
+  is seen by nothing in the daemon, so `AgentCapabilities.cli` names the previous
+  build for up to ten minutes while the spawn already runs the new one — the file
+  a held path names was swapped by rename. Before, because `pnpm install` brings none of the CLIs any more: a
+  machine upgraded from 0.5.0, which vendored claude, codex and opencode under
+  `node_modules`, would come back up with none of the three for the five minutes
+  until the daemon's own first run, and `autoResume` would refuse every interrupted session
+  on those harnesses in that window. Every prune is withheld because this script
+  cannot know which harnesses have a live agent and the daemon's next run can. It
+  prints `agents (<source>)`; a script that did not finish is a line on stderr —
+  *the daemon retries daily* — and never a failed deploy. Cheap when everything is
+  current, since a refresh that finds nothing newer is a no-op.
+- The resolver is one rule with two sources: an override in the vendor's own
+  variable outright, else the first copy `findOnPath` finds — PATH in order, then
+  `MANAGED_CLI_DIRS` (`~/.local/bin`, `~/.opencode/bin`, `~/.reemoat/toolchain/bin`).
+  `chooseCli` answers `{path, version, source}` with `source` one of `override` or
+  `path`; `AgentCliChoice.source` has those two members and no third. An operator's
+  own copy on PATH therefore outranks the one the daemon keeps current, which is the
+  rule `ensure_npm` applies from its side: a copy outside the toolchain and the
+  vendors' directories is named and not moved. `resolveLoginBinary` is the same two
+  steps as an existence test, and every caller that consumes a *path* goes through
+  `agentCli`. ⚠ **`agentCli` never caches a miss.** `cliChosen` holds only an
+  `AgentCliChoice`, and a `null` is re-walked on the next call — cheap, since
+  `findOnPath` keeps its own thirty-second miss memo and a `null` spawned no
+  `--version`. It used to hold the miss for the full `AGENT_CLI_TTL_MS`: ten
+  minutes over a memo that forgets in thirty seconds, which opened the window
+  `launch`'s own comment said could not open — an install `describe` could already
+  see, `launch` could not, and the adapter was spawned with the vendor's variable
+  unset.
+- `resolveAgent("claude")` and `resolveAgent("codex")` refuse with
+  `AgentUnavailableError` when there is neither an override nor a CLI on PATH or in
+  `MANAGED_CLI_DIRS` — `cliFor` asks, `noCli` phrases it — so `describe()` fails
+  fast and `GET /agents` reports the harness `available: false` with a sentence
+  naming the remedy: run `deploy/agents.sh`, `--source npm` behind a firewall, or
+  name a copy in the variable. `resolveAgent("opencode")` is `findOnPath("opencode")`
+  alone, and its refusal names the script and the vendor's own one-liner.
+- `spawnPlan` has three arms where it had four: for a harness with a variable the
+  chosen path — override or PATH — is written into it, **always**; for a harness
+  that *is* the program the command is replaced; and with no choice at all — a
+  contributed harness, or a built-in with no CLI on the machine — the launch is
+  left untouched, `describe` having already refused the second. The arm that went
+  was the vendored copy, under which nothing was written because the adapter
+  resolved that same file itself. The `--version` of the chosen copy is still read, through
+  `firstVersion`, for `AgentCapabilities.cli` on the wire and the picker's
+  `listedByBuild` line under the model list — a report and no longer a comparison —
+  and a copy that will not say which build it is runs with `version: null` and no
+  warning.
+- The ten-minute cache on `AGENT_CLI_TTL_MS`, the in-flight collapse in
+  `cliInFlight`, the `probeGeneration` fence and `forgetAvailability()` — which calls
+  `forgetPathHits()` — are Q6.106's and are unchanged.
+
+**What it costs, and what it narrows.** Two things, said here rather than
+discovered.
+- A fresh machine that cannot reach a vendor's host has that harness **absent**
+  until the next daily run, where it used to have one exactly as old as the release.
+  The tile says so, `install_agents` warns rather than dies, and the answer for a
+  machine that can reach nothing but an npm mirror is `--agent-source npm` with
+  `npm_config_registry` or `~/.npmrc` naming the mirror, which nothing here reads.
+  What is given up is the property Q6.106's *Rejected* paragraph leaned on — that
+  `pnpm install` alone guaranteed a working harness on any host. `curl | sh` still
+  ends in a machine that runs, because `bootstrap.sh` runs `deploy/agents.sh`
+  before the daemon starts — and an update still does, because `deploy.sh` runs it
+  before the restart — and not because the checkout carries the programs.
+- Every measurement in `src/acp/` that names a pair — *adapter 0.63.0 + claude
+  2.1.220*, *adapter 1.1.9 / codex 0.146.1* — used to be re-runnable by pinning the
+  floor with one flag. There is no floor to pin. The pair is re-created by pointing
+  `CLAUDE_CODE_EXECUTABLE` or `CODEX_PATH` at that build, and what a *running*
+  daemon actually used is what `AgentCapabilities.cli` records — which was already
+  the answer Q6.106 gave to `pincheck`'s "nothing records which build".
+
+**Rejected.**
+- An automatic vendor→npm fallback. A vendor outage would silently switch a machine
+  to a differently built binary — the registry's claude runs under node where the
+  vendor's installer ships a native build — and nobody asked for that. It is a
+  choice, and the daemon passes the same value on every run so the install and the
+  refresh cannot disagree; a vendor that is down is a warning and an absent tile,
+  never a different program.
+- `optional=false` / `--no-optional`, which drops every optional dependency
+  including esbuild's own platform binary and breaks `tsx` — the measurement
+  `deploy/docker/prune-store.mjs` already records from the image build.
+- A `.pnpmfile.cjs` readPackage hook. It works, and it is code that runs at install
+  time on every machine and in every CI job — and it would also drop a future
+  non-binary optional dependency an adapter added, silently. Fourteen declarative
+  lines a driver can compare against the adapters' manifests are the smaller
+  thing.
+- Keeping the vendored pair one more release as a floor. Half the saving, all of
+  the treadmill, and a floor that was already behind on the day this was measured.
+- "Newest of all copies wins" across PATH and `MANAGED_CLI_DIRS` — Q6.106's
+  comparison kept without its third leg. It costs a `--version` spawn per candidate
+  for a comparison nothing needs once no copy is stale by construction — every copy
+  on a machine is one somebody installed or one the daily refresh keeps moving — and
+  it would contradict `ensure_npm` leaving an operator's own copy alone: the daemon
+  would run a managed build over the one the script had just promised not to move.
+
+**Measured after the first deploy, 2026-09-04, and the resume pass changed for
+it.** The dev stand does not deploy through `deploy/deploy.sh` — it is the
+`reemoat-prod` wrapper and a `launchctl kickstart` — so the step above never ran
+there, and the boot pass met `opencode not found on this daemon's PATH` on three
+opencode sessions, three times each, and marked them `attempts_exhausted`: a
+verdict for the daemon's life, which the updater installing opencode five minutes
+later did nothing about. Rather than teach every deploy path the step, the daemon
+now treats a harness with no CLI as neither an attempt nor a verdict —
+`agent_missing`, `ManagedSession.deferResume`, the reason on the snapshot as
+`waiting` with no attempt spent — nudges the updater to run at once
+(`AgentUpdates.nudge`, a no-op when it is off or already running), and starts
+another pass when the run completes; `autoResume` queues a pass behind one in
+flight. And a completed run is a line in the log now, with the script's own notes
+under it: the step ran on that stand and left no trace, and somebody waited seven
+minutes watching for one. `daemoncheck` drives the deferral, the pass after the
+install, the queueing and the nudge.
+
+**Status.** Current; applied 2026-09-04. Supersedes Q6.106 in part — the vendored
+arm, the comparison, the pin flag and the demotion warning are gone; its resolver,
+cache, fence and wire report stand — and corrects Q4.113's "the vendored copies
+stay as the floor". What asserts it: `pincheck` — the `overrides` list equals what
+the two installed adapters declare, none of the fourteen is on disk, `opencode-ai`
+is gone; `deploycheck` — every `--source` arm of `deploy/agents.sh` executed
+(`--check` under both, the two refusals, an operator's own copy, an override), the
+bootstrap flag, `.env.example`; `daemoncheck` — `spawnPlan`'s arms, `chooseCli`'s
+two sources and the `version: null` case, and the refusal `resolveAgent` answers
+with no CLI; `webcheck` — the picker line under `override`, `path`, no version and
+a `source` it has never heard of, which draws the plain line. And the round that
+found the switch: `deploycheck` reads `provenance`'s four answers off
+`MANAGED_CLI_DIRS`, every `ensure_*` arm as a `case` over it, and runs the npm
+path with a fake registry — install, refresh, the prune `--skip` withholds, a
+refused refresh keeping its build, a vendor-installed claude under `--source npm`
+named and counted, a toolchain copy refreshed from npm under `vendor` — and runs
+`deploy.sh`'s daemon arm against a stub, env file by env file; `daemoncheck`
+holds `agentSourceFrom`'s spellings and that `agentCli` holds no miss.
+
 ## Invariants — rules that were defects first
 
 These are load-bearing. Each was a real defect before it was a rule, and none of
@@ -19546,6 +19916,17 @@ That variable is preserved through `agentEnv`'s strip for the same reason: it is
 the documented override for *which* build the adapter drives, and a login must
 drive that one or it writes credentials the session never reads.
 
+[Amended 2026-09-04, Q4.114: the platform package is **excluded** now, through
+`pnpm-workspace.yaml`'s overrides, so the adapter resolves nothing internally and
+throws with `CLAUDE_CODE_EXECUTABLE` unset — the Behaviour above no longer holds.
+What stands in its place: `resolveAgent` refuses the harness first, through
+`cliFor` — an override, else `findOnPath` — so `describe()` fails with a sentence
+rather than the adapter dying at spawn; `LocalRuntime.launch` writes the variable
+on **every** spawn from the copy `agentCli` chose, `spawnPlan` being the decision;
+and `resolveLoginBinary` is an existence test only — the copy that runs, for the
+login, the logout, the probe and the session alike, is `agentCli`'s answer, which
+is what keeps the Consequence from recurring by that route.]
+
 ### Q6.22 — Why does an agent login need `script`?
 
 **Behaviour.** A daemon's stdin is never a TTY, and both agents' login flows are
@@ -19966,7 +20347,8 @@ override" — so the driver would have defended the error against anyone correct
 it. The live failure it left: with `CODEX_PATH` set, sessions run one build while
 the login wizard and the signed-in probe drive another, which is precisely the
 "login that appears to work and changes nothing" that preferring the vendored copy
-exists to prevent, re-entering through the override door. `resolveLoginBinary` now
+existed to prevent, and that `agentCli`'s single resolution now prevents,
+re-entering through the override door. `resolveLoginBinary` now
 reads `AGENT_LOGIN[agent].executableEnv` for every agent rather than under an
 `agent === "claude"` test, and the assertion pins the pair **by name**, because the
 count was the part that looked right. `CODEX_HOME` is a different variable — it
@@ -20276,6 +20658,98 @@ the agent needs a credential at all. It does not.
 opencode exports into a session's own environment, which is what
 `SESSION_SCOPED_ENV` would need; and whether `auth logout` behaves with a
 provider that is not configured. Neither is reachable without a real key.
+
+### Q6.106 — Which build of a CLI runs: the newest of an override, PATH and the vendored copy
+
+**Question.** Fable 5.1 did not appear in the model list. `SYSTEMS.anthropic.models`
+is `[]` on purpose; the list is what the `claude` binary publishes, and
+`claude-agent-acp`'s `claudeCliPath()` is two branches — `CLAUDE_CODE_EXECUTABLE`,
+else a `require` bound to its SDK — and **throws** with neither, never consulting
+PATH. So the vendored copy was not a preference but the only answer, exactly as old
+as the pin.
+
+**Measured, 2026-09-03, against the pinned adapter 0.63.0.** Its vendored claude is
+2.1.220 (built 2026-07-24) and publishes `claude-fable-5[1m]` "Fable 5"; the same
+adapter pointed at a 2.1.259 through `CLAUDE_CODE_EXECUTABLE` publishes
+`claude-fable-5-1[1m]` "Fable 5.1", with `mode`, `effort` (`xhigh` included) and
+`fast` identical choice for choice. The SDK does not verify the CLI it drives — it
+announces its own version into the CLI's environment and asks nothing back — so the
+compatibility burden runs SDK → CLI and a newer CLI under an older adapter is the
+forgiving direction.
+`codex-acp` has the same door, `CODEX_PATH`; a `codex` 0.146.1 on PATH against a
+vendored 0.145.0. kimi vendors nothing; opencode is the package and already fell
+back to PATH.
+
+**Decision.** One resolver, `LocalRuntime.agentCli`, for login, logout, the status
+probe and the session alike — a credential is always written by the build a session
+runs. An override wins outright and is never compared (`agentEnv` preserves those
+names on the grounds that an operator who set one meant it); else the higher
+`--version` of the copy on PATH and the copy the vendored resolver found (a
+`switch` over the adapters' platform packages, since deleted — Q4.114), an
+unreadable version losing on either side so a moved layout costs the comparison
+rather than the running binary, and a demotion said once per path through
+`onWarning`. The pin flag, REEMOAT_AGENT_CLI=vendored, pinned the floor, which was
+what made every "measured against 0.63.0" docblock re-runnable, and left a harness
+that vendors nothing alone rather than switching it off [the flag went with the
+floor, Q4.114; a measured pair is re-created through `CLAUDE_CODE_EXECUTABLE` or
+`CODEX_PATH` now]. Cached ten minutes (`AGENT_CLI_TTL_MS`,
+`MODELS_TTL_MS`'s number and its argument), collapsed to one decision in flight per
+harness and fenced by `probeGeneration` exactly as the login probe is, and cleared
+by `forgetAvailability()` — which the daily agent update calls, beside
+`AgentAskRuns.forget()` and the PATH walk's own memo. `findOnPath` searches
+`MANAGED_CLI_DIRS` **after** PATH, because the unit's PATH does not name
+`~/.local/bin` and re-rendering the unit is a reload that interrupts every session.
+
+**The vendored copy is never written into the vendor's variable**, and that is a
+measurement about `codex-acp` 1.1.9: with `CODEX_PATH` unset it spawns
+`process.execPath` on its bundled `codex.js`; set, it spawns the path directly — a
+`#!/usr/bin/env node` shebang resolved against the unit's PATH. The floor is the
+floor because it works on a host with no `node` of its own. `spawnPlan` is the
+decision, pure, so `daemoncheck` can hold all four shapes [three since Q4.114: the
+vendored arm is gone, and the chosen copy is written into the variable on every
+spawn — under `--source npm` all four run on the node the bootstrap installed, and
+under `vendor` each is the vendor's own native build].
+
+**What it reports.** `AgentCapabilities.cli` — `{version, source}`, never the path
+— rides `GET /agents/capabilities` beside the list that build published, so the
+version on screen cannot describe a different spawn than the rows under it; `null`
+where nothing was spawned, absent from an older daemon, and the client tells those
+apart rather than drawing "unknown version" for either. The picker draws
+`Listed by Claude Code 2.1.259` under a provider whose rows all came from one
+harness, and nothing under a mixed one. `pincheck`'s "nothing records which build
+the measurements were taken against" is answered by the running daemon rather than
+a pin: kimi's build is *chosen* to be the newest, which is a different thing from
+being recorded.
+
+**What an agent can now do.** Same uid, no sandbox: a file at `~/.local/bin/claude`
+whose `--version` prints a higher number becomes the build every session and login
+runs, within ten minutes. Before this it could edit the vendored binary in
+`node_modules` to the same effect, so this is a second door to a room that was
+open; `CLAUDE.md` names it under **What is not confined**, and the pin flag or a
+named `CLAUDE_CODE_EXECUTABLE` closed it — with the flag gone (Q4.114) the
+override is the one that does.
+
+**Rejected.** Reading `agentInfo.version` off ACP's `initialize` — claude fills it
+from its adapter's own `package.json`, 0.63.0, not the CLI holding the list.
+Dropping the vendored CLIs altogether — `pnpm install` guaranteeing a working
+harness on any host is what lets `curl | sh` end in a machine that runs; the 689 MB
+they cost is a separate question [reversed by Q4.114, which answered the separate
+question by dropping them: `curl | sh` ends in a machine that runs because
+`bootstrap.sh` runs `deploy/agents.sh` before the daemon starts, not because the
+checkout carries the programs]. A third `source` on the client for a value it has
+not heard of — an unknown one draws the plain line, `compatibility.md`'s rule 2.
+
+**Status.** Superseded in part by Q4.114 — gone with the vendored copies: the
+vendored arm, the `--version` comparison between PATH and the floor, the pin flag
+and the demotion warning through `onWarning`. Standing: one resolver, `agentCli`,
+for login, logout, the status probe and the session alike; the ten-minute cache on
+`AGENT_CLI_TTL_MS`, the in-flight collapse and the `probeGeneration` fence;
+`AgentCapabilities.cli` on the wire and the picker line under it, `source` now one
+of `override` or `path`; and `findOnPath` searching `MANAGED_CLI_DIRS` **after**
+PATH. `daemoncheck` drives what stands with stubs on PATH and an injected
+`--version`, the in-flight collapse, the fence, and `spawnPlan`; `webcheck` the
+refusals of the picker line; `relaycheck` nothing — none of this crosses the relay.
+What keeps the PATH copy moving is Q4.113.
 
 ## Open questions and deliberate non-goals
 
@@ -20854,8 +21328,9 @@ half of it was wrong. The claim was that a third agent is blocked behind one of
 three protocol decisions; in fact codex advertises `sessionCapabilities.resume`,
 so it lands inside the narrow claim this entry said had to be *made* first, and
 the decision it was waiting on never arose. What the work actually cost was five
-edits — one arm in `resolveAgent`, one row in `AGENT_LOGIN`, one arm in
-`vendoredCli`, one literal in `wire.ts`, one entry in `pincheck`'s adapter list —
+edits — one arm in `resolveAgent`, one row in `AGENT_LOGIN`, one arm in the
+vendored-CLI resolver (since deleted, Q4.114), one literal in `wire.ts`, one entry
+in `pincheck`'s adapter list —
 and none of them was the type refactor this entry warns about. The 63 `AgentId`
 references were, as predicted, the cheapest part: the compiler found every one
 that mattered and the only silent seam was `wire.ts`, exactly as written.
@@ -23486,7 +23961,9 @@ measurement is worth keeping. It asked the agent's CLI "is anybody signed in"
 before every message, which cost a process spawn on the hot path, could only ever
 be as fresh as its 3s cache, and **made the offline drivers depend on whether the
 person running them was signed in** — a stub runtime inherits `LocalRuntime`, and
-`resolveLoginBinary` finds the adapter's own vendored binary in `node_modules`.
+`resolveLoginBinary` found the adapter's own vendored binary in `node_modules`
+(then — the vendored copies are gone, Q4.114, and it finds an override or a copy
+on PATH).
 CI is signed in to nothing, so it refused a prompt two unrelated assertions
 expected to land, and the failure was invisible on a developer's own machine.
 
@@ -23617,7 +24094,7 @@ the message box off the screen.
 am not logged in, and why will it not let me send anything.* Both were right.
 
 **Measured, on the reporter's own machine.** The daemon's own probe — its exact
-binary (`resolveLoginBinary` finds the adapter's vendored copy), its exact
+binary (`resolveLoginBinary` found the adapter's vendored copy — then; Q4.114), its exact
 environment (`agentEnv()` plus pasted secrets, `HOME` untouched) — answered:
 
 ```
@@ -24570,8 +25047,8 @@ its own precondition: *"a fourth agent, to show the pattern is a pattern rather
 than two coincidences."* opencode is that fourth agent (2026-08-27).
 
 **It cost the five edits Q7.31 predicted, and two it did not.** The five:
-`AGENT_IDS`, an `AGENT_LOGIN` row, a `resolveAgent` arm, a `vendoredCli` arm, and
-a `pincheck` entry. The two:
+`AGENT_IDS`, an `AGENT_LOGIN` row, a `resolveAgent` arm, an arm in the vendored-CLI
+resolver (since deleted, Q4.114), and a `pincheck` entry. The two:
 
 - `packages/web/src/wire.ts`, the hand mirror — still the one seam with no
   compiler help, and still the one that has to be remembered.

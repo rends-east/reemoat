@@ -78,10 +78,13 @@ What it does, in order: checks this machine has git and a node ≥ 24 (installin
 one under `~/.reemoat/toolchain` from the official tarball, checksum-verified, if
 not); reads `GET /v1/instance` to learn whether that instance takes sign-ups;
 asks for a credential; **creates the machine before it clones anything**, so a
-refusal costs seconds rather than 750 MB; clones the version that instance runs;
-`pnpm install --frozen-lockfile`; writes `~/.reemoat/daemon.env`; and then hands
-the rest to `deploy/install.sh daemon --non-interactive`, which renders the unit,
-starts it and probes it. It reimplements none of that.
+refusal costs seconds rather than a clone, a ~220 MB `pnpm install` and ~700 MB of
+agent CLIs; clones the version that instance runs; `pnpm install
+--frozen-lockfile` (the daemon and the two ACP adapters — no CLI is vendored);
+runs `deploy/agents.sh` for the four coding-agent CLIs, which are the only copies
+there are; writes `~/.reemoat/daemon.env`; and then hands the rest to
+`deploy/install.sh daemon --non-interactive`, which renders the unit, starts it
+and probes it. It reimplements none of that.
 
 Four ways to prove who you are, offered least-authority-first:
 
@@ -93,19 +96,44 @@ Four ways to prove who you are, offered least-authority-first:
 | signing up | only offered where `registration.enabled` is on. Where the instance confirms by mail it waits on **a keypress, not a timer** — `POST /v1/login` tolerates five failures in fifteen minutes before it starts blocking, so a polling loop would lock you out of the account you just made |
 
 Flags: `--url`, `--api-key`, `--enroll-code`, `--label`, `--dir` (default
-`~/srv/reemoat`), `--ref`, `--node`, `--yes`, `--uninstall`, `--purge`, `--help`.
+`~/srv/reemoat`), `--ref`, `--node`, `--agent-source vendor|npm`, `--yes`,
+`--uninstall`, `--purge`, `--help`.
 
 **What it will not do:** no `sudo`, no package manager, nothing written to a
-shell profile, and nothing outside `~/.reemoat` and the checkout. The daemon does
-not need node on *your* `PATH` — `runtime_path` bakes the resolved one into the
-unit — which is what makes the removal below complete rather than approximate.
+shell profile. Reemoat's own state is under `~/.reemoat` and the checkout. The
+coding-agent CLIs are not part of `pnpm install` — nothing vendors them any more —
+but are installed by `deploy/agents.sh` — by default three of them with each
+vendor's own installer into the vendors' own directories (`~/.local/bin`,
+`~/.local/share/claude`, `~/.codex`, `~/.opencode`), because none of those
+installers is relocatable, and kimi from the npm registry into
+`~/.reemoat/toolchain`. `--agent-source npm` installs all four from the npm
+registry instead, everything under `~/.reemoat/toolchain`, for a machine that
+cannot reach the vendors' hosts (point npm at your mirror the way npm is pointed
+anywhere, in `~/.npmrc` or `npm_config_registry`); it is written into the env
+file as `REEMOAT_AGENT_SOURCE=npm`, so the daemon's daily re-run of that script —
+which is what keeps them current — agrees with the install. It is a choice rather
+than a fallback: a vendor outage never switches a machine to a differently built
+binary by itself. And it decides only how a CLI that is missing is installed — one
+already on the machine keeps being refreshed the way it was installed — which is
+also why the flag is refused on a machine that is already set up: the setting is
+`REEMOAT_AGENT_SOURCE` in the env file, and the installer says so. `REEMOAT_AGENT_UPDATES=off` stops the re-run, and
+`deploy/agents.sh --check` previews one. The daemon does not need node on *your*
+`PATH` — `runtime_path` bakes the resolved one into the unit.
 
 `--uninstall` stops the service, removes its unit, and removes a toolchain this
-script installed. It **names your data and deletes none of it**: the env file,
-the SQLite database and above all `~/.reemoat/worktrees`, which holds git working
-copies that may carry uncommitted work. `--purge` deletes those too, and prints
-the list of worktrees first. Neither retires the machine row — that is one tap in
-Settings → Machines, and doing it here would mean the uninstall path held a
+script installed — only once the service is confirmed stopped. If it cannot be
+(a checkout it cannot find), it exits non-zero, leaves the toolchain the unit
+still runs, and says which `--dir` would work. It **names your data and deletes
+none of it**: the env file, the SQLite database and above all
+`~/.reemoat/worktrees`, which holds git working copies that may carry uncommitted
+work. The toolchain it removes holds the CLIs installed from npm — kimi, and all
+four under `--agent-source npm` — so those go with it; the vendor-installed CLIs
+stay, and so does every sign-in, which lives in the vendors' own directories
+(`~/.claude`, `~/.codex`, `~/.kimi-code`, opencode's data directory) that nothing
+here touches. `--purge`
+deletes the data too, and always asks first, naming the database, the checkout and
+every worktree; `--yes` answers. Neither retires the machine row — that is one tap
+in Settings → Machines, and doing it here would mean the uninstall path held a
 credential.
 
 ⚠ Under `curl … | sh` the script's **stdin is the download**, so every question

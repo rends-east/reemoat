@@ -81,7 +81,7 @@ plugin *manifest* does name all three, disclosed in `consent.adds` on
 |---|---|
 | `GET /systems` | Every system, and whether a key is saved. Spawns nothing. The built-ins in their own order, then any a plugin added — each carrying `contributedBy` |
 | `PUT /systems/:system` · `DELETE /systems/:system` | Set or clear that system's key |
-| `GET /agents/capabilities` | What each harness offers and what it can be pointed at. **Starts an agent per harness**, cached ten minutes |
+| `GET /agents/capabilities` | What each harness offers and what it can be pointed at. **Starts an agent per harness**, cached ten minutes. Each row carries `cli` — which build of the harness's own CLI published `models` (`version` may be `null`; `source` is `override` or `path`) — `null` where nothing was spawned, absent from daemons older than this field, and never the path it was resolved from |
 | `GET /custom-agents` · `POST /custom-agents` · `PATCH /custom-agents/:id` · `DELETE /custom-agents/:id` | The harness+system+model presets on this machine. A `PATCH` carries all four fields — an edit is a replace, so the pairing is never weighed against a merge |
 | `GET /agent-strip` · `PUT /agent-strip` | Which agents this machine's New session strip offers, and in what order. A **partial** record — a position and a hidden flag for what somebody moved or hid — merged by the client against the two listings above, so a `ref` naming something that is gone keeps its place and is simply not drawn. The `PUT` carries the whole list and replaces it; no `ref` is validated against anything |
 

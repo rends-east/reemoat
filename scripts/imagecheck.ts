@@ -307,6 +307,12 @@ const store = docker(["run", "--rm", "--entrypoint", "sh", IMAGE, "-c", "ls /app
  * would be a linux pair. The optional group is why the arm is a pattern: naming
  * only `opencode-ai@` would pass while a quarter-gigabyte of agent rode in beside
  * it, which is `@openai`'s lesson one paragraph up.
+ *
+ * (All of that is history as of Q4.114: the claude SDK's and `@openai/codex`'s
+ * platform packages are excluded by `pnpm-workspace.yaml`'s overrides, and
+ * `opencode-ai` is no longer a dependency at all — the CLIs come from
+ * `deploy/agents.sh`. The patterns stay exactly as they are: they are the guard
+ * against any of it riding back in with a bump.)
  */
 const daemonOnly = store.filter((k) =>
   /^(@agentclientprotocol|@anthropic-ai|@modelcontextprotocol|@openai)|^(zod|zod-to-json-schema|diff|open|vscode-jsonrpc)@|^opencode(-[a-z0-9-]+)?@/.test(

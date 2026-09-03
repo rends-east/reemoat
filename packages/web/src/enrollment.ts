@@ -2,9 +2,10 @@
  * One value of the three lines below, as shell *data* rather than shell source.
  *
  * **`controlPlaneUrl` is caller-influenced and that is why this is not
- * cosmetic.** It is `publicUrl(c)` on the control plane — `new URL(c.req.url).origin`
- * — i.e. it comes from the request's own `Host` header, which anybody who can
- * reach the service writes. Measured 2026-08-08 through a real `node:http`
+ * cosmetic.** It is `installOrigin(c, trustedProxyHops)` on the control plane —
+ * `new URL(c.req.url).origin`, with the scheme taken from `x-forwarded-proto`
+ * behind declared proxy hops — i.e. it comes from the request's own `Host` header,
+ * which anybody who can reach the service writes. Measured 2026-08-08 through a real `node:http`
  * server: a `Host` of ``a`id`b``, `a$(id)b`, `a'b` and `a;id` all reach
  * `URL.origin` intact. Unquoted, the paste then *executes* it — measured,
  * sourcing ``export REEMOAT_CONTROL_PLANE=http://a`touch PWNED`b`` created the
@@ -104,7 +105,7 @@ export function enrollmentLines(controlPlaneUrl: string, code: string): string {
 export function installCommand(controlPlaneUrl: string): string {
   // One trailing slash, removed once. `location.origin` never carries one, but
   // this also takes a URL off the wire (`controlPlaneUrl` on a created machine
-  // is `publicUrl(c)` server-side), and `https://cp//install.sh` is a 404 with
+  // is `installOrigin(c, …)` server-side), and `https://cp//install.sh` is a 404 with
   // no clue in it.
   const origin = controlPlaneUrl.endsWith("/") ? controlPlaneUrl.slice(0, -1) : controlPlaneUrl;
   return `curl -fsSL ${shellQuote(`${origin}/install.sh`)} | sh`;

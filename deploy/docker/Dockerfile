@@ -122,6 +122,10 @@ FROM manifests AS deps
 # `@anthropic-ai/claude-agent-sdk-linux-arm64`, in the image of a process that
 # spawns no agent — and codex put a second binary of that order beside it, since
 # `@openai/codex` ships a platform build per architecture. It grows per agent.
+# (Those platform packages are excluded by `pnpm-workspace.yaml`'s overrides now
+# — Q4.114, the CLIs come from `deploy/agents.sh` — so the root importer no longer
+# drags them in; the numbers stand as history, and the prune below stays as the
+# guard for the day a bump brings one back.)
 RUN pnpm install --frozen-lockfile --filter @reemoat/control-plane
 
 # So the store is pruned to what the control plane can actually reach. The

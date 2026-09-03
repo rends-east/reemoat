@@ -17,6 +17,7 @@ import {
   groupModels,
   harnessRowRefusal,
   hostable,
+  listedByBuild,
   searchModels,
   supportingHarnesses,
   type ModelChoice,
@@ -2186,6 +2187,7 @@ function ModelPicker({
              * it: `cannotRun` names the *model*, so a large group's sublines would
              * all differ and 356 of them would draw individually.
              */
+            const build = listedByBuild(group, capabilities, nameOf);
             const sublines = group.choices.map((one) => choiceRefusal(null, one, null));
             const first = sublines[0] ?? null;
             const shared =
@@ -2204,6 +2206,13 @@ function ModelPicker({
                 <h2 className={`${SETTINGS_HEADING} mb-1.5`}>{group.system.displayName}</h2>
               )}
               {shared !== null && <p className="mb-1.5 text-2xs text-faint">{shared}</p>}
+              {/* Which build published these rows, where that is true of all of
+                  them — see `listedByBuild`. At most one of this and the hoisted
+                  line above is ever drawn: that one needs a refusal every row
+                  shares, and a row its own harness published carries none. Same
+                  slot and same class as `notice`, because it is the same kind of
+                  thing — a fact about the list rather than a failure of it. */}
+              {build !== null && <p className="mb-1.5 text-2xs text-faint">{build}</p>}
               <ul className="flex flex-col gap-2">
                 {group.choices.map((choice) => {
                   /*

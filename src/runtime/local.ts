@@ -1,18 +1,17 @@
 import { execFile, spawn, type ChildProcessByStdio } from "node:child_process";
-import { createRequire } from "node:module";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { homedir, uptime as osUptime } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 
 import {
   AGENT_LOGIN,
   agentEnv,
   findOnPath,
+  forgetPathHits,
   hasLoginFlow,
   isBuiltinAgentId,
   resolveAgent,
-  vendoredOpencode,
   type AgentId,
   type AgentLaunchConfig,
   type BuiltinAgentId,
@@ -22,6 +21,7 @@ import { BUILTIN_CATALOGUE, type MachineCatalogue, type SystemId } from "../acp/
 import { hostGit, type GitExec } from "../git.js";
 import type {
   AgentAvailability,
+  AgentCliChoice,
   AgentHandle,
   AgentLoginSupport,
   AgentProcess,
@@ -142,6 +142,28 @@ class LocalAgentProcess extends LocalChildProcess implements AgentProcess {
  */
 const LOGIN_PROBE_TTL_MS = 3_000;
 
+/**
+ * How long "which build of this CLI runs here" is reused.
+ *
+ * ⚠ **Deliberately not {@link LOGIN_PROBE_TTL_MS}, and the difference is what the
+ * two facts are *about*.** Three seconds is the tempo of a person signing in and
+ * expecting a screen to change. A CLI build changes when a background updater
+ * lands one — `~/.local/share/claude/versions/` gains a directory and the launcher
+ * is repointed — which is hours apart, and each answer costs a `--version` per
+ * harness. At three seconds that is a subprocess per harness every few seconds for
+ * a number that moves twice a week.
+ *
+ * The same ten minutes as `MODELS_TTL_MS`, and that is the honest pairing rather
+ * than a coincidence: the model list is what this decides, so the two halves of
+ * one screen do not go stale on different clocks.
+ *
+ * Non-zero rather than a per-process memo for the reason the memo it sits beside
+ * is cleared: a self-updating CLI moves under a running daemon, and an answer held
+ * for the life of the process would pin the model list to whatever was installed
+ * at boot.
+ */
+const AGENT_CLI_TTL_MS = 10 * 60_000;
+
 /** How long a status command may take before it is treated as no answer. */
 const LOGIN_PROBE_TIMEOUT_MS = 10_000;
 
@@ -194,6 +216,63 @@ export const MAX_START_REFUSAL_CHARS = 512;
  */
 export function startRefusalLive(held: StartRefusal, now: number): boolean {
   return now - held.at < START_REFUSAL_TTL_MS;
+}
+
+/**
+ * The first dotted number in a `--version` line, or `null`.
+ *
+ * The CLIs do not agree on the shape of that line — `2.1.259 (Claude Code)` puts
+ * it first, `codex-cli 0.146.1` puts it last — so it is found wherever it sits
+ * rather than by position. Deliberately **not** a full semver parse: what is being
+ * answered is "which build is this", for a line under a model list that somebody
+ * compares against their own `--version`, and a pre-release suffix or a fourth
+ * component is noise against that. It used to decide a comparison too — the copy on
+ * PATH against one this repository vendored — and that comparison went with the
+ * vendored copies (Q4.114); what is left is the report.
+ */
+export function firstVersion(text: string): string | null {
+  /*
+   * ⚠ **A lookbehind rather than `\b`, and the difference is a shipped bug.** `\b`
+   * sits between a *word* character and a non-word one, and a letter and a digit
+   * are both word characters — so `v2.1.259` had its first boundary after the `2`
+   * and the whole thing read as `1.259`, a version older than almost anything it
+   * would be compared against. Anchored on "not preceded by a digit or a dot"
+   * instead, which is what "the start of a number" actually means here.
+   */
+  return /(?<![\d.])(\d+(?:\.\d+)+)/.exec(text)?.[1] ?? null;
+}
+
+/**
+ * Where a chosen CLI goes on the spawn, or nowhere.
+ *
+ * Pure and exported for the reason {@link firstVersion} is: `launch` is the one
+ * place these arms meet, every driver that reaches a session overrides `launch`,
+ * and so the arms had no witness. The block in
+ * {@link LocalRuntime.launch} is the argument for each; this is the decision.
+ *
+ * - `overrideName` set: the vendor's variable is written and the command is left
+ *   alone — the adapter resolves a CLI of its own, and naming that CLI as the
+ *   command would spawn a coding agent where an ACP server is expected. Written
+ *   for an override too, though it is already in the environment: saying it is
+ *   what makes the spawn's environment the whole answer to "which build".
+ * - `overrideName` null: the harness *is* the program, so the command is replaced.
+ * - no choice at all: a contributed harness, or a built-in with no CLI on the
+ *   machine — left entirely alone. For the second `describe` has already refused,
+ *   and {@link LocalRuntime.agentCli} never holds a miss, so the first launch after
+ *   an install finds the file rather than a cached "none".
+ *
+ * ⚠ **There used to be a fourth arm — a vendored copy, under which nothing was
+ * written because the adapter resolved that same file itself.** It went with the
+ * vendored copies (Q4.114); every copy that runs now is named out loud.
+ */
+export function spawnPlan(
+  command: string,
+  chosen: AgentCliChoice | null,
+  overrideName: string | null,
+): { command: string; env: NodeJS.ProcessEnv } {
+  if (chosen === null) return { command, env: {} };
+  if (overrideName === null) return { command: chosen.path, env: {} };
+  return { command, env: { [overrideName]: chosen.path } };
 }
 
 /** What a pty-allocating login spawn looks like. */
@@ -440,12 +519,21 @@ export class LocalRuntime implements SessionRuntime {
   /** Memoised: `script` does not appear and disappear during a daemon's life. */
   private scriptResolved: string | null | undefined;
   /**
-   * Memoised for the same reason: a vendored binary does not move at runtime.
+   * Which build each harness resolved to, and when it was decided.
    *
-   * Per agent, because two of the three vendor a CLI and they vendor it
-   * differently — see {@link vendoredCli}.
+   * On a clock rather than for the process, because the file it names is the one
+   * thing under this daemon that moves without a restart — `deploy/agents.sh`
+   * repoints it daily. See {@link agentCli}.
    */
-  private readonly vendored = new Map<AgentId, string | null>();
+  private readonly cliChosen = new Map<AgentId, { at: number; value: AgentCliChoice }>();
+
+  /**
+   * One decision in flight per harness, for `loginInFlight`'s reason: a restart
+   * launches every interrupted session at once and each of them asks, the
+   * capability sweep asks beside them, and N askers arriving on a cold cache were
+   * N `--version` spawns of one file.
+   */
+  private readonly cliInFlight = new Map<AgentId, Promise<AgentCliChoice | null>>();
 
   /**
    * The login probe's cache, and the two things that keep it honest.
@@ -665,9 +753,9 @@ export class LocalRuntime implements SessionRuntime {
  * and that guard was the wrong shape: it spawned the agent's CLI on the hot path,
  * was only ever as fresh as its 3s cache, and — the reason it was removed —
  * made every offline driver depend on whether the person running it was signed
- * in. A stub runtime inherits this class, and `resolveLoginBinary` finds the
- * adapter's own vendored binary in `node_modules`, so CI (signed in to nothing)
- * refused a prompt two assertions expected to land.
+ * in. A stub runtime inherits this class, and `resolveLoginBinary` found the copy
+ * this repository vendored then, so CI (signed in to nothing) refused a prompt two
+ * assertions expected to land.
  *
  * What replaced it is not a better probe but a different source: the agent says
  * so itself. `isAuthFailure` reads `errorKind` off the ACP error on the event
@@ -682,6 +770,17 @@ export class LocalRuntime implements SessionRuntime {
     this.probeGeneration += 1;
     this.loginProbed.clear();
     this.loginInFlight.clear();
+    /*
+     * ⚠ **The CLI choice too.** The daily agent update is one of this method's
+     * callers, and it is the event that moves the file a choice names: a memo held
+     * past this point is the build the updater has just replaced, run for another
+     * ten minutes while the fresh one sits on disk.
+     */
+    this.cliChosen.clear();
+    // And the PATH walk's own memo, which is module-level and outlives every map
+    // here: a hit never expires, and the daily agent update is the one event that
+    // puts a binary where there was none.
+    forgetPathHits();
   }
 
   /**
@@ -711,7 +810,12 @@ export class LocalRuntime implements SessionRuntime {
     if (login === null || flow === null) return null;
     const script = this.scriptPath();
     if (script === null) return null;
-    const command = this.resolveLoginBinary(agent);
+    // The *chosen* build, not merely a resolvable one — a login that wrote its
+    // credential through a different binary than sessions run is the failure
+    // `agentCli`'s docblock exists to prevent, and it reports success while it
+    // happens.
+    const chosen = await this.agentCli(agent);
+    const command = chosen?.path ?? null;
     if (command === null) {
       this.onWarning(`cannot log ${agent} in: ${login.command} is not on PATH`);
       return null;
@@ -799,7 +903,8 @@ export class LocalRuntime implements SessionRuntime {
     const login = this.builtinLogin(agent);
     const args = login?.logoutArgs ?? null;
     if (login === null || args === null) return null;
-    const command = this.resolveLoginBinary(agent);
+    // The same build the login drove and a session runs — see `login` above.
+    const command = (await this.agentCli(agent))?.path ?? null;
     if (command === null) {
       return { ok: false, detail: `${login.command} is not on this daemon's PATH` };
     }
@@ -820,6 +925,38 @@ export class LocalRuntime implements SessionRuntime {
 
   async launch(agent: AgentId, extra: NodeJS.ProcessEnv = {}, routed = false): Promise<AgentProcess> {
     const config = resolveAgent(agent, this.machine);
+    /*
+     * **Which build the session runs, said out loud rather than left to whatever
+     * the adapter finds — and the adapter finds nothing on its own any more.** See
+     * {@link agentCli} for how it is chosen; what this does is put that answer
+     * where the spawn can act on it, and the two shapes are not interchangeable:
+     *
+     * - claude and codex spawn an *adapter*, which then resolves a CLI of its own.
+     *   The only way in is the vendor's own variable — so it is written into the
+     *   child's environment and `config.command` is left alone. Writing the CLI
+     *   there instead would spawn a coding agent where an ACP server is expected.
+     *   ⚠ And it is the *only* way in now: the platform package the adapter would
+     *   otherwise `require` is excluded from `node_modules` (Q4.114), so with the
+     *   variable unset claude's adapter throws at start and codex's spawns a shim
+     *   that exits. Two things keep a spawn from reaching here without a choice:
+     *   `describe` refuses first, with a sentence, and `agentCli` never caches a
+     *   miss, so the walk that `describe` just made is the walk this makes.
+     * - opencode and kimi *are* the program, so the command is replaced and there
+     *   is no variable to write. `AGENT_LOGIN[*].executableEnv` is what tells the
+     *   two apart, which is the same field `resolveLoginBinary` reads — a harness
+     *   that grows one is handled by the first arm without a second edit here.
+     *
+     * Measured in `codex-acp` 1.1.9 and still worth knowing: with `CODEX_PATH` set
+     * it spawns the path directly, so a `#!/usr/bin/env node` launcher — which is
+     * what `--source npm` puts at `~/.reemoat/toolchain/bin/codex` — resolves `node`
+     * against the unit's PATH. `runtime_path` puts the toolchain's node there, which
+     * is the same dependency kimi has had all along.
+     *
+     * A contributed harness answers `null` and is left entirely alone: what a
+     * manifest names is a program on PATH.
+     */
+    const chosen = await this.agentCli(agent);
+    const { command, env: cliEnv } = spawnPlan(config.command, chosen, this.builtinLogin(agent)?.executableEnv ?? null);
     // `detached` puts the agent in its own process group, which buys two things.
     // The agent adapters spawn their own children (claude-agent-acp runs a
     // `claude` binary), and those children only get cleaned up by an exit handler
@@ -827,7 +964,7 @@ export class LocalRuntime implements SessionRuntime {
     // avoid leaving a live grandchild reparented to init. It also stops a Ctrl-C
     // in the daemon's terminal from reaching every agent directly, which would
     // otherwise hide whether our own shutdown path actually works.
-    const child = spawn(config.command, config.args, {
+    const child = spawn(command, config.args, {
       // Secrets last, so a pasted token beats an ambient one: the Settings screen
       // says "set", and it has to be telling the truth about what the agent reads.
       //
@@ -858,7 +995,12 @@ export class LocalRuntime implements SessionRuntime {
        * runs as this uid and can read `REEMOAT_DB`. What this removes is the
        * accident, on the one path where the credential has no purpose at all.
        */
-      env: { ...config.env, ...(routed ? {} : this.secrets(agent)), ...extra },
+      /*
+       * `cliEnv` before `extra`, so a caller that passes the vendor's variable
+       * explicitly still wins — the same precedence `chooseCli` gives the
+       * operator's own environment, applied one layer down.
+       */
+      env: { ...config.env, ...cliEnv, ...(routed ? {} : this.secrets(agent)), ...extra },
       stdio: ["pipe", "pipe", "pipe"],
       detached: true,
     }) as PipedChild;
@@ -874,41 +1016,32 @@ export class LocalRuntime implements SessionRuntime {
   }
 
   /**
-   * Which binary a login drives, which is **not** the one {@link describe}
-   * resolves.
+   * Whether *any* binary exists for this harness — an existence test, and not the
+   * answer to which one runs.
    *
-   * `available` is about `claude-agent-acp`, the ACP adapter this daemon spawns.
-   * `loggedIn` and {@link login} are about `claude`, a different program that
-   * ships as a platform-specific *optional* dependency of
-   * `@anthropic-ai/claude-agent-sdk` with no `bin` entry. Conflating them is what
-   * made an earlier documented remedy unrunnable: the adapter worked perfectly
-   * and `claude` was not on PATH.
+   * ⚠ **This used to decide which binary a login drove, and that decision moved to
+   * {@link agentCli}.** The two synchronous callers left — `loginSupport` and
+   * `cannotAskHint` — compare its answer to `null` and nothing else, so what it
+   * has to get right is only "is there one at all": an override counts, a copy on
+   * PATH or in `MANAGED_CLI_DIRS` counts. Which of them a login, a logout, a status
+   * probe or a session actually runs is `chooseCli`'s answer, and every caller that
+   * consumes a *path* is async and goes through it — which is what keeps a login
+   * and a session from picking differently, the failure `agentCli`'s docblock is
+   * about.
    *
-   * **This mirrors the adapter's own `claudeCliPath()` rather than walking PATH,
-   * and that ordering is the whole point.** Measured 2026-08-02: this daemon runs
+   * The override is looked up from `AGENT_LOGIN[agent].executableEnv` for
+   * **every** agent rather than under an `agent === "claude"` test, because two of
+   * the four have one: `CLAUDE_CODE_EXECUTABLE`, and codex's `CODEX_PATH`, read by
+   * the adapter's `startAcpServer()`. Written as that test, codex's override chose
+   * the binary sessions ran while this function kept resolving another.
+   *
+   * Measured 2026-08-02 and the reason `MANAGED_CLI_DIRS` exists: this daemon runs
    * under launchd with `PATH=/opt/homebrew/bin:/usr/bin:/usr/local/bin:/bin:...`,
-   * while `claude` was installed at `~/.local/bin/claude` — not on it. Sessions
-   * worked, because the adapter resolves the vendored binary through the SDK and
-   * never consults PATH; only the *probe* failed, so every agent reported
-   * "signed in: cannot tell" with nothing saying why.
-   *
-   * Resolving the same binary the adapter will spawn is also the more correct
-   * question, not merely the more available one: a login that wrote credentials
-   * for a different build than the session reads is a login that appears to work
-   * and changes nothing.
-   *
-   * PATH stays as the last resort, for an agent installed some other way and for
-   * `kimi`, which has no vendored copy at all.
-   *
-   * **Codex is the same story, override and all.** Its adapter also brings its own
-   * CLI (`@openai/codex`, a direct dependency), and the measured hazard is
-   * identical: `codex` installs to `~/.local/bin` by default, which is exactly the
-   * directory a launchd `PATH` does not have. It also has its own
-   * `CLAUDE_CODE_EXECUTABLE` — `CODEX_PATH`, read by the adapter's
-   * `startAcpServer()` — which is why the override is looked up from
-   * `AGENT_LOGIN[agent].executableEnv` for **every** agent rather than under an
-   * `agent === "claude"` test. Written as that test, codex's override chose the
-   * binary sessions ran while this function kept resolving the vendored one.
+   * while `claude` was installed at `~/.local/bin/claude` — not on it. Then, the
+   * adapter resolved a copy this repository vendored and only the *probe* failed,
+   * so every agent reported "signed in: cannot tell" with nothing saying why. Now
+   * there is no vendored copy (Q4.114), `resolveAgent` refuses the harness outright
+   * on the same absence, and the sentence it refuses with names the remedy.
    */
   private resolveLoginBinary(agent: AgentId): string | null {
     /*
@@ -927,137 +1060,122 @@ export class LocalRuntime implements SessionRuntime {
       const override = (process.env[overrideName] ?? "").trim();
       if (override.length > 0) return override;
     }
-    const vendored = this.vendoredCli(agent);
-    if (vendored !== null) return vendored;
     return findOnPath(login.command);
   }
 
   /**
-   * The copy of an agent's CLI that its adapter brought with it, if it brought one.
+   * Which build of an agent's CLI this daemon runs, and why that one.
    *
-   * A `switch` with **no `default` arm**, so a fourth agent is a compile error here
-   * rather than a silent `null`. The question it forces — "does this adapter vendor
-   * the binary a login has to drive?" — is one whose wrong answer is invisible: the
-   * login runs, writes credentials somewhere, and the session goes on reporting
-   * logged out.
+   * **Two sources, in order of authority:**
+   * - `override` — `AGENT_LOGIN[agent].executableEnv` is set. It wins outright,
+   *   because `agentEnv` preserves those names precisely on the grounds that *an
+   *   operator who set one meant it*.
+   * - `path` — otherwise the first copy `findOnPath` finds: PATH in order, then
+   *   `MANAGED_CLI_DIRS`, which is where `deploy/agents.sh` installs. So a copy of
+   *   the operator's own on PATH outranks the one this daemon keeps current, and
+   *   the script agrees from its side: a copy it did not install — outside the
+   *   vendors' directories and its own toolchain — is named and not moved, and one
+   *   it did install is refreshed through the door it came in by, whatever
+   *   `--source` says today.
+   *
+   * ⚠ **There was a third, and a comparison, and both are gone (Q4.114).** The
+   * adapters used to bring a pinned CLI with them under `node_modules`, exactly as
+   * old as the release — measured 2026-09-03, adapter 0.63.0 vendored claude
+   * **2.1.220**, which publishes `claude-fable-5[1m]` where a 2.1.259 publishes
+   * `claude-fable-5-1[1m]` — so this weighed `--version` of the copy on PATH
+   * against it and ran the newer. With no stale floor there is nothing to weigh:
+   * every copy on the machine is one somebody installed or one the daily refresh
+   * keeps moving, and "first found" is the predictable answer. What is still read
+   * is the version, for the report — `AgentCapabilities.cli` names the build under
+   * the model list it published — and a binary that will not say which build it is
+   * still runs, with `version: null`.
+   *
+   * ⚠ **Cached on {@link AGENT_CLI_TTL_MS} rather than for the process, and that
+   * is the whole point rather than tidiness.** The CLI moves under a running
+   * daemon — `deploy/agents.sh` repoints `~/.local/bin/claude` or
+   * `~/.reemoat/toolchain/bin/kimi` daily — so a memo held for the daemon's life
+   * would pin the answer to whatever was installed at boot and quietly defeat this.
+   * Ten minutes rather than the login probe's three seconds — see the constant for
+   * why the two facts move at different speeds; and the updater calls
+   * `forgetAvailability` besides, so the day's build is picked up at once. A
+   * refresh `deploy.sh` makes without restarting the daemon is seen by nothing
+   * here, so for up to ten minutes after one the *report* names the previous
+   * build while the spawn already runs the new one — the file a held path names
+   * was swapped by rename, and the path did not move.
+   *
+   * **Every caller that consumes the *path* is async and goes through here; the two
+   * that are synchronous ask only whether a binary exists at all** — `loginSupport`
+   * and `cannotAskHint` both compare `resolveLoginBinary(...) !== null`. That is
+   * what keeps this from opening a window in which a login and a session could pick
+   * differently: nothing synchronous ever picks.
    */
-  private vendoredCli(agent: AgentId): string | null {
-    const cached = this.vendored.get(agent);
-    if (cached !== undefined) return cached;
+  async agentCli(agent: AgentId): Promise<AgentCliChoice | null> {
+    const held = this.cliChosen.get(agent);
+    if (held !== undefined && Date.now() - held.at < AGENT_CLI_TTL_MS) return held.value;
+    const running = this.cliInFlight.get(agent);
+    if (running !== undefined) return running;
+
     /*
-     * ⚠ **Narrowed before the `switch`, so the `switch` keeps being the thing this
-     * docblock claims it is.** Widening `AgentId` to a string would otherwise have
-     * turned an exhaustive `switch` into one with an implicit fall-through and no
-     * error — the same failure `AgentGlyph` shipped for four releases while its own
-     * comment said a missing arm was a compile error. A harness a plugin added
-     * vendors nothing by construction: what a manifest names is a program on PATH,
-     * and `resolveAgent` and this function resolve the same file for it.
+     * `probeGeneration` is the fence, exactly as it is for `loginProbed`:
+     * `forgetAvailability()` bumps it — a plugin change, a credential arriving, the
+     * daily agent update — and a decision that started before the bump must not
+     * write itself back afterwards, or the build the updater has just replaced is
+     * held for another ten minutes.
      */
-    if (!isBuiltinAgentId(agent)) {
-      this.vendored.set(agent, null);
-      return null;
-    }
-    let resolved: string | null;
-    switch (agent) {
-      case "claude":
-        resolved = this.vendoredClaude();
-        break;
-      case "codex":
-        resolved = this.vendoredCodex();
-        break;
-      case "kimi":
-        // Installed globally and nowhere else; there is no copy to prefer.
-        resolved = null;
-        break;
-      case "opencode":
-        // The one file `resolveAgent` also picks — see {@link vendoredOpencode}.
-        // No wrapper here on purpose: a second name for it is a second thing to
-        // keep in step, which is the failure this arm exists to prevent.
-        resolved = vendoredOpencode() ?? null;
-        break;
-    }
-    this.vendored.set(agent, resolved);
-    return resolved;
-  }
-
-  /**
-   * The `codex` the adapter would spawn.
-   *
-   * Two hops like {@link vendoredClaude}, and easier at both: `@openai/codex` is a
-   * *direct* dependency of the adapter rather than an optional platform variant, it
-   * exports its own `package.json`, and it declares a real `bin` — so there is a
-   * path to read rather than a platform-and-libc guess to make.
-   *
-   * **What it points at is a `#!/usr/bin/env node` launcher, not a native binary,
-   * and that trades one dependency for another.** No platform to know here; but the
-   * adapter runs that file as `spawn(process.execPath, [...])`, i.e. explicitly
-   * *this* node, while a login hands the path to `script` and the shebang resolves
-   * `node` from the unit's PATH. Those agree only because `runtime_path` puts
-   * node's own directory on it — see the PATH section of `CLAUDE.md`.
-   * {@link vendoredClaude} has no such dependency, because what it finds is
-   * executable on its own.
-   *
-   * `bin` is normalized because npm allows both spellings: a bare string means "one
-   * binary, named after the package".
-   */
-  private vendoredCodex(): string | null {
-    try {
-      const fromHere = createRequire(import.meta.url);
-      const adapter = fromHere.resolve("@agentclientprotocol/codex-acp/package.json");
-      const manifestPath = createRequire(adapter).resolve("@openai/codex/package.json");
-      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
-        bin?: string | Record<string, string>;
-      };
-      const entry = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.["codex"];
-      if (entry === undefined) return null;
-      const resolved = join(dirname(manifestPath), entry);
-      return existsSync(resolved) ? resolved : null;
-    } catch {
-      // No adapter, or a layout that moved. `findOnPath` is the fallback.
-      return null;
-    }
-  }
-
-  /**
-   * The `claude` the adapter would spawn, resolved the way the adapter does it.
-   *
-   * A `require` bound to the SDK rather than to this file, because pnpm's strict
-   * layout means the root cannot resolve a transitive dependency — the same
-   * reason `token.ts` is hand-rolled on `node:crypto` instead of using `jose`.
-   *
-   * Linux ships glibc and musl variants that can sit side by side, and picking
-   * the wrong one segfaults at runtime rather than failing to spawn. Both are
-   * tried; the adapter additionally sniffs libc to choose an order, which is a
-   * refinement worth having only if this ever runs somewhere it matters.
-   */
-  private vendoredClaude(): string | null {
-    let resolved: string | null = null;
-    try {
-      const fromHere = createRequire(import.meta.url);
-      const sdk = fromHere.resolve("@anthropic-ai/claude-agent-sdk", {
-        paths: [fromHere.resolve("@agentclientprotocol/claude-agent-acp/package.json")],
+    const generation = this.probeGeneration;
+    const run = this.chooseCli(agent)
+      .then((value) => {
+        /*
+         * ⚠ **A miss is never held.** `findOnPath` forgets one after thirty seconds
+         * for exactly this reason, and this cache sat over it with ten minutes — so
+         * an install that `describe` could already see, `launch` could not, and the
+         * adapter was spawned with the vendor's variable unset in precisely the
+         * window `launch`'s comment says cannot open. A hit is a file, and stable;
+         * a miss is what the next install disproves, and it costs nothing to ask
+         * again, since a `null` here spawned no `--version`.
+         */
+        if (value !== null && generation === this.probeGeneration) this.cliChosen.set(agent, { at: Date.now(), value });
+        return value;
+      })
+      .finally(() => {
+        if (this.cliInFlight.get(agent) === run) this.cliInFlight.delete(agent);
       });
-      const fromSdk = createRequire(sdk);
-      const ext = process.platform === "win32" ? ".exe" : "";
-      const candidates =
-        process.platform === "linux"
-          ? [
-              `@anthropic-ai/claude-agent-sdk-linux-${process.arch}/claude${ext}`,
-              `@anthropic-ai/claude-agent-sdk-linux-${process.arch}-musl/claude${ext}`,
-            ]
-          : [`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/claude${ext}`];
-      for (const candidate of candidates) {
-        try {
-          resolved = fromSdk.resolve(candidate);
-          break;
-        } catch {
-          // Try the next variant; absent entirely is a legitimate install.
-        }
+    this.cliInFlight.set(agent, run);
+    return run;
+  }
+
+  /** {@link agentCli} without the cache. */
+  private async chooseCli(agent: AgentId): Promise<AgentCliChoice | null> {
+    const login = this.builtinLogin(agent);
+    if (login === null) return null;
+
+    const overrideName = login.executableEnv;
+    if (overrideName !== null) {
+      const override = (process.env[overrideName] ?? "").trim();
+      if (override.length > 0) {
+        return { path: override, version: await this.cliVersion(override), source: "override" };
       }
-    } catch {
-      // No adapter, or no SDK under it. `findOnPath` is the fallback.
     }
-    return resolved;
+
+    // `null` here is a harness with no CLI at all — `describe` has already refused
+    // it with a sentence, and `GET /agents` draws it unavailable; this is the same
+    // absence seen from the reporting side.
+    const onPath = findOnPath(login.command);
+    if (onPath === null) return null;
+    return { path: onPath, version: await this.cliVersion(onPath), source: "path" };
+  }
+
+  /**
+   * What `<cli> --version` says, reduced to the first dotted number in it.
+   *
+   * The CLIs disagree about the rest of the line — `2.1.259 (Claude Code)` against
+   * `codex-cli 0.146.1` — so the number is taken wherever it sits rather than by
+   * position. `null` for anything that does not answer one; the binary still runs,
+   * and the line under the model list names the program without a number.
+   */
+  private async cliVersion(command: string): Promise<string | null> {
+    const out = await this.exec(command, ["--version"], agentEnv(), "stdout");
+    return firstVersion(out ?? "");
   }
 
   private scriptPath(): string | null {
@@ -1092,8 +1210,8 @@ export class LocalRuntime implements SessionRuntime {
         : `Set ${overrideName} to the binary you log in with, or put it on this daemon's PATH`;
     return (
       `${login.command} could not be found, so this daemon cannot tell whether ` +
-      `${agent} is signed in — sessions may still work, because the adapter resolves its own ` +
-      `copy. ${remedy} (a service does not read your shell profile).`
+      `${agent} is signed in. ${remedy} (a service does not read your shell profile), ` +
+      `or run deploy/agents.sh, which installs it.`
     );
   }
 
@@ -1166,7 +1284,10 @@ export class LocalRuntime implements SessionRuntime {
     if (spec === null) return pasted ? true : null;
 
     if (spec.status !== null) {
-      const command = this.resolveLoginBinary(agent);
+      // ⚠ **The chosen build, or the probe answers about a binary nothing runs.**
+      // "signed in" is a fact about one CLI's credential store, and the two builds
+      // need not share one.
+      const command = (await this.agentCli(agent))?.path ?? null;
       if (command === null) return pasted ? true : null;
       const answer = await this.probe(command, spec.status.args, agent, spec.status.stream);
       // Believed either way, pasted credential or not. The probe above ran *with*

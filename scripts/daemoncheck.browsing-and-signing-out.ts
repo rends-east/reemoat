@@ -373,8 +373,8 @@ process.stdout.write("\nsigning out, as a state of the machine\n");
    * discovered by asking. The prompt path deliberately has no probe: one there
    * cost a spawn per message, was only ever as fresh as a 3s cache, and made this
    * driver depend on whether the person running it was signed in — a stub runtime
-   * inherits the real probe, and `resolveLoginBinary` finds the adapter's own
-   * vendored binary in `node_modules`, which on CI is signed in to nothing.
+   * inherits the real probe, and `resolveLoginBinary` found the copy this
+   * repository vendored then, which on CI is signed in to nothing.
    */
   check("the prompt path asks no CLI whether anybody is signed in", /sessionRuntime\.signedOut\(/.test(routes), false);
   /*

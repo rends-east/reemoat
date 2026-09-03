@@ -11,8 +11,10 @@ paths:
 
 ## Logging an agent in
 
-All three agents authenticate out of band and the daemon can only inherit
-credentials from disk — it never calls ACP's `session/authenticate`. So something
+All four agents authenticate out of band — opencode nowhere at all: it reaches its
+own gateway anonymously, and every other provider it knows is a key you hand it —
+and the daemon can only inherit credentials from disk; it never calls ACP's
+`session/authenticate`. So something
 has to put credentials on that disk, and from a phone there is no terminal.
 
 **Path A — paste a token.** `agent_credentials(agent, env_name, secret,
@@ -64,16 +66,33 @@ codex's own advice and `daemoncheck` pins it: dropped, the login still *starts*
 and then times out, indistinguishable from a network fault. Q2.204.
 
 **The binary a login drives is not the binary the daemon launches.** `available`
-is about the adapter; `loggedIn` and `login` are about the CLI under it, and the
-three vendor it differently — claude inside a platform-specific SDK package with
-no `bin` entry, `@openai/codex` an ordinary one, kimi not at all — so
-`vendoredCli` is a `switch` with **no `default` arm**. `resolveLoginBinary` reads the agent's `executableEnv` first, **from the table
-rather than written out**, because two of the three have such a variable:
+is about the adapter; `loggedIn` and `login` are about the CLI under it — and
+nothing vendors that CLI any more, for any of the four (Q4.114): `deploy/agents.sh`
+installs it, and the adapters this repository pins cannot run without one. **Which
+build runs is `LocalRuntime.agentCli`'s answer, and login, logout, the status probe
+and the session all consume it** — so a credential is always written by the build a
+session runs. It reads the agent's `executableEnv` first, **from the table rather
+than written out**, because two of the four have such a variable:
 `CLAUDE_CODE_EXECUTABLE` and codex's `CODEX_PATH`, both read by the adapter's own
-`startAcpServer()` and therefore deciding which binary *sessions* run.
-`daemoncheck` pins the pair by name. Q2.205. `CODEX_HOME` is **not** that
-variable — it names where credentials live, so offering it as the remedy for
-"cannot find the CLI" sends somebody to move their credentials.
+`startAcpServer()`, and an override wins outright; else the **first** copy
+`findOnPath` finds — PATH in order, then `MANAGED_CLI_DIRS`, which is where that
+script installs — so an operator's own copy outranks the one the daemon keeps
+current, which is the rule the script applies from its side: `ensure_npm` names a
+copy outside the toolchain and the vendors' directories — *installed outside
+reemoat, not updated from here* — and does not move it, while a copy in the
+vendors' directories is refreshed by the vendor's own updater under `--source
+vendor` and named as un-refreshable under `npm`; `--source` decides only how an
+absent harness is installed. Nothing is compared by `--version` any more; the
+number is read only for the report on `GET /agents/capabilities`, and a copy that
+will not say still runs. Cached ten minutes (`AGENT_CLI_TTL_MS`), because
+`deploy/agents.sh` moves the file under the running daemon, and cleared at once by
+`forgetAvailability()` when it has.
+`resolveLoginBinary` answers only whether any binary exists at all — an override
+counts, a copy on PATH or in `MANAGED_CLI_DIRS` counts — and its two synchronous
+callers compare it to `null` and nothing else. `daemoncheck` pins the pair by name.
+Q2.205, Q6.106, Q4.114. `CODEX_HOME` is **not** that variable — it names where
+credentials live, so offering it as the remedy for "cannot find the CLI" sends
+somebody to move their credentials.
 
 **A status probe is read from the stream its CLI answers on, and that is a field
 rather than an assumption.** `claude auth status` prints JSON on **stdout**;

@@ -25,6 +25,72 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+### Added
+
+- The daemon keeps the coding-agent CLIs current by itself. `deploy/agents.sh`
+  installs what is missing — three with each vendor's own installer into the
+  vendors' own directories (`~/.local/bin`, `~/.local/share/claude`, `~/.codex`,
+  `~/.opencode`), kimi from the npm registry into `~/.reemoat/toolchain` — and
+  refreshes what is there; the one-line installer runs it once, and the daemon
+  runs it five minutes after start and then daily. On by default —
+  `REEMOAT_AGENT_UPDATES=off` switches it off, and `deploy/agents.sh --check` says
+  what a run would do without doing it. `--uninstall` removes the toolchain, and
+  the npm-installed CLIs with it, and leaves the vendors' directories in place
+  because they hold sign-ins of your own.
+- `GET /agents/capabilities` rows carry `cli`: which build of the harness's own
+  CLI published the model list, and whether it was an operator's override
+  (`override`) or the copy found on PATH (`path`). The model picker draws it under
+  the provider heading. Absent from older daemons; `null` where nothing was
+  spawned.
+- `CLAUDE_CODE_EXECUTABLE` and `CODEX_PATH` are documented in `.env.example`; a
+  harness named there runs as named, and the daily refresh leaves it alone.
+- `REEMOAT_AGENT_SOURCE=npm`, and the one-line installer's `--agent-source npm`:
+  all four CLIs from the npm registry rather than the vendors' own hosts, for a
+  machine that cannot reach them. Your mirror is named the way npm is pointed
+  anywhere (`~/.npmrc`, `npm_config_registry`); everything lands under
+  `~/.reemoat/toolchain`. A choice rather than a fallback — a vendor outage never
+  switches a machine to a differently built binary on its own. It decides only
+  how a missing CLI is installed: one already on the machine keeps being refreshed
+  the way it was installed, and under `npm` a vendor-installed copy is reported on
+  every run until it is removed.
+
+### Changed
+
+- A session whose harness has no CLI on the machine yet is left waiting rather
+  than given up on: the boot pass spends no attempt on it, runs the agent
+  installer at once instead of in five minutes, and tries again when it
+  completes. The daemon's log shows every completed agent update, with the
+  script's own notes under it.
+- The coding-agent CLIs are no longer installed by `pnpm install`. The two ACP
+  adapters stay pinned; the CLI platform packages they used to bring with them are
+  excluded through `pnpm-workspace.yaml` overrides, and `node_modules` went from
+  907 MB to 217 MB on darwin-arm64. `deploy/agents.sh` installs the only copies
+  there are, and the daemon runs an operator's override, else the first copy on
+  PATH, then in the directories that script installs into — re-decided every ten
+  minutes, so a refresh under a running daemon is picked up. A harness with no CLI
+  on the machine is refused with a sentence naming the script rather than started.
+- `deploy/deploy.sh` installs or refreshes the agent CLIs before it restarts the
+  daemon, so a machine upgraded from a release that vendored them comes back with
+  its harnesses rather than waiting on the daemon's first daily run.
+- `--source` and `REEMOAT_AGENT_SOURCE` decide only how a missing CLI is
+  installed; one already present is refreshed the way it was installed — a
+  vendor-installed copy by the vendor's own updater, an npm-installed one from the
+  registry — and the one thing a switch to `npm` cannot refresh, a vendor-installed
+  copy, is named on every run until it is removed.
+- The one-line installer refuses `--agent-source` on a machine that is already
+  set up, naming `REEMOAT_AGENT_SOURCE` in the env file rather than accepting a
+  flag that would change nothing.
+- The one-line installer's questions are arrow-key menus, and a password or API
+  key no longer reaches `curl`'s command line.
+- `controlPlaneUrl` on `POST /v1/machines`, `POST /v1/machines/:id/enrollments`,
+  `POST /v1/provision` and the admin mint honours `x-forwarded-proto` behind
+  `REEMOAT_CP_TRUSTED_PROXY_HOPS`, so a daemon enrolled through a TLS proxy dials
+  `https://` rather than the plaintext origin.
+- `--uninstall` exits non-zero and leaves the private node in place when the
+  service could not be stopped, rather than deleting the node a still-installed
+  unit runs. `--purge` always confirms and names the database and checkout it is
+  about to delete, not only the worktrees; `--yes` still answers.
+
 ## [0.5.0] - 2026-09-01
 
 ### Added

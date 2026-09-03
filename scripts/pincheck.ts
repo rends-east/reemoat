@@ -1,49 +1,113 @@
 #!/usr/bin/env node
 import { createRequire } from "node:module";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { dirname, join } from "node:path";
+
+import { AGENT_IDS } from "../src/acp/agents.js";
 
 /**
  * The regression driver for a number written down more than once.
  *
- * **Two subjects, and the widening is deliberate rather than incidental.** This
+ * **Four subjects, and each widening was deliberate rather than incidental.** This
  * file began as the driver for the agent adapters — three copies each — and it now
- * also holds this project's own version, which has five. They are one file because
- * they are one question: *do the places a version is written down agree with each
- * other, and with what is actually there?* The failure mode is identical in both
- * halves and is never a crash — it is two numbers that disagree while everything
- * compiles. A second driver asking that question about a different noun would be
- * the shape the paragraph below already calls out, arriving one level up.
+ * also holds this project's own version, which has six copies of which five are
+ * read here; the plugin API and the one plugin this repository ships; and — the
+ * newest, and a *list* rather than a number — the platform packages `pnpm install`
+ * is told to leave out. They are one file because they are one question: *do the
+ * places a thing is written down agree with each other, and with what is actually
+ * there?* The failure mode is identical in every half and is never a crash — it
+ * is two copies that disagree while everything compiles. A second driver asking
+ * that question about a different noun would be the shape the paragraph below
+ * already calls out, arriving one level up.
  *
- * Each agent adapter is pinned in the root
- * `package.json` (what the daemon loads), in `pnpm-workspace.yaml`'s
- * `minimumReleaseAgeExclude`, and — the one that matters most — in
- * `node_modules`, which is the only copy that actually runs. The failure when
- * those drift is not a crash: the daemon speaks one version of ACP to an agent
- * built against another, which looks like an agent bug.
+ * Each agent adapter is pinned in the root `package.json` (what the daemon
+ * loads), in `pnpm-workspace.yaml`'s `minimumReleaseAgeExclude`, and — the one
+ * that matters most — in `node_modules`, which is the only copy that actually
+ * runs. The failure when those drift is not a crash: the daemon speaks one version
+ * of ACP to an agent built against another, which looks like an agent bug.
  *
- * **Two adapters now, and the file is a loop rather than a constant.** That shape
- * is the point: written around a single `ACP` name, adding codex pinned a second
- * adapter in `package.json` and asserted it nowhere — which is precisely the state
- * the kimi paragraph below calls the real loss, reintroduced one package over.
+ * **Two adapters, and the file is a loop rather than a constant.** That shape is
+ * the point: written around a single `ACP` name, adding codex pinned a second
+ * adapter in `package.json` and asserted it nowhere — which is precisely the loss
+ * the kimi paragraph below records, reintroduced one package over. The list held
+ * a third entry for a while, `opencode-ai`, pinned here although it is no adapter
+ * at all — opencode ships none, `opencode acp` being a subcommand of the binary a
+ * login drives — because the mechanism existed, and declining it would have been
+ * electing the kimi loss rather than inheriting it. That entry went with the
+ * vendored copies (Q4.114, below); the loop stays a loop, for the reason it became
+ * one.
  *
  * **Two checks were deleted with the container image, and only one of them was a
  * loss.**
  *
  * The image used to install `@anthropic-ai/claude-code` so a tenant had a
  * `claude` binary to log in with, and it had to be the same build the adapter
- * drives — the SDK resolves its own binary internally, and the two reading
- * different credential formats surfaces as "the login worked and the session says
- * logged out". That check is not merely gone, it is **unnecessary**: with no
- * image, the `claude` a person logs in with is whatever `CLAUDE_CODE_EXECUTABLE`
- * or PATH resolves, and the SDK resolves the same one for the adapter. The
- * property is now structural rather than asserted, which is a better outcome than
- * a passing test — written down here so nobody re-adds the check by reflex.
+ * drives — the SDK resolves a binary of its own when it is told none, and the two
+ * reading different credential formats surfaces as "the login worked and the
+ * session says logged out". That check is not merely gone, it is **unnecessary**:
+ * with no image, the `claude` a person logs in with is whatever
+ * `CLAUDE_CODE_EXECUTABLE` or PATH resolves, and the adapter is handed that same
+ * file — `LocalRuntime.launch` writes the variable on every spawn from the copy
+ * `chooseCli` picked, so the SDK's own resolution never runs. The property is
+ * structural rather than asserted, which is a better outcome than a passing test
+ * — written down here so nobody re-adds the check by reflex.
  *
- * kimi is the real loss. Its version was pinned in the image and nowhere else,
- * and it is resolved from PATH now, so **nothing records which build the
- * measurements in this repository were taken against.** There is no mechanism
- * that could pin it; see `CLAUDE.md`'s Next section.
+ * kimi was the real loss. Its version was pinned in the image and nowhere else,
+ * and once it was resolved from PATH, **nothing recorded which build the
+ * measurements in this repository were taken against.**
+ *
+ * ⚠ **This used to end "there is no mechanism that could pin it", and there is one
+ * now — which deliberately does not pin, and which covers all four rather than
+ * kimi alone.** `deploy/agents.sh` installs each CLI with its vendor's own
+ * installer — or, under `--source npm`, from the registry, for a machine that
+ * cannot reach the vendors' hosts — and the daemon re-runs it daily, because the
+ * requirement it serves is that a machine nobody thinks about keeps current. So
+ * the build is *chosen* rather than unknown, and it is chosen to be the newest,
+ * which is a different thing from being recorded. What records it is the running
+ * daemon: `AgentCapabilities.cli` carries the version of the build that published
+ * a model list and where it came from — `override` for one an operator named,
+ * `path` for the copy the script keeps current or one of the operator's own — off
+ * `GET /agents/capabilities`. This file pins no CLI, and that is the state rather
+ * than a gap in it.
+ *
+ * **Until Q4.114 `pnpm install` brought three of the four along, and the newest
+ * section here is what keeps them out.** `opencode-ai` was a root dependency; a
+ * `claude` and a `codex` arrived as *optional platform packages* of the two
+ * adapters' own dependencies — `@anthropic-ai/claude-agent-sdk` under
+ * `claude-agent-acp`, the `@openai/codex` shim under `codex-acp` — one build per
+ * OS and architecture, of which pnpm installs the one that matches. Measured on
+ * this repository's own darwin-arm64 checkout: 245 MB, 307 MB and 137 MB, 689 MB
+ * of a 907 MB `node_modules`, for three programs `deploy/agents.sh` installs
+ * anyway and keeps current from there, while the pinned copy was exactly as old as
+ * the release and was never the one that ran once a vendor's copy was on the
+ * machine. `opencode-ai` is simply gone from `package.json`. The platform packages
+ * are excluded by name, one `'-'` override per package in `pnpm-workspace.yaml` —
+ * the workspace file rather than `package.json`'s `pnpm.overrides`, because pnpm
+ * 11.17.0 ignores the latter, measured; a `.pnpmfile.cjs` hook also works and was
+ * declined as code that runs at install. The adapters stay pinned and installed,
+ * and neither can run without a CLI: `claude-agent-acp` reads
+ * `CLAUDE_CODE_EXECUTABLE`, else requires the platform package — now absent — else
+ * throws, and `codex-acp` does the same with `CODEX_PATH`. The daemon writes the
+ * variable on every spawn, and `resolveAgent` refuses before then when there is
+ * nothing to write.
+ *
+ * **Why that list is asserted here rather than trusted: three places have to
+ * agree, and two of them are somebody else's.** What the adapters *declare* is the
+ * `optionalDependencies` of two packages this repository does not author and
+ * re-resolves with every adapter pin; what the workspace *excludes* is a
+ * hand-written list, one line per package; what is *on disk* is whatever pnpm made
+ * of the two. A
+ * platform the vendor adds — a musl build, a new architecture — is a package that
+ * rides back in with every other check green, at a few hundred megabytes and with
+ * no symptom beyond a slower install; a line left over after the vendor drops one
+ * is a pin on nothing, which reads as protection. So the union of what the two
+ * declare is compared to the exclusion list in both directions, each direction on
+ * its own line because they are different mistakes, and `node_modules/.pnpm` is
+ * then read for every declared package — the section's one assertion that reads
+ * disk rather than text, for the reason the adapter half gives: every other line
+ * compares files to each other and none of them to what an install actually
+ * produced. And it is here rather than in a driver of its own because it is this
+ * file's question with a list where the number was.
  *
  * **The release half, and why six copies rather than one.** This project's
  * version is in the root `package.json`, in both workspace manifests, in a literal
@@ -110,93 +174,28 @@ function escapeForRegex(value: string): string {
 }
 
 /**
- * One adapter, and how to reach the CLI it brings with it.
+ * One adapter: a package this repository pins and the daemon spawns as an ACP
+ * server.
  *
- * The CLI hop is per-adapter because the two packages are laid out differently and
- * neither layout is guessable — see {@link readCliVersion}.
+ * ⚠ **The CLI it drives is deliberately not a field here any more.** It was — a
+ * name and one of two resolution shapes — so the loop below could resolve the
+ * vendored CLI through its adapter and prove the hop still worked. There is no
+ * vendored CLI to reach (Q4.114): the adapter is told where its CLI is on every
+ * spawn, and what this file asserts about the packages that used to carry one is
+ * the section after the loop, through {@link DECLARERS}. Putting the CLI back
+ * on this record would describe a resolution that never happens.
  */
 interface Adapter {
   /** The npm name, which is also how it is written down in both files. */
   name: string;
   /** Which agent it adapts. Output only. */
   agent: string;
-  /**
-   * The CLI it vendors and which of the two shapes reading its version takes, or
-   * `null` where the package **is** the CLI.
-   *
-   * ⚠ **`null` is a third state and not an omission.** opencode ships no adapter:
-   * `opencode acp` is a subcommand of the same binary a login drives, so there is
-   * no second hop to resolve. Inventing one — pointing this at `opencode-ai`
-   * itself — would be a check that resolves a package to itself and passes by
-   * construction, which this file's own header calls the only outcome worse than
-   * no check at all.
-   */
-  cli: { name: string; via: "manifest-beside-entry" | "own-package-json" } | null;
 }
 
 const ADAPTERS: readonly Adapter[] = [
-  {
-    name: "@agentclientprotocol/claude-agent-acp",
-    agent: "claude",
-    cli: { name: "@anthropic-ai/claude-agent-sdk", via: "manifest-beside-entry" },
-  },
-  {
-    name: "@agentclientprotocol/codex-acp",
-    agent: "codex",
-    cli: { name: "@openai/codex", via: "own-package-json" },
-  },
-  {
-    // Not an adapter, and pinned here anyway — which is the point. `pincheck`'s
-    // header calls kimi's PATH resolution "the real loss", because nothing records
-    // which build this repository's measurements were taken against. For opencode
-    // there *is* a mechanism, so declining it would be electing that loss rather
-    // than inheriting it.
-    name: "opencode-ai",
-    agent: "opencode",
-    cli: null,
-  },
+  { name: "@agentclientprotocol/claude-agent-acp", agent: "claude" },
+  { name: "@agentclientprotocol/codex-acp", agent: "codex" },
 ];
-
-/**
- * The version of the CLI an adapter would actually load, or null.
- *
- * Resolved *through* the adapter rather than from here, and both packages are
- * transitive dependencies, so pnpm's strict layout means the root cannot resolve
- * either — the same reason `jose` is in the lockfile and `token.ts` is hand-rolled
- * on node:crypto. Asking the adapter is also the more honest question: the version
- * that matters is the one it would load.
- *
- * **Two shapes, both measured, neither derivable from the other.**
- *
- * `@anthropic-ai/claude-agent-sdk` ships an `exports` map with no `./package.json`
- * and no `./manifest.json`, so every subpath specifier fails
- * ERR_PACKAGE_PATH_NOT_EXPORTED — including the one that reads like the obvious way
- * to do this. What resolves is the bare entry point; the manifest is a file beside
- * it. (The adapter, inversely, exports only `./package.json` and not its own entry,
- * which is why the hops here look wrong until you try the symmetric version.)
- *
- * `@openai/codex` is an ordinary package that exports its own `package.json`, so
- * the direct read works and the manifest dance would fail. It is also a *direct*
- * dependency of its adapter rather than an optional platform variant, which is what
- * makes one resolve enough where claude's needs a candidate list at runtime.
- */
-function readCliVersion(adapterPkgPath: string, cli: NonNullable<Adapter["cli"]>): string | null {
-  const fromAdapter = createRequire(adapterPkgPath);
-  let parsed: unknown;
-  switch (cli.via) {
-    case "manifest-beside-entry": {
-      const entry = fromAdapter.resolve(cli.name);
-      parsed = JSON.parse(readFileSync(new URL("manifest.json", pathToFileURL(entry)), "utf8"));
-      break;
-    }
-    case "own-package-json": {
-      parsed = JSON.parse(readFileSync(fromAdapter.resolve(`${cli.name}/package.json`), "utf8"));
-      break;
-    }
-  }
-  const version = (parsed as { version?: unknown }).version;
-  return typeof version === "string" ? version : null;
-}
 
 const packageJson = read("package.json");
 const workspaceYaml = read("pnpm-workspace.yaml");
@@ -252,29 +251,27 @@ process.stdout.write(
  * still printed `all green` and exited 0. That is the outcome the note above
  * `capture` calls the only one worse than no check at all, arrived at by the other
  * door — and it lands on precisely the change this exists to police, since the
- * resolution hops are what an adapter or CLI bump breaks. In CI it is worse still:
+ * resolution hops are what an adapter bump breaks. In CI it is worse still:
  * `pnpm install --frozen-lockfile` has definitely run by the time this step does,
  * so there the null can only mean the chain is broken.
  *
- * A fresh clone still skips, which is the case the tolerance was written for.
+ * A fresh clone still skips, which is the case the tolerance was written for. The
+ * same condition governs the disk half of the next section, for the same reason.
  */
 const installed = existsSync(new URL("node_modules", root));
+const fromRoot = createRequire(new URL("package.json", root));
 
 process.stdout.write("\nthe adapters actually installed, against the ones written down\n");
 
 if (!installed) {
   process.stdout.write("  skip  nothing is installed (run pnpm install)\n");
 } else {
-  const fromRoot = createRequire(new URL("package.json", root));
   for (const adapter of ADAPTERS) {
     let installedAdapter: string | null = null;
-    let cliVersion: string | null = null;
     try {
-      const adapterPkgPath = fromRoot.resolve(`${adapter.name}/package.json`);
-      const adapterPkg: unknown = JSON.parse(readFileSync(adapterPkgPath, "utf8"));
+      const adapterPkg: unknown = JSON.parse(readFileSync(fromRoot.resolve(`${adapter.name}/package.json`), "utf8"));
       const adapterVersion = (adapterPkg as { version?: unknown }).version;
       installedAdapter = typeof adapterVersion === "string" ? adapterVersion : null;
-      cliVersion = adapter.cli === null ? null : readCliVersion(adapterPkgPath, adapter.cli);
     } catch {
       // Left null and asserted on below. Inside the `installed` branch a broken
       // chain is a failure, not a tolerance — that is the whole point of the
@@ -285,19 +282,282 @@ if (!installed) {
     // runs, so a lockfile resolving 0.62.x under a `package.json` reading 0.63.0
     // passed all of them.
     check(`the installed ${adapter.agent} adapter is the pinned one`, installedAdapter, pinned.get(adapter.name));
-    // The CLI hop is kept even with nothing to compare its version *to*, because a
-    // broken resolution chain is exactly what an adapter or CLI bump breaks — and
-    // `LocalRuntime.resolveLoginBinary` drives the binary it names.
-    //
-    // Skipped, loudly, where the package is the CLI: there is no hop, and a line
-    // reporting one would be describing a resolution that never happened.
-    if (adapter.cli === null) {
-      process.stdout.write(`  note  ${adapter.agent} ships no adapter, so there is no CLI hop to resolve\n`);
-    } else {
-      check(`the ${adapter.agent} CLI the adapter loads is still resolvable`, cliVersion !== null, true);
-    }
   }
 }
+
+// ------------------------------ the CLIs this repository deliberately does not install
+
+/**
+ * A package an adapter depends on whose `optionalDependencies` are the platform
+ * builds of a CLI — the ones `pnpm-workspace.yaml` removes by name.
+ *
+ * Reached *through* the adapter rather than from here: both are transitive
+ * dependencies, so pnpm's strict layout means the root cannot resolve either — the
+ * same reason `jose` is in the lockfile and `token.ts` is hand-rolled on
+ * node:crypto. Asking the adapter is also the more honest question, since the
+ * declaration that matters is the one the installed adapter would pull in.
+ */
+interface Declarer {
+  /** The npm name of the declaring package — the one that *stays* installed. */
+  name: string;
+  /** The adapter it is resolved through, and which agent that adapter is for. */
+  adapter: string;
+  agent: string;
+  /**
+   * How to reach its `package.json`, which is not the same for the two — see
+   * {@link readDeclaredPlatforms}.
+   */
+  manifest: "nearest-above-entry" | "exported";
+}
+
+const DECLARERS: readonly Declarer[] = [
+  {
+    name: "@anthropic-ai/claude-agent-sdk",
+    adapter: "@agentclientprotocol/claude-agent-acp",
+    agent: "claude",
+    manifest: "nearest-above-entry",
+  },
+  {
+    name: "@openai/codex",
+    adapter: "@agentclientprotocol/codex-acp",
+    agent: "codex",
+    manifest: "exported",
+  },
+];
+
+/**
+ * The platform packages a declarer names, as `name → spec`, or null where the
+ * chain to its manifest is broken.
+ *
+ * **Two shapes, both measured, neither derivable from the other.**
+ *
+ * `@anthropic-ai/claude-agent-sdk` ships an `exports` map with no `./package.json`,
+ * so the subpath that reads like the obvious way to do this fails
+ * ERR_PACKAGE_PATH_NOT_EXPORTED. What resolves is the bare entry point, and the
+ * manifest is found by walking *up* from it to the nearest `package.json` whose
+ * `name` is the package's. Today the entry is `sdk.mjs` at the package root, so the
+ * first directory is the answer; the walk is for the day an `exports` map points
+ * into `dist/`, and the name test is for the `package.json` a build tool drops into
+ * such a directory to set `type` — a manifest, but not the one with the
+ * declarations on it.
+ *
+ * `@openai/codex` is an ordinary package that exports its own `package.json`, so
+ * the direct read works and the walk would be a longer way to the same file.
+ *
+ * ⚠ **What each declares is also not the same shape, and the disk check has to
+ * know.** The SDK names its platforms outright — `"@anthropic-ai/claude-agent-sdk-darwin-arm64": "0.3.220"` — while codex names *aliases*:
+ * `"@openai/codex-darwin-arm64": "npm:@openai/codex@0.145.0-darwin-arm64"`, six
+ * prerelease-suffixed versions of the shim's own name. Both spellings are the
+ * keys `pnpm-workspace.yaml` overrides, so the comparison of lists is by key; where
+ * the two part is {@link pnpmDirPrefix}.
+ */
+function readDeclaredPlatforms(declarer: Declarer): Record<string, string> | null {
+  const fromAdapter = createRequire(fromRoot.resolve(`${declarer.adapter}/package.json`));
+  let manifestPath: string | null = null;
+  switch (declarer.manifest) {
+    case "exported": {
+      manifestPath = fromAdapter.resolve(`${declarer.name}/package.json`);
+      break;
+    }
+    case "nearest-above-entry": {
+      let dir = dirname(fromAdapter.resolve(declarer.name));
+      for (;;) {
+        const candidate = join(dir, "package.json");
+        if (existsSync(candidate)) {
+          const named = (JSON.parse(readFileSync(candidate, "utf8")) as { name?: unknown }).name;
+          if (named === declarer.name) {
+            manifestPath = candidate;
+            break;
+          }
+        }
+        const up = dirname(dir);
+        if (up === dir) break;
+        dir = up;
+      }
+      break;
+    }
+  }
+  if (manifestPath === null) return null;
+  const declared = (JSON.parse(readFileSync(manifestPath, "utf8")) as { optionalDependencies?: unknown }).optionalDependencies;
+  if (typeof declared !== "object" || declared === null) return null;
+  const out: Record<string, string> = {};
+  for (const [name, spec] of Object.entries(declared)) {
+    if (typeof spec !== "string") return null;
+    out[name] = spec;
+  }
+  return out;
+}
+
+/**
+ * The `overrides:` block of `pnpm-workspace.yaml`, as `name → replacement`, or
+ * null when there is no such block.
+ *
+ * Hand-parsed for the reason the rest of this file reads YAML with a regex: the
+ * root has no YAML dependency and is not getting one for a driver. The block's
+ * shape is one `  'name': 'value'` per line at two spaces, ending at the first
+ * line that is not indented — a top-level key or a comment at column 0, which is
+ * what follows it today. Comments and blank lines *inside* the block are skipped
+ * rather than ending it, so a line explaining one entry does not silently halve
+ * the list.
+ *
+ * Read from the workspace file and not from `package.json`, because that is the
+ * only place the setting works: `pnpm.overrides` in `package.json` is ignored by
+ * pnpm 11.17.0, measured while placing the block (Q4.114). A parser that also
+ * accepted the manifest would accept a block that removes nothing.
+ */
+function readOverrides(yaml: string): Map<string, string> | null {
+  const lines = yaml.split("\n");
+  const start = lines.findIndex((line) => /^overrides:\s*$/.test(line));
+  if (start === -1) return null;
+  const out = new Map<string, string>();
+  for (const line of lines.slice(start + 1)) {
+    if (/^\s*$/.test(line) || /^\s+#/.test(line)) continue;
+    if (!/^\s/.test(line)) break;
+    const entry = /^\s+'([^']+)':\s*'([^']*)'\s*$/.exec(line);
+    // A line that is indented and is not an entry is a block this parser does not
+    // understand — reported as an entry it cannot read rather than skipped, so the
+    // comparison below fails on it instead of quietly running on a shorter list.
+    out.set(entry?.[1] ?? `unreadable: ${line.trim()}`, entry?.[2] ?? "");
+  }
+  return out;
+}
+
+/**
+ * How `node_modules/.pnpm` would spell a package's directory, from its declared
+ * spec — or null for a spec this driver cannot turn into a name.
+ *
+ * pnpm stores every package as `<name>@<version>` with `/` written `+`, and a
+ * peer suffix after `_` where there is one — so a *prefix* is what is matched.
+ * For a plain spec the version is left off: the name alone is unambiguous
+ * (`@anthropic-ai+claude-agent-sdk-darwin-arm64@` prefixes nothing else) and a
+ * check that named the version would go green on a stale one.
+ *
+ * ⚠ **An alias is stored under the name it aliases, not the key.** In the lockfile
+ * this repository had before the exclusion, `@openai/codex-darwin-arm64` resolved
+ * to `'@openai/codex@0.145.0-darwin-arm64'`, so the directory was
+ * `@openai+codex@0.145.0-darwin-arm64` — a pattern built from the key would have
+ * matched nothing while 307 MB sat there. For an alias the version is therefore
+ * kept, because the aliased name on its own is the shim that *is* installed.
+ */
+function pnpmDirPrefix(name: string, spec: string): string | null {
+  if (!spec.startsWith("npm:")) return `${name.replaceAll("/", "+")}@`;
+  const real = spec.slice("npm:".length);
+  const at = real.lastIndexOf("@");
+  if (at <= 0) return null;
+  const version = real.slice(at + 1);
+  if (!/^\d+\.\d+\.\d+/.test(version)) return null;
+  return `${real.slice(0, at).replaceAll("/", "+")}@${version}`;
+}
+
+process.stdout.write("\nthe CLIs this repository deliberately does not install\n");
+
+const overrides = readOverrides(workspaceYaml);
+check("the overrides block of pnpm-workspace.yaml is readable at all", overrides !== null, true);
+const overrideEntries = [...(overrides ?? new Map<string, string>()).entries()];
+const excluded = overrideEntries
+  .filter(([, replacement]) => replacement === "-")
+  .map(([name]) => name)
+  .sort();
+/*
+ * The block is documented as removals and nothing else, and a key mapped to
+ * anything but `-` is the wrong kind of line for this list: a platform package
+ * *pinned* rather than removed is installed at that version, and it would drop out
+ * of `excluded` above and read below as a package the adapters declare and the
+ * workspace does not exclude — true, and not the sentence that finds the typo.
+ */
+check(
+  "every override in it removes a package rather than pinning one",
+  overrideEntries.filter(([, replacement]) => replacement !== "-").map(([name, replacement]) => `${name}: ${replacement}`),
+  [],
+);
+check("the block excludes something at all", excluded.length >= 1, true);
+
+if (!installed) {
+  process.stdout.write("  skip  nothing is installed, so what the adapters declare cannot be read (run pnpm install)\n");
+} else {
+  const declared = new Map<string, string>();
+  let readable = true;
+  for (const declarer of DECLARERS) {
+    let platforms: Record<string, string> | null = null;
+    try {
+      platforms = readDeclaredPlatforms(declarer);
+    } catch {
+      // Left null and asserted on below: inside the `installed` branch a chain
+      // that does not resolve is the failure, and the message names which hop.
+    }
+    check(`${declarer.name} is reachable through the ${declarer.agent} adapter and declares its platforms`, platforms !== null, true);
+    if (platforms === null) {
+      readable = false;
+      continue;
+    }
+    // A floor, because an empty declaration would make the list comparison below
+    // report every line as stale — true, and the wrong diagnosis.
+    check(`and ${declarer.agent}'s declaration names at least one platform`, Object.keys(platforms).length >= 1, true);
+    for (const [name, spec] of Object.entries(platforms)) declared.set(name, spec);
+  }
+
+  if (readable) {
+    const declaredNames = [...declared.keys()].sort();
+    // Two directions, two lines, because they are two different mistakes: the
+    // first is a download that came back, the second is a line guarding nothing.
+    check(
+      "every platform package the adapters declare is excluded from the install",
+      declaredNames.filter((name) => !excluded.includes(name)),
+      [],
+    );
+    check(
+      "every exclusion names a platform package an adapter still declares",
+      excluded.filter((name) => !declared.has(name)),
+      [],
+    );
+
+    const storeUrl = new URL("node_modules/.pnpm/", root);
+    check("node_modules/.pnpm is there to be read", existsSync(storeUrl), true);
+    const store = existsSync(storeUrl) ? readdirSync(storeUrl) : [];
+    const prefixes = declaredNames.map((name) => [name, pnpmDirPrefix(name, declared.get(name) ?? "")] as const);
+    // A spec this driver cannot spell as a directory would make the disk check
+    // pass vacuously for that package, which is the outcome the header calls worse
+    // than no check.
+    check(
+      "every declared platform spec is one this driver can look for on disk",
+      prefixes.filter(([, prefix]) => prefix === null).map(([name]) => `${name}: ${declared.get(name) ?? ""}`),
+      [],
+    );
+    check(
+      "none of the excluded platform packages is under node_modules/.pnpm",
+      prefixes.flatMap(([, prefix]) => (prefix === null ? [] : store.filter((entry) => entry.startsWith(prefix)))),
+      [],
+    );
+  }
+}
+
+/*
+ * And the direct dependencies, where the fourth used to be.
+ *
+ * The four CLIs are read off `deploy/agents.sh` — the `ensure_npm <agent> <package>`
+ * calls, which is the one place their npm names are written down — rather than
+ * restated here, for the reason this file gives everywhere: a second list drifts.
+ * The agents found are then held equal to `AGENT_IDS`, so the pattern cannot rot
+ * into matching nothing and passing. `@openai/codex` is a dependency of its
+ * adapter and is meant to be — that is the shim the platform packages hang off,
+ * and it is what stays installed — so the assertion is about the *root* manifest
+ * only, where `opencode-ai` sat until Q4.114.
+ */
+const agentsSh = read("deploy/agents.sh");
+const cliPackages = new Map<string, string>();
+for (const m of agentsSh.matchAll(/\bensure_npm ([a-z]+) (\S+) "/g)) {
+  if (m[1] !== undefined && m[2] !== undefined) cliPackages.set(m[1], m[2]);
+}
+check("deploy/agents.sh names an npm package for each of the four", [...cliPackages.keys()].sort(), [...AGENT_IDS].sort());
+const manifest = JSON.parse(packageJson) as Record<string, Record<string, string> | undefined>;
+const dependencySections = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
+check(
+  "none of those CLIs is a dependency of the root package.json",
+  [...cliPackages.values()]
+    .sort()
+    .flatMap((pkg) => dependencySections.filter((section) => manifest[section]?.[pkg] !== undefined).map((section) => `${pkg} in ${section}`)),
+  [],
+);
 
 // ---------------------------------------------------- this release, in six places
 

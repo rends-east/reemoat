@@ -1223,6 +1223,19 @@ export function createApp(options: ServerOptions): AppBundle {
           {
             models: answer.models,
             routing: answer.routing === null ? null : { ...answer.routing, pinsModel: pinsModel(id) },
+            /*
+             * Which build published the list above. Sent beside it rather than on
+             * `GET /agents`, so the version a client draws cannot describe a
+             * different spawn than the rows it draws it under.
+             *
+             * ⚠ **Projected rather than spread, and the dropped field is the
+             * point.** `AgentCliChoice.path` is an absolute path on this host; the
+             * screen draws a program name and a version and has no use for it, so
+             * sending it would put the filesystem layout on a route for nobody,
+             * readable by anything holding the `model` scope. What is on the wire
+             * is what is drawn.
+             */
+            cli: answer.cli === null ? null : { version: answer.cli.version, source: answer.cli.source },
             error: null,
           },
         ] as const;
@@ -1231,7 +1244,13 @@ export function createApp(options: ServerOptions): AppBundle {
         // take down a picker that could still offer the other three.
         return [
           id,
-          { models: [], routing: null, error: error instanceof Error ? error.message : String(error) },
+          /*
+           * `cli: null` on the failing arm, and it is the honest value rather than
+           * a gap: nothing was spawned, so nothing published a list and there is no
+           * build to name. A version carried through here would be a claim about a
+           * read that did not happen.
+           */
+          { models: [], routing: null, cli: null, error: error instanceof Error ? error.message : String(error) },
         ] as const;
       }
       }),
@@ -2789,9 +2808,9 @@ export function createApp(options: ServerOptions): AppBundle {
      * process spawn on the hot path, could only ever be as fresh as its 3s cache,
      * and — the reason it is gone — made the offline drivers depend on whether
      * the person running them happened to be signed in, because a stub runtime
-     * inherits the real probe and `resolveLoginBinary` finds the adapter's own
-     * vendored copy in `node_modules`. CI is signed in to nothing, so it refused
-     * a prompt two assertions expected to land.
+     * inherits the real probe and `resolveLoginBinary` found the copy this
+     * repository vendored then under `node_modules`. CI is signed in to nothing,
+     * so it refused a prompt two assertions expected to land.
      *
      * The two real cases are covered without asking. A sign-out *through this
      * daemon* ends the conversations itself (`signOutSessions`). A credential

@@ -5,6 +5,7 @@ paths:
   - src/events.ts
   - src/store/*
   - scripts/daemon.ts
+  - src/agentupdate.ts
   - scripts/daemoncheck.ts
   - scripts/daemoncheck.*.ts
   - scripts/harness.ts
@@ -74,7 +75,9 @@ polls `/health` for 30s and a boot behind two ACP handshakes reports a healthy
 daemon as a failed update. Most-recently-active first. Two at a time. Three
 attempts, full jitter 2s→60s. `supportsSessionResume` can only be asked *after* an
 agent has started, so one wasted spawn per agent binary is unavoidable and an agent
-that refuses once is not asked again in that pass. Q2.4.
+that refuses once is not asked again in that pass. Q2.4. **No CLI costs no
+attempt** (`agent_missing`): the installer is nudged, the pass repeats after it,
+and passes queue, never overlap. Q4.114.
 
 **A launch identifies itself to its own callbacks.** `launch()` passes the launch
 promise to `onStarted(starting, session)` / `onStartFailed(starting, error)` and
@@ -408,6 +411,7 @@ non-goal, with the numbers, at Q7.113.
 | `src/session.ts` | One ACP session: spawn, prompt, cancel a turn, normalized events, clean shutdown |
 | `src/registry.ts` | Session lifecycle, derived status, the permission state machine, the turn pump and how a turn is stopped |
 | `scripts/daemon.ts` | Entry point: env, signals, logging |
+| `src/agentupdate.ts` | Runs `deploy/agents.sh` five minutes after start, then daily; drops the cached CLI choice after; nudged when a resume finds no CLI. `REEMOAT_AGENT_UPDATES=off` arms nothing |
 | `scripts/harness.ts` | Pre-daemon CLI that drives `Session` directly. Keep it working: the regression test for the untouched default paths |
 | `scripts/daemoncheck.ts` | Offline driver for the daemon's HTTP surface and durable state. The runner only — the assertions are in the nineteen `daemoncheck.<subject>.ts` beside it, and what they share is in `daemoncheck.env`/`.fixtures`/`.bodies` |
 

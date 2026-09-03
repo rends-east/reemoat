@@ -16,6 +16,7 @@ import type { AgentId } from "../src/acp/agents.js";
 import { systemSecretFor } from "../src/acp/systems.js";
 import { AgentAskRuns } from "../src/agentask.js";
 import { AgentLoginRuns } from "../src/agentauth.js";
+import { AgentUpdates, agentSourceFrom } from "../src/agentupdate.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import { resolveRoots } from "../src/browse.js";
 import { codeFingerprint, enroll, EnrollError } from "../src/enroll.js";
@@ -564,6 +565,74 @@ registry.setSessionLimits({
   refillMs: boundedInt(process.env["REEMOAT_SESSION_CREATE_REFILL_MS"], SESSION_CREATE_REFILL_MS),
 });
 
+/**
+ * Keeping the agent CLIs current, because not one of them does it itself.
+ *
+ * Constructed here rather than inside the registry for `agentLogins`' reason: it is
+ * not part of a session's lifecycle. It needs the registry all the same — the answer
+ * to "may this binary be replaced right now" is a question about live agents, and
+ * this is the only screen holding both that and the runtime.
+ *
+ * ⚠ **`agentHandle` and not merely `terminal`.** What must not be taken away is a
+ * build a *process* is executing; a session that is idle with no agent is holding
+ * nothing. The handle includes one restored from before a restart, which may name a
+ * pid that is gone — so this errs toward naming a harness, which is the safe
+ * direction when what the name withholds is the pruning of a build a session may
+ * still be on. The script decides what each name means: Q4.113.
+ */
+const AGENT_UPDATES_OFF: ReadonlySet<string> = new Set(["off", "0", "false", "no", "never"]);
+
+
+const agentUpdates = AgentUpdates.start({
+  busy: () => [
+    ...new Set(
+      registry
+        .list()
+        .filter((session) => !session.terminal && session.agentHandle !== null)
+        .map((session) => session.agent),
+    ),
+  ],
+  onWarning: (detail: string) => console.error(`agent update: ${detail}`),
+  onUpdated: (report: string | null) => {
+    // Said even when nothing moved: a daily run of three vendors' installers with
+    // no line in the log was measured as invisible, and the script's own notes
+    // are the only record of which build each harness is on now.
+    console.log(`agent update: ran deploy/agents.sh${report === null ? "" : `\n${report.replace(/^/gm, "    ")}`}`);
+    // Or the daemon goes on launching the build it resolved before this ran, for the
+    // length of that cache — see `LocalRuntime.agentCli`.
+    runtime.forgetAvailability();
+    /*
+     * And the capability cache, which `forgetAvailability` cannot reach: it holds
+     * the model list *and* the build that published it for `MODELS_TTL_MS`, so a
+     * picker opened just before the run would name the old build over the old list
+     * for ten minutes after the binary moved — the exact pairing `cli` rides that
+     * route to keep honest.
+     */
+    agentAsks.forget();
+    /*
+     * And the sessions that were waiting for exactly this: a harness with no CLI
+     * on the machine costs a resume no attempt (`agent_missing`), so the pass is
+     * run again now that one may have arrived. Queued behind a boot pass still in
+     * flight, by `autoResume` itself.
+     */
+    resumeInterrupted("after the agent update");
+  },
+  /*
+   * On by default, and that is the decision rather than an oversight: the whole
+   * requirement is that somebody who ran one install script never thinks about this
+   * again, and a switch defaulting off is a switch nobody finds. Off is for a
+   * machine with no outbound network, or one whose CLIs somebody else manages — and
+   * every spelling `worktreeMode` takes for "no" switches it off, because the
+   * sibling switches in `.env.example` teach `0` and a `0` that left a `curl | bash`
+   * running would be the wrong surprise.
+   */
+  mode: AGENT_UPDATES_OFF.has((process.env["REEMOAT_AGENT_UPDATES"] ?? "").trim().toLowerCase()) ? "off" : "daily",
+  // Where the script gets the CLIs from; the spelling rule lives beside the
+  // updater so a driver can hold it, and an unknown value is said here rather
+  // than obeyed.
+  source: agentSourceFrom(process.env["REEMOAT_AGENT_SOURCE"], (detail: string) => console.error(`agent update: ${detail}`)),
+});
+
 /*
  * Plugins, if this machine wants them.
  *
@@ -778,34 +847,57 @@ injectWebSocket(server as unknown as Server);
  * the prompt route resumes the moment somebody types, which is the same code by
  * a different door.
  */
-void registry
-  .autoResume({
-    enabled: autoResume,
-    onOutcome: (outcome) => {
-      // Only the ends, not the attempts. A crash-looping agent would otherwise
-      // fill the log with the same sentence three times per session per boot,
-      // and the interesting line is the one that says it stopped trying.
-      if (outcome.result === "resumed" || outcome.result === "failed") return;
-      console.error(
-        `auto-resume ${outcome.sessionId}: ${outcome.result}` +
-          (outcome.detail === null ? "" : ` — ${outcome.detail}`),
+resumeInterrupted("at boot");
+
+/**
+ * One pass of the registry's auto-resume, with its outcomes on the log.
+ *
+ * A function because it has two callers now: boot, and the completion of every
+ * agent update — the second being what brings back a session whose harness had
+ * no CLI on the machine when the first ran (`agent_missing`, which spends no
+ * attempt). `autoResume` queues the second pass behind a first still in flight.
+ */
+function resumeInterrupted(when: string): void {
+  let missing = 0;
+  void registry
+    .autoResume({
+      enabled: autoResume,
+      onOutcome: (outcome) => {
+        // Only the ends, not the attempts. A crash-looping agent would otherwise
+        // fill the log with the same sentence three times per session per boot,
+        // and the interesting line is the one that says it stopped trying.
+        if (outcome.result === "resumed" || outcome.result === "failed") return;
+        if (outcome.result === "agent_missing") missing += 1;
+        console.error(
+          `auto-resume ${outcome.sessionId}: ${outcome.result}` +
+            (outcome.detail === null ? "" : ` — ${outcome.detail}`),
+        );
+      },
+    })
+    .then((report) => {
+      if (report.considered === 0) return;
+      console.log(
+        `auto-resume ${when}: ${report.resumed}/${report.considered} session(s) reattached` +
+          (report.skipped > 0 ? `, ${report.skipped} skipped` : "") +
+          (report.failed > 0 ? `, ${report.failed} failed` : "") +
+          (report.deferred > 0 ? `, ${report.deferred} waiting for an agent CLI to be installed` : ""),
       );
-    },
-  })
-  .then((report) => {
-    if (report.considered === 0) return;
-    console.log(
-      `auto-resume: ${report.resumed}/${report.considered} session(s) reattached` +
-        (report.skipped > 0 ? `, ${report.skipped} skipped` : "") +
-        (report.failed > 0 ? `, ${report.failed} failed` : ""),
-    );
-  })
-  .catch((error: unknown) => {
-    // The pass swallows per-session failures itself, so reaching here means the
-    // loop broke rather than a resume did. Say so and carry on: the daemon is
-    // serving, and every session it did not reach is still resumable by hand.
-    console.error(`auto-resume: ${error instanceof Error ? error.message : String(error)}`);
-  });
+      /*
+       * The install that the waiting sessions need is already scheduled — five
+       * minutes after start, so it does not race this very pass — and with this
+       * pass over and sessions waiting on it, the wait is the whole cost. Run it
+       * now; its completion starts the next pass. A no-op when updates are off,
+       * and then the sentence above is the operator's cue.
+       */
+      if (missing > 0) agentUpdates.nudge();
+    })
+    .catch((error: unknown) => {
+      // The pass swallows per-session failures itself, so reaching here means the
+      // loop broke rather than a resume did. Say so and carry on: the daemon is
+      // serving, and every session it did not reach is still resumable by hand.
+      console.error(`auto-resume ${when}: ${error instanceof Error ? error.message : String(error)}`);
+    });
+}
 
 function startRelayTunnel(local: { host: string; port: number }): void {
   if (enrolledRelay === null) {
@@ -940,6 +1032,9 @@ async function shutdown(signal: string): Promise<void> {
   // this daemon is gone. Stopped before the sessions because it is cheap and
   // unconditional, and because it is not on the 20s session budget.
   await agentLogins.shutdown();
+  // Disarms the schedule; a run already in flight is deliberately left alone rather
+  // than killed — see `AgentUpdates.doShutdown`.
+  await agentUpdates.shutdown();
   /*
    * ⚠ **Before the plugin host, and that ordering is the whole of this line.** A
    * model ask is started *by* a plugin, so draining the host first would leave

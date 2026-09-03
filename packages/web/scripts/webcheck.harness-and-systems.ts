@@ -5,7 +5,7 @@ import { type SystemInfo } from "./webcheck.modules.js";
 
 process.stdout.write("\nwhich harness can be pointed at which system\n");
 {
-  const { allModels, choiceRefusal, defaultAgentName, customAgentSubline, groupModels, harnessRowRefusal, hostable, keyMissing, readyFirst, searchModels, supportingHarnesses } =
+  const { allModels, choiceRefusal, defaultAgentName, customAgentSubline, groupModels, harnessRowRefusal, hostable, keyMissing, listedByBuild, readyFirst, searchModels, supportingHarnesses } =
     await import("../src/agents.js");
 
   const system = (over: Partial<SystemInfo> = {}): SystemInfo => ({
@@ -738,6 +738,81 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     ["Moonshot"],
   );
   check("with every row under it", groupModels([published, tabled])[0]?.choices.length, 2);
+
+  /*
+   * **Which build published a group's models, and the three ways it declines.**
+   *
+   * The line exists because a model list is only ever as fresh as the binary that
+   * published it, and a binary is only as fresh as whoever last refreshed it —
+   * `deploy/agents.sh` daily, or nobody for an operator's own copy on PATH — with
+   * no error and nothing on screen when a model released last week is simply
+   * absent.
+   *
+   * ⚠ **The mixed-source case is the one that matters and it is why this is not
+   * simply "name the native harness".** OpenRouter's rows are mostly a catalogue
+   * the browser fetched, with a handful published by a keyed opencode; a sentence
+   * naming opencode over that list is wrong about almost every row in it.
+   */
+  const buildCaps = (over: Record<string, unknown> = {}) =>
+    ({ kimi: { models: [], routing: null, error: null, cli: { version: "0.29.2", source: "path" } }, ...over }) as never;
+  const groupOf = (...rows: unknown[]) => groupModels(rows as never)[0] as never;
+
+  check(
+    "a group whose rows all came from one harness names the build that published them",
+    listedByBuild(groupOf(published), buildCaps(), (id) => (id === "kimi" ? "Kimi Code" : id)),
+    "Listed by Kimi Code 0.29.2.",
+  );
+  check(
+    "an override reads like any other chosen build, because the operator chose it",
+    listedByBuild(groupOf(published), buildCaps({ kimi: { models: [], routing: null, error: null, cli: { version: "9.9.9", source: "override" } } }), () => "Kimi Code"),
+    "Listed by Kimi Code 9.9.9.",
+  );
+  check(
+    "a binary that will not say which build it is still names the program",
+    listedByBuild(groupOf(published), buildCaps({ kimi: { models: [], routing: null, error: null, cli: { version: null, source: "path" } } }), () => "Kimi Code"),
+    "Listed by Kimi Code.",
+  );
+  /*
+   * The three refusals, and they are different facts rather than one absence: a
+   * mixed group has no single answer, a daemon too old to send the field is about
+   * the *machine*, and a `null` is a read that failed. None of them may be drawn
+   * as "unknown version" — that sends a reader looking in the wrong place.
+   */
+  check(
+    "a group holding one table row says nothing at all, because no build published that row",
+    listedByBuild(groupOf(published, tabled), buildCaps(), () => "Kimi Code"),
+    null,
+  );
+  check(
+    "nor does a daemon too old to have sent the field",
+    listedByBuild(groupOf(published), { kimi: { models: [], routing: null, error: null } } as never, () => "Kimi Code"),
+    null,
+  );
+  check(
+    "nor one whose read found no binary to name",
+    listedByBuild(groupOf(published), buildCaps({ kimi: { models: [], routing: null, error: null, cli: null } }), () => "Kimi Code"),
+    null,
+  );
+  check(
+    "and a provider no harness is native to has nobody to name",
+    listedByBuild(
+      groupModels([{ ...published, system: system({ nativeHarness: null }) }] as never)[0] as never,
+      buildCaps(),
+      () => "Kimi Code",
+    ),
+    null,
+  );
+  // A newer daemon's third `source` still names the build: the plain line, never
+  // a refusal. There used to be a second sentence to fall into — the vendored
+  // arm's "the copy installed with this app", the one line that claimed something
+  // about where the copy came from — and it went with the vendored copies
+  // (Q4.114), so there is one sentence left for a known source and an unknown one
+  // alike.
+  check(
+    "and a source this build has never heard of draws the plain line",
+    listedByBuild(groupOf(published), buildCaps({ kimi: { models: [], routing: null, error: null, cli: { version: "1.0.0", source: "future" } } }), () => "Kimi Code"),
+    "Listed by Kimi Code 1.0.0.",
+  );
   /*
    * ⚠ **And it stays one heading however many rows arrive — which is the *second*
    * thing taken out of this slot, and the reason it is driven at the size that

@@ -587,6 +587,64 @@ export interface ModelGroup {
 }
 
 /**
+ * Which build of which CLI published this group's models, as a sentence, or `null`.
+ *
+ * **The question it answers is why a list might be missing something.** A model
+ * list is whatever the harness's own binary published, and that binary is only as
+ * new as whoever last refreshed it — `deploy/agents.sh` daily for the copy it
+ * keeps, nobody here for an operator's own copy found first on PATH or one pointed
+ * at by hand — so a model released last week is simply absent, with no error and
+ * nothing on screen saying why. This is the one line that says which build was
+ * asked.
+ *
+ * ⚠ **Drawn only where it is true of the *whole* group, which is what keeps it
+ * from lying under OpenRouter.** That provider's rows are a mix: most come from a
+ * catalogue the browser fetched and some from what a keyed opencode published.
+ * "Listed by Opencode 1.18.23" over the fetched majority would name the wrong
+ * source for almost every row. So every row must be `published`, or nothing is
+ * said — the same *"say nothing rather than something nearly true"* rule
+ * `SessionView` follows when it declines to name a harness it cannot look up.
+ *
+ * ⚠ **Three refusals and they are different facts.** No native harness means
+ * nobody published anything; `undefined` means a daemon too old to have sent the
+ * field, which is about the *machine* rather than the build; `null` means the read
+ * failed or the harness names no binary. Only the last two look alike, and neither
+ * may be drawn as "unknown version" — an unknown build and an un-upgraded daemon
+ * send a reader to different places.
+ *
+ * The **program** is named, never the harness id: `AGENT_LABEL` exists for that
+ * and `agentCard.ts` states the rule. The version is the CLI's own, so it is the
+ * string somebody can compare against their own `--version`.
+ */
+export function listedByBuild(
+  group: ModelGroup,
+  capabilities: Readonly<Record<string, AgentCapabilities>>,
+  nameOf: (id: string) => string,
+): string | null {
+  const harness = group.system.nativeHarness;
+  if (harness === null) return null;
+  if (group.choices.length === 0) return null;
+  if (!group.choices.every((one) => one.source === "published")) return null;
+  const cli = capabilities[harness]?.cli;
+  if (cli === undefined || cli === null) return null;
+  const name = nameOf(harness);
+  const build = cli.version === null ? name : `${name} ${cli.version}`;
+  /*
+   * One sentence for every `source`, and it was two. The vendored arm used to earn
+   * extra words — "the copy installed with this app" — because it was the only
+   * copy whose age was not the operator's own doing: they had installed the other
+   * two, and saying so was what turned "this list looks short" into an action.
+   * That copy went with the vendored CLIs (Q4.114). Now no copy on any machine is
+   * one the operator did not install or the daemon did not refresh, so there is
+   * nothing about where it came from that the build's own version does not
+   * already say. A `source` this build has never heard of draws the same line —
+   * the direction `compatibility.md`'s rule 2 asks for, since the build is still
+   * named and an unknown value fails toward "keep working".
+   */
+  return `Listed by ${build}.`;
+}
+
+/**
  * The catalogue narrowed by what somebody typed and which provider they ticked.
  *
  * ⚠ **The system's own name is searchable, and that is not a convenience.** The

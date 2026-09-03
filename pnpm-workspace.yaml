@@ -8,10 +8,49 @@ packages:
 allowBuilds:
   # esbuild's install script links its prebuilt platform binary; tsx needs it.
   esbuild: true
-  # opencode-ai's install script links the platform binary its `bin` shim
-  # re-execs; without it `opencode --version` exits non-zero and every session
-  # on this harness fails at spawn with a message about a missing target.
-  opencode-ai: true
+  # `opencode-ai` used to sit here too, its postinstall allowed so that the
+  # platform binary its shim re-execs was linked. It is no longer a dependency at
+  # all (Q4.114) — and ⚠ a `pnpm install` that meets a package with a build script
+  # and no verdict here writes `<name>: set this to true or false` into this list
+  # by itself, which is how a placeholder for a package that had just been removed
+  # came to ship in a draft of this change. `pincheck` reads this list now.
+
+# **The coding-agent CLIs are not installed by `pnpm install`, and these lines are
+# what keeps them out.** Two adapters this repository pins bring a CLI with them
+# as *optional* platform packages — `@anthropic-ai/claude-agent-sdk` under
+# `claude-agent-acp`, the `@openai/codex` shim under `codex-acp` — one build per
+# OS and architecture, of which pnpm installs the one that matches. Measured on
+# this repository's own darwin-arm64 checkout: 245 MB and 307 MB, 552 MB of a
+# 907 MB `node_modules`, for two programs `deploy/agents.sh` installs anyway with
+# each vendor's own installer and keeps current from there. The pinned copy was
+# exactly as old as the release and never the one that ran once a vendor's copy
+# was on the machine, so it bought nothing but the download (Q4.114).
+#
+# `-` removes a dependency; the adapters still resolve, and each is told where its
+# CLI is by `CLAUDE_CODE_EXECUTABLE` / `CODEX_PATH`, which `LocalRuntime.launch`
+# writes on every spawn from the copy `deploy/agents.sh` installed. A machine that
+# cannot reach the vendors' hosts installs the same four from the npm registry
+# instead — `REEMOAT_AGENT_SOURCE=npm`, in `.env.example` — never from here.
+#
+# **One line per platform package, and `pnpm pincheck` asserts the list is exactly
+# what the installed adapters declare**: a platform the vendor adds is a package
+# that would ride back in with every check green, and a line left over after one
+# is dropped is a pin on nothing.
+overrides:
+  '@anthropic-ai/claude-agent-sdk-darwin-arm64': '-'
+  '@anthropic-ai/claude-agent-sdk-darwin-x64': '-'
+  '@anthropic-ai/claude-agent-sdk-linux-arm64': '-'
+  '@anthropic-ai/claude-agent-sdk-linux-arm64-musl': '-'
+  '@anthropic-ai/claude-agent-sdk-linux-x64': '-'
+  '@anthropic-ai/claude-agent-sdk-linux-x64-musl': '-'
+  '@anthropic-ai/claude-agent-sdk-win32-arm64': '-'
+  '@anthropic-ai/claude-agent-sdk-win32-x64': '-'
+  '@openai/codex-darwin-arm64': '-'
+  '@openai/codex-darwin-x64': '-'
+  '@openai/codex-linux-arm64': '-'
+  '@openai/codex-linux-x64': '-'
+  '@openai/codex-win32-arm64': '-'
+  '@openai/codex-win32-x64': '-'
 # **`minimumReleaseAge` is not set, so this exclusion currently excludes nothing.**
 #
 # Said here rather than left to be discovered, because the shape reads like a policy
@@ -38,4 +77,3 @@ allowBuilds:
 minimumReleaseAgeExclude:
   - '@agentclientprotocol/claude-agent-acp@0.63.0'
   - '@agentclientprotocol/codex-acp@1.1.9'
-  - 'opencode-ai@1.18.23'

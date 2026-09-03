@@ -250,6 +250,23 @@ export interface ReapDecision {
   detail: string | null;
 }
 
+/** Which build of an agent's CLI a launch resolved to, and where it came from. */
+export interface AgentCliChoice {
+  path: string;
+  /** `null` where the binary runs but would not say which build it is. */
+  version: string | null;
+  /**
+   * ⚠ **Two members and not a boolean, and it was three.** A reader has to be able
+   * to tell a machine running the copy `deploy/agents.sh` keeps current — or one of
+   * its own, on PATH — from one an operator pointed by hand, because only the
+   * second explains why a daily refresh changed nothing there. `vendored` was the
+   * third, the copy this repository used to ship under `node_modules`; it went with
+   * the copies (Q4.114), and a client that still knows the word draws the plain
+   * line for it.
+   */
+  source: "override" | "path";
+}
+
 export interface SessionRuntime {
   /**
    * Whether the daemon will perform file IO on the agent's behalf.
@@ -292,6 +309,25 @@ export interface SessionRuntime {
    * inside a half-started session.
    */
   describe(agent: AgentId): AgentLaunchConfig;
+
+  /**
+   * Which build of this agent's CLI a launch would run, or `null`.
+   *
+   * ⚠ **A different question from {@link describe}, and the two answer about
+   * different programs.** For claude and codex `describe` names the *adapter*;
+   * what publishes the model list is a CLI underneath it, chosen separately. So a
+   * daemon reporting only the launch config says nothing about the thing whose
+   * list is on screen.
+   *
+   * Reported rather than acted on. The model list a picker draws is exactly as
+   * fresh as this build — a fact with no symptom except a model somebody has read
+   * about being absent, which is why the build is named beside the list. `null`
+   * for a harness with no binary to name.
+   *
+   * Asynchronous because deciding it may cost a `--version`; every caller that
+   * needs the *path* is already async for the same reason.
+   */
+  agentCli(agent: AgentId): Promise<AgentCliChoice | null>;
 
   /** What `GET /agents` reports. May do real work, unlike `describe`. */
   availability(): Promise<AgentAvailability[]>;

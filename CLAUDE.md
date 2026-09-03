@@ -57,7 +57,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 838 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 841 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -177,6 +177,9 @@ pnpm docscheck                       # the documentation, held to what it claims
 pnpm imagecheck                      # the control plane's image, and both services it runs.
                                      #   NOT offline: needs docker + network
 pnpm daemon                          # needs REEMOAT_TOKEN; see .env.example
+deploy/agents.sh --check             # what the agent CLIs would install or refresh, changing nothing.
+                                     #   Run for real by the installer once, by `deploy.sh` on every
+                                     #   daemon update, and by the daemon daily
 curl -fsSL 'https://<control-plane>/install.sh' | sh   # a machine, from nothing to enrolled.
                                      #   `deploy/bootstrap.sh` served by `GET /install.sh` with the
                                      #   requesting origin quoted in — so an instance hands out an
@@ -256,6 +259,31 @@ The one real boundary is that **the browser executes none of it** — a plugin s
 a description and the app draws it, so the origin holding `reemoat.credential`
 runs nothing a plugin author wrote. `docs/PLUGINS.md` is the author's document;
 Q1.612 is the argument.
+
+**This daemon downloads and executes third-party installer scripts, as you, on a
+timer, by default.** `src/agentupdate.ts` runs `deploy/agents.sh` five minutes after
+start and then daily; that script installs three of them with each vendor's own
+installer into the vendors' own directories and kimi from the npm registry into
+`~/.reemoat/toolchain`, and refreshes what is there through the door it came in by
+— a copy installed outside both is named and not moved. It is on by default because the requirement is that somebody who ran
+one install script never thinks about agents again, and it is here rather than in a
+footnote because it is a real change in posture: three named hosts run code as this
+uid with nobody pressing anything. What bounds it is narrow: no `sudo` and no
+system package manager (`deploycheck` asserts the first over the script), no shell
+profile is edited, the script runs under `agentEnv()`, not this daemon's
+environment, an installer is downloaded whole before running, a build a live
+session may be on is kept, and a failure is a warning rather than a stop. Nothing
+is vendored under it any more (Q4.114): a harness with no CLI is refused with a
+sentence rather than started; `REEMOAT_AGENT_SOURCE=npm`, all four from the npm
+registry into that toolchain, is a firewalled machine's choice, never a fallback,
+and decides only how an absent CLI is installed.
+`REEMOAT_AGENT_UPDATES=off` (or `0`) switches it off. What runs is
+`CLAUDE_CODE_EXECUTABLE`/`CODEX_PATH` outright, else the **first** copy on PATH,
+then in the directories the script installs into — so a file an agent drops into
+`~/.local/bin` is the build the daemon runs within ten minutes, as the same uid
+(Q6.106). **Why it exists at all is a measurement, not a preference**: none of the
+four self-updates when a *daemon* drives it, every updater being gated on a
+terminal an ACP-spawned agent never has (Q4.113).
 
 **`~/.claude/settings.json` can bypass the permission machinery entirely.** Where
 it blanket-allows `Bash`, `Edit` or `Write`, the inner CLI decides for itself and
@@ -419,8 +447,8 @@ answering -32000 (Q7.65).
 Agents are a **four**-member union now, and the fourth met the precondition Q7.31
 set for itself — *"a fourth agent, to show the pattern is a pattern rather than two
 coincidences"* — and left the answer unchanged. opencode cost the five edits codex
-cost (`resolveAgent`, `AGENT_LOGIN`, `vendoredCli`, `wire.ts`'s hand-mirrored
-union, `pincheck`'s list) plus one the compiler was *claiming* to force and was
+cost (`resolveAgent`, `AGENT_LOGIN`, the vendored-CLI resolver (gone),
+`wire.ts`'s hand-mirrored union, `pincheck`'s list) plus one the compiler was *claiming* to force and was
 not: `AgentGlyph` answers `ReactNode`, `undefined` inhabits it, and a `switch`
 falling off the end returns exactly that — so a blank tile would have compiled
 clean for four releases. It ends in a `never` arm now. Everything else — questions,

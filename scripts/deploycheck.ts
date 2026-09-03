@@ -1,9 +1,22 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { AGENT_IDS, AGENT_LOGIN, MANAGED_CLI_DIRS } from "../src/acp/agents.js";
 import { tmp } from "./tmp.js";
 
 /**
@@ -87,6 +100,27 @@ import { tmp } from "./tmp.js";
  * run once per member of `SERVICES`, so a missing arm, a name that stops
  * matching and a catch-all answering for somebody else all go red — a shape no
  * amount of reading the file had caught.
+ *
+ * A third, since Q4.114, is the daemon arm of the per-service loop, which runs
+ * `deploy/agents.sh` before deciding the restart. Extracted with `armOf` and run
+ * against a stub script under a fake `REPO_ROOT`, so what is asserted is what
+ * reached the script — the source read off the env file, one `--skip` per
+ * harness — and that a script exiting non-zero is a line on stderr under
+ * `lib.sh`'s own `set -e` rather than a deploy that stopped after the checkout
+ * had moved.
+ *
+ * **And `deploy/agents.sh`, a fourth subject, which is driven for real rather
+ * than only under `--check`.** A fake `npm` answering the one shape `ensure_npm`
+ * calls — an executable that prints its build, a one-line manifest, a package it
+ * refuses on request — and this process's own `node` beside it are enough to
+ * reach every state the daily run reaches on a machine: an install into a
+ * versioned directory, a refresh that repoints the symlink, a build kept under
+ * `--skip` and pruned on the run after, a refresh that moves nothing, a refusal
+ * that keeps the previous build with no stage left behind, and the two
+ * directions of a switched `--source` — an npm copy refreshed from npm under
+ * `vendor`, a vendor copy named and counted under `npm`. Nothing here reaches a
+ * vendor's host or the registry; what the fake cannot say is whether the real
+ * ones still answer that shape.
  *
  * `ask` is in that list and is driven at exactly one point of it, which is worth
  * one sentence rather than a silent exception: with stdin at EOF it returns the
@@ -730,6 +764,937 @@ check(
   ],
 );
 
+/**
+ * The four CLIs as the npm registry names them. `deploy/agents.sh --source npm`
+ * installs exactly these, and `.env.example` names them so an operator behind a
+ * firewall knows what to mirror (Q4.114).
+ *
+ * **A literal, and the one place this driver restates rather than reads.** A
+ * package name is the one input to `npm i -g <name>@latest` whose failure mode is
+ * not a warning: misspelled, it is either nothing installed under a name the
+ * script then reports as done, or — the registry being open — somebody else's
+ * package run as this uid, daily. Two copies of that string is the point rather
+ * than the hazard. Keyed on `AGENT_IDS`'s own union, so a fifth agent is a compile
+ * error here until somebody names its package or decides it has none.
+ */
+const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
+  claude: "@anthropic-ai/claude-code",
+  codex: "@openai/codex",
+  opencode: "opencode-ai",
+  kimi: "@moonshot-ai/kimi-code",
+};
+
+/*
+ * **The two controls an operator has over which build of an agent runs, and the
+ * document that has to name both.**
+ *
+ * Each `AGENT_LOGIN[*].executableEnv` is a *vendor's* variable, and since Q4.114
+ * it is the only door its adapter has: `claude-agent-acp`'s `claudeCliPath()`
+ * reads it and otherwise `require`s a platform package this repository no longer
+ * installs, and `codex-acp`'s `startAcpServer()` is the same shape one variable
+ * over. With neither set the daemon runs the first copy it finds — on PATH, then
+ * in `MANAGED_CLI_DIRS` — and writes *that* into the variable on every spawn, so
+ * setting one here is how an operator chooses, and both survive `agentEnv()`'s
+ * strip on purpose. Undocumented, the only way to discover either is to read the
+ * adapter's source, and what it decides is not cosmetic: which build runs is
+ * which model list is on screen. Measured 2026-09-03, while the adapter still
+ * carried a copy of its own: 0.63.0 published `claude-fable-5[1m]` off its
+ * 2.1.220 and `claude-fable-5-1[1m]` off a 2.1.259 named here, with every other
+ * control identical.
+ *
+ * Driven off `AGENT_LOGIN` rather than a literal, on the same grounds as the
+ * proxy-hop key below: a driver that hardcodes the string it checks for stops
+ * checking anything the moment the string moves. That also makes the *absence*
+ * meaningful — a harness whose `executableEnv` is null (kimi, opencode) is not
+ * required to appear, so this cannot be satisfied by documenting the wrong set.
+ */
+{
+  const daemonExample = readFileSync(join(repoRoot, ".env.example"), "utf8");
+  const named = AGENT_IDS.map((id) => AGENT_LOGIN[id].executableEnv).filter((one): one is string => one !== null);
+
+  check("every harness that has a binary override is documented", named.filter((key) => !daemonExample.includes(key)), []);
+  check(
+    "each shown as a commented assignment rather than only mentioned in prose",
+    named.filter((key) => !new RegExp(`^#\\s*${key}=`, "m").test(daemonExample)),
+    [],
+  );
+  /*
+   * `CODEX_HOME` is the trap this block exists to keep documented: it sits one
+   * letter away from the variable above it in every listing, names the
+   * credential directory rather than the binary, and setting it for this would
+   * silently point a login at a store no session reads. The example has to say
+   * so, or the pair is worse documented than neither.
+   */
+  check("and the credential directory is named as not being one of them", /CODEX_HOME/.test(daemonExample), true);
+  /*
+   * And the one variable here that is *ours*: where `deploy/agents.sh` gets the
+   * CLIs from. `vendor` is each vendor's own installer and `npm` is the registry,
+   * and the second exists for a machine that cannot reach the first at all — so
+   * an example that shows the default and never names the other value has
+   * documented the switch for exactly the operator who does not need it. The
+   * four package names belong beside it for the same reason: a mirror has to be
+   * told what to carry, and the script is not where a firewall operator reads.
+   *
+   * Read as a paragraph rather than the whole file, so a package name mentioned
+   * three screens away — in a comment about something else — does not satisfy
+   * the sentence that has to name it here.
+   */
+  const sourceBlock = daemonExample.split(/\n\s*\n/).find((para) => /^#\s*REEMOAT_AGENT_SOURCE=/m.test(para)) ?? "";
+  check(
+    "and where the CLIs come from is shown as a commented assignment, at its default",
+    /^#\s*REEMOAT_AGENT_SOURCE=vendor$/m.test(daemonExample),
+    true,
+  );
+  check("with npm named as the other value", /`npm`/.test(sourceBlock), true);
+  check(
+    "and the four packages that value installs, for whoever has to mirror them",
+    AGENT_IDS.filter((id) => !sourceBlock.includes(NPM_PACKAGES[id])),
+    [],
+  );
+  // The installer writes this line from its own flag, and the example is where an
+  // operator who did not run the installer finds out that it exists.
+  check("and the installer flag that writes it", sourceBlock.includes("--agent-source npm"), true);
+}
+
+/* ------------------------------------------------------------------ *
+ * the script that installs the agents, and keeps them moving
+ * ------------------------------------------------------------------ */
+
+/*
+ * **`deploy/agents.sh` is the one place a vendor's installer is run, and its
+ * properties are load-bearing rather than tidy.**
+ *
+ * It exists because *none of the four CLIs self-updates under ACP* — every one of
+ * their updaters is gated on a terminal a daemon-spawned agent never has — so the
+ * cadence is reemoat's. Measured 2026-09-03: kimi 0.29.2 against 0.40.1 upstream,
+ * codex 0.146.1 against 0.153.0. And since Q4.114 the copies it installs are the
+ * **only** copies: `pnpm install` brings the two ACP adapters and no CLI, so a
+ * script that quietly stopped working would leave a fresh machine with no harness
+ * at all rather than a stale one — the tile says so, and nothing else does.
+ */
+{
+  const agentsRaw = readFileSync(join(repoRoot, "deploy/agents.sh"), "utf8");
+  /*
+   * ⚠ **The negative assertions below read the *executable* lines, comments removed
+   * — the opposite of the builder's credential rule, and for the opposite reason.**
+   * There the file's prose was written to name neither identifier so the absence
+   * could be total. Here the prose is where the measurement lives: the paragraph
+   * explaining that `kimi upgrade` exits 0 without installing is the most valuable
+   * thing in the file, and a check that forbade writing it down would trade an
+   * explanation for a grep. Full-line comments only, so nothing inside a string is
+   * cut.
+   */
+  const agentLines = agentsRaw.split("\n").filter((line) => !/^\s*#/.test(line));
+  const agents = agentLines.join("\n");
+  check("the agent installer was found", agentsRaw.length > 0, true);
+  // All three callers exec the file directly — `spawn(script, …)` in the daemon,
+  // `"$CHECKOUT/deploy/agents.sh"` in the bootstrap and `"$REPO_ROOT/deploy/agents.sh"`
+  // in `deploy.sh` — so a mode bit lost on the way through git is a daily `EACCES`
+  // warning, a deploy line saying the script did not finish, and no agent ever
+  // refreshed.
+  check("and it is executable, because every caller execs it directly", (statSync(join(repoRoot, "deploy/agents.sh")).mode & 0o111) !== 0, true);
+  check("and its reasoning is written down rather than left to a reader", agentsRaw.length > agents.length, true);
+
+  /*
+   * ⚠ **Never `sudo`.** Two of these installers have no root guard of their own, and
+   * run as root they would put a binary the service user cannot update into a
+   * directory the service user does not own — a machine that then silently stops
+   * updating, which is this script's whole failure mode.
+   */
+  check("it never reaches for root", /\bsudo\b/.test(agents), false);
+
+  /*
+   * ⚠ **`kimi upgrade` may not appear, and this is the one assertion here that pins
+   * a measurement rather than a policy.** Without a TTY that verb prints the manual
+   * command and **exits 0 without installing**. A timer calling it would report
+   * success for ever while the build never moved — worse than not trying, because
+   * the failure is invisible from every side.
+   */
+  check("and never calls kimi's own upgrade, which lies about having run", /kimi\s+(upgrade|update)/.test(agents), false);
+
+  /*
+   * The directories are written down twice — here and in `MANAGED_CLI_DIRS`, which
+   * is what the *daemon* searches — and the two must not drift: a CLI installed
+   * where nothing looks for it is a download that produces a file nothing executes.
+   * Imported rather than restated, on the same grounds as the env-example keys above.
+   */
+  const home = process.env["HOME"] ?? "";
+  const named = MANAGED_CLI_DIRS.map((dir) => dir.replace(home, "$HOME_DIR"));
+  check(
+    "every directory the daemon searches is one this script installs into",
+    named.filter((dir) => !agents.includes(dir)),
+    [],
+  );
+
+  /*
+   * Each agent's refresh half, by name. The install half is a vendor URL that may
+   * legitimately move; the refresh verb is a decision — `claude update` rather than
+   * a re-run of an installer with no already-installed check that downloads ~200 MB
+   * every time, and `--method curl` on opencode because without it the resolver can
+   * answer `unknown` and stop on a prompt nobody is there to answer. kimi's refresh
+   * *is* its install — `ensure_npm`, which is also what the other three take under
+   * `--source npm` — and what makes that not a re-download every night is that
+   * `npm` resolves `@latest` before it fetches anything.
+   */
+  check("each agent has a refresh that does not re-download it", [
+    /claude update/.test(agents),
+    /codex update/.test(agents),
+    /opencode upgrade --method curl/.test(agents),
+    agents.includes(`ensure_npm kimi ${NPM_PACKAGES.kimi} `),
+    /"\$_pkg@latest"/.test(agents),
+  ], [true, true, true, true, true]);
+
+  /*
+   * Four rules the header states, asserted as text because each was a defect in a
+   * draft of this script (Q4.113): the directories are appended to PATH rather than
+   * put in front of it; no installer is piped straight into a shell; every download
+   * carries a deadline; and a harness whose binary an operator named is left alone
+   * — with the names read off `AGENT_LOGIN`, not retyped.
+   */
+  check("its directories are appended to PATH, never prepended", /^PATH="\$PATH:/m.test(agents), true);
+  check("no installer is piped straight into a shell", /curl[^\n]*\|\s*(ba)?sh\b/.test(agents), false);
+  check("and every download carries a deadline", /curl [^\n]*--max-time \d+/.test(agents), true);
+  const overrides = AGENT_IDS.map((id) => AGENT_LOGIN[id].executableEnv).filter((one): one is string => one !== null);
+  check(
+    "a harness whose binary an operator named is left alone",
+    overrides.filter((key) => !new RegExp(`\\$\\{${key}:-\\}`).test(agents)),
+    [],
+  );
+  /*
+   * And the vendors' hosts are *here* — the other half of the bootstrap sieve
+   * below, which is only a rule about where they may not be. The path after the
+   * host is the vendor's to move; the host is what a firewall operator has to be
+   * told, which is why `.env.example` names the same three.
+   */
+  check("the three vendor installers are fetched from here", [
+    /download claude https:\/\/claude\.ai\//.test(agents),
+    /download codex https:\/\/chatgpt\.com\//.test(agents),
+    /download opencode https:\/\/opencode\.ai\//.test(agents),
+  ], [true, true, true]);
+
+  /*
+   * **The npm arm, which is kimi's arm generalised (Q4.114).** An npm package is
+   * written by `npm i -g` over a tree in place — `ETXTBSY` against a live process
+   * on Linux and a half-written install everywhere — so every harness that arrives
+   * as one goes into `$TOOLCHAIN/<agent>-<version>` and `$TOOLCHAIN/bin/<agent>` is
+   * repointed by rename, the same shape as the three native installers. That used
+   * to be asserted for kimi by name; it is asserted for the *function* now, since
+   * under `--source npm` all four go through it. Staged first, so the final move
+   * is one `rename(2)`; and `--skip` withholds only the pruning of the previous
+   * build, for whichever harness the daemon names.
+   */
+  check("an npm-installed harness lands in a directory of its own rather than over the one that runs", /\$_agent-\$_ver/.test(agents) && /mv -f .*bin\/\$_agent/.test(agents), true);
+  check("staged under the toolchain, so the move is one rename", /npm" i -g --prefix "\$_stage" "\$_pkg@latest"/.test(agents) && /mv "\$_stage" "\$_build"/.test(agents), true);
+  const skipUses = agentLines.filter((line) => /\bskipped "/.test(line));
+  check("and --skip guards the prune, for any harness rather than for kimi", skipUses, ['  if skipped "$_agent"; then']);
+  check(
+    "each of the four is named to the registry, on the line that installs it",
+    AGENT_IDS.filter((id) => !agents.includes(`ensure_npm ${id} ${NPM_PACKAGES[id]} `)),
+    [],
+  );
+
+  /*
+   * **Where a copy came from decides how it is refreshed; `--source` decides only
+   * how an absent one is installed.** Both directions of a switch were measured
+   * going wrong before `provenance` existed: under `npm` a claude the vendor arm
+   * had put in `~/.local/bin` read as "installed outside reemoat" and was never
+   * refreshed again — on exactly the machine `npm` is for, one whose vendor hosts
+   * went dark after a vendor install — and under `vendor` the native updaters ran
+   * against copies npm had put under the toolchain. So the rule is one function
+   * reading the path `command -v` answers, and every arm below is a `case` over
+   * what it says.
+   *
+   * The three places it knows are the daemon's `MANAGED_CLI_DIRS`, read off the
+   * same import as the PATH check above rather than retyped: the toolchain's
+   * `bin` is `toolchain`, the two vendor directories are `vendor`, and anything
+   * else on PATH is `outside`. One of the three is spelled through `$TOOLCHAIN`,
+   * so that assignment is read too and substituted in before the daemon's list is
+   * compared against the body — a function that classified the right *variable*
+   * pointing at the wrong directory would otherwise pass.
+   */
+  const provenance = blockIn("agents.sh", agentLines, "provenance", "provenance() {", "}");
+  const toolchainDef = lineIn("agents.sh", agentLines, "the toolchain directory", "TOOLCHAIN=");
+  check("the toolchain is under the home the script was given", toolchainDef, 'TOOLCHAIN="$HOME_DIR/.reemoat/toolchain"');
+  const provenanceSpelled = provenance
+    .replace(/"\$TOOLCHAIN"/g, toolchainDef.slice('TOOLCHAIN="'.length, -1))
+    .replace(/"\$HOME_DIR"/g, "$HOME_DIR")
+    .split("\n");
+  const classOf = (dir: string): string | undefined => {
+    const arm = provenanceSpelled.find((line) => line.includes(`${dir}/*`));
+    return arm === undefined ? undefined : /printf '([a-z]*)'/.exec(arm)?.[1];
+  };
+  check(
+    "provenance classifies every directory the daemon searches, by whose it is",
+    named.map((dir) => [dir, classOf(dir)]),
+    named.map((dir) => [dir, dir.startsWith("$HOME_DIR/.reemoat/") ? "toolchain" : "vendor"]),
+  );
+  check(
+    "reads anywhere else on PATH as outside, and no copy at all as nothing",
+    [/^\s*\*\) printf 'outside' ;;$/m.test(provenance), /^\s*""\) printf '' ;;$/m.test(provenance), /command -v "\$1"/.test(provenance)],
+    [true, true, true],
+  );
+
+  /*
+   * Each of the three harnesses with a vendor arm is one `case` over that answer,
+   * and the arms are the assertion: `toolchain` goes back to the registry whatever
+   * the flag says, `outside` is named and left, and `vendor` is the vendor's own
+   * updater — except under `--source npm`, where refreshing it is the one thing a
+   * switch cannot do, said as a warning and counted so the daemon warns daily.
+   * Only the fall-through, a harness that is absent, reads `$SOURCE` to choose a
+   * door.
+   *
+   * ⚠ **And `ensure_npm` is never a fallback.** A vendor outage that quietly
+   * switched a machine to a differently built binary is a change nobody asked
+   * for, and the header says so; what makes it true is that every reach into the
+   * npm arm from these three is either the `toolchain` arm — a copy that *came*
+   * from npm — or the absent-harness line gated on the flag, and the `vendor` arm,
+   * the one place an update can fail, holds no call at all. Every call site in the
+   * file is then one of three shapes, and a fourth is a red build rather than a
+   * fallback nobody reviewed.
+   */
+  const VENDOR_REFRESH: Record<"claude" | "codex" | "opencode", string> = {
+    claude: "claude update",
+    codex: "codex update",
+    opencode: "opencode upgrade --method curl",
+  };
+  for (const id of ["claude", "codex", "opencode"] as const) {
+    const fn = `ensure_${id}`;
+    const body = blockIn("agents.sh", agentLines, fn, `${fn}() {`, "}");
+    const lines = body.split("\n").map((line) => line.trim());
+    const arm = (label: string): string => lines.find((line) => line.startsWith(`${label})`)) ?? "";
+    const vendorArm = armOf(body, "vendor");
+    const esacAt = body.indexOf("\n  esac\n");
+    const afterCase = esacAt === -1 ? "" : body.slice(esacAt + "\n  esac\n".length);
+    check(`${fn} asks where the copy came from`, [body.includes(`case "$(provenance ${id})" in`), esacAt !== -1], [true, true]);
+    check(
+      `and a toolchain copy goes back to the registry, whatever the flag says`,
+      [arm("toolchain").startsWith(`toolchain) ensure_npm ${id} ${NPM_PACKAGES[id]} "`), arm("toolchain").endsWith('"; return 0 ;;')],
+      [true, true],
+    );
+    check(`an outside copy is named and left`, new RegExp(`^outside\\) outside_note "[^"]*" ${id}; return 0 ;;$`).test(arm("outside")), true);
+    check(
+      `a vendor copy is refused the registry under --source npm, and otherwise takes the vendor's own verb`,
+      [
+        new RegExp(`^\\s*if \\[ "\\$SOURCE" = npm \\]; then vendor_copy_stays "[^"]*" ${id}; return 0; fi$`, "m").test(vendorArm),
+        vendorArm.includes(VENDOR_REFRESH[id]),
+        /failed; keeping \$\(/.test(vendorArm),
+        /\bensure_npm\b/.test(vendorArm),
+      ],
+      [true, true, true, false],
+    );
+    check(
+      `and only an absent ${id} reads the flag: npm behind it, the vendor's download otherwise`,
+      [
+        new RegExp(`^  if \\[ "\\$SOURCE" = npm \\]; then ensure_npm ${id} ${NPM_PACKAGES[id]} "[^"]*"; return 0; fi$`, "m").test(afterCase),
+        new RegExp(`download ${id} https://`).test(afterCase),
+        afterCase.includes("install failed; this machine has no copy of it until the next run"),
+      ],
+      [true, true, true],
+    );
+  }
+  const npmCalls = agentLines.filter((line) => /\bensure_npm\b/.test(line) && !/^ensure_npm\(\)/.test(line));
+  const npmCallShapes = [
+    /^\s*toolchain\) ensure_npm \S+ \S+ "[^"]*"; return 0 ;;$/,
+    /^\s*if \[ "\$SOURCE" = npm \]; then ensure_npm \S+ \S+ "[^"]*"; return 0; fi$/,
+    /^\s*ensure_npm kimi \S+ "[^"]*"$/,
+  ];
+  check(
+    "every reach into the npm arm is a toolchain copy, an absent harness behind the flag, or kimi",
+    [npmCalls.filter((line) => !npmCallShapes.some((shape) => shape.test(line))), npmCalls.length],
+    [[], 2 * (AGENT_IDS.length - 1) + 1],
+  );
+
+  /*
+   * `ensure_npm` reads the same answer from its own side — absent is an install,
+   * toolchain a refresh, anything else somebody else's copy — and what it says on
+   * failure is decided by that verb, because the two leave different machines
+   * behind: a failed refresh leaves the previous build linked and running, and
+   * only a failed install leaves nothing. The version is read off the manifest
+   * npm wrote by the node beside that npm, as JSON; a `sed` anchored on the line
+   * start answered nothing on a one-line manifest and every run landed in a
+   * directory named by the clock — so nothing was ever "already the build on
+   * disk", and every nightly run repointed and pruned over an unchanged version.
+   * Both are driven below; this pins the order.
+   */
+  const ensureNpm = blockIn("agents.sh", agentLines, "ensure_npm", "ensure_npm() {", "}");
+  const ensureNpmLines = ensureNpm.split("\n").map((line) => line.trim());
+  const at = (startsWith: string): number => ensureNpmLines.findIndex((line) => line.startsWith(startsWith));
+  check(
+    "ensure_npm reads the same answer: absent is an install, toolchain a refresh, anything else somebody else's",
+    [
+      ensureNpmLines.includes('"") _verb=install ;;'),
+      ensureNpmLines.includes("toolchain) _verb=refresh ;;"),
+      ensureNpmLines.includes('*) outside_note "$_pad" "$_agent"; return 0 ;;'),
+    ],
+    [true, true, true],
+  );
+  check(
+    "a failure is said by what is true afterwards, and that differs by verb",
+    [
+      at('if [ "$_verb" = refresh ]; then') !== -1,
+      at('if [ "$_verb" = refresh ]; then') < at('warn "  $_pad refresh failed; keeping $('),
+      at('warn "  $_pad refresh failed; keeping $(') < at('warn "  $_pad install failed; this machine has no copy of it until the next run"'),
+    ],
+    [true, true, true],
+  );
+  const nodeRead = at(`_ver=$("$_node" -p 'require(process.argv[1]).version'`);
+  const sedRead = at(`[ -n "$_ver" ] || _ver=$(grep -o '"version": *"[^"]*"' "$_manifest" 2>/dev/null | head -1 | sed`);
+  const clockRead = at('[ -n "$_ver" ] || _ver=$(date +');
+  check("the version is read as JSON by node first, then as the first version key on the file, then off the clock", [nodeRead !== -1, sedRead > nodeRead, clockRead > sedRead], [true, true, true]);
+  check("with the node beside the npm that installed it", ensureNpmLines.includes('_node=$(dirname -- "$(command -v "$_npm")")/node'), true);
+  /*
+   * The one arm that is a warning rather than a note, since it is the state in
+   * which a harness rots: the vendor's own updater is the only thing that
+   * refreshes this copy and `--source npm` was set because that updater's host
+   * cannot be reached. Counted, so the daemon's daily run forwards it; naming the
+   * path, so it can be removed; naming the remedy, so somebody knows that
+   * removing it is enough.
+   */
+  const stays = blockIn("agents.sh", agentLines, "vendor_copy_stays", "vendor_copy_stays() {", "}");
+  check(
+    "a vendor copy under --source npm is a warning naming the path and the remedy, and it counts",
+    [
+      /^\s*warn "  \$1 \$\("\$2" --version[^\n]* at \$\(command -v "\$2"\) was installed by the vendor's installer, which --source npm does not reach; remove it and the next run installs from the npm registry"$/m.test(stays),
+      stays.includes("failed=$((failed + 1))"),
+    ],
+    [true, true],
+  );
+  check(
+    "and the summary counts against the four rather than a number retyped elsewhere",
+    agents.includes(`warn "  $failed of ${AGENT_IDS.length} agents were not installed or refreshed; the lines above say why"`),
+    true,
+  );
+
+  /*
+   * **Run, not only read.** A sandbox home, a PATH of the system directories plus a
+   * fake `npm` and a real `node`, and first `--check`, so nothing is downloaded and
+   * nothing executed — what is measured is the argument parser, the dry run's
+   * honesty about what it would do, and the refusals that cost nothing to reach.
+   * The real runs against the fake registry follow.
+   *
+   * **A registry with nothing behind it.** `npm i -g --prefix <p> <pkg>@latest` is
+   * the one shape `ensure_npm` calls, and this answers it the way the real one does
+   * as far as the script can see: an executable `<p>/bin/<agent>` that prints the
+   * build it is, and the manifest npm writes at
+   * `<p>/lib/node_modules/<pkg>/package.json` — on **one line**, which is what a
+   * published manifest looks like and what the line-anchored `sed` that used to
+   * read them answered nothing on. `FAKE_VER` is the build the registry has today;
+   * `FAKE_FAIL` names the one package it refuses, exit 1, the way a registry a
+   * firewall stops does. Anything else is a fake being asked a question the real
+   * one was never asked — exit 3 with the argv on stderr, which no branch of the
+   * script reads as success.
+   *
+   * Keyed on `NPM_PACKAGES` rather than a second list: a package the script asks
+   * for that this map does not know is exit 3 and a red run, not a directory
+   * named after a typo. The `node` is this process's own, linked in beside the
+   * fake: `ensure_npm` reads the manifest with the node *beside the npm it found*,
+   * so the one on PATH has to sit in the same directory to be the one measured.
+   */
+  const agentsPath = join(repoRoot, "deploy/agents.sh");
+  const agentsHome = join(sandbox, "agents-home");
+  const agentsStubs = join(sandbox, "agents-stubs");
+  mkdirSync(agentsHome, { recursive: true });
+  mkdirSync(agentsStubs, { recursive: true });
+  writeFileSync(
+    join(agentsStubs, "npm"),
+    [
+      "#!/bin/sh",
+      '[ "$#" = 5 ] && [ "$1" = i ] && [ "$2" = -g ] && [ "$3" = --prefix ] || { echo "fake npm: unexpected argv: $*" >&2; exit 3; }',
+      'prefix=$4',
+      'pkg=${5%@latest}',
+      '[ "$pkg" != "$5" ] || { echo "fake npm: not @latest: $5" >&2; exit 3; }',
+      '[ "$pkg" != "${FAKE_FAIL:-}" ] || exit 1',
+      'case "$pkg" in',
+      ...AGENT_IDS.map((id) => `  ${NPM_PACKAGES[id]}) agent=${id} ;;`),
+      '  *) echo "fake npm: unknown package $pkg" >&2; exit 3 ;;',
+      "esac",
+      'mkdir -p "$prefix/bin" "$prefix/lib/node_modules/$pkg"',
+      "printf '#!/bin/sh\\necho %s\\n' \"${FAKE_VER:-1.0.0}\" > \"$prefix/bin/$agent\"",
+      'chmod 755 "$prefix/bin/$agent"',
+      "printf '{\"name\":\"%s\",\"version\":\"%s\"}\\n' \"$pkg\" \"${FAKE_VER:-1.0.0}\" > \"$prefix/lib/node_modules/$pkg/package.json\"",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(join(agentsStubs, "npm"), 0o755);
+  symlinkSync(process.execPath, join(agentsStubs, "node"));
+  const runAgents = (args: string[], env: Record<string, string> = {}): Run => {
+    const run = spawnSync("sh", [agentsPath, ...args], {
+      encoding: "utf8",
+      env: { HOME: agentsHome, PATH: `/usr/bin:/bin:${agentsStubs}`, TMPDIR: sandbox, ...env },
+      input: "",
+      timeout: 60_000,
+    });
+    return { status: run.status ?? -1, out: run.stdout ?? "", err: run.stderr ?? "" };
+  };
+  check("an unknown flag is refused with 2", runAgents(["--bogus"]).status, 2);
+  const bareSkip = runAgents(["--skip"]);
+  check("and so is --skip with no name", [bareSkip.status, bareSkip.err.includes("--skip needs an agent name")], [2, true]);
+  /*
+   * `--source` takes two spellings and nothing else. The daemon passes it from
+   * `REEMOAT_AGENT_SOURCE` after reading the same two, so a third value reaching
+   * here is a bug in the daemon rather than a choice — refused with the same 2 as
+   * an unknown flag, and by name, because the alternative is a run that read
+   * `bogus` as `vendor` and never said so.
+   */
+  const badSource = runAgents(["--source", "bogus"]);
+  check("--source with a value it does not know is refused by name", [badSource.status, badSource.err.includes("--source takes vendor or npm, not bogus")], [2, true]);
+  const bareSource = runAgents(["--source"]);
+  check("and so is --source with no value", [bareSource.status, bareSource.err.includes("--source needs vendor or npm")], [2, true]);
+  const dry = runAgents(["--check", "--skip", "kimi"]);
+  check("--check exits 0 and says nothing will be changed", [dry.status, dry.out.includes("nothing will be changed")], [0, true]);
+  // The header names the source, because a machine's operator reading the daemon's
+  // warning has to be able to tell which door the run went through.
+  check("and which installer it would have used", dry.out.includes("with each vendor's own installer"), true);
+  check(
+    "and claims only what would happen",
+    [/claude\s+would install/.test(dry.out), /would download https:\/\/claude\.ai/.test(dry.out), /installed/.test(dry.out.replace(/would install/g, ""))],
+    [true, true, false],
+  );
+  check("with kimi named as an install into its own directory", /kimi-<version>/.test(dry.out), true);
+  const ownKimi = join(sandbox, "own-kimi");
+  mkdirSync(ownKimi, { recursive: true });
+  writeFileSync(join(ownKimi, "kimi"), "#!/bin/sh\necho 0.29.2\n");
+  chmodSync(join(ownKimi, "kimi"), 0o755);
+  const outside = runAgents(["--check"], { PATH: `/usr/bin:/bin:${agentsStubs}:${ownKimi}` });
+  check("an operator's own kimi is named and left alone", /kimi\s+0\.29\.2 — installed outside reemoat/.test(outside.out), true);
+  const pinnedRun = runAgents(["--check"], { CLAUDE_CODE_EXECUTABLE: "/x/claude", CODEX_PATH: "/x/codex" });
+  check(
+    "and so is a harness whose binary an operator named",
+    [/claude\s+left alone/.test(pinnedRun.out), /codex\s+left alone/.test(pinnedRun.out), /claude\s+would/.test(pinnedRun.out)],
+    [true, true, false],
+  );
+
+  /*
+   * **The same dry run through the other door.** What `--source npm` has to say
+   * is different for every harness — the package, the versioned directory and the
+   * symlink it would repoint — and the same in one respect: nothing is fetched
+   * from a vendor, which is the whole reason the door exists.
+   */
+  const npmDry = runAgents(["--check", "--source", "npm"]);
+  check("--check --source npm exits 0 and names the registry", [npmDry.status, npmDry.out.includes("from the npm registry")], [0, true]);
+  check(
+    "and says, per harness, which package into which directory",
+    AGENT_IDS.filter((id) => !new RegExp(`^  ${id}: would run: \\S*npm i -g --prefix \\S*/${id}-<version> ${NPM_PACKAGES[id]}@latest, then repoint \\S*/bin/${id}$`, "m").test(npmDry.out)),
+    [],
+  );
+  check("and that each would be an install", AGENT_IDS.filter((id) => !new RegExp(`^  ${id}\\s+would install$`, "m").test(npmDry.out)), []);
+  check("with nothing fetched from a vendor", /would download|claude update|codex update|opencode upgrade/.test(npmDry.out), false);
+  /*
+   * An operator's own copy wins under either source, and the reason is the
+   * daemon's rule rather than this script's: `findOnPath` walks `PATH` before
+   * `MANAGED_CLI_DIRS`, so a managed copy beside a Homebrew or global-npm one could
+   * never be the one that runs, and installing it would be ~100 MB to produce a
+   * file nothing executes while reporting success.
+   */
+  const ownClaude = join(sandbox, "own-claude");
+  mkdirSync(ownClaude, { recursive: true });
+  writeFileSync(join(ownClaude, "claude"), "#!/bin/sh\necho '2.1.259 (Claude Code)'\n");
+  chmodSync(join(ownClaude, "claude"), 0o755);
+  const npmOutside = runAgents(["--check", "--source", "npm"], { PATH: `/usr/bin:/bin:${agentsStubs}:${ownClaude}` });
+  check(
+    "under npm an operator's own claude is named and left alone",
+    [/claude\s+2\.1\.259 \(Claude Code\) — installed outside reemoat, not updated from here/.test(npmOutside.out), /claude: would run/.test(npmOutside.out)],
+    [true, false],
+  );
+  check("while the other three would still be installed", ["codex", "opencode", "kimi"].filter((id) => !new RegExp(`^  ${id}: would run: `, "m").test(npmOutside.out)), []);
+  // And an override outranks the door too: the daemon never looks past one, so a
+  // copy installed beside it from the registry would be the same download nothing runs.
+  const npmPinned = runAgents(["--check", "--source", "npm"], { CLAUDE_CODE_EXECUTABLE: "/x/claude", CODEX_PATH: "/x/codex" });
+  check(
+    "and so is a harness whose binary an operator named",
+    [/claude\s+left alone/.test(npmPinned.out), /codex\s+left alone/.test(npmPinned.out), /(claude|codex): would run/.test(npmPinned.out), /kimi: would run/.test(npmPinned.out)],
+    [true, true, false, true],
+  );
+  // And under vendor too: outside is outside whichever door is open, since the
+  // reason is the daemon's lookup order and not the flag.
+  const vendorOutside = runAgents(["--check"], { PATH: `/usr/bin:/bin:${agentsStubs}:${ownClaude}` });
+  check(
+    "and under vendor an operator's own claude is the same sentence, and no verb",
+    [/claude\s+2\.1\.259 \(Claude Code\) — installed outside reemoat, not updated from here/.test(vendorOutside.out), /claude: would run|claude\s+would/.test(vendorOutside.out)],
+    [true, false],
+  );
+
+  /*
+   * **The npm door, for real.** Everything above is `--check`; what follows runs
+   * `--source npm` against the fake registry and reads the toolchain afterwards,
+   * because the properties that matter here are on disk rather than in the
+   * output: a versioned directory per build, a symlink that is the only thing
+   * repointed, a previous build kept for exactly as long as `--skip` says, a
+   * stage that never survives a failure. Every case is a state the daily run
+   * reaches on a real machine, in the order it reaches them.
+   */
+  const toolchainOf = (h: string): string => join(h, ".reemoat", "toolchain");
+  const buildsOf = (h: string, id: string): string[] =>
+    existsSync(toolchainOf(h))
+      ? readdirSync(toolchainOf(h)).filter((name) => name.startsWith(`${id}-`) || name.startsWith(`${id}.stage.`)).sort()
+      : [];
+  const linkOf = (h: string, id: string): string | null => {
+    try {
+      return readlinkSync(join(toolchainOf(h), "bin", id));
+    } catch {
+      // No symlink there at all — which is an answer several cases below want, so
+      // it is a value rather than a throw.
+      return null;
+    }
+  };
+  const buildOf = (h: string, id: string, ver: string): string => join(toolchainOf(h), `${id}-${ver}`, "bin", id);
+  const saysEach = (out: string, verb: string, ver: string, ids: readonly string[] = AGENT_IDS): string[] =>
+    ids.filter((id) => !new RegExp(`^  ${id}\\s+${verb} ${ver.replace(/\./g, "\\.")}$`, "m").test(out));
+
+  const npmHome = join(sandbox, "agents-npm-home");
+  mkdirSync(npmHome, { recursive: true });
+  const first = runAgents(["--source", "npm"], { HOME: npmHome, FAKE_VER: "1.0.0" });
+  check("--source npm on a fresh home exits 0 with nothing on stderr", [first.status, first.err], [0, ""]);
+  check("and installs all four, each into a directory named by its build", AGENT_IDS.map((id) => buildsOf(npmHome, id)), AGENT_IDS.map((id) => [`${id}-1.0.0`]));
+  check("each reached through a symlink under bin", AGENT_IDS.map((id) => linkOf(npmHome, id)), AGENT_IDS.map((id) => buildOf(npmHome, id, "1.0.0")));
+  check("that runs", spawnSync(join(toolchainOf(npmHome), "bin", "claude"), ["--version"], { encoding: "utf8" }).stdout, "1.0.0\n");
+  check("and each says it was an install, with the build it now runs", saysEach(first.out, "install", "1.0.0"), []);
+
+  /*
+   * The daily run with a newer build on the registry and one harness live. The
+   * install still happens and the symlink still moves — that is the invariant
+   * `--skip` does not touch — and the only difference is the build the live
+   * agent may be on, kept and said so, against the one nothing is on, pruned.
+   */
+  const second = runAgents(["--source", "npm", "--skip", "claude"], { HOME: npmHome, FAKE_VER: "2.0.0" });
+  check("a newer build on the registry is a refresh of all four", [second.status, second.err, saysEach(second.out, "refresh", "2.0.0")], [0, "", []]);
+  check("that repoints every symlink", AGENT_IDS.map((id) => linkOf(npmHome, id)), AGENT_IDS.map((id) => buildOf(npmHome, id, "2.0.0")));
+  check(
+    "keeps the build a live agent may be on, and says so",
+    [buildsOf(npmHome, "claude"), /^  claude\s+previous build kept: an agent is using it$/m.test(second.out)],
+    [["claude-1.0.0", "claude-2.0.0"], true],
+  );
+  check("and prunes the one nothing is on", ["codex", "opencode", "kimi"].map((id) => buildsOf(npmHome, id)), [["codex-2.0.0"], ["opencode-2.0.0"], ["kimi-2.0.0"]]);
+
+  /*
+   * The run after that, with nothing newer: the build on disk is already the
+   * build the registry has, so nothing moves — asserted by inode rather than by
+   * name, since a stage renamed over the old directory would carry the same
+   * name — and the build kept last night, with no agent on it now, goes.
+   */
+  const codexInode = statSync(join(toolchainOf(npmHome), "codex-2.0.0")).ino;
+  const third = runAgents(["--source", "npm"], { HOME: npmHome, FAKE_VER: "2.0.0" });
+  check("the same build again is a refresh that moves nothing", [third.status, third.err, saysEach(third.out, "refresh", "2.0.0")], [0, "", []]);
+  check("leaving the directory that was already there", statSync(join(toolchainOf(npmHome), "codex-2.0.0")).ino, codexInode);
+  check("and exactly one build per harness, the kept one pruned now that nothing is on it", AGENT_IDS.map((id) => buildsOf(npmHome, id)), AGENT_IDS.map((id) => [`${id}-2.0.0`]));
+  check("with every symlink where it was", AGENT_IDS.map((id) => linkOf(npmHome, id)), AGENT_IDS.map((id) => buildOf(npmHome, id, "2.0.0")));
+
+  /*
+   * A registry that refuses one refresh. What is true afterwards is that the
+   * previous build is still linked and running, and the warning has to say that
+   * rather than "no copy" — and the stage the failed install was going into has
+   * to be gone, or every failed night leaves one more directory under the toolchain.
+   */
+  const refused = runAgents(["--source", "npm"], { HOME: npmHome, FAKE_VER: "2.0.0", FAKE_FAIL: NPM_PACKAGES.codex });
+  check(
+    "a refresh the registry refuses warns, naming the build kept, exit 0",
+    [refused.status, /^  codex\s+refresh failed; keeping 2\.0\.0$/m.test(refused.err), refused.err.includes(`1 of ${AGENT_IDS.length} agents were not installed or refreshed`)],
+    [0, true, true],
+  );
+  check("with the symlink still on that build and no stage left behind", [linkOf(npmHome, "codex"), buildsOf(npmHome, "codex")], [buildOf(npmHome, "codex", "2.0.0"), ["codex-2.0.0"]]);
+  check("and the other three refreshed regardless", saysEach(refused.out, "refresh", "2.0.0", ["claude", "opencode", "kimi"]), []);
+
+  /*
+   * **The flag switched on a machine that already has its agents.** Every copy
+   * here came from npm, so under `--source vendor` every one goes back to npm —
+   * the door it came in by — and nothing is fetched from a vendor. The header
+   * still names the flag, because that is what the daemon's warning has to be
+   * read against; the arms name the door.
+   */
+  const backThroughNpm = runAgents(["--source", "vendor", "--check"], { HOME: npmHome });
+  check(
+    "under --source vendor a copy npm installed is still refreshed from npm",
+    [
+      backThroughNpm.status,
+      backThroughNpm.out.includes("with each vendor's own installer"),
+      AGENT_IDS.filter((id) => !new RegExp(`^  ${id}: would run: \\S*npm i -g --prefix \\S*/${id}-<version> ${NPM_PACKAGES[id]}@latest, then repoint \\S*/bin/${id}$`, "m").test(backThroughNpm.out)),
+      AGENT_IDS.filter((id) => !new RegExp(`^  ${id}\\s+would refresh$`, "m").test(backThroughNpm.out)),
+      /would download|claude update|codex update|opencode upgrade/.test(backThroughNpm.out),
+    ],
+    [0, true, [], [], false],
+  );
+
+  /*
+   * **And the other direction, which is the one a switch cannot finish.** A claude
+   * the vendor's installer put in `~/.local/bin` — the case that read as "outside
+   * reemoat" before `provenance` existed — under `--source npm` is the warning,
+   * counted, with nothing installed beside it: the daemon would never run a
+   * managed copy behind it, so a download there is a file nothing executes. Under
+   * `--source vendor` the same copy takes the vendor's own verb, while the three
+   * npm installed beside it go back to npm whatever the flag.
+   */
+  const vendorHome = join(sandbox, "agents-vendor-home");
+  const vendorClaude = join(vendorHome, ".local", "bin", "claude");
+  mkdirSync(dirname(vendorClaude), { recursive: true });
+  writeFileSync(vendorClaude, "#!/bin/sh\necho '2.1.259 (Claude Code)'\n");
+  chmodSync(vendorClaude, 0o755);
+  const staysWarning = ` at ${vendorClaude} was installed by the vendor's installer, which --source npm does not reach; remove it and the next run installs from the npm registry`;
+  const vendorCopy = runAgents(["--source", "npm"], { HOME: vendorHome, FAKE_VER: "1.0.0" });
+  check(
+    "a vendor-installed claude under --source npm is a warning on stderr, naming the path and the remedy",
+    [vendorCopy.status, /^  claude\s+2\.1\.259 \(Claude Code\) at /m.test(vendorCopy.err), vendorCopy.err.includes(staysWarning)],
+    [0, true, true],
+  );
+  check("counted as one the run could not refresh", vendorCopy.err.includes(`1 of ${AGENT_IDS.length} agents were not installed or refreshed`), true);
+  check(
+    "with nothing installed beside it, while the other three are",
+    [buildsOf(vendorHome, "claude"), linkOf(vendorHome, "claude"), saysEach(vendorCopy.out, "install", "1.0.0", ["codex", "opencode", "kimi"])],
+    [[], null, []],
+  );
+  check("and --check says the same, since it is a refusal and not an act", runAgents(["--source", "npm", "--check"], { HOME: vendorHome }).err.includes(staysWarning), true);
+  const vendorDoor = runAgents(["--source", "vendor", "--check"], { HOME: vendorHome });
+  check(
+    "under --source vendor the same copy is refreshed by the vendor's own verb",
+    [vendorDoor.status, vendorDoor.err, /^  claude: would run: claude update$/m.test(vendorDoor.out), /^  claude\s+would refresh$/m.test(vendorDoor.out)],
+    [0, "", true, true],
+  );
+  check("while the three npm installed beside it go back to npm", ["codex", "opencode", "kimi"].filter((id) => !new RegExp(`^  ${id}: would run: \\S*npm i -g`, "m").test(vendorDoor.out)), []);
+
+  /*
+   * An operator's own copy, for real rather than under `--check`: a run under
+   * `npm` with a claude on PATH from somewhere else installs the other three and
+   * writes nothing for claude, since a managed copy could never be the one that runs.
+   */
+  const outsideHome = join(sandbox, "agents-outside-home");
+  mkdirSync(outsideHome, { recursive: true });
+  const outsideRun = runAgents(["--source", "npm"], { HOME: outsideHome, FAKE_VER: "1.0.0", PATH: `/usr/bin:/bin:${agentsStubs}:${ownClaude}` });
+  check(
+    "a run under npm installs nothing beside an operator's own claude, and says whose it is",
+    [outsideRun.status, outsideRun.err, /^  claude\s+2\.1\.259 \(Claude Code\) — installed outside reemoat, not updated from here$/m.test(outsideRun.out), buildsOf(outsideHome, "claude"), saysEach(outsideRun.out, "install", "1.0.0", ["codex", "opencode", "kimi"])],
+    [0, "", true, [], []],
+  );
+
+  /*
+   * A registry that refuses an *install*, on a fresh machine. There is no floor
+   * under it any more, so the warning has to say what that now costs — a harness
+   * absent until the next run — and nothing half-made may be left: no build, no
+   * symlink to nowhere, no stage.
+   */
+  const failHome = join(sandbox, "agents-fail-home");
+  mkdirSync(failHome, { recursive: true });
+  const noCopy = runAgents(["--source", "npm"], { HOME: failHome, FAKE_VER: "1.0.0", FAKE_FAIL: NPM_PACKAGES.claude });
+  check(
+    "an install the registry refuses says what that costs now, exit 0",
+    [noCopy.status, /^  claude\s+install failed; this machine has no copy of it until the next run$/m.test(noCopy.err), noCopy.err.includes(`1 of ${AGENT_IDS.length} agents were not installed or refreshed`)],
+    [0, true, true],
+  );
+  check("and leaves no half-made build, no symlink and no stage", [buildsOf(failHome, "claude"), linkOf(failHome, "claude"), existsSync(join(toolchainOf(failHome), "bin", "claude"))], [[], null, false]);
+  check(
+    "while the other three are installed",
+    AGENT_IDS.filter((id) => id !== "claude").map((id) => buildsOf(failHome, id)),
+    AGENT_IDS.filter((id) => id !== "claude").map((id) => [`${id}-1.0.0`]),
+  );
+
+  // The shape `bootstrap.sh` is held to, for the same reason: a truncated download
+  // must define functions and then do nothing, rather than half-run.
+  const agentCode = agentLines.filter((line) => line.trim().length > 0);
+  check("everything runs from one call on the last line", agentCode.at(-1), 'main "$@"');
+  check("and nothing else calls it", agentCode.filter((line) => /^main /.test(line)).length, 1);
+
+  /*
+   * **And the installer calls it, before the daemon exists.**
+   *
+   * ⚠ **Order is the assertion, not presence.** `hand_off` is where the unit is
+   * rendered and the service started, so a call after it means the first thing
+   * somebody sees is an app whose agents are missing — working, which is why
+   * nothing would fail, and empty, which is the whole complaint this closes.
+   */
+  const boot = readFileSync(join(repoRoot, "deploy/bootstrap.sh"), "utf8");
+  const bootLines = boot.split("\n");
+  const bootBody = bootLines.filter((line) => !/^\s*#/.test(line));
+  check("the installer defines the agent step", bootBody.filter((line) => /^install_agents\(\)/.test(line)).length, 1);
+  const callsAgents = bootBody.findIndex((line) => /^\s+install_agents$/.test(line));
+  const callsHandOff = bootBody.findIndex((line) => /^\s+hand_off$/.test(line));
+  check("and calls it exactly once", bootBody.filter((line) => /^\s+install_agents$/.test(line)).length, 1);
+  check(
+    "before the unit is rendered and the daemon started",
+    callsAgents > 0 && callsHandOff > 0 && callsAgents < callsHandOff,
+    true,
+  );
+
+  /*
+   * **One answer, given twice, and the two must agree (Q4.114).** The installer's
+   * first run of the script and the daemon's daily one have to take the same door,
+   * or a machine installed from a mirror refreshes from the vendors the next
+   * morning — through a firewall that refuses, with a warning and a harness that
+   * stops moving. So `--agent-source` is a flag the bootstrap validates itself,
+   * passes to its own run as `--source`, and writes into the env file for the
+   * daemon's, **only when it is not the default**: an env file says what somebody
+   * chose and nothing else, and the daemon reads an absent value as `vendor`.
+   * Each of those is a line, and each is asserted as one, inside the function it
+   * belongs to — the `write_env_file` arm is the one where the argument order is
+   * load-bearing, since the test inside the `sh -c` reads `$2` and only the call
+   * line says that `$2` is `AGENT_SOURCE`.
+   */
+  const bootFn = (name: string): string => blockIn("bootstrap.sh", bootLines, name, `${name}() {`, "}");
+  check("the bootstrap defaults the agent source", lineIn("bootstrap.sh", bootLines, "the agent-source default", "AGENT_SOURCE="), "AGENT_SOURCE=vendor");
+  const parseFlags = bootFn("parse_flags");
+  check(
+    "and parse_flags takes --agent-source, refusing any third spelling by name",
+    [/--agent-source\)/.test(parseFlags), /vendor \| npm\) ;;/.test(parseFlags), parseFlags.includes('die "--agent-source takes vendor or npm, not $AGENT_SOURCE"')],
+    [true, true, true],
+  );
+  check("usage documents the flag and both values", [/--agent-source <src>/.test(bootFn("usage")), /`vendor`/.test(bootFn("usage")), /`npm`/.test(bootFn("usage"))], [true, true, true]);
+  check("install_agents passes it to the script as --source", bootFn("install_agents").includes('"$CHECKOUT/deploy/agents.sh" --source "$AGENT_SOURCE"'), true);
+  const writeEnv = bootFn("write_env_file");
+  check(
+    "and write_env_file writes it for the daemon only when it is npm",
+    [
+      bootBody.filter((line) => /set_env REEMOAT_AGENT_SOURCE/.test(line)).length,
+      /^\s*if \[ "\$2" = npm \]; then set_env REEMOAT_AGENT_SOURCE npm "\$_env"; fi$/m.test(writeEnv),
+      /^\s*' "\$CHECKOUT\/deploy\/lib\.sh" "\$CP" "\$AGENT_SOURCE"/m.test(writeEnv),
+    ],
+    [1, true, true],
+  );
+
+  /*
+   * **And that arm, run.** The text check pins the line; this lifts the body the
+   * bootstrap hands to `sh -c` out of it and runs it with the real `lib.sh` as its
+   * `$0` — the trick the comment above the function describes, since `lib.sh`
+   * derives `DEPLOY_DIR` from `$0` and under `curl | sh` that is the bare string
+   * `sh`. `env_file` honours `REEMOAT_ENV_FILE`, so the file lands in the sandbox
+   * while the real `.env.example` is what it is seeded from; the code arrives on
+   * stdin, as it does from `printf`. What a run under `vendor` writes is the
+   * assertion that matters: no source line at all, so the file says what somebody
+   * chose and nothing else.
+   */
+  const envBody = /sh -c '([\s\S]*?)' "\$CHECKOUT\/deploy\/lib\.sh"/.exec(writeEnv)?.[1];
+  check("write_env_file's body can be lifted out of it", envBody !== undefined, true);
+  const envHome = join(sandbox, "bootstrap-env-home");
+  const writeEnvRun = (source: string): { run: Run; file: string } => {
+    const file = join(envHome, source, "daemon.env");
+    const run = spawnSync("sh", ["-c", envBody ?? "false", join(deployDir, "lib.sh"), "https://cp.example", source], {
+      encoding: "utf8",
+      env: { ...baseEnv, HOME: envHome, REEMOAT_ENV_FILE: file },
+      input: "code-1",
+    });
+    return { run: { status: run.status ?? -1, out: run.stdout ?? "", err: run.stderr ?? "" }, file };
+  };
+  const valueIn = (file: string, key: string): string => sh(`file_value "${file}" ${key}`).out;
+  const npmEnv = writeEnvRun("npm");
+  check(
+    "under npm it writes the control plane, the code and the source, and prints where",
+    [
+      npmEnv.run.status,
+      npmEnv.run.out,
+      valueIn(npmEnv.file, "REEMOAT_AUTH"),
+      valueIn(npmEnv.file, "REEMOAT_CONTROL_PLANE"),
+      valueIn(npmEnv.file, "REEMOAT_ENROLL_CODE"),
+      valueIn(npmEnv.file, "REEMOAT_AGENT_SOURCE"),
+    ],
+    [0, npmEnv.file, "signed", "https://cp.example", "code-1", "npm"],
+  );
+  check("into a directory and a file closed to everybody else", [statSync(dirname(npmEnv.file)).mode & 0o777, statSync(npmEnv.file).mode & 0o777], [0o700, 0o600]);
+  const vendorEnv = writeEnvRun("vendor");
+  check(
+    "and under vendor the same file with no source line at all",
+    [
+      vendorEnv.run.status,
+      valueIn(vendorEnv.file, "REEMOAT_CONTROL_PLANE"),
+      valueIn(vendorEnv.file, "REEMOAT_AGENT_SOURCE"),
+      readFileSync(vendorEnv.file, "utf8").split("\n").filter((line) => /^REEMOAT_AGENT_SOURCE=/.test(line)),
+    ],
+    [0, "https://cp.example", "", []],
+  );
+
+  /*
+   * **`install_node` removes node's own files and never the directory.** The
+   * toolchain also holds every npm-installed harness — kimi always, all four
+   * under `--agent-source npm` — each in a versioned directory a live session may
+   * be on, and this was `rm -rf "$TOOLCHAIN"`: a re-run that found node missing
+   * or too old took every one of them with it (Q4.114). The list is the tarball's
+   * top level; what is pinned is that it is a list, that node's own binaries are
+   * on it, that nothing on it is a directory the harnesses live under, and that
+   * it runs before the unpack rather than after.
+   */
+  const installNode = bootFn("install_node");
+  // Code lines only: the function's own comment names the line that was wrong,
+  // which is the measurement and may stay — the same rule the `agents.sh`
+  // negatives above follow.
+  const installNodeCode = installNode.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
+  const removed = (/^\s*for _f in ([^;]*); do$/m.exec(installNodeCode)?.[1] ?? "").trim().split(/\s+/);
+  check("install_node never removes the toolchain directory itself", /rm -rf "\$TOOLCHAIN"(?!\/)/.test(installNodeCode), false);
+  check(
+    "and removes node's own files by name, before unpacking over them",
+    [
+      ["bin/node", "bin/npm", "bin/npx", "bin/corepack", "lib/node_modules/npm", "lib/node_modules/corepack"].filter((one) => !removed.includes(one)),
+      removed.filter((one) => ["bin", "lib", "lib/node_modules", ".", ""].includes(one)),
+      /^\s*rm -rf "\$TOOLCHAIN\/\$_f"$/m.test(installNode),
+      installNode.indexOf("for _f in") < installNode.indexOf("tar -xzf"),
+    ],
+    [[], [], true, true],
+  );
+
+  /*
+   * And the agents script gets node's directory in front of PATH from the
+   * installer, in a subshell so nothing after it inherits the change: the npm
+   * arm needs an `npm` and a `node`, and with `--node` naming one off PATH there
+   * would otherwise be neither — every npm-installed harness "skipped: no npm to
+   * install it with" on a machine that had just installed one.
+   */
+  const agentsCall = bootFn("install_agents").split("\n").find((line) => line.includes("deploy/agents.sh")) ?? "";
+  check(
+    "install_agents runs the script with the installed node's directory in front",
+    agentsCall.trim().startsWith('( PATH="$(dirname -- "$NODE_BIN"):$PATH" "$CHECKOUT/deploy/agents.sh" --source "$AGENT_SOURCE" )'),
+    true,
+  );
+
+  /*
+   * `--agent-source` on a machine that is already set up would be accepted and
+   * change nothing: the install writes it and the daemon reads it, and neither
+   * happens on "Update", which is `deploy.sh` reading the env file. So whether
+   * the flag was *given* is remembered separately from its value — the value
+   * defaults to `vendor` either way — and `existing_install` refuses it, naming
+   * where the setting lives now and the script that would apply it today, before
+   * any menu or non-interactive exit. And only *after* the env file has been
+   * found and read, since a fresh machine given the flag must carry on and
+   * install with it.
+   */
+  check("the bootstrap remembers whether --agent-source was given, defaulting to not", lineIn("bootstrap.sh", bootLines, "the agent-source-given default", "AGENT_SOURCE_GIVEN="), "AGENT_SOURCE_GIVEN=0");
+  const flagLines = parseFlags.split("\n").map((line) => line.trim());
+  const sourceArm = flagLines.indexOf("--agent-source)");
+  check(
+    "parse_flags sets it as the arm's first act after taking the value",
+    [sourceArm !== -1, flagLines[sourceArm + 1]?.startsWith('AGENT_SOURCE="${2:-}"; need_value "--agent-source"'), flagLines[sourceArm + 2]],
+    [true, true, "AGENT_SOURCE_GIVEN=1"],
+  );
+  const existing = bootFn("existing_install").split("\n").map((line) => line.trim());
+  const boundRead = existing.indexOf('[ -n "$_bound" ] || return 1');
+  const flagRefused = existing.findIndex((line) => line.startsWith('[ "$AGENT_SOURCE_GIVEN" = 0 ] || die "already set up here, so --agent-source changes nothing.'));
+  const nonTty = existing.findIndex((line) => line.startsWith('if [ "$TTY_OPEN" != 1 ]; then'));
+  const menuAt = existing.findIndex((line) => line.includes('menu "Already joined'));
+  check("existing_install refuses the flag on a machine that is already set up", flagRefused !== -1, true);
+  check(
+    "after the env file is read, so a fresh machine given the flag carries on, and before any menu or non-interactive exit",
+    [boundRead !== -1 && boundRead < flagRefused, nonTty !== -1 && flagRefused < nonTty, menuAt !== -1 && flagRefused < menuAt],
+    [true, true, true],
+  );
+  check(
+    "naming where the setting lives now, and the script that would apply it today",
+    [
+      existing.slice(flagRefused, flagRefused + 3).join("\n").includes("REEMOAT_AGENT_SOURCE=$AGENT_SOURCE in $_env"),
+      existing.slice(flagRefused, flagRefused + 3).join("\n").includes("deploy/agents.sh --source $AGENT_SOURCE"),
+    ],
+    [true, true],
+  );
+  /*
+   * The vendor hostnames stay in `agents.sh`. `bootstrap.sh` is held to a sieve
+   * saying the only lines naming a host are the ones resolving a control plane, and
+   * inlining a `curl https://claude.ai/install.sh` here would go red against it —
+   * which is the right outcome, and this states why rather than leaving it to be
+   * rediscovered.
+   *
+   * ⚠ **Named in prose is allowed; fetched from is not** — the same line the
+   * control-plane sieve draws. `--agent-source`'s usage text has to say *which*
+   * hosts `npm` is the answer to, or the flag is documented for exactly the
+   * operator who cannot tell whether they need it; so the test is a URL, not a
+   * word. The registry's own host may not appear even as a word: `npm` is pointed
+   * at a mirror through its own configuration, and a bootstrap that named the
+   * public registry would be one edit from writing it into that configuration.
+   */
+  check("and names no vendor of its own", /https?:\/\/(claude\.ai|chatgpt\.com|opencode\.ai)|registry\.npmjs/.test(boot), false);
+}
+
 /* ------------------------------------------------------------------ *
  * the setting that decides what a rate limit counts
  * ------------------------------------------------------------------ */
@@ -1337,6 +2302,30 @@ function blockIn(file: string, lines: readonly string[], what: string, startsWit
     return "false # not found";
   }
   return lines.slice(start, end + 1).join("\n");
+}
+
+/**
+ * One arm of a `case`, from the line whose trimmed text is `<label>)` to the
+ * `;;` that closes it.
+ *
+ * `blockIn` cannot reach these: an arm's closer sits two columns *deeper* than
+ * its opener in this repository's style (`    daemon)` … `      ;;`), so the
+ * same-column rule that makes `blockIn` exact for a function or an `if` finds
+ * nothing here. The closer is found by that indentation rather than as the next
+ * `;;` at all, because an arm may hold a `case` of its own — `deploy.sh`'s daemon
+ * arm switches on the daily-refresh switch — and the first `;;` after the opener
+ * is then the inner arm's, which cut the extract off before the call it was
+ * meant to reach. Empty on a miss rather than a placeholder, because every caller
+ * goes on to assert something the arm contains — and an empty string contains
+ * none of it.
+ */
+function armOf(block: string, label: string): string {
+  const lines = block.split("\n");
+  const start = lines.findIndex((line) => line.trim() === `${label})`);
+  if (start === -1) return "";
+  const closer = `${" ".repeat((/^\s*/.exec(lines[start] ?? "")?.[0].length ?? 0) + 2)};;`;
+  const end = lines.findIndex((line, i) => i > start && line === closer);
+  return end === -1 ? "" : lines.slice(start, end + 1).join("\n");
 }
 
 const installLine = (what: string, startsWith: string): string => lineIn("install.sh", installLines, what, startsWith);
@@ -1978,6 +2967,177 @@ process.stdout.write("\nwhat a deploy says a restart will cost\n");
   const saysTunnelsDrop = (svc: string): boolean => /\bdrops?\b/i.test(announced(svc).join(" "));
   check("the relay's line is the one that says tunnels drop", saysTunnelsDrop("relay"), true);
   check("and the control plane's does not, because after the split it does not", saysTunnelsDrop("control-plane"), false);
+}
+
+/* ------------------------------------------------------------------ *
+ * What a deploy does to the agents, before it decides on a restart
+ *
+ * `pnpm install` brings no coding agent (Q4.114), so a daemon upgraded from a
+ * release that vendored them under `node_modules` would come back up with no
+ * `claude` and no `codex` — every interrupted session on those harnesses
+ * refused by `autoResume` — until its own first run, five minutes after start.
+ * So the daemon arm runs `deploy/agents.sh` itself, before the restart
+ * decision, with the source the daemon will use read off its env file and every
+ * prune withheld, since this script cannot know which harnesses have a live
+ * agent and the daemon's next run can.
+ *
+ * Read for its shape and then run, with a stub in the script's place recording
+ * what reached it — the same split the restart announcement takes above. What
+ * the stub cannot say is whether the real script does the right thing with
+ * those arguments; that is the section on `agents.sh` itself.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nwhat a deploy does to the agents\n");
+
+{
+  const daemonArm = armOf(deployBlock("the per-service case", 'case "$svc" in', "esac"), "daemon");
+  check("deploy.sh has a daemon arm", daemonArm.length > 0, true);
+  // Continuation lines joined, so the call and its `||` read as the one
+  // statement they are.
+  const armLines = daemonArm
+    .replace(/\\\n\s*/g, " ")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"));
+  const envAt = armLines.indexOf("_daemon_env=$(env_file daemon)");
+  const readsOff = armLines.indexOf(`_agent_updates=$(file_value "$_daemon_env" REEMOAT_AGENT_UPDATES | tr '[:upper:]' '[:lower:]')`);
+  const offArm = armLines.indexOf("off | 0 | false | no | never)");
+  const readsSource = armLines.indexOf('_agent_source=$(file_value "$_daemon_env" REEMOAT_AGENT_SOURCE)');
+  const defaults = armLines.indexOf('[ "$_agent_source" = npm ] || _agent_source=vendor');
+  const announces = armLines.indexOf('echo "  agents ($_agent_source)"');
+  const callAt = armLines.findIndex((line) => line.startsWith('"$REPO_ROOT/deploy/agents.sh" --source "$_agent_source"'));
+  const call = armLines[callAt] ?? "";
+  const guardAt = armLines.indexOf(') || echo "  agents: the script did not finish; the daemon retries daily" >&2');
+  const restartAt = armLines.findIndex((line) => line.startsWith("restart_list="));
+  check("the daemon arm reads the daemon's env file once, and the daily switch off it first", [envAt !== -1, readsOff === envAt + 1], [true, true]);
+  /*
+   * The daemon's own spellings of "off", read here as text rather than imported:
+   * `AGENT_UPDATES_OFF` lives in `scripts/daemon.ts`, an entry script this driver
+   * does not load, so the two lists are held together by this line.
+   */
+  const daemonTs = readFileSync(join(repoRoot, "scripts/daemon.ts"), "utf8");
+  const offSpellings = /AGENT_UPDATES_OFF: ReadonlySet<string> = new Set\(\[([^\]]+)\]\)/.exec(daemonTs)?.[1]?.match(/"([^"]+)"/g)?.map((one) => one.slice(1, -1)) ?? [];
+  check("and honours every spelling the daemon reads as off", [offArm !== -1, offSpellings.length > 0, offSpellings.filter((one) => !(armLines[offArm] ?? "").split(/\s*\|\s*/).map((w) => w.replace(/\)$/, "")).includes(one))], [true, true, []]);
+  check("then reads the source off the same file, and defaults it to vendor", [readsSource > offArm, defaults === readsSource + 1], [true, true]);
+  check("and the two override variables, which the daemon's own run would see", [armLines.indexOf('_agent_claude=$(file_value "$_daemon_env" CLAUDE_CODE_EXECUTABLE)') > defaults, armLines.indexOf('_agent_codex=$(file_value "$_daemon_env" CODEX_PATH)') > defaults], [true, true]);
+  check("says which, then runs the same script the bootstrap and the daemon run, with that source", [announces > defaults, callAt > announces], [true, true]);
+  check("with node's directory in front, as the bootstrap puts it", armLines.some((line) => line.startsWith('PATH="${NODE_BIN:+$(dirname -- "$NODE_BIN"):}$PATH"')), true);
+  check("withholding every prune, since it cannot know which harnesses are live", AGENT_IDS.filter((id) => !call.includes(` --skip ${id}`)), []);
+  check("with exactly one --skip per harness", (call.match(/ --skip /g) ?? []).length, AGENT_IDS.length);
+  check("never fatal, and saying who retries", guardAt === callAt + 1, true);
+  check("before the restart decision, so the copies are there when the daemon comes back", callAt !== -1 && restartAt > callAt, true);
+  check("and this is the only place deploy.sh reaches the script", deployLines.filter((line) => !/^\s*#/.test(line) && line.includes("deploy/agents.sh")).length, 1);
+
+  /*
+   * Run against a stub `agents.sh` under a fake `REPO_ROOT`, with `touched`
+   * answering "nothing moved" so the arm has nothing else to do. `lib.sh` runs
+   * under `set -eu`, which is what makes the failing case an assertion rather
+   * than a courtesy: without the `|| echo`, a stub exiting 1 would end the deploy
+   * mid-loop, after the checkout had already moved.
+   */
+  const fakeRoot = join(sandbox, "deploy-root");
+  const argvLog = join(fakeRoot, "agents-argv");
+  const seenLog = join(fakeRoot, "agents-env");
+  mkdirSync(join(fakeRoot, "deploy"), { recursive: true });
+  const runArm = (env: Record<string, string>, exitWith = 0): { run: Run; argv: string; seen: string } => {
+    // The stub records its argv, and the three things the arm has to hand it
+    // through the environment rather than the command line.
+    writeFileSync(
+      join(fakeRoot, "deploy", "agents.sh"),
+      `#!/bin/sh\nprintf '%s' "$*" > "${argvLog}"\nprintf '%s|%s|%s' "\${CLAUDE_CODE_EXECUTABLE:-}" "\${CODEX_PATH:-}" "\${PATH%%:*}" > "${seenLog}"\nexit ${exitWith}\n`,
+    );
+    chmodSync(join(fakeRoot, "deploy", "agents.sh"), 0o755);
+    rmSync(argvLog, { force: true });
+    rmSync(seenLog, { force: true });
+    const run = sh(
+      [
+        `REPO_ROOT="${fakeRoot}"`,
+        "touched() { return 1; }",
+        'SHARED=; RESTART_DEPS=; svc=daemon; restart_list=""',
+        `case "$svc" in\n${daemonArm}\nesac`,
+        'printf "restart_list=[%s]\\n" "$restart_list"',
+      ].join("\n"),
+      env,
+    );
+    return {
+      run,
+      argv: existsSync(argvLog) ? readFileSync(argvLog, "utf8") : "",
+      seen: existsSync(seenLog) ? readFileSync(seenLog, "utf8") : "",
+    };
+  };
+  /*
+   * The argv as what it means rather than as a string: one source, and the set
+   * of harnesses skipped. The script reads `--skip` into a set too, so the order
+   * the call spells them in is nothing it is held to — and `AGENT_IDS` is in a
+   * different order, which a string comparison would have pinned by accident.
+   */
+  const meaning = (argv: string): { source: string | undefined; skips: string[]; rest: string[] } => {
+    const tokens = argv.split(" ").filter((one) => one.length > 0);
+    const out: { source: string | undefined; skips: string[]; rest: string[] } = { source: undefined, skips: [], rest: [] };
+    for (let i = 0; i < tokens.length; i += 1) {
+      if (tokens[i] === "--source") out.source = tokens[++i];
+      else if (tokens[i] === "--skip") out.skips.push(tokens[++i] ?? "");
+      else out.rest.push(tokens[i] as string);
+    }
+    out.skips.sort();
+    return out;
+  };
+  const everyHarness = [...AGENT_IDS].sort();
+  const envDir = join(sandbox, "deploy-env");
+  mkdirSync(envDir, { recursive: true });
+  const envSaying = (value: string | null, more = ""): string => {
+    const file = join(envDir, `${value ?? "absent"}${more.length > 0 ? "-more" : ""}.env`);
+    if (value !== null || more.length > 0) writeFileSync(file, `${value === null ? "" : `REEMOAT_AGENT_SOURCE='${value}'\n`}${more}`);
+    return file;
+  };
+  const npmDeploy = runArm({ REEMOAT_ENV_FILE: envSaying("npm") });
+  check(
+    "an env file saying npm runs the script with --source npm and every prune withheld",
+    [npmDeploy.run.status, meaning(npmDeploy.argv), npmDeploy.run.out.includes("  agents (npm)\n"), npmDeploy.run.err],
+    [0, { source: "npm", skips: everyHarness, rest: [] }, true, ""],
+  );
+  check("and adds nothing to the restart list by itself", npmDeploy.run.out.includes("restart_list=[]\n"), true);
+  const noEnv = runArm({ REEMOAT_ENV_FILE: envSaying(null) });
+  check(
+    "no env file at all is vendor, which is what the daemon reads an absent value as",
+    [noEnv.run.status, meaning(noEnv.argv), noEnv.run.out.includes("  agents (vendor)\n")],
+    [0, { source: "vendor", skips: everyHarness, rest: [] }, true],
+  );
+  /*
+   * A spelling the daemon would warn about and read as `vendor` is passed as
+   * `vendor` here too — `agentSourceFrom` in `src/agentupdate.ts` is the rule,
+   * and the script itself would exit 2 on the raw value, which the `|| echo`
+   * would then report as a run that did not finish.
+   */
+  const bogus = runArm({ REEMOAT_ENV_FILE: envSaying("bogus") });
+  check("and a spelling that is neither is passed as vendor rather than as itself", [bogus.run.status, meaning(bogus.argv)], [0, { source: "vendor", skips: everyHarness, rest: [] }]);
+  const failed = runArm({ REEMOAT_ENV_FILE: envSaying("npm") }, 1);
+  check(
+    "a script that did not finish is a line on stderr, and the deploy goes on",
+    [failed.run.status, failed.run.err.includes("agents: the script did not finish; the daemon retries daily"), failed.run.out.includes("restart_list=[]\n")],
+    [0, true, true],
+  );
+  /*
+   * The daily switch, the overrides and node's directory, each read off the same
+   * file or shell the daemon's own run would see — and each with a measured cost
+   * when missed: the vendors' installers run on a machine somebody switched off,
+   * a ~200 MB claude installed beside an override nothing runs, and an npm arm
+   * with no `npm` under `--node`.
+   */
+  const switchedOff = runArm({ REEMOAT_ENV_FILE: envSaying("npm", "REEMOAT_AGENT_UPDATES='Off'\n") });
+  check(
+    "an env file that switches the daily refresh off switches the deploy's off too, and says so",
+    [switchedOff.run.status, switchedOff.argv, switchedOff.run.out.includes("agents: off (REEMOAT_AGENT_UPDATES=off)"), switchedOff.run.err],
+    [0, "", true, ""],
+  );
+  const overridden = runArm({ REEMOAT_ENV_FILE: envSaying("vendor", "CLAUDE_CODE_EXECUTABLE='/mine/claude'\nCODEX_PATH='/mine/codex'\n"), NODE_BIN: "/opt/tool/bin/node" });
+  check(
+    "the overrides in the env file reach the script's environment, and node's directory leads its PATH",
+    [overridden.run.status, meaning(overridden.argv).source, overridden.seen],
+    [0, "vendor", "/mine/claude|/mine/codex|/opt/tool/bin"],
+  );
+  const plain = runArm({ REEMOAT_ENV_FILE: envSaying("vendor") });
+  check("and with none set the script sees none, rather than an empty string standing for one", plain.seen.startsWith("||"), true);
 }
 
 /* ------------------------------------------------------------------ *
@@ -3140,7 +4300,7 @@ process.stdout.write("\nthe one-line installer\n");
    * the documented non-interactive path. This runs under whatever `/bin/sh` is,
    * and on `check.yml`'s `ubuntu-latest` that is `dash`.
    */
-  for (const flag of ["--url", "--api-key", "--enroll-code", "--label", "--dir", "--ref", "--node"]) {
+  for (const flag of ["--url", "--api-key", "--enroll-code", "--label", "--dir", "--ref", "--node", "--agent-source"]) {
     const run = spawnSync("sh", [bootstrapPath, flag], {
       cwd: deployDir,
       encoding: "utf8",
@@ -3149,6 +4309,25 @@ process.stdout.write("\nthe one-line installer\n");
     });
     check(`${flag} with no value is refused by name`, run.stderr.includes(`${flag} needs a value`), true);
     check("without installing anything on the way", existsSync(join(home, ".reemoat", "toolchain")), false);
+  }
+
+  /*
+   * **`--agent-source` is the one flag with a closed set of values, and both
+   * halves of that are driven (Q4.114).** `parse_flags` runs before anything
+   * else in `main`, so a third spelling is refused by name before a terminal is
+   * opened or a control plane looked for — and it *has* to be refused there,
+   * because the value is written into the daemon's env file for every refresh
+   * that follows, and a daemon reads an unknown spelling as `vendor` with one
+   * line on stderr nobody installing from `curl | sh` is watching. The accepted
+   * spelling is driven too, and what proves it got past the parser is that the
+   * run fails *later*, on the placeholder, and says nothing about the flag.
+   */
+  {
+    const bad = runBootstrap(["--agent-source", "bogus"]);
+    check("--agent-source with a value it does not know is refused by name", [bad.status, bad.err.includes("--agent-source takes vendor or npm, not bogus")], [2, true]);
+    check("without installing anything on the way", existsSync(join(home, ".reemoat", "toolchain")), false);
+    const good = runBootstrap(["--agent-source", "npm"]);
+    check("while npm passes the parser and fails on the control plane instead", [good.status, good.err.includes("--url"), good.err.includes("--agent-source")], [2, true, false]);
   }
 
   /*
@@ -3339,6 +4518,18 @@ process.stdout.write("\nthe one-line installer\n");
       const f = fixture("purge-yes", { lib: true, worktree: false });
       const run = uninstall(f, "--purge", "--yes");
       check("--yes purges", [run.status, existsSync(f.db), existsSync(f.checkout)], [0, false, false]);
+    }
+    // The working copies, which are the reason the confirmation exists at all: named
+    // before the question, and taken only with the answer.
+    {
+      const f = fixture("purge-tree", { lib: true, worktree: true });
+      const copy = join(f.home, ".reemoat", "worktrees", "branch-a");
+      const run = uninstall(f, "--purge");
+      check("--purge names the working copies it would take", run.err.includes("branch-a"), true);
+      check("and takes none of them without an answer", [run.status !== 0, existsSync(copy)], [true, true]);
+      const g = fixture("purge-tree-yes", { lib: true, worktree: true });
+      const yes = uninstall(g, "--purge", "--yes");
+      check("while --yes takes them with everything else", [yes.status, existsSync(join(g.home, ".reemoat", "worktrees", "branch-a"))], [0, false]);
     }
   }
 }

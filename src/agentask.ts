@@ -38,7 +38,7 @@
 import type { AgentId } from "./acp/agents.js";
 import type { AgentRouting } from "./acp/systems.js";
 import type { AgentConfigOption } from "./events.js";
-import type { SessionRuntime } from "./runtime/types.js";
+import type { AgentCliChoice, SessionRuntime } from "./runtime/types.js";
 import { isAuthRequiredMessage, Session } from "./session.js";
 
 /** The most a caller may send. Their prompt, not a conversation. */
@@ -211,6 +211,20 @@ export interface AgentCapabilities {
   models: AgentModelChoice[];
   /** `null` where this agent cannot be pointed at another system at all. */
   routing: AgentRouting | null;
+  /**
+   * Which build of the harness's own CLI answered, or `null`.
+   *
+   * ⚠ **It rides this answer rather than `GET /agents` because it is a fact about
+   * *this list*.** The models above are whatever that binary published, and the
+   * two go stale together: a machine whose CLI stopped moving publishes a list
+   * exactly that old, and the only symptom is a model somebody has read about
+   * being absent. Reported off the same read, so the version on screen cannot
+   * describe a different spawn than the rows under it.
+   *
+   * `null` for a harness with no binary to name, and for a daemon that answered
+   * before this field existed — see the client's mirror, where it is optional.
+   */
+  cli: AgentCliChoice | null;
 }
 
 /**
@@ -764,7 +778,16 @@ export class AgentAskRuns {
       // `routing` answers `null` on every failure rather than throwing — an
       // agent that cannot be re-pointed is two of the three, not a broken one —
       // so the model list is never lost to a question about providers.
-      const answer: AgentCapabilities = { models, routing: await session.routing() };
+      /*
+       * Asked of the runtime rather than of the session, because it is a question
+       * about which *file* was spawned and the session only knows it is talking to
+       * something. Cheap and cached there; this read is already behind a spawn.
+       */
+      const answer: AgentCapabilities = {
+        models,
+        routing: await session.routing(),
+        cli: await this.options.runtime.agentCli(agent),
+      };
       // Returned either way — the caller asked and this is the answer it got — but
       // only cached when nothing cleared the map while we were asking. See
       // {@link capsGeneration}.

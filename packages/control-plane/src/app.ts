@@ -6094,9 +6094,24 @@ function shellQuote(value: string): string {
 function installOrigin(c: Context, trustedHops: number): string {
   const base = publicUrl(c);
   if (base === "" || trustedHops <= 0) return base;
-  // The left-most value is the client's own claim; with a proxy in front it is
-  // the scheme the browser actually used, which is the question being asked.
-  const forwarded = (c.req.header("x-forwarded-proto") ?? "").split(",")[0]?.trim().toLowerCase() ?? "";
+  /*
+   * The entry `trustedHops` from the right, exactly as `callerAddressOf` reads
+   * `x-forwarded-for`: that is the end the operator's own proxy appends to, and the
+   * leftmost value is whatever the client sent. ⚠ This read the leftmost once, on
+   * the reasoning that a proxy *overwrites* the header — Traefik and nginx do — but
+   * one that appends leaves the client's own claim in front, and a caller could then
+   * put `http` ahead of the proxy's `https` and downgrade the paste it was about to
+   * receive. Self-inflicted, but the same header read two ways in one file is the
+   * disagreement that gets reconciled in the wrong direction later. Fewer entries
+   * than hops means the request did not come through the chain described, and
+   * `publicUrl` stands.
+   */
+  const entries = (c.req.header("x-forwarded-proto") ?? "")
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 0);
+  if (entries.length < trustedHops) return base;
+  const forwarded = entries[entries.length - trustedHops] ?? "";
   if (forwarded !== "https" && forwarded !== "http") return base;
   return base.replace(/^https?:/, `${forwarded}:`);
 }

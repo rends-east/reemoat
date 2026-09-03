@@ -1635,6 +1635,29 @@ export interface AgentRouting {
 export interface AgentCapabilities {
   models: { id: string; name: string; description: string | null; group: string | null }[];
   routing: AgentRouting | null;
+  /**
+   * Which build of the harness's own CLI published `models`, or absent.
+   *
+   * ⚠ **Optional, and the absence is a *daemon* that is older rather than a
+   * harness that has none** — the two are told apart by `null` against `undefined`
+   * and nothing else. A daemon that predates this field sends neither, so a client
+   * must draw no line at all rather than one saying the build is unknown: an
+   * unknown build and an un-upgraded daemon are different facts and only the
+   * second is about the machine.
+   *
+   * `version` may be `null` on a binary that would not say which build it is;
+   * `source` says why *this* one was picked, which is what tells a machine
+   * running the copy `deploy/agents.sh` keeps current — or the operator's own,
+   * found first on PATH — from one an operator pointed at by hand through
+   * `CLAUDE_CODE_EXECUTABLE` or `CODEX_PATH`, since only the second explains a
+   * daily refresh that changed nothing on that machine. `vendored` was a third
+   * member, the copy this repository used to ship under `node_modules`; it went
+   * with those copies (Q4.114), and nothing carrying the three-member union was
+   * ever released, so no daemon sends the word. A value this build has not heard
+   * of is still drawn — the plain line naming the build, which is
+   * `compatibility.md`'s rule 2: an unknown value fails toward "keep working".
+   */
+  cli?: { version: string | null; source: "override" | "path" } | null;
   /** Why this harness could not be asked, or `null`. Never throws the picker away. */
   error: string | null;
 }

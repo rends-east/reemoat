@@ -382,8 +382,11 @@ last two are one decision.
 - **An icon.** `img-src` would have to name the plugin's origin; the monogram is the
   answer.
 - **A binary inside the archive, or resolved from an npm package.** `PATH` only.
-- **`pincheck` covering a contributed harness.** It pins adapter versions this
-  repository vendors and asserts the CLI hop resolves; what a manifest names is
-  whatever is on PATH under a name somebody chose, and `Session.start`'s timeouts are
-  the whole bound. That difference is honest and is written down rather than left as
-  an absence.
+- **`pincheck` covering a contributed harness.** It pins the two adapters this
+  repository depends on and asserts that the CLI platform packages they would bring
+  with them are the ones `pnpm-workspace.yaml`'s overrides exclude — no CLI is
+  vendored and there is no CLI hop to resolve any more (Q4.114); the CLI under
+  either adapter is whatever `deploy/agents.sh` installed, found on PATH like
+  anything else. What a manifest names is whatever is on PATH under a name somebody
+  chose, and `Session.start`'s timeouts are the whole bound. That difference is
+  honest and is written down rather than left as an absence.

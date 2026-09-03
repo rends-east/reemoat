@@ -49,9 +49,19 @@
 #
 # No sudo, ever. No package manager. Nothing written to `~/.zshrc` or any other
 # profile: the daemon does not need node on *your* PATH, because `runtime_path`
-# in `lib.sh` bakes the resolved node's directory into the unit. Nothing lands
-# outside `~/.reemoat` and the checkout, which is what makes `--uninstall`
-# complete rather than approximate.
+# in `lib.sh` bakes the resolved node's directory into the unit — and
+# `deploy/agents.sh` puts its own directories on PATH before running a vendor
+# installer, which is what makes codex's and opencode's profile writers return
+# early rather than edit anything.
+#
+# ⚠ **One clause of this used to be "nothing lands outside `~/.reemoat` and the
+# checkout", and the agent CLIs narrowed it.** They go into the vendors' own
+# directories — `~/.local/bin`, `~/.local/share/claude`, `~/.codex`, `~/.opencode`
+# — because not one of their installers is relocatable. `--uninstall` deliberately
+# leaves them: they hold credentials somebody signed in with, and taking those away
+# is not what removing reemoat means. Everything reemoat itself writes is still
+# under `~/.reemoat` and the checkout, so `--uninstall` is still complete about
+# *its own* state.
 set -eu
 
 # Substituted by `GET /install.sh`. Left literal in a checkout — the `case` in
@@ -85,6 +95,13 @@ TOOLCHAIN_MARKER="$TOOLCHAIN/.installed-by-bootstrap"
 CP=""
 API_KEY="${REEMOAT_API_KEY:-}"
 ENROLL_CODE=""
+# Where the coding-agent CLIs come from: each vendor's own installer, or the npm
+# registry for a machine that cannot reach those hosts. `deploy/agents.sh` explains
+# the two; the daemon is told the same answer through `REEMOAT_AGENT_SOURCE`.
+AGENT_SOURCE=vendor
+# Whether somebody said so on the command line, because on a machine that is
+# already set up the flag would otherwise be accepted and change nothing.
+AGENT_SOURCE_GIVEN=0
 LABEL=""
 CHECKOUT="$HOME/srv/reemoat"
 GIT_REF=""
@@ -281,7 +298,10 @@ menu() {
       # caller acts on the empty answer, under both dash and bash.
       3) restore_tty; printf '\r\n' >/dev/tty; kill -INT "$$" 2>/dev/null; exit 130 ;;
       27)
-        [ "$(_key)" = 91 ] || continue
+        # `ESC [` in normal mode, `ESC O` once something has left the terminal in
+        # application-cursor mode (a `less` or `vim` that did not reset it); the
+        # final byte is the same either way.
+        case "$(_key)" in 91 | 79) ;; *) continue ;; esac
         case "$(_key)" in
           65) _sel=$((_sel - 1)); [ "$_sel" -lt 1 ] && _sel=$_n ;;
           66) _sel=$((_sel + 1)); [ "$_sel" -gt "$_n" ] && _sel=1 ;;
@@ -380,12 +400,21 @@ Set up a Reemoat daemon on this machine and add it to the app.
   --dir <path>          where to put the checkout (default ~/srv/reemoat)
   --ref <git-ref>       clone this instead of the version the control plane runs
   --node <path>         use this node, install none
+  --agent-source <src>  where the coding-agent CLIs come from: `vendor` (each
+                        vendor's own installer, the default) or `npm` (the same
+                        four from the npm registry, for a machine that cannot
+                        reach claude.ai, chatgpt.com or opencode.ai — point npm at
+                        your mirror with npm_config_registry or ~/.npmrc). Written
+                        into the daemon's settings, so its daily refresh agrees
   --yes                 do not ask to confirm anything
-  --uninstall           stop and remove the service and anything this script
-                        installed. Names your data; deletes none of it
+  --uninstall           stop and remove the service and the node this script
+                        installed. Names your data; deletes none of it. Exits
+                        non-zero and keeps the node if the service could not
+                        be stopped — pass --dir <the checkout it runs from>
   --purge               with --uninstall, also delete ~/.reemoat and the
-                        checkout. Worktrees hold uncommitted work: read the
-                        list it prints first
+                        checkout. Always asks, after naming the database, the
+                        checkout and every worktree (uncommitted work lives
+                        there); --yes answers
 USAGE
 }
 
@@ -400,6 +429,13 @@ parse_flags() {
       --dir)         CHECKOUT="${2:-}"; need_value "--dir" "$@"; shift 2 ;;
       --ref)         GIT_REF="${2:-}"; need_value "--ref" "$@"; shift 2 ;;
       --node)        NODE_BIN="${2:-}"; need_value "--node" "$@"; shift 2 ;;
+      --agent-source)
+                     AGENT_SOURCE="${2:-}"; need_value "--agent-source" "$@"; shift 2
+                     AGENT_SOURCE_GIVEN=1
+                     case "$AGENT_SOURCE" in
+                       vendor | npm) ;;
+                       *) die "--agent-source takes vendor or npm, not $AGENT_SOURCE" ;;
+                     esac ;;
       --yes | -y)    ASSUME_YES=1;         shift ;;
       --uninstall)   UNINSTALL=1;          shift ;;
       --purge)       PURGE=1;              shift ;;
@@ -428,27 +464,44 @@ parse_flags() {
 # author's fleet" is how a self-hoster ends up with their laptop in somebody
 # else's control plane by pressing Enter. The hosted instance is named as an
 # option because otherwise somebody who wants it has to go and find it, but it
-# is never what an empty answer means. `deploycheck` asserts no control-plane
-# host is written into this file outside that one sentence.
+# is never what an empty answer means. `deploycheck` asserts that the only lines
+# naming a control-plane host are inside `resolve_control_plane`, that the hosted
+# instance is never the first row of that menu, and that it is assigned only
+# behind that menu's answer.
+
 # **Sets `CP`, and it is the one place an origin is judged.** A value from the
-# *server* — the `controlPlaneUrl` a 201 hands back — meets the same three rules
-# as one somebody typed: an http(s) origin or a refusal, a plaintext warning
-# said out loud rather than implied, and one trailing slash removed so nothing
-# downstream builds `//v1/…`.
+# *server* — the `controlPlaneUrl` a 201 hands back — meets the same rules as one
+# somebody typed: an http(s) *origin* or a refusal, a plaintext warning said out
+# loud rather than implied, and one trailing slash removed so nothing downstream
+# builds `//v1/…`.
 #
 # ⚠ **A function rather than something that prints the value back.** `die` inside
 # `$( … )` exits the substitution and nothing else — the same trap `menu` is
 # annotated for — so this assigns the global instead of being read through one.
 adopt_origin() {
-  case "$1" in
-    https://* | http://127.0.0.1* | http://localhost*) : ;;
-    http://*) warn "warning: $1 is plaintext. Everything below, including a password, crosses it in the clear." ;;
+  _o=$1
+  case "$_o" in */) _o=${_o%/} ;; esac
+  case "$_o" in
+    https://* | http://*) : ;;
     *) die "$2: $1" ;;
   esac
-  case "$1" in
-    */) CP="${1%/}" ;;
-    *)  CP="$1" ;;
+  # An origin and nothing after it — scheme, host, a port — because everything
+  # below appends `/v1/…` to it: a path would land every request somewhere else, a
+  # query or a fragment would ride into each one, and `user:pass@` would put a
+  # credential into the env file. A server's answer is held to it as strictly as a
+  # typed one, since `create_machine` adopts what the 201 names after the machine
+  # already exists.
+  case "${_o#*://}" in
+    "" | */* | *\?* | *\#* | *@*) die "$2: $1" ;;
   esac
+  # Loopback is exempt from the plaintext warning, and the arms are anchored on the
+  # host: a prefix match let `127.0.0.10` and `localhost.example` pass as this
+  # machine and cross the network with the warning swallowed.
+  case "$_o" in
+    https://* | http://127.0.0.1 | http://127.0.0.1:* | http://localhost | http://localhost:*) : ;;
+    http://*) warn "warning: $_o is plaintext. Everything below, including a password, crosses it in the clear." ;;
+  esac
+  CP=$_o
 }
 
 resolve_control_plane() {
@@ -541,8 +594,11 @@ http_request() {
     # base64url or `xx_` plus base64url — no `"` and no `\` exist in one, so the
     # quoted form cannot be stepped out of. Refused rather than escaped if that
     # ever stops being true, since a mangled header is a 401 nobody can explain.
+    # A newline is the other way out of a `-K` line — the parser is line-oriented
+    # and the remainder would read as further curl options — so anything that is
+    # not a printable character is refused with the two quoting characters.
     case "$_auth" in
-      *'"'* | *'\'*) die "that credential holds a character this installer cannot send safely." ;;
+      *'"'* | *'\'* | *[![:print:]]*) die "that credential holds a character this installer cannot send safely." ;;
     esac
     ( umask 077; printf 'header = "authorization: Bearer %s"\n' "$_auth" >"$TMP/auth.$$" )
     set -- "$@" -K "$TMP/auth.$$"
@@ -590,6 +646,21 @@ api_code()    { json_path error.code "$1"; }
 # ---------------------------------------------------------------------------
 
 node_major() { "$1" --version 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\)\..*/\1/p'; }
+
+# The body of a sign-in or a sign-up, built with the password on no command line.
+#
+# ⚠ **`node -e … "$_pass"` put the password on argv for the length of node's
+# start-up**, which is the same `ps -axww -o args` exposure `http_request` moves
+# the *request* off argv to avoid — the docblock there was claiming argv-free while
+# this line, one call earlier, was not. NUL-separated on stdin, because a password
+# may hold anything a keyboard produces except a NUL; the address is optional and
+# empty means absent.
+credential_body() {
+  printf '%s\0%s\0%s\0' "$1" "$2" "${3:-}" | "$NODE_BIN" -e '
+    const [name, password, email] = require("fs").readFileSync(0, "utf8").split("\0");
+    process.stdout.write(JSON.stringify(email ? {name, password, email} : {name, password}));
+  '
+}
 
 # **What a refusal may honestly promise about this machine.** Every request here
 # happens after `ensure_node`, because `json_path` needs a node to parse with —
@@ -669,9 +740,17 @@ install_node() {
   [ -n "$_tar" ] || die "nodejs.org publishes no $_plat-$ARCH build for v$NODE_MAJOR."
   curl -fsSL "$_dist/$_tar" -o "$TMP/node/$_tar" || die "the node download failed."
   verify_sha256 "$TMP/node/$_tar" "$TMP/node/SHASUMS256.txt" "$_tar" \
-    || die "the node download does not match its published checksum. Nothing has been installed."
-  rm -rf "$TOOLCHAIN"
+    || die "the node download does not match its published checksum. $(nothing_installed)"
+  # ⚠ **Node's own files, never the directory.** `$TOOLCHAIN` also holds the
+  # coding-agent CLIs `deploy/agents.sh` installs from npm — kimi always, all four
+  # under `--agent-source npm` — each in a versioned directory of its own with a
+  # symlink under `bin/`, and a live session may be on one of them (Q4.114). This
+  # was `rm -rf "$TOOLCHAIN"`, which took those with node on every re-run that
+  # found node missing or too old. The list is the tarball's top level.
   mkdir -p "$TOOLCHAIN"
+  for _f in bin/node bin/npm bin/npx bin/corepack lib/node_modules/npm lib/node_modules/corepack include share CHANGELOG.md LICENSE README.md; do
+    rm -rf "$TOOLCHAIN/$_f"
+  done
   tar -xzf "$TMP/node/$_tar" -C "$TOOLCHAIN" --strip-components=1 || die "could not unpack $_tar."
   : > "$TOOLCHAIN_MARKER"
   NODE_BIN="$TOOLCHAIN/bin/node"
@@ -779,7 +858,7 @@ sign_in() {
   [ -n "$_name" ] || die "no username given."
   _pass=$(tty_secret "  password")
   [ -n "$_pass" ] || die "no password given."
-  _body=$("$NODE_BIN" -e 'process.stdout.write(JSON.stringify({name: process.argv[1], password: process.argv[2]}))' "$_name" "$_pass")
+  _body=$(credential_body "$_name" "$_pass")
   http_request POST "$CP/v1/login" "$_body"
   case "$HTTP_STATUS" in
     200) SESSION_TOKEN=$(json_path token "$HTTP_BODY"); AUTH="$SESSION_TOKEN"; return 0 ;;
@@ -809,7 +888,7 @@ wait_for_confirmation() {
   while [ "$_tries" -lt 5 ]; do
     _tries=$((_tries + 1))
     tty_ask "  Enter when done" "" >/dev/null
-    _body=$("$NODE_BIN" -e 'process.stdout.write(JSON.stringify({name: process.argv[1], password: process.argv[2]}))' "$_name" "$_pass")
+    _body=$(credential_body "$_name" "$_pass")
     http_request POST "$CP/v1/login" "$_body"
     case "$HTTP_STATUS" in
       200) SESSION_TOKEN=$(json_path token "$HTTP_BODY"); AUTH="$SESSION_TOKEN"; say "  signed in."; return 0 ;;
@@ -841,10 +920,7 @@ register() {
   _pass=$(tty_secret "  password")
   _again=$(tty_secret "  again")
   [ "$_pass" = "$_again" ] || die "the two passwords are not the same."
-  _body=$("$NODE_BIN" -e '
-    const [name, password, email] = process.argv.slice(1);
-    process.stdout.write(JSON.stringify(email ? {name, password, email} : {name, password}));
-  ' "$_name" "$_pass" "$_email")
+  _body=$(credential_body "$_name" "$_pass" "$_email")
   http_request POST "$CP/v1/register" "$_body"
   case "$HTTP_STATUS" in
     201)
@@ -917,10 +993,15 @@ choose_credential() {
 # checkout cannot stop the service** — `do_uninstall` needs `lib.sh` out of it —
 # and the two places that print that command used to drop the flag, so a machine
 # installed with `--dir` was handed a command that could not work on it.
+#
+# Single-quoted, because what is printed is pasted into a shell: a checkout under
+# a directory with a space in it word-splits into a `--dir` that names half of it.
+# The `'\''` form is the one `lib.sh`'s `sq` uses, written out here because this
+# runs before there is a checkout to source it from.
 dir_flag() {
   case "$CHECKOUT" in
     "$HOME/srv/reemoat") : ;;
-    *) printf ' --dir %s' "$CHECKOUT" ;;
+    *) printf " --dir '%s'" "$(printf '%s' "$CHECKOUT" | sed "s/'/'\\\\''/g")" ;;
   esac
 }
 
@@ -959,8 +1040,9 @@ check_label() {
 
 # **Before the clone and before `pnpm install`, and the order is the point.** A
 # fresh account on an instance whose machine limit is zero gets `409
-# machine_limit` — and under the other order that refusal arrives after 750 MB
-# and several minutes of somebody's evening.
+# machine_limit` — and under the other order that refusal arrives after a clone, a
+# ~220 MB `pnpm install`, ~700 MB of agent CLIs and several minutes of somebody's
+# evening.
 create_machine() {
   # A code already names a machine on the control plane, so nothing is created
   # here — but the summary still has to call it something, and `LABEL` is unset
@@ -1121,9 +1203,40 @@ clone_or_fetch() {
 }
 
 install_dependencies() {
-  note "deps          installing (~750 MB, a few minutes)"
+  note "deps          installing (~220 MB, a minute or two)"
   ( cd "$CHECKOUT" && PATH="$(dirname -- "$NODE_BIN"):$(dirname -- "$PNPM_BIN"):$PATH" \
       "$PNPM_BIN" install --frozen-lockfile ) || die "pnpm install failed. Nothing has been started."
+}
+
+# The coding-agent CLIs, and the reason this is a step of its own.
+#
+# `pnpm install` above brings the daemon and the two ACP adapters it pins, and no
+# CLI at all — it used to carry a pinned copy of three of the four, exactly as old as
+# the release, and that was 689 MB nothing ran once a vendor's copy was on the
+# machine (Q4.114). None of the four self-updates when a daemon drives it over ACP —
+# every one of their updaters is gated on a terminal — so `deploy/agents.sh` installs
+# them here and the daemon re-runs it on a timer, which is what keeps a model released
+# last week from being simply absent with no error.
+#
+# ⚠ **Before `hand_off`, which is where the unit is rendered and the daemon started.**
+# After it, the first thing somebody sees is an app whose agents are missing.
+#
+# ⚠ **A warning rather than a death**, which is `check_script_binary`'s shape: a
+# vendor being down must not fail an install that has already made a machine, cloned
+# a checkout and written an env file. What it costs now is real — a harness that could
+# not be installed is absent from the app rather than merely stale — and the script
+# says which on stderr; the daemon tries again within the day, and the tile says so
+# until then. `--agent-source` is passed here and written into the env file below, so
+# the run that installs and the run that refreshes never disagree about where from.
+install_agents() {
+  note "agents        installing (~700 MB, a few minutes)"
+  # Node's directory in front, as `install_dependencies` puts it: the script's npm
+  # arm needs an `npm` and a `node`, and with `--node` naming one off PATH there
+  # would otherwise be neither — kimi, and all four under `--agent-source npm`,
+  # "skipped: no npm to install it with" on a machine that has just installed one.
+  ( PATH="$(dirname -- "$NODE_BIN"):$PATH" "$CHECKOUT/deploy/agents.sh" --source "$AGENT_SOURCE" ) || warn "
+  some agent CLIs could not be installed. The daemon retries daily; until then that
+  harness is absent from the app. The lines above say which and why."
 }
 
 # ---------------------------------------------------------------------------
@@ -1140,8 +1253,13 @@ install_dependencies() {
 # `DEPLOY_DIR` from `$0`, and under `curl | sh` that is the bare string `sh`.
 # Passing the library's own path as `$0` makes both it and `REPO_ROOT` resolve.
 write_env_file() {
-  sh -c '
+  # The enrollment code arrives on stdin rather than argv, for `credential_body`'s
+  # reason: it is single-use and an hour long, and a command line is readable by
+  # every account on the host. Read before `lib.sh` is sourced, so nothing in that
+  # file can have consumed it first.
+  printf '%s' "$ENROLL_CODE" | sh -c '
     set -eu
+    _code=$(cat)
     . "$0"
     _env=$(env_file daemon)
     _dir=$(dirname -- "$_env")
@@ -1155,10 +1273,13 @@ write_env_file() {
     fi
     [ -f "$_env" ] || { cp "$(env_example daemon)" "$_env" && chmod 600 "$_env"; }
     set_env REEMOAT_AUTH           signed "$_env"
-    set_env REEMOAT_CONTROL_PLANE  "$1"   "$_env"
-    set_env REEMOAT_ENROLL_CODE    "$2"   "$_env"
+    set_env REEMOAT_CONTROL_PLANE  "$1"     "$_env"
+    set_env REEMOAT_ENROLL_CODE    "$_code" "$_env"
+    # Only the non-default is written, so an env file says what somebody chose and
+    # nothing else; the daemon reads an absent value as `vendor`.
+    if [ "$2" = npm ]; then set_env REEMOAT_AGENT_SOURCE npm "$_env"; fi
     printf "%s" "$_env"
-  ' "$CHECKOUT/deploy/lib.sh" "$CP" "$ENROLL_CODE" > "$TMP/envpath" \
+  ' "$CHECKOUT/deploy/lib.sh" "$CP" "$AGENT_SOURCE" > "$TMP/envpath" \
     || die "could not write the daemon's environment file."
   ENV_FILE=$(cat "$TMP/envpath")
   note "settings      $ENV_FILE"
@@ -1249,6 +1370,13 @@ existing_install() {
   [ -f "$_env" ] || return 1
   _bound=$(sed -n "s/^REEMOAT_CONTROL_PLANE='\{0,1\}\([^']*\)'\{0,1\}.*/\1/p" "$_env" | tail -1)
   [ -n "$_bound" ] || return 1
+  # `--agent-source` is written by the install and read by the daemon; on a machine
+  # that is already set up neither happens here — "Update" is `deploy.sh`, which
+  # reads the env file — so the flag would be accepted and change nothing. Refused
+  # instead, naming where the setting lives.
+  [ "$AGENT_SOURCE_GIVEN" = 0 ] || die "already set up here, so --agent-source changes nothing.
+      Set REEMOAT_AGENT_SOURCE=$AGENT_SOURCE in $_env and restart the daemon,
+      or run $CHECKOUT/deploy/agents.sh --source $AGENT_SOURCE now."
   say ""
   if [ "$TTY_OPEN" != 1 ]; then
     die "already set up here, joined to $_bound.
@@ -1429,6 +1557,7 @@ main() {
   resolve_ref
   clone_or_fetch
   install_dependencies
+  install_agents
 
   write_env_file
   hand_off

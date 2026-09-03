@@ -17,6 +17,11 @@
  * esbuild's own platform binary with it and break `tsx`. All four were tried
  * before this was written.
  *
+ * (Since Q4.114 those platform packages are excluded by `pnpm-workspace.yaml`'s
+ * overrides — the CLIs come from `deploy/agents.sh` — so the root importer no
+ * longer carries them and the sizes above are history. The walk stays exactly as
+ * it is: it is what guards the image the day a dependency brings one back.)
+ *
  * **It is a reachability walk, never a blacklist.** Start at the control plane's
  * own `node_modules`, follow every symlink into `.pnpm/<key>`, and recurse
  * through each of those packages' own `node_modules`. What is never reached is

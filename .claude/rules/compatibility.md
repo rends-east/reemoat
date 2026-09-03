@@ -27,7 +27,7 @@ a tab left open across a daemon update — is the one that was destructive.
 **The daemon still asks the control plane nothing** (Q1.9, Q1.10). Everything
 below is announced on a connection the daemon opens anyway, or read off a reply it
 was already getting. Nothing here adds a request, and nothing may — `src/` holds
-exactly one `fetch`, in `enroll.ts`, and that count is the property.
+three `fetch` calls, each named in `plugins.md`, and that count is the property.
 
 ⚠ **Updating a daemon is its owner's act, and nothing here is a step toward
 changing that.** A daemon does not update itself, is not told to update, and is

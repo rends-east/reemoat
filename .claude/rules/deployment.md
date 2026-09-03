@@ -18,7 +18,12 @@ curl -fsSL https://github.com/rends-east/reemoat/releases/latest/download/instal
   … | sh -s -- --url https://cp.example  #   or say it outright (REEMOAT_CONTROL_PLANE too)
   … | sh -s -- --enroll-code ec_…    #   with a code already minted, and no account credential
   … | sh -s -- --uninstall           #   stop it and take the unit away; names your data, deletes none
-  … | sh -s -- --uninstall --purge   #   and delete it, after printing the worktrees it would take
+  … | sh -s -- --uninstall --purge   #   and delete it, after naming the database, checkout and worktrees it would take
+deploy/agents.sh --check             # what the agent CLIs would install or refresh, changing nothing.
+                                     #   Run for real by the bootstrap once, by `deploy.sh` on every
+                                     #   daemon update, and by the daemon daily
+deploy/agents.sh --source npm        #   the same four from the npm registry rather than the vendors'
+                                     #   hosts — what the daemon passes under REEMOAT_AGENT_SOURCE=npm
 
 deploy/install.sh control-plane      # one-time, interactive: settings → image → start → admin key → first user
 deploy/install.sh daemon             #   same; enrolls itself against a local control plane if there is one
@@ -62,10 +67,12 @@ exactly this in production since before this script existed.
 **Three provenances, one order, no fallback constant.** `--url` /
 `REEMOAT_CONTROL_PLANE` wins; else the origin `GET /install.sh` substituted into
 the placeholder (`publicUrl(c)` corrected by `x-forwarded-proto` — see below);
-else it **asks**, with no default. `deploycheck` asserts no URL naming a real host
-sits on any line that could act on one, and separately that the hosted instance
-*is* named in prose — both halves, because "never mentioned" and "used as a
-default" are both wrong.
+else it **asks**, with no default. `deploycheck` asserts that the only lines naming a
+real control-plane host are inside `resolve_control_plane`, that the hosted
+instance is offered there and never as the menu's first row, and that it is
+assigned only behind that menu's answer — the property is "nothing arrives there
+without being chosen", which an assignment behind a choice satisfies and a
+default does not.
 
 **⚠ The README downloads from a release asset, not from a control plane, and that
 is Q4.112.** A download URL answers *where the software is*; letting it also
@@ -111,10 +118,19 @@ this one, so a bootstrap installing pnpm 10 against a lockfile written by 11.17.
 would fail on a stranger's laptop and be green here.
 
 **The machine is created before the clone**, so `409 machine_limit` costs seconds
-rather than 750 MB. **Only the enrollment code reaches disk** — an API key is used
-in memory and dropped, a minted session is revoked with `DELETE
-/v1/me/sessions/current` (the `:id` form is below `requirePasswordCurrent` and
-would 403 for exactly the account most likely to be running this).
+rather than a clone, a ~220 MB `pnpm install` and ~700 MB of agent CLIs. **Only
+the enrollment code reaches disk** — an API key is used in memory and dropped, a
+minted session is revoked with `DELETE /v1/me/sessions/current` (the `:id` form
+is below `requirePasswordCurrent` and would 403 for exactly the account most
+likely to be running this).
+
+**`--agent-source npm` is one flag for two runs.** `parse_flags` refuses anything
+but `vendor` or `npm`; the value is passed to the bootstrap's own `deploy/agents.sh`
+run and written into the env file as `REEMOAT_AGENT_SOURCE=npm`, so the install and
+every daily refresh after it agree about where the four come from. `vendor` is the
+default and writes nothing. On a machine that is already set up neither run happens
+here, so `existing_install` refuses the flag and names the env file setting
+instead of accepting a flag that changes nothing.
 
 **`svc_uninstall` lives in `lib.sh`, not in the bootstrap.** That file is the only
 one that knows one machine from another, and a script issuing `launchctl`
@@ -309,9 +325,10 @@ untouched, because that function inspects the *local* image either way.
 | `deploy/install.sh` | One-time setup for **one** service. A wizard on a terminal, a plain installer without one |
 | `deploy/ci-deploy.sh` | What a runner does before `deploy.sh`: the secrets it must have, the daemon it may not touch, the CI verdict it will not go around. A script rather than YAML so `deploycheck` can drive every branch, through `SSH` and `GH` as seams |
 | `deploy/ci-release.sh` | What a runner does to publish one: the six versions that must agree, the CI verdict it will not go around, the tag it will not move, and the labels it derives rather than writes. Four verbs, three seams, and every gate re-run by each |
-| `deploy/deploy.sh` | The update path. Refuses a dirty tree, builds the image once, then restarts only what the diff touched — with `RELAY_INPUTS` as the one list that decides whether the fleet's tunnels drop |
+| `deploy/deploy.sh` | The update path. Refuses a dirty tree, builds the image once, then restarts only what the diff touched — with `RELAY_INPUTS` as the one list that decides whether the fleet's tunnels drop. On the daemon it runs `deploy/agents.sh` **before** deciding the restart, with the source read off the env file and every prune withheld, so a machine upgraded from a release that vendored the CLIs comes back with its harnesses rather than five minutes later; a script that did not finish is a line on stderr, never a failed deploy |
 | `deploy/run-daemon.sh` | What the supervisor runs. Standalone by design — it must work when the environment is at its strangest |
 | `deploy/run-cp.sh` | ⚠ On no code path, and **kept until the last host has migrated**: a rendered unit's `@EXEC@` points here, so deleting it takes the fleet down at the next reboot rather than the next deploy |
+| `deploy/agents.sh` | The coding-agent CLIs — the only copies there are, since `pnpm install` vendors none (Q4.114): install what is missing, refresh what is there. `--source vendor` (the default) is each vendor's own installer into the vendors' own directories for three of them and the npm registry for kimi; `--source npm` is all four from the npm registry with everything under `~/.reemoat/toolchain`, and is what the daemon passes when `REEMOAT_AGENT_SOURCE=npm` — a choice, never a fallback. `--source` decides how an *absent* harness is installed and nothing about one that is present, which is refreshed through the door it came in by — `provenance` reads where the file is; the one case a switch cannot refresh, a vendor-installed copy under `npm`, is named on stderr until it is removed. One script, three callers — the bootstrap once, `deploy.sh` on every update, `src/agentupdate.ts` daily — `--check` to preview and `--skip <agent>` per live harness; always exit 0, so a vendor being down is a line on stderr rather than a failed install. The directories it writes into are `MANAGED_CLI_DIRS`, which `deploycheck` imports rather than restates |
 | `deploy/compose.sh` | `docker compose` with the project name, directory, env file and tag pinned. **Not** the repo root as project directory — compose would load the daemon's `.env` |
 | `deploy/docker/*` | The control plane as an image: a filtered install, the web bundle built in, a reachability walk that prunes what the root workspace dragged in — and **two services from that one image**, sharing a volume, with no `depends_on` between them |
 | `deploy/launchd/*.in`, `deploy/systemd/*.in` | One template per init system |

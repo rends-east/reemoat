@@ -2820,6 +2820,26 @@ process.stdout.write("\nsigning in, sessions and passwords\n");
       })
     ).json()) as { controlPlaneUrl?: string };
     check("while an undeclared proxy's header moves nothing", forged.controlPlaneUrl?.startsWith("http://"), true);
+    /*
+     * And it is read the way `x-forwarded-for` is: the entry `trustedHops` from the
+     * right. A proxy that appends leaves the client's own claim on the left, so with
+     * one hop declared `http, https` is the proxy saying `https` and the client
+     * saying nothing that counts.
+     */
+    const appended = (await (
+      await post("/v1/machines", { name: "appended-proto" }, { ...admin, "x-forwarded-proto": "http, https" })
+    ).json()) as { machine?: { id?: string }; controlPlaneUrl?: string };
+    check("and with a proxy that appends, the proxy's entry outranks the client's", appended.controlPlaneUrl?.startsWith("https://"), true);
+    const short = (await (
+      await post("/v1/machines", { name: "short-chain" }, { ...admin, "x-forwarded-proto": "" })
+    ).json()) as { controlPlaneUrl?: string };
+    check("and a header with fewer entries than hops is not believed", short.controlPlaneUrl?.startsWith("http://"), true);
+    // The other two routes that mint a code: the admin's, and — further down — the
+    // provisioning key's. A fix on the first pair that missed either reads green here.
+    const adminMinted = (await (
+      await post(`/v1/admin/machines/${appended.machine?.id ?? "m_missing"}/enrollments`, {}, proxied)
+    ).json()) as { controlPlaneUrl?: string };
+    check("and a code an admin mints honours it too", adminMinted.controlPlaneUrl?.startsWith("https://"), true);
   }
 
   check("but /v1/jwks is still public", (await send("/v1/jwks")).status, 200);
@@ -5394,6 +5414,20 @@ process.stdout.write("\nmachines somebody owns\n");
       await outcome(await post("/v1/provision", { key: first, user: target.id, machine: "stale" }, bare)),
       [401, "invalid_provisioning_key"],
     );
+    /*
+     * The fourth code-minting route, driven against an app that trusts one proxy
+     * hop: what this answers goes straight into an env file on a host somebody is
+     * provisioning, and `publicUrl` alone reads `http://` behind every TLS proxy.
+     */
+    const proxiedApp = createControlPlaneApp({ db, issuer: ISSUER, tokenTtlSeconds: 300, relayUrl, relay: registry, trustedProxyHops: 1 });
+    const provisionedProxied = (await (
+      await proxiedApp.request("/v1/provision", {
+        method: "POST",
+        headers: { ...bare, "x-forwarded-proto": "https" },
+        body: JSON.stringify({ key: reminted, user: target.id, machine: "proxied-provision" }),
+      })
+    ).json()) as { controlPlaneUrl?: string };
+    check("a provisioned machine's controlPlaneUrl honours a trusted x-forwarded-proto", provisionedProxied.controlPlaneUrl?.startsWith("https://"), true);
     check(
       "while the new one works",
       (await post("/v1/provision", { key: reminted, user: target.id, machine: "fresh" }, bare)).status,

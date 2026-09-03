@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import type { AgentId, AgentLaunchConfig } from "../src/acp/agents.js";
+import { AgentUnavailableError, type AgentId, type AgentLaunchConfig } from "../src/acp/agents.js";
 import { AgentLoginRuns } from "../src/agentauth.js";
 import {
   MemoryEventStore,
@@ -380,6 +380,76 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
       promptResult?.kind === "accepted" ? promptResult.turn : promptResult?.kind,
       4,
     );
+    await own.shutdown();
+  }
+
+  /*
+   * **A harness with no CLI on the machine costs no attempt and is not given up
+   * on.** Measured 2026-09-04 on the dev stand, the first deploy after the
+   * vendored CLIs went (Q4.114): the stand's own deploy path restarts the daemon
+   * without running `deploy/agents.sh` first, so three opencode sessions met
+   * `opencode not found on this daemon's PATH` three times each and were marked
+   * `attempts_exhausted` — a verdict for the daemon's life — while the updater
+   * installed opencode five minutes later and nothing re-drove them. An attempt
+   * is for a failure a retry might not repeat; a verdict is for a fact a retry
+   * cannot change; a missing binary repeats exactly until the install lands and
+   * then does not. So it is `agent_missing`: the reason goes on the snapshot as
+   * `waiting` with no attempt spent, the session stays in every later pass's
+   * queue, and the pass the daemon starts after the update brings it back.
+   */
+  {
+    const rig = rigWith({ resume: true });
+    const store = storeOf([interruptedRow("s_nocli", "daemon_restarted", "a_nocli")]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    const describe = rig.runtime.describe.bind(rig.runtime);
+    let installed = false;
+    // `describe` is what `resolveAgent` reaches through, and a missing CLI is a
+    // refusal there — before any spawn — so this is the shape the real refusal
+    // takes, with its real class and its real sentence.
+    rig.runtime.describe = (agent: AgentId): AgentLaunchConfig => {
+      if (!installed) throw new AgentUnavailableError("opencode not found on this daemon's PATH. deploy/agents.sh installs it (or `curl -fsSL https://opencode.ai/install | bash`).");
+      return describe(agent);
+    };
+    const outcomes: string[] = [];
+    const first = await own.autoResume({ ...options, concurrency: 1, onOutcome: (one) => void outcomes.push(`${one.result}:${one.attempt}`) });
+    const waiting = own.get("s_nocli");
+    check("a harness with no CLI is reported as missing, once, with no attempt spent", outcomes, ["agent_missing:0"]);
+    check("and counted as deferred rather than failed", [first.considered, first.deferred, first.failed, first.resumed], [1, 1, 0, 0]);
+    check("the session is still interrupted", waiting?.status, "interrupted");
+    check("not given up on", waiting?.resumeAbandoned, null);
+    check("and its snapshot says it is waiting, and why, with no attempt on it", [waiting?.snapshot().resume?.state, waiting?.snapshot().resume?.attempts, waiting?.snapshot().resume?.error?.code], ["waiting", 0, "agent_unavailable"]);
+    check("without an error event in its log", waiting?.snapshot().lastSeq, own.get("s_nocli")?.snapshot().lastSeq);
+    check("and nothing was spawned to find that out", rig.launches(), 0);
+    // The install lands, and the pass the daemon starts afterwards picks it up.
+    installed = true;
+    const second = await own.autoResume({ ...options, concurrency: 1, onOutcome: (one) => void outcomes.push(`${one.result}:${one.attempt}`) });
+    check("the pass after the install brings it back", [second.considered, second.resumed, own.get("s_nocli")?.status], [1, 1, "idle"]);
+    check("on its first attempt, since the deferral spent none", outcomes.at(-1), "resumed:1");
+    check("and the snapshot has forgotten the wait", own.get("s_nocli")?.snapshot().resume ?? null, null);
+    await own.shutdown();
+  }
+
+  /*
+   * **Two passes over one registry run one after the other, never together.**
+   * The pass after an agent update can start while the boot pass is still waiting
+   * out a backoff, and two passes driving `resume()` on one session is a race
+   * nothing below is built for. The second waits; what the first brought back is
+   * not in its queue.
+   */
+  {
+    const rig = rigWith({ resume: true, stallMs: 40 });
+    const store = storeOf([interruptedRow("s_one", "daemon_restarted", "a_one"), interruptedRow("s_two", "daemon_restarted", "a_two")]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    const order: string[] = [];
+    const a = own.autoResume({ ...options, concurrency: 1, onOutcome: (one) => void order.push(`a:${one.sessionId}`) });
+    const b = own.autoResume({ ...options, concurrency: 1, onOutcome: (one) => void order.push(`b:${one.sessionId}`) });
+    const [ra, rb] = await Promise.all([a, b]);
+    check("the first pass resumes both", [ra.considered, ra.resumed], [2, 2]);
+    check("and the second, queued behind it, finds nothing left to do", [rb.considered, rb.resumed], [0, 0]);
+    check("in that order", order.every((one) => one.startsWith("a:")), true);
+    check("with each agent asked to resume exactly once", rig.resumes().length, 2);
     await own.shutdown();
   }
 

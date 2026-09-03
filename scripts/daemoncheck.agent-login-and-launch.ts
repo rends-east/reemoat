@@ -1,3 +1,5 @@
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import {
@@ -5,9 +7,10 @@ import {
   AGENT_LOGIN,
   agentEnv,
   credentialEnvNames,
+  findOnPath,
+  forgetPathHits,
   hasLoginFlow,
   resolveAgent,
-  vendoredOpencode,
   type AgentId,
   type AgentLaunchConfig,
 } from "../src/acp/agents.js";
@@ -16,15 +19,17 @@ import { MemoryEventStore } from "../src/events.js";
 import { SessionRegistry, sameCommands } from "../src/registry.js";
 import {
   LocalRuntime,
+  firstVersion,
   hostLoginArgs,
   loginBlockedReason,
   loginStdio,
   readLoginAnswer,
+  spawnPlan,
 } from "../src/runtime/local.js";
 import { toCommands } from "../src/session.js";
 import type { AgentProcess } from "../src/runtime/types.js";
 import { createApp } from "../src/server.js";
-import { check } from "./daemoncheck.env.js";
+import { check, report } from "./daemoncheck.env.js";
 import { sandbox, users, now, tokenFor, verifier, credentials } from "./daemoncheck.fixtures.js";
 
 /**
@@ -418,8 +423,8 @@ process.stdout.write("\nthe agent's command list is bounded where it arrives\n")
  * login wizard in front of somebody whose agent works.
  *
  * Drivable at all because of `LocalRuntimeOptions.exec` and because
- * `resolveLoginBinary` reads `CLAUDE_CODE_EXECUTABLE` first — neither is a test
- * hook invented here, the second is the documented override for *which* build the
+ * `chooseCli` reads `CLAUDE_CODE_EXECUTABLE` first — neither is a test hook
+ * invented here, the second is the documented override for *which* build the
  * adapter drives.
  * ------------------------------------------------------------------ */
 
@@ -536,7 +541,9 @@ process.stdout.write("\nis this agent signed in\n");
    * `AGENT_LOGIN[agent].executableEnv` is asserted as data below; this is the
    * half that says it is *read*. Written as `agent === "claude"` — which is what
    * it was — codex's override chose the binary sessions ran while the login and
-   * the probe went on resolving the vendored copy, and no driver noticed.
+   * the probe went on resolving the copy this repository vendored then, and no
+   * driver noticed. The vendored copies are gone (Q4.114) and the property is the
+   * same one: whatever the variable names is what every spawn drives.
    *
    * Asserted through `availability()` rather than by calling the private method,
    * so what is pinned is the path a login and a status probe actually take.
@@ -549,9 +556,29 @@ process.stdout.write("\nis this agent signed in\n");
   check("and as signed out", await probeAs("codex", "Not logged in"), false);
   // The third answer, which must never render as logged out.
   check("and anything else is cannot-tell", await probeAs("codex", "Checking…"), null);
-  const codexProbe = [...spawned.values()].find((entry) => entry.command === codexStub);
+  /*
+   * ⚠ **By its arguments, not by its command, because the daemon now spawns that
+   * same binary twice.** Deciding which build runs means asking each candidate
+   * `--version`, so a status probe and a version read share a command and only the
+   * argv tells them apart — and `find` returning the wrong one made this assert
+   * `["--version"]` while reading exactly the sentence it was written to pin.
+   */
+  const statusOf = (command: string) =>
+    [...spawned.values()].find((entry) => entry.command === command && entry.args[0] !== "--version");
+  const codexProbe = statusOf(codexStub);
   check("CODEX_PATH chose the binary the probe ran", codexProbe?.command, codexStub);
   check("with the status arguments from the table", codexProbe?.args, ["login", "status"]);
+  /*
+   * **And the version read went to the same file, which is the whole property.**
+   *
+   * "Which build is this" and "is it signed in" are two questions about one
+   * binary, and a daemon that asked them of different files would report the
+   * version of one while running the other — the failure `agentCli`'s docblock
+   * is about, reached through the reporting side rather than the credential side.
+   */
+  const versionOf = (command: string) =>
+    [...spawned.values()].find((entry) => entry.command === command && entry.args[0] === "--version");
+  check("and the version read asked the same binary", versionOf(codexStub)?.args, ["--version"]);
   /*
    * **And its answer is read from the stream that CLI answers on.**
    *
@@ -562,9 +589,26 @@ process.stdout.write("\nis this agent signed in\n");
    * existed and nothing asserted it was forwarded.
    */
   check("and read from stderr, where codex answers", codexProbe?.stream, "stderr");
-  const claudeProbe = [...spawned.values()].find((entry) => entry.command !== codexStub);
+  const claudeStub = join(sandbox, "claude-stub");
+  const claudeProbe = statusOf(claudeStub);
   check("while claude's is read from stdout", claudeProbe?.stream, "stdout");
-  check("and CLAUDE_CODE_EXECUTABLE chose its binary", claudeProbe?.command, join(sandbox, "claude-stub"));
+  check("and CLAUDE_CODE_EXECUTABLE chose its binary", claudeProbe?.command, claudeStub);
+  check("and its version was read off that binary too", versionOf(claudeStub)?.args, ["--version"]);
+  /*
+   * ⚠ **An override is never compared, and this is where that is pinned.** Both
+   * stubs above are named by the vendor's own variable, so no other copy — the
+   * `claude` on this machine's PATH, or the one in `MANAGED_CLI_DIRS` that
+   * `deploy/agents.sh` keeps current — may be spawned at all: `chooseCli` returns
+   * on the override before it walks PATH, and there is no longer a vendored copy
+   * for it to weigh the override against (Q4.114). Asserted as an absence,
+   * because the symptom of getting it wrong is a subprocess nobody asked for
+   * rather than a wrong answer.
+   */
+  check(
+    "and no other binary was consulted while an override named one",
+    [...spawned.values()].filter((entry) => entry.command !== codexStub && entry.command !== claudeStub).length,
+    0,
+  );
   if (priorCodexPath === undefined) delete process.env["CODEX_PATH"];
   else process.env["CODEX_PATH"] = priorCodexPath;
 
@@ -741,8 +785,8 @@ process.stdout.write("\neach agent's login, as it is written down\n");
   /*
    * **Codex's login must stay `--device-auth`.**
    *
-   * Measured 2026-08-07, and the flag is present on the vendored 0.145.0 the
-   * adapter actually spawns as well as the 0.146.1 on PATH: a bare `codex login`
+   * Measured 2026-08-07, and the flag is present on the 0.145.0 this repository
+   * vendored then as well as the 0.146.1 on PATH: a bare `codex login`
    * binds a local
    * server on port 1455 and waits for a browser to come back to it, which on this
    * daemon is a wizard that can never finish — nobody is at that machine's browser
@@ -807,9 +851,10 @@ process.stdout.write("\neach agent's login, as it is written down\n");
    *
    * This asserted "only claude" and was wrong: `CODEX_PATH` is read by codex-acp's
    * own `startAcpServer()` and chooses the CLI a *session* runs. Missing it meant
-   * the login and the signed-in probe resolved the vendored copy while sessions ran
-   * whatever `CODEX_PATH` named — a login that appears to work and changes nothing,
-   * which is the failure the vendored-copy preference exists to prevent.
+   * the login and the signed-in probe resolved the copy this repository vendored
+   * then while sessions ran whatever `CODEX_PATH` named — a login that appears to
+   * work and changes nothing, which is the failure `agentCli`'s one-decision rule
+   * exists to prevent: login, logout, probe and session all consume its answer.
    *
    * Pinned by name rather than by count, because the count was the part that
    * looked right.
@@ -942,16 +987,31 @@ process.stdout.write("\nthe environment an agent is spawned with\n");
  * one assertion that catches an adapter renamed, moved, or dropped from
  * `package.json`, which otherwise surfaces as `AgentUnavailableError` on somebody's
  * first session.
+ *
+ * ⚠ **The two adapters refuse to resolve without a CLI under them, and no CLI is
+ * vendored any more (Q4.114).** `resolveAgent("claude")` and `("codex")` ask
+ * `cliFor` — the vendor's own variable, else `findOnPath` over PATH and
+ * `MANAGED_CLI_DIRS` — and throw `AgentUnavailableError` when both are empty, so
+ * that `describe` fails fast with a sentence rather than the adapter dying at
+ * spawn over a platform package `pnpm-workspace.yaml` excludes. CI has neither
+ * `claude` nor `codex`, so this section names a stub in each variable for the
+ * length of the loop: an override is believed as named and never tested for
+ * existence, which is what makes the adapter half resolvable on every machine.
+ * Both are put back afterwards.
  */
 process.stdout.write("\nhow each agent is launched\n");
 {
+  const prior = { claude: process.env["CLAUDE_CODE_EXECUTABLE"], codex: process.env["CODEX_PATH"] };
+  process.env["CLAUDE_CODE_EXECUTABLE"] = join(sandbox, "claude-stub");
+  process.env["CODEX_PATH"] = join(sandbox, "codex-stub");
   for (const id of AGENT_IDS) {
     let config: AgentLaunchConfig | null = null;
     try {
       config = resolveAgent(id);
     } catch {
-      // Not installed here. kimi is resolved from PATH and is legitimately absent
-      // on a machine that has never had it; the two vendored adapters are not.
+      // Not installed here. kimi and opencode are resolved from PATH and are
+      // legitimately absent on a machine that has never had them; the two
+      // adapters are dependencies of this repository and are not.
     }
     if (id === "kimi") {
       /*
@@ -970,34 +1030,107 @@ process.stdout.write("\nhow each agent is launched\n");
     }
     if (id === "opencode") {
       /*
-       * **Vendored, so no skip** — `opencode-ai` is a dependency of this repo and
-       * an absent one is a real failure, unlike kimi above. What it does not have
-       * is an adapter: `opencode acp` is a subcommand of the same binary a login
-       * drives, which is why the argument list is kimi's shape and the resolution
-       * is claude's.
+       * **kimi's shape now, skip included.** `opencode-ai` was a dependency of
+       * this repository and an absent one was a real failure; it is installed by
+       * `deploy/agents.sh` like the other three (Q4.114), so a machine that has
+       * never run that script legitimately has none, and the skip is the honest
+       * line for the reason kimi's is. What it still does not have is an adapter:
+       * `opencode acp` is a subcommand of the same binary a login drives, which is
+       * why the argument list is kimi's shape.
        */
-      check("opencode is launched as an ACP subcommand of the CLI itself", config?.args, ["acp"]);
-      check("and opencode says which binary it is", (config?.displayName ?? "").length > 0, true);
+      if (config === null) {
+        process.stdout.write("  skip  opencode is not installed here, so its launch shape is unasserted\n");
+        continue;
+      }
+      check("opencode is launched as an ACP subcommand of the CLI itself", config.args, ["acp"]);
+      check("and opencode says which binary it is", config.displayName.length > 0, true);
       /*
-       * ⚠ **The property vendoring buys, and the one this agent alone can be held
-       * to.** For claude and codex the program a session runs and the program a
-       * login drives are honestly different files — an adapter and the CLI under
-       * it — so nothing can compare them. Here they are one file, and resolving
-       * them apart is exactly the "a login that appears to work and changes
-       * nothing" failure `vendoredCli` exists to prevent.
+       * ⚠ **The property this agent alone can be held to.** For claude and codex
+       * the program a session runs and the program a login drives are honestly
+       * different files — an adapter and the CLI under it — so nothing can compare
+       * them. Here they are one file: `resolveAgent` and `LocalRuntime.agentCli`
+       * both ask `findOnPath` the same name, and resolving them apart is exactly
+       * the "a login that appears to work and changes nothing" failure `agentCli`
+       * exists to prevent. The vendored copy used to be what pinned the two
+       * together; the shared lookup is what does now.
        */
-      check(
-        "and the binary a session runs is the one a login drives",
-        config?.command ?? "(unresolved)",
-        vendoredOpencode() ?? "(unresolved)",
-      );
+      check("and the binary a session runs is the one a login drives", config.command, findOnPath("opencode"));
       continue;
     }
-    // Both vendored adapters speak ACP on stdio with no arguments at all. An
-    // argument appearing here would mean the adapter changed how it is started.
+    // Both adapters — pinned dependencies of this repository, unlike the CLIs
+    // under them — speak ACP on stdio with no arguments at all. An argument
+    // appearing here would mean the adapter changed how it is started.
     check(`${id}'s adapter is resolvable and takes no arguments`, config?.args, []);
     check(`and ${id} says which binary it is`, (config?.displayName ?? "").length > 0, true);
   }
+
+  /*
+   * ⚠ **And with no CLI at all the adapter is refused, with the remedy in the
+   * sentence — for every harness that has an adapter, and the sentence has three
+   * parts.** This is the arm CI actually takes — no override, nothing on PATH —
+   * and what it has to say is `deploy/agents.sh`, because the alternative is a
+   * tile reporting `available: false` over a hint about a package that is
+   * deliberately absent; `--source npm`, because the machine most likely to be
+   * reading the sentence is the one behind a firewall, for which a bare
+   * `deploy/agents.sh` is a run that ends in the same tile (Q4.114); and the
+   * harness's *own* variable, because the remedy was once a literal naming
+   * claude's, so a harness with no such variable was told to set
+   * `CLAUDE_CODE_EXECUTABLE`. The harnesses
+   * are derived from `AGENT_LOGIN` rather than listed: whichever have an
+   * `executableEnv` are the ones with an adapter under them, and a fifth that
+   * grew one would join the loop without an edit here — which is also why the
+   * loop is asserted non-empty first, since a loop over nothing is the check
+   * `pincheck`'s header calls worse than none.
+   *
+   * Reachable only where `MANAGED_CLI_DIRS` holds no copy either: that list is
+   * searched after PATH and cannot be redirected, so a developer machine with
+   * `~/.local/bin/claude` skips that harness and says where the copy is, while CI —
+   * which has none — runs it. PATH is pointed at an empty directory rather than
+   * unset, so what is being asserted is the search and not a missing variable.
+   */
+  const priorPath = process.env["PATH"];
+  const bare = join(sandbox, "no-cli-bin");
+  mkdirSync(bare, { recursive: true });
+  process.env["PATH"] = bare;
+  const withAdapter = AGENT_IDS.flatMap((id) => {
+    const variable = AGENT_LOGIN[id].executableEnv;
+    return variable === null ? [] : [{ id, variable, command: AGENT_LOGIN[id].command }];
+  });
+  report("some harness has an adapter, so the refusal below is asked of somebody", withAdapter.length > 0, withAdapter.map((one) => one.id).join(", "));
+  for (const { id, variable, command } of withAdapter) {
+    delete process.env[variable];
+    forgetPathHits();
+    const name = `without a CLI the ${id} adapter is refused, naming deploy/agents.sh, --source npm and ${variable}`;
+    const elsewhere = findOnPath(command);
+    if (elsewhere !== null) {
+      report(name, true, `skipped: this machine has a ${command} at ${elsewhere}, which is searched after PATH`);
+      continue;
+    }
+    let refusal: string | null = null;
+    try {
+      resolveAgent(id);
+    } catch (error) {
+      refusal = error instanceof Error ? error.message : String(error);
+    }
+    report(
+      name,
+      refusal !== null &&
+        refusal.includes("deploy/agents.sh") &&
+        refusal.includes("--source npm") &&
+        refusal.includes(variable),
+      refusal ?? `resolved with no ${command} anywhere`,
+    );
+  }
+  if (priorPath === undefined) delete process.env["PATH"];
+  else process.env["PATH"] = priorPath;
+  // The misses above are cached for thirty seconds and would otherwise be believed
+  // by every later section that asks for `claude` or `codex`.
+  forgetPathHits();
+
+  if (prior.claude === undefined) delete process.env["CLAUDE_CODE_EXECUTABLE"];
+  else process.env["CLAUDE_CODE_EXECUTABLE"] = prior.claude;
+  if (prior.codex === undefined) delete process.env["CODEX_PATH"];
+  else process.env["CODEX_PATH"] = prior.codex;
 }
 
 process.stdout.write("\nwhether a login can be driven\n");
@@ -1435,4 +1568,633 @@ process.stdout.write("\ntwo tabs, and the shutdown that follows\n");
   check("shutdown stops the live run", runtime.stopped[1], ["stdin"]);
   check("and a start afterwards refuses", await logins.start("claude"), null);
   check("without spawning anything to leave behind", runtime.stopped.length, 2);
+}
+
+/** A promise and the hand that settles it, held apart so a driver can hold a run open. */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve = (): void => {};
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve: () => resolve() };
+}
+
+process.stdout.write("\nkeeping the agent CLIs current\n");
+{
+  const { AgentUpdates, FIRST_RUN_DELAY_MS, UPDATE_INTERVAL_MS, UPDATE_JITTER, agentSourceFrom } = await import(
+    "../src/agentupdate.js"
+  );
+
+  /*
+   * **A scheduler nothing drives is a scheduler nobody knows is broken**, which is
+   * why the timer, the clock and the spawn are all injected: every branch below is
+   * unreachable from a machine that is not left running for a day, and every one of
+   * them is a way to fail *quietly* — a run that never fires, a run that fires twice
+   * over the same directories, a fresh CLI the daemon then declines to notice.
+   */
+  type Fired = { delay: number; fire: () => void };
+  const armed: Fired[] = [];
+  const fake = (fn: () => void, ms: number) => {
+    const entry = { delay: ms, fire: fn };
+    armed.push(entry);
+    return { cancel: () => { entry.fire = () => {}; } };
+  };
+
+  const ran: string[][] = [];
+  const warnings: string[] = [];
+  const updated: Array<string | null> = [];
+  const make = (over: Partial<Parameters<typeof AgentUpdates.start>[0]> = {}) =>
+    AgentUpdates.start({
+      busy: () => [],
+      onWarning: (detail) => warnings.push(detail),
+      onUpdated: (report) => updated.push(report),
+      schedule: fake,
+      jitter: () => 0.5,
+      run: async (_script, args) => {
+        ran.push([...args]);
+        return { ok: true, detail: "  claude        refresh 2.1.259" };
+      },
+      ...over,
+    });
+
+  const runs = make();
+  check("the first run is armed, and not at boot", armed[0]?.delay, FIRST_RUN_DELAY_MS);
+  /*
+   * ⚠ **Not at boot is the assertion, not a preference.** `restore()` and
+   * `autoResume` are already starting an agent per interrupted session at that
+   * moment, and a ~700 MB download racing them makes the slowest part of a restart
+   * slower still — on the one screen somebody who has just installed this is watching.
+   */
+  check("which is minutes rather than seconds", FIRST_RUN_DELAY_MS >= 60_000, true);
+
+  armed[0]?.fire();
+  await new Promise((r) => setTimeout(r, 0));
+  check("firing it runs the script once", ran.length, 1);
+  check("with nothing skipped when nothing is live", ran[0], []);
+  check("and the cached CLI choice is dropped afterwards", updated.length, 1);
+  // With what the script said, so a run that changed nothing still leaves a line
+  // — a daily run with no trace was measured as invisible, seven minutes of
+  // somebody watching a log for it.
+  check("handing over what the script printed", updated[0], "  claude        refresh 2.1.259");
+  /*
+   * Or an update lands and the daemon goes on launching the build it resolved
+   * before it, for the length of `AGENT_CLI_TTL_MS` — the fresh binary sitting on
+   * disk, unused, with the old version still on screen.
+   */
+  check("then the next run is armed", armed.length, 2);
+  check("a day away, jittered either side of it", armed[1]?.delay, UPDATE_INTERVAL_MS);
+  check(
+    "and the jitter really does reach both directions",
+    [
+      Math.round(UPDATE_INTERVAL_MS * (1 + (0 * 2 - 1) * UPDATE_JITTER)) < UPDATE_INTERVAL_MS,
+      Math.round(UPDATE_INTERVAL_MS * (1 + (1 * 2 - 1) * UPDATE_JITTER)) > UPDATE_INTERVAL_MS,
+    ],
+    [true, true],
+  );
+
+  /*
+   * ⚠ **A harness with a live agent is named to the script, and what the name
+   * withholds is one thing: the pruning of the previous versioned build.** Every
+   * harness that arrives through npm — kimi always, and all four under
+   * `--source npm` — is installed into a versioned directory of its own with
+   * `~/.reemoat/toolchain/bin/<agent>` repointed by rename, so the install still
+   * happens and the symlink still moves under a live agent; the build that agent
+   * may still be running is what a skip keeps on disk, until a run with nothing
+   * live on that harness. The three native installers swap by rename as well and
+   * have nothing to withhold. Which arm a harness takes today is the script's
+   * `provenance` rule and none of the daemon's business, so it names every live
+   * one and the script decides (Q4.114).
+   */
+  ran.length = 0;
+  armed.length = 0;
+  const busy = make({ busy: () => ["kimi", "claude"] });
+  armed[0]?.fire();
+  await new Promise((r) => setTimeout(r, 0));
+  check("a live harness is passed through as a skip", ran[0], ["--skip", "kimi", "--skip", "claude"]);
+  await busy.shutdown();
+
+  /*
+   * **Where the CLIs come from is a flag, not an environment variable.** The
+   * script runs under `updateEnv()`, which strips every `REEMOAT_*` name — so
+   * `REEMOAT_AGENT_SOURCE=npm` cannot reach it as itself and the daemon has to say
+   * it on the command line (Q4.114). It goes ahead of the skips by convention
+   * rather than need — the script collects every flag before it acts, so either
+   * order reads the same — and the whole list is pinned as one value so that a
+   * change to what the daemon says is a change here first.
+   *
+   * What the flag decides on the far side is narrower than it sounds: how a
+   * harness that is *absent* is installed. One that is present is refreshed
+   * through the door it came in by — the toolchain from npm, a vendor's directory
+   * by the vendor's own updater, and anywhere else left alone and said so —
+   * whatever the flag says today. That is the script's `provenance` rule, and it
+   * is what makes switching the flag on a machine that already has its agents safe
+   * in both directions; the one thing a switch cannot do is refresh a
+   * vendor-installed copy from the registry, and under `npm` that copy is a
+   * warning the daemon forwards daily.
+   */
+  ran.length = 0;
+  armed.length = 0;
+  const fromNpm = make({ source: "npm", busy: () => ["kimi"] });
+  armed[0]?.fire();
+  await new Promise((r) => setTimeout(r, 0));
+  check("the npm source is named to the script, ahead of the skips", ran[0], ["--source", "npm", "--skip", "kimi"]);
+  await fromNpm.shutdown();
+
+  /*
+   * **And `vendor` is not spelled out, even when it was chosen explicitly.** It is
+   * the script's own default — `SOURCE=vendor` before any flag is read — and the
+   * daemon naming it would make this the one caller with an opinion about what the
+   * default is called: rename it in the script and every daemon in the field would
+   * exit 2 on its next run, with nothing refreshed anywhere until a restart on a
+   * new build. What the daemon knows is the one departure from the default, and
+   * that is all it says.
+   */
+  ran.length = 0;
+  armed.length = 0;
+  const fromVendor = make({ source: "vendor", busy: () => ["kimi"] });
+  armed[0]?.fire();
+  await new Promise((r) => setTimeout(r, 0));
+  check("the vendor source is the script's own default, and is not spelled out to it", ran[0], ["--skip", "kimi"]);
+  await fromVendor.shutdown();
+
+  /*
+   * **The spelling read off `REEMOAT_AGENT_SOURCE`**, held here because it is one
+   * line in `scripts/daemon.ts` and it decides where four programs come from.
+   * Pure and exported for exactly this. An unknown spelling is *reported* and then
+   * read as the default, rather than obeyed — the script would exit 2 on it, daily,
+   * and the machine would have no agents — or refused, which is a typo costing a
+   * daemon that will not start. The posture is `REEMOAT_AGENT_UPDATES`'s, where
+   * every spelling of "no" is accepted and nothing else is. Case and padding are
+   * forgiven because an env file is edited by hand; and the warning has to name
+   * the spelling it saw and the two it knows, or the line says "wrong" and not
+   * what would have been right.
+   */
+  {
+    const said: string[] = [];
+    const read = (value: string | undefined) => agentSourceFrom(value, (detail) => void said.push(detail));
+    check("npm is npm, however it is cased or padded", [read("npm"), read(" NPM ")], ["npm", "npm"]);
+    check("and nothing is said about it", said, []);
+    check(
+      "unset, empty and vendor are all the default",
+      [read(undefined), read(""), read("vendor"), read(" Vendor ")],
+      ["vendor", "vendor", "vendor", "vendor"],
+    );
+    check("in silence", said, []);
+    check("a spelling the daemon does not know is read as the default rather than obeyed or refused", read("bogus"), "vendor");
+    check(
+      "with exactly one line, naming the spelling it saw and the two it knows",
+      [said.length, said[0]?.includes("bogus") ?? false, said[0]?.includes("vendor or npm") ?? false],
+      [1, true, true],
+    );
+  }
+
+  /*
+   * **A nudge runs the armed run now, and only an armed one.** The five-minute
+   * first run is right until it is the thing a session is waiting for: on the
+   * first boot after the vendored CLIs went, a machine whose deploy path had not
+   * run the installer met `opencode not found` on every opencode session and the
+   * binary arrived five minutes later. The boot pass reports that harness as
+   * missing, the daemon nudges, and the run that was going to happen anyway
+   * happens now — never beside one in flight, and never at all when the updater
+   * is off or shut down.
+   */
+  ran.length = 0;
+  armed.length = 0;
+  const nudged = make();
+  check("before the nudge the first run is still minutes away", [armed.length, armed[0]?.delay], [1, FIRST_RUN_DELAY_MS]);
+  nudged.nudge();
+  await new Promise((r) => setTimeout(r, 0));
+  check("a nudge runs it now", ran.length, 1);
+  check("and the next run is armed a day away as usual", [armed.length, armed[1]?.delay], [2, UPDATE_INTERVAL_MS]);
+  nudged.nudge();
+  await new Promise((r) => setTimeout(r, 0));
+  check("a second nudge runs it again, off the day's timer", ran.length, 2);
+  await nudged.shutdown();
+  nudged.nudge();
+  await new Promise((r) => setTimeout(r, 0));
+  check("after shutdown a nudge runs nothing", ran.length, 2);
+  {
+    ran.length = 0;
+    armed.length = 0;
+    const gate = deferred();
+    const slow = make({ run: async (_script, args) => { ran.push([...args]); await gate.promise; return { ok: true, detail: null }; } });
+    armed[0]?.fire();
+    await new Promise((r) => setTimeout(r, 0));
+    slow.nudge();
+    await new Promise((r) => setTimeout(r, 0));
+    check("a nudge during a run starts no second run beside it", ran.length, 1);
+    gate.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+    await slow.shutdown();
+  }
+  {
+    ran.length = 0;
+    armed.length = 0;
+    const off = make({ mode: "off" });
+    off.nudge();
+    await new Promise((r) => setTimeout(r, 0));
+    check("and with updates off a nudge runs nothing at all", [armed.length, ran.length], [0, 0]);
+    await off.shutdown();
+  }
+
+  /*
+   * A failure is a warning and the schedule survives it. A vendor being down, a
+   * network that is blocked, an installer that changed its mind — none of them may
+   * end the daemon's only way of noticing a new model, and none may throw out of a
+   * timer into an unhandledRejection handler instead of reaching an operator.
+   */
+  ran.length = 0;
+  armed.length = 0;
+  updated.length = 0;
+  const failing = make({ run: async () => ({ ok: false, detail: "curl: (6) could not resolve host" }) });
+  armed[0]?.fire();
+  await new Promise((r) => setTimeout(r, 0));
+  check("a failed run warns", warnings.at(-1)?.includes("could not resolve host"), true);
+  /*
+   * ⚠ **And the cache is *not* dropped**, which is the half that matters: forgetting
+   * it costs a `--version` per harness for nothing, and — worse — a failed run that
+   * announced an update would make every later reader believe a build moved when it
+   * did not.
+   */
+  check("and does not claim anything was updated", updated.length, 0);
+  check("while still arming the next one", armed.length, 2);
+  await failing.shutdown();
+
+  /*
+   * A run that *throws* is the same answer, and it is a separate arm: `execFile`
+   * rejecting on a missing script reaches here as an exception rather than as
+   * `ok: false`, and an unhandled one in a timer is invisible.
+   */
+  ran.length = 0;
+  armed.length = 0;
+  const throwing = make({ run: async () => { throw new Error("ENOENT agents.sh"); } });
+  armed[0]?.fire();
+  await new Promise((r) => setTimeout(r, 0));
+  check("a run that throws is reported rather than lost", warnings.at(-1)?.includes("ENOENT"), true);
+  await throwing.shutdown();
+
+  // `off` is for a machine with no outbound network, or one whose CLIs somebody else
+  // manages. It must arm nothing at all rather than arm a timer that does nothing.
+  armed.length = 0;
+  const off = make({ mode: "off" });
+  check("switched off, nothing is armed", armed.length, 0);
+  await off.shutdown();
+
+  // Shutdown disarms, and a fired timer afterwards must not resurrect the schedule.
+  armed.length = 0;
+  ran.length = 0;
+  const stopping = make();
+  const pending = armed[0];
+  await stopping.shutdown();
+  pending?.fire();
+  await new Promise((r) => setTimeout(r, 0));
+  check("shutdown disarms the schedule", ran.length, 0);
+  check("and nothing re-arms after it", armed.length, 1);
+  check("shutting down twice is the same as once", await stopping.shutdown(), undefined);
+
+  /*
+   * ⚠ **A run that completed with a vendor unreachable is a warning, and the cache
+   * is still dropped.** The script exits 0 whatever the vendors answered — the
+   * installer must not abort over one being down — so `ok` alone said nothing, and
+   * a fleet with every vendor blocked read as updated daily with no line anywhere.
+   * The two lines are quoted from the script — `ensure_codex`'s `update failed;
+   * keeping …` and the summary `main` prints — rather than invented, though an
+   * injected `run` proves nothing about what the script says: what is pinned is
+   * that the line reaches `onWarning` whole.
+   */
+  ran.length = 0;
+  armed.length = 0;
+  updated.length = 0;
+  warnings.length = 0;
+  const partial = make({
+    run: async () => ({
+      ok: true,
+      detail: null,
+      warnings: "  codex         update failed; keeping codex-cli 0.146.1\n  1 of 4 agents were not installed or refreshed; the lines above say why",
+    }),
+  });
+  armed[0]?.fire();
+  await new Promise((r) => setTimeout(r, 0));
+  check("a vendor the run could not reach is a warning", warnings.at(-1)?.includes("were not installed or refreshed"), true);
+  check("and the cache is still dropped, because three of four may have moved", updated.length, 1);
+  await partial.shutdown();
+
+  // A shutdown that lands while a run is in flight: the run settles on its own,
+  // and what it may not do afterwards is arm the next one.
+  armed.length = 0;
+  ran.length = 0;
+  const settle = deferred();
+  const during = make({ run: () => settle.promise.then(() => ({ ok: true, detail: null })) });
+  armed[0]?.fire();
+  await new Promise((r) => setTimeout(r, 0));
+  await during.shutdown();
+  settle.resolve();
+  await new Promise((r) => setTimeout(r, 0));
+  check("a shutdown during a run does not re-arm when the run settles", armed.length, 1);
+
+  /*
+   * **The real runner, against real scripts**, because the two properties that
+   * matter most are the two an injected `run` cannot show: which environment the
+   * script sees, and whether the deadline reaches what the script started.
+   */
+  const { runScript, updateEnv } = await import("../src/agentupdate.js");
+  const priorToken = process.env["REEMOAT_TOKEN"];
+  process.env["REEMOAT_TOKEN"] = "not-for-vendors";
+  const env = updateEnv();
+  check("the script never sees this daemon's own configuration", Object.keys(env).filter((key) => key.startsWith("REEMOAT_")), []);
+  check("and is rooted where MANAGED_CLI_DIRS is", env["HOME"], homedir());
+  const echo = join(sandbox, "agents-echo.sh");
+  writeFileSync(echo, "#!/bin/sh\nprintf '%s|%s' \"${REEMOAT_TOKEN:-}\" \"$HOME\"\nprintf 'vendor down\\n' >&2\n");
+  chmodSync(echo, 0o755);
+  const echoed = await runScript(echo, [], 5000);
+  check("the real runner hands it that environment", echoed.detail?.startsWith(`|${homedir()}`), true);
+  check("and hands stderr back on its own", echoed.warnings, "vendor down");
+  check("with the run counted as complete", echoed.ok, true);
+  if (priorToken === undefined) delete process.env["REEMOAT_TOKEN"];
+  else process.env["REEMOAT_TOKEN"] = priorToken;
+
+  /*
+   * ⚠ **The deadline reaches the grandchild.** `execFile`'s own timeout signalled
+   * the direct `sh` alone; the `sleep` it backgrounds stands in for a vendor's
+   * installer, and it has to be dead when the runner answers — or tomorrow's run
+   * starts a second installer over whatever this one is still writing.
+   */
+  const stall = join(sandbox, "agents-stall.sh");
+  writeFileSync(stall, "#!/bin/sh\nsleep 30 &\necho \"grandchild=$!\"\nsleep 30\n");
+  chmodSync(stall, 0o755);
+  const before = Date.now();
+  const cut = await runScript(stall, [], 300);
+  // Named, because the detail also carries "timed out after 0 min" and a bare
+  // number would read the deadline as the pid.
+  const grandchild = Number.parseInt(/grandchild=(\d+)/.exec(cut.detail ?? "")?.[1] ?? "0", 10);
+  check("the deadline ends the run", [cut.ok, cut.detail?.includes("timed out")], [false, true]);
+  check("within the deadline rather than the installer's own patience", Date.now() - before < 5000, true);
+  await new Promise((r) => setTimeout(r, 50));
+  const alive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  check("and reaches the grandchild the script left behind", [grandchild > 0, alive(grandchild)], [true, false]);
+
+  await runs.shutdown();
+}
+
+process.stdout.write("\nwhich build of a CLI runs\n");
+{
+  check("a v prefix is not a word boundary", firstVersion("v2.1.259"), "2.1.259");
+  check("claude puts the number first", firstVersion("2.1.259 (Claude Code)"), "2.1.259");
+  check("codex puts it last", firstVersion("codex-cli 0.146.1"), "0.146.1");
+  check("a pre-release suffix is noise", firstVersion("1.0.0-beta.1"), "1.0.0");
+  check("and so is a build stamp after it", firstVersion("codex-cli 0.146.1 (build 20260903)"), "0.146.1");
+  check("nothing is nothing", [firstVersion(""), firstVersion("garbage"), firstVersion("2")], [null, null, null]);
+  /*
+   * What is *not* here any more: the comparison. `newer` weighed the copy on PATH
+   * against the one this repository vendored and is gone with it (Q4.114) — the
+   * version is read for the line under the model list and decides nothing.
+   */
+
+  check(
+    "an override names the vendor's variable and leaves the command alone",
+    spawnPlan("/adapter", { path: "/mine/claude", version: "9.9.9", source: "override" }, "CLAUDE_CODE_EXECUTABLE"),
+    { command: "/adapter", env: { CLAUDE_CODE_EXECUTABLE: "/mine/claude" } },
+  );
+  check(
+    "so does a copy found on PATH, under a harness that has a variable",
+    spawnPlan("/adapter", { path: "/usr/local/bin/codex", version: "1.0.0", source: "path" }, "CODEX_PATH"),
+    { command: "/adapter", env: { CODEX_PATH: "/usr/local/bin/codex" } },
+  );
+  check(
+    "a harness with no variable has its command replaced",
+    spawnPlan("/usr/bin/kimi", { path: "/toolchain/bin/kimi", version: "0.40.1", source: "path" }, null),
+    { command: "/toolchain/bin/kimi", env: {} },
+  );
+  /*
+   * ⚠ **A built-in with no CLI is left alone rather than given a variable naming
+   * nothing.** `describe` has already refused it — `resolveAgent` throws on the
+   * same absence — so no spawn reaches this arm; what is pinned is that the arm
+   * writes nothing, since the old third choice (the vendored copy) *also* wrote
+   * nothing and a reader could take this for that.
+   */
+  check(
+    "a built-in with no CLI leaves the launch untouched, because describe has already refused it",
+    spawnPlan("/adapter", null, "CLAUDE_CODE_EXECUTABLE"),
+    { command: "/adapter", env: {} },
+  );
+  check("and no choice at all leaves the launch untouched", spawnPlan("/somewhere/acme", null, null), { command: "/somewhere/acme", env: {} });
+
+  /*
+   * The decision itself, against stubs on a PATH of this driver's own — first on
+   * PATH, so a developer machine's `~/.local/bin/claude` sits behind them — with
+   * `--version` answered by the injected `exec` rather than by running anything.
+   * `findOnPath` memoises hits for the process, so every scenario starts by
+   * forgetting them (which `forgetAvailability` now does on its own).
+   *
+   * Two sources and no third: an override outright, else the first copy found —
+   * PATH in order, then `MANAGED_CLI_DIRS`. Nothing is weighed against anything,
+   * which is why there is no pin flag to drive either (Q4.114).
+   */
+  const bin = join(sandbox, "cli-bin");
+  mkdirSync(bin, { recursive: true });
+  for (const name of ["claude", "codex", "kimi"]) {
+    writeFileSync(join(bin, name), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(bin, name), 0o755);
+  }
+  const prior = {
+    path: process.env["PATH"],
+    claude: process.env["CLAUDE_CODE_EXECUTABLE"],
+    codex: process.env["CODEX_PATH"],
+  };
+  process.env["PATH"] = `${bin}:${prior.path ?? ""}`;
+  delete process.env["CLAUDE_CODE_EXECUTABLE"];
+  delete process.env["CODEX_PATH"];
+  const answers = new Map<string, string | null>();
+  const spawns: string[] = [];
+  const warnings: string[] = [];
+  const runtime = new LocalRuntime({
+    exec: async (command, args) => {
+      spawns.push(command);
+      return args[0] === "--version" ? (answers.get(command) ?? null) : null;
+    },
+    secrets: () => ({}),
+    onWarning: (detail) => warnings.push(detail),
+  });
+  const fresh = (): void => {
+    runtime.forgetAvailability();
+    spawns.length = 0;
+  };
+  const stubClaude = join(bin, "claude");
+  const stubKimi = join(bin, "kimi");
+
+  fresh();
+  answers.set(stubClaude, "9.9.9 (Claude Code)");
+  const onPath = await runtime.agentCli("claude");
+  check("a copy on PATH is chosen, and says which build", [onPath?.source, onPath?.path, onPath?.version], ["path", stubClaude, "9.9.9"]);
+
+  /*
+   * ⚠ **A copy that will not say which build it is still runs, and quietly.** It
+   * used to lose to the vendored copy with a warning naming the demotion; there is
+   * nothing to lose to now, so `version: null` is the whole of what an unreadable
+   * `--version` costs, and a warning about it would be a line on every boot of a
+   * machine whose CLI merely prints its version in a shape `firstVersion` does not
+   * read.
+   */
+  fresh();
+  answers.set(stubClaude, null);
+  const mute = await runtime.agentCli("claude");
+  check("one that will not say which build it is still runs, with no version", [mute?.source, mute?.path, mute?.version], ["path", stubClaude, null]);
+  check("and nothing is warned about it", warnings.length, 0);
+
+  /*
+   * **An override wins outright, and only that file is asked anything.** A copy
+   * on PATH answering a newer number does not move it — there is no comparison to
+   * move — and the version read goes to the override alone, which is the same
+   * absence the signed-in section pins from the probe side.
+   */
+  fresh();
+  answers.set(stubClaude, "9.9.9 (Claude Code)");
+  answers.set("/mine/claude", "8.8.8 (Claude Code)");
+  process.env["CLAUDE_CODE_EXECUTABLE"] = "/mine/claude";
+  const overridden = await runtime.agentCli("claude");
+  check("an override is chosen whatever PATH holds", [overridden?.source, overridden?.path, overridden?.version], ["override", "/mine/claude", "8.8.8"]);
+  check("and its version is read from that file alone", spawns, ["/mine/claude"]);
+  delete process.env["CLAUDE_CODE_EXECUTABLE"];
+
+  fresh();
+  answers.set(stubKimi, "0.40.1");
+  const kimiOnly = await runtime.agentCli("kimi");
+  check("a harness that is the program runs the one on PATH, and says which build", [kimiOnly?.source, kimiOnly?.path, kimiOnly?.version], ["path", stubKimi, "0.40.1"]);
+  /*
+   * opencode has no stub above, so what is found is this machine's own — or
+   * nothing, on a machine that has never run `deploy/agents.sh`, where the skip
+   * is the honest line. When it is there, `agentCli` and `resolveAgent` have to
+   * name the same file, which is the property the launch section pins from the
+   * other side.
+   */
+  fresh();
+  const ownOpencode = findOnPath("opencode");
+  const opencode = await runtime.agentCli("opencode");
+  report(
+    "a harness with no adapter runs the file a login would drive",
+    ownOpencode === null ? true : opencode?.source === "path" && opencode.path === ownOpencode,
+    ownOpencode === null
+      ? "skipped: no opencode on this machine, so there is nothing to choose"
+      : `source ${String(opencode?.source)}, ${String(opencode?.path)}`,
+  );
+
+  fresh();
+  answers.set(stubClaude, "9.9.9 (Claude Code)");
+  await runtime.agentCli("claude");
+  await runtime.agentCli("claude");
+  check("a choice is held rather than re-asked", spawns.length, 1);
+  runtime.forgetAvailability();
+  await runtime.agentCli("claude");
+  check("and forgetAvailability makes the next call ask again", spawns.length, 2);
+
+  /*
+   * ⚠ **A miss is never held, and it is the runtime's own cache being pinned here,
+   * not `findOnPath`'s.** `cliChosen` used to hold `null` for `AGENT_CLI_TTL_MS` —
+   * ten minutes — over a walk whose own miss memo is thirty seconds, so a CLI
+   * `deploy/agents.sh` had just put on the machine was one `describe` could see
+   * and `launch` could not, and the adapter went out with the vendor's variable
+   * unset in precisely the window `launch`'s comment says cannot open. Now
+   * `cliChosen` holds only a choice, and a miss re-walks on the next call.
+   *
+   * Driven on codex against a PATH that holds claude and kimi and not it, and
+   * pointed at that directory *alone* rather than in front of the real one, so the
+   * only place a codex could still be found is `MANAGED_CLI_DIRS` — searched after
+   * PATH and not redirectable. So this is a skip on a developer machine with
+   * `~/.local/bin/codex`, saying where, and asserted on CI, which has none: the
+   * shape the launch section's refusal takes, for the same reason.
+   *
+   * `forgetPathHits()` between the two calls stands in for the thirty seconds:
+   * without it `findOnPath`'s own miss memo would answer `null` a second time and
+   * the check would fail on the wrong cache. `forgetAvailability()` is *not*
+   * called, because that clears `cliChosen` as well and would make the check pass
+   * whether or not the runtime had held the miss — which is the whole question.
+   */
+  const missBin = join(sandbox, "cli-bin-miss");
+  mkdirSync(missBin, { recursive: true });
+  for (const name of ["claude", "kimi"]) {
+    writeFileSync(join(missBin, name), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(missBin, name), 0o755);
+  }
+  process.env["PATH"] = missBin;
+  fresh();
+  const codexElsewhere = findOnPath("codex");
+  if (codexElsewhere !== null) {
+    report(
+      "a miss is not held by the runtime, so the first call after an install finds the file",
+      true,
+      `skipped: this machine has a codex at ${codexElsewhere}, which is searched after PATH`,
+    );
+  } else {
+    const missed = await runtime.agentCli("codex");
+    const stubCodex = join(missBin, "codex");
+    writeFileSync(stubCodex, "#!/bin/sh\nexit 0\n");
+    chmodSync(stubCodex, 0o755);
+    answers.set(stubCodex, "codex-cli 0.153.0");
+    forgetPathHits();
+    const found = await runtime.agentCli("codex");
+    report(
+      "a miss is not held by the runtime, so the first call after an install finds the file",
+      missed === null && found?.source === "path" && found.path === stubCodex && found.version === "0.153.0",
+      `before ${JSON.stringify(missed)}, after ${JSON.stringify(found)}`,
+    );
+  }
+  process.env["PATH"] = `${bin}:${prior.path ?? ""}`;
+  forgetPathHits();
+
+  /*
+   * Two askers on a cold cache — a restart's `autoResume` beside a `GET /agents` —
+   * cost one `--version`, and an answer that started before `forgetAvailability`
+   * is not written back over the clear: the race `probeGeneration` fences for the
+   * login probe, fenced the same way here.
+   */
+  const gate = deferred();
+  const slowSpawns: string[] = [];
+  const slow = new LocalRuntime({
+    exec: async (command) => {
+      slowSpawns.push(command);
+      await gate.promise;
+      return "9.9.9 (Claude Code)";
+    },
+    secrets: () => ({}),
+  });
+  forgetPathHits();
+  const first = slow.agentCli("claude");
+  const second = slow.agentCli("claude");
+  await new Promise((r) => setTimeout(r, 0));
+  check("two askers arriving together cost one --version", slowSpawns.length, 1);
+  gate.resolve();
+  check("and get the same answer", (await first)?.path === (await second)?.path, true);
+
+  const lateGate = deferred();
+  const fencedSpawns: string[] = [];
+  const fenced = new LocalRuntime({
+    exec: async (command) => {
+      fencedSpawns.push(command);
+      await lateGate.promise;
+      return "9.9.9 (Claude Code)";
+    },
+    secrets: () => ({}),
+  });
+  forgetPathHits();
+  const inFlight = fenced.agentCli("claude");
+  await new Promise((r) => setTimeout(r, 0));
+  fenced.forgetAvailability();
+  lateGate.resolve();
+  await inFlight;
+  fencedSpawns.length = 0;
+  await fenced.agentCli("claude");
+  check("an answer that started before forgetAvailability is not written back over it", fencedSpawns.length, 1);
+
+  if (prior.path === undefined) delete process.env["PATH"];
+  else process.env["PATH"] = prior.path;
+  if (prior.claude !== undefined) process.env["CLAUDE_CODE_EXECUTABLE"] = prior.claude;
+  if (prior.codex !== undefined) process.env["CODEX_PATH"] = prior.codex;
+  forgetPathHits();
 }

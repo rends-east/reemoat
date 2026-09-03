@@ -683,6 +683,50 @@ for svc in $TARGETS; do
       # Nothing to build. The daemon runs straight off tsx and spawns agents from
       # PATH, so an update is a checkout, an install, and a restart if anything
       # the running process already loaded has moved.
+      #
+      # ⚠ **The agent CLIs first, and before the restart.** `pnpm install` brings
+      # none of them (Q4.114), so a machine upgraded from a release that vendored
+      # them under `node_modules` would come back up with no `claude`, no `codex`
+      # and no `opencode` — every interrupted session on those harnesses refused by
+      # `autoResume` — until the daemon's own first run, five minutes after start.
+      # The same script the bootstrap and the daemon run, with what the daemon will
+      # use read off its env file: the source; the switch that turns the daily
+      # refresh off, honoured here too, since a machine with no outbound network or
+      # with CLIs somebody else manages is not one a deploy should reach into; and
+      # the two override variables, which `agentEnv` hands the daemon's own run and
+      # which make the script leave that harness alone — without them a deploy
+      # would install a copy nothing runs. Node's directory in front, as the
+      # bootstrap puts it, so the script's npm arm finds an `npm` and a `node`;
+      # `provenance` reads this shell's PATH, which is the daemon's only for the
+      # daily run. Every prune is withheld, because this script does not know which
+      # harnesses have a live agent and the daemon's next run does. Cheap when
+      # everything is current, since a refresh that finds nothing newer is a no-op;
+      # and a refresh with no restart is seen by nothing in the daemon, so its
+      # version report lags the binary by up to ten minutes. Never fatal, for the
+      # reason the script itself gives. Not fenced against the daemon's own run —
+      # the overlap needs a deploy within five minutes of a restart or on the day's
+      # tick, and the npm arm stages per run, so what could overlap is two vendor
+      # updaters at worst.
+      _daemon_env=$(env_file daemon)
+      _agent_updates=$(file_value "$_daemon_env" REEMOAT_AGENT_UPDATES | tr '[:upper:]' '[:lower:]')
+      case "$_agent_updates" in
+        off | 0 | false | no | never)
+          echo "  agents: off (REEMOAT_AGENT_UPDATES=$_agent_updates), so nothing is installed or refreshed here either"
+          ;;
+        *)
+          _agent_source=$(file_value "$_daemon_env" REEMOAT_AGENT_SOURCE)
+          [ "$_agent_source" = npm ] || _agent_source=vendor
+          _agent_claude=$(file_value "$_daemon_env" CLAUDE_CODE_EXECUTABLE)
+          _agent_codex=$(file_value "$_daemon_env" CODEX_PATH)
+          echo "  agents ($_agent_source)"
+          (
+            PATH="${NODE_BIN:+$(dirname -- "$NODE_BIN"):}$PATH"; export PATH
+            [ -z "$_agent_claude" ] || { CLAUDE_CODE_EXECUTABLE=$_agent_claude; export CLAUDE_CODE_EXECUTABLE; }
+            [ -z "$_agent_codex" ] || { CODEX_PATH=$_agent_codex; export CODEX_PATH; }
+            "$REPO_ROOT/deploy/agents.sh" --source "$_agent_source" --skip claude --skip codex --skip opencode --skip kimi
+          ) || echo "  agents: the script did not finish; the daemon retries daily" >&2
+          ;;
+      esac
       if touched "$SHARED" '^scripts/daemon\.ts$' "$RESTART_DEPS" '^deploy/run-daemon\.sh$'; then
         restart_list="${restart_list:+$restart_list }$svc"
       fi

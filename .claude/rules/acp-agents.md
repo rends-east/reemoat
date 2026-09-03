@@ -227,7 +227,7 @@ handed the tool. Q2.28.
 | `src/acp/agents.ts` | How each agent is launched, how each logs in, how to ask whether it already has. Strips the parent's session env and everything `REEMOAT_*`. The only place PATH is walked |
 | `src/acp/subagents.ts` | Which tool call a tool call ran inside. One of the **two** places claude's `_meta.claudeCode` shape is known — this is the inbound one, projected to two scalars; `acp/agents.ts`'s `sessionMetaFor` is the outbound one |
 | `src/acp/client.ts` | JSON-RPC over an agent's stdio, routed by `sessionId`. Takes an `AgentProcess` rather than spawning — which is what lets a driver stand two `PassThrough`s in for an agent |
-| `scripts/pincheck.ts` | Each ACP adapter's version: exact, agreed across files, and matching what is *actually installed*. A loop over a list, because written around one constant it pinned the second adapter nowhere |
+| `scripts/pincheck.ts` | Each ACP adapter's version: exact, agreed across files, and matching what is *actually installed* — and that the CLI platform packages each adapter declares are the ones `pnpm-workspace.yaml` excludes, since no CLI is vendored (Q4.114). A loop over a list, because written around one constant it pinned the second adapter nowhere |
 
 ## Bounds
 
@@ -396,7 +396,27 @@ handed the tool. Q2.28.
   enumerated before it is authenticated. Q6.105.
 - **`/undo` and `/redo` are unsupported over opencode's ACP**, by its own
   documentation, while working in its terminal. Nothing here drives them.
-- **`claude-agent-acp` resolves a `claude` that is not on PATH** — it ships inside a
-  platform-specific SDK package with no `bin` entry, so the adapter can work
-  perfectly while `claude` is absent. `CLAUDE_CODE_EXECUTABLE` survives `agentEnv`'s
-  strip for the same reason. Q6.21.
+- **`claude-agent-acp` never consults PATH for its `claude`.** `claudeCliPath()` is
+  two branches — `CLAUDE_CODE_EXECUTABLE`, else a `require` of a platform-specific
+  SDK package with no `bin` entry — and with neither it **throws**. That package is
+  excluded now (`pnpm-workspace.yaml`'s overrides, Q4.114), so the variable is the
+  only door, and `LocalRuntime.launch` writes it on **every** spawn from the copy
+  `agentCli` chose — `spawnPlan` is the decision. `CLAUDE_CODE_EXECUTABLE` survives
+  `agentEnv`'s strip for the same reason. Q6.21.
+- ⚠ **A machine with no `claude` therefore has the harness refused by
+  `resolveAgent`, never by the adapter throwing.** `cliFor` asks the override, then
+  PATH, then `MANAGED_CLI_DIRS`, and `describe()` fails with a sentence naming
+  `deploy/agents.sh` (and `--source npm`, and the variable) — so `GET /agents`
+  draws it unavailable rather than a session dying at spawn. History, and why the
+  vendored copy went: it was exactly as old as the pin. Measured 2026-09-03, adapter
+  0.63.0 vendored **2.1.220** (built 2026-07-24), which publishes
+  `claude-fable-5[1m]` "Fable 5", while the *same* adapter pointed at a 2.1.259
+  publishes `claude-fable-5-1[1m]` "Fable 5.1". The SDK does not verify the CLI it
+  drives — it announces itself into its environment as `CLAUDE_AGENT_SDK_VERSION`,
+  so the compatibility burden runs SDK → CLI and a newer CLI under an older adapter
+  is the forgiving direction. Driven, not reasoned: every other control came back
+  identical, choice for choice (`mode`, `effort` including `xhigh`, `fast`).
+  `CODEX_PATH` is the same variable one adapter over — `codex-acp`'s
+  `startAcpServer()` has the same two branches, and `@openai/codex`'s platform
+  builds are excluded the same way; both are documented in `.env.example` and
+  asserted by `deploycheck` off `AGENT_LOGIN[*].executableEnv`. Q6.106, Q4.114.

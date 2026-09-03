@@ -2072,6 +2072,32 @@ export class ManagedSession {
   }
 
   /**
+   * A failure that spends nothing and gives nothing up: the reason is put on the
+   * snapshot so a screen can say why the session is still waiting, and the
+   * counters are left exactly as they were.
+   *
+   * ⚠ **The one caller is a harness with no CLI on the machine, and the reason it
+   * is neither an attempt nor a verdict is that the thing which fixes it is
+   * already scheduled.** Measured 2026-09-04 on the dev stand, on the first
+   * deploy after the vendored CLIs went (Q4.114): the stand's deploy path
+   * restarts the daemon without running `deploy/agents.sh` first, so three
+   * opencode sessions met `opencode not found on this daemon's PATH` three times
+   * each, were marked `attempts_exhausted`, and stayed that way after the
+   * updater had installed opencode five minutes later — because that verdict is
+   * final for a daemon's life and nothing re-drives it. An attempt is for a
+   * failure that a retry might not repeat; a verdict is for a fact a retry
+   * cannot change. A missing binary is neither: it repeats exactly until the
+   * install lands, and then it does not. So it costs no attempt, `resumeSettled`
+   * stays `false`, and the pass the daemon starts after every completed agent
+   * update picks the session up again.
+   */
+  deferResume(code: string, message: string): void {
+    this.lastResumeFailureAt = Date.now();
+    this.resumeError = { code, message };
+    this.touchSafe();
+  }
+
+  /**
    * Stop trying, and say so exactly once.
    *
    * The `error` event is what makes this visible in a transcript somebody opens
@@ -2237,7 +2263,9 @@ export class ManagedSession {
         at: this.lastResumeFailureAt ?? Date.now(),
       };
     }
-    if (this.resumeAttempts === 0) return null;
+    // A deferral has an error and no attempt — see `deferResume` — and it is the
+    // one waiting state with something to say, so it is drawn.
+    if (this.resumeAttempts === 0 && this.resumeError === null) return null;
     return {
       state: "waiting",
       attempts: this.resumeAttempts,
@@ -4470,7 +4498,13 @@ export type AutoResumeResult =
   | "unsupported"
   | "forgotten"
   | "failed"
-  | "attempts_exhausted";
+  | "attempts_exhausted"
+  /**
+   * The harness has no CLI on this machine. Not an attempt and not a verdict —
+   * see `ManagedSession.deferResume` — and the outcome `scripts/daemon.ts` reads
+   * as the cue to run the agent installer now rather than in five minutes.
+   */
+  | "agent_missing";
 
 export interface AutoResumeOutcome {
   sessionId: string;
@@ -4484,6 +4518,8 @@ export interface AutoResumeReport {
   resumed: number;
   skipped: number;
   failed: number;
+  /** Left waiting for a CLI the machine does not have yet — see `agent_missing`. */
+  deferred: number;
 }
 
 /**
@@ -4997,7 +5033,33 @@ export class SessionRegistry {
    * handshakes, and nobody is reading more than one of them.
    */
   async autoResume(options: AutoResumeOptions = {}): Promise<AutoResumeReport> {
-    const report: AutoResumeReport = { considered: 0, resumed: 0, skipped: 0, failed: 0 };
+    /*
+     * ⚠ **One pass at a time, and a second caller waits for the first.** There
+     * were exactly one caller and one moment — boot — until the daemon started a
+     * pass after every completed agent update as well (Q4.114), and the first
+     * update can land while the boot pass is still waiting out a backoff. Two
+     * passes over one session would race `resume()` on it; queued instead, the
+     * second sees what the first left, and a session the first brought back is
+     * not in its queue at all.
+     */
+    const previous = this.resumePass ?? Promise.resolve();
+    const run = previous.then(
+      () => this.autoResumePass(options),
+      () => this.autoResumePass(options),
+    );
+    this.resumePass = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  /** The pass in flight, so the next one queues behind it. */
+  private resumePass: Promise<void> | null = null;
+
+  /** One pass, see {@link autoResume}. */
+  private async autoResumePass(options: AutoResumeOptions): Promise<AutoResumeReport> {
+    const report: AutoResumeReport = { considered: 0, resumed: 0, skipped: 0, failed: 0, deferred: 0 };
     if (!(options.enabled ?? this.autoResumeAllowed)) return report;
 
     const maxAttempts = options.maxAttempts ?? MAX_RESUME_ATTEMPTS;
@@ -5116,6 +5178,21 @@ export class SessionRegistry {
               session.abandonResume("forgotten", described.code, described.message);
               report.skipped += 1;
               say({ sessionId: session.id, result: "forgotten", attempt: 0, detail: described.message });
+              return;
+            }
+            /*
+             * The harness has no CLI on this machine — `describe` refused before
+             * anything was spawned. Neither an attempt nor a verdict, for the
+             * reason `deferResume` gives: it repeats exactly until the install
+             * lands and then it does not, and the daemon runs the installer on
+             * this outcome and starts another pass when it completes. Spending
+             * the budget here was measured on the dev stand: three sessions
+             * `attempts_exhausted` over a binary that arrived five minutes later.
+             */
+            if (error instanceof AgentUnavailableError) {
+              session.deferResume(described.code, described.message);
+              report.deferred += 1;
+              say({ sessionId: session.id, result: "agent_missing", attempt: session.resumeAttemptCount, detail: described.message });
               return;
             }
             failure = described;

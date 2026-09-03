@@ -34,9 +34,20 @@ curl -fsSL https://github.com/rends-east/reemoat/releases/latest/download/instal
 
 It asks which control plane to join, installs the daemon, asks who you are on
 that control plane — sign in, sign up, or paste a key — adds the machine, and
-starts it. Nothing needs `sudo`, nothing is written to your shell profile, and
-everything it puts on the machine is under `~/.reemoat` and `~/srv/reemoat`. To
-take it off again, `… | sh -s -- --uninstall`.
+starts it. Nothing needs `sudo` and nothing is written to your shell profile. The
+daemon and its checkout live under `~/.reemoat` and `~/srv/reemoat`. The
+coding-agent CLIs are not part of `pnpm install`: `deploy/agents.sh` installs
+three of them with each vendor's own installer, into the vendors' own directories
+(`~/.local/bin`, `~/.local/share/claude`, `~/.codex`, `~/.opencode`), and kimi
+from the npm registry into `~/.reemoat/toolchain`; the daemon re-runs it daily so
+they stay current. Behind a firewall that blocks the vendors' hosts,
+`… | sh -s -- --agent-source npm` installs all four from the npm registry instead
+— your mirror, named the way npm is pointed anywhere (`~/.npmrc` or
+`npm_config_registry`) — under `~/.reemoat/toolchain`. To take it off again,
+`… | sh -s -- --uninstall`, which removes `~/.reemoat/toolchain` and with it any
+CLI installed from npm; the vendor-installed CLIs stay, and so does every sign-in,
+which lives in the vendors' own directories (`~/.claude`, `~/.codex`,
+`~/.kimi-code`, opencode's data directory) that it does not touch.
 
 **Where the software comes from and which fleet it joins are two questions, and
 this command keeps them apart.** It downloads from this repository and joins
@@ -109,7 +120,7 @@ Three pieces, and you can run all of them yourself.
 | `docs/API.md` | The HTTP surface of both services — 115 routes, what each is for, and the conventions every one of them answers in |
 | `docs/PLUGINS.md` | Writing a plugin: the manifest, the host API, the drawing vocabulary, and what a plugin is trusted with |
 | `docs/RELEASING.md` | Where the version is written down, when it moves, and what a tag does that a push does not |
-| `docs/DECISIONS.md` | **Why** any of it is that way. 838 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
+| `docs/DECISIONS.md` | **Why** any of it is that way. 841 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
 | `deploy/README.md` | The deployment surface in full |
 | `deploy/RELAYS.md` | Running more than one relay, and the order of operations |
 | `CHANGELOG.md` | What changed in each release, and what a 0.x minor is allowed to break |

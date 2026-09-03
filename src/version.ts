@@ -25,5 +25,13 @@
  * This constant travels one way, outward, so that a person can look; nothing
  * anywhere sends a version *to* a daemon, and adding that is a different decision
  * from this one.
+ *
+ * ⚠ **The coding-agent CLIs beneath it are a different subject, and all four now
+ * move on a timer.** `src/agentupdate.ts` runs `deploy/agents.sh` daily. Every
+ * reason the paragraph above exists is about *this* process: a daemon restart
+ * interrupts every turn in flight and drops every pending approval. Replacing a
+ * program the daemon spawns fresh at each session start costs none of that, needs no
+ * restart, and changes nothing in this repository — so it neither contradicts this
+ * nor is a step toward it.
  */
 export const DAEMON_VERSION = "0.5.0";

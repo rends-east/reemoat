@@ -1018,6 +1018,14 @@ process.stdout.write("\nwhich model a one-shot ask runs on\n");
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
     }
+    // The capability read now asks which build answered, and the real answer spawns
+    // whatever `claude --version` is on the host — a subprocess this driver did not
+    // start, differing by machine. A fixed choice keeps the read hermetic. `path`
+    // is what a copy `deploy/agents.sh` installed reports; `vendored` was the
+    // third source and went with the vendored copies (Q4.114).
+    override agentCli(): Promise<any> {
+      return Promise.resolve({ path: "/stub/claude", version: "0.0.0", source: "path" });
+    }
     override availability(): Promise<any> {
       return Promise.resolve([{ id: "claude", displayName: "claude", available: true, hint: null, loggedIn: true, lastStartRefusal: null }]);
     }

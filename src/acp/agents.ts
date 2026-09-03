@@ -1,18 +1,23 @@
-import { accessSync, constants, readFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { accessSync, constants } from "node:fs";
+import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
- * The harnesses this repository ships, vendors, pins and measures.
+ * The harnesses this repository ships, pins and measures.
  *
  * ⚠ **Still exactly four, and it stays that way — this is not the list of what a
  * machine offers.** Everything that makes a built-in a built-in is written down
- * here and nowhere else: a `resolveAgent` arm, an `AGENT_LOGIN` row, a
- * `vendoredCli` arm, a `pincheck` entry, and a glyph. A machine may also offer
+ * here and nowhere else: a `resolveAgent` arm, an `AGENT_LOGIN` row, a `pincheck`
+ * entry where there is an adapter to pin, and a glyph. A machine may also offer
  * harnesses a plugin added — see {@link HarnessCatalogue} — and those have none of
  * those things and cannot: `pincheck` pins an adapter version this repository
  * depends on, and a program somebody named in a manifest is not one it can pin.
+ *
+ * ⚠ **None of the four CLIs is vendored any more, and the adapters that are pinned
+ * cannot run without one.** `deploy/agents.sh` installs and refreshes all four —
+ * with each vendor's own installer, or from the npm registry where those hosts are
+ * blocked — and `LocalRuntime.agentCli` picks the copy that runs. Q4.114.
  *
  * Keeping this array meaning *built-in* is what keeps every sweep written against
  * it honest. `AGENT_IDS.every((id) => AGENT_LOGIN[id] !== undefined)` is a real
@@ -137,8 +142,8 @@ const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", ".."
  * credentials, and only the first is `AGENT_LOGIN.codex.executableEnv`.
  *
  * The codex half was measured rather than guessed, 2026-08-07 against the CLI the
- * adapter actually spawns (`@openai/codex` 0.145.0, vendored under codex-acp
- * 1.1.9): asking a session to print its own environment returns `CODEX_CI`,
+ * adapter actually spawns (`@openai/codex` 0.145.0, under codex-acp 1.1.9):
+ * asking a session to print its own environment returns `CODEX_CI`,
  * `CODEX_MANAGED_BY_NPM`, `CODEX_MANAGED_PACKAGE_ROOT`, `CODEX_SANDBOX`,
  * `CODEX_SANDBOX_NETWORK_DISABLED` and `CODEX_THREAD_ID`. Two of those are worse
  * than untidy if they are inherited: `CODEX_THREAD_ID` names the *parent's*
@@ -318,7 +323,7 @@ export type LoginStatusProbe = {
  * `status` runs non-interactively and answers the one question a PATH lookup
  * cannot: an agent can be installed and logged out, which used to report
  * `available: true` and then fail the first prompt with `502
- * agent_auth_required` — after a worktree had already been made. Two of the three
+ * agent_auth_required` — after a worktree had already been made. Two of the four
  * have such a command and they answer in **different formats**, which is why
  * {@link LoginStatusProbe} is a union rather than a pair of args: claude's
  * `auth status` prints `{"loggedIn": …}`, codex's `login status` prints a
@@ -333,11 +338,12 @@ export type LoginStatusProbe = {
  * `~/.kimi-code/{device_id,config.toml,logs}` and no `credentials/` at all.
  *
  * `command` here is **not** the same binary as {@link resolveAgent}'s. That one
- * resolves the ACP *adapter* (`claude-agent-acp`); this one resolves the CLI the
- * adapter drives (`claude`), which ships inside a platform-specific package of
- * `@anthropic-ai/claude-agent-sdk` with no `bin` entry. Conflating the two is
- * what made an earlier documented remedy unrunnable: the adapter resolved
- * perfectly and `claude` was not on PATH.
+ * resolves the ACP *adapter* (`claude-agent-acp`); this one names the CLI the
+ * adapter drives (`claude`), which is whatever `deploy/agents.sh` installed or an
+ * operator named — it used to ship inside a platform-specific package of
+ * `@anthropic-ai/claude-agent-sdk` with no `bin` entry, and that package is
+ * excluded now (Q4.114). Conflating the two is what made an earlier documented
+ * remedy unrunnable: the adapter resolved perfectly and `claude` was not on PATH.
  */
 export const AGENT_LOGIN: Record<
   BuiltinAgentId,
@@ -399,7 +405,7 @@ export const AGENT_LOGIN: Record<
     args: ["auth", "login"],
     // Measured: the flow prints its URL wrapped in an OSC 8 hyperlink and then
     // waits on a paste prompt for the code the page gives back. It is the one of
-    // the three that needs the box — and, on BSD, the one `loginStdio` therefore
+    // the four that needs the box — and, on BSD, the one `loginStdio` therefore
     // cannot rescue.
     interactiveStdin: true,
     logoutArgs: ["auth", "logout"],
@@ -426,8 +432,8 @@ export const AGENT_LOGIN: Record<
   codex: {
     command: "codex",
     // `--device-auth` and not a bare `login`, on codex's own advice. Measured
-    // 2026-08-07, and the flag is present on the vendored 0.145.0 as well as the
-    // 0.146.1 on PATH: `codex login` binds a local server on port 1455,
+    // 2026-08-07, and the flag is present on the 0.145.0 this repository pinned
+    // then as well as the 0.146.1 on PATH: `codex login` binds a local server on port 1455,
     // opens a browser, and prints "On a remote or headless machine? Use `codex
     // login --device-auth` instead." A daemon driven from a phone is exactly that
     // machine — nobody is at its browser and nothing can reach port 1455. The
@@ -440,8 +446,8 @@ export const AGENT_LOGIN: Record<
     interactiveStdin: false,
     logoutArgs: ["logout"],
     // Measured rather than assumed, because this is the exact field the kimi entry
-    // above is under suspicion for. Both plausible names were tried against the
-    // vendored 0.145.0 with a bogus key and an empty `CODEX_HOME`, and the
+    // above is under suspicion for. Both plausible names were tried against
+    // 0.145.0 with a bogus key and an empty `CODEX_HOME`, and the
     // distinguishing evidence is *which* rejection came back: `CODEX_API_KEY`
     // produced `invalid_api_key` / "Incorrect API key" — the server refusing the
     // key we supplied, so it was sent — while `OPENAI_API_KEY` produced "Missing
@@ -489,11 +495,11 @@ export const AGENT_LOGIN: Record<
     // `CODEX_PATH` is codex's `CLAUDE_CODE_EXECUTABLE`, and this said there was no
     // such variable. Read from the adapter's own `startAcpServer()`, which is the
     // path the daemon takes: `const codexPath = process.env["CODEX_PATH"]`, falling
-    // back to the copy it vendors. So it decides which binary *sessions* run, and
-    // without it here the login and the probe would drive the vendored copy while
-    // sessions drove somebody else's — the exact "a login that appears to work and
-    // changes nothing" failure `resolveLoginBinary` prefers the vendored copy to
-    // avoid, reintroduced through the door left open for it.
+    // back to a platform package this repository excludes (Q4.114). So it decides
+    // which binary *sessions* run, and without it here the login and the probe
+    // would drive one copy while sessions drove another — the exact "a login that
+    // appears to work and changes nothing" failure `LocalRuntime.agentCli` exists
+    // to prevent, reintroduced through the door left open for it.
     //
     // It survives `agentEnv`'s strip for the same reason `CLAUDE_CODE_EXECUTABLE`
     // does, and `CODEX_HOME` is *not* this variable: that one names where
@@ -559,8 +565,8 @@ export const AGENT_LOGIN: Record<
      */
     status: null,
     // No adapter, so no second binary and nothing for a variable to override.
-    // `resolveAgent` and `resolveLoginBinary` resolve the *same* file here, which
-    // `vendoredCli`'s opencode arm is what guarantees.
+    // `resolveAgent` and `LocalRuntime.agentCli` resolve the *same* file here,
+    // because both ask `findOnPath` the same name.
     executableEnv: null,
     /*
      * Presence proves a provider was configured; absence proves nothing, which is
@@ -626,15 +632,17 @@ const PATH_HITS = new Map<string, string>();
  * wrong in the one direction somebody watches.** A *hit* is permanent: PATH is
  * read once by the process at exec, and an absolute path that resolved to an
  * executable does not stop being one — the same argument `LocalRuntime` already
- * makes for `scriptResolved` and `vendored`.
+ * makes for `scriptResolved`. The one event that moves a binary under a running
+ * daemon, `deploy/agents.sh`, is followed by {@link forgetPathHits}.
  *
  * A *miss* is not, because installing the agent is the obvious next thing a
  * person does about it. `GET /agents` feeds a settings screen that says "not
  * installed"; cached for the life of the process, that screen keeps saying it
  * after `npm i -g` has fixed it, until the daemon is restarted — an answer that
  * is wrong, that the user has just disproved, and that nothing on screen explains.
- * The precedent above does not cover this case: `script` and the vendored CLI ship
- * with the daemon, so their absence really is permanent.
+ * The precedent above does not cover this case: `script` ships with the host, so
+ * its absence really is permanent — and a CLI is exactly what `deploy/agents.sh`
+ * puts on the machine while the daemon is running.
  *
  * Thirty seconds keeps essentially all of the win. The exposure being removed is a
  * full PATH scan **per poll per agent**, and this makes it one scan per agent per
@@ -645,6 +653,63 @@ const PATH_MISS_TTL_MS = 30_000;
 
 /** When each cached miss stops being believed. Separate map: a hit never expires. */
 const PATH_MISSES = new Map<string, number>();
+
+/**
+ * Forget every PATH lookup, hits included.
+ *
+ * A hit never expires on its own — see {@link findOnPath} — which is right for the
+ * life of a daemon and wrong across the one event that moves binaries under it:
+ * `deploy/agents.sh` installing a CLI where none was, or an operator deleting the
+ * one that was found. `LocalRuntime.forgetAvailability` calls this beside its own
+ * caches, so the next launch walks PATH again rather than spawning a path that is
+ * gone — which was ENOENT until a restart.
+ */
+export function forgetPathHits(): void {
+  PATH_HITS.clear();
+  PATH_MISSES.clear();
+}
+
+/**
+ * Where this daemon installs the agent CLIs, searched after `PATH`.
+ *
+ * ⚠ **The unit's `PATH` deliberately does not name these, and adding them there was
+ * the obvious fix and the wrong one.** `runtime_path` builds the unit's `PATH` from
+ * the system directories plus the directories of the two tools it is handed
+ * (`runtime_path "$_node" "$_git"`, `deploy/lib.sh:1135`), and changing it means
+ * re-rendering the unit — which means a reload, which `deploy/install.sh` documents
+ * as interrupting every live session. Searching here instead reaches every machine
+ * already in the field on a plain `deploy.sh`, because `^src/` restarts the daemon
+ * and nothing else has to move.
+ *
+ * **Appended, never prepended.** These are a *fallback* for a name the system does
+ * not have, not a preference: prepending would let a stray `git` or `node` in
+ * `~/.local/bin` shadow `/usr/bin/git` for every spawn this daemon makes, which is
+ * the privilege-path hazard `runtime_path`'s own comment weighs one directory at a
+ * time.
+ *
+ * The three are the vendors' own, and none of them is relocatable:
+ * - `~/.local/bin` — claude and codex both install there, and claude's binary
+ *   carries `.local/bin/claude` as its only bin literal.
+ * - `~/.opencode/bin` — opencode's installer assigns `INSTALL_DIR` outright.
+ * - `~/.reemoat/toolchain/bin` — ours. kimi goes there always, because it has no
+ *   relocatable native installer and is put there as an npm global with the node
+ *   the bootstrap already installed; and all four go there under
+ *   `REEMOAT_AGENT_SOURCE=npm`, the arm for a machine that cannot reach the
+ *   vendors' hosts (Q4.114).
+ *
+ * **`homedir()` rather than a bare `HOME` read, and the difference is narrower
+ * than it looks.** On POSIX `os.homedir()` answers `$HOME` when that is set and the
+ * account's passwd entry only when it is not — so the two agree under every service
+ * manager that sets `HOME`, and diverge only for one that sets none, where a bare
+ * read would build `undefined/.local/bin`. What is being located is where
+ * `deploy/agents.sh` put a file, and that script roots on `$HOME` and refuses to run
+ * without one; the daemon hands it the same answer this constant was built from.
+ */
+export const MANAGED_CLI_DIRS: readonly string[] = [
+  join(homedir(), ".local", "bin"),
+  join(homedir(), ".opencode", "bin"),
+  join(homedir(), ".reemoat", "toolchain", "bin"),
+];
 
 export function findOnPath(name: string): string | null {
   /*
@@ -668,7 +733,11 @@ export function findOnPath(name: string): string | null {
   const missedAt = PATH_MISSES.get(name);
   if (missedAt !== undefined && Date.now() - missedAt < PATH_MISS_TTL_MS) return null;
 
-  for (const dir of (process.env["PATH"] ?? "").split(delimiter)) {
+  /*
+   * `PATH` first and {@link MANAGED_CLI_DIRS} after it — see that constant for why
+   * the second list exists and why it may not go in front.
+   */
+  for (const dir of [...(process.env["PATH"] ?? "").split(delimiter), ...MANAGED_CLI_DIRS]) {
     if (!dir) continue;
     const candidate = join(dir, name);
     if (isExecutable(candidate)) {
@@ -682,37 +751,42 @@ export function findOnPath(name: string): string | null {
 }
 
 /**
- * The `opencode` binary this repository vendors, or `null`.
+ * The CLI under an adapter, as an existence test.
  *
- * ⚠ **Exported because two callers must agree on it and nothing else could make
- * them.** `resolveAgent` picks the program a *session* runs; `LocalRuntime`'s
- * `vendoredCli` picks the one a *login* drives. For claude and codex those are
- * honestly different files — an adapter and the CLI underneath it — so each side
- * resolves its own. opencode ships no adapter: `opencode acp` and
- * `opencode auth login` are subcommands of one binary, and two independent
- * lookups that happened to disagree would write credentials for a build no
- * session runs, reporting success the whole way.
+ * ⚠ **Neither adapter falls back to PATH, and this repository no longer vendors a
+ * CLI for either — so an adapter that resolves is not yet a harness that can
+ * start.** `claude-agent-acp`'s `claudeCliPath()` is two branches,
+ * `CLAUDE_CODE_EXECUTABLE` else a `require` bound to its SDK's platform package,
+ * and it throws with neither. `codex-acp`'s `startAcpServer()` has the same two
+ * branches one variable over, and its second does not throw: it spawns the
+ * `@openai/codex` shim `pnpm install` still brings, under this node, and the shim
+ * exits complaining about the platform package it cannot find. The platform
+ * packages are excluded in `pnpm-workspace.yaml` (Q4.114), so on every machine the
+ * variable is the only door that leads to a running CLI — `LocalRuntime.launch`
+ * writes it on every spawn from whichever copy this finds. Asked here, synchronously, so that `describe` fails fast with a
+ * sentence naming the remedy rather than an adapter dying at spawn with a stack
+ * trace about a package that is deliberately absent, and so that `GET /agents`
+ * draws the tile as unavailable rather than as a harness refusing every start.
  *
- * Resolved through the manifest rather than `node_modules/.bin`, which is
- * `vendoredCodex`'s shape and is the sturdier of the two: `bin.opencode` points
- * at a platform executable the package's own postinstall puts there (measured on
- * 1.18.23 — a 144 MB Mach-O, not a script), so this answers with the real file
- * rather than a shim whose layout is the package manager's business.
+ * An override is believed as named and not tested for existence — an operator who
+ * set one meant it, `chooseCli` makes the same choice, and the failure a wrong one
+ * produces is the adapter's own, about a file the operator chose.
  */
-export function vendoredOpencode(): string | null {
-  try {
-    const manifestPath = createRequire(import.meta.url).resolve("opencode-ai/package.json");
-    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
-      bin?: string | Record<string, string>;
-    };
-    const entry = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.["opencode"];
-    if (entry === undefined) return null;
-    const resolved = join(dirname(manifestPath), entry);
-    return isExecutable(resolved) ? resolved : null;
-  } catch {
-    // Not installed, or a layout that moved. `findOnPath` is the fallback.
-    return null;
-  }
+function cliFor(agent: "claude" | "codex"): string | null {
+  const login = AGENT_LOGIN[agent];
+  const override = login.executableEnv === null ? "" : (process.env[login.executableEnv] ?? "").trim();
+  if (override.length > 0) return override;
+  return findOnPath(login.command);
+}
+
+/** What to do about a CLI that is not on this machine, said the same way for both. */
+function noCli(agent: "claude" | "codex"): string {
+  const login = AGENT_LOGIN[agent];
+  return (
+    `${login.command} is not on this daemon's PATH or in the directories deploy/agents.sh installs into, ` +
+    `and its adapter cannot run without it. Run deploy/agents.sh on this machine — behind a firewall, ` +
+    `deploy/agents.sh --source npm — or name a copy in ${login.executableEnv ?? "the vendor's own variable"}.`
+  );
 }
 
 /**
@@ -720,26 +794,33 @@ export function vendoredOpencode(): string | null {
  *
  * Claude: `claude-agent-acp` with no arguments — it speaks ACP on stdio
  * immediately and exits on stdin EOF. It does not implement authentication
- * itself; it spawns a `claude` binary (from `CLAUDE_CODE_EXECUTABLE`, else the
- * one vendored by @anthropic-ai/claude-agent-sdk) and inherits whatever that
- * binary is logged in as.
+ * itself; it spawns the `claude` binary named in `CLAUDE_CODE_EXECUTABLE` and
+ * inherits whatever that binary is logged in as. ⚠ It never looks on PATH, and
+ * this repository no longer vendors a `claude` for it to find — {@link cliFor} is
+ * the consequence.
  *
  * Kimi: `kimi acp` — a multi-session ACP server on stdio. It answers
  * `initialize` while logged out but rejects `session/new` with -32000.
  *
- * Codex: `codex-acp`, structurally claude's case rather than kimi's. It is a
- * dependency of this repo with a `bin` entry, so the vendored copy is preferred
- * and PATH is the fallback; and like claude's adapter it drives a CLI it brings
- * with it (`@openai/codex`, which unlike the claude SDK *does* declare a `bin`).
+ * Codex: `codex-acp`, structurally claude's case rather than kimi's: an adapter
+ * this repository pins, driving a `codex` it is told about in `CODEX_PATH`.
  * Measured 2026-08-07 against adapter 1.1.9 / codex 0.146.1: logged out it answers
  * `initialize` and rejects `session/new` with -32000 — kimi's shape, and the one
  * `502 agent_auth_required` already knows how to report.
  *
  * **Two version numbers, and they are different programs.** The adapter is 1.1.9
- * and the CLI it spawns is `@openai/codex` 0.145.0, vendored beneath it. A `codex`
- * on PATH may be neither — 0.146.1 here — and `CODEX_PATH` is what chooses. Every
- * measurement in this file that decides daemon behaviour was taken against the
- * vendored pair, because that is what runs.
+ * and pinned; the CLI it spawns is whatever `deploy/agents.sh` installed or an
+ * operator named, and it moves daily. A measurement in this file names the pair it
+ * was taken against, and `AgentCapabilities.cli` names the build a running daemon
+ * actually used — that, rather than a pin, is what records it now (Q6.106).
+ *
+ * ⚠ **Which CLI runs is not decided here.** This function resolves the **adapter**
+ * and refuses when there is no CLI for it to drive; `LocalRuntime.agentCli`
+ * decides which copy goes under it — an operator's override outright, else the
+ * first on PATH and then in {@link MANAGED_CLI_DIRS}. The copy this repository used
+ * to vendor was the floor under that choice, exactly as old as the release and
+ * never the one that ran once a vendor's copy was on the machine; Q4.114 is why it
+ * is gone and what a machine behind a firewall does instead.
  */
 export function resolveAgent(id: string, machine?: HarnessCatalogue): AgentLaunchConfig {
   /*
@@ -767,6 +848,7 @@ export function resolveAgent(id: string, machine?: HarnessCatalogue): AgentLaunc
             "`npm i -g @agentclientprotocol/claude-agent-acp`).",
         );
       }
+      if (cliFor("claude") === null) throw new AgentUnavailableError(noCli("claude"));
       return {
         id,
         displayName: "Claude (claude-agent-acp)",
@@ -826,6 +908,7 @@ export function resolveAgent(id: string, machine?: HarnessCatalogue): AgentLaunc
             "`npm i -g @agentclientprotocol/codex-acp`).",
         );
       }
+      if (cliFor("codex") === null) throw new AgentUnavailableError(noCli("codex"));
       return {
         id,
         displayName: "Codex (codex-acp)",
@@ -845,12 +928,13 @@ export function resolveAgent(id: string, machine?: HarnessCatalogue): AgentLaunc
     case "opencode": {
       // No adapter package: `opencode acp` is a subcommand of the same binary a
       // login drives, so there is one file here where claude and codex have two —
-      // and {@link vendoredOpencode} is that one file, shared with `vendoredCli`.
-      const command = vendoredOpencode() ?? findOnPath("opencode");
+      // and `LocalRuntime.agentCli` asks `findOnPath` the same name, so a login and
+      // a session cannot pick differently.
+      const command = findOnPath("opencode");
       if (!command) {
         throw new AgentUnavailableError(
-          "opencode not found. It is a dependency of this repo — run `pnpm install` " +
-            "in the project root (or install it globally with `npm i -g opencode-ai`).",
+          "opencode not found on this daemon's PATH. deploy/agents.sh installs it " +
+            "(or `curl -fsSL https://opencode.ai/install | bash`).",
         );
       }
       return {

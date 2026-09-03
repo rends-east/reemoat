@@ -1101,6 +1101,9 @@ process.stdout.write("\nwhat each harness says it can be pointed at\n");
         // Non-null on both, or `pinsModel` is never reached: the route spreads it
         // onto `routing` and answers `null` outright where the agent published none.
         routing: { providerId: "main", supported: ["anthropic"] },
+        // Which build published the list above. Distinct per harness, so an
+        // assertion cannot pass by reading somebody else's row.
+        cli: { path: `/bin/${agent}`, version: `1.2.${agent.length}`, source: "path" },
       };
     },
   };
@@ -1130,6 +1133,30 @@ process.stdout.write("\nwhat each harness says it can be pointed at\n");
 
   check("the route answers", read.status, 200);
   check("with a row per harness this machine offers", Object.keys(agents).sort(), ["acme:flat", "claude", "kimi"]);
+
+  /*
+   * **Which build published each list, carried through to the client.**
+   *
+   * ⚠ **It rides *this* answer rather than `GET /agents`, and the failing arm is
+   * the half worth pinning.** The models on a row are whatever that binary
+   * published, so a version carried beside them can be trusted to describe the
+   * same spawn — while a version taken from anywhere else could name a build that
+   * did not produce the rows under it. And on the arm where nothing was spawned
+   * there is no build to name: `null` there is the honest value, where forwarding
+   * a version would be a claim about a read that never happened.
+   */
+  check("each row names the build that published its models", rowOf("claude").cli?.version, "1.2.6");
+  check("and the source that decided it", rowOf("claude").cli?.source, "path");
+  check("a harness that could not be asked names no build", rowOf("kimi").cli, null);
+  /*
+   * ⚠ **And the path it was resolved from does not travel.** The screen draws a
+   * program and a version; an absolute path is this host's filesystem layout, and
+   * a route that spread the whole record would hand it to anything holding the
+   * scope that reads models. Asserted as an absence, because spreading is the
+   * shorter spelling and the one somebody tidying this will reach for.
+   */
+  check("and no row carries the path it was resolved from", Object.keys(rowOf("claude").cli ?? {}).sort(), ["source", "version"]);
+  check("while still reporting why it could not", typeof rowOf("kimi").error, "string");
 
   /*
    * ⚠ **The pair is the assertion, and neither half is one alone.** `pinsModel`

@@ -376,7 +376,8 @@ async function currentPasswordBody(): Promise<string> {
  * talking about enrollment rather than about a variable name.
  *
  * **Both values are single-quoted, and that is not tidiness.** `controlPlaneUrl`
- * is the server's `publicUrl(c)` — `new URL(c.req.url).origin`, i.e. derived from
+ * is the server's `installOrigin(c, trustedProxyHops)` — `new URL(c.req.url).origin`
+ * with the scheme corrected behind declared proxy hops, i.e. derived from
  * the request's own `Host` header, which any caller writes. Measured 2026-08-08
  * through a real `node:http` server, a `Host` of ``a`id`b``, `a$(id)b`, `a'b` and
  * `a;id` all reach `URL.origin` intact; unquoted, the paste executes it —
