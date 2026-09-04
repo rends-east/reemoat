@@ -4,8 +4,8 @@ import type { MailDelivery } from "./cp";
  * What this control plane allows, and where each setting's value came from.
  *
  * Two separate jobs that share a shape. The first is read by the signed-out
- * screen, which has no credential; the second only by an admin looking at Server
- * settings. They live together because both are *statements about the instance*
+ * screen, which has no credential; the second only by an admin looking at the
+ * Server and Email settings. They live together because both are *statements about the instance*
  * rather than about a person, and neither belongs in `settings.ts` — that module
  * answers "which settings screen does this URL name, and who may see it".
  */
@@ -254,11 +254,11 @@ export type MailTrouble =
   | { kind: "backlog"; text: string };
 
 /**
- * The one sentence Server settings owes an admin about delivery, or `null`.
+ * The one sentence Email settings owes an admin about delivery, or `null`.
  *
  * ⚠ **Nothing said any of this, and the silence was the defect.** `send()` on the
  * server reports whether a *row was inserted*; the Users screen turns that into
- * "Invitation queued for …" and stops. A permanent SMTP failure after that point
+ * "Invitation sent to …" and stops. A permanent SMTP failure after that point
  * reached one `console.error` inside a container with rotating logs, the delivery
  * log was removed from this UI as noise, and `cpctl admin mail` only helps
  * somebody who already suspects a problem. So the first user's invitation could
@@ -275,26 +275,27 @@ export type MailTrouble =
  * `null` for a config this client has not read, deliberately — a rolled-back
  * control plane sends no `delivery` object, and inventing "all clear" from
  * absence is how a banner becomes something nobody trusts.
+ *
+ * Each sentence is at most ten words (the copy table's cap), and the singular
+ * `1 message has` is pinned: it is the one an admin of a personal instance
+ * actually reads, since the first failure is the invitation to the second user.
  */
 export function mailTrouble(delivery: MailDelivery | undefined): MailTrouble | null {
   if (delivery === undefined) return null;
   if (delivery.paused) {
     return {
       kind: "paused",
-      text: "Delivery is paused: five sends failed in a row, so the server has stopped dialling for a few minutes. It will try again by itself.",
+      text: "Delivery paused after five failures. It will retry.",
     };
   }
   if (delivery.failed > 0) {
     const many = delivery.failed === 1 ? "1 message has" : `${delivery.failed} messages have`;
-    return {
-      kind: "failed",
-      text: `${many} failed to send. Anybody waiting on an invitation or a password reset did not get it.`,
-    };
+    return { kind: "failed", text: `${many} failed to send.` };
   }
   if (delivery.oldestPendingMs !== null && delivery.oldestPendingMs >= MAIL_BACKLOG_WARN_MS) {
     return {
       kind: "backlog",
-      text: `${delivery.pending} message${delivery.pending === 1 ? "" : "s"} queued and not going out. The oldest has been waiting over an hour.`,
+      text: `${delivery.pending} message${delivery.pending === 1 ? "" : "s"} queued for over an hour.`,
     };
   }
   return null;

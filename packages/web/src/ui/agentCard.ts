@@ -453,10 +453,11 @@ export function stanceLine(
   if (stance === "no_login") {
     // Two short sentences and no third: this is the only line on the card now, and
     // the second half is the only thing that says what the box below it is for.
-    return `${name} needs no sign-in. A key below adds the models it can reach.`;
+    // No name in it: the card's heading is the name, 20px above.
+    return "No sign-in needed. A key adds more models.";
   }
   if (stance === "not_installed") {
-    return `${name} isn't installed on this machine. Nothing on this screen can change that — it has to be installed on the machine itself.`;
+    return `${name} isn't installed. Install it on the machine itself.`;
   }
   /*
    * ⚠ **It blames the harness, and it must never blame the host.** The
@@ -474,29 +475,34 @@ export function stanceLine(
    */
   if (stance === "start_refused") {
     return canSignIn
-      ? `${name} refused to start the last time this machine tried.`
-      : `${name} refused to start the last time this machine tried. Sign it in on the machine itself, or paste a key below.`;
+      ? `${name} refused to start last time.`
+      : `${name} refused to start last time. Sign in on the machine, or paste a key.`;
   }
   // Signed in, and signed out with a way in: the badge says it and the control
   // below does something about it. A sentence here can only be self-reference,
   // which is what the deleted paragraph's second clause was.
   if (stance === "signed_in") return null;
   if (stance === "signed_out") {
+    // ⚠ Pinned verbatim for `darwin`/claude in `webcheck` — the one sentence
+    // whose whole job is to say the fault is the host's and not the reader's,
+    // and it is the only arm of this function that survived the 2026-09-04 cut
+    // unshortened, because every shorter form dropped the "own" that makes it
+    // true: the wizard is the CLI's, and the OS refuses it a terminal.
     return canSignIn
       ? null
       : `${host} can't run ${name}'s own sign-in, so a saved key is the only way in.`;
   }
   // "cannot tell" is kimi's permanent, correct answer and claude's or codex's
   // accident. The load-bearing half of `cannotAskHint` is the same either way:
-  // do not panic, sessions may still work.
+  // sessions may still work, and a chat is how to find out. "That's normal" is
+  // gone — reassurance about a state the sentence already declines to alarm
+  // over is a second sentence saying the first one (decision 11A).
   const why =
     agent.id === "kimi"
-      ? `${name} doesn't report whether it's signed in. That's normal.`
+      ? `${name} doesn't report sign-in state.`
       : `This machine couldn't check whether ${name} is signed in.`;
-  const cannotRun = canSignIn
-    ? ""
-    : ` ${host} can't run ${name}'s own sign-in either, so a saved key is the only way in.`;
-  return `${why} ${name} may well be working — start a chat to find out.${cannotRun}`;
+  const cannotRun = canSignIn ? "" : ` ${host} can't run ${name}'s sign-in — paste a key.`;
+  return `${why} Start a chat to find out.${cannotRun}`;
 }
 
 /**
@@ -507,21 +513,15 @@ export function stanceLine(
  * It survives as a `title` and as the wire key, and nowhere else.
  */
 export const CREDENTIAL_LABELS: Record<string, { name: string; note: string }> = {
-  CLAUDE_CODE_OAUTH_TOKEN: {
-    name: "Claude subscription token",
-    note: "A sign-in token made on the machine itself — not a key from a website.",
-  },
-  ANTHROPIC_API_KEY: { name: "Anthropic API key", note: "A key from your Anthropic account." },
-  KIMI_API_KEY: { name: "Kimi API key", note: "A key from your Kimi account." },
-  CODEX_API_KEY: { name: "OpenAI API key", note: "A key from your OpenAI account." },
-  OPENROUTER_API_KEY: {
-    name: "OpenRouter API key",
-    note: "A key from your OpenRouter account. It adds OpenRouter's whole catalogue to Opencode's model list.",
-  },
-  OPENCODE_API_KEY: {
-    name: "OpenCode Zen key",
-    note: "A key from your OpenCode Zen account. The free models work without one.",
-  },
+  // Every note at six words or fewer: it sits under a field that already has a
+  // name, so what is left to say is *where the value comes from* and, for the
+  // one slot that is not a website key, that it is not one.
+  CLAUDE_CODE_OAUTH_TOKEN: { name: "Claude subscription token", note: "Made on the machine, not a website." },
+  ANTHROPIC_API_KEY: { name: "Anthropic API key", note: "From your Anthropic account." },
+  KIMI_API_KEY: { name: "Kimi API key", note: "From your Kimi account." },
+  CODEX_API_KEY: { name: "OpenAI API key", note: "From your OpenAI account." },
+  OPENROUTER_API_KEY: { name: "OpenRouter API key", note: "From your OpenRouter account." },
+  OPENCODE_API_KEY: { name: "OpenCode Zen key", note: "Optional — the free models need none." },
 };
 
 export function credentialLabel(envName: string): { name: string; note: string } {
@@ -540,17 +540,25 @@ export function credentialLabel(envName: string): { name: string; note: string }
  * Codex's is the load-bearing sentence on the whole screen (Q2.200): with
  * `CODEX_API_KEY` set and no real login, `codex-acp` still answers `session/new`
  * with -32000. It does not overclaim — the key IS merged last at spawn and does
- * reach codex's own API calls, so "won't start a chat on its own" is true where
- * "does nothing" would be false.
+ * reach codex's own API calls, so "won't sign Codex in" is true where "does
+ * nothing" would be false.
+ *
+ * ⚠ **A caveat about another product survives only when it is measured and at
+ * most ten words** (decision 11A). Both of these are measurements — Q2.200 for
+ * codex, Q2.201 for kimi, whose `KIMI_API_KEY` applies according to the
+ * installation's own `config.toml` rather than to this daemon — and each was
+ * twice this length, spending its second sentence on advice ("finish it on the
+ * page that opens", "if signing in works, prefer that") that the control beside
+ * it already gives. What is kept is the fact a person must hold before typing.
  */
 export function credentialCaveat(id: string, canSignIn: boolean): string | null {
   if (id === "codex") {
     return canSignIn
-      ? "A key on its own does not sign Codex in — it will still refuse to start a chat. Use Sign in to Codex above and finish it on the page that opens."
-      : "A key on its own does not sign Codex in — it will still refuse to start a chat. Codex has to be signed in on the machine itself.";
+      ? "A key won't sign Codex in — use Sign in above."
+      : "A key won't sign Codex in — sign in on the host.";
   }
   if (id === "kimi") {
-    return "Some Kimi setups ignore a key saved here and use the one kept on the machine instead. If signing in works, prefer that.";
+    return "Kimi may prefer the key on the machine.";
   }
   /*
    * ⚠ **opencode had one and it is deleted rather than reworded.** It said a key
@@ -569,7 +577,13 @@ export function credentialCaveat(id: string, canSignIn: boolean): string | null 
 export function multiSlotLine(agent: { id: string; label?: string }, slots: number): string | null {
   // The row, for `stanceLine`'s reason: this is the last sentence on the card that
   // was still naming a contributed harness by its namespaced id.
-  return slots > 1 ? `${harnessName(agent)} takes either one — you only need one of them.` : null;
+  // The name is dropped rather than kept: the sentence is drawn between the two
+  // slots it is about, under a card headed by the harness, so "either one" has
+  // its subject on screen twice already. The row stays in the signature — the
+  // two callers hand it over, and a sentence that names the harness again is
+  // one edit away — so it is consumed rather than renamed.
+  void agent;
+  return slots > 1 ? "Either one is enough." : null;
 }
 
 /**
@@ -597,9 +611,11 @@ export function storedChip(agent: { id: string; label?: string }, stance: AgentS
 /** kimi only. `POST /agent-auth/:agent/logout` answers 503 for it, so no button may be drawn. */
 export function signOutSentence(id: string, stored: number): string {
   const name = agentLabel(id);
+  // "from here", because it is not that the harness cannot be signed out — it is
+  // that nothing on this screen can do it; the machine itself still can.
   return stored > 0
-    ? `${name} has no way to sign out. You can remove the saved key below — anything ${name} saved on the machine itself stays until somebody clears it there.`
-    : `${name} has no way to sign out. Once it's signed in on a machine it stays signed in until somebody clears it on the machine itself.`;
+    ? `${name} can't be signed out from here. Remove the key below.`
+    : `${name} can't be signed out from here. Clear it on the machine itself.`;
 }
 
 /** An "or" is only drawn when there is something on both sides of it. */
@@ -630,8 +646,33 @@ export function dividerWord(
    * wizard: then there is something above, and `or` is right.
    */
   if (stance === "start_refused" && !signInAbove) return null;
-  return signInAbove ? "or" : "Sign in with a key instead";
+  // Lower-case and verb-first, because it is a divider and not a heading: it
+  // sits between a wizard above and a box below, and "Sign in with a key
+  // instead" read as a second heading over the same box.
+  return signInAbove ? "or" : "or paste a key";
 }
+
+/**
+ * What a screen says when a **re**-read failed and the previous answer is still
+ * drawn under it.
+ *
+ * ⚠ **One constant for both screens that draw it, and it is here rather than in
+ * either because both import from this module and neither may import the
+ * other.** `SystemsPanel` had its own spelling ("Couldn't re-check this
+ * machine's systems — what's below may be out of date.") and `AgentsPanel`
+ * another ("Couldn't reach that machine — what's below may be out of date."),
+ * and `SystemDetail` mounts `AgentDetail` directly under its own copy — so the
+ * ordinary case where both reads fail together, because they share a transport,
+ * drew two near-identical sentences about one machine, one above the other.
+ * Two sentences that differ by a noun read as a bug rather than as two failed
+ * reads. One string, drawn wherever a stale answer is on screen; the caller
+ * keeps the margin, for the reason `FIELD` gives about layout.
+ *
+ * A subject rather than a verb ("Machine status", not "Couldn't re-check"),
+ * because what the reader needs is which part of the screen to distrust. Seven
+ * words; the cap for a screen line is fourteen.
+ */
+export const STALE_READ = "Machine status may be out of date.";
 
 /**
  * What to call the host in a sentence that blames it.

@@ -43,7 +43,17 @@ CREATE TABLE IF NOT EXISTS users (
   -- what happened, and rewriting it to keep a join valid is the opposite of one.
   -- What the sentence was **not** protecting is a list of people that grows for
   -- ever because somebody who left in March can only ever be greyed out.
-  disabled_at INTEGER
+  disabled_at INTEGER,
+  -- When the person last chose a password themselves: written by
+  -- `POST /v1/me/password` and by the mailed reset (`POST /v1/reset`), and by
+  -- nothing else. An admin-issued temporary password and the bootstrap in
+  -- `main.ts` leave it alone — neither is the person choosing anything, and the
+  -- settings screen draws this as "Changed <age> ago", which would be a lie for
+  -- a value somebody else set. NULL for every row that predates the column and
+  -- for every account whose password was only ever issued; the screen says
+  -- "Set" there rather than inventing a date. Added by `migrate()` in `store.ts`
+  -- on an existing database — this CREATE only reaches a fresh one.
+  password_changed_at INTEGER
 );
 
 -- `users.name` is UNIQUE and therefore BINARY-indexed, which `WHERE lower(name)
@@ -90,7 +100,18 @@ CREATE TABLE IF NOT EXISTS api_keys (
   prefix     TEXT    NOT NULL,
   key_hash   TEXT    NOT NULL,
   created_at INTEGER NOT NULL,
-  revoked_at INTEGER
+  revoked_at INTEGER,
+  -- When this key last authenticated a request, so a row in a list of ten can
+  -- say which one `cpctl` on the old laptop is still holding. Written by
+  -- `callerAuth` on an accepted bearer lookup and **at most once a minute per
+  -- key**: this table sits on every authenticated request and a write per
+  -- request would put a disk write on the path every tunnel shares (see
+  -- `user_sessions.last_seen_at`, which keeps the same discipline at fifteen
+  -- minutes). A revoked key is refused before the write, so its value stops
+  -- where the revocation found it. NULL means never used since the column
+  -- existed — indistinguishable from never used at all, and nothing needs to
+  -- tell them apart. Added by `migrate()` on an existing database.
+  last_used_at INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys (prefix);

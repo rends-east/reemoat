@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { check } from "./webcheck.env.js";
 import { stripComments } from "./webcheck.source.js";
 
@@ -25,6 +25,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     visibleSections,
     settingsUp,
     settingsPaneTitle,
+    settingsLeafPath,
     settingsUpLabel,
   } = await import("../src/settings.js");
   const { sheetTitle, sheetUpLabel, upFrom } = await import("../src/nav.js");
@@ -79,12 +80,12 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "a machine path round-trips",
     parseSettingsRoute(seg(settingsPath("machines", "m_1" as never))),
-    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, leaf: null },
   );
   check(
     "a system path round-trips",
     parseSettingsRoute(seg(settingsPath("machines", "m_1" as never, "moonshot"))),
-    { section: "machines", machineId: "m_1", system: "moonshot", signin: null, agents: false },
+    { section: "machines", machineId: "m_1", system: "moonshot", signin: null, agents: false, leaf: null },
   );
   /*
    * ⚠ **A system this client has never heard of still parses**, which is the one
@@ -119,7 +120,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "a segment that is not `systems` drops to the machine",
     parseSettingsRoute(["machines", "m_1", "sessions", "kimi"]),
-    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, leaf: null },
   );
   /*
    * ⚠ **`…/agents` names a screen again, and the tail of the old address goes
@@ -136,12 +137,12 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "the machine's agent strip parses",
     parseSettingsRoute(["machines", "m_1", "agents"]),
-    { section: "machines", machineId: "m_1", system: null, signin: null, agents: true },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: true, leaf: null },
   );
   check(
     "and the old one-agent address falls to it, tail dropped",
     parseSettingsRoute(["machines", "m_1", "agents", "claude"]),
-    { section: "machines", machineId: "m_1", system: null, signin: null, agents: true },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: true, leaf: null },
   );
   check(
     "which is the address the builder emits",
@@ -151,7 +152,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "and it round-trips",
     parseSettingsRoute(seg(agentStripPath("m_1" as never))),
-    { section: "machines", machineId: "m_1", system: null, signin: null, agents: true },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: true, leaf: null },
   );
   /*
    * ⚠ **A strip route never carries a system and a system route never carries the
@@ -171,7 +172,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "a machine id under another section is ignored",
     parseSettingsRoute(["account", "m_1", "agents", "kimi"]),
-    { section: "account", machineId: null, system: null, signin: null, agents: false },
+    { section: "account", machineId: null, system: null, signin: null, agents: false, leaf: null },
   );
   /*
    * The decoder is threaded in rather than applied inside, so the one place that
@@ -201,17 +202,17 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "a bare plugins segment is the machine",
     parseSettingsRoute(["machines", "m_1", "plugins"]),
-    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, leaf: null },
   );
   check(
     "and so is one that still names a plugin",
     parseSettingsRoute(["machines", "m_1", "plugins", "board"]),
-    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, leaf: null },
   );
   check(
     "including one nobody has installed",
     parseSettingsRoute(["machines", "m_1", "plugins", "not-installed"]),
-    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, leaf: null },
   );
   /*
    * ⚠ **Nothing in this module builds that path any more.** `pluginSettingsPath`
@@ -231,7 +232,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
    */
   check(
     "a system goes up to its machine",
-    settingsUp({ section: "machines", machineId: "m_1" as never, system: "moonshot", signin: null, agents: false }),
+    settingsUp({ section: "machines", machineId: "m_1" as never, system: "moonshot", signin: null, agents: false, leaf: null }),
     { path: "/settings/machines/m_1", withinNav: false },
   );
   /*
@@ -245,7 +246,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
    */
   check(
     "the agent strip goes up to its machine, wherever it was opened from",
-    settingsUp({ section: "machines", machineId: "m_1" as never, system: null, signin: null, agents: true }),
+    settingsUp({ section: "machines", machineId: "m_1" as never, system: null, signin: null, agents: true, leaf: null }),
     { path: "/settings/machines/m_1", withinNav: false },
   );
   /*
@@ -258,12 +259,12 @@ process.stdout.write("\nwhich settings screen a URL names\n");
    */
   check(
     "a sign-in goes up to its machine, like the two leaves beside it",
-    settingsUp({ section: "machines", machineId: "m_1" as never, system: null, signin: "acme:gemini", agents: false }),
+    settingsUp({ section: "machines", machineId: "m_1" as never, system: null, signin: "acme:gemini", agents: false, leaf: null }),
     { path: "/settings/machines/m_1", withinNav: false },
   );
   check(
     "and it is titled by what it is rather than by which machine",
-    settingsPaneTitle({ section: "machines", machineId: "m_1" as never, system: null, signin: null, agents: true }),
+    settingsPaneTitle({ section: "machines", machineId: "m_1" as never, system: null, signin: null, agents: true, leaf: null }),
     "Agents",
   );
   /*
@@ -286,6 +287,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
       machineId: "m_1" as never,
       system: null,
       signin: null, agents: true,
+      leaf: null,
     };
     const fromNew = "/new/m_1/%2FUsers%2Fme%2Fsrc";
     check(
@@ -297,11 +299,11 @@ process.stdout.write("\nwhich settings screen a URL names\n");
       "and nothing else in this sheet reads it",
       [
         settingsUp(
-          { section: "machines" as const, machineId: "m_1" as never, system: null, signin: null, agents: false },
+          { section: "machines" as const, machineId: "m_1" as never, system: null, signin: null, agents: false, leaf: null },
           fromNew,
         ),
         settingsUp(
-          { section: "account" as const, machineId: null, system: null, signin: null, agents: false },
+          { section: "account" as const, machineId: null, system: null, signin: null, agents: false, leaf: null },
           fromNew,
         ),
       ],
@@ -332,14 +334,95 @@ process.stdout.write("\nwhich settings screen a URL names\n");
 
   const plain = { id: "u_1", name: "ada", isAdmin: false };
   const admin = { id: "u_2", name: "root", isAdmin: true };
-  check("a plain user sees two sections", visibleSections(plain).map((s) => s.id), ["account", "machines"]);
-  check("an admin sees four", visibleSections(admin).map((s) => s.id), ["account", "machines", "server", "users"]);
+  check("a plain user sees three sections", visibleSections(plain).map((s) => s.id), ["account", "keys", "machines"]);
+  check(
+    "an admin sees six",
+    visibleSections(admin).map((s) => s.id),
+    ["account", "keys", "machines", "server", "email", "users"],
+  );
+  // Six ids, and this is the count the plan named three ways before it was one:
+  // the union, the table and the `SectionBody` switch. The switch ends in a
+  // `never` arm and the union is the table's element type, so this line is the
+  // table's own claim.
+  check("and the table has exactly six entries", SECTION_SPECS.length, 6);
+  // The owner's call: the rows everybody sees say what they are and carry no
+  // second line; the admin rows keep one because their titles do not.
+  check(
+    "the user sections carry no blurb and the admin sections do",
+    SECTION_SPECS.map((spec) => spec.blurb !== null),
+    SECTION_SPECS.map((spec) => spec.adminOnly),
+  );
+
+  /*
+   * **Nothing on a settings screen expands in place.** The password form, the
+   * address form and the key mint opened inside their rows for one release and
+   * the owner's review of it was two words. Each is a leaf address now; the row
+   * carries the verb and the verb navigates. Pinned at both ends: the parser
+   * answers the leaf, and the screens hold no `editing`/`asking` toggle.
+   */
+  const leafOf = (segments: readonly string[]): string | null => parseSettingsRoute(segments).leaf;
+  check(
+    "the three form screens parse to their leaf",
+    [leafOf(["account", "password"]), leafOf(["account", "email"]), leafOf(["keys", "new"])],
+    ["password", "email", "new-key"],
+  );
+  check(
+    "and anything else under those sections falls up to the section",
+    [parseSettingsRoute(["account", "nope"]), parseSettingsRoute(["keys", "password"])].map((r) => [r.section, r.leaf]),
+    [["account", null], ["keys", null]],
+  );
+  check("a leaf never carries a machine", parseSettingsRoute(["account", "password"]).machineId, null);
+  check(
+    "each leaf's path parses back to itself",
+    (["password", "email", "new-key"] as const).map((leaf) => parseSettingsRoute(settingsLeafPath(leaf).split("/").slice(2)).leaf),
+    ["password", "email", "new-key"],
+  );
+  check(
+    "a form screen goes up to its section, outside the nav",
+    [settingsUp(parseSettingsRoute(["account", "password"])), settingsUp(parseSettingsRoute(["keys", "new"]))],
+    [{ path: "/settings/account", withinNav: false }, { path: "/settings/keys", withinNav: false }],
+  );
+  check(
+    "and is titled by what it is, never by its parent's name",
+    (["password", "email", "new-key"] as const).map((leaf) => settingsPaneTitle(parseSettingsRoute(settingsLeafPath(leaf).split("/").slice(2)))),
+    ["Password", "Your email", "New key"],
+  );
+  const accountSrc = stripComments(readFileSync(new URL("../src/ui/settings/AccountSection.tsx", import.meta.url), "utf8"));
+  const keysSrc = stripComments(readFileSync(new URL("../src/ui/settings/KeysSection.tsx", import.meta.url), "utf8"));
+  check("no row on Account opens a form in place", /setEditing|\[editing,/.test(accountSrc), false);
+  check("and its verbs navigate to the leaf", (accountSrc.match(/navigate\(settingsLeafPath\(/g) ?? []).length >= 3, true);
+  check("the keys screen is a table", /<KeyTable>/.test(keysSrc), true);
+  check("whose New key leaves the screen rather than opening under itself", /navigate\(settingsLeafPath\("new-key"\)\)/.test(keysSrc) && !/setAsking/.test(keysSrc), true);
+  // The mint is the list's one tap and the screen only shows the answer: it
+  // calls `mintMyKey` nowhere, reads the handoff once, and leaves when empty.
+  const newKeyScreen = keysSrc.slice(keysSrc.indexOf("export function NewKeyScreen"));
+  check("and the New key screen mints nothing itself", /mintMyKey\(/.test(newKeyScreen), false);
+  check("reads the handoff once", /useState<string \| null>\(takeHandoff\)/.test(newKeyScreen), true);
+  check("and walks back when there is nothing to show", /if \(minted === null\) back\(\);/.test(newKeyScreen), true);
+  check("and the minted key is drawn once, with no second box of the same bytes", /CommandLine/.test(keysSrc), false);
+  /*
+   * **One placeholder row per settings list, and the primitive cannot be asked
+   * for more.** `SkeletonRow` exists because "No keys yet." was drawn before the
+   * keys had been read, and it is one row because the lists it stands in for
+   * commonly hold zero or one thing — three placeholders collapsing to one
+   * sentence is a layout shift that implied two items. Q3.548. Pinned on the
+   * primitive's signature and on every settings file, so a `rows` prop or a
+   * second adjacent row cannot arrive quietly.
+   */
+  const bitsSrc = stripComments(readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8"));
+  check("SkeletonRow takes no count", /export function SkeletonRow\(\): ReactNode/.test(bitsSrc), true);
+  check("and stands the list in as busy, with the bar hidden", /aria-busy="true"[\s\S]{0,200}aria-hidden="true"/.test(bitsSrc), true);
+  const settingsDir = new URL("../src/ui/settings/", import.meta.url);
+  const twoInARow = readdirSync(settingsDir)
+    .filter((name) => name.endsWith(".tsx"))
+    .filter((name) => /<SkeletonRow \/>\s*<SkeletonRow \/>|\.map\([^)]*<SkeletonRow/.test(stripComments(readFileSync(new URL(name, settingsDir), "utf8"))));
+  check("no settings list draws two placeholder rows", twoInARow, []);
   /*
    * `me` really is null while `phase` is "ready": `bootstrap`'s catch keeps that
    * phase when the control plane is unreachable but machines are already known,
    * and never sets `me`. So this fails closed rather than optimistically.
    */
-  check("and somebody we could not identify sees two", visibleSections(null).map((s) => s.id), ["account", "machines"]);
+  check("and somebody we could not identify sees three", visibleSections(null).map((s) => s.id), ["account", "keys", "machines"]);
   /*
    * The default the pane draws where the URL names no section — `Settings.tsx`
    * renders it at `sm` and above, and the rail highlights the same constant.
@@ -450,6 +533,13 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     // this list drives, not only to the three literals one block down.
     ["machines", "m_1", "systems"],
     ["machines", "m_1", "systems", "moonshot"],
+    // The three form screens, each its own address rather than a form opening
+    // inside a row (`SettingsLeaf`). Reachable: every row's verb navigates here.
+    ["account", "password"],
+    ["account", "email"],
+    ["keys"],
+    ["keys", "new"],
+    ["email"],
   ];
   check(
     "every parent a chevron names is itself a real settings screen",
@@ -468,7 +558,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
    * ⭐ A sheet's head is a child of its panel, so at `sm` and above it spans the
    * 224px section rail *as well as* the pane. Measured at 1280px: the head's text
    * box starts 40px in, so `mac · agents` was drawn across a rail whose rows read
-   * Machines / Account / Server settings / Users — a title describing one pane and
+   * Account / API keys / Machines / Server / Email / Users — a title describing one pane and
    * covering two. The name moved into the pane; the head names the pop-up. Q3.427.
    * ---------------------------------------------------------------- */
   const pane = (segments: readonly (string | undefined)[]): string | null =>
@@ -476,8 +566,8 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check("the index has no pane heading", pane([]), null);
   check(
     "a section names itself in the pane",
-    [pane(["machines"]), pane(["account"]), pane(["server"]), pane(["users"])],
-    ["Machines", "Account", "Server settings", "Users"],
+    [pane(["account"]), pane(["keys"]), pane(["machines"]), pane(["server"]), pane(["email"]), pane(["users"])],
+    ["Account", "API keys", "Machines", "Server", "Email", "Users"],
   );
   /*
    * **Every machine depth is titled by what the screen is**, never by which
@@ -795,10 +885,10 @@ process.stdout.write("\nwhich settings screen a URL names\n");
    */
   check(
     "and each section is drawn from exactly one place",
-    ["<MachinesSection", "<AccountSection", "<ServerSection", "<UsersSection"].map(
+    ["<MachinesSection", "<AccountSection", "<KeysSection", "<ServerSection", "<EmailSection", "<UsersSection"].map(
       (tag) => (settingsTsxSrc.match(new RegExp(tag, "g")) ?? []).length,
     ),
-    [1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1],
   );
 
   /*

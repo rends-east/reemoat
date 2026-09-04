@@ -236,15 +236,16 @@ export function MachineAgentsSection({
        *
        * Drawn here rather than inside `StripEditor` because this is the component
        * that has the machine — and because the guards above it are the states in
-       * which it would be a promise about a list that is not there. The wording
-       * was cut on 2026-09-04 for fewer words; what was kept is the name, the id,
-       * the order, which one is the default, and that removing signs nothing out.
+       * which it would be a promise about a list that is not there. Cut to the
+       * screen-line cap (13 words, the id not counted): the name, the id, and the
+       * one rule the `default` badge below needs a reader to know. What removing
+       * costs is said where it is decided — on the row's own confirmation for an
+       * assembled agent, and by `Add back` staying on a hidden harness.
        */}
       <p className="text-xs text-muted">
         What New session offers on {machine.name} (
-        <code className="text-muted/80">{machine.id}</code>), in this order — the first that can
-        start is the <em>default</em>. Removing one signs nothing out; an agent you assembled has to
-        be built again from <em>Add an agent</em>.
+        <code className="text-muted/80">{machine.id}</code>). The first that can start is the{" "}
+        <em>default</em>.
       </p>
       <StripEditor key={machineId} machineId={machineId} />
     </div>
@@ -616,10 +617,8 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
       .catch((cause: unknown) => setWriteFailure(errorText(cause)));
   };
 
-  if (listing === null) return <Spinner />;
-
   /**
-   * The one sentence the reserved line draws, whichever half produced it.
+   * The one sentence the status line draws, whichever half produced it.
    *
    * ⚠ **The write outranks the read**, `AgentBuilder`'s rule for the same pair: a
    * request that was made and failed is newer than one this screen has stopped
@@ -628,6 +627,28 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
    * operand somebody has to remember to add to.
    */
   const failure = writeFailure ?? readFailure;
+  const statusText =
+    failure ?? (supported ? "" : "This machine's daemon is too old to reorder agents — update it.");
+  /**
+   * The status line's node, for the one scroll it is allowed — see its JSX.
+   *
+   * ⚠ **Above the `listing === null` return**, like every hook in this function:
+   * a hook under an early return is a different hook count per render, and the
+   * spinner arm is the render this screen opens on.
+   */
+  const statusLine = useRef<HTMLParagraphElement | null>(null);
+  useEffect(() => {
+    /*
+     * Only a *failure* earns the scroll. The old-daemon notice is text on the
+     * first paint, and scrolling to it would open the strip on an old daemon at
+     * the foot of the list before anybody has touched it; a write failure is
+     * what somebody needs to see under a long list after a drag.
+     */
+    if (failure === null) return;
+    statusLine.current?.scrollIntoView({ block: "nearest" });
+  }, [failure]);
+
+  if (listing === null) return <Spinner />;
 
   /**
    * Where a row sits while another one is being dragged over it.
@@ -681,78 +702,6 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
   return (
     <div>
       {/*
-       * ⚠ **One line, always in the layout, never a row that appears.** It carries
-       * a read that failed, a write that was refused, or nothing — and reserving
-       * the space is what stops the list jumping down the screen the first time a
-       * save is refused, at the moment somebody is least able to afford the thing
-       * they were aiming at moving.
-       *
-       * ⚠ **Two lines of reserve, where it was `min-h-4`.** 16px against a
-       * `text-2xs` line box of 1.125rem is 2px short of *one* line and 20px short
-       * of two — and every string this can hold wraps at this size on a 390px
-       * phone, the old-daemon notice included. So the invariant the paragraph
-       * above states was false in exactly the state it exists for. Expressed as
-       * the token rather than as `min-h-9`, so it stays two lines if the type
-       * scale moves.
-       *
-       * ⚠ **`text-danger` when it is a failure, and it used to be `text-muted`
-       * either way.** A refused save and an informational notice about an old
-       * daemon shared one element, one size and one colour — so a drag that
-       * settled and then jumped back 800ms later was accounted for in the quietest
-       * ink on the screen, indistinguishable from a caption. `index.css` allows a
-       * non-control use of this token where a second look does not repair the
-       * thing, and this is the narrower case that has always been allowed: it is
-       * the only report a write gets, and the list has already moved back under it.
-       */}
-      <p
-        role="status"
-        aria-live="polite"
-        className={`mt-2 min-h-[calc(var(--text-2xs--line-height)*2)] text-2xs wrap-anywhere ${
-          failure === null ? "text-muted" : "text-danger"
-        }`}
-      >
-        {failure ??
-          (supported
-            ? ""
-            : "This machine's daemon is too old to reorder agents — update it.")}
-      </p>
-      {/*
-       * ⚠ **The one remedy that is not already on screen** — `AgentBuilder`'s
-       * argument, one pop-up over. A refused write is re-run by doing the thing
-       * again, and the list it was about is right there; a refused *read* is re-run
-       * by nothing, because the effect's dependencies are the machine and this
-       * counter. Drawn only while the sentence above it **is** that read: `failure`
-       * prefers the write, so a `Try again` under a refused reorder would offer to
-       * re-list the agents about something else entirely.
-       *
-       * ⚠ **It may appear without breaking the reserve above it**, which is the one
-       * thing this screen's layout rule forbids. Every arm that sets `readFailure`
-       * also sets an empty listing, so the only thing under this button in the
-       * state that draws it is the `Add an agent` bar — there is no list here to
-       * push down.
-       */}
-      {writeFailure === null && readFailure !== null && (
-        <Button size="sm" className="mt-1" onClick={retryReads}>
-          Try again
-        </Button>
-      )}
-      {/*
-       * ⚠ **What a keyboard move did, and it was announced nowhere.** The handle
-       * answers `ArrowUp`/`ArrowDown`/`Home`/`End` precisely so a reorder is not a
-       * gesture only a pointer can make — and the reordering then happened in
-       * total silence, since the only live region on this screen reports failures.
-       * A pointer drag needs nothing here: the row is under the finger.
-       *
-       * Mounted with the screen and only its text swapping, which is the one
-       * arrangement that reliably announces — `Sheet`, `EventList` and the
-       * builder's search box all record the same measurement. `sr-only` is
-       * `absolute`, so it takes no layout and the reserve above is untouched.
-       */}
-      <p role="status" aria-live="polite" className="sr-only">
-        {moved}
-      </p>
-
-      {/*
        * ⚠ **Said only when the read succeeded, which is the rule `NewSession`
        * already keeps one screen over: a failed read is not an empty machine.**
        * Every failure arm above sets an empty listing so the spinner leaves, so
@@ -794,6 +743,82 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
           ))}
         </ul>
       )}
+
+      {/*
+       * ⚠ **Under the list, and zero height until it has something to say** (13A).
+       * It carries a read that failed, a write that was refused, or the old-daemon
+       * notice. It sat *above* the list with two lines reserved, so that a refused
+       * save could not push the rows down under a finger — and the reserve was
+       * two blank lines on every healthy machine, on the screen's first paint,
+       * between the lede and the list it introduces. Both halves of that trade are
+       * kept by moving it: below the rows, a sentence appearing moves only the
+       * `Add an agent` bar, which nobody is mid-gesture on; and an empty `<p>` has
+       * no line box, so it costs nothing until it speaks. The `mt-2` rides the
+       * text rather than the element for the same reason — a margin on an empty
+       * block is still a margin.
+       *
+       * ⚠ **Mounted always, text swapping.** A `role="status"` inserted in the
+       * same paint as its content is commonly not spoken at all (`Sheet`'s
+       * measurement, VoiceOver on iOS included), so the region is here on every
+       * render and only its text changes.
+       *
+       * ⚠ **Scrolled into view once, when it gains text.** On a long list the foot
+       * of the screen is below the fold, which is exactly where a refused write's
+       * only account would now sit. `block: "nearest"` moves the pane the least
+       * amount that shows the line — never the rows a finger is over, which are
+       * already on screen by definition.
+       *
+       * ⚠ **`text-danger` when it is a failure, and it used to be `text-muted`
+       * either way.** A refused save and an informational notice about an old
+       * daemon shared one element, one size and one colour — so a drag that
+       * settled and then jumped back 800ms later was accounted for in the quietest
+       * ink on the screen, indistinguishable from a caption. `index.css` allows a
+       * non-control use of this token where a second look does not repair the
+       * thing, and this is the narrower case that has always been allowed: it is
+       * the only report a write gets, and the list has already moved back under it.
+       */}
+      <p
+        ref={statusLine}
+        role="status"
+        aria-live="polite"
+        className={`text-2xs wrap-anywhere ${statusText === "" ? "" : "mt-2"} ${
+          failure === null ? "text-muted" : "text-danger"
+        }`}
+      >
+        {statusText}
+      </p>
+      {/*
+       * ⚠ **The one remedy that is not already on screen** — `AgentBuilder`'s
+       * argument, one pop-up over. A refused write is re-run by doing the thing
+       * again, and the list it was about is right there; a refused *read* is re-run
+       * by nothing, because the effect's dependencies are the machine and this
+       * counter. Drawn only while the sentence above it **is** that read: `failure`
+       * prefers the write, so a `Try again` under a refused reorder would offer to
+       * re-list the agents about something else entirely.
+       *
+       * Every arm that sets `readFailure` also sets an empty listing, so the only
+       * thing this button can displace is the `Add an agent` bar below it.
+       */}
+      {writeFailure === null && readFailure !== null && (
+        <Button size="sm" className="mt-1" onClick={retryReads}>
+          Try again
+        </Button>
+      )}
+      {/*
+       * ⚠ **What a keyboard move did, and it was announced nowhere.** The handle
+       * answers `ArrowUp`/`ArrowDown`/`Home`/`End` precisely so a reorder is not a
+       * gesture only a pointer can make — and the reordering then happened in
+       * total silence, since the only live region on this screen reports failures.
+       * A pointer drag needs nothing here: the row is under the finger.
+       *
+       * Mounted with the screen and only its text swapping, which is the one
+       * arrangement that reliably announces — `Sheet`, `EventList` and the
+       * builder's search box all record the same measurement. `sr-only` is
+       * `absolute`, so it takes no layout.
+       */}
+      <p role="status" aria-live="polite" className="sr-only">
+        {moved}
+      </p>
 
       {/*
        * ⚠ **The bar sits outside the list**, which is the shape the plugin machine
@@ -918,6 +943,25 @@ function StripRowView({
   onRemove: () => void;
 }): ReactNode {
   const node = useRef<HTMLLIElement | null>(null);
+  /**
+   * Whether this row is asking "Remove <name>?" — an assembled agent only.
+   *
+   * ⚠ **Per row, and it replaces the row's *controls* rather than adding a line.**
+   * The confirmation used to live inside this `<li>` as an extra row of buttons,
+   * which changed the row's height — and a drag measures **one** row at
+   * `pointerdown` and applies that number to every neighbour's shift, so a drag
+   * begun on a confirming row carried an oversized step into `dropIndex`. It is
+   * back, on the plan's decision that deleting an assembled agent is not the
+   * one-tap act hiding a harness is (rebuilding one is a walk through the builder,
+   * not `Add back`), and it is back **at the row's own height**: the question
+   * takes the name column's box, the pair takes the kebab's slot, and the handle
+   * and glyph stay mounted. See the confirming arm below for the arithmetic.
+   *
+   * State here rather than in the menu, which closes on the first tap: a menu
+   * held open to hold a confirmation would be a second dismissable layer over the
+   * sheet, for one tap (`web-shell.md`).
+   */
+  const [confirming, setConfirming] = useState(false);
   /**
    * The half of the drag that changes every frame.
    *
@@ -1325,6 +1369,47 @@ function StripRowView({
           {glyph === null ? null : <AgentGlyph agent={glyph} size={18} />}
         </span>
 
+        {confirming ? (
+          /*
+           * ⚠ **The row's own height, by the row's own arithmetic.** The name
+           * column below is `py-2.5` around a line box of `--text-sm--line-height`
+           * plus a subline of `--text-2xs--line-height`; this box is the sum of
+           * those two, so a row that is asking is exactly as tall as one that is
+           * not, and a drag past it measures what it measured before. The
+           * question wraps inside that box and is clipped rather than growing
+           * it. `items-center` keeps a 44px coarse-pointer button inside the same
+           * 60px content box the kebab already sat in.
+           *
+           * ⚠ **Cancel last, and no `danger`.** Q3.218's ordering: both arms lay
+           * out in the same slot, so a second tap on a laggy connection lands on
+           * the undo. No `DangerButton` because `danger` is for an act nothing
+           * brings back, and this one is rebuildable — the question says where.
+           */
+          <>
+            <span className="min-w-0 flex-1 py-2.5 pl-1">
+              <span className="flex h-[calc(var(--text-sm--line-height)+var(--text-2xs--line-height))] items-center overflow-hidden text-xs text-fg">
+                <span>
+                  Remove <span className="font-medium">{name}</span>? Rebuild it from Add an agent.
+                </span>
+              </span>
+            </span>
+            <span className="flex shrink-0 items-center gap-2 pr-1">
+              <Button
+                size="sm"
+                onClick={() => {
+                  setConfirming(false);
+                  onRemove();
+                }}
+              >
+                Remove
+              </Button>
+              <Button size="sm" onClick={() => setConfirming(false)}>
+                Cancel
+              </Button>
+            </span>
+          </>
+        ) : (
+        <>
         <span className="min-w-0 flex-1 py-2.5 pl-1">
           {/*
            * ⚠ **The line's height is pinned to the name's own line box, so nothing
@@ -1427,12 +1512,14 @@ function StripRowView({
          * "everything else a settings row can do sits behind one kebab"; the
          * toggle is *else*.
          *
-         * ⚠ **And it is never disabled, which is the other half of that move.** It
-         * held only Edit and Remove, so a built-in harness had nothing behind it
-         * and was drawn switched off. Hiding is something every row can do — that
-         * is the whole point of hiding a *harness* — so the menu always has at
-         * least one item, and `frozen` (a daemon that cannot store an order at
-         * all) is the only thing that takes it away.
+         * ⚠ **And it is never disabled — not even by an old daemon.** It held
+         * only Edit and Remove, so a built-in harness had nothing behind it and
+         * was drawn switched off. Hiding is something every row can do — that is
+         * the whole point of hiding a *harness* — so the menu always has at least
+         * one item. `frozen` (a daemon that cannot store an order at all) used to
+         * switch the whole menu off, and that took Edit and Check again with it,
+         * two items that never touch the strip route; it now disables the one
+         * item that does, inside the panel. `webcheck` pins the kebab as ungated.
          */}
         <Menu
           align="right"
@@ -1451,7 +1538,6 @@ function StripRowView({
               // with no growth mechanism at all, which `webcheck` ratchets against.
               size="lg"
               active={open}
-              disabled={frozen}
               onClick={toggle}
             />
           )}
@@ -1507,11 +1593,15 @@ function StripRowView({
                * `Add back`, because a flag is all there is to undo; an assembled one
                * has no row left to dim.
                *
-               * ⚠ **No two-tap confirmation, which reverses the settings-row rule
-               * on purpose.** That rule exists for acts nothing brings back —
-               * retiring a machine, deleting a person, uninstalling a plugin with
-               * its data. A confirmation on a reversible act is a tax on the act
-               * somebody performs most.
+               * ⚠ **A harness hides on one tap; an assembled agent asks first.**
+               * The settings-row rule confirms acts nothing brings back, and
+               * hiding is undone by `Add back` one tap away — a confirmation there
+               * is a tax on the act somebody performs most. Deleting an assembled
+               * agent is `DELETE /custom-agents/:id`, and what brings it back is a
+               * walk through the builder, so the row asks "Remove <name>?" in
+               * place (see `confirming`) and names where to rebuild it. The branch
+               * is on what the act *does* — a flag or a delete — which this screen
+               * may decide on; what it draws for either is the same item.
                */}
               {/*
                * ⚠ **Only where there is something to drop, and that is the one
@@ -1541,15 +1631,25 @@ function StripRowView({
               )}
               <RowAction
                 label={row.hidden ? "Add back" : "Remove"}
+                /*
+                 * ⚠ **This item, not the kebab, is what an old daemon takes away.**
+                 * Hiding writes the strip and removing an assembled agent writes it
+                 * after the `DELETE`, so both need the route; Edit and Check again
+                 * do not. Disabling the whole menu for one item's sake left a row
+                 * with nothing behind its only control.
+                 */
+                disabled={frozen}
                 onClick={() => {
                   close();
                   if (harness) onToggle();
-                  else onRemove();
+                  else setConfirming(true);
                 }}
               />
             </>
           )}
         </Menu>
+        </>
+        )}
       </div>
     </li>
   );

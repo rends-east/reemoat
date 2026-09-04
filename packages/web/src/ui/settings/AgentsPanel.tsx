@@ -12,7 +12,7 @@ import type {
   AgentId,
   AgentLoginSupport,
 } from "../../wire";
-import { Badge, Button, ChoiceRow, DangerButton, Empty, FIELD, Icon, IconButton, Spinner } from "../bits";
+import { Badge, Button, DangerButton, Empty, FIELD, Icon, IconButton, Spinner } from "../bits";
 import { copyText } from "../clipboard";
 import { CommandLine } from "../CommandLine";
 import { loginOutcome, rawTranscriptIsOpen, readLoginTranscript, type LoginOutcome } from "../login";
@@ -26,6 +26,7 @@ import {
   multiSlotLine,
   signOutSentence,
   stanceLine,
+  STALE_READ,
   storedChip,
   tokenBlockFor,
   type AgentStance,
@@ -43,9 +44,10 @@ import { toast } from "../Toast";
  * one agent, so three cards of equal weight made the one that mattered the
  * hardest to find.
  *
- * What is here now: `AgentChooser`, a list of three with their status, and
- * `AgentDetail`, one agent's whole configuration — sign in, credentials,
- * permissions.
+ * What is here now: `AgentDetail`, one agent's whole configuration — sign in,
+ * credentials, permissions. The list it used to sit under, `AgentChooser`, is
+ * deleted: the rows became *systems* (`SystemChooser`, one file over) and it
+ * was left exported with no call site for three releases.
  */
 
 /** Reads `GET /agent-auth` for one machine, and hands the whole listing down. */
@@ -138,92 +140,6 @@ function statusOf(agent: AgentAuthInfo): { tone: "plain" | "strong"; text: strin
 }
 
 /**
- * Pick an agent.
- *
- * A list rather than a dropdown, and with three entries that is not a close
- * call: the list is the size of the control that would hide it, and it shows all
- * three statuses at once — which is the question somebody arriving here is
- * usually asking.
- */
-export function AgentChooser({
-  machineId,
-  onPick,
-}: {
-  machineId: MachineId;
-  onPick: (agent: AgentId) => void;
-}): ReactNode {
-  const { listing, error, loading, refresh } = useAgentAuth(machineId);
-
-  if (loading && listing === null) {
-    return (
-      <div className="mt-4 flex items-center gap-2 text-xs text-muted">
-        <Spinner /> Asking that machine…
-      </div>
-    );
-  }
-  if (listing === null) {
-    return (
-      // A read that did not come back, which is what `failed` is for — and the
-      // one branch on this screen that had no way out of itself: "Check again"
-      // lives in the success arm, so a first read that failed left the whole
-      // section inert until somebody navigated away and back.
-      <Empty
-        failed
-        action={
-          <Button size="sm" onClick={refresh}>
-            Try again
-          </Button>
-        }
-      >
-        {error ?? "Could not read this machine's agents."}
-      </Empty>
-    );
-  }
-
-  return (
-    <div className="mt-4 space-y-2">
-      {/* The read failed and the rows below are the last good answer. The same
-          arm, the same sentence and the same defect as `AgentDetail`'s — see
-          {@link StaleNotice} — and it rendered nowhere here for just as long. */}
-      {error !== null && <StaleNotice />}
-      {listing.agents.map((agent) => {
-        const status = statusOf(agent);
-        return (
-          /*
-           * ⚠ **`ChoiceRow`, and the border is the reason.** This was the row's
-           * own class string: `border-edge` with `hover:border-edge-strong`. That
-           * is a decorative 1.31:1 hairline standing as the *sole* identification
-           * of a control on the sheet's white ground, and then a hover that moves
-           * that hairline instead of a fill — the two things `index.css` states
-           * about those tokens, broken in one attribute. A phone has no hover at
-           * all, so what was actually on screen there was three passive-looking
-           * cards.
-           *
-           * `SystemChooser` one file over is the same list with the same badge and
-           * has already made this move; the two sit one tap apart inside pop-ups
-           * meant to read as one app, so they may not differ. The badge goes in
-           * `trailing`, which is what this row could do and the other two copies
-           * of it — `MachinesSection`'s and `InstalledList`'s — cannot: theirs sit
-           * *inside* the title line, and that is a prop `ChoiceRow` does not have.
-           */
-          <ChoiceRow
-            key={agent.id}
-            title={agent.displayName}
-            subline={agent.id}
-            /* `null` is a state with nothing to report rather than a state that
-               failed to load — see `agentBadge`. Nothing is drawn, and the row's
-               own name is then the whole of it. */
-            trailing={status !== null ? <Badge tone={status.tone}>{status.text}</Badge> : undefined}
-            onClick={() => onPick(agent.id)}
-          />
-        );
-      })}
-      <RecheckButton onClick={refresh} busy={loading} />
-    </div>
-  );
-}
-
-/**
  * ⚠ It was `px-1 py-0.5` — roughly 20px — on a control a non-technical person is
  * being asked to tap on a phone. `-mx-2` keeps its ink where it was while the box
  * grows to the 44px floor.
@@ -243,24 +159,19 @@ function RecheckButton({ onClick, busy }: { onClick: () => void; busy: boolean }
 /**
  * The read failed and what is on screen is the last good answer.
  *
- * ⚠ **One sentence for both halves of this screen, and for a release only one of
- * them drew it at all.** `AgentDetail` records the fix — `error` was rendered
- * solely inside its `listing === null` branch, so a machine that went unreachable
- * *after* a successful read froze the card on a stale badge for ever with nothing
- * saying so — and `AgentChooser` had exactly the same arm with exactly the same
- * gap. Shared rather than typed out twice, because a second copy is how one of
- * the two gets reworded and the two screens start disagreeing about the same
- * failure.
+ * ⚠ **One sentence, and it is `agentCard.ts`'s `STALE_READ` — the same string
+ * `SystemsPanel` draws directly above this card.** `AgentDetail`'s `error` was
+ * once rendered solely inside its `listing === null` branch, so a machine that
+ * went unreachable *after* a successful read froze the card on a stale badge for
+ * ever with nothing saying so; and once the arm existed it had its own spelling,
+ * so `SystemDetail` drew two near-identical sentences about one machine for the
+ * ordinary case where both reads fail together. One constant, two call sites.
  *
  * `text-muted` and not `text-danger`: nothing has failed permanently here. What
  * is below was true a moment ago, and "Check again" is on screen.
  */
 function StaleNotice(): ReactNode {
-  return (
-    <p className="text-xs text-muted">
-      Couldn&apos;t reach that machine — what&apos;s below may be out of date.
-    </p>
-  );
+  return <p className="text-xs text-muted">{STALE_READ}</p>;
 }
 
 /** One agent: sign in, credentials, permissions. */
@@ -324,7 +235,8 @@ export function AgentDetail({
   }
   if (listing === null) {
     return (
-      // `failed`, and a way out of the branch — see `AgentChooser`'s twin above.
+      // `failed`, and a way out of the branch: "Check again" otherwise lives only
+      // in the success arm, so a first read that failed left the card inert.
       <Empty
         failed
         action={
@@ -390,7 +302,7 @@ export function AgentDetail({
        * This line is the arm that rendered nowhere: `error` was drawn only in the
        * `listing === null` branch, so a machine that went unreachable mid-login
        * froze this card on a stale badge for ever with nothing saying so.
-       * `AgentChooser` had the identical gap and now draws the identical
+       * `SystemChooser` had the identical gap and now draws the identical
        * sentence, which is why it is {@link StaleNotice} rather than a `<p>`.
        */}
       {error !== null && <StaleNotice />}
@@ -1154,7 +1066,7 @@ function LoginWizard({
             failures < MAX_FAILURES
               ? { text: "Lost contact with that machine. Still trying…", retrying: true }
               : {
-                  text: "Cannot reach that machine right now. The sign-in may still be running on it.",
+                  text: "Cannot reach that machine — the sign-in may still be running.",
                   retrying: false,
                 },
           );
@@ -1372,9 +1284,7 @@ function LoginWizard({
       )}
 
       {(view.phase === "acting" || view.phase === "waiting") && (
-        <p className="text-xs text-muted">
-          You can leave — this page will say when it&apos;s done.
-        </p>
+        <p className="text-xs text-muted">You can leave this page.</p>
       )}
 
       {view.phase === "waiting" && (
@@ -1405,18 +1315,12 @@ function LoginWizard({
         </p>
       )}
       {outcome === "notSignedIn" && (
-        <p className="text-xs text-fg">
-          That didn&apos;t sign {displayName} in — the code may have expired, or the page
-          wasn&apos;t finished.
-        </p>
+        <p className="text-xs text-fg">That didn&apos;t sign {displayName} in. Try again.</p>
       )}
       {/* Never "signed in", never "failed", and never styled as an alarm: for
           kimi this is the ordinary ending. */}
       {outcome === "cannotTell" && (
-        <p className="text-xs text-muted">
-          Finished. This machine can&apos;t check whether {displayName} is signed in — start a chat
-          to find out.
-        </p>
+        <p className="text-xs text-muted">Finished — start a chat to check.</p>
       )}
       {outcome === "unreachable" && (
         <p className="text-xs text-danger">Couldn&apos;t reach that machine to check whether it worked.</p>

@@ -135,7 +135,7 @@ export function SettingsNav({
                 for the reason above. */}
             <RailRow
               title={spec.title}
-              blurb={spec.blurb}
+              blurb={spec.blurb ?? undefined}
               active={variant === "rail" && spec.id === active}
               onClick={() => navigate(settingsPath(spec.id))}
             />

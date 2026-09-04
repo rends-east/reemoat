@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect, type ReactNode } from "react";
-import { AlertTriangle, ChevronRight, MoreHorizontal, Upload } from "lucide-react";
+import { AlertTriangle, ChevronRight, MoreHorizontal, Trash2, Upload } from "lucide-react";
 import { consentBroken, MACHINE_GONE, pluginFailure, pluginPath, pluginStateText } from "../../plugins";
 import { peekPluginArchive, type ArchivePeek, type ManifestPreview } from "../../pluginArchive";
 import { PLUGIN_ARCHIVE_ACCEPT, PluginArchiveNote, PluginConsent, PluginUnreadable } from "../PluginConsent";
@@ -258,6 +258,51 @@ function PluginRow({
 
   return (
     <li className="border-b border-edge last:border-b-0">
+      {/*
+       * **The confirmation still leaves the menu and lands on the row — and it
+       * lands *in place of* the row's controls, not under them.** A menu held
+       * open to hold a two-step confirm would be a second dismissable layer over
+       * the sheet, for one tap; `UsersSection` settled that. And drawn *below*
+       * the row, which is where it was, the link and the kebab stayed live above
+       * the question, so a second tap aimed at the kebab opened it over a
+       * confirmation still waiting for an answer. Both groups lay out in the same
+       * box now, which is the settings-row rule kept for its measured reason: the
+       * last child occupies the same pixels, so a second tap aimed at a button
+       * that looked inert lands on Cancel. This one earns it more than most,
+       * because uninstalling takes the plugin's data with it and nothing brings
+       * that back.
+       *
+       * The question names the plugin: "Remove it?" over a list of three is a
+       * question about whichever row the eye happened to be on.
+       *
+       * Cancel is **last** and in the default tone. It was `tone="primary"` —
+       * the only filled button on the screen — which made the undo the loudest
+       * object in a row about deleting something. `BUTTON_TONE`'s rule is that a
+       * fill is the affirmative act inside a decision; here there is none to
+       * affirm, only one to decline.
+       */}
+      {confirming ? (
+        <div className="flex min-h-14 min-w-0 flex-wrap items-center gap-2 px-1 py-2.5">
+          <span className="min-w-0 flex-1 text-xs text-muted">
+            Remove <span className="font-medium text-fg">{plugin.name}</span> and its data?
+          </span>
+          <DangerButton
+            icon={Trash2}
+            size="sm"
+            className="[@media(pointer:coarse)]:min-h-11"
+            disabled={busy || daemon === undefined}
+            onClick={() => {
+              setConfirming(false);
+              if (daemon !== undefined) run(daemon.removePlugin(plugin.id), "Removing…", "Removed");
+            }}
+          >
+            Remove
+          </DangerButton>
+          <Button size="sm" className="[@media(pointer:coarse)]:min-h-11" onClick={() => setConfirming(false)}>
+            Cancel
+          </Button>
+        </div>
+      ) : (
       <div className="flex min-w-0 items-center gap-1">
         {/*
          * ⚠ **The row is a link to the plugin, and the wall of text it used to be
@@ -327,9 +372,10 @@ function PluginRow({
                   row above says why, and a control that vanishes is one somebody
                   goes looking for. `focusableRows` skips a disabled button, so it
                   is not a stop on the way to one either. */}
-              {plugin.contributes.screen !== null && plugin.enabled && (
+              {plugin.contributes.screen !== null && (
                 <RowAction
                   label="Open"
+                  disabled={!plugin.enabled}
                   onClick={() => {
                     close();
                     navigate(pluginPath(machineId, plugin.id));
@@ -366,6 +412,7 @@ function PluginRow({
           )}
         </Menu>
       </div>
+      )}
 
       {plugin.failure !== null && (
         <PluginFailure
@@ -380,44 +427,6 @@ function PluginRow({
         />
       )}
 
-      {/*
-       * **The confirmation still leaves the menu and lands on the row.** A menu
-       * held open to hold a two-step confirm would be a second dismissable layer
-       * over the sheet, for one tap — `UsersSection` settled that, and the
-       * confirming pair below is its shape, down to Cancel being last and filled.
-       */}
-      {confirming ? (
-        /*
-         * Two-step, and the confirming row ends with Cancel — the settings-row
-         * rule, kept for its measured reason: both groups lay out in the same box,
-         * so a second tap aimed at a button that looked inert lands on the undo.
-         * This one earns it more than most, because uninstalling takes the
-         * plugin's data with it and nothing brings that back.
-         */
-        <div className="mb-2 flex flex-wrap items-center gap-2 px-1">
-          <span className="text-xs text-muted">Remove it and everything it kept?</span>
-          <Button
-            tone="destructive"
-            size="sm"
-            className="[@media(pointer:coarse)]:min-h-11"
-            disabled={busy || daemon === undefined}
-            onClick={() => {
-              setConfirming(false);
-              if (daemon !== undefined) run(daemon.removePlugin(plugin.id), "Removing…", "Removed");
-            }}
-          >
-            Remove
-          </Button>
-          <Button
-            tone="primary"
-            size="sm"
-            className="[@media(pointer:coarse)]:min-h-11"
-            onClick={() => setConfirming(false)}
-          >
-            Cancel
-          </Button>
-        </div>
-      ) : null}
     </li>
   );
 }

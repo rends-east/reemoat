@@ -1001,3 +1001,124 @@ process.stdout.write("\na login transcript, read as steps\n");
     );
   }
 }
+
+/* ------------------------------------------------------------------ *
+ * Your own API keys, on their own screen
+ *
+ * The keys list left Account for a section of its own, and what moved with it
+ * is a set of decisions the plan wrote down as pins rather than as prose: which
+ * row is *this browser's* is decided from the credential in hand and only for
+ * an API-key credential; revoking that row signs out on purpose, with the
+ * credential cleared before anything can be re-read; and the list is sorted on
+ * the client because the route answers `created_at ASC`.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nyour own API keys\n");
+{
+  const { stripComments } = await import("./webcheck.source.js");
+  const { keySubline, orderKeys, rememberRevokedKey, revokedKeyNotice, takeRevokedKeyNotice, thisBrowsersKey } =
+    await import("../src/account.js");
+  const read = (file: string): string =>
+    stripComments(readFileSync(new URL(`../src/ui/settings/${file}`, import.meta.url), "utf8"));
+
+  /*
+   * D-K-1, client-side: `keyPrefix` on the control plane is `slice(3, 11)`, so
+   * "this browser" is a string comparison over the credential the tab holds.
+   * The session arm is the one that matters — a session token can never be a
+   * listed key, and drawing the badge or the sign-out sentence for one would be
+   * a claim about a revoke that cannot sign anybody out.
+   */
+  const key = "rk_9f2a1b3c4d5e6f7a8b9c";
+  check("this browser's key is the one whose prefix the credential carries", thisBrowsersKey({ value: key, kind: "api_key" }, "9f2a1b3c"), true);
+  check("and a different prefix is not", thisBrowsersKey({ value: key, kind: "api_key" }, "00000000"), false);
+  check("a session credential is never a listed key, whatever its bytes", thisBrowsersKey({ value: key, kind: "session" }, "9f2a1b3c"), false);
+  check("and no credential is no key", thisBrowsersKey(null, "9f2a1b3c"), false);
+
+  /*
+   * Both arms of the badge, on the row's own source: the two literals exist, and
+   * neither is reachable except under the `thisBrowser` guard — so with a session
+   * credential, which never sets it, there is no such row and no such sentence.
+   */
+  const keyRow = read("KeyRow.tsx");
+  const guard = "thisBrowser && !revoked && (";
+  const firstGuard = keyRow.indexOf(guard);
+  check("the row has the this-browser guard", firstGuard >= 0, true);
+  for (const literal of ["this browser", "revoking it signs you out"]) {
+    check(`"${literal}" is drawn exactly once`, keyRow.split(literal).length - 1, 1);
+    check(`and only under the guard`, keyRow.indexOf(literal) > firstGuard, true);
+  }
+  // The consequence at rest is allowed only beside a one-tap control (10A), and
+  // the own-keys screen is the only caller that draws it.
+  const keys = read("KeysSection.tsx");
+  check("own keys are one tap", /confirm=\{false\}/.test(keys), true);
+  check("and the screen decides this-browser from the credential in hand", /thisBrowsersKey\(credential,/.test(keys), true);
+
+  /*
+   * 5A: revoking the key this tab holds signs out **on purpose**. The order is
+   * the property — notice, clear, reload — and nothing may be re-read in between,
+   * because a `load()` there would send the dead key, answer `401
+   * api_key_revoked`, and hand the gate "Your session expired" about an act the
+   * person just chose.
+   */
+  const remembers = keys.indexOf("rememberRevokedKey(");
+  const clears = keys.indexOf("cp.clearSession()");
+  const leaves = keys.indexOf("window.location.href");
+  check("the revoke leaves a notice for the gate", remembers >= 0, true);
+  check("clears the credential itself", clears >= 0, true);
+  check("and leaves", leaves >= 0, true);
+  check("in that order", remembers < clears && clears < leaves, true);
+  const between = keys.slice(clears, leaves);
+  check("with no re-read between the clear and the reload", /load\(\)|myKeys\(/.test(between), false);
+  check("and no request can 401 its way there first", keys.indexOf("load()", remembers) === -1 || keys.indexOf("load()", remembers) > leaves, true);
+
+  /*
+   * The gate's one-shot line: read once, gone. Driven with a `Map`, because both
+   * halves take the storage as an argument for exactly this reason.
+   */
+  const fake = new Map<string, string>();
+  const jar = {
+    getItem: (name: string): string | null => fake.get(name) ?? null,
+    setItem: (name: string, value: string): void => void fake.set(name, value),
+    removeItem: (name: string): void => void fake.delete(name),
+  };
+  check("no revoke, no notice", takeRevokedKeyNotice(jar), null);
+  rememberRevokedKey(jar, "9f2a1b3c");
+  check("a revoke leaves one, naming the key", takeRevokedKeyNotice(jar), revokedKeyNotice("9f2a1b3c"));
+  check("which reads as an act, not an expiry", /revoked\. Sign in again\.$/.test(revokedKeyNotice("9f2a1b3c")), true);
+  check("and reading it is what deletes it", takeRevokedKeyNotice(jar), null);
+
+  /*
+   * Newest first, revoked last: the route answers `created_at ASC` and the
+   * screen wants the key you just made at the top and the dead ones out of the
+   * way. Client-side so an older control plane answers the same screen.
+   */
+  const rows = [
+    { id: "a", createdAt: 1, revokedAt: null },
+    { id: "b", createdAt: 3, revokedAt: 4 },
+    { id: "c", createdAt: 2, revokedAt: null },
+    { id: "d", createdAt: 5, revokedAt: null },
+  ];
+  check("live keys newest first, revoked last", orderKeys(rows).map((row) => row.id), ["d", "c", "a", "b"]);
+
+  /*
+   * The subline's null arm: `undefined` is a control plane older than the
+   * column, `null` a key nothing has presented, and the row cannot tell them
+   * apart — so both say "never used" rather than one of them saying "unknown".
+   */
+  const now = 10 * 24 * 3600 * 1000;
+  check("a never-used key says so", keySubline({ createdAt: 0, lastUsedAt: null }, now), "made 10d ago · never used");
+  check("and so does one an older control plane answered without the field", keySubline({ createdAt: 0 }, now), "made 10d ago · never used");
+  check("a used one says when", keySubline({ createdAt: 0, lastUsedAt: now - 7200_000 }, now), "made 10d ago · last used 2h ago");
+
+  /*
+   * And the move itself: the account screen mints and lists nothing any more.
+   * Both calls have exactly one caller in the product, and it is the keys screen.
+   */
+  const account = read("AccountSection.tsx");
+  check("the account screen lists no keys", /myKeys\(/.test(account), false);
+  check("and mints none", /mintMyKey\(/.test(account), false);
+  check("the keys screen does both", /myKeys\(/.test(keys) && /mintMyKey\(/.test(keys), true);
+  // Devices folded into Account (1B): one skeleton row, no sentence over it.
+  check("the device list draws one skeleton row", account.split("<SkeletonRow").length - 1, 1);
+  check("and no longer narrates its own loading", /reading your sessions/.test(account), false);
+}

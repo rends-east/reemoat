@@ -33,7 +33,6 @@ export function MachineSystemsSection({
   machineId,
   system,
   signin,
-  lede = true,
 }: {
   state: AppState;
   machineId: MachineId;
@@ -47,22 +46,6 @@ export function MachineSystemsSection({
    * arms above are the same three.
    */
   signin: string | null;
-  /**
-   * Draw the paragraph saying where this machine's credentials live.
-   *
-   * ⚠ **`false` where `MachineSection` has already said it, which is the whole of
-   * why this prop exists.** That screen drew this block and the plugins block
-   * about 200px apart and each ended its own paragraph with the identical clause
-   * *"Nothing here is shared with your other machines."* — two sentences written
-   * in isolation, each defensible on its own, neither aware of the other. The
-   * per-machine fact is stated once at the top of that screen now and these two
-   * sections say nothing about it.
-   *
-   * Defaulted rather than required because the leaf — `/settings/machines/:id/
-   * systems/:system`, rendered straight from `Settings.tsx` — has no screen above
-   * it to have said anything, and that is the arm that must not have to remember.
-   */
-  lede?: boolean;
 }): ReactNode {
   const machine = state.machines.find((candidate) => candidate.id === machineId) ?? null;
 
@@ -112,22 +95,18 @@ export function MachineSystemsSection({
    */
   const read = daemonRead(machine.reach);
 
+  /*
+   * ⚠ **No lede, at either depth, and the `lede` prop went with it.** The
+   * sentence said where the credentials live ("Stored on <id> only — not shared
+   * with your other machines"), and `MachineSection` passed `lede={false}` so as
+   * not to say it twice on the one screen that already had. The leaf never
+   * needed it either: the machine is named by the chevron pointing back at it,
+   * and everything on this screen writes to that machine's daemon by
+   * construction. A fact with no decision hanging off it is a heading's job, and
+   * the heading is there.
+   */
   return (
     <div>
-      {lede && (
-        <p className="text-xs text-muted">
-          {/* The name is gone from this sentence because the pane's heading is
-              directly above it now, at every width — it was the machine named twice
-              within 40px. The id stays: it is the half a heading cannot carry, this
-              screen is reached from a row that may have a twin, and everything below
-              writes to one daemon's database. Cut on 2026-09-04 for fewer words:
-              the id and the not-shared fact are kept; the database and the home
-              are this comment's now. */}
-          Stored on <code className="text-muted/80">{machine.id}</code> only — not shared with your
-          other machines.
-        </p>
-      )}
-
       {read === "asking" ? (
         /*
          * ⚠ **No failure claim, because nothing has been measured.** No `failed`,
@@ -155,18 +134,15 @@ export function MachineSystemsSection({
          * absence of an answer: the probe was made and did not come back.
          */
         <Empty failed>
-          {machine.name} is not reachable right now — {reachText(machine.reach, machine.offlineReason)}
           {/*
-           * **The system is named here because this branch *replaces*
-           * `SystemDetail`**, which is the only other thing on the screen that
-           * says which one you drilled into — and the head no longer says it
-           * either, now that the pane's heading names the machine rather than the
-           * URL segment. Without this, a phone deep-linked to
-           * `/settings/machines/:id/systems/anthropic` against an offline daemon
-           * named it nowhere on screen, on the screen this component's own comment
-           * above calls the commonest reason anybody is here.
+           * The trailing clause — ", so nothing about <system> can be read or
+           * changed" — is cut. It named the system because this branch replaces
+           * `SystemDetail`, the only other thing that said which one you drilled
+           * into; but a phone deep-linked here against an offline daemon still
+           * cannot act on that name, and the machine's own sentence is what the
+           * reader can act on. `webcheck` pins the sentence's first half.
            */}
-          {system === null ? "." : `, so nothing about ${system} can be read or changed.`}
+          {machine.name} is not reachable right now — {reachText(machine.reach, machine.offlineReason)}.
         </Empty>
       ) : signin !== null ? (
         /*

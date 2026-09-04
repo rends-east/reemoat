@@ -63,7 +63,7 @@ import {
   pruneEnrollmentCodes,
   retireSigningKey,
 } from "../packages/control-plane/src/keys.js";
-import { createControlPlaneApp } from "../packages/control-plane/src/app.js";
+import { KEY_TOUCH_INTERVAL_MS, createControlPlaneApp } from "../packages/control-plane/src/app.js";
 import { applyControlPlaneSchema } from "../packages/control-plane/src/store.js";
 import { readAgentClisHeader, readDaemonVersionHeader, recordDaemonBuild } from "../packages/control-plane/src/machines.js";
 import { callerAddressOf, forwardingIgnored } from "../packages/control-plane/src/net.js";
@@ -3553,7 +3553,23 @@ process.stdout.write("\nsigning in, sessions and passwords\n");
   check("a wrong current password is refused", await outcome(await post("/v1/me/password", { currentPassword: "nope", newPassword: "a-fine-new-password" }, bearer(laptop.token))), [401, "invalid_password"]);
   check("a short new one is refused with a reason", await outcome(await post("/v1/me/password", { currentPassword: made.password, newPassword: "short" }, bearer(laptop.token))), [400, "weak_password"]);
 
+  /*
+   * **When the password was last chosen, off `/v1/me`.** Read before and after
+   * the change rather than compared to a literal, because ada has already
+   * replaced her temporary password once higher up: the assertion is that this
+   * act moves the value forward, and that it is a number afterwards whatever
+   * it was before.
+   */
+  const changedBefore = ((await (await send("/v1/me", { headers: bearer(laptop.token) })).json()) as { passwordChangedAt?: number | null }).passwordChangedAt;
+  const changeAt = Date.now();
   check("the change lands", (await post("/v1/me/password", { currentPassword: made.password, newPassword: "a-fine-new-password" }, bearer(laptop.token))).status, 200);
+  {
+    const changedAfter = ((await (await send("/v1/me", { headers: bearer(laptop.token) })).json()) as { passwordChangedAt?: number | null }).passwordChangedAt;
+    check("/v1/me says when the password was changed", [
+      typeof changedAfter === "number" && changedAfter >= changeAt,
+      typeof changedAfter === "number" && (changedBefore === null || changedBefore === undefined || changedAfter > changedBefore),
+    ], [true, true]);
+  }
   // The tab that made the change keeps working; every other device does not.
   // Signing you out of the screen you just used reads as the change having failed.
   check("the tab that made it stays signed in", (await send("/v1/me", { headers: bearer(laptop.token) })).status, 200);
@@ -3583,9 +3599,21 @@ process.stdout.write("\nsigning in, sessions and passwords\n");
     now,
   );
   const legacy = { authorization: `Bearer ${legacyKey.key}`, "content-type": "application/json" };
+  // A row inserted with no `password_changed_at` answers `null`, not `0` and not
+  // a guess off `user_passwords.updated_at` — the screen has a word for `null`.
+  check(
+    "a row that never chose a password answers null for when it did",
+    ((await (await send("/v1/me", { headers: legacy })).json()) as { passwordChangedAt?: number | null }).passwordChangedAt,
+    null,
+  );
   // The migration, and the reason the absence of a `user_passwords` row is
   // meaningful rather than a gap: their key was already full authority.
   check("a user with no password sets a first one with their key alone", (await post("/v1/me/password", { newPassword: "an-entirely-new-password" }, legacy)).status, 200);
+  check(
+    "and setting a first one counts as choosing it",
+    typeof ((await (await send("/v1/me", { headers: legacy })).json()) as { passwordChangedAt?: number | null }).passwordChangedAt,
+    "number",
+  );
   check("and then the current one is required", await outcome(await post("/v1/me/password", { newPassword: "another-new-password" }, legacy)), [400, "bad_request"]);
   check("they can now sign in", (await login("oldtimer", "an-entirely-new-password")).status, 200);
 
@@ -3633,18 +3661,138 @@ process.stdout.write("\nsigning in, sessions and passwords\n");
    * only place an API key comes from outside `main.ts`'s bootstrap.
    */
   const bobSession = bearer(((await (await login("bob", withKey.password)).json()) as { token: string }).token);
-  check(
-    "minting a key without the current password is refused",
-    (await post("/v1/me/keys", {}, { ...bobSession, "content-type": "application/json" })).status,
-    400,
-  );
   const bobMinted = (await (await post(
     "/v1/me/keys",
-    { currentPassword: withKey.password },
+    {},
     { ...bobSession, "content-type": "application/json" },
   )).json()) as { apiKey: string };
   check("and with it, a key that looks like every other one here", bobMinted.apiKey.slice(0, 3), "rk_");
   const bobKey = { authorization: `Bearer ${bobMinted.apiKey}`, "content-type": "application/json" };
+
+  /* -- when a key was last used, and how often that is written ------------- */
+
+  {
+    /*
+     * **`last_used_at` is written at most once a minute per key**, and the
+     * guard is asserted here for `LAST_SEEN_WRITE_INTERVAL_MS`'s reason: a
+     * write-per-request on the authentication path looks exactly like a
+     * throttled one from every route, so only reading the column between two
+     * requests can tell them apart. No clock is injected into the app, so the
+     * minute is crossed by moving the stored value back rather than by waiting.
+     */
+    const bobKeys = async (): Promise<{ id: string; prefix: string; revokedAt: number | null; lastUsedAt: number | null }[]> =>
+      ((await (await send("/v1/me/keys", { headers: bobSession })).json()) as {
+        keys: { id: string; prefix: string; revokedAt: number | null; lastUsedAt: number | null }[];
+      }).keys;
+    const minted = (await bobKeys()).find((key) => key.prefix === bobMinted.apiKey.slice(3, 11));
+    check("a freshly minted key has never been used", minted?.lastUsedAt, null);
+    const storedUse = (): number | null => {
+      const value = db.prepare("SELECT last_used_at FROM api_keys WHERE id = ?").get(minted?.id ?? "")?.["last_used_at"];
+      return value === null || value === undefined ? null : Number(value);
+    };
+
+    const firstUse = Date.now();
+    check("using it authenticates", (await send("/v1/me", { headers: bobKey })).status, 200);
+    const afterFirst = storedUse();
+    check("and the first use is written", afterFirst !== null && afterFirst >= firstUse, true);
+    check("a second use inside the minute writes nothing", [(await send("/v1/me", { headers: bobKey })).status, storedUse()], [200, afterFirst]);
+    // Cross the minute by aging the stored value, then the next use moves it.
+    db.prepare("UPDATE api_keys SET last_used_at = ? WHERE id = ?").run((afterFirst ?? 0) - KEY_TOUCH_INTERVAL_MS - 1, minted?.id ?? "");
+    const aged = storedUse();
+    check("a use past the minute writes again", [(await send("/v1/me", { headers: bobKey })).status, (storedUse() ?? 0) > (aged ?? 0)], [200, true]);
+    // Both list routes carry it, in the same field, off the same projection.
+    check("the keys list answers it", typeof (await bobKeys()).find((key) => key.id === minted?.id)?.lastUsedAt, "number");
+    check(
+      "and so does the admin's view of the same list",
+      typeof ((await (await send(`/v1/admin/users/${withKey.id}/keys`, { headers: admin })).json()) as {
+        keys: { id: string; lastUsedAt: number | null }[];
+      }).keys.find((key) => key.id === minted?.id)?.lastUsedAt,
+      "number",
+    );
+
+    /*
+     * **A revoked key's value stops where the revocation found it.** On a second
+     * key, so `bobKey` survives for the machines below. The refusal comes before
+     * the write, and the statement's own `revoked_at IS NULL` is the second lock
+     * on the same door; a marker no request could have written is what proves
+     * neither moved it.
+     */
+    const spare = (await (await post(
+      "/v1/me/keys",
+      { currentPassword: withKey.password },
+      bobSession,
+    )).json()) as { apiKey: string };
+    const spareRow = (await bobKeys()).find((key) => key.prefix === spare.apiKey.slice(3, 11));
+    const spareBearer = { authorization: `Bearer ${spare.apiKey}` };
+    check("the spare key works before it is revoked", (await send("/v1/me", { headers: spareBearer })).status, 200);
+    check("revoking it lands", (await send(`/v1/me/keys/${spareRow?.id ?? ""}`, { method: "DELETE", headers: bobSession })).status, 200);
+    const marker = 1_000_000;
+    db.prepare("UPDATE api_keys SET last_used_at = ? WHERE id = ?").run(marker, spareRow?.id ?? "");
+    check("a revoked key is refused", await outcome(await send("/v1/me", { headers: spareBearer })), [401, "api_key_revoked"]);
+    check(
+      "and its last use does not move",
+      Number(db.prepare("SELECT last_used_at FROM api_keys WHERE id = ?").get(spareRow?.id ?? "")?.["last_used_at"]),
+      marker,
+    );
+  }
+
+  /* -- a database from before either column ---------------------------- */
+
+  {
+    /*
+     * **An old file opens and answers `null`**, which is `compatibility.md`'s
+     * rule 3 asserted rather than trusted: the columns arrive by `migrate()`'s
+     * `ADD COLUMN`, so a database built by a control plane that never had them
+     * — stood up here from the two tables as they used to be declared — comes
+     * up with both present and every existing row reading `null`, and
+     * `CP_SCHEMA_VERSION` did not have to move for it.
+     */
+    const old = new DatabaseSync(":memory:");
+    old.exec(
+      "CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, is_admin INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, disabled_at INTEGER);" +
+        "CREATE TABLE api_keys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, prefix TEXT NOT NULL, key_hash TEXT NOT NULL, created_at INTEGER NOT NULL, revoked_at INTEGER);",
+    );
+    const oldKey = newApiKey();
+    old.prepare("INSERT INTO users (id, name, is_admin, created_at) VALUES ('u_before', 'before', 0, ?)").run(now);
+    old.prepare("INSERT INTO api_keys (id, user_id, prefix, key_hash, created_at) VALUES ('ak_before', 'u_before', ?, ?, ?)").run(
+      oldKey.prefix,
+      oldKey.hash,
+      now,
+    );
+    applyControlPlaneSchema(old);
+    applyControlPlaneSchema(old);
+    const columnNames = (table: string): string[] =>
+      old.prepare(`PRAGMA table_info(${table})`).all().map((column) => String(column["name"]));
+    check("migrating an old file adds both columns, and twice is harmless", [
+      columnNames("users").includes("password_changed_at"),
+      columnNames("api_keys").includes("last_used_at"),
+    ], [true, true]);
+    check(
+      "and the rows that were there read null in both",
+      [
+        old.prepare("SELECT password_changed_at AS v FROM users WHERE id = 'u_before'").get()?.["v"],
+        old.prepare("SELECT last_used_at AS v FROM api_keys WHERE id = 'ak_before'").get()?.["v"],
+      ],
+      [null, null],
+    );
+    ensureSigningKey(old);
+    const before = createControlPlaneApp({ db: old, issuer: ISSUER, tokenTtlSeconds: 300, relayUrl, relay: registry });
+    const oldBearer = { authorization: `Bearer ${oldKey.key}` };
+    check(
+      "a row from before the column answers null for its password",
+      ((await (await before.request("/v1/me", { headers: oldBearer })).json()) as { passwordChangedAt?: number | null }).passwordChangedAt,
+      null,
+    );
+    // The lookup that just authenticated wrote the first use; a row listed
+    // before that would have read `null`, which is what the keys list said
+    // about the freshly minted key above.
+    check(
+      "and its key's first use after the upgrade is the upgrade's first request",
+      typeof ((await (await before.request("/v1/me/keys", { headers: oldBearer })).json()) as { keys: { lastUsedAt: number | null }[] }).keys[0]?.lastUsedAt,
+      "number",
+    );
+    old.close();
+  }
 
   const mine = (await (await post("/v1/machines", { name: "laptop" }, ada)).json()) as {
     machine: { id: string; scopes: string[] };
@@ -6192,28 +6340,26 @@ process.stdout.write("\nproving it is your own account, and retiring a key\n");
    * against `POST /v1/me/keys`, which is the one route that still mints a
    * permanent credential.
    */
-  check("minting yourself a key needs your password", await outcome(await post("/v1/me/keys", {}, hers)), [400, "bad_request"]);
-  check("a wrong one is refused", await outcome(await post("/v1/me/keys", { currentPassword: "not-my-password" }, hers)), [401, "invalid_password"]);
-  const second = await post("/v1/me/keys", { currentPassword: hopper.password }, hers);
-  check("and the right one mints it", second.status, 201);
   /*
-   * **A missing body is an absent field, not its own refusal.** A request with
-   * no body at all is the only shape that tells the two apart, because `{}`
-   * above reaches the same status and code by the other arm. The sentence is
-   * what is asserted: the status and the code are deliberately the same, so
-   * `authFailure` on the client reads it identically and does not sign anybody
-   * out over a field they were never asked for.
+   * ⚠ **Reversed on 2026-09-04 (Q1.630): a session is enough to mint a key.**
+   * The password gate this block used to assert is gone from this one route —
+   * `POST /v1/me/password` and `PUT /v1/me/email` keep theirs, asserted below —
+   * so what is pinned here is the new shape: no body needed, a stray
+   * `currentPassword` ignored rather than verified, and a bodiless request
+   * minting exactly as `{}` does.
    */
-  const messageOf = async (response: Response): Promise<string> =>
-    ((await response.json()) as { error?: { message?: string } }).error?.message ?? "(none)";
+  const second = await post("/v1/me/keys", {}, hers);
+  check("minting yourself a key needs only your session", second.status, 201);
+  check(
+    "and a password in the body is ignored, not verified",
+    (await post("/v1/me/keys", { currentPassword: "not-my-password" }, hers)).status,
+    201,
+  );
   const bodiless = await send("/v1/me/keys", {
     method: "POST",
     headers: { authorization: hers.authorization },
   });
-  check("and a request carrying no body names the field rather than the body", [bodiless.status, await messageOf(bodiless)], [
-    400,
-    "currentPassword is required",
-  ]);
+  check("and a request carrying no body mints too", bodiless.status, 201);
   /*
    * **And no admin route can be aimed at anybody else at all**, which is the
    * half that used to be here in the opposite form: "aimed at somebody else this
@@ -6279,7 +6425,7 @@ process.stdout.write("\nproving it is your own account, and retiring a key\n");
   check("you can list your own keys", own.keys.length, 1);
   // Never the hash and never the key: only the hash was ever stored, so the
   // plaintext is unrecoverable by construction and this projection says so.
-  check("and the row carries nothing secret", Object.keys(own.keys[0] ?? {}).sort(), ["createdAt", "id", "prefix", "revokedAt"]);
+  check("and the row carries nothing secret", Object.keys(own.keys[0] ?? {}).sort(), ["createdAt", "id", "lastUsedAt", "prefix", "revokedAt"]);
   const keyId = own.keys[0]?.id ?? "";
   check("revoking the key you are holding is allowed", (await send(`/v1/me/keys/${keyId}`, { method: "DELETE", headers: theirs })).status, 200);
   check("and it stops authenticating immediately", await outcome(await send("/v1/me", { headers: theirs })), [401, "api_key_revoked"]);
@@ -9511,25 +9657,20 @@ process.stdout.write("\nregistration, recovery, and the mail that carries them\n
     );
   }
 
-  /* -- repointing the reset channel needs the password, always ------------- */
+  /* -- repointing the reset channel takes the session alone (Q1.630) -------- */
 
   {
     /*
-     * **A borrowed session must not become permanent ownership**, and this route
-     * was the one hole left in that rule.
-     *
-     * `PUT /v1/me/email` asked for the current password only when the account
-     * already had a *verified* address — so for every account without one, a
-     * stolen session bearer ran the whole chain: repoint the address, confirm it
-     * with the same session, `/v1/forgot`, `/v1/reset`, and out comes a password
-     * the thief chose plus a `revokeAllSessions` that evicts the real owner. The
-     * bootstrap admin is created with no `user_emails` row at all, so the fleet's
-     * founding account was in exactly that state.
-     *
-     * Asserted in the state that used to be exempt — **no address row** — because
-     * the guarded state was never the broken one. The pair matters: the refusal
-     * names the field, and the same request with the password lands, so this
-     * cannot pass by the route being broken outright.
+     * ⚠ **Reversed on 2026-09-04 by the owner's decision.** For one release this
+     * route asked for the current password unconditionally, because with a
+     * stolen session bearer and nothing else the chain repoint → verify with the
+     * same session → `/v1/forgot` → `/v1/reset` ends in a password the thief
+     * chose. That chain is open again, by decision rather than by accident, and
+     * `app.ts` keeps it written down at the route. What is pinned here is the
+     * new shape: an account with a password adds or changes its address on the
+     * session alone, and a `currentPassword` in the body is ignored rather than
+     * verified — so the refusal this block used to assert cannot come back by a
+     * stray import.
      */
     const pia = seedUser("u_pia", "pia", null, false);
     const piaPassword = "pia's own long password";
@@ -9539,25 +9680,13 @@ process.stdout.write("\nregistration, recovery, and the mail that carries them\n
     const piaKey = seedKey(pia);
 
     check(
-      "adding a first address needs the current password too",
-      await codeOf(await gput("/v1/me/email", { email: "pia@example.com" }, piaKey)),
-      [400, "bad_request"],
+      "adding a first address takes the session alone",
+      (await gput("/v1/me/email", { email: "pia@example.com" }, piaKey)).status,
+      200,
     );
     check(
-      "a wrong one is refused as a password rather than as a body",
-      await codeOf(
-        await gput("/v1/me/email", { email: "pia@example.com", currentPassword: "not it" }, piaKey),
-      ),
-      [401, "invalid_password"],
-    );
-    check(
-      "and the address is unchanged, so nothing was half-applied",
-      gdb.prepare("SELECT email FROM user_emails WHERE user_id = ?").get(pia),
-      undefined,
-    );
-    check(
-      "with the password it lands",
-      (await gput("/v1/me/email", { email: "pia@example.com", currentPassword: piaPassword }, piaKey)).status,
+      "and a password in the body is ignored, not verified",
+      (await gput("/v1/me/email", { email: "pia2@example.com", currentPassword: "not it" }, piaKey)).status,
       200,
     );
 

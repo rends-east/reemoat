@@ -1,4 +1,5 @@
 import { Suspense, lazy, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
+import { takeRevokedKeyNotice } from "./account";
 import { isSheet, sheetTitle, sheetUpLabel, upFrom } from "./nav";
 import { navigate, parsePath, useOrigin, useRoute, useUnder, type Route } from "./router";
 import { setTelegramBack } from "./telegram";
@@ -75,6 +76,24 @@ const PAGE_TITLE = "Reemoat";
  */
 export function App(): ReactNode {
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  /*
+   * The one-shot line a deliberate sign-out leaves behind: revoking the key this
+   * browser was holding clears the credential and reloads onto the sign-in
+   * screen, and without this the gate would say nothing about an act the person
+   * just chose. `takeRevokedKeyNotice` deletes on read, so it is read **once, in
+   * a state initialiser** — not in the render body, where the first signed-out
+   * paint would consume it and the config patch a moment later (`bootstrap`
+   * fires `loadConfig` before it settles the phase) would re-render to `null`.
+   * Storage disabled is the same as no notice.
+   */
+  const [revoked] = useState<string | null>(() => {
+    try {
+      return takeRevokedKeyNotice(window.sessionStorage);
+    } catch {
+      // Private browsing, or storage disabled: the sign-in screen is still right.
+      return null;
+    }
+  });
   const route = useRoute();
   const under = useUnder();
   // The other pop-up this one was opened from, for the way *up*. The ✕ is
@@ -176,7 +195,12 @@ export function App(): ReactNode {
    */
   if (route.name === "gate") return <Gate screen={route.screen} state={state} />;
 
-  if (state.phase === "signed_out") return <SignIn notice={state.authError} config={state.config} />;
+  if (state.phase === "signed_out") {
+    // An involuntary sign-out has its own sentence and wins over the revoke
+    // notice — the two cannot both be true of one reload, since the revoke
+    // cleared the credential before any request could 401.
+    return <SignIn notice={state.authError ?? revoked} config={state.config} />;
+  }
 
   if (state.phase === "loading") {
     return (

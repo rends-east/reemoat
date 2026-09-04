@@ -309,15 +309,18 @@ export const PLUGIN_ARCHIVE_ACCEPT = ".tgz,.gz,.zip,application/gzip,application
  * about the consent step below.
  */
 export function PluginArchiveNote(): ReactNode {
+  /*
+   * Eleven words. "Nothing is sent until you have read what it asks for." was a
+   * reassurance about the consent step, and the consent step is *drawn* — the
+   * `PluginConsent` wall appears before the send button does, which says it
+   * better than a sentence promising it will.
+   */
   return (
-    <>
-      <p className="text-xs text-muted">
-        A <code className="text-muted/80">.tar.gz</code> or <code className="text-muted/80">.zip</code> holding{" "}
-        <code className="text-muted/80">plugin.json</code> and <code className="text-muted/80">server.js</code>.
-        Installing the same id again updates it and keeps what it has stored.
-      </p>
-      <p className="mt-1 text-xs text-muted">Nothing is sent until you have read what it asks for.</p>
-    </>
+    <p className="text-xs text-muted">
+      <code className="text-muted/80">.tar.gz</code> or <code className="text-muted/80">.zip</code> with{" "}
+      <code className="text-muted/80">plugin.json</code> and <code className="text-muted/80">server.js</code>.
+      Re-installing keeps stored data.
+    </p>
   );
 }
 

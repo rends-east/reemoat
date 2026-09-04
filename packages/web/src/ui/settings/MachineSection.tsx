@@ -80,7 +80,13 @@ export function MachineSection({
   machineId: MachineId;
 }): ReactNode {
   const machine = state.machines.find((candidate) => candidate.id === machineId) ?? null;
-  const [busy, setBusy] = useState(false);
+  /*
+   * Two flags, not one. A single `busy` disabled Retire's Cancel while a setup
+   * code minted — two acts on two sections, sharing a lock because they shared a
+   * file. Each section holds its own.
+   */
+  const [minting, setMinting] = useState(false);
+  const [retiring, setRetiring] = useState(false);
   const [code, setCode] = useState<{ url: string; code: string; expiresAt: number } | null>(null);
   const [confirming, setConfirming] = useState(false);
 
@@ -119,21 +125,21 @@ export function MachineSection({
   const listable = machine.enrolled && read === "readable";
 
   const mint = (): void => {
-    setBusy(true);
+    setMinting(true);
     void cp
       .mintEnrollment(machine.id)
       .then((minted) =>
         setCode({ url: minted.controlPlaneUrl, code: minted.code, expiresAt: minted.expiresAt }),
       )
       .catch((cause: unknown) => toast("error", errorText(cause)))
-      .finally(() => setBusy(false));
+      .finally(() => setMinting(false));
   };
 
   const revoke = (): void => {
-    setBusy(true);
+    setRetiring(true);
     void cp
       .revokeMachine(machine.id)
-      .then((answer) => {
+      .then(() => {
         /*
          * ⚠ **Leave the screen before the machine leaves the list, and in this
          * order.** `machinesChanged` drops it from `state.machines`, and this
@@ -142,20 +148,19 @@ export function MachineSection({
          * machine they just retired. Replace rather than push: shallower.
          * The toast is global and survives the navigation, which is what tells
          * them it worked.
+         *
+         * Three words. It used to add how many enrollment codes were burned and
+         * when issued tokens expire — facts read from `answer` — and a toast is
+         * the one place a fact cannot be re-read (decision D-U-1): the machine is
+         * gone from every screen that could carry them, so they went too. The
+         * confirmation above already said what retiring costs, before the tap.
          */
         navigate(settingsPath("machines"), true);
-        const burned = answer.enrollmentCodesInvalidated ?? 0;
-        const seconds = answer.outstandingTokensExpireWithinSeconds;
-        toast(
-          "ok",
-          `${machine.name} is retired.` +
-            (burned > 0 ? ` ${burned} outstanding enrollment code${burned === 1 ? "" : "s"} stopped working.` : "") +
-            (seconds !== undefined ? ` Tokens already issued for it expire within ${seconds}s.` : ""),
-        );
+        toast("ok", `${machine.name} is retired.`);
         void store.machinesChanged("machine-revoked");
       })
       .catch((cause: unknown) => toast("error", errorText(cause)))
-      .finally(() => setBusy(false));
+      .finally(() => setRetiring(false));
   };
 
   return (
@@ -189,17 +194,16 @@ export function MachineSection({
        * list: what is on this screen belongs to one daemon's database and one
        * host's home, and a plugin among them runs on that host as you. Said once
        * at the top, `MachineSystemsSection` and `MachinePluginsSection` draw no
-       * prose at all here — the first takes `lede={false}`, the second has none
+       * prose at all here — the first has no lede at any depth any more, the second has none
        * left to suppress. `ambiguousNames` stays a property of the list: a screen
        * has no siblings to be ambiguous against, which is why this names the id
-       * and not the machine. The wording was cut on 2026-09-04 for fewer words;
-       * what it keeps is the id, that nothing here is shared with the other
-       * machines, and that a plugin runs there as you — "one daemon's database and
-       * one host's home" is now this comment's fact rather than the sentence's.
+       * and not the machine. Nine words: what it keeps is the id, that nothing
+       * here is shared with the other machines ("only"), and that a plugin runs
+       * there as you — "one daemon's database and one host's home" is this
+       * comment's fact rather than the sentence's.
        */}
       <p className="text-xs text-muted">
-        Everything here belongs to <code className="text-muted/80">{machine.id}</code> and is not
-        shared with your other machines. A plugin runs there as you.
+        Belongs to <code className="text-muted/80">{machine.id}</code> only. Plugins run there as you.
       </p>
 
       {/*
@@ -231,11 +235,11 @@ export function MachineSection({
        * ⚠ **Never minted on mount.** There is one live code per machine and
        * minting burns the previous one, so a screen that mints on entry destroys
        * a code on every visit and every reload. The button is offered; the code
-       * is not. The sentence over the button was cut on 2026-09-04 for fewer
-       * words to the one fact that bears on pressing it — that it replaces any
-       * code already outstanding; single-use, shown-once and what redeeming does
-       * (identity, tunnel-key rotation) left the paragraph, and the first two are
-       * still said on the code itself once it is minted.
+       * is not. No sentence over the button: the one fact that bears on pressing
+       * it — that it replaces any code already outstanding — is said on the
+       * minted panel's note beside single-use and shown-once, where it is read
+       * once, after the tap, rather than above a button most visits never press.
+       * What redeeming does (identity, tunnel-key rotation) is this comment's.
        *
        * ⚠ **It sits directly under Name, and it used to sit between Systems and
        * Retire on an argument that pointed the other way.** That argument was
@@ -250,16 +254,15 @@ export function MachineSection({
       {setupOffered && (
         <section className={SETTINGS_SECTION}>
           <h2 className={SETTINGS_HEADING}>Setup code</h2>
-          <p className="mt-2 text-xs text-muted">Replaces any code already outstanding.</p>
-          <Button className="mt-3" disabled={busy} onClick={mint}>
-            {busy ? <Spinner /> : "Generate"}
+          <Button className="mt-3" disabled={minting} onClick={mint}>
+            {minting ? <Spinner /> : "Generate"}
           </Button>
           {code !== null && (
             <div className="mt-2">
               <OneTimeSecret
                 label={`Start the daemon on ${machine.name} with`}
                 value={enrollmentLines(code.url, code.code)}
-                note={`Single-use, ${enrollmentExpiryText(code.expiresAt, Date.now())}. Shown once.`}
+                note={`Single-use, ${enrollmentExpiryText(code.expiresAt, Date.now())}. Shown once. Replaces any earlier code.`}
                 onDone={() => setCode(null)}
               />
             </div>
@@ -296,7 +299,6 @@ export function MachineSection({
               machineId={machineId}
               system={null}
               signin={null}
-              lede={false}
             />
           </section>
 
@@ -316,15 +318,16 @@ export function MachineSection({
            * is how one of them rots.
            */}
           <section className={SETTINGS_SECTION}>
-            <h2 className={SETTINGS_HEADING}>Agents</h2>
-            {/* No "on this machine": the lede at the top has already said which
-                daemon everything on this screen belongs to. The paragraph that
-                stood here was cut on 2026-09-04 for fewer words; the fact it
-                carried — that this is what New session offers — moved into the
-                row's own subline, still without the machine. */}
+            {/* **No `h2` over this row.** "Agents" was drawn twice 40px apart — as
+                the section heading and as the row's own title — and a heading
+                that restates the one row under it is the row said louder. The
+                `ChoiceRow` carries the word; the pane it opens is titled "Agents"
+                by `settingsPaneTitle`, so the reader meets it there too. Three
+                words of subline: the verbs, without the machine, since the lede
+                at the top has already said which daemon this screen belongs to. */}
             <ChoiceRow
               title="Agents"
-              subline="What New session offers — reorder, hide, add, edit"
+              subline="Reorder, hide, add."
               trailing={<Icon as={ChevronRight} size={16} className="shrink-0 text-faint" />}
               onClick={() => navigate(agentStripPath(machineId))}
             />
@@ -371,7 +374,7 @@ export function MachineSection({
              * neither the triangle nor the live region.
              */
             <Empty>
-              {machine.name} has not enrolled yet, so there is nothing to list.
+              {machine.name} has not enrolled yet.
               {setupOffered ? " Start its daemon with the setup code above." : ""}
             </Empty>
           ) : read === "asking" ? (
@@ -391,13 +394,13 @@ export function MachineSection({
             /*
              * Asked, and no answer came back — the one arm that has earned the
              * words "not reachable", and the one that is genuinely the absence of
-             * an answer, so it takes `failed`. Naming the three lists is what stops
-             * it reading as a status banner: it is here because they are not.
+             * an answer, so it takes `failed`. It sits where the three lists would
+             * be, which is what says they are not listed; the clause that used to
+             * name them was the position said again.
              */
             <Empty failed>
               {machine.name} is not reachable right now —{" "}
-              {reachText(machine.reach, machine.offlineReason)}, so its systems, agents and plugins
-              are not listed.
+              {reachText(machine.reach, machine.offlineReason)}.
             </Empty>
           )}
         </section>
@@ -417,16 +420,14 @@ export function MachineSection({
          */
         <section className="mt-12 border-t border-edge pt-5">
           <h2 className={RETIRE_HEADING}>Retire this machine</h2>
-          {/* The consequence as prose above the control — `AccountSection`'s
-              own-keys idiom — rather than crammed into a confirmation. Cut on
-              2026-09-04 for fewer words; every consequence is kept: the name and
-              the slot come back, the setup code dies, sessions and issued tokens
-              do not, and adding it back is a new id that drops every share. */}
-          <p className="mt-2 text-xs text-muted">
-            Frees the name and a machine-limit slot and voids any outstanding setup code. Sessions
-            are kept; tokens already issued keep working until they expire. ⚠ Adding it back is not
-            a re-install: it gets a new id, and everybody it was shared with loses it silently.
-          </p>
+          {/* **Nothing at rest but the button** (decision 10A). The consequence
+              used to be a 45-word paragraph above it, the own-keys idiom — but
+              that idiom is for a *one-tap* control, where the prose is the only
+              warning there is. This control is two-step, so its cost is the
+              confirmation's text, read at the moment of deciding: the name and
+              the slot come back, re-adding is a new id, shares are lost. Sessions
+              and issued tokens surviving, and the setup code dying, are true and
+              are this comment's rather than the screen's. */}
           {confirming ? (
             /* The answer that undoes the question is **last**: `.tap` removes the
                double-tap delay, and a second tap aimed at a control that looked
@@ -441,16 +442,21 @@ export function MachineSection({
                   reversing what `SignOutButton` does with the identical pair of
                   taps. A confirmation that does not name what it is about is a
                   confirmation of nothing. */}
-              <span className="text-xs text-muted">Retire {machine.name}?</span>
-              <DangerButton icon={Trash2} disabled={busy} onClick={revoke}>
-                {busy ? <Spinner /> : "Retire"}
+              <span className="text-xs text-fg">
+                Retire {machine.name}?
+                <span className="block text-muted">
+                  Frees the name and a slot. Re-adding gives a new id; shares are lost.
+                </span>
+              </span>
+              <DangerButton icon={Trash2} disabled={retiring} onClick={revoke}>
+                {retiring ? <Spinner /> : "Retire"}
               </DangerButton>
-              <Button disabled={busy} onClick={() => setConfirming(false)}>
+              <Button disabled={retiring} onClick={() => setConfirming(false)}>
                 Cancel
               </Button>
             </div>
           ) : (
-            <DangerButton icon={Trash2} className="mt-3" disabled={busy} onClick={() => setConfirming(true)}>
+            <DangerButton icon={Trash2} className="mt-3" disabled={retiring} onClick={() => setConfirming(true)}>
               Retire {machine.name}
             </DangerButton>
           )}

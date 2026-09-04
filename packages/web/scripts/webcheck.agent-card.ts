@@ -629,7 +629,8 @@ process.stdout.write("\nwhat one agent's card says\n");
       dividerWord("signed_out", true, "stored_only"),
       dividerWord("signed_out", true, "hidden"),
     ],
-    ["or", "Sign in with a key instead", "Saved keys", null],
+    // "or paste a key", lower-case and verb-first: a divider, not a heading.
+    ["or", "or paste a key", "Saved keys", null],
   );
   /*
    * ⚠ **And "instead" needs a first option**, which one agent has none of. It
@@ -663,4 +664,63 @@ process.stdout.write("\nwhat one agent's card says\n");
     [credentialCaveat("opencode", false), credentialCaveat("claude", true), credentialCaveat("codex", true) !== null],
     [null, null, true],
   );
+}
+
+/* ------------------------------------------------------------------ *
+ * The sign-in screens after the 2026-09-04 cut
+ *
+ * Four source facts the redesign (settings plan, T7) left behind, each of which
+ * `typecheck` cannot see: a deleted component, a constant that must exist once,
+ * an input that must live in a form, and a prop that must stay gone.
+ * ------------------------------------------------------------------ */
+process.stdout.write("\nthe sign-in screens, cut\n");
+{
+  const settings = (name: string): string =>
+    stripComments(readFileSync(new URL(`../src/ui/settings/${name}`, import.meta.url), "utf8"));
+  const agentsPanel = settings("AgentsPanel.tsx");
+  const systemsPanel = settings("SystemsPanel.tsx");
+  const machineSystems = settings("MachineSystemsSection.tsx");
+  const card = stripComments(readFileSync(new URL("../src/ui/agentCard.ts", import.meta.url), "utf8"));
+  check("all four files were found", [agentsPanel, systemsPanel, machineSystems, card].map((one) => one.length > 0), [true, true, true, true]);
+
+  /*
+   * `AgentChooser` had no call site for three releases — the rows became systems
+   * — and an exported component nobody mounts is a second copy of a list that
+   * drifts. Absent by name, and its private hook stays, since `AgentDetail` reads
+   * it.
+   */
+  check("AgentChooser is gone", /AgentChooser/.test(agentsPanel), false);
+  check("and the hook it shared with AgentDetail stays", /function useAgentAuth\(/.test(agentsPanel), true);
+
+  /*
+   * One spelling of "what is below may be stale", defined once in the pure module
+   * both screens import from and drawn from there in both. Two definitions is the
+   * defect: `SystemDetail` mounts `AgentDetail` directly under its own line.
+   */
+  const { STALE_READ } = await import("../src/ui/agentCard.js");
+  check("STALE_READ is defined exactly once, in agentCard", (card.match(/export const STALE_READ\b/g) ?? []).length, 1);
+  check("and neither panel spells its own", [/const STALE_READ\b/.test(systemsPanel), /const STALE_READ\b/.test(agentsPanel)], [false, false]);
+  check("and both draw the shared one", [/\{STALE_READ\}/.test(systemsPanel), /\{STALE_READ\}/.test(agentsPanel)], [true, true]);
+  check("which is seven words and names the subject", [STALE_READ.split(/\s+/).length, /^Machine status/.test(STALE_READ)], [7, true]);
+
+  /*
+   * The key box is a form: Enter submits through `onSubmit` and there is no
+   * hand-wired Enter handler standing in for one.
+   */
+  const keyForm = systemsPanel.slice(systemsPanel.indexOf("export function KeyOnly("));
+  check("the key input sits in a form that submits", [/<form[^>]*onSubmit=/.test(keyForm), /<Button type="submit"/.test(keyForm)], [true, true]);
+  check("and no Enter handler is wired by hand", /onKeyDown/.test(keyForm), false);
+  /*
+   * The removal names the key, and the consequence lives in the question rather
+   * than at rest (decision 10A): nothing above the resting button says what a
+   * removal costs.
+   */
+  check("the removal question names the key and its cost", /Remove the \{keyName\}\? New sessions pointed at/.test(keyForm), true);
+  check("and no paragraph at rest restates it", /Sessions pointed at \{system\.displayName\} sign with this key/.test(keyForm), false);
+
+  /* The lede is gone from the systems screen, and the prop that gated it. */
+  check("MachineSystemsSection takes no lede", /\blede\b/.test(machineSystems), false);
+  check("and says nothing about where credentials are stored", /Stored on/.test(machineSystems), false);
+  check("while the unreachable sentence keeps its pinned half", /is not reachable right now/.test(machineSystems), true);
+  check("without the trailing clause about the system", /can be read or changed/.test(machineSystems), false);
 }

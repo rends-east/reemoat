@@ -996,59 +996,6 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   const noticeAlreadySent = (emailFolded: string, now: number): boolean =>
     mail !== null && sentRecently(db, emailFolded, "register_notice", NOTICE_INTERVAL_MS, now);
 
-  /**
-   * Prove you are still the person whose account this is.
-   *
-   * What is left of `proveSelf` after the two admin credential routes were
-   * deleted, and it kept the piece worth keeping. That helper existed because
-   * those routes reached the caller's *own* account through an `:id` and asked
-   * nothing — measured, a session token lifted from an admin's tab minted a
-   * permanent key or reset the password in one request. The routes are gone; the
-   * question they should have been asking is now asked by the two routes that
-   * genuinely need it, about the caller and never about a parameter.
-   *
-   * The migration exception is `POST /v1/me/password`'s, unchanged: a caller with
-   * no `user_passwords` row is let through, because the API key they are holding
-   * was already full authority over the account and requiring a password they
-   * have never had would make the migration impossible rather than safe.
-   *
-   * A missing body is an absent `currentPassword` rather than its own refusal,
-   * so the answer names the field to send instead of complaining about a body
-   * shape the caller was never asked for.
-   *
-   * Returns the `Response` to answer with, or `null` when the caller may proceed.
-   */
-  const proveCurrentPassword = async (
-    c: Context<AppEnv>,
-    body: Record<string, unknown> | null,
-  ): Promise<Response | null> => {
-    const caller = c.get("caller");
-    const stored = db.prepare("SELECT hash FROM user_passwords WHERE user_id = ?").get(caller.userId);
-    if (stored === undefined) return null;
-
-    const current = body?.["currentPassword"];
-    if (typeof current !== "string" || current.length === 0 || current.length > MAX_PASSWORD_FIELD_CHARS) {
-      return jsonError(c, 400, "bad_request", "currentPassword is required");
-    }
-
-    // The same key `/v1/me/password` uses, because it is the same question about
-    // the same secret — namespaced on the user id, so no volume of anonymous
-    // sign-in attempts can block somebody from re-keying their own account.
-    const key = passwordChangeKey(caller.userId);
-    const decision = throttle.check(key);
-    if (!decision.allowed) return tooManyAttempts(c, decision.retryAfterSeconds);
-    throttle.fail(key);
-    try {
-      const verified = await verifyPassword(current, String(stored["hash"]), "authenticated");
-      if (!verified.ok) return jsonError(c, 401, "invalid_password", "that is not your current password");
-    } catch (error) {
-      if (error instanceof PasswordBusyError) return passwordBusy(c);
-      throw error;
-    }
-    throttle.succeed(key);
-    return null;
-  };
-
   /* ---------------------------------------------------------------- *
    * Public
    * ---------------------------------------------------------------- */
@@ -2167,6 +2114,10 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         "INSERT INTO user_passwords (user_id, hash, updated_at) VALUES (?, ?, ?) " +
           "ON CONFLICT(user_id) DO UPDATE SET hash = excluded.hash, updated_at = excluded.updated_at",
       ).run(held.userId, hash, now);
+      // Chosen by the person holding the link, so it counts as theirs — for an
+      // invitation this is the first password they ever chose, and the screen
+      // saying "Changed just now" over it is the truth.
+      markPasswordChanged(db, held.userId, now);
       revoked = revokeAllSessions(db, held.userId, null, now);
       burnEmailTokens(db, held.userId, "password_changed", now);
       // Spending the link proved the address. For a reset it was already
@@ -2495,6 +2446,18 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       via: caller.via,
       hasPassword: db.prepare("SELECT 1 FROM user_passwords WHERE user_id = ?").get(caller.userId) !== undefined,
       /*
+       * When they last chose a password themselves, or `null`.
+       *
+       * `null` covers three states the screen draws as one word ("Set"): the
+       * row predates the column, the password was issued by an admin or the
+       * bootstrap and never replaced, or there is no password at all — and
+       * `hasPassword` beside it is what separates the last from the other two.
+       * Deliberately not `user_passwords.updated_at`: that is rewritten by the
+       * best-effort rehash on sign-in and by an admin's temporary password,
+       * neither of which is the person changing anything.
+       */
+      passwordChangedAt: passwordChangedAt(db, caller.userId),
+      /*
        * The address, and whether it has been proved.
        *
        * `emailVerified` is carried rather than derived from `email !== null`,
@@ -2644,6 +2607,8 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
           "INSERT INTO user_passwords (user_id, hash, updated_at) VALUES (?, ?, ?) " +
             "ON CONFLICT(user_id) DO UPDATE SET hash = excluded.hash, updated_at = excluded.updated_at",
         ).run(caller.userId, hash, now);
+        // The one fact `GET /v1/me` draws about this act, written beside the act.
+        markPasswordChanged(db, caller.userId, now);
 
         /*
          * Every other session goes, and this one stays.
@@ -2832,13 +2797,19 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * assume keys can exist, so removing the admin door without opening this one
    * would have ended API keys as a credential.
    *
-   * `currentPassword` is required whenever there is one, which is
-   * `POST /v1/me/password`'s rule reached by the same argument: a session token
-   * lives in `localStorage` on an origin with no CSP, and without this a token
-   * lifted from a tab converts into a **permanent** credential in one request —
-   * strictly worse than what was stolen. The migration exception is that route's
-   * too: an account with no password row is proved by the API key it is already
-   * holding, which was full authority over the account before this existed.
+   * **A session is enough; no password is asked** (Q1.630, the owner's decision
+   * on 2026-09-04, reversing the rule this route shipped with). The argument
+   * for asking was that a session token lives in `localStorage` on an origin
+   * with no CSP, so a token lifted from a tab could convert into a permanent
+   * credential in one request. What answers it now is that the key is never
+   * invisible: every key is listed with when it was made and last used, the
+   * one this browser holds is marked, and any of them is one tap to revoke — so
+   * a key minted from a borrowed session is a row its owner can see and kill.
+   * `POST /v1/me/password` and `PUT /v1/me/email` keep asking, because a
+   * password change or a repointed reset channel is the account itself.
+   *
+   * No body is read: the request carries nothing this route decides on, so a
+   * bodiless `POST` mints exactly as `{}` does.
    *
    * **Capped, unlike anything before it.** Nothing bounded `api_keys` because
    * only an admin could write to the table. Every other credential in this
@@ -2849,18 +2820,14 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    */
   app.post("/v1/me/keys", async (c) => {
     /*
-     * **First, and above `proveCurrentPassword` in particular.** That call is
-     * ~51ms of scrypt out of the authenticated lane's four slots, so counting
-     * after it would make the refusal the expensive path — the rule the
-     * enrollments route states, sharpened here because the expense is a shared
-     * semaphore rather than a disk write: a loop against this route with a wrong
-     * password queues every sign-in in the fleet behind it.
+     * First: the write budget is what bounds a loop against this route now that
+     * there is no password to prove, and the cap below is what bounds what a
+     * loop could leave behind.
      */
     const writeGuard = spendWrite(c, "key");
     if (writeGuard !== null) return writeGuard;
 
     const caller = c.get("caller");
-    const body = await readJsonObject(c);
 
     const live = Number(
       db.prepare("SELECT COUNT(*) AS n FROM api_keys WHERE user_id = ? AND revoked_at IS NULL").get(caller.userId)?.[
@@ -2875,9 +2842,6 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         `an account may hold ${MAX_KEYS_PER_USER} API keys at once — revoke one first`,
       );
     }
-
-    const refused = await proveCurrentPassword(c, body);
-    if (refused !== null) return refused;
 
     const key = newApiKey();
     db.prepare("INSERT INTO api_keys (id, user_id, prefix, key_hash, created_at) VALUES (?, ?, ?, ?, ?)").run(
@@ -2897,37 +2861,28 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   /**
    * Set or change the address on your account.
    *
-   * **The current password is required, whatever the account's current address
-   * is**, and the reason is sharper than the one guarding a password change: the
-   * address is the reset channel, so repointing it *is* taking the account — one
-   * request, and the thief no longer needs the password at all.
+   * **A session is enough; no password is asked** (Q1.630, the owner's decision
+   * on 2026-09-04). This route asked for the current password unconditionally
+   * for one release, and the docblock that argued for it is kept below as the
+   * cost, because it is a real one and the next reader must not rediscover it
+   * as a bug:
    *
-   * ⚠ **This used to ask only when the existing address was already *verified*,
-   * and that was a full account takeover from a borrowed session.** The exemption
-   * read "adding one for the first time needs no proof, because there is nothing
-   * to steal yet and clicking the link is itself the proof". Both halves are
-   * wrong about the thing being protected. There is nothing to steal *about the
-   * address*; the account is what gets stolen, and this route is what installs
-   * the channel it gets stolen through. And clicking the link proves control of a
-   * mailbox, never that the session holder is the account's owner.
-   *
-   * The chain it opened, with a stolen session bearer and nothing else: `PUT
-   * /v1/me/email` to an attacker address (no proof asked, because the victim had
-   * no verified one) → `POST /v1/me/email/verify` with the same session, whose
-   * `held.userId !== caller.userId` check passes *because the token was minted
-   * for the caller* → `POST /v1/forgot`, which `verifiedOwnerOf` now resolves to
-   * the victim → `POST /v1/reset`, which writes a password the attacker chose,
-   * revokes every session including the real owner's, and mints the attacker one.
-   * The population was not marginal: `main.ts`'s bootstrap admin is created with
-   * no `user_emails` row at all, and so is every account from the no-SMTP arm of
-   * `/v1/register` below.
-   *
-   * **`proveCurrentPassword` already carries the only legitimate exemption** — a
-   * caller with no `user_passwords` row is let through, because their API key was
-   * already full authority over the account. That stays exactly as narrow as it
-   * is: no session can exist without a password row (all three `mintSession`
-   * call sites require or create one), so this is now unreachable by a session
-   * and the takeover is closed rather than narrowed.
+   * ⚠ The address is the reset channel, so repointing it is a way to take the
+   * account. The chain, with a stolen session bearer and nothing else: `PUT
+   * /v1/me/email` to an attacker address → `POST /v1/me/email/verify` with the
+   * same session, whose `held.userId !== caller.userId` check passes *because
+   * the token was minted for the caller* → `POST /v1/forgot`, which
+   * `verifiedOwnerOf` now resolves to the victim → `POST /v1/reset`, which
+   * writes a password the attacker chose, revokes every session including the
+   * real owner's, and mints the attacker one. The bootstrap admin is created
+   * with no `user_emails` row at all, and so is every account from the no-SMTP
+   * arm of `/v1/register` below. **That chain is open again by decision**: the
+   * owner weighed it against a password field on every address change and chose
+   * the field's absence. What still bounds it is that a session is the thing
+   * being stolen either way, that the Devices list shows every sign-in and ends
+   * any of them, and that `POST /v1/me/password` still asks — inline, since
+   * `proveCurrentPassword`, the helper this route and `/v1/me/keys` shared, is
+   * deleted with its two callers.
    *
    * **An address somebody else has already verified is not refused.** Refusing
    * would answer "does this address have an account here" to any signed-in
@@ -2946,8 +2901,6 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     if (!checked.ok) return jsonError(c, 400, "bad_request", checked.message);
 
     const existing = emailOf(db, caller.userId);
-    const refused = await proveCurrentPassword(c, body);
-    if (refused !== null) return refused;
 
     if (!mayMail(checked.folded)) {
       return tooManyAttempts(
@@ -5687,8 +5640,26 @@ function callerAuth(db: DatabaseSync): MiddlewareHandler<AppEnv> {
    * `sessions.ts` caches its own two for the same reason.
    */
   const keyByPrefix = db.prepare(
-    "SELECT k.key_hash, k.revoked_at, u.id, u.name, u.is_admin, u.disabled_at " +
+    "SELECT k.id AS key_id, k.key_hash, k.revoked_at, k.last_used_at, u.id, u.name, u.is_admin, u.disabled_at " +
       "FROM api_keys k JOIN users u ON u.id = k.user_id WHERE k.prefix = ?",
+  );
+  /*
+   * The one write on the API-key path, and the reason it is conditional.
+   *
+   * `last_used_at` is what lets a row in the keys list say "last used 2 d ago",
+   * and `schema.sql` warns at the column what an unconditional write here would
+   * cost: this middleware runs on every authenticated request, on the event loop
+   * every tunnel shares, so a write per request is a disk write per request. It
+   * is written **at most once a minute per key** instead — the same discipline
+   * `touchSession` keeps for `last_seen_at`, at a shorter interval because "used
+   * today" is the resolution a person revoking a key wants. The `WHERE` repeats
+   * the staleness test so two overlapping requests on one key cost one write,
+   * and `revoked_at IS NULL` is belt over braces: the refusal above never reaches
+   * this statement, and a revoked key's value must stop where the revocation
+   * found it regardless.
+   */
+  const touchKey = db.prepare(
+    "UPDATE api_keys SET last_used_at = ? WHERE id = ? AND revoked_at IS NULL AND (last_used_at IS NULL OR last_used_at < ?)",
   );
   const userById = db.prepare("SELECT id, name, is_admin, disabled_at FROM users WHERE id = ?");
 
@@ -5750,6 +5721,14 @@ function callerAuth(db: DatabaseSync): MiddlewareHandler<AppEnv> {
       }
       if (row["disabled_at"] !== null) {
         return jsonError(c, 403, "user_disabled", "this user has been disabled");
+      }
+      // Accepted: the only point on this path where the key is known to be live.
+      // The staleness test is repeated in JavaScript so the common case — a key
+      // used a second ago — costs no statement at all.
+      const usedAt = row["last_used_at"] === null ? null : Number(row["last_used_at"]);
+      const at = Date.now();
+      if (usedAt === null || at - usedAt >= KEY_TOUCH_INTERVAL_MS) {
+        touchKey.run(at, String(row["key_id"]), at - KEY_TOUCH_INTERVAL_MS);
       }
       c.set("caller", {
         userId: String(row["id"]),
@@ -5890,14 +5869,58 @@ function readLabel(raw: unknown): { ok: true; label: string } | { ok: false; mes
  */
 function apiKeyRows(db: DatabaseSync, userId: string): Record<string, unknown>[] {
   return db
-    .prepare("SELECT id, prefix, created_at, revoked_at FROM api_keys WHERE user_id = ? ORDER BY created_at ASC")
+    .prepare("SELECT id, prefix, created_at, revoked_at, last_used_at FROM api_keys WHERE user_id = ? ORDER BY created_at ASC")
     .all(userId)
     .map((row) => ({
       id: String(row["id"]),
       prefix: String(row["prefix"]),
       createdAt: Number(row["created_at"]),
       revokedAt: row["revoked_at"] === null ? null : Number(row["revoked_at"]),
+      // `null` is "never used since the column existed" — see `schema.sql` —
+      // and the list draws it as "never used", which is the honest reading for
+      // a key minted after this shipped and the only available one before.
+      lastUsedAt: row["last_used_at"] === null ? null : Number(row["last_used_at"]),
     }));
+}
+
+/**
+ * How stale `api_keys.last_used_at` may get before a request is worth a write.
+ *
+ * One minute: "used today" is what somebody deciding which key to revoke wants,
+ * and a minute of slack keeps a `cpctl` loop or a dashboard poll from turning
+ * the authentication path into a write path. `LAST_SEEN_WRITE_INTERVAL_MS` in
+ * `sessions.ts` makes the same trade at fifteen minutes for a row nobody reads
+ * as often.
+ *
+ * Exported for `relaycheck`, for the reason that constant is: a guard reachable
+ * from nowhere is asserted nowhere.
+ */
+export const KEY_TOUCH_INTERVAL_MS = 60_000;
+
+/**
+ * When this account last chose its own password, or `null`.
+ *
+ * Read off `users.password_changed_at`, which `migrate()` adds to a database that
+ * predates it — so on a row from before the column the answer is `null`, and
+ * `GET /v1/me` says so rather than guessing at `user_passwords.updated_at`.
+ */
+function passwordChangedAt(db: DatabaseSync, userId: string): number | null {
+  const row = db.prepare("SELECT password_changed_at FROM users WHERE id = ?").get(userId);
+  const value = row?.["password_changed_at"];
+  return value === null || value === undefined ? null : Number(value);
+}
+
+/**
+ * Record that the person chose a password, at the two routes where they do.
+ *
+ * A function rather than a column in the two upserts, so the list of writers is
+ * greppable: `POST /v1/me/password` and `POST /v1/reset`, and nothing else. An
+ * admin issuing a temporary password, the bootstrap, and the sign-in rehash all
+ * write `user_passwords` and all leave this alone — none of them is the person
+ * choosing anything, and the screen draws this as "Changed <age> ago".
+ */
+function markPasswordChanged(db: DatabaseSync, userId: string, now: number): void {
+  db.prepare("UPDATE users SET password_changed_at = ? WHERE id = ?").run(now, userId);
 }
 
 /**

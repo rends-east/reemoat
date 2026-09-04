@@ -230,9 +230,13 @@ answer `/new` for its sections too. Narrowed to the New session pop-up so
 **Two controls on a row — a handle and a menu — and what varies is *inside* the
 menu.** A row that loses a control moves every control beside it, and on a list you
 drag that is the one thing that must not happen; a menu's panel is drawn on demand
-and displaces nothing. So the kebab is live on **every** row, and `frozen` — a
-daemon that cannot store an order — is the only thing that switches it off. The
-error line above the list is reserved for the same layout reason.
+and displaces nothing. So the kebab is live on **every** row, on an old daemon
+too: `frozen` — a daemon that cannot store an order — disables the drag handle
+and the Add back / Remove item, the two acts that write the strip, and nothing
+else, since Edit and Check again need no strip route.
+The status line sits **under** the list and is 0-height until it has something
+to say, for the same layout reason: a write failure must never move the rows a
+finger is over (Q3.543's sibling decision, 13A).
 
 **One removal per row, called the same thing on both kinds.** From the picker's
 side "hide this harness" and "delete this assembled agent" are one act — *this stops
@@ -255,10 +259,13 @@ place it last went wrong.
 rather than a signal.** A built-in is the hidden flag, so its row stays — dimmed,
 offering **Add back**, because a flag is all there is to undo. An assembled agent is
 `DELETE /custom-agents/:id`, so there is no row left to dim and getting it back
-means assembling it again. **No two-tap confirmation and no `danger`**, which
-reverses the settings-row rule on purpose: that rule is for acts nothing brings back
-— retiring a machine, deleting a person, uninstalling a plugin with its data — and
-this one is rebuildable from the bar at the foot of the same screen.
+means assembling it again. So removing an assembled agent confirms in place —
+"Remove `<name>`? Rebuild it from Add an agent." · Remove · Cancel last — and
+hiding a harness does not; **neither wears `danger`**, which reverses the
+settings-row rule on purpose: that rule is for acts nothing brings back —
+retiring a machine, deleting a person, uninstalling a plugin with its data — and
+this one is rebuildable from the bar at the foot of the same screen. The confirm
+is the row's state, never the menu's, and its label is not derived from the kind.
 
 **Both verbs are on both kinds. A built-in agent is an agent.** `Edit` was absent
 from a harness row on the argument that a harness has nothing stored to edit — true,

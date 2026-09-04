@@ -6,7 +6,7 @@ import { MACHINE_GONE } from "../../plugins";
 import { store } from "../../store";
 import type { AgentAuthInfo, SystemInfo } from "../../wire";
 import { anyKeySet, unspokenFor } from "../../agents";
-import { boundedName, harnessName } from "../agentCard";
+import { boundedName, harnessName, STALE_READ } from "../agentCard";
 import { Badge, Button, ChoiceRow, DangerButton, Empty, FIELD, Icon, Spinner } from "../bits";
 import { toast } from "../Toast";
 import { AgentDetail } from "./AgentsPanel";
@@ -111,7 +111,8 @@ function useSystems(machineId: MachineId): {
           setError(absent ? null : errorText(listing.reason));
         }
         // Never cleared on failure: a stale harness list beside a fresh provider
-        // list is what `STALE_READ` above is already the sentence for.
+        // list is what `STALE_READ` (in `agentCard.ts`, shared with `AgentDetail`)
+        // is already the sentence for.
         if (auth.status === "fulfilled") setAgents(auth.value.agents);
       })
       .finally(() => {
@@ -131,27 +132,6 @@ function useSystems(machineId: MachineId): {
     refresh: useCallback(() => setEpoch((n) => n + 1), []),
   };
 }
-
-/**
- * What a screen says when a **re**-read failed and the previous answer is still
- * drawn under it.
- *
- * ⚠ **This is `AgentDetail`'s line one file over, with this screen's own noun in
- * it — and the noun is the deliberate part.** `SystemDetail` mounts that
- * component directly below this sentence, so the two would otherwise draw the
- * identical string twice about one machine for the ordinary case where both
- * reads fail together (they share a transport: if `GET /systems` could not be
- * made, `GET /agent-auth` could not either). Two copies of one sentence read as a
- * bug rather than as two failed reads.
- *
- * A constant rather than a component because the *margin* differs at the two call
- * sites — one lands inside a `space-y-2` box, the other is the first child of a
- * bare `<div>` — and layout stays with the caller for the reason `FIELD` gives.
- * As a string rather than JSX text it also keeps its own apostrophes. The
- * wording was cut on 2026-09-04 for fewer words; the noun "systems" and the
- * "may be out of date" half are what it keeps.
- */
-const STALE_READ = "Couldn't re-check this machine's systems — what's below may be out of date.";
 
 /**
  * The way out of a failed read, drawn as the one thing to do about it.
@@ -176,9 +156,10 @@ function Recheck({ onClick, busy }: { onClick: () => void; busy: boolean }): Rea
 }
 
 /**
- * The list. A list rather than a dropdown, for `AgentChooser`'s reason: at this
- * count it is not a close call, and every row carries a state worth seeing at a
- * glance.
+ * The list. A list rather than a dropdown: at this count it is not a close call,
+ * and every row carries a state worth seeing at a glance. (`AgentChooser`, the
+ * per-agent list this argument was first made for, is deleted — it had no call
+ * site once systems replaced agents as the rows.)
  */
 export function SystemChooser({
   machineId,
@@ -239,7 +220,7 @@ export function SystemChooser({
        * "sign in", on a machine that had just been signed in to — and the only
        * evidence the request had happened was that nothing had. So it was pressed
        * again. `AgentDetail` records the identical defect in the past tense and
-       * this is its line; see {@link STALE_READ} for why the noun differs.
+       * draws the same {@link STALE_READ}, which is why there is one spelling.
        */}
       {error !== null && <p className="text-xs text-muted">{STALE_READ}</p>}
       {/*
@@ -596,19 +577,18 @@ export function KeyOnly({
       <p className="text-xs text-muted">
         {routing
           /*
-           * ⚠ **"above" is gone, because this is drawn on two screens now.** In
-           * settings a CLI sign-in really is directly above it; in the agent
-           * builder there is no sign-in on the screen at all, and a sentence
-           * pointing at one is a sentence pointing at nothing — the failure the
-           * refusal strings one file over were rewritten for. What is true in both
-           * places is the fact, not its position. All three were cut on 2026-09-04
-           * for fewer words; what each keeps is which requests the key signs and
-           * whether a sign-in already covers it.
+           * At most eleven words each (the plan's key-box cap). "above" is back
+           * in the borrowed arm and only there: that arm exists solely under a
+           * CLI sign-in on this screen — the builder draws no credential control
+           * at all, which `webcheck` asserts — so the word points at something
+           * real. The other two say which requests the key signs and whether a
+           * sign-in covers it, which is the whole of what a person deciding
+           * whether to paste needs.
            */
           ? borrowed
-            ? `Signs requests when another agent is pointed at ${system.displayName} — the key saved above already covers it.`
-            : `Signs requests when another agent is pointed at ${system.displayName}. Signing in to its CLI does not cover it.`
-          : `${system.displayName} has no sign-in here, so a key is the only way in.`}
+            ? "Covered by the key above."
+            : `For agents routed to ${system.displayName}. Its CLI sign-in does not cover this.`
+          : `Key only — ${system.displayName} has no sign-in.`}
       </p>
 
       {borrowed && !overriding ? (
@@ -624,16 +604,19 @@ export function KeyOnly({
           Use a different key here
         </button>
       ) : (
-      <div className="flex gap-2">
+      /* A real form, so Enter submits through the one path a browser already
+         owns — the hand-wired `onKeyDown` this replaces was a second copy of
+         "what Enter does" that no assistive technology knew about. */
+      <form
+        className="flex gap-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          save();
+        }}
+      >
         <input
           value={value}
           onChange={(event) => setValue(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              save();
-            }
-          }}
           /*
            * ⚠ **Not `type="password"`, and `autoComplete="off"` was never going to
            * be enough.** Reported from the Z.ai row: the browser offered to fill an
@@ -669,10 +652,10 @@ export function KeyOnly({
           aria-label={keyName}
           className={`${FIELD} min-w-0 flex-1 font-mono`}
         />
-        <Button onClick={save} disabled={busy || value.trim().length === 0}>
+        <Button type="submit" disabled={busy || value.trim().length === 0}>
           {busy ? <Spinner /> : "Save"}
         </Button>
-      </div>
+      </form>
       )}
 
       {/* Never over a borrowed key: it removes a row that is not there, and the
@@ -694,19 +677,15 @@ export function KeyOnly({
            * 44px through a pseudo-element. And a single tap took a credential that
            * every session pointed at this system signs with.
            *
-           * So: the consequence as prose above the control — `MachineSection`'s
-           * Retire idiom, stated where somebody reads it *before* deciding rather
-           * than crammed into a question they are already halfway through — and
-           * the two-step `SignOutButton` shape underneath it, which is the same
-           * shape for a strictly less damaging act. The sentence was cut on
-           * 2026-09-04 for fewer words; it keeps that sessions sign with the key,
-           * that the next one refuses to start, and that the refusal shows on the
-           * session rather than on this screen.
+           * So: the two-step `SignOutButton` shape, which is the same shape for a
+           * strictly less damaging act. **The consequence is in the question and
+           * nowhere at rest** (decision 10A): a paragraph above a two-step control
+           * is read by everybody and acted on by nobody, since the tap that needs
+           * it is the second one — so the first tap replaces the button with the
+           * question, and the question carries the cost. It names the key, because
+           * `SystemDetail` can draw two of these boxes for one system and "Remove
+           * it?" answered neither.
            */}
-          <p className="text-xs text-muted">
-            Sessions pointed at {system.displayName} sign with this key. Remove it and the next one
-            refuses to start — it says so on the session, not here.
-          </p>
           {/*
            * ⚠ **The geometry this paragraph claimed was never on the screen, and
            * it is the safety property rather than a description of one.** It read:
@@ -742,7 +721,10 @@ export function KeyOnly({
            */}
           {confirmingRemove ? (
             <div className={removeBox}>
-              <span className="basis-full text-center text-xs text-muted">Remove it?</span>
+              <span className="basis-full text-center text-xs text-muted">
+                Remove the {keyName}? New sessions pointed at {system.displayName} will refuse to
+                start.
+              </span>
               <DangerButton icon={Trash2} disabled={busy} onClick={remove}>
                 {busy ? <Spinner /> : "Remove"}
               </DangerButton>

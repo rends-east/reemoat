@@ -1947,6 +1947,15 @@ export interface Me {
   via?: "api_key" | "session";
   hasPassword?: boolean;
   /**
+   * When they last chose a password themselves, or `null`.
+   *
+   * `null` is three states the screen draws as one word — the row predates the
+   * column, the password was issued rather than chosen, or there is none — and
+   * `hasPassword` separates the last from the first two. Optional because an
+   * older control plane does not send it, which degrades to the same word.
+   */
+  passwordChangedAt?: number | null;
+  /**
    * The address on the account, and whether anybody proved it.
    *
    * **`emailVerified` is carried rather than derived from `email !== null`**,

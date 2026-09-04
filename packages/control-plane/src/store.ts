@@ -247,8 +247,22 @@ export function applyControlPlaneSchema(db: DatabaseSync): void {
  * or a RENAME.
  */
 function migrate(db: DatabaseSync): void {
-  const columns = db.prepare("PRAGMA table_info(machines)").all();
-  const has = (name: string): boolean => columns.some((column) => column["name"] === name);
+  /*
+   * One `table_info` read per table this function touches, taken before any
+   * `ALTER` — a second table's columns were read off `machines` for as long as
+   * there was only one table here, and a lookup keyed on the wrong table
+   * answers "missing" for a column that exists, which `addColumn` then survives
+   * only by the race clause below. Each statement is a plain double-quoted
+   * literal rather than a template over the table name, because that is what
+   * `deploycheck` reads this function's SQL off — a literal it cannot see is a
+   * statement it cannot refuse.
+   */
+  const columnsOf = (pragma: string): Set<string> =>
+    new Set(db.prepare(pragma).all().map((column) => String(column["name"])));
+  const machines = columnsOf("PRAGMA table_info(machines)");
+  const users = columnsOf("PRAGMA table_info(users)");
+  const apiKeys = columnsOf("PRAGMA table_info(api_keys)");
+  const has = (name: string): boolean => machines.has(name);
 
   /*
    * What build last dialled in, and what protocol version it agreed.
@@ -275,6 +289,17 @@ function migrate(db: DatabaseSync): void {
    * row, an addition an older build never selects.
    */
   addColumn(db, has("daemon_agents"), "ALTER TABLE machines ADD COLUMN daemon_agents TEXT");
+  /*
+   * When somebody last chose their own password, and when a key last signed a
+   * request — two facts the settings screen draws beside the row they belong to
+   * ("Changed 3 mo ago", "last used 2 d ago"). Both nullable with no DEFAULT,
+   * for the reason the `machines` columns above are: NULL is the honest answer
+   * for every row that predates them, and the screen has a word for it ("Set",
+   * "never used") rather than a fabricated date. `schema.sql` says what writes
+   * each; an older build selects neither, so the version does not move.
+   */
+  addColumn(db, users.has("password_changed_at"), "ALTER TABLE users ADD COLUMN password_changed_at INTEGER");
+  addColumn(db, apiKeys.has("last_used_at"), "ALTER TABLE api_keys ADD COLUMN last_used_at INTEGER");
 }
 
 /**

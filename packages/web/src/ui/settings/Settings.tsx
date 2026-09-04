@@ -12,7 +12,9 @@ import type { AppState } from "../../store";
 import { ChevronLeft } from "lucide-react";
 import { navigate, useOrigin } from "../../router";
 import { IconButton } from "../bits";
-import { AccountSection } from "./AccountSection";
+import { AccountSection, EmailScreen, PasswordScreen } from "./AccountSection";
+import { EmailSection } from "./EmailSection";
+import { KeysSection, NewKeyScreen } from "./KeysSection";
 import { MachineAgentsSection } from "./MachineAgentsSection";
 import { MachineSystemsSection } from "./MachineSystemsSection";
 import { MachineSection } from "./MachineSection";
@@ -245,6 +247,17 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
                 <SectionBody state={state} section={DEFAULT_SECTION} />
               </div>
             </>
+          ) : route.leaf !== null ? (
+            /* The three form screens. Each is its own address rather than a
+               form opening inside a row, because a row that grows three fields
+               under itself moves everything below it — see `SettingsLeaf`. */
+            route.leaf === "password" ? (
+              <PasswordScreen me={state.me} />
+            ) : route.leaf === "email" ? (
+              <EmailScreen me={state.me} config={state.config} />
+            ) : (
+              <NewKeyScreen />
+            )
           ) : drilled && route.machineId !== null ? (
             /* The machine's own screen, and one level in, one of its two leaves:
                its systems, or the agents its New session strip offers. All three
@@ -278,10 +291,10 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
 /**
  * One section, and the whole of the mapping from a section id to a screen.
  *
- * ⚠ **A `switch` over the union rather than four `&&`s in the pane, because there
+ * ⚠ **A `switch` over the union rather than six `&&`s in the pane, because there
  * are two call sites now** — the section a URL names, and `DEFAULT_SECTION` where
- * it names none. A fifth member of `SettingsSection` has to be a compile error here
- * rather than a pane that silently renders nothing at one of the two.
+ * it names none. A seventh member of `SettingsSection` has to be a compile error
+ * here rather than a pane that silently renders nothing at one of the two.
  *
  * `config` is passed to two of them for the reason `UsersSection` states: what this
  * instance can do is not on `Me`, and the Email block promises a password reset an
@@ -295,8 +308,12 @@ function SectionBody({ state, section }: { state: AppState; section: SettingsSec
       return <MachinesSection state={state} />;
     case "account":
       return <AccountSection me={state.me} config={state.config} />;
+    case "keys":
+      return <KeysSection me={state.me} />;
     case "server":
       return <ServerSection />;
+    case "email":
+      return <EmailSection />;
     case "users":
       return <UsersSection me={state.me} config={state.config} />;
     default:
@@ -309,7 +326,7 @@ function SectionBody({ state, section }: { state: AppState; section: SettingsSec
  *
  * ⚠ **The docblock said a fifth member "has to be a compile error here" and it
  * was not.** This function answers `ReactNode`, `undefined` inhabits `ReactNode`,
- * and a `switch` that falls off the end returns exactly that — so a fifth
+ * and a `switch` that falls off the end returns exactly that — so a new
  * `SettingsSection` would have rendered a blank pane at both call sites and
  * compiled clean. `noFallthroughCasesInSwitch` does not see it and
  * `noImplicitReturns` is not set in either `tsconfig`.

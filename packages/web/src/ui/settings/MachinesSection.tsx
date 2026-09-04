@@ -11,7 +11,16 @@ import { navigate } from "../../router";
 import { settingsPath } from "../../settings";
 import type { AppState } from "../../store";
 import { ambiguousNames, lastSeenText } from "../../wire";
-import { Badge, Dot, Empty, Icon, SETTINGS_HEADING, SETTINGS_SECTION, reachText } from "../bits";
+import {
+  Badge,
+  Dot,
+  Empty,
+  Icon,
+  SETTINGS_HEADING,
+  SETTINGS_SECTION,
+  SkeletonRow,
+  reachText,
+} from "../bits";
 import { CommandLine } from "../CommandLine";
 
 /**
@@ -33,6 +42,15 @@ import { CommandLine } from "../CommandLine";
  * a re-mint is for is `cpctl enroll <machineId>`. Retire-then-Add is expressly
  * not the substitute: it mints a new machine id and silently drops every grant but
  * the creator's. Q3.428.
+ *
+ * **The list first, the installer under it, and no sentence introducing either**
+ * (decision 3B). The intro — "A machine is a host running the daemon. To add
+ * one, run this on it:" — sat above the command, above the list, so the first
+ * thing on the screen was an explanation of the second thing and the rows
+ * somebody came to scan were below both. The heading ADD A MACHINE over a
+ * command line *is* the instruction; when there is no door, the quota notice
+ * takes the command's place under the same heading, so exactly one sentence on
+ * this screen is ever about the limit.
  */
 
 export function MachinesSection({ state }: { state: AppState }): ReactNode {
@@ -70,15 +88,61 @@ export function MachinesSection({ state }: { state: AppState }): ReactNode {
      * different left edges.
      */
     <div>
-      {/*
-       * The intro is a claim about what this screen does, and in the state
-       * where there is no door it would be false — "run this on it" over nothing
-       * to run. The notice takes its place rather than joining it, so exactly
-       * one sentence on this screen is about the limit.
-       */}
-      <p className="text-xs text-muted">
-        {canAdd ? "A machine is a host running the daemon. To add one, run this on it:" : machineQuotaNotice(state.me)}
-      </p>
+      {/* First section on the screen, so `SETTINGS_HEADING` alone — a rule above
+          the first thing on a page is a line under the title. */}
+      <section>
+        <div className="flex items-baseline gap-2">
+          <h2 className={SETTINGS_HEADING}>Your machines</h2>
+          {/* `text-faint` and beside the heading: a fact about the list, which must
+              never look like the notice — the one sentence here allowed to be
+              about a *problem*. */}
+          {allowance !== null && <span className="text-2xs text-faint">{allowance}</span>}
+        </div>
+
+        <div className="mt-3 space-y-2">
+          {state.phase === "loading" ? (
+            /*
+             * **"No machines yet." may never be a false claim**, and this is the
+             * arm that keeps it true. Today it is a guard rather than a state:
+             * `App.tsx` draws a spinner for the whole app while `phase` is
+             * `loading`, and `bootstrap` promotes to `ready` only on the listing
+             * having landed — so this screen is never mounted before the first
+             * read. The arm exists because that gate is one file away and the
+             * sentence below is the wrong thing to draw the day it moves. One
+             * `SkeletonRow`, never more: the expected count here is 0–1.
+             */
+            <SkeletonRow />
+          ) : state.machines.length === 0 ? (
+            /*
+             * **"No machines yet." is false while the control plane is
+             * unreachable**, and it is the one state where this list is empty for
+             * a reason that has nothing to do with how many machines you have.
+             * `bootstrap` keeps `phase: "ready"` with no machines and `cpError`
+             * set on a cold load against a dead control plane, and the banner
+             * that says so (`ControlPlaneNotice`) is rendered in `AppShell`'s
+             * *sessions* arm and in `Home` — neither of which is on screen here.
+             * So an outage drew a confident empty state with a remedy that could
+             * not work: the installer goes to the same service. `failed`, because
+             * this is the absence of an answer rather than an answer of "none".
+             */
+            state.cpError !== null ? (
+              <Empty failed>Control plane unreachable. Your machines are not gone.</Empty>
+            ) : (
+              // The section under this one is how to add one, or why nothing can
+              // be added, so the empty list need not say either.
+              <Empty>No machines yet.</Empty>
+            )
+          ) : (
+            state.machines.map((machine) => (
+              <MachineRow
+                key={machine.id}
+                machine={machine}
+                showId={ambiguous.has(machine.name.toLowerCase())}
+              />
+            ))
+          )}
+        </div>
+      </section>
 
       {/*
        * **The one-line installer is the only door, and the by-name form is gone.**
@@ -90,11 +154,11 @@ export function MachinesSection({ state }: { state: AppState }): ReactNode {
        * with a checkout runs the same script, and `cpctl` still mints a code for
        * an operator who needs one. `webcheck` asserts the form's absence.
        *
-       * **Removed, not disabled**, in the `!canAdd` state: a command that adds a
-       * machine, printed under a sentence saying there is no way to add one, would
-       * make that sentence a lie while `machineQuotaNotice` stayed literally
+       * **Replaced by the notice, never disabled**, in the `!canAdd` state: a
+       * command that adds a machine, printed under a heading saying to add one,
+       * would make the heading a lie while `machineQuotaNotice` stayed literally
        * `null`-iff-`mayAddMachine`. The property that pair protects is "a door,
-       * or the sentence saying why there is not one".
+       * or the sentence saying why there is not one", under one heading.
        *
        * Nothing under the command. The old note restated the intro ("it installs
        * the daemon, asks who you are, and adds the machine itself") and printed
@@ -102,52 +166,15 @@ export function MachinesSection({ state }: { state: AppState }): ReactNode {
        * "Read it first" link that replaced it went the same day — the URL is in
        * the command, and anybody who wants to read the script can open it.
        */}
-      {canAdd && <CommandLine command={installCommand(location.origin)} />}
-
-      {/* `h2` under `Sheet`'s `h1` and the pane's own heading, in the app's one
-          settings-section chrome — see `SETTINGS_SECTION`. */}
       <section className={SETTINGS_SECTION}>
-        <div className="flex items-baseline gap-2">
-          <h2 className={SETTINGS_HEADING}>Your machines</h2>
-          {/* `text-faint` and beside the heading: a fact about the list, which must
-              never look like the notice — the one sentence here allowed to be
-              about a *problem*. */}
-          {allowance !== null && <span className="text-2xs text-faint">{allowance}</span>}
-        </div>
-
-        <div className="mt-3 space-y-2">
-        {state.machines.length === 0 ? (
-          /*
-           * **"Add one above" is false while the control plane is unreachable**,
-           * and it is the one state where this list is empty for a reason that
-           * has nothing to do with how many machines you have. `bootstrap` keeps
-           * `phase: "ready"` with no machines and `cpError` set on a cold load
-           * against a dead control plane, and the banner that says so
-           * (`ControlPlaneNotice`) is rendered in `AppShell`'s *sessions* arm and
-           * in `Home` — neither of which is on screen here. So an outage drew a
-           * confident empty state with a remedy that could not work: `POST
-           * /v1/machines` goes to the same service.
-           */
-          state.cpError !== null ? (
-            <Empty>
-              Cannot reach the control plane, so your machines cannot be listed. They are not gone — this list is read
-              from it, and so is adding one.
-            </Empty>
-          ) : (
-            // One sentence in both states: the intro above is what says how to
-            // add one, or why nothing can be added, so the empty list need not.
-            <Empty>No machines yet.</Empty>
-          )
+        <h2 className={SETTINGS_HEADING}>Add a machine</h2>
+        {canAdd ? (
+          <div className="mt-3">
+            <CommandLine command={installCommand(location.origin)} />
+          </div>
         ) : (
-          state.machines.map((machine) => (
-            <MachineRow
-              key={machine.id}
-              machine={machine}
-              showId={ambiguous.has(machine.name.toLowerCase())}
-            />
-          ))
+          <p className="mt-2 text-xs text-muted">{machineQuotaNotice(state.me)}</p>
         )}
-        </div>
       </section>
     </div>
   );
@@ -161,16 +188,25 @@ function MachineRow({
   /** Another machine in this list answers to the same name. See `ambiguousNames`. */
   showId: boolean;
 }): ReactNode {
-  const badge = machineBadgeText(machine);
+  /*
+   * **At most one badge per row.** A limit or enrolment badge is the fact that
+   * has to be fixed first; `shared` is a fact about who may act, and it gives
+   * way. Two boxes beside a truncating name on a 390px phone is the collapse the
+   * kebab exists to prevent, and it is the *name* that truncates — every badge
+   * is `shrink-0`, because the badge is what makes the row recognisable.
+   */
+  const stateBadge = machineBadgeText(machine);
+  const badge = stateBadge ?? (machine.owned === true ? null : "shared");
 
-  const standing = machine.ownerDisabled
-    ? // Only ever a machine somebody else owns — a banned owner cannot reach
-      // this screen — so the remedy named is the admin's, not theirs.
-      "its owner has been disabled, so it is switched off until that is lifted"
-    : machine.overLimit
-      ? machine.owned === true
-        ? "over your machine limit — retire another to bring it back"
-        : "over its owner's machine limit"
+  const standing =
+    machine.ownerDisabled || machine.overLimit
+      ? /*
+         * The badge names the state, so the subline does not say it again —
+         * "over the limit" was drawn twice on one row, once in a box and once as
+         * a clause. What survives is the age, the one fact the badge cannot
+         * carry; `lastSeenText` is `null` where it would be noise.
+         */
+        lastSeenText(machine.lastSeenAt)
       : machine.reach === "online"
         ? "online"
         : machine.enrolled
@@ -196,24 +232,30 @@ function MachineRow({
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-1.5">
           <span className="min-w-0 truncate text-sm font-medium">{machine.name}</span>
-          {badge !== null && <Badge tone="strong">{badge}</Badge>}
-        </span>
-        <span className="block truncate text-2xs text-muted">
-          {showId && (
-            <>
-              <code className="text-2xs text-muted/80">{machine.id}</code>
-              {" · "}
-            </>
+          {badge !== null && (
+            <span className="shrink-0">
+              {/* `strong` for a state that needs fixing, plain for `shared`,
+                  which is a fact and not a problem. */}
+              <Badge tone={stateBadge !== null ? "strong" : "plain"}>{badge}</Badge>
+            </span>
           )}
-          {standing}
-          {machine.owned === true ? "" : " · not yours to rename or retire"}
         </span>
+        {(showId || standing !== null) && (
+          <span className="block truncate text-2xs text-muted">
+            {showId && (
+              <>
+                <code className="text-2xs text-muted/80">{machine.id}</code>
+                {standing !== null && " · "}
+              </>
+            )}
+            {standing}
+          </span>
+        )}
       </span>
-      {/* `AgentChooser` needs no such glyph — its whole content is three tappable
-          rows, so the block itself establishes that rows open. This list
-          interleaves rows with prose, a form, a one-time secret and three empty
-          states, and one of its rows may be a machine you do not own, which is
-          exactly where a reader would otherwise assume it is inert. */}
+      {/* The glyph says rows open. This list interleaves rows with headings, a
+          command line and two empty states, and one of its rows may be a machine
+          you do not own, which is exactly where a reader would otherwise assume
+          it is inert. */}
       <Icon as={ChevronRight} size={16} className="shrink-0 text-faint" />
     </button>
   );

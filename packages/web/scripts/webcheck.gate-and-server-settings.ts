@@ -719,7 +719,7 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
   const { canResetField, fieldOrigin, MAIL_BACKLOG_WARN_MS, mailTrouble, originText, secretFieldText, senderMismatch, smtpProblem } = await import(
     "../src/instance.js"
   );
-  const { emailChangeNeedsProof, linkError, userState, userStateText } = await import("../src/account.js");
+  const { linkError, userState, userStateText } = await import("../src/account.js");
   const { navRows, GROUP_TITLES } = await import("../src/settings.js");
   const { ApiError } = await import("../src/http.js");
 
@@ -882,27 +882,13 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
   );
 
   /*
-   * **Setting the address is taking the account**, so the answer does not depend
-   * on what the address currently is.
-   *
-   * ⚠ This asserted the opposite for the state below — `emailVerified: false`
-   * used to be exempt, on both sides, and the server agreed with it. That pair
-   * was a full takeover from a borrowed session: repoint the address with no
-   * proof, confirm it with the same session, `/v1/forgot`, `/v1/reset`, and out
-   * comes a password the thief chose. Both green assertions agreed with each
-   * other and with the defect. The case is kept and its expectation inverted
-   * rather than deleted, because the state it names — an account with a password
-   * and no confirmed address, which is what `main.ts` creates the bootstrap admin
-   * as — is the one that was exposed.
+   * `emailChangeNeedsProof` is gone (Q1.630): `PUT /v1/me/email` takes the
+   * session alone by the owner's decision, and the predicate that decided when to
+   * draw the password field went with it. `relaycheck` pins the route's new shape.
    */
-  check("changing a confirmed address needs proof", emailChangeNeedsProof({ emailVerified: true, hasPassword: true }), true);
-  check("and so does adding the first one", emailChangeNeedsProof({ emailVerified: false, hasPassword: true }), true);
-  check("as does an account that has no address at all", emailChangeNeedsProof({ hasPassword: true }), true);
-  // The migration rule reappearing, and the one exemption that stays: an account
-  // with no password row is proved by its API key, and demanding one it never had
-  // would strand it. Not a hole — no session can exist without that row, so only
-  // a key reaches this arm and a key is already full authority.
-  check("nor does an account with no password", emailChangeNeedsProof({ emailVerified: true, hasPassword: false }), false);
+  check("the email form asks no proof of its own", /emailChangeNeedsProof|account-email-proof/.test(
+    readFileSync(new URL("../src/ui/settings/AccountSection.tsx", import.meta.url), "utf8"),
+  ), false);
 
   /*
    * Every way a link can be dead reads the same. Written as an equality rather
@@ -918,27 +904,49 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
   const plain = { id: "u_1", name: "ada", isAdmin: false };
   const admin = { id: "u_2", name: "root", isAdmin: true };
 
-  check("a non-admin sees two rows", navRows(plain).map((row) => row.spec.id), ["account", "machines"]);
+  check("a non-admin sees three rows", navRows(plain).map((row) => row.spec.id), ["account", "keys", "machines"]);
   /*
    * THE case, and it is invisible to the only people who could report it: a
    * heading computed from the static table renders "Server" above nothing for a
    * non-admin, and only an admin ever sees this nav in a correct state.
    */
   check("and no heading floats over nothing", navRows(plain).every((row) => row.heading === null), true);
-  check("an unknown viewer is treated as a non-admin", navRows(null).map((row) => row.spec.id), ["account", "machines"]);
-  check("an admin sees four", navRows(admin).map((row) => row.spec.id), ["account", "machines", "server", "users"]);
+  check("an unknown viewer is treated as a non-admin", navRows(null).map((row) => row.spec.id), ["account", "keys", "machines"]);
+  check(
+    "an admin sees six",
+    navRows(admin).map((row) => row.spec.id),
+    ["account", "keys", "machines", "server", "email", "users"],
+  );
   check(
     "with the heading on the first row of its group only",
     navRows(admin).map((row) => row.heading),
-    [null, null, "server", null],
+    [null, null, null, "server", null, null],
   );
-  check("and Server settings sits above Users", navRows(admin).findIndex((row) => row.spec.id === "server") < navRows(admin).findIndex((row) => row.spec.id === "users"), true);
+  const adminIndex = (id: string): number => navRows(admin).findIndex((row) => row.spec.id === id);
+  check("and Server sits above Users", adminIndex("server") < adminIndex("users"), true);
+  // Email slots between them: it was split out of Server and reads as its
+  // continuation, and Users is the screen with the most rows, so it goes last.
+  check("with Email between the two", adminIndex("server") < adminIndex("email") && adminIndex("email") < adminIndex("users"), true);
   check("every group has a title", Object.keys(GROUP_TITLES).length >= 1, true);
+  /*
+   * ⚠ **The heading may not be a word a row under it uses.** It was "Server"
+   * over "Server settings", and a heading that restates its first row reads as
+   * the row. Pinned as the string *and* as the property, so a renamed row cannot
+   * quietly collide with it again. Decision 2A.
+   */
+  check("the admin band is headed \"Admin\"", GROUP_TITLES.server, "Admin");
+  check(
+    "and no row under it shares a word with its heading",
+    navRows(admin)
+      .filter((row) => row.spec.group === "server")
+      .every((row) => !row.spec.title.toLowerCase().split(/\s+/).includes(GROUP_TITLES.server.toLowerCase())),
+    true,
+  );
 
   /*
-   * **No field in Server settings writes itself.**
+   * **No field in Server or Email settings writes itself.**
    *
-   * That screen shipped with two saving mechanisms: some fields committed on
+   * The SMTP form shipped with two saving mechanisms: some fields committed on
    * `onBlur` while the Save button wrote the same keys from a separate draft, and
    * an empty value in that draft means *clear* — so pressing Save deleted exactly
    * the fields that had just saved themselves, and the screen then correctly
@@ -953,7 +961,11 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
     new URL("../src/ui/settings/ServerSection.tsx", import.meta.url),
     "utf8",
   );
-  check("no settings field commits on blur", /onBlur=/.test(serverSection), false);
+  // The SMTP form is `EmailSection` since the split; the field primitive both
+  // draw is `SettingField`, so all three are swept.
+  const emailSection = readFileSync(new URL("../src/ui/settings/EmailSection.tsx", import.meta.url), "utf8");
+  const settingField = readFileSync(new URL("../src/ui/settings/SettingField.tsx", import.meta.url), "utf8");
+  check("no settings field commits on blur", /onBlur=/.test(serverSection + emailSection + settingField), false);
   /*
    * And the password's state sentence is not rebuilt in the JSX. It was two
    * expressions — an existence test on `set` and an `originText` beside it — and
@@ -961,11 +973,43 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
    * did: "No password set. from the environment". The rule is that this file
    * asks one function.
    */
-  check(
-    "the secret's state is not re-derived on the screen",
-    /No password|A password is set/.test(serverSection.replace(/\/\*[\s\S]*?\*\//g, "")),
-    false,
-  );
+  const emailCode = emailSection.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  check("the secret's state is not re-derived on the screen", /No password|A password is set/.test(emailCode), false);
+  check("and the screen asks the one function", /secretFieldText\(/.test(emailCode), true);
+  /*
+   * ⭐ **The password's Remove exists only while a row is stored here**, and the
+   * placeholder promising to keep the stored one with it. On a fresh server
+   * both were drawn — a Remove for nothing, over a placeholder describing a
+   * value that did not exist. Removability is `set` alone (`secretFieldText`'s
+   * own distinction: presence is `set || envSet`, removability is `set`), so
+   * the gate is that field and nothing looser.
+   */
+  const removeGate = emailCode.indexOf("passwordStored =");
+  check("removing the stored password is gated on a row being stored", removeGate >= 0, true);
+  check("and the gate reads `set` alone", /passwordStored = passwordField\?\.set === true/.test(emailCode), true);
+  check("and the Remove is two-step, naming what goes", /Remove the stored password\?/.test(emailCode), true);
+  check("with Cancel last", /Remove the stored password\?[\s\S]*?"Remove"[\s\S]*?Cancel/.test(emailCode), true);
+  /*
+   * **Registration is a badge and a verb, not a switch** (decision 7A). A
+   * `role="switch"` promises a tap flips it, and opening waits behind a confirm.
+   * Only the widening act is confirmed (Q3.220): the question text appears in
+   * one arm and the closing tap goes straight to `set(false)`.
+   */
+  const serverCode = serverSection.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  check("registration is not drawn as a switch", /role="switch"/.test(serverCode), false);
+  check("opening registration asks first", (serverCode.match(/Open registration to anyone\?/g) ?? []).length, 1);
+  check("and closing does not", /open \? set\(false\) : setConfirming\(true\)/.test(serverCode), true);
+  /*
+   * **Remint is two-step** (decision 12A, Q3.219's mirror): the cost of a remint
+   * lands on somebody else's provisioning script, not on the person tapping.
+   * The first mint retires nothing and stays one tap.
+   */
+  check("reminting the provisioning key asks first", /Replace the provisioning key\?/.test(serverCode), true);
+  check("and the first mint does not", /minted \? \(\) => setConfirming\(true\) : mint/.test(serverCode), true);
+  // Save buttons are drawn always and disabled until dirty: a button that
+  // materialises on the first keystroke is a layout shift under the finger.
+  check("Save is never gated on dirtiness in the JSX", /dirty && \(?\s*<Button/.test(serverCode + emailCode), false);
+  check("and is disabled until dirty instead", ((serverCode + emailCode).match(/disabled=\{busy \|\| !dirty/g) ?? []).length, 2);
   /*
    * And the sign-in screen reads the *drawn* predicate rather than the three-way
    * one — testing `=== "link"` there is what threw the fail-open away.
@@ -1062,9 +1106,10 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
    */
   check(
     "and the SMTP fields are held in one draft",
-    serverSection.split("useState<SmtpDraft>").length - 1,
+    emailSection.split("useState<SmtpDraft>").length - 1,
     1,
   );
+  check("and that draft lives on the Email screen, not the Server one", /SmtpDraft/.test(serverSection), false);
 
   // The property rather than the rows, so a third group cannot arrive wrong.
   for (const me of [null, plain, admin]) {

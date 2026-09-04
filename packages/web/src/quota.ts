@@ -85,9 +85,11 @@ export function mayAddMachine(me: Me | null): boolean {
  * deliberately no "2 of 5" line while there is room: that would break the iff,
  * and a progress readout is a second function's job.
  *
- * "Whoever runs this control plane" rather than "the admin", because the person
- * reading this is not the person with a shell on it — `gateNotice`'s vocabulary,
- * for its reason.
+ * "Whoever runs this server" rather than "the admin", because the person
+ * reading this is not the person with a shell on it — `gateNotice`'s reason,
+ * one word shorter. **Every sentence here is at most fourteen words** (the
+ * settings copy caps, decision 9B, held in review): the old ones ran to 27, and
+ * a notice that replaces a control has to be read at the moment a tap failed.
  */
 export function machineQuotaNotice(me: Me | null): string | null {
   /*
@@ -125,24 +127,22 @@ export function machineQuotaNotice(me: Me | null): string | null {
        * would be this screen guessing, which is the other half of the same
        * lesson.
        */
-      return "You cannot add a machine on this account. Ask whoever runs this control plane why.";
+      return "This account cannot add machines. Ask whoever runs this server.";
     case "none":
       return quota.count === 0
-        ? "Your machine limit is 0, so you cannot add one. Ask whoever runs this control plane to raise it."
-        : "Your machine limit is 0, so your machines have stopped working. " +
-            "Only whoever runs this control plane can raise it again.";
+        ? "Your machine limit is 0. Ask for it to be raised."
+        : "Your limit is 0, so your machines are off. Ask for a higher limit.";
     case "full": {
       const over = quota.count - quota.limit;
       if (over <= 0) {
-        return (
-          `You are using all ${quota.limit} of your ${quota.limit} machines. ` +
-          "Retire one, or ask whoever runs this control plane to raise the limit."
-        );
+        return `All ${quota.limit} machines in use. Retire one, or ask for a higher limit.`;
       }
+      // No numbers: `machineAllowanceText` draws "3 of 2" beside the heading
+      // this sits under, and repeating them here pushed the sentence past
+      // fourteen words.
       return (
-        `You have ${quota.count} machines and a limit of ${quota.limit}, so the newest ` +
-        `${over === 1 ? "one has" : `${over} have`} stopped working. ` +
-        "Retire one, or ask whoever runs this control plane to raise the limit."
+        `Over the limit: the newest ${over === 1 ? "one is" : `${over} are`} off. ` +
+        "Retire one, or ask for more."
       );
     }
   }
@@ -183,9 +183,14 @@ export function machineBadgeText(machine: {
 export function machineLimitChangeNotice(name: string, owned: number, next: number): string | null {
   const stopping = owned - next;
   if (stopping <= 0) return null;
+  /*
+   * Sixteen words with two machines, two over the cap, and accepted: the pinned
+   * substrings — `newest N working` and `brings them back` — cost seven of them,
+   * and the count and the rule are the whole of what an admin is deciding on.
+   */
   return (
-    `${name} owns ${owned} machine${owned === 1 ? "" : "s"}. A limit of ${next} stops the newest ` +
-    `${stopping === 1 ? "one" : String(stopping)} working — raising it again brings ` +
+    `${name} has ${owned}. A limit of ${next} stops the newest ` +
+    `${stopping === 1 ? "one" : String(stopping)} working — raising it brings ` +
     `${stopping === 1 ? "it" : "them"} back.`
   );
 }
@@ -255,12 +260,11 @@ export function fleetMachineLimitNotice(current: string, next: string): string |
   const from = resolve(current);
   const to = resolve(next);
   if (to >= from) return null;
+  // Drawn only inside the confirmation (decision 10A), so it is read at the
+  // moment of deciding: the rule, and that it is reversible. Nothing else.
   return to === 0
-    ? "Nobody on this instance will be able to run a machine, and everybody's machines stop working. " +
-        "Nothing is deleted — raising the limit brings them all back."
-    : `Everyone whose limit comes from the instance default drops from ${from} to ${to}. ` +
-        "Anybody owning more than that has their newest machines stop working — nothing is deleted, " +
-        "and raising the limit brings them back.";
+    ? "Every machine on the server stops. Raising the limit brings them back."
+    : `Default drops from ${from} to ${to}; machines over it stop. Raising the limit brings them back.`;
 }
 
 /**
@@ -275,7 +279,7 @@ export function fleetMachineLimitNotice(current: string, next: string): string |
 export function machineLimitProblem(draft: string): string | null {
   const text = draft.trim();
   if (text.length === 0) return null;
-  if (!/^\d+$/.test(text)) return "The limit must be a whole number, or empty to use the default.";
+  if (!/^\d+$/.test(text)) return "Whole number, or empty for the default.";
   if (Number.parseInt(text, 10) > HARD_MACHINE_CEILING) {
     return `${HARD_MACHINE_CEILING} machines per person is the fleet-wide ceiling.`;
   }

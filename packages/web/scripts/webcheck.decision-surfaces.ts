@@ -321,12 +321,43 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
      * which is how the one nobody uses drifts from the one they do.
      */
     const wanted = ['label="Open"', 'label="Remove"', "danger", "<Menu", "IconButton"];
+    // Comments stripped: the docblock over the note records the cut sentence.
+    const consent = readFileSync(new URL("../src/ui/PluginConsent.tsx", import.meta.url), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "");
+    // The archive note is eleven words; the reassurance that used to follow it
+    // described a step the screen draws anyway.
+    check("the archive note no longer promises what the consent wall shows", consent.includes("Nothing is sent until"), false);
+    check("and says re-installing keeps data", consent.includes("Re-installing keeps stored data."), true);
     check(
       "a machine's plugin row keeps every act, behind one kebab",
       wanted.filter((needle) => !panel.includes(needle)),
       [],
     );
     check("and offers no settings of its own", panel.includes('label="Settings"'), false);
+    /*
+     * ⚠ **Open is present-but-disabled while the plugin is off**, which its own
+     * comment claimed for a release while the JSX gated it on `plugin.enabled`
+     * and drew nothing. A control that vanishes is one somebody goes looking
+     * for; a dimmed row says why it will not act.
+     */
+    check("Open stays in the menu while the plugin is off, disabled", /label="Open"\s*disabled=\{!plugin\.enabled\}/.test(panel), true);
+    /*
+     * **The remove confirmation names the plugin and replaces the row's
+     * controls.** "Remove it and everything it kept?" was drawn *under* a row
+     * whose link and kebab stayed live, and Cancel was the one filled button on
+     * the screen. Three pins: the question carries `plugin.name`; the confirming
+     * group ends with Cancel; and no Cancel in this file wears `tone="primary"`.
+     */
+    const confirmStart = panel.indexOf("and its data?");
+    check("the remove question names the plugin", confirmStart >= 0 && /Remove <span[^>]*>\{plugin\.name\}<\/span> and its data\?/.test(panel), true);
+    const confirmEnd = panel.indexOf("</div>", confirmStart);
+    const confirmGroup = confirmStart >= 0 && confirmEnd >= 0 ? panel.slice(confirmStart, confirmEnd) : "";
+    check("and Cancel is the last button in the confirming group", /Cancel\s*<\/Button>\s*$/.test(confirmGroup), true);
+    check("and Cancel wears the default tone", /tone="primary"[^>]*>\s*Cancel|<Button[^>]*tone="primary"[\s\S]{0,120}Cancel/.test(panel), false);
+    // The confirmation is drawn *instead of* the link-and-kebab box, so the two
+    // are the arms of one ternary rather than siblings: `confirming ? (…) : (…)`.
+    check("and the confirmation stands in for the row's controls rather than under them", /\{confirming \? \(\s*<div[^>]*>\s*<span[^>]*>\s*Remove/.test(panel), true);
     /*
      * ⚠ **The row is a link, and the link is the whole answer to "where are this
      * plugin's settings".** Without this, deleting the `Settings` entry above

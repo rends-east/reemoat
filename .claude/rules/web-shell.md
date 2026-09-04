@@ -96,21 +96,13 @@ have to enter. These are the rules a change here must not break:
   pin, the two spinners); *move it off the row* when it is neither (the context
   percentage went into a popover). A mount only displaces what lies between it and
   the nearest `flex-1` sibling.
-- **Reserve the gutter**, `scrollbar-gutter: stable` as `.scroll-stable`, on the
-  **one** box other things are measured against — the transcript — never on `*`,
-  which would pad every popover and `<pre>`. `scrollbar-width: thin` takes layout
-  width, so crossing the fit threshold moves everything centred by half of it. The
-  rail and the content pane are exceptions and neither may take it back. Q3.203.
-- **The content pane paints `bg-surface`, the rail `bg-ink`, both explicitly.**
-  Neither may fall through to `body`. Q3.204.
-- **The paper is grey with a memory of warmth, and `raised` is spent at two
-  strengths.** Chroma across all three surfaces is 0.003–0.006 in OKLCH; `surface`
-  is plain `#ffffff`. **In the transcript, machinery has no fill at all** — a tool
-  call is a bare row, like the folded run beside it. What stays filled is
-  **`bg-raised`** for the message you wrote at 1.22:1, and **`bg-raised/50`** at
-  1.10:1 for a plan, a wizard's panel, and a well *inside* an expanded row. `ink`
-  is the rail and, at 1.06:1 from the pane, is **not** a tonal step anything in the
-  conversation may be built on. Q3.205, Q3.206.
+- **Reserve the gutter**, `.scroll-stable`, on the transcript only — never on `*`,
+  never on the rail or the content pane. Q3.203.
+- **The content pane paints `bg-surface`, the rail `bg-ink`, explicitly.** Q3.204.
+- **`raised` is spent at two strengths, and machinery in the transcript has no
+  fill at all** — `bg-raised` for the message you wrote, `bg-raised/50` for a plan,
+  a wizard's panel and a well inside an expanded row; `ink` is the rail and not a
+  step anything in the conversation may be built on. Q3.205, Q3.206.
 - **A control is drawn in the colour of what it sits on, so `edge-strong` is its
   only identification.** Every field and every unfilled button matches its ground
   (`bg-ink` in the rail, `bg-surface` on a sheet or in the composer) and is bounded
@@ -136,11 +128,8 @@ have to enter. These are the rules a change here must not break:
   loudest object on screen. `raised` means **state**: a tab you are on, a toggle
   that is on, a chosen menu row. Q3.209.
 - **The magnifier in the rail header is the fleet-wide search, not built, drawn
-  `disabled` rather than doing nothing silently.** The box below it filters *this
-  machine's* chats by title. Q3.211.
-- **`border-r` on the rail: the rule is the ratio.** Below roughly 1.15:1 a line
-  does the dividing and the tone only supports it; at 1.06:1 two panes with no
-  line between them read as one pane. Q3.210.
+  `disabled`.** The box below it filters *this machine's* chats by title. Q3.211.
+- **`border-r` on the rail: the rule is the ratio**, measured in Q3.210.
 - **`visibleRows` in `groups.ts` is the single source of render order**, shared
   with `keyboard.ts` so `j` cannot land on a row nobody can see. `pinnedFor` and
   `orphansFor` are the two exported slices the JSX is **obliged** to call —
@@ -263,9 +252,9 @@ have to enter. These are the rules a change here must not break:
 **A machine row carries its id, because the name is not unique.** `nameVisibleTo`
 refuses a duplicate on the five routes that *name* a machine, but `PUT
 /v1/admin/grants` reaches the same state without naming anything;
-`resolveMachineRef` then silently picks the owned one, so the id is on the row. The
-subline says **"not yours to rename or retire"** rather than "not registered to
-you" — the reader needs the consequence.
+`resolveMachineRef` then silently picks the owned one, so the id is on the row. A
+machine that is not yours carries a **`shared` badge** rather than a subline; one
+badge per row, and a limit or enrolment badge outranks it. Q3.543.
 
 **Systems live inside a machine, and there is no top-level section for them.**
 `/settings/machines/:machineId/systems[/:systemId]`: the machine rides the URL for
@@ -295,15 +284,21 @@ their own machine under Settings → Machines. Also **no workspace changes scree
 per machine and holds a socket only for the three most recently viewed sessions.
 
 **The two-step confirmation is the only modal-shaped control on a settings *row*,
-and there are four of them** — deleting a person (`UserRow`), retiring a machine
-(`MachinesSection`), signing an agent out (`SignOutButton`, which takes `danger` on
+and there are six of them** — deleting a person (`UserRow`), retiring a machine
+(`MachineSection`), signing an agent out (`SignOutButton`, which takes `danger` on
 the *first* tap: retiring a machine is undone by enrolling it again from the same
-screen, while a signed-out CLI needs a device-code flow in another tab), and
-revoking an API key — but **only somebody else's**. `KeyRow` in `UsersSection` is
-two-step; `AccountSection`'s list of *your own* keys is a bare `Revoke` on one tap,
-with the consequence put **before** the button as prose. Q3.219. The one confirming
-control not on a row is Registration in `ServerSection`, asymmetric on purpose:
-**only the act that widens authority is confirmed**. Q3.220.
+screen, while a signed-out CLI needs a device-code flow in another tab), removing
+a plugin, removing the stored SMTP password (`EmailSection`), reminting the
+provisioning key (`ServerSection`, Q3.547), and revoking an API key — but
+**only somebody else's**. One `KeyRow` serves both lists and `confirm` is the
+prop: two-step in `UsersSection`; `KeysSection`'s *own* keys are a bare `Revoke`
+on one tap, the only consequence at rest being the `this browser` row's — decided
+by `thisBrowsersKey`, never under a session credential. Q3.219, Q3.545, Q3.546.
+**Every confirmation names its subject**, and a two-step control is a bare button
+at rest: its cost is the confirmation's text. The one confirming control not on a
+row is Registration in `ServerSection`, a `Badge` and a verb button rather than a
+`role="switch"`, asymmetric on purpose: **only the act that widens authority is
+confirmed**. Q3.220.
 
 The first tap replaces the row's buttons with the question and its two answers, so
 nothing else on the row can be hit by accident. **The confirming row ends with
@@ -385,7 +380,7 @@ primitive adds `tap` itself and carries its own entry.
 | `packages/web/src/nav.ts` | What a navigation moves (`depthOf`, `isSheet`, `navMove` — five values, two stacks never compared) and where "up" goes (`upFrom`, read by Telegram's arrow). Its own module because `router.ts` reads `window.location` in its module body |
 | `packages/web/src/telegram.ts` | The mini-app bridge, hand-written: the injected `TelegramWebviewProxy` only, no SDK, and **no iframe transport** while `frame-ancestors 'none'` stands |
 | `packages/web/src/ui/SessionMenu.tsx` | What you can do to a session — rename, pin, stop, resume — used from the header and every list row, plus `RenameField` |
-| `packages/web/src/ui/settings/` | `SettingsNav` is the 224px column beside the section at `sm` and the whole sheet body below it. One file per section — Account, Machines, **Server settings**, Users, in that order; the last two `adminOnly`. **No neutral state at `sm`+**: the pane draws `DEFAULT_SECTION` and the rail highlights the same constant. `/settings` still parses to `section: null` (below `sm` it *is* the list), so the default feeds what is *drawn*, never `settingsUp`, and is never `adminOnly`. `ServerSection` is the whole admin surface — registration, the machine limit, the provisioning key, the SMTP form and a test send — and carries no delivery log (Q3.225). It is the only thing that can change what `GET /v1/instance` reports, so it calls `store.refreshConfig()` beside its own `setAnswer`. Systems is **not** a section: `MachineSystemsSection` and `SystemsPanel` hang off a machine, two URL depths down |
+| `packages/web/src/ui/settings/` | `SettingsNav` is the 224px column beside the section at `sm` and the whole sheet body below it. One file per section — Account, **API keys**, Machines, then under an "Admin" heading Server, **Email**, Users, in that order; the last three `adminOnly` (Q3.543). **No neutral state at `sm`+**: the pane draws `DEFAULT_SECTION` and the rail highlights the same constant. `/settings` still parses to `section: null` (below `sm` it *is* the list), so the default feeds what is *drawn*, never `settingsUp`, and is never `adminOnly`. `ServerSection` holds registration, the domains, the machine limit and the provisioning key; `EmailSection` holds the SMTP form, the test send and delivery trouble, and carries no delivery log (Q3.225). Both change what `GET /v1/instance` reports, so each calls `store.refreshConfig()` beside its own `setAnswer`. A list being read draws one `SkeletonRow` (Q3.548, Q3.544). **No row opens a form in place**: password, email and a new key are leaf screens (`SettingsLeaf`, Q3.549); keys are a `KeyTable`. Systems is **not** a section: `MachineSystemsSection` and `SystemsPanel` hang off a machine, two URL depths down |
 | `packages/web/scripts/webcheck.ts` | Offline driver for the browser client. Stubs `window`, uses a real loopback socket. **Every pure function it imports is one this repo promises to keep assertable** |
 
 ## Bounds

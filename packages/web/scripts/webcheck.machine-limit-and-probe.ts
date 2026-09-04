@@ -130,30 +130,40 @@ process.stdout.write("\nthe machine limit\n");
 
   const noticeOf = (over: Record<string, unknown>): string => machineQuotaNotice(me(over)) ?? "";
   report(
-    "a fresh account on a closed instance is told who to ask",
-    noticeOf({ machineCount: 0, machineLimit: 0 }).includes("Ask whoever runs this control plane"),
+    "a fresh account on a closed instance is told what to ask for",
+    noticeOf({ machineCount: 0, machineLimit: 0 }).includes("Ask for it to be raised"),
     noticeOf({ machineCount: 0, machineLimit: 0 }),
   );
   report(
     "and one whose machines just went dark is told they went dark",
-    noticeOf({ machineCount: 2, machineLimit: 0 }).includes("stopped working"),
+    noticeOf({ machineCount: 2, machineLimit: 0 }).includes("your machines are off"),
     noticeOf({ machineCount: 2, machineLimit: 0 }),
   );
   report(
     "at the limit, the count is in the sentence",
-    noticeOf({ machineCount: 2, machineLimit: 2 }).includes("all 2 of your 2"),
+    noticeOf({ machineCount: 2, machineLimit: 2 }).includes("All 2 machines in use"),
     noticeOf({ machineCount: 2, machineLimit: 2 }),
   );
   report(
     "over it, one machine is singular",
-    noticeOf({ machineCount: 3, machineLimit: 2 }).includes("newest one has"),
+    noticeOf({ machineCount: 3, machineLimit: 2 }).includes("newest one is off"),
     noticeOf({ machineCount: 3, machineLimit: 2 }),
   );
   report(
     "and two are plural",
-    noticeOf({ machineCount: 4, machineLimit: 2 }).includes("newest 2 have"),
+    noticeOf({ machineCount: 4, machineLimit: 2 }).includes("newest 2 are off"),
     noticeOf({ machineCount: 4, machineLimit: 2 }),
   );
+  /*
+   * The copy caps (decision 9B) are held in review rather than by a driver, and
+   * this is the one place a driver can count without reading JSX: every notice
+   * is a pure string. Fourteen words is the cap for a sentence that replaces a
+   * control, and 27 is what these ran to before.
+   */
+  for (const [count, limit] of [[0, 0], [2, 0], [2, 2], [3, 2], [4, 2], [0, 5]] as const) {
+    const text = noticeOf({ machineCount: count, machineLimit: limit, canAddMachine: false });
+    report(`the notice for ${count}/${limit} is at most 14 words`, text.split(/\s+/).length <= 14, text);
+  }
 
   /* ---- the admin's consequence line, which is also whether to confirm ---- */
 
@@ -299,6 +309,37 @@ process.stdout.write("\nthe machine limit\n");
       `${asks} < ${door}`,
     );
     /*
+     * **The list first, the installer under it, under its own heading, with no
+     * sentence** (decision 3B). The intro that opened this screen explained the
+     * command before the rows anybody came to scan; the heading is the
+     * instruction now. Pinned as the heading's presence, the intro's absence, and
+     * the order — the rows' heading before the door's.
+     */
+    const listHeading = src.indexOf("Your machines");
+    const addHeading = src.indexOf("Add a machine");
+    check("the installer sits under its own heading", addHeading >= 0, true);
+    check("with no sentence introducing it", /host running the daemon|run this on it/.test(src), false);
+    check("and the list comes first", listHeading >= 0 && addHeading >= 0 && listHeading < addHeading, true);
+    /*
+     * **"No machines yet." may never be a false claim.** One skeleton row stands
+     * in while the first listing is in flight — exactly one, because the expected
+     * count is 0–1 and two placeholders collapsing to one sentence is a layout
+     * shift that implied an item. Ordered before the sentence in source so the
+     * loading arm is tested first.
+     */
+    const skeletons = src.split("<SkeletonRow").length - 1;
+    check("one skeleton row stands in for the first listing", skeletons, 1);
+    check("and it is asked before the empty state is claimed", src.indexOf("<SkeletonRow") < src.indexOf("No machines yet."), true);
+    /*
+     * **Ownership is a badge, not a clause.** " · not yours to rename or retire"
+     * rode the truncating subline, so on a phone the one fact that told you a row
+     * was inert was the part that got cut. It is `shared` in a `shrink-0` badge
+     * now, and at most one badge draws per row — a limit or enrolment badge wins.
+     */
+    check("a machine you do not own carries a `shared` badge", /"shared"/.test(src), true);
+    check("and no longer says so in the subline", /not yours to rename or retire/.test(src), false);
+    check("with the state badge outranking it", /machineBadgeText\(machine\)[\s\S]{0,200}\?\? \(machine\.owned === true \? null : "shared"\)/.test(src), true);
+    /*
      * Creating and retiring a machine move `machineCount`, which is the number
      * the limit is enforced against — and `runResume` refreshes `me` only on a
      * `loading → ready` promotion. Through `resume` alone, the add form stays
@@ -379,6 +420,33 @@ process.stdout.write("\nthe machine limit\n");
       leavesScreen >= 0 && dropsMachine >= 0 && leavesScreen < dropsMachine,
       true,
     );
+    /*
+     * **Retire names its subject and carries its cost only in the confirmation**
+     * (decisions 10A and Q3.218). The 45-word paragraph at rest is gone; the
+     * question names the machine — this app explicitly supports two machines
+     * called the same thing — and the consequence sentence appears after
+     * `confirming ?`, never before it.
+     */
+    const question = machineSrc.indexOf("Retire {machine.name}?");
+    const cost = machineSrc.indexOf("Frees the name and a slot.");
+    const branch = machineSrc.indexOf("confirming ?");
+    check("the retire confirmation names the machine", question >= 0, true);
+    check("and states the cost", cost >= 0, true);
+    check("only inside the confirming arm", branch >= 0 && cost > branch, true);
+    check("with nothing of it drawn at rest", /voids any outstanding setup code|loses it silently/.test(machineSrc), false);
+    /*
+     * **Two acts, two locks.** One `busy` flag disabled Retire's Cancel while a
+     * setup code minted. Each section holds its own now, and the confirming
+     * pair's Cancel reads the retire one.
+     */
+    check("minting and retiring hold separate flags", /setMinting\(/.test(machineSrc) && /setRetiring\(/.test(machineSrc), true);
+    check("and Retire's Cancel is locked by retiring alone", /disabled=\{retiring\} onClick=\{\(\) => setConfirming\(false\)\}/.test(machineSrc), true);
+    // The toast is three words: the facts it carried cannot be re-read once the
+    // machine is gone from every screen, which is what a toast may not be the
+    // only copy of.
+    check("the retire toast carries no facts nothing can re-read", /enrollment code.*stopped working|expire within/.test(machineSrc), false);
+    // The unreachable arm no longer restates its own position.
+    check("the unreachable line names the reason and stops", /so its systems, agents and plugins/.test(machineSrc), false);
   }
 
   {
@@ -398,6 +466,36 @@ process.stdout.write("\nthe machine limit\n");
     // `DangerButton`'s glyph is reserved for the irreversible, and this undoes
     // itself the moment the number goes back up.
     check("lowering is not dressed as irreversible", /DangerButton[\s\S]{0,200}Save limit/.test(src), false);
+    /*
+     * **One key row for both lists.** `UsersSection` drew its own `KeyRow` and
+     * `AccountSection` drew a second markup of the same key, and only one said
+     * how old it was. The admin panel now imports the shared one and defines
+     * none — so the two lists cannot drift, and the two-step-versus-one-tap
+     * decision is that component's `confirm` prop rather than two copies.
+     */
+    check("the admin's key panel draws the shared row", /import \{ KeyRow, KeyTable \} from "\.\/KeyRow"/.test(src), true);
+    check("and keeps no copy of its own", /function KeyRow\(/.test(src), false);
+    check("with the two-step on, since it is somebody else's credential", /<KeyRow[\s\S]{0,200}confirm=\{true\}/.test(src), true);
+    /*
+     * **The admin checkbox precedes Create in DOM order.** It came after, so tab
+     * order and reading order both reached the button before the one choice
+     * that changes what the button does. Source order is DOM order here.
+     */
+    const adminBox = src.indexOf('type="checkbox"');
+    const createButton = src.indexOf('type="submit"');
+    check("the admin checkbox is drawn", adminBox >= 0, true);
+    check("and so is Create", createButton >= 0, true);
+    check("and the checkbox comes first", adminBox >= 0 && createButton >= 0 && adminBox < createButton, true);
+    /*
+     * The CLI limitation that opened the screen is a fact for `web-shell.md`,
+     * not the first line an admin reads (decision 11A); the unreachable empty
+     * state is replaced by the reachable one — the admin is always a row.
+     */
+    check("the grant sentence has left the screen", /cpctl admin grant/.test(src), false);
+    check("and the empty arm is one somebody can reach", /Only you so far\./.test(src), true);
+    check("and \"Nobody yet\" is not drawn over a list that always has you in it", /Nobody yet/.test(src), false);
+    // The panel's direction is measured on the tap, never taken from the index.
+    check("the kebab's direction is measured, not indexed", /getBoundingClientRect\(\)/.test(src) && !/openUp/.test(src), true);
   }
 
   {
@@ -414,6 +512,9 @@ process.stdout.write("\nthe machine limit\n");
      * own `+` drawn for the life of the tab, onto a `409`.
      */
     check("saving a server setting re-reads the admin's own quota", /refreshMe\(\)/.test(src), true);
+    // The fleet-wide consequence is drawn only once somebody is confirming
+    // (decision 10A): at rest this is a field and a disabled Save.
+    check("the fleet consequence is drawn only in the confirm arm", /confirming && consequence !== null \?/.test(src), true);
   }
 }
 

@@ -967,6 +967,40 @@ export function Skeleton({ rows = 3 }: { rows?: number }): ReactNode {
 }
 
 /**
+ * One row's worth of "not read yet", for a list whose expected length is 0–1.
+ *
+ * A sibling of {@link Skeleton} rather than `rows={1}` on it, and the difference
+ * is the shape it stands in for. That one is a *session* row — a status dot and
+ * two lines at `px-4 py-3.5` — and the four settings lists that draw this are
+ * none of those things: a key, a device, a person, a machine, each one `min-h-11`
+ * row with a title and a short subline. Standing the session shape in front of
+ * them made the list jump on arrival, which is the one thing a placeholder is
+ * for preventing.
+ *
+ * ⚠ **Exactly one row, and the primitive takes no count on purpose.** The
+ * settings lists this is for commonly hold zero or one thing — your keys, your
+ * other devices, the people on a personal instance — so three placeholder rows
+ * collapsing to "No keys yet." is a two-row layout shift that implied two items
+ * that never existed. One row collapsing to one sentence is a paint. `webcheck`
+ * pins the absence of a `rows` prop and that no settings list draws two.
+ *
+ * `aria-busy` on the wrapper is the accessible half: it is the *list* that is
+ * busy, and the bar inside is decoration a screen reader has no use for, hence
+ * `aria-hidden` on that alone. No sentence — "reading your sessions…" and its
+ * siblings said what the shape already says.
+ *
+ * `bg-raised/50` is the transcript's own fill for "the shape of something
+ * arriving" ({@link TranscriptSkeleton}), at the width of a short title.
+ */
+export function SkeletonRow(): ReactNode {
+  return (
+    <div aria-busy="true" className="flex min-h-11 items-center">
+      <div aria-hidden="true" className="h-3 w-1/3 animate-pulse rounded-sm bg-raised/50" />
+    </div>
+  );
+}
+
+/**
  * The shape of a conversation that has not arrived yet.
  *
  * A sibling of {@link Skeleton} rather than a `rows` variant of it: that one is a
@@ -2009,21 +2043,29 @@ export function ChoiceRow({
  * In `UsersSection` it replaced `ToggleDisabled`, which existed to give Disable a
  * `Ban` glyph and Enable an ordinary button — a distinction a menu draws with one
  * word.
+ *
+ * **`disabled` keeps the row and dims the label**, for the reason `PluginsPanel`'s
+ * Open row gives: a control that vanishes is one somebody goes looking for, and a
+ * row that says why it will not act is the answer. `focusableRows` already skips
+ * a `:disabled` button, so it is not a stop on the way to one either.
  */
 export function RowAction({
   label,
   onClick,
   danger = false,
+  disabled = false,
 }: {
   label: string;
   onClick: () => void;
   danger?: boolean;
+  disabled?: boolean;
 }): ReactNode {
   return (
     <button
       role="menuitem"
       onClick={onClick}
-      className={`${menuRow("center")} ${
+      disabled={disabled}
+      className={`${menuRow("center")} disabled:text-muted ${
         danger ? "text-danger hover:bg-danger/15" : "text-fg hover:bg-raised"
       }`}
     >
@@ -2209,7 +2251,8 @@ function useListKeys(open: boolean): {
  * has to mean the viewport; this is `absolute` against its trigger's `relative`
  * wrapper, which is the only way to anchor something *without measuring the
  * viewport* — and measuring it is breakpoint-state-in-JavaScript wearing a hat.
- * `placement` and `align` are props for the same reason, never detected.
+ * `placement` and `align` are props; the primitive never measures, and `Dropdown`'s
+ * docblock says what a caller may measure on the tap.
  *
  * The caller is responsible for one thing: no ancestor between the trigger and the
  * scroll container may clip. That is why `AppShell`'s rail moved its `overflow` to
@@ -2312,9 +2355,13 @@ export interface DropdownItem<T> {
  * where every option must be visible at once — hiding "reject" behind a popover is
  * a safety regression on the one screen where that matters.
  *
- * `placement` is a prop and never auto-detected. Measuring the viewport in
- * JavaScript to choose a direction is breakpoint-state-in-JavaScript wearing a
- * different hat, and `AppShell` is explicit that this app does not have any.
+ * `placement` is a prop, and the primitive itself never measures. A caller may
+ * decide it from where the trigger is **at the moment of the tap** — `UsersSection`
+ * reads the row's rect against the viewport and hands the answer in — because a
+ * kebab near the bottom of a sheet used to open downward off the screen by its
+ * *index*. That is a one-shot geometry read, discarded on close, and not the thing
+ * `AppShell` forbids: a breakpoint held in JavaScript state, which a resized window
+ * cannot correct. A measurement that is wrong is wrong for one open.
  */
 export function Dropdown<T extends string>({
   items,

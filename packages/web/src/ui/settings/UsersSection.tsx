@@ -1,8 +1,8 @@
 import { MoreHorizontal, Trash2 } from "lucide-react";
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import * as cp from "../../cp";
 import type { AdminUserRow, ApiKeyRecord } from "../../cp";
-import { userState, userStateText } from "../../account";
+import { orderKeys, userState, userStateText } from "../../account";
 import { errorText } from "../../http";
 import { adminMayInvite, type InstanceConfig } from "../../instance";
 import { machineLimitChangeNotice, machineLimitProblem } from "../../quota";
@@ -18,10 +18,11 @@ import {
   RowAction,
   SETTINGS_HEADING,
   SETTINGS_SECTION,
+  SkeletonRow,
   Spinner,
-  shortDuration,
 } from "../bits";
 import { toast } from "../Toast";
+import { KeyRow, KeyTable } from "./KeyRow";
 import { OneTimeSecret } from "./OneTimeSecret";
 
 /**
@@ -38,7 +39,14 @@ import { OneTimeSecret } from "./OneTimeSecret";
  * for users, machines or grants (that stays `cpctl`)". Two thirds of that is
  * reversed here. **Grants are not**: sharing a machine with a second person is
  * still `cpctl admin grant`, because it is the one operation with no obvious
- * shape on a phone and no demand behind it.
+ * shape on a phone and no demand behind it. The screen used to open with that
+ * sentence — the first line an admin read was a limitation of a CLI they may
+ * never use — and it is a fact for this docblock and `web-shell.md`, not for the
+ * screen (decision 11A: CLI on a settings screen is a white-list of three lines,
+ * and this is not one of them).
+ *
+ * **Two things on screen, in this order: Add a person, then the People list.**
+ * Nothing narrates either; the headings are the instructions.
  */
 export function UsersSection({ me, config }: { me: Me | null; config: InstanceConfig | null }): ReactNode {
   const [users, setUsers] = useState<AdminUserRow[] | null>(null);
@@ -59,9 +67,18 @@ export function UsersSection({ me, config }: { me: Me | null; config: InstanceCo
 
   return (
     <div>
-      <p className="text-xs text-muted">
-        Sharing one machine between two people is still <code className="font-mono">cpctl admin grant</code>.
-      </p>
+      {/*
+       * **Above the form, not under it.** A listing that failed is the first
+       * fact about this screen — every row's act goes to the same control plane
+       * — and a form drawn above a failure invites a create that will answer the
+       * same way. `Empty failed` is the app's one failure shape, with the retry
+       * beside it.
+       */}
+      {error !== null && (
+        <Empty failed action={<Button size="sm" onClick={refresh}>Try again</Button>}>
+          {error}
+        </Empty>
+      )}
 
       <CreateUser
         canInvite={adminMayInvite(config)}
@@ -78,13 +95,15 @@ export function UsersSection({ me, config }: { me: Me | null; config: InstanceCo
         moment — so there is nothing to copy, and rendering a one-time card with
         an absent value would print "copy this" over `undefined`. That is exactly
         why `CreatedUser.password` became optional: it forces the two shapes to be
-        distinguished at the call site.
+        distinguished at the call site. **The card is the explanation**: the form
+        used to say in advance which of the two would happen, in twenty-one
+        words, and the result says it in one line after the fact.
       */}
       {created !== null && created.password !== undefined && (
         <OneTimeSecret
           label={`Password for ${created.name}`}
           value={created.password}
-          note="Shown once. They must replace it the first time they sign in."
+          note="Shown once. They must change it at first sign-in."
           onDone={() => setCreated(null)}
         />
       )}
@@ -97,13 +116,6 @@ export function UsersSection({ me, config }: { me: Me | null; config: InstanceCo
         </p>
       )}
 
-      {error !== null && <Empty>{error}</Empty>}
-      {users === null && error === null && (
-        <div className="mt-4 flex items-center gap-2 text-xs text-muted">
-          <Spinner /> reading users…
-        </div>
-      )}
-
       {/*
        * A table rather than a stack of cards.
        *
@@ -113,15 +125,27 @@ export function UsersSection({ me, config }: { me: Me | null; config: InstanceCo
        * here is one short row: who they are, what state they are in, and the two
        * things you can do about it. Nothing is lost, because the card had no
        * fourth line to lose.
+       *
+       * **The heading is always drawn**, in all three states. A list that has not
+       * arrived yet stands one `SkeletonRow` under it — never a sentence, and
+       * never "Nobody yet.", which was unreachable: the admin reading this is a
+       * row, so the shortest real list is one.
        */}
-      {users !== null && users.length > 0 && (
-        <section className={SETTINGS_SECTION}>
-          {/* `h2` under `Settings.tsx`'s `h1`, and the only label this list has —
-              the intro above it is prose about grants, not a heading. In the app's
-              one settings-section chrome rather than a hand-written `mt-6` with no
-              rule: see `SETTINGS_SECTION` for what those three spellings cost. */}
-          <h2 className={SETTINGS_HEADING}>People</h2>
-          {/*
+      <section className={SETTINGS_SECTION}>
+        {/* `h2` under `Settings.tsx`'s `h1`. In the app's one settings-section
+            chrome rather than a hand-written `mt-6` with no rule: see
+            `SETTINGS_SECTION` for what those three spellings cost. */}
+        <h2 className={SETTINGS_HEADING}>People</h2>
+        {users === null ? (
+          error === null && <SkeletonRow />
+        ) : (
+          <>
+          {/* Drawn whenever there is a row, the admin's own included: that row
+              carries the kebab with the limit readout and Resend invitation,
+              which a sentence standing in for it would hide. The sentence sits
+              under the one row rather than instead of it. */}
+          {users.length > 0 && (
+          /*
            * **No `overflow-hidden`, and its removal is required rather than
            * cosmetic.** `Menu` is `absolute` against its trigger and never
            * portals — that is what lets it anchor without measuring the viewport
@@ -130,44 +154,29 @@ export function UsersSection({ me, config }: { me: Me | null; config: InstanceCo
            * a kebab on the last row would have opened into nothing. It was only
            * ever rounding the corners of rows that have no fill of their own, and
            * `last:border-b-0` already handles the bottom rule.
-           */}
+           */
           <div className="mt-2 rounded-lg border border-edge">
-            {users.map((user, index) => (
+            {users.map((user) => (
               <UserRow
                 key={user.id}
                 user={user}
                 isSelf={user.id === me?.id}
-                /*
-                 * **The bottom two rows open their menu upward, and it is a prop
-                 * because measuring the viewport is forbidden.**
-                 *
-                 * `Menu` is `absolute` and defaults to `top-full`, so the last
-                 * row's panel is drawn past the bottom of the settings pane.
-                 * Measured on a 375×667 phone with three users, the 190px panel
-                 * ended 50px below the pane and "Delete" — the last item — was off
-                 * screen; with six users only the top edge of the first item
-                 * showed. Since every per-row act moved into this menu, that is
-                 * every act on the bottom row unreachable until the reader
-                 * discovers a scrollbar their own tap created.
-                 *
-                 * Two rows rather than one, because a menu that clears the edge by
-                 * a few pixels is still a menu somebody has to scroll. `placement`
-                 * is a prop on `Menu` for the reason its docblock gives — a
-                 * detected direction is breakpoint-state-in-JavaScript wearing a
-                 * hat — so the caller answers it from what it knows, which here is
-                 * the row's index.
-                 */
-                openUp={index >= users.length - 2 && users.length > 2}
                 emailEnabled={adminMayInvite(config)}
                 onChanged={refresh}
               />
             ))}
           </div>
-        </section>
-      )}
+          )}
+          {users.length <= 1 && <p className="mt-2 text-xs text-muted">Only you so far.</p>}
+          </>
+        )}
+      </section>
     </div>
   );
 }
+
+/** A field's visible name. 12px, never `text-2xs`: a label is read, not scanned. */
+const LABEL = "mt-3 block text-xs font-semibold tracking-wider text-muted uppercase";
 
 function CreateUser({
   onCreated,
@@ -218,40 +227,50 @@ function CreateUser({
       .finally(() => setBusy(false));
   };
 
+  /*
+   * **Every field has a visible label, and placeholders are examples.** The form
+   * had `placeholder="name"` as its only label — gone the moment somebody types
+   * — and "email (optional)" the same. `Gate.tsx` already keeps the rule for the
+   * sign-up form this creates the same kind of account as.
+   *
+   * **The admin checkbox comes before Create in DOM order.** It came after, so
+   * the tab order and the reading order both reached the button before the one
+   * choice that changes what the button does; a keyboard user who tabbed to
+   * Create and pressed it had made an admin decision by omission. `webcheck` pins
+   * the order as source text.
+   */
   return (
-    <form onSubmit={submit} className="mt-3">
-      <div className="flex max-w-sm gap-2">
-        <input
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-          placeholder="name"
-          autoCapitalize="off"
-          autoCorrect="off"
-          spellCheck={false}
-          aria-label="New user name"
-          className={`min-w-0 flex-1 ${FIELD}`}
-        />
-        <Button type="submit" tone="primary" disabled={busy || name.trim().length === 0}>
-          {busy ? <Spinner /> : "Create"}
-        </Button>
-      </div>
+    <form onSubmit={submit} className="max-w-sm">
+      <h2 className={SETTINGS_HEADING}>Add a person</h2>
+      <label htmlFor="new-user-name" className={LABEL}>
+        Name
+      </label>
+      <input
+        id="new-user-name"
+        value={name}
+        onChange={(event) => setName(event.target.value)}
+        placeholder="ada"
+        autoCapitalize="off"
+        autoCorrect="off"
+        spellCheck={false}
+        className={`mt-1 w-full ${FIELD}`}
+      />
       {canInvite && (
         <>
+          <label htmlFor="new-user-email" className={LABEL}>
+            Email (optional)
+          </label>
           <input
+            id="new-user-email"
             value={email}
             onChange={(event) => setEmail(event.target.value)}
-            placeholder="email (optional)"
+            placeholder="ada@example.com"
             type="email"
             autoCapitalize="off"
             autoCorrect="off"
             spellCheck={false}
-            aria-label="New user email"
-            className={`mt-2 w-full max-w-sm ${FIELD}`}
+            className={`mt-1 w-full ${FIELD}`}
           />
-          <p className="mt-1 max-w-sm text-xs text-muted">
-            With an address they are invited to set their own password; without one you get a temporary password to
-            pass on.
-          </p>
         </>
       )}
       {/*
@@ -273,21 +292,45 @@ function CreateUser({
         also an admin
       </label>
       {error !== null && <p className="mt-2 text-sm text-danger">{error}</p>}
+      <div className="mt-2">
+        <Button type="submit" tone="primary" disabled={busy || name.trim().length === 0}>
+          {busy ? <Spinner /> : "Create"}
+        </Button>
+      </div>
     </form>
   );
 }
 
+/**
+ * Which panel under a row is open. **One at a time**: the keys list and the
+ * machine limit used to be two booleans, so both could be open under one row and
+ * the limit panel — drawn second — sat under a key list that had just changed
+ * height. A union makes "both" unspellable.
+ */
+type RowPanel = "keys" | "limit" | null;
+
+/**
+ * How much room a kebab's panel needs below the row before it opens upward.
+ *
+ * `w-56` and four items measure about 190px; the margin is for the sheet's own
+ * bottom padding. The row's *position* is measured, on the tap, and that is a
+ * different thing from the breakpoint-in-JavaScript `AppShell` forbids: no
+ * render branches on it, no width is read, and the answer is about *this* row
+ * at *this* moment — which its index in the list, the previous answer, could
+ * not know. The last two rows opened upward by index, so a two-row list opened
+ * both up on a desktop with a whole pane of room below them, and a ten-row list
+ * on a phone opened the third-from-last into the sheet's footer.
+ */
+const MENU_ROOM_PX = 240;
+
 function UserRow({
   user,
   isSelf,
-  openUp = false,
   onChanged,
   emailEnabled,
 }: {
   user: AdminUserRow;
   isSelf: boolean;
-  /** Near the bottom of the list, so the kebab's panel opens upward. */
-  openUp?: boolean;
   onChanged: () => void;
   /** Whether anybody on this instance could confirm an address at all. */
   emailEnabled: boolean;
@@ -306,16 +349,27 @@ function UserRow({
   const state = userState(user, emailEnabled);
   const [confirming, setConfirming] = useState(false);
   const [keys, setKeys] = useState<ApiKeyRecord[] | null>(null);
-  const [keysOpen, setKeysOpen] = useState(false);
-  const [limitOpen, setLimitOpen] = useState(false);
+  const [panel, setPanel] = useState<RowPanel>(null);
+  const [placement, setPlacement] = useState<"up" | "down">("down");
+  const rowRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  /*
+   * **A panel that opens off screen is a panel nobody finds.** On a phone the
+   * kebab is at the bottom of the sheet more often than not, and the panel it
+   * opens is drawn *under* the row — below the fold. `nearest` so a panel that
+   * is already visible moves nothing, which is the case on a desktop.
+   */
+  useEffect(() => {
+    if (panel !== null) panelRef.current?.scrollIntoView({ block: "nearest" });
+  }, [panel]);
 
   /**
    * `done` receives the answer, which it used to be handed no way to read.
    *
    * Generic rather than `Promise<unknown>` so a route whose *body* says something
-   * an admin needs — how many enrollment codes a ban just burned — can say it
-   * without a second code path around this helper. Every existing callback takes
-   * no parameter and is unaffected.
+   * an admin needs can say it without a second code path around this helper.
+   * Every existing callback takes no parameter and is unaffected.
    */
   const run = <T,>(work: Promise<T>, done?: (value: T) => void): void => {
     setBusy(true);
@@ -331,31 +385,33 @@ function UserRow({
   /**
    * Open or close the key list for this row, re-reading it on every open.
    *
-   * (The docblock that used to sit here described `needsProof`, which went with
-   * the reset-password and mint-key actions; it was left attached to the next
-   * function down when they were deleted. Nothing on this row asks for a
-   * password any more — an admin may revoke a key here and may not issue one.)
+   * Nothing on this row asks for a password — an admin may revoke a key here and
+   * may not issue one.
    */
   const toggleKeys = (): void => {
-    if (keysOpen) {
-      setKeysOpen(false);
+    if (panel === "keys") {
+      setPanel(null);
       return;
     }
-    setKeysOpen(true);
-    // Back to the spinner on every open: rows held from a previous open are a
-    // claim about a list somebody may have changed since.
+    setPanel("keys");
+    // Back to the placeholder on every open: rows held from a previous open are
+    // a claim about a list somebody may have changed since.
     setKeys(null);
     void cp
       .adminUserKeys(user.id)
-      .then(setKeys)
+      .then((rows) => setKeys(orderKeys(rows)))
       .catch((cause: unknown) => {
-        setKeysOpen(false);
+        setPanel(null);
         toast("error", errorText(cause));
       });
   };
 
+  const over = user.machinesOverLimit ?? 0;
+  const atLimit =
+    over === 0 && typeof user.machineLimit === "number" && (user.machines ?? 0) >= user.machineLimit && user.machineLimit > 0;
+
   return (
-    <div className="border-b border-edge/60 last:border-b-0">
+    <div ref={rowRef} className="border-b border-edge/60 last:border-b-0">
       {/*
        * **One line at every width, because there is one control on it.**
        *
@@ -424,13 +480,19 @@ function UserRow({
           {state !== null && <Badge tone="strong">{userStateText(state)}</Badge>}
           {/*
             A second badge beside `userState`'s one-by-precedence, and bounded:
-            it appears only on a row that is genuinely over — which is a fault an
-            admin caused and can undo, on a different axis from the credential
-            states above it. Every other row draws nothing extra.
+            it appears only on a row that is genuinely at or over its limit —
+            a fault an admin caused and can undo, on a different axis from the
+            credential states above it. Every other row draws nothing extra.
+
+            **This is where the toast's fact went** (decision D-U-1). "2 machines
+            stopped working" used to be said once, for four seconds, after the
+            save; it is a fact about the row for as long as it is true, and the
+            listing already carries it as `machinesOverLimit`. A fact nobody can
+            re-read is a toast by another name, so the row says it and the toast
+            says only that the save landed.
           */}
-          {(user.machinesOverLimit ?? 0) > 0 && (
-            <Badge tone="strong">{`${user.machines ?? 0} of ${user.machineLimit ?? 0} machines`}</Badge>
-          )}
+          {over > 0 && <Badge tone="strong">{`${over} machine${over === 1 ? "" : "s"} off`}</Badge>}
+          {atLimit && <Badge>{`${user.machines ?? 0} of ${user.machineLimit}`}</Badge>}
         </span>
 
         <span
@@ -445,7 +507,9 @@ function UserRow({
            * phone. So the first tap replaces the row's controls with the question
            * and its two answers, drawn *in place of* the buttons they are about,
            * so there is nothing else on the row to hit by accident and the name
-           * being deleted is right beside it, unmoved.
+           * being deleted is right beside it, unmoved — and **named in the
+           * question**, which is every confirmation's rule now: action, subject,
+           * effect.
            *
            * **Cancel is last, and that is not arbitrary.** Both groups are laid
            * out left to right in the same box, so a child in the same position
@@ -479,27 +543,24 @@ function UserRow({
            */}
           {confirming ? (
             <>
-              <span className="text-xs text-muted">Delete for good?</span>
+              <span className="text-xs text-muted">
+                Delete <span className="font-medium text-fg">{user.name}</span> for good?
+              </span>
               <DangerButton
                 icon={Trash2}
                 size="sm"
                 disabled={busy}
                 onClick={() =>
                   run(
-                    cp.adminDeleteUser(user.id).then((answer) => {
-                      toast(
-                        "ok",
-                        answer.machinesRevoked > 0
-                          ? `${answer.name} is gone. ${answer.machinesRevoked} machine${
-                              answer.machinesRevoked === 1 ? "" : "s"
-                            } they registered ${
-                              answer.machinesRevoked === 1 ? "is" : "are"
-                            } off the network — getting ${
-                              answer.machinesRevoked === 1 ? "it" : "them"
-                            } back means enrolling on the host again.`
-                          : `${answer.name} is gone.`,
-                      );
-                    }),
+                    /*
+                     * "N machines they registered are off the network — enrolling
+                     * again brings them back" used to ride this toast. It was a
+                     * fact about machines that are no longer in any list an admin
+                     * can open, so nothing on screen could carry it as state; a
+                     * fact nobody can re-read is dropped rather than flashed
+                     * (D-U-1). The row is gone, and the toast says that.
+                     */
+                    cp.adminDeleteUser(user.id).then((answer) => toast("ok", `${answer.name} is gone.`)),
                     () => setConfirming(false),
                   )
                 }
@@ -525,10 +586,13 @@ function UserRow({
              *
              * The reserved 184px slot those two used to sit in is gone with them:
              * this trigger is the same square on every row, so nothing shifts.
+             *
+             * `placement` is measured on the tap — see `MENU_ROOM_PX` — and handed
+             * to `Menu` as the prop it insists on; the menu itself detects nothing.
              */
             <Menu
               align="right"
-              placement={openUp ? "up" : "down"}
+              placement={placement}
               panelClassName="w-56"
               trigger={(open, toggle) => (
                 <IconButton
@@ -537,7 +601,13 @@ function UserRow({
                   size="sm"
                   active={open}
                   disabled={busy}
-                  onClick={toggle}
+                  onClick={() => {
+                    const rect = rowRef.current?.getBoundingClientRect();
+                    if (rect !== undefined) {
+                      setPlacement(window.innerHeight - rect.bottom < MENU_ROOM_PX ? "up" : "down");
+                    }
+                    toggle();
+                  }}
                 />
               )}
             >
@@ -578,7 +648,8 @@ function UserRow({
                    * one line up: zero row width, and an absent field degrades to
                    * no number rather than to `0 of undefined`. This is the only
                    * place in the app an admin can see how close somebody is to
-                   * their limit without opening anything.
+                   * their limit without opening anything — the row's badge is
+                   * drawn only at or over it.
                    */}
                   <RowAction
                     label={
@@ -588,7 +659,7 @@ function UserRow({
                     }
                     onClick={() => {
                       close();
-                      setLimitOpen(!limitOpen);
+                      setPanel(panel === "limit" ? null : "limit");
                     }}
                   />
                   {/*
@@ -614,8 +685,8 @@ function UserRow({
                           toast(
                             answer.mailQueued ? "ok" : "error",
                             answer.mailQueued
-                              ? `Invitation queued for ${answer.email}.`
-                              : `Could not queue an invitation for ${answer.email} — check Server settings.`,
+                              ? `Invitation sent to ${answer.email}.`
+                              : "Invitation not queued — check Email settings.",
                           );
                         });
                       }}
@@ -626,29 +697,19 @@ function UserRow({
                       label={user.disabled ? "Enable" : "Disable"}
                       onClick={() => {
                         close();
+                        /*
+                         * A disable burns every unredeemed enrollment code this
+                         * person minted, and `Enable` does not give them back. The
+                         * toast used to say how many. **It no longer does**
+                         * (D-U-1): nothing on the row can re-derive that number,
+                         * so a four-second sentence was the only copy of it, and
+                         * a fact nobody can re-read is a toast by another name.
+                         * The permanent fact — that they are disabled — is the
+                         * badge `userState` draws for as long as it is true; the
+                         * toast says only that the act landed.
+                         */
                         run(cp.adminSetDisabled(user.id, !user.disabled), (answer) => {
-                          /*
-                           * Said out loud for the reason `MachinesSection` says
-                           * the identical number out loud: a disable burns every
-                           * unredeemed enrollment code this person minted, each
-                           * of which mints a full machine identity and rotates a
-                           * tunnel key — and **`Enable` does not give them
-                           * back**. Silent, the reversible-looking button had an
-                           * irreversible half nothing on screen mentioned.
-                           *
-                           * Only on the disable direction and only when there
-                           * were any: `enable` answers `{disabled: false}` alone,
-                           * and a toast reporting zero is a toast people learn to
-                           * dismiss unread.
-                           */
-                          const burned = answer.enrollmentCodesInvalidated ?? 0;
-                          if (burned > 0) {
-                            toast(
-                              "ok",
-                              `${user.name} is disabled. ${burned} unredeemed enrollment code${burned === 1 ? "" : "s"} ` +
-                                `stopped working, and enabling them again will not restore ${burned === 1 ? "it" : "them"}.`,
-                            );
-                          }
+                          if (answer.disabled) toast("ok", `${user.name} is disabled.`);
                         });
                       }}
                     />
@@ -676,50 +737,62 @@ function UserRow({
         </span>
       </div>
 
-      {keysOpen && (
-        <div className="px-3 pb-3">
+      {panel === "keys" && (
+        <div ref={panelRef} className="border-t border-edge/50 px-3 pb-3 pt-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className={SETTINGS_HEADING}>API keys</span>
+            {/* Both panels close the same way — this one had no Close while the
+                limit panel did, so the only way to fold it was the kebab again. */}
+            <Button size="sm" tone="ghost" onClick={() => setPanel(null)}>
+              Close
+            </Button>
+          </div>
           {/*
            * Revoked rows are **listed rather than filtered**: the question this
            * panel answers is "is the one that leaked dead yet", which a row that
-           * vanishes on revocation cannot answer.
+           * vanishes on revocation cannot answer. Newest first, revoked last —
+           * `orderKeys`, the same order the person's own API keys screen draws.
+           *
+           * `KeyRow` is the one shared with that screen, with `confirm` on: an
+           * admin retiring *somebody else's* credential is two taps, and the
+           * question names the key (Q3.219). No sentence about this browser's own
+           * key here — an admin's own keys are the API keys section's job, and
+           * the row cannot know which one this tab holds without repeating that
+           * screen's logic.
            */}
           {keys === null ? (
-            <div className="flex items-center gap-2 text-xs text-muted">
-              <Spinner /> reading keys…
-            </div>
+            <SkeletonRow />
+          ) : keys.length === 0 ? (
+            <p className="mt-1 text-xs text-muted">No keys.</p>
           ) : (
-            <>
-              {keys.length === 0 && <p className="text-xs text-muted">No API keys.</p>}
+            <KeyTable>
               {keys.map((record) => (
                 <KeyRow
                   key={record.id}
-                  userId={user.id}
                   record={record}
-                  onChanged={() => {
+                  confirm={true}
+                  revoke={() => cp.adminRevokeKey(user.id, record.id)}
+                  onRevoked={() => {
                     // Same rule as the mint path: a failed re-read keeps the rows
-                    // on screen rather than dropping into the spinner state.
-                    void cp.adminUserKeys(user.id).then(setKeys).catch(() => undefined);
+                    // on screen rather than dropping into the placeholder state.
+                    void cp
+                      .adminUserKeys(user.id)
+                      .then((rows) => setKeys(orderKeys(rows)))
+                      .catch(() => undefined);
                     onChanged();
                   }}
                 />
               ))}
-              {isSelf && (
-                // Said before the button rather than after the surprise: cp.ts
-                // makes the same point at `revokeMyKey`. There is no self-refusal
-                // on the server, deliberately — the account this most needs to
-                // work on is the one whose key just leaked. The wording was cut
-                // on 2026-09-04 for fewer words; what it keeps is the consequence,
-                // that this tab is signed out.
-                <p className="mt-2 text-2xs text-faint">
-                  Revoking the key this browser is signed in with signs this tab out.
-                </p>
-              )}
-            </>
+            </KeyTable>
           )}
         </div>
       )}
 
-      {limitOpen && <MachineLimitPanel user={user} onChanged={onChanged} onClose={() => setLimitOpen(false)} />}
+      {panel === "limit" && (
+        <div ref={panelRef}>
+          <MachineLimitPanel user={user} onChanged={onChanged} onClose={() => setPanel(null)} />
+        </div>
+      )}
     </div>
   );
 }
@@ -735,7 +808,9 @@ function UserRow({
  * Save, a Reset and a sentence — rather than a yes/no.
  *
  * `Domains`' draft/dirty/explicit-Save shape, and `machineLimitProblem` is the
- * **same** validator `ServerSection` calls.
+ * **same** validator `ServerSection` calls. Save is always drawn and disabled
+ * until dirty, the same as every Save on the admin screens now: a button that
+ * materialises on the first keystroke moves the row under the finger typing.
  */
 function MachineLimitPanel({
   user,
@@ -797,12 +872,14 @@ function MachineLimitPanel({
       .then((answer) => {
         setConfirming(null);
         setDraft(String(answer.maxMachines));
+        /*
+         * Eight words, and the count is the only part that is not on the row: the
+         * "N machines off" badge carries the standing fact (D-U-1), and "nothing
+         * was deleted" is what the badge's own remedy — raise the limit — says.
+         */
         if (answer.suspended.length > 0) {
-          toast(
-            "ok",
-            `${answer.suspended.length} machine${answer.suspended.length === 1 ? "" : "s"} stopped working. ` +
-              "Nothing was deleted — raising the limit brings them back.",
-          );
+          const n = answer.suspended.length;
+          toast("ok", `${n} machine${n === 1 ? "" : "s"} stopped. Raise the limit to restore ${n === 1 ? "it" : "them"}.`);
         }
         onChanged();
       })
@@ -812,9 +889,10 @@ function MachineLimitPanel({
 
   return (
     <div className="border-t border-edge/50 px-3 pb-3 pt-2">
+      {/* A readout, not a sentence: the numbers are what the panel is about and
+          the word after the dot is where they came from. */}
       <p className="text-xs text-muted">
-        {user.name} owns {owned} machine{owned === 1 ? "" : "s"}. Their limit is {current}
-        {user.machineLimitSource === "override" ? ", set for them" : ", from the instance default"}.
+        {`${owned} of ${current} · ${user.machineLimitSource === "override" ? "override" : "default"}`}
       </p>
 
       {confirming === "save" && consequence !== null ? (
@@ -846,9 +924,7 @@ function MachineLimitPanel({
            * the default is, and the honest admission where it did not.
            */}
           <p className="mt-2 text-xs text-muted">
-            {clearingCost ??
-              `${user.name}'s limit becomes the instance default, which may be lower than the one set for them ` +
-                "and may stop machines. Raising it again brings them back."}
+            {clearingCost ?? "Drops to the default; machines over it stop. Raising it brings them back."}
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <Button tone="plain" size="sm" disabled={busy} onClick={() => write(cp.adminClearMachineLimit(user.id))}>
@@ -871,20 +947,18 @@ function MachineLimitPanel({
             aria-label={`Machine limit for ${user.name}`}
             className={`w-20 ${FIELD}`}
           />
-          {dirty && (
-            <Button
-              tone="primary"
-              size="sm"
-              disabled={busy}
-              onClick={() =>
-                // Raising costs nobody anything and lands at once; only a change
-                // that switches somebody's machine off states itself first.
-                consequence === null ? write(cp.adminSetMachineLimit(user.id, next)) : setConfirming("save")
-              }
-            >
-              {busy ? <Spinner /> : "Save"}
-            </Button>
-          )}
+          <Button
+            tone="primary"
+            size="sm"
+            disabled={busy || !dirty}
+            onClick={() =>
+              // Raising costs nobody anything and lands at once; only a change
+              // that switches somebody's machine off states itself first.
+              consequence === null ? write(cp.adminSetMachineLimit(user.id, next)) : setConfirming("save")
+            }
+          >
+            {busy ? <Spinner /> : "Save"}
+          </Button>
           {/*
            * Offered for exactly one origin, which is `canResetField`'s rule:
            * where there is no override there is nothing to reset *to*.
@@ -919,81 +993,14 @@ function MachineLimitPanel({
   );
 }
 
-/**
- * One API key, and the two-step that retires it.
- *
- * Its own component for the reason `UserRow`'s confirmation is: the confirming
- * state belongs to the row it is about, so a refreshed list cannot leave the
- * question pointing at a different key. Same ordering rule as well — the answer
- * that undoes the question is **last**, so a second tap on a laggy connection
- * cancels rather than confirms.
- */
-function KeyRow({
-  userId,
-  record,
-  onChanged,
-}: {
-  userId: string;
-  record: ApiKeyRecord;
-  onChanged: () => void;
-}): ReactNode {
-  const [busy, setBusy] = useState(false);
-  const [confirming, setConfirming] = useState(false);
-  const revoked = record.revokedAt !== null;
-
-  return (
-    <div className="flex flex-col items-start gap-2 border-b border-edge/50 py-2 last:border-b-0 sm:flex-row sm:items-center sm:gap-3">
-      <span className="flex w-full min-w-0 items-center gap-2 sm:flex-1">
-        {/* The eight clear characters the lookup is indexed on — never the key and
-            never its hash, neither of which this route will ever send. It is the
-            only thing that lets somebody holding two keys tell which row is
-            which. */}
-        <span className="truncate font-mono text-xs">{record.prefix}…</span>
-        {revoked && <Badge tone="plain">revoked</Badge>}
-      </span>
-      <span className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:shrink-0">
-        <span className="text-2xs text-muted">
-          {`made ${shortDuration(Math.max(0, Date.now() - record.createdAt))} ago`}
-        </span>
-        {!revoked &&
-          (confirming ? (
-            <>
-              <span className="text-xs text-muted">Revoke it?</span>
-              <DangerButton
-                icon={Trash2}
-                size="sm"
-                disabled={busy}
-                onClick={() => {
-                  setBusy(true);
-                  void cp
-                    .adminRevokeKey(userId, record.id)
-                    .then(() => {
-                      setConfirming(false);
-                      onChanged();
-                    })
-                    .catch((cause: unknown) => toast("error", errorText(cause)))
-                    .finally(() => setBusy(false));
-                }}
-              >
-                {busy ? <Spinner /> : "Revoke"}
-              </DangerButton>
-              <Button size="sm" disabled={busy} onClick={() => setConfirming(false)}>
-                Cancel
-              </Button>
-            </>
-          ) : (
-            <Button size="sm" disabled={busy} onClick={() => setConfirming(true)}>
-              Revoke
-            </Button>
-          ))}
-      </span>
-    </div>
-  );
-}
-
-
 /*
- * `RowAction` was here, and it is in `bits.tsx` now.
+ * `KeyRow` was here, and it is `./KeyRow` now — one row for this panel and for
+ * the person's own API keys screen, which drew the same key in a second markup
+ * with a second spacing and no age. The two-step-versus-one-tap decision that
+ * used to be the difference between the two copies is that component's
+ * `confirm` prop.
+ *
+ * `RowAction` was here before that, and it is in `bits.tsx` now.
  *
  * It moved when `MachinesSection` grew a kebab of its own: a second hand-written
  * copy is how one of the two loses `role="menuitem"` or picks a different danger

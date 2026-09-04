@@ -42,11 +42,13 @@ paths:
   password verified, which leaks nothing to somebody who does not already hold it.
   The body field is still `name` and takes either, bounded at `MAX_EMAIL_CHARS`
   rather than 200 — a legal address refused as `bad_request` would be its own oracle.
-- **A password change requires the current password even under a valid session, on
-  all three routes that are one** — `POST /v1/me/password`, `POST /v1/me/keys`
-  (minting a permanent credential from a borrowed session is the escalation the guard
-  exists for) and `PUT /v1/me/email` (the address is the reset channel, so repointing
-  it *is* taking the account). Two ask through `proveCurrentPassword`;
+- **A password change requires the current password even under a valid session**,
+  on `POST /v1/me/password` alone. `POST /v1/me/keys` and `PUT /v1/me/email` asked
+  too until 2026-09-04 and do not now: a session is enough, by the owner's decision
+  (Q1.630) — with the cost written at the email route, since repointing the reset
+  channel from a stolen session is a chain to a password the thief chose. What stands
+  in for the gate is that every key and every sign-in is listed and one tap to end.
+  `proveCurrentPassword` is deleted with its two callers;
   `/v1/me/password` verifies inline, because it is also the route that must let an
   account with no password row set a first one — that user is the one exception, their
   API key being the proof, in one function and not three. `PUT /v1/me/email` asks
@@ -77,8 +79,8 @@ paths:
   Q1.406.
 - **A hash names which side of the credential gate it is for, and `HashLane` has no
   default.** The lane is about which side of THE LINE the route sits on and not about
-  how the caller feels: `POST /v1/me/password`, `POST /v1/me/keys` and
-  `POST /v1/admin/users` are authenticated, while **`POST /v1/reset` takes `"public"`**
+  how the caller feels: `POST /v1/me/password` and `POST /v1/admin/users` are
+  authenticated, while **`POST /v1/reset` takes `"public"`**
   and shares that lane with `/v1/login` and `/v1/register`, so a login spray can still
   queue a mailed recovery behind it — bounded rather than closed, by the public lane's
   own wait list. `release` wakes an authenticated waiter first, unconditionally: a fair
@@ -86,8 +88,12 @@ paths:
   verification, because a decoy waiting elsewhere rebuilds the user oracle out of the
   defence against flooding. Q1.407.
 - **A credential the code can read is a credential something must be able to write.**
-  There is **one `UPDATE api_keys` statement, reached by two routes**: `revokeApiKey`
-  behind `DELETE /v1/me/keys/:keyId` and `DELETE /v1/admin/users/:id/keys/:keyId`. **No
+  There is **one `UPDATE api_keys` statement that changes what a key *is*, reached
+  by two routes**: `revokeApiKey` behind `DELETE /v1/me/keys/:keyId` and
+  `DELETE /v1/admin/users/:id/keys/:keyId`. The second `UPDATE` on that table is a
+  bookkeeping one — `touchKey` writes `last_used_at` on an accepted bearer lookup,
+  at most once per `KEY_TOUCH_INTERVAL_MS` and never on a revoked row, so a leaked
+  key's row says when it was last presented (Q1.629). **No
   password change on this service retires a key** — revoking it is its own act, and it
   is the one an admin has. Same shape `sessionOf` is named for: **a property the code
   appears to have and nothing enforces is worse than one it visibly lacks.** Q1.408.
@@ -113,8 +119,7 @@ paths:
 - **The client decides on the code, never the status.** `authFailure` returns `null`
   for `403 forbidden`, because `requireAdmin` answers that to every non-admin — and in
   the other direction for `401 invalid_password`, a 401 about the request *body*,
-  reachable from **three** routes (`/v1/me/password`, `/v1/me/keys`,
-  `PUT /v1/me/email`): mistyping your own password on the screen that fixes a suspected
+  reachable from **one** route now (`/v1/me/password`): mistyping your own password on the screen that fixes a suspected
   leak must not be what ends the tab. Q1.411.
 - **A 401 signs you out only about the credential it was sent with.** `cpFetch`
   captures `const sent = credential` before building the header and tears down only

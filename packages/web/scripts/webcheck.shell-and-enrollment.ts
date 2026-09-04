@@ -991,7 +991,10 @@ process.stdout.write("\nthe three lines a daemon is started with\n");
       "the command is inside the door arm, not beside the notice",
       [
         /mayAddMachine\(state\.me\) \? \([\s\S]{0,1200}installCommand\(/.test(browser),
-        /canAdd && <CommandLine command=\{installCommand\(/.test(machines),
+        // The door is one arm of a ternary now — the other arm is the notice
+        // under the same heading (decision 3B) — so the window is a few tags of
+        // wrapper, never long enough to reach across into the notice arm.
+        /canAdd \? \([\s\S]{0,200}<CommandLine command=\{installCommand\(/.test(machines),
       ],
       [true, true],
     );

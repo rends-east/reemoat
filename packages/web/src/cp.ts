@@ -458,6 +458,13 @@ export interface ApiKeyRecord {
   prefix: string;
   createdAt: number;
   revokedAt: number | null;
+  /**
+   * When this key last authenticated a request, or `null` for never — written by
+   * the control plane at most once a minute, so it is a day-resolution fact.
+   * Optional on the wire: an older control plane does not send it, and a row
+   * without it reads the same as one never used.
+   */
+  lastUsedAt?: number | null;
 }
 
 export async function myKeys(): Promise<ApiKeyRecord[]> {
@@ -485,18 +492,13 @@ export function revokeMyKey(keyId: string): Promise<{ revoked: boolean }> {
  * into existence outside the bootstrap: an admin may take a credential away and
  * may never issue one.
  *
- * `currentPassword` is required whenever the account has one, and the reason is
- * the one `changePassword` gives: a session token lives in `localStorage` on an
- * origin with no CSP, and without this a token lifted from a tab converts into a
- * **permanent** credential in one request — strictly worse than what was stolen.
- * The exception is an account with no password row, proved by the API key it is
- * already holding.
+ * The session is the whole proof (Q1.630): the route asked for the current
+ * password until 2026-09-04 and the owner took that out. What stands in for it
+ * is the keys table itself — every key listed, dated, marked if it is this
+ * browser's, and one tap to revoke.
  */
-export function mintMyKey(currentPassword?: string): Promise<{ apiKey: string }> {
-  return cpFetch<{ apiKey: string }>("/v1/me/keys", {
-    method: "POST",
-    body: JSON.stringify({ currentPassword }),
-  });
+export function mintMyKey(): Promise<{ apiKey: string }> {
+  return cpFetch<{ apiKey: string }>("/v1/me/keys", { method: "POST" });
 }
 
 /* ------------------------------------------------------------------ *
@@ -506,16 +508,14 @@ export function mintMyKey(currentPassword?: string): Promise<{ apiKey: string }>
 /**
  * Set or change it. A confirmation goes out; nothing is verified until it is used.
  *
- * `currentPassword` is required to change an address that is **already
- * verified**, and for a sharper reason than a password change: the address is
- * the reset channel, so repointing it *is* taking the account. Adding the first
- * one needs no proof — there is nothing to steal yet, and clicking the link is
- * the proof. `emailChangeNeedsProof` is the predicate.
+ * The session is the whole proof (Q1.630): the route asked for the current
+ * password until 2026-09-04 and the owner took that out, knowing the chain the
+ * control plane's own docblock on `PUT /v1/me/email` records.
  */
-export function setMyEmail(email: string, currentPassword?: string): Promise<{ email: string; verified: boolean }> {
+export function setMyEmail(email: string): Promise<{ email: string; verified: boolean }> {
   return cpFetch<{ email: string; verified: boolean }>("/v1/me/email", {
     method: "PUT",
-    body: JSON.stringify({ email, currentPassword }),
+    body: JSON.stringify({ email }),
   });
 }
 

@@ -343,34 +343,6 @@ export function userStateText(state: NonNullable<UserState>): string {
   }
 }
 
-/**
- * Whether changing the address needs the current password.
- *
- * **Setting the address is taking the account**, because the address is the
- * reset channel — one request and the thief no longer needs the password at
- * all. So the answer is yes for every account that has a password, whatever its
- * current address is.
- *
- * ⚠ **This read `me.emailVerified === true && …`, and the server agreed with
- * it.** Both were wrong in the same direction, which is why the mirror is worth
- * having only while it *is* the mirror: adding an address for the first time was
- * exempt on the grounds that "there is nothing to steal yet", which is true of
- * the address and false of the account this route hands over. A stolen session
- * on any account without a verified address — the bootstrap admin included —
- * walked the whole chain to a password of the thief's choosing. `PUT
- * /v1/me/email` in the control plane's `app.ts` is the other half; changing one
- * without the other is a `400 currentPassword is required` on screen.
- *
- * The `hasPassword !== false` half stays and is `PasswordForm`'s `firstTime`
- * rule reappearing: an account with no password row is proved by its API key,
- * and demanding a password nobody ever set would make the migration impossible.
- * It is not a hole — no session can exist without a password row, so only a key
- * reaches it, and a key is already full authority.
- */
-export function emailChangeNeedsProof(me: { emailVerified?: boolean; hasPassword?: boolean }): boolean {
-  return me.hasPassword !== false;
-}
-
 /** What the password form says when the server refuses. */
 export function changePasswordError(error: unknown): string {
   if (!ApiError.isApiError(error)) return "Cannot reach the control plane.";
@@ -391,4 +363,120 @@ export function changePasswordError(error: unknown): string {
     default:
       return error.message;
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * API keys, the parts of the screen that are decisions rather than paint
+ * ------------------------------------------------------------------ */
+
+/**
+ * Whether a listed key is the one this browser is holding.
+ *
+ * **Client-side, with no control-plane change** (decision D-K-1). The browser
+ * holds the credential, `keyPrefix` on the control plane is `slice(3, 11)` of the
+ * key — the eight clear characters after `rk_` — and a listed row carries exactly
+ * that prefix. So "this browser" is a string comparison over something already in
+ * hand.
+ *
+ * ⚠ **Only for an `api_key` credential.** With a session credential no key is
+ * this browser's and revoking one cannot sign you out, so the badge and the
+ * sentence under it are drawn for neither. `webcheck` pins both arms.
+ */
+export function thisBrowsersKey(
+  credential: { value: string; kind: "session" | "api_key" } | null,
+  prefix: string,
+): boolean {
+  return credential !== null && credential.kind === "api_key" && credential.value.slice(3, 11) === prefix;
+}
+
+/**
+ * How long ago, in the row vocabulary, extended past days.
+ *
+ * `shortDuration` in `bits.tsx` stops at days because a session row is never
+ * older than a week; a key's "made" and a password's "changed" are commonly
+ * months. Same units below two days, then `mo` and `y`, so a screen that draws
+ * both never mixes "3d" with "three months".
+ */
+export function ageText(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return "<1m";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours}h`;
+  const days = Math.round(hours / 24);
+  if (days < 60) return `${days}d`;
+  const months = Math.round(days / 30);
+  if (months < 24) return `${months}mo`;
+  return `${Math.round(days / 365)}y`;
+}
+
+/**
+ * The line a key row carries under its prefix.
+ *
+ * `lastUsedAt` is `undefined` off a control plane older than the column and
+ * `null` for a key nothing has ever presented; both read "never used", because
+ * the row cannot tell them apart and "unknown" is not a thing a person can act
+ * on. At most eight words, which is the subline cap.
+ */
+export function keySubline(record: { createdAt: number; lastUsedAt?: number | null }, now: number): string {
+  const made = `made ${ageText(now - record.createdAt)} ago`;
+  const used = record.lastUsedAt === undefined || record.lastUsedAt === null
+    ? "never used"
+    : `last used ${ageText(now - record.lastUsedAt)} ago`;
+  return `${made} · ${used}`;
+}
+
+/**
+ * The order the keys screen draws: newest first, revoked last.
+ *
+ * The route answers `created_at ASC` because that is the order a database gives
+ * for free; the screen wants the key you just made at the top and the dead ones
+ * out of the way. Sorted here rather than on the control plane so an older one
+ * answers the same screen. Stable within each half, so two keys minted in one
+ * second keep the order the server gave.
+ */
+export function orderKeys<K extends { createdAt: number; revokedAt: number | null }>(keys: readonly K[]): K[] {
+  const live = keys.filter((key) => key.revokedAt === null).sort((a, b) => b.createdAt - a.createdAt);
+  const dead = keys.filter((key) => key.revokedAt !== null).sort((a, b) => b.createdAt - a.createdAt);
+  return [...live, ...dead];
+}
+
+/**
+ * The one-shot line the gate draws after this browser's own key was revoked.
+ *
+ * **The sign-out is deliberate, so it says so** (decision 5A). Revoking the key
+ * a tab is holding used to be discovered: the next request answered `401
+ * api_key_revoked`, `cpFetch` signed the tab out, and the gate said "Your session
+ * expired" about a thing the person had just done on purpose. Now the client
+ * clears the credential itself, writes this under one `sessionStorage` name, and
+ * the gate reads it **once** — `takeRevokedKeyNotice` deletes on read — so a
+ * reload of the sign-in screen does not repeat it. `sessionStorage` rather than
+ * `localStorage` because the notice belongs to the tab that did the revoking.
+ *
+ * Both halves take the storage as an argument so they stay pure: `webcheck`
+ * drives them with a `Map`, and nothing here touches `window`.
+ */
+export const REVOKED_KEY_NOTICE = "reemoat.revokedKey";
+
+export function revokedKeyNotice(prefix: string): string {
+  return `Key rk_${prefix}… revoked. Sign in again.`;
+}
+
+export interface NoticeStorage {
+  getItem(name: string): string | null;
+  setItem(name: string, value: string): void;
+  removeItem(name: string): void;
+}
+
+export function rememberRevokedKey(storage: NoticeStorage, prefix: string): void {
+  storage.setItem(REVOKED_KEY_NOTICE, prefix);
+}
+
+/** The notice, if a revoke wrote one, and it is gone the moment it is read. */
+export function takeRevokedKeyNotice(storage: NoticeStorage): string | null {
+  const prefix = storage.getItem(REVOKED_KEY_NOTICE);
+  if (prefix === null || prefix.length === 0) return null;
+  storage.removeItem(REVOKED_KEY_NOTICE);
+  return revokedKeyNotice(prefix);
 }

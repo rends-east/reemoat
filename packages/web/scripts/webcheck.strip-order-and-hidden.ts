@@ -546,19 +546,34 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
    *
    * So the kebab is live on every row — hiding is the act every row has, including
    * a built-in harness, which is what "the delete option must be available for
-   * Claude Code" turned out to mean — and `frozen`, a daemon that cannot store an
-   * order at all, is the only thing that takes it away. Edit and Remove are the
-   * two items a harness has no answer for, and inside the panel they are simply
-   * absent.
+   * Claude Code" turned out to mean — **and nothing switches it off, not even a
+   * daemon that cannot store an order.** `frozen` used to disable the whole menu,
+   * which took Edit and Check again with it, two items that never touch the strip
+   * route; it now disables the one item that does, inside the panel. Read off the
+   * kebab's own JSX — the slice from its glyph to its `onClick` — rather than off
+   * the file, because `disabled={frozen}` legitimately survives on the handle and
+   * on the Remove item.
    */
+  const kebabAt = pane.indexOf("icon={MoreHorizontal}");
+  check("the kebab was found", kebabAt > 0, true);
+  const kebab = pane.slice(kebabAt, pane.indexOf("onClick={toggle}", kebabAt));
   check(
-    "the kebab is live on every row, and only the daemon can switch it off",
+    "the kebab is live on every row, and not even an old daemon switches it off",
     [
-      /disabled=\{frozen\}/.test(pane.replace(/\s+/g, " ")),
+      /disabled=/.test(kebab),
       /disabled=\{frozen \|\| harness\}/.test(pane.replace(/\s+/g, " ")),
       /\{!harness && \(/.test(pane),
     ],
-    [true, false, false],
+    [false, false, false],
+  );
+  /*
+   * What an old daemon *does* take away is the one item that writes the strip —
+   * on the same line as the pinned label, so the two cannot come apart.
+   */
+  check(
+    "and only the item that writes the strip is what an old daemon disables",
+    /label=\{row\.hidden \? "Add back" : "Remove"\}\s*disabled=\{frozen\}/.test(pane),
+    true,
   );
   /*
    * ⚠ **And both verbs are on both kinds now, which is the whole of "they must not
@@ -642,17 +657,42 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     [false, false],
   );
   /*
-   * ⚠ **And no two-tap confirmation, which reverses the settings-row rule on
-   * purpose.** That rule is for acts nothing brings back — retiring a machine,
-   * deleting a person, uninstalling a plugin with its data. This one is
-   * rebuildable from the screen it was removed on, so the confirmation was a tax
-   * on the act somebody performs most. Asserted as an absence, since a rule about
-   * a control *not* being there is not a value anything can hold.
+   * ⚠ **A harness hides on one tap; an assembled agent asks first, in place, by
+   * name.** The settings-row rule confirms acts nothing brings back, and hiding is
+   * undone by `Add back` one tap away — so the harness arm still confirms nothing
+   * (`onToggle` is called straight from the menu). Deleting an assembled agent is
+   * a `DELETE` whose undo is a walk through the builder, so its arm opens the
+   * row's own confirmation rather than calling `onRemove` from the menu: the menu
+   * closes on the first tap, and a menu held open to hold a question would be a
+   * second dismissable layer over the sheet.
+   *
+   * Three things about the pair. It **names the agent** — "Remove <name>?" with
+   * where to rebuild it — because a question that names nothing is answered by
+   * reflex. **Cancel is last** (Q3.218: a second tap on a laggy connection lands on
+   * the undo). And it **holds the row's height** by the row's own arithmetic —
+   * the sum of the name line and the subline the normal column draws — which is
+   * the property the old confirmation broke: a drag measures one row at
+   * `pointerdown` and applies it to every neighbour, so a taller confirming row
+   * put an oversized step into `dropIndex`. The `danger` negative one check up
+   * still covers this pair.
    */
   check(
-    "and no confirming pair on the row",
-    [/setConfirming/.test(pane), /Cancel<\/Button>/.test(pane)],
-    [false, false],
+    "an assembled agent's removal asks in place, by name, with Cancel last",
+    [
+      /if \(harness\) onToggle\(\);\s*else setConfirming\(true\);/.test(pane),
+      /Remove <span className="font-medium">\{name\}<\/span>\? Rebuild it from Add an agent\./.test(pane),
+      /onRemove\(\);\s*\}\}\s*>\s*Remove\s*<\/Button>\s*<Button size="sm" onClick=\{\(\) => setConfirming\(false\)\}>\s*Cancel\s*<\/Button>/.test(pane),
+    ],
+    [true, true, true],
+  );
+  check(
+    "and the question is drawn at the row's own height",
+    [
+      /h-\[calc\(var\(--text-sm--line-height\)\+var\(--text-2xs--line-height\)\)\]/.test(pane),
+      /h-\[var\(--text-sm--line-height\)\]/.test(pane),
+      /min-h-\[var\(--text-2xs--line-height\)\]/.test(pane),
+    ],
+    [true, true, true],
   );
   /*
    * ⚠ **44px of ink on the one control that now carries every act on the row.**
@@ -835,10 +875,49 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
    * order.** It was also switched off while the row held a removal confirmation —
    * the drag measures one row's height off the row it started on, and that pair
    * lived inside the same `<li>`, so a drag begun there carried an oversized step
-   * into `dropIndex`. The confirmation is gone, and with it the only other state a
-   * row could be in that changed its height.
+   * into `dropIndex`. The confirmation is back at the row's own height (pinned
+   * above), and the handle stays mounted through it — its `touchmove` listener is
+   * registered once for the component's life and a handle that unmounted would
+   * come back without one — so nothing about a confirming row needs the handle
+   * switched off.
    */
   check("the handle answers to the daemon and to nothing else", /disabled=\{frozen\}/.test(pane), true);
+  /*
+   * ⚠ **The status line sits under the list, with no height reserved** (13A). It
+   * carried two reserved lines *above* the rows so a refused write could not push
+   * them under a finger — and those two lines were blank on every healthy
+   * machine's first paint, between the lede and the list. Under the rows the
+   * only thing a sentence can displace is the `Add an agent` bar, so the reserve
+   * is gone: an empty `<p>` has no line box, and the margin rides the text. The
+   * `sr-only` move announcer is a second `role="status"` and is exempt from the
+   * height test by being `absolute`; the first one in source order is the one
+   * this is about.
+   */
+  const listAt = pane.indexOf('<ul className="mt-1 border-y border-edge">');
+  const statusAt = pane.indexOf('role="status"');
+  check("the status line was found, after the list", listAt > 0 && statusAt > listAt, true);
+  check(
+    "and it reserves no height until it has something to say",
+    [
+      /min-h-\[calc\(var\(--text-2xs--line-height\)\*2\)\]/.test(pane),
+      /statusText === "" \? "" : "mt-2"/.test(pane),
+      /scrollIntoView\(\{ block: "nearest" \}\)/.test(pane),
+    ],
+    [false, true, true],
+  );
+  /*
+   * The lede at the screen-line cap: the name, the id, and the one rule the
+   * `default` badge needs a reader to know. What removing costs left it for the
+   * row that decides it.
+   */
+  check(
+    "the lede says what the list is and which row is the default, and no more",
+    [
+      /\)\. The first that can start is the\{" "\}\s*<em>default<\/em>\./.test(pane),
+      /Removing one signs nothing out/.test(pane),
+    ],
+    [true, false],
+  );
   /*
    * ⚠ **Removing an agent hands the removal to the strip whatever door it came
    * through, and the builder's copy of this was gated and permanently wrong.**

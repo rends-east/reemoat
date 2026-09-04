@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 121 | `###` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 123 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 79 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 288 | `####` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 295 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 53 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 109 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 66 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 127 | `###` |
-| | | **843** | |
+| | | **852** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 843 rather than the 446
+dividers. So the count is over **both** depths, and it says 852 rather than the 448
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -811,7 +811,8 @@ outright, both asking nothing. That is what those routes did on the day somebody
 looked, and it is the evidence for removing them rather than hardening them.
 
 **Status.** Superseded — both routes are deleted; the question moved to
-`proveCurrentPassword` on `/v1/me/keys` and `/v1/me/email`
+`proveCurrentPassword` on `/v1/me/keys` and `/v1/me/email`, and on 2026-09-04
+left `/v1/me/keys` again by the owner's decision (Q1.630)
 
 ### Q1.611 — Can an API key be revoked?
 
@@ -883,7 +884,7 @@ account at all.
 
 Two consequences the earlier text has backwards. The way back from a revoked key
 is **not** `POST /v1/admin/users/:id/keys`, which is deleted — it is `POST
-/v1/me/keys`, self-service, behind `proveCurrentPassword`, which is also the first
+/v1/me/keys`, self-service, behind the session alone since Q1.630, which is also the first
 thing in this service that ever bounded the table (**10 live per account**, because
 until now only an admin could write to it). And "somebody who thinks their key
 leaked revokes the key" stopped being advice and became the only mechanism: the
@@ -1908,10 +1909,12 @@ the *address*, false of the account the route hands over.
 requires or creates a `user_passwords` row, so only an API key reaches the no-password
 branch, and a key is already full authority.
 
-**Client half.** `emailChangeNeedsProof` in `packages/web/src/account.ts` carries the
-same rule; changing one side without the other is a `400` on screen.
+**Client half.** `emailChangeNeedsProof` in `packages/web/src/account.ts` carried the
+same rule; changing one side without the other was a `400` on screen.
 
-**Status.** Current
+**Status.** Superseded — reversed on 2026-09-04 by the owner's decision, Q1.630: the
+route asks nothing again, the client predicate is deleted, and the chain above is
+open by choice rather than by accident.
 
 ### Q1.403 — Should an admin be able to reset somebody's password?
 
@@ -2087,8 +2090,8 @@ returns `null`, and so does `401 invalid_password`.
 **Why.** Under the old `status === 401 || status === 403` test, `requireAdmin` answers 403
 to every non-admin — so merely opening the Users section would have signed a non-admin out
 of the whole app. The mirror case is `401 invalid_password`, a 401 about the request
-*body* rather than about the credential that carried it, reachable from three routes
-(`/v1/me/password`, `/v1/me/keys`, `PUT /v1/me/email`): mistyping your own password on the
+*body* rather than about the credential that carried it, reachable from two routes
+(`/v1/me/password`, `PUT /v1/me/email`; `/v1/me/keys` stopped asking, Q1.630): mistyping your own password on the
 screen that fixes a suspected leak must not be what ends the tab.
 
 **Status.** Current
@@ -3111,6 +3114,75 @@ that. A "refresh" verb on the control plane, which is Q7.42: a report, never a v
 **Status.** Applied. `relaycheck` pins the row, the redial, the omission and the
 refusals; `daemoncheck` pins what the daemon sends and that an empty inventory sends
 no header at all.
+
+### Q1.629 — When was the password last changed, and when was a key last used?
+
+**Decision.** Two nullable columns, `users.password_changed_at` and
+`api_keys.last_used_at`, added by `ALTER TABLE … ADD COLUMN` with
+`CP_SCHEMA_VERSION` unmoved. `GET /v1/me` answers `passwordChangedAt`; both keys
+routes answer `lastUsedAt`. The first is written by `markPasswordChanged` from
+`POST /v1/me/password` and the mailed reset only — a temporary password an admin
+issued, the bootstrap row and the sign-in rehash leave it `NULL`, so "Set" on the
+Account row means *issued and never replaced*. The second is touched on an
+accepted bearer lookup **at most once a minute per key**, `KEY_TOUCH_INTERVAL_MS`,
+compared in the middleware and again in the `UPDATE`'s `WHERE`, so two
+overlapping requests cost one write and a revoked key is never touched.
+
+**Why.** The settings redesign turned two forms into rows, and a row needs a value:
+"Changed 3mo ago" and "last used 2d ago" are what make a stale key recognisable
+on a phone. A write per request is the cost `schema.sql`'s own comment on
+`api_keys` warns about, which is what the minute buys — the row reads "2d ago"
+either way. Additive, so `compatibility.md` rule 3 holds: an older web client
+ignores the fields and an older control plane answers without them, which is why
+`Me.passwordChangedAt` and `ApiKeyRecord.lastUsedAt` are optional on the wire and
+the row says "never used" for `undefined` and `null` alike — it cannot tell them
+apart, and "unknown" is not something a person can act on.
+
+**Alternatives taken out.** Deriving "changed" from `password_hash` moving, which
+counts the rehash on sign-in. Touching `last_used_at` on every request, per the
+schema comment. Answering the age as text from the control plane, which is a
+string a client cannot re-derive when it reloads a minute later.
+
+**Status.** Applied. `relaycheck` pins the throttle (two lookups inside a minute
+write once), the null arm on a row from before the column, that a revoked key's
+value stops moving, and that a migrated file migrates twice harmlessly.
+
+### Q1.630 — Does minting your own API key, or changing your address, need your password?
+
+**Decision.** No, neither. `POST /v1/me/keys` takes a session and nothing
+else; it reads no body, so a bodiless request and `{}` mint alike and a stray
+`currentPassword` is ignored rather than verified. `PUT /v1/me/email` takes the
+session and the address. `POST /v1/me/password` alone still asks, inline.
+`proveCurrentPassword` is deleted with its two callers.
+
+**The email half reopens Q1.402's chain, by decision.** With a stolen session
+bearer and nothing else: repoint the address, confirm it with the same
+session, `POST /v1/forgot`, `POST /v1/reset` — a password the thief chose and
+every other session revoked. The owner weighed that against a password field
+on every address change (2026-09-04) and chose the field's absence; the route's
+docblock keeps the chain written down so nobody rediscovers it as a bug. What
+bounds it is that the session is what is stolen either way, that Devices lists
+every sign-in and ends any of them, and that a password change still asks.
+
+**Why.** The owner's decision on 2026-09-04, in one line: the session is
+enough. The route had asked since it replaced the deleted admin minter
+(Q1.610's escalation: a session token lifted from `localStorage` converting into
+a permanent credential in one request). What answers that now is the keys
+screen rather than a gate — every key is listed with when it was made and last
+used (Q1.629), the one this browser holds is marked, and any is one tap to
+revoke — so a key minted from a borrowed session is a row its owner can see
+and kill, and the sign-in a leak would need is the same sign-in the leak
+already has. The cost is stated rather than hidden: a stolen session is now
+worth a permanent key until its owner looks at that screen.
+
+**Alternatives taken out.** Asking only when the session is older than N
+minutes, which is a rule nobody could predict from the screen. Keeping the
+gate and hiding the field behind a "use my session" toggle, which is the same
+tap count with a lie in it.
+
+**Status.** Applied. `relaycheck` pins the 201 with no body, with `{}`, and
+with a wrong password in the body; the password gate stays pinned on the two
+routes that keep it.
 
 ## Session lifecycle, questions and attachments
 
@@ -10516,27 +10588,36 @@ it, unmoved — which is why the arrival of `Sheet` (Q3.214) did not change it.
 
 #### Q3.219 — Is revoking your own API key two-step?
 
-**Decision.** No — `AccountSection`'s list of your own keys is a bare `Revoke`
-that fires on one tap. `KeyRow` in `UsersSection`, which revokes somebody else's,
-is two-step.
+**Decision.** No — `KeysSection`'s list of your own keys is a bare `Revoke` that
+fires on one tap, every key, the last live key of a password-less account
+included (4C, Q3.546). The same `KeyRow` with `confirm` set, in `UsersSection`,
+revokes somebody else's and is two-step, and its question names the key.
 
 **Why.** Revoking the key this browser is holding is allowed and is often the
 point: "this key leaked" is precisely the case where the leaked one is in your
-hand. So the screen puts the consequence **before** the button as prose —
-*"Revoking the key this browser is signed in with signs this tab out on its next
-request"* — instead of behind a question after it. A confirmation you have already
-read is a tap that says nothing.
+hand. So the row that *is* this browser's says so — a `this browser` badge and
+"revoking it signs you out" under it, the one consequence Q3.545 allows at rest —
+instead of a question after the tap. A confirmation you have already read is a
+tap that says nothing. What changed with the redesign is only where the sentence
+sits (on the one row it is true of, rather than under the whole list) and what
+follows the tap (a deliberate sign-out rather than a discovered one).
 
 **Status.** Current
 
 #### Q3.220 — Is opening registration confirmed, and closing it?
 
-**Decision.** Only opening. The confirmation states what it costs, in one of two
-sentences depending on whether mail is configured; closing gets no question at
-all.
+**Decision.** Only opening. The control is a `Badge` reading Open or Closed and
+one `Button` whose label is the verb for the other state; tapping "Open
+registration" replaces it with "Open registration to anyone?" · Open · Cancel —
+plus the line "Without email nobody is verified." while mail is unconfigured,
+since with SMTP it would be false; closing is one tap; the badge flips
+on the 200 and never before (7A).
 
 **Why.** Only the act that widens authority is confirmed. It is also the one
-confirming control that is not on a settings row.
+confirming control that is not on a settings row. It was a `role="switch"` for a
+while and is not now: a switch that waits behind a confirmation reads as broken,
+and one drawn flipped before the server answers is the optimistic paint this app
+forbids elsewhere.
 
 **Status.** Current
 
@@ -15715,6 +15796,204 @@ a typed id, the dedupe against a published row of the same id, the no-key
 sentence, the refusal under the native harness, Save kept for a stored-but-unlisted
 model, and the negative control that a system with `routable !== true` gets no
 field.
+
+#### Q3.543 — Why did Settings become six sections, and why did Devices stay inside Account?
+
+**Decision.** `SECTION_SPECS` is six rows: Account · API keys · Machines, then
+under an "Admin" heading Server · Email · Users. Two are new — `KeysSection` and
+`EmailSection` — and both are *splits* rather than features: keys left Account
+because a key is minted for `cpctl` on another machine and the screen it sat on
+was about you; Email left Server because the SMTP form was nine fields down a
+scroll that also held registration and the machine limit. Devices stays inside
+Account, above Sign out. `GROUP_TITLES.server` is "Admin", and its id stays
+`server` so no route or pin moves with a label.
+
+**Why.** The brief was three sentences: too much wording, several weak UX choices,
+and API keys as their own section. The test applied to every candidate section was
+subtraction — what is the screen when its one obvious row is taken away — and
+Devices fails it: for an API-key credential it is one sentence ("Signed in with an
+API key — nothing to end."), and its verbs are Sign out's verbs. Two outside
+reviews split on it and the owner chose the fold (decision 1B). "Admin" rather
+than "Server" because the heading sat a finger's width above a row that read
+"Server settings": one word doing two jobs, the heading reading as a row and the
+row as a restatement (2A). The installer sits under the machine list under its own
+heading and with no sentence, always (3B): the heading is the instruction.
+
+**Alternatives taken out.** Devices as a seventh section. A "You" heading over
+the first band, which is `Dropdown`'s grouped-list idiom refused for the same
+reason it was refused before. Renaming the `SettingsGroup` id to match its title,
+which moves every pin for a label.
+
+**Status.** Applied. `webcheck` pins the six ids in order, that the table has
+exactly six entries, that `GROUP_TITLES.server` is "Admin" and that no row under it
+shares a word with its heading, and that each section is drawn from exactly one
+place in `Settings.tsx`.
+
+#### Q3.544 — How short is a settings string allowed to be, and who enforces it?
+
+**Decision.** A table of caps in words, applied to every string on a settings
+screen: nav blurb 5, the one line a screen may carry under its title 14 (and most
+screens have none), row subline 8, field hint 8, a consequence at rest 6, a
+consequence inside a confirmation 14, empty state 8, success toast 6, failure
+toast 12, a measured caveat about another product 10. **Enforced in review, not
+by a driver** (9B). The plan's Appendix A is the reference a reviewer diffs
+against, and the baseline table it was measured from is what "grew back" means.
+
+**Why.** Measured on 2026-09-04 before the redesign: the one-machine screen
+carried 84 words of muted help prose on its typical path and 100 on its worst,
+Server settings 60 and ~192, and the longest single string was a 45-word Retire
+paragraph drawn at rest beside a button that already confirmed. Nobody reads a
+paragraph under a button on a phone, so the words were not information — they
+were the screen narrating the product, and every one of them goes stale when the
+product changes. A `webcheck` word budget was designed and rejected: a count over
+JSX is gameable by tag and by prop, and a count over the pure text modules would
+still not see the JSX. A check that can be satisfied without the property is worse
+than a stated rule, which is `docscheck`'s own lesson from the other direction.
+
+**Alternatives taken out.** The prose budget driver, for the reason above. Caps in
+characters, which reward abbreviation. Localising the caps, which would make them
+about a language this app is not written in yet.
+
+**Status.** Current. The numbers live in the plan and here; nothing in the
+repository restates them.
+
+#### Q3.545 — Where may a consequence be drawn, and which CLI lines may a settings screen carry?
+
+**Decision.** A consequence appears at rest **only beside a one-tap control**
+(10A) — today that is your own key's Revoke, whose row says "revoking it signs you
+out". Every two-step control is a bare button at rest and its cost is the
+confirmation's text: "Retire `<name>`?" with what it frees, "Remove the `<key>`?"
+with what stops. Every confirmation carries action, subject and effect, and names
+its subject. CLI on a settings screen is a white-list of two lines (11A, narrowed by
+Q3.549): the installer under Machines and `claude setup-token` on the sign-in
+card. A freshly minted key *names* `REEMOAT_CP_KEY` in its note rather than
+drawing an `export` line, which was a second box with the same bytes. A caveat about another
+product survives only when measured and at ten words or fewer — the Kimi note is
+"Kimi may prefer the key on the machine." — and reassurance ("That's normal",
+"Nothing is sent until…") leaves.
+
+**Why.** The old screens drew a consequence at rest *and* asked a question after
+it, so the paragraph was read by nobody and the question said nothing new. Putting
+the cost in exactly one place per control makes the number of taps say which kind
+of control it is. The CLI lines are the ones a person needs to *copy*; "sharing a
+machine is still `cpctl admin grant`" was a limitation stated as the first line of
+a screen, which is a screen apologising before it has been used.
+
+**Alternatives taken out.** Confirming every revoke, which Q3.219 refuses.
+Consequences in tooltips, which a phone has no hover for.
+
+**Status.** Applied. `webcheck` pins the `this browser` badge and its subline as
+drawn only under an `api_key` credential, and the plugin and machine confirmations
+as naming their subject with Cancel last.
+
+#### Q3.546 — Which key is "this browser", and what happens when you revoke it?
+
+**Decision.** `thisBrowsersKey` answers it client-side with no control-plane
+change: the credential in hand is an `api_key` and its `slice(3, 11)` equals the
+row's prefix, `keyPrefix`'s own width. With a session credential no row is this
+browser's and nothing on the screen says revoking could sign you out. Revoking
+that key signs out **on purpose** (5A): after the 200, `rememberRevokedKey` writes
+the prefix under one `sessionStorage` name, `clearSession` drops the credential,
+and the page reloads onto the gate, which draws "Key rk_…… revoked. Sign in again."
+once — `takeRevokedKeyNotice` deletes on read. No request is allowed to 401 its way
+there. Own keys stay one-tap in every case (4C), **including the last live key of
+a password-less account**.
+
+**Why.** The old path was discovery: the next request answered `401
+api_key_revoked`, `cpFetch` signed the tab out, and the gate said "Your session
+expired" about a thing the person had just chosen. The lockout case was argued
+both ways by two reviewers — confirm everything, or guard the password-less
+last-key case — and the owner kept Q3.219 whole. The cost is recorded rather than
+hidden: an account with `hasPassword === false` can revoke the key its tab signed
+in with and have no way back, since an admin never issues credentials (Q7.61's
+reasoning). It is chosen, not missed.
+
+**Alternatives taken out.** A `thisBrowser` flag on the control plane's row,
+which would mean the control plane hashing the bearer it was just handed to
+compare against every row. A confirmation on that one row, which makes the number
+of taps depend on which key you are holding.
+
+**Status.** Applied. `webcheck` pins both arms of the badge and that
+`clearSession` precedes the reload with no re-read between them.
+
+#### Q3.547 — Is reminting the provisioning key two-step?
+
+**Decision.** Yes — "Replace the provisioning key?" with "Retires the current key.
+Anything provisioning with it stops." · Replace · Cancel. The first mint, with no
+key to retire, is one tap. Recorded as Q3.219's mirror: **one tap where the cost
+lands on you, two where it lands on somebody else's script** (12A).
+
+**Why.** Your own API key is yours to burn, and the tab that burns it is the tab
+that chose to. The provisioning key is held by a machine somewhere that is not
+the phone reminting it, and the person who finds out is whoever runs the next
+provision. The registration control follows the same principle from Q3.220 —
+only the act that widens authority is confirmed — and it is drawn as a `Badge`
+and one `Button` whose label is the verb for the other state, never a
+`role="switch"`: a switch that waits behind a confirmation reads as broken, and
+drawing it flipped before the server answers is the optimistic paint this app
+forbids.
+
+**Alternatives taken out.** One tap with a consequence at rest, which Q3.545
+reserves for controls whose cost lands on the person tapping.
+
+**Status.** Applied. `webcheck` pins the two-step on `ServerSection` and that the
+file draws no `role="switch"`.
+
+#### Q3.548 — What does a settings list draw while it is being read, and why is it one row?
+
+**Decision.** `SkeletonRow` — one `min-h-11` row with a `bg-raised/50` bar the
+width of a title, `aria-busy` on the wrapper and `aria-hidden` on the bar, and no
+sentence. Exactly one per list, and the primitive takes no count. Drawn by the
+keys, devices, users and machines lists while their first read is in flight.
+
+**Why.** "No keys yet." was drawn before the keys had been read, which is a false
+claim for the two seconds it takes to be refuted. `Skeleton` in `bits.tsx` is the
+session shape — a dot and two lines at `px-4 py-3.5` — and standing it in front of
+a key row made the list jump on arrival. The lists this is for commonly hold zero
+or one thing, so three placeholder rows collapsing to one sentence is a two-row
+layout shift that implied two items that never existed; one row collapsing to one
+sentence is a paint. "reading your sessions…" and its siblings said what the shape
+already says.
+
+**Alternatives taken out.** `rows={1}` on `Skeleton`, for the shape reason. A
+spinner, which says the app is busy and not what with.
+
+**Status.** Applied. `webcheck` pins that the primitive takes no `rows` prop and
+that no settings file draws two in a row.
+
+#### Q3.549 — May a settings row open a form inside itself?
+
+**Decision.** No. Changing the password, changing the address and minting a
+key are each a screen of their own — `/settings/account/password`,
+`/settings/account/email`, `/settings/keys/new`, `SettingsLeaf` in
+`settings.ts` — and the row carries a verb that navigates there. The keys
+screen is a `KeyTable`: one line per key, one column per fact, a Revoke at
+the end, and a New key button that leaves the screen. The minted key is drawn
+once, by `OneTimeSecret`, whose note names `REEMOAT_CP_KEY` instead of a second
+box carrying the same bytes.
+
+**Why.** The first cut of the redesign (Q3.543) opened each form *in place*: a
+button that grew three fields under itself, a minted key that pushed the list
+down by a card and a command line. Reviewed on a phone by the owner, the
+verdict was that the interface jumps, that a list of keys is always a table,
+and that anything which pops up belongs on its own screen or must not pop up.
+That is the rule now, and it is the one the machine depths already kept —
+`…/systems/:system` is a form reached from a row, not a row that becomes a
+form. A row's height is a promise to the thumb above it.
+
+**What did not change.** The two-step confirmations keep swapping a button pair
+inside its own box (Q3.218) — that is the same pixels, not a new region. The
+password on the mint step did not survive the same review: it was the control
+plane's refusal rather than the screen's choice, and the owner dropped it
+there (Q1.630), so New key is one tap on the list — the mint runs from the
+button — and the leaf screen only shows what came back, once, from a
+module-level handoff it reads and clears; arriving there with nothing in hand
+walks back to the table without minting.
+
+**Status.** Applied. `webcheck` pins the three leaves parsing, their way up,
+their titles, that Account holds no `editing` toggle above Devices, that the
+keys screen is a table whose New key navigates, and that no `CommandLine` is
+drawn there.
 
 ## Deployment, packaging and code layout
 
@@ -23261,9 +23540,10 @@ wrong the same way — which is why the mirror is worth having only while it *is
 the mirror. Changing one without the other is a `400 currentPassword is
 required` on screen.
 
-**Status.** Fixed. `relaycheck` drives the refusal in the state that used to be
-exempt (no address row) and `webcheck`'s case is kept with its expectation
-inverted, because the state it names is the exposed one.
+**Status.** Fixed, then reversed on 2026-09-04: the condition was deleted and
+then the whole gate was, by the owner's decision (Q1.630). The measurement stands
+as what a stolen session can do again; `relaycheck` now pins the route taking the
+session alone.
 
 ### Q7.82 — Two fields rode the snapshot with no bound, behind a comment saying they did
 

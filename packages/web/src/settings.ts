@@ -12,18 +12,34 @@ import type { Me } from "./wire";
  * reach is a decision nothing asserts.
  */
 
-export type SettingsSection = "machines" | "account" | "server" | "users";
+export type SettingsSection = "account" | "keys" | "machines" | "server" | "email" | "users";
 
 /**
  * The band a section belongs to, or `null` for the first.
  *
  * One group today, and a *union* rather than a boolean so a second one needs no
- * change of shape. `null` for the first band rather than an invented "You"
- * heading, which is `Dropdown`'s existing grouped-list idiom — a heading above
+ * change of shape. Its id is `server` and its title is "Admin" — see
+ * {@link GROUP_TITLES} for why they differ. `null` for the first band rather
+ * than an invented "You" heading, which is `Dropdown`'s existing grouped-list idiom — a heading above
  * the first item that carries one, and none for items without. Adopting it means
  * this nav grows no second idiom.
  */
 export type SettingsGroup = "server";
+
+/**
+ * A screen one tap under a section that is a *form*, not a list.
+ *
+ * ⚠ **Nothing on a settings screen expands in place, and this union is what
+ * that rule costs.** Changing the password, changing the address and minting a
+ * key were forms that opened *inside* their row — a button that added three
+ * fields under itself and moved everything below it. On a phone that is the
+ * screen jumping under a thumb, and the owner's review said so in plain words.
+ * So each is its own address: the row carries the verb and the verb navigates,
+ * which is the shape `…/machines/:id/systems/:system` already has one section
+ * over. Never together with a machine, and only under `account` and `keys` —
+ * {@link parseSettingsRoute} enforces both.
+ */
+export type SettingsLeaf = "password" | "email" | "new-key";
 
 /**
  * A settings URL, in full.
@@ -108,12 +124,18 @@ export interface SettingsRoute {
    * answers to *signed in?*" this whole section was built to remove.
    */
   signin: string | null;
+  /**
+   * The form screen under `account` or `keys`, if the URL names one. See
+   * {@link SettingsLeaf}. Never with a machine.
+   */
+  leaf: SettingsLeaf | null;
 }
 
 export interface SectionSpec {
   id: SettingsSection;
   title: string;
-  blurb: string;
+  /** The line under the title in the nav, or `null` for none — see {@link SECTION_SPECS}. */
+  blurb: string | null;
   adminOnly: boolean;
   group: SettingsGroup | null;
 }
@@ -122,10 +144,21 @@ export interface SectionSpec {
  * The sections, in the order they are drawn.
  *
  * Settings was one flat scroll with two headings and no navigation, which is what
- * made "change my password" and "sign an agent in" the same screen. Four now —
- * the fourth, Server settings, arrived with SMTP and is the only admin-only one
- * besides Users — and the split is by *what you came here to do* rather than by
- * which service answers.
+ * made "change my password" and "sign an agent in" the same screen. Six now,
+ * three of them admin-only — and the split is by *what you came here to do*
+ * rather than by which service answers. The two newest are splits of the same
+ * kind: API keys left Account because minting one for `cpctl` is not "my
+ * account", and Email left Server because the SMTP form was nine fields on a
+ * scroll that also held registration and the machine limit. Q3.219's "own keys"
+ * list is that section now.
+ *
+ * **The three sections everybody sees carry no blurb; the admin three do.** The
+ * owner's call (2026-09-04): "Account", "API keys" and "Machines" say what they
+ * are, and a second line under each was the rail explaining the obvious. The
+ * admin rows keep theirs because "Server" and "Email" are not self-describing —
+ * one is registration and limits, the other is SMTP. Where a blurb exists it is
+ * at most five words: the rail truncates past about 28 characters. Held in review
+ * rather than by a driver (9B); which rows carry one is pinned.
  *
  * **Account leads, and it leads because it is the one the pane opens on.** There
  * is no neutral state at `sm` and above any more — the rail highlights
@@ -138,10 +171,16 @@ export const SECTION_SPECS: readonly SectionSpec[] = [
   {
     id: "account",
     title: "Account",
-    // Sign out is on that screen and is not what anybody came for, and this
-    // string truncates in the nav — so it names the four things you go looking
-    // for. Email and keys are new there and are the reason it changed.
-    blurb: "Your password, your email, your keys and your devices.",
+    blurb: null,
+    adminOnly: false,
+    group: null,
+  },
+  {
+    id: "keys",
+    title: "API keys",
+    // Its own section, which is the brief in one line: a key is minted for a
+    // tool on another machine, and the screen it was on was about *you*.
+    blurb: null,
     adminOnly: false,
     group: null,
   },
@@ -151,17 +190,26 @@ export const SECTION_SPECS: readonly SectionSpec[] = [
     // picker. It is gone: an agent is signed in *on a machine*, so it is reached
     // from that machine's row rather than from a list that has to ask which one.
     title: "Machines",
-    // Not "Add a machine, …": adding one is not always on offer, and a nav blurb
-    // promising it on an instance that hands out none is the same false claim
-    // the intro on that screen had to stop making.
-    blurb: "Your machines, the systems they sign in to, and which are reachable.",
+    blurb: null,
     adminOnly: false,
     group: null,
   },
   {
     id: "server",
-    title: "Server settings",
-    blurb: "Registration, email, and how people get accounts.",
+    // "Server", under a group heading that is no longer the same word — see
+    // `GROUP_TITLES`. "Server settings" restated the pop-up's own name.
+    title: "Server",
+    blurb: "Registration, limits, provisioning.",
+    adminOnly: true,
+    group: "server",
+  },
+  {
+    id: "email",
+    // Split out of Server: the SMTP form is the one admin screen somebody sets
+    // up once from a phone, and it was nine fields down a scroll that also held
+    // registration and the machine limit.
+    title: "Email",
+    blurb: "SMTP and delivery.",
     adminOnly: true,
     group: "server",
   },
@@ -170,7 +218,7 @@ export const SECTION_SPECS: readonly SectionSpec[] = [
     title: "Users",
     // "reset passwords" is gone with the route: an admin can take a credential
     // away and can never issue one.
-    blurb: "Create people, disable accounts, see their keys.",
+    blurb: "People and their access.",
     adminOnly: true,
     group: "server",
   },
@@ -203,7 +251,17 @@ export const SECTION_SPECS: readonly SectionSpec[] = [
  */
 export const DEFAULT_SECTION: SettingsSection = "account";
 
-export const GROUP_TITLES: Record<SettingsGroup, string> = { server: "Server" };
+/**
+ * What the band is called, above the first row in it.
+ *
+ * ⚠ **"Admin", never a word a row below it uses.** It was "Server", and the row
+ * directly under it was "Server settings" — one word doing two jobs a finger's
+ * width apart, so the heading read as a row and the row as a restatement. The
+ * group is the *audience* (who may see these rows); the rows are the subjects.
+ * The `SettingsGroup` id stays `server` so no route or pin moves with a label.
+ * Decision 2A; `webcheck` pins the string.
+ */
+export const GROUP_TITLES: Record<SettingsGroup, string> = { server: "Admin" };
 
 /**
  * The section a path segment names, or `null` for the index.
@@ -255,8 +313,18 @@ export function parseSettingsRoute(
   decode: (part: string) => string = (part) => part,
 ): SettingsRoute {
   const section = parseSettingsSection(segments[0]);
+  /*
+   * The three form screens, matched exactly: `account/password`, `account/email`
+   * and `keys/new`. Anything else under those two sections falls *up* to the
+   * section, which is this function's standing posture for a segment it does not
+   * know — a stale link lands one tap from where it was going.
+   */
+  if (section === "account" || section === "keys") {
+    const leaf = leafOf(section, segments[1]);
+    return { section, machineId: null, system: null, signin: null, agents: false, leaf };
+  }
   if (section !== "machines" || segments[1] === undefined) {
-    return { section, machineId: null, system: null, signin: null, agents: false };
+    return { section, machineId: null, system: null, signin: null, agents: false, leaf: null };
   }
   const machine = machineId(decode(segments[1]));
   /*
@@ -269,7 +337,7 @@ export function parseSettingsRoute(
    * segment claiming to be one is a stale link.
    */
   if (segments[2] === "agents") {
-    return { section, machineId: machine, system: null, signin: null, agents: true };
+    return { section, machineId: machine, system: null, signin: null, agents: true, leaf: null };
   }
   /*
    * The harness leaf, beside `systems/:system` rather than inside it — see
@@ -285,6 +353,7 @@ export function parseSettingsRoute(
       system: null,
       signin: named.length > 0 && named.length <= MAX_SYSTEM_ID_CHARS ? named : null,
       agents: false,
+      leaf: null,
     };
   }
   /*
@@ -301,7 +370,7 @@ export function parseSettingsRoute(
    * page.
    */
   if (segments[2] !== "systems" || segments[3] === undefined) {
-    return { section, machineId: machine, system: null, signin: null, agents: false };
+    return { section, machineId: machine, system: null, signin: null, agents: false, leaf: null };
   }
   const wanted = decode(segments[3]);
   return {
@@ -310,7 +379,34 @@ export function parseSettingsRoute(
     system: wanted.length > 0 && wanted.length <= MAX_SYSTEM_ID_CHARS ? wanted : null,
     signin: null,
     agents: false,
+    leaf: null,
   };
+}
+
+/** Which leaf a segment under `account` or `keys` names, or `null` for the section. */
+function leafOf(section: "account" | "keys", segment: string | undefined): SettingsLeaf | null {
+  if (section === "account") {
+    if (segment === "password") return "password";
+    if (segment === "email") return "email";
+    return null;
+  }
+  return segment === "new" ? "new-key" : null;
+}
+
+/**
+ * The path for one of the three form screens. Positional like {@link settingsPath}:
+ * the section is implied by the leaf, so a leaf under the wrong section is not
+ * expressible.
+ */
+export function settingsLeafPath(leaf: SettingsLeaf): string {
+  switch (leaf) {
+    case "password":
+      return `${settingsPath("account")}/password`;
+    case "email":
+      return `${settingsPath("account")}/email`;
+    case "new-key":
+      return `${settingsPath("keys")}/new`;
+  }
 }
 
 /**
@@ -427,6 +523,13 @@ export function settingsUp(
   origin: string | null = null,
 ): { path: string; withinNav: boolean } | null {
   if (route.section === null) return null;
+  // A form screen goes up to its section. `false`: the nav draws the section's
+  // row, not the form's, so the chevron is the only way back at every width.
+  // `typeof`, not `!== null`: the drivers build partial routes by hand (cast
+  // `as never`) and every other field here already tolerates that shape.
+  if (typeof route.leaf === "string") {
+    return { path: settingsPath(route.section), withinNav: false };
+  }
   if (
     route.agents &&
     origin !== null &&
@@ -513,6 +616,14 @@ export function settingsUp(
  */
 export function settingsPaneTitle(route: SettingsRoute): string | null {
   if (route.section === null) return null;
+  /*
+   * The form screens, titled by what the screen *is* — and none may share a
+   * string with its parent (the injectivity this docblock argues): "Email" is
+   * the admin section's title, so the account's own address is "Your email".
+   */
+  if (route.leaf === "password") return "Password";
+  if (route.leaf === "email") return "Your email";
+  if (route.leaf === "new-key") return "New key";
   /*
    * **"Agents", and it is what the screen is rather than what it is about** — the
    * same rule the machine title below states at length. It is not the machine's
