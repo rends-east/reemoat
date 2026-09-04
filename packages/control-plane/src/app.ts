@@ -170,7 +170,7 @@ import {
  * against `package.json` instead, so the two cannot drift silently.
  */
 const SOURCE_URL = "https://github.com/rends-east/reemoat";
-const VERSION = "0.5.0";
+const VERSION = "0.6.0";
 
 /**
  * Work a route answered before doing, still owed.

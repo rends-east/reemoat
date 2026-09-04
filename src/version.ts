@@ -34,4 +34,4 @@
  * restart, and changes nothing in this repository — so it neither contradicts this
  * nor is a step toward it.
  */
-export const DAEMON_VERSION = "0.5.0";
+export const DAEMON_VERSION = "0.6.0";

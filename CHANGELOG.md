@@ -25,7 +25,15 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-04
+
 ### Added
+
+- `users.password_changed_at` and `api_keys.last_used_at` on the control plane,
+  both additive: `GET /v1/me` answers `passwordChangedAt` and both keys routes
+  answer `lastUsedAt`, touched on an accepted bearer lookup at most once a minute
+  and never on a revoked key. An older client ignores the fields and an older
+  control plane answers without them.
 
 - `deploy/ci-freshness.sh`, run weekly by `.github/workflows/freshness.yml`,
   compares each ACP adapter pin in `package.json` with what the npm registry
@@ -88,6 +96,22 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Changed
 
+- Settings is six sections — Account · API keys · Machines, then under an
+  "Admin" heading Server · Email · Users. API keys are a table on a screen of
+  their own, with when each was made and last used and which one this browser
+  holds; New key is one tap, and the key is shown once on `/settings/keys/new`.
+  Email (SMTP, the test send, delivery trouble) is split out of Server;
+  registration is a badge and a verb button, reminting the provisioning key is
+  two-step. Password and email changes are their own screens rather than forms
+  opening inside a row — nothing on a settings screen expands in place. Every
+  confirmation names its subject with Cancel last; help prose is cut to the caps
+  the plan set, and the machine row marks a machine that is not yours with a
+  `shared` badge. Revoking the key this browser holds signs the tab out on
+  purpose, and the sign-in screen says so.
+- `POST /v1/me/keys` and `PUT /v1/me/email` take the session alone: neither asks
+  for the current password any more, and a `currentPassword` in the body is
+  ignored rather than verified. `POST /v1/me/password` still asks. The cost of
+  the email half is written at the route.
 - `@agentclientprotocol/claude-agent-acp` 0.63.0 → 0.73.0 and
   `@agentclientprotocol/codex-acp` 1.1.9 → 1.8.0. Re-measured against `claude`
   2.1.259 and `codex` 0.153.1: the model chip reads the model claude's `Default
