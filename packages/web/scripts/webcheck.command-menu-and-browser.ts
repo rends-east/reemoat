@@ -1108,15 +1108,23 @@ process.stdout.write("\nwhat is actually on screen\n");
   check("the filesystem root is named for itself", folderNames(["/"]), ["/"]);
 
   /*
-   * The render order. Pinned is cross-fleet and leads; then the selected
-   * machine's folders; then orphans. `m_b/kept` is drawn under Pinned *and* under
-   * its own folder when `m_b` is selected, and named once either way.
+   * The render order. Pinned leads, **cut to the selected machine**; then that
+   * machine's folders; then orphans. `m_b/kept` is pinned and lives on `m_b`, so
+   * under `m_a` it is not drawn at all (Q3.550: a section drawn identically on
+   * every tab read as the pins having been copied to each machine), and under
+   * `m_b` it leads and is named once.
    */
-  check("pinned leads, then the selected machine's folders", keys(visibleRows(groups, currentView(groups))), [
-    "m_b/kept",
+  check("the selected machine's folders, with no other machine's pins", keys(visibleRows(groups, currentView(groups))), [
     "m_a/blocked",
     "m_a/live",
   ]);
+  selectMachine("m_b" as never);
+  // After the waiting floor, which is `m_a/blocked` seen from `m_b`'s tab: a pin
+  // leads its machine's list, and the floor leads everything.
+  check("pinned leads on the machine it lives on", keys(visibleRows(groups, currentView(groups))), ["m_a/blocked", "m_b/kept", "m_b/other"]);
+  selectMachine("all" as never);
+  check("and under All every pin is drawn", keys(visibleRows(groups, currentView(groups)))[0], "m_b/kept");
+  selectMachine("m_a" as never);
   check("and blocked leads its folder", foldersOf(groups, currentView(groups))[0]?.rows[0]?.key, "m_a/blocked");
   check("which the folder header says even when shut", foldersOf(groups, currentView(groups))[0]?.blockedCount, 1);
 
@@ -1152,15 +1160,17 @@ process.stdout.write("\nwhat is actually on screen\n");
    */
   const folder = foldersOf(groups, currentView(groups))[0]!;
   toggleFolder(folder.id);
-  check("collapsing a folder removes exactly its rows", keys(visibleRows(groups, currentView(groups))), ["m_b/kept"]);
+  check("collapsing a folder removes exactly its rows", keys(visibleRows(groups, currentView(groups))), []);
+  selectMachine("m_b" as never);
   check("a pinned row survives any collapse", keys(visibleRows(groups, currentView(groups))).includes("m_b/kept"), true);
+  selectMachine("m_a" as never);
   // "blocked" would match nothing: the raw session id is deliberately not
   // searched, so a needle has to name something visible on the row.
   setQuery("api");
   check("but a search opens it again", keys(visibleRows(groups, currentView(groups))), ["m_a/blocked", "m_a/live"]);
   setQuery("");
   toggleFolder(folder.id);
-  check("expanding restores it", visibleRows(groups, currentView(groups)).length, 3);
+  check("expanding restores it", visibleRows(groups, currentView(groups)).length, 2);
 
   /*
    * The needle. `sessionLabel` first, which is the exact defect that got the last
@@ -1381,7 +1391,7 @@ process.stdout.write("\nthe orphan section, drawn and walked from one list\n");
   const browser = readFileSync(new URL("../src/ui/SessionBrowser.tsx", import.meta.url), "utf8");
   check("the rail's orphan section goes through the helper", /\borphansFor\(groups, filter\)/.test(browser), true);
   check("and never reaches past it to the raw group", /groups\.orphans/.test(browser), false);
-  check("the rail's pinned section goes through the helper too", /\bpinnedFor\(groups, filter\)/.test(browser), true);
+  check("the rail's pinned section goes through the helper too", /\bpinnedFor\(groups, view\)/.test(browser), true);
   check("and never reaches past that one either", /groups\.pinned/.test(browser), false);
 
   /*
@@ -1412,7 +1422,7 @@ process.stdout.write("\nthe orphan section, drawn and walked from one list\n");
   );
   check(
     "and the rail applies it at both call sites",
-    [/matching\(pinnedFor\(groups, filter\), view\.query\)/.test(browser), /matching\(orphansFor\(groups, filter\), view\.query\)/.test(browser)],
+    [/matching\(pinnedFor\(groups, view\), view\.query\)/.test(browser), /matching\(orphansFor\(groups, filter\), view\.query\)/.test(browser)],
     [true, true],
   );
 }

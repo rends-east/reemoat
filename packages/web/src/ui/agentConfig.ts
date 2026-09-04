@@ -1180,3 +1180,42 @@ export function configBarShows(
 ): boolean {
   return optionCount > 0 || contextPercent !== null || hasLeading;
 }
+
+/**
+ * What a model change owes the effort control, or `null` when nothing.
+ *
+ * A model switch left the previous model's effort in place, and on kimi that
+ * put a checkmark on "Thinking Max" in a list that had just grown a "Thinking
+ * on" row the old model never offered: the agent carries the level across, and
+ * the new model's list is a different list. Reported with a screenshot. The
+ * rule the owner set: when the two models' effort choices differ, the old level
+ * is dropped and the new model's default is set.
+ *
+ * Pure and keyed on `category`, never on an id (claude says `effort`, kimi
+ * `thinking`): the changed option must be the `model`; the effort control is
+ * `thought_level` on both sides. `null` when the new model publishes none
+ * (nothing to set), when the old one published none (the agent's own default
+ * already applies), or when the two lists hold the same values (the level still
+ * means what it meant). The default is the choice whose value is literally
+ * `default`, claude's way back to adaptive, and otherwise the first choice.
+ * `null` too when that is already the value, so nothing is sent for nothing.
+ *
+ * Answers a `{configId, value}` rather than sending, so `applyConfigChange`
+ * stays the one place the daemon is asked and `webcheck` can drive this with
+ * two option lists and no daemon.
+ */
+export function effortFollowUp(
+  changed: Pick<AgentConfigOption, "category"> | undefined,
+  before: readonly AgentConfigOption[],
+  after: readonly AgentConfigOption[],
+): { configId: string; value: string } | null {
+  if (changed === undefined || changed.category !== "model") return null;
+  const was = before.find((option) => option.category === "thought_level");
+  const now = after.find((option) => option.category === "thought_level");
+  if (was === undefined || now === undefined || now.kind !== "select" || now.choices.length === 0) return null;
+  const values = (option: AgentConfigOption): string => option.choices.map((choice) => choice.value).join(" ");
+  if (values(was) === values(now)) return null;
+  const preferred = now.choices.find((choice) => choice.value === "default") ?? now.choices[0];
+  if (preferred === undefined || preferred.value === now.value) return null;
+  return { configId: now.id, value: preferred.value };
+}

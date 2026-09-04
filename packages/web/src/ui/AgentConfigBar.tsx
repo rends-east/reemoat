@@ -37,6 +37,7 @@ import {
   type ConfigProse,
   type DrawnControls,
   type PieLevel,
+  effortFollowUp,
 } from "./agentConfig";
 import { Icon, MENU_HEADING, MENU_PANEL, menuRow, TAP_GROW_Y } from "./bits";
 import { toast } from "./Toast";
@@ -73,11 +74,33 @@ export function applyConfigChange(
     toast("error", "that machine is not reachable");
     return Promise.resolve(false);
   }
+  /*
+   * What the session held before the change, for `effortFollowUp`: a model
+   * switch that changes the effort list owes the new model its default, and
+   * only the *before* list says whether it changed. Read off the store rather
+   * than passed in, since the composer's `/model` menu is the second door and
+   * would have to carry it too.
+   */
+  const before =
+    store.getSnapshot().sessions.find((row) => row.key === keyOf(sessionRef))?.snapshot.agentConfig?.options ?? [];
   const held = beginChoice(keyOf(sessionRef), configId, value);
   return daemon
     .setConfig(sessionRef.sessionId, { configId, value })
     .then((result) => {
       store.applySnapshot(sessionRef, result.session);
+      /*
+       * The follow-up goes through this same function (recorded, sent from the
+       * one `setConfig` call site, released) rather than a second request
+       * written here. It cannot recurse further: the follow-up is a
+       * `thought_level` change, and `effortFollowUp` answers `null` for
+       * anything but a `model`.
+       */
+      const followUp = effortFollowUp(
+        before.find((option) => option.id === configId),
+        before,
+        result.session.agentConfig?.options ?? [],
+      );
+      if (followUp !== null) return applyConfigChange(sessionRef, followUp.configId, followUp.value);
       return true;
     })
     .catch((cause: unknown) => {

@@ -2867,9 +2867,10 @@ export interface SessionGroups {
   /**
    * Pinned sessions, across the whole fleet, as one group above the machines.
    *
-   * Gathered here rather than sorted to the top of each section: a pin is somebody
-   * saying "this one, wherever it lives", and scattering them one per section
-   * makes that list something you have to reassemble by eye.
+   * Gathered here rather than sorted to the top of each section, and drawn under
+   * the machine tab the session is on — `pinnedFor` in `groups.ts` cuts this list
+   * by `ListView.machine`, since a section drawn identically on every tab read as
+   * the pins having been copied to each machine.
    *
    * **A copy, not a move.** Every row here is also under its own machine in
    * `groups` (or in `orphans`). Pinning is a second way to reach a session, not a
@@ -2975,8 +2976,8 @@ export function sessionGroups(state: AppState): SessionGroups {
     if (group === undefined) {
       // A row with nowhere to live. `orphansFor` draws these under "No longer
       // granted", and a *pinned* one never reaches here — it is already in
-      // `pinned`, which is a section that does not care which machine a session
-      // is on and is precisely where somebody would look for it.
+      // `pinned`, and `pinnedFor` draws a pin with no tab on every tab, which is
+      // this section's own rule.
       orphans.push(row);
       return null;
     }
