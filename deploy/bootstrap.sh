@@ -93,7 +93,14 @@ TOOLCHAIN="$REEMOAT_HOME/toolchain"
 TOOLCHAIN_MARKER="$TOOLCHAIN/.installed-by-bootstrap"
 
 CP=""
+# Copied once and taken out of the environment on the next line. The documented
+# quiet form is `REEMOAT_API_KEY=rk_… sh -c "$(curl …)"`, which *exports* the
+# whole account's key to every child this script starts — `pnpm install`'s
+# lifecycle scripts, the node tarball's `tar`, and the three vendor installer
+# scripts `deploy/agents.sh` downloads and runs as this user — none of which has
+# any use for it. `$API_KEY` is the only reader, so nothing here misses it.
 API_KEY="${REEMOAT_API_KEY:-}"
+unset REEMOAT_API_KEY
 ENROLL_CODE=""
 # Where the coding-agent CLIs come from: each vendor's own installer, or the npm
 # registry for a machine that cannot reach those hosts. `deploy/agents.sh` explains
@@ -1435,6 +1442,22 @@ do_uninstall() {
       . "$0"
       svc_uninstall daemon
     ' "$CHECKOUT/deploy/lib.sh" || _stopped=0
+  elif [ ! -f "$_env" ]; then
+    # **No checkout and no env file is an install that never reached the
+    # service, and there is nothing to stop.** `nothing_installed` promises, on
+    # every refusal after `ensure_node` — the `409 machine_limit` at
+    # `create_machine` being the one people meet — that "there is a private node
+    # in $TOOLCHAIN, which `--uninstall` removes". That run died before
+    # `clone_or_fetch`, so `$CHECKOUT` was never made; and this arm used to read
+    # a missing checkout as "could not stop the service", keep the toolchain and
+    # die telling somebody to pass `--dir` to a checkout that does not exist —
+    # the promise was false for exactly the case it was written for. The env
+    # file is the evidence, and the same file `existing_install` reads: `main`
+    # calls `write_env_file` before `hand_off`, so no env file means the unit was
+    # never rendered and nothing runs the node about to be removed. An env file
+    # *with* no checkout is the other case — installed with `--dir` and run
+    # without it — and keeps the refusal below.
+    say "no checkout at $CHECKOUT and no $_env, so the install never reached the service; nothing to stop."
   else
     _stopped=0
     warn "note: no checkout at $CHECKOUT, so the service could not be stopped through lib.sh."

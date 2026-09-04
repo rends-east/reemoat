@@ -1,0 +1,52 @@
+# How far behind the registry the ACP adapter pins are, once a week.
+#
+# `check.yml` runs every driver on every push and one of them, `pincheck`, is
+# about the adapter pins — and it deliberately answers only that the pins agree
+# with each other and with what is installed, never whether the registry has
+# moved on. It cannot: every step in that job is offline in one process, and
+# asking the registry is a network call. So this is a separate workflow for the
+# reason `check.yml`'s `image` job is a separate job — it needs the world — and
+# it runs on a schedule rather than on a push because the answer changes when the
+# registry changes, not when this tree does.
+#
+# **This file decides nothing**, the same correction `deploy.yml` and
+# `release.yml` exist in. Every outcome — current, behind, deprecated, no longer
+# published, registry unreachable — and the exit code each earns is in
+# `deploy/ci-freshness.sh`, where `deploycheck` drives all five through the
+# `NPM_VIEW` seam with no registry and no network. What is left here is a
+# checkout and one call.
+#
+# Nothing here moves a pin. `renovate.json` proposes the bump as a pull request, a
+# person merges it, and each machine still takes it through `deploy/deploy.sh`.
+# This says how stale the pin is whether or not anybody opened the proposal.
+
+name: freshness
+
+on:
+  schedule:
+    # Monday 06:17 UTC. An odd minute, since GitHub's own advice is that
+    # top-of-the-hour schedules queue behind everybody else's.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+# A checkout, and nothing written back. The registry is asked anonymously.
+permissions:
+  contents: read
+
+jobs:
+  freshness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # `npm view` is the only tool the script needs, and it ships with node.
+      # The same major `check.yml` runs the drivers under, so the npm that asks
+      # here is the npm that installs there.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: freshness
+        run: deploy/ci-freshness.sh

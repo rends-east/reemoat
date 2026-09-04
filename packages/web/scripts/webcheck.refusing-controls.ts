@@ -412,19 +412,30 @@ process.stdout.write("\nno authorization on the Configure agent screen\n");
    * ⚠ **Every field on the screen, swept rather than sampled.** Naming the
    * removed component catches the box coming back by the door it left through;
    * this catches it arriving by any other, including a credential field typed out
-   * by hand with no import at all. The screen is entitled to exactly two inputs —
-   * the agent's name and the shared search box — and both are identified by an
-   * attribute rather than by position, so reordering the file is not a failure and
-   * a third field is.
+   * by hand with no import at all. The screen is entitled to exactly three inputs —
+   * the agent's name, the shared search box and a typed model id — and each is
+   * identified by an attribute rather than by position, so reordering the file is
+   * not a failure and a fourth field is.
    */
   const fields = builder.split("<input").slice(1).map((one) => one.slice(0, 500));
-  check("and carries exactly two fields", fields.length, 2);
-  // Written as "none is unaccounted for" rather than "two are accounted for": the
-  // second form is satisfied by a third field arriving beside the two known ones,
-  // and leans entirely on the count above to notice.
+  /*
+   * Three now, and the third is a *model id* — typed under a routable provider's
+   * group, substituted into the listing, and never a secret: it is the string a
+   * routed session names in `ANTHROPIC_MODEL`, which is on the wire in clear
+   * anyway. It is identified by its label, which names the system it belongs to.
+   */
+  check("and carries exactly three fields", fields.length, 3);
+  // Written as "none is unaccounted for" rather than "three are accounted for":
+  // the second form is satisfied by a fourth field arriving beside the known
+  // ones, and leans entirely on the count above to notice.
   check(
-    "and every one of them is one of the two it is entitled to",
-    fields.filter((one) => !/aria-label="Agent name"/.test(one) && !/type="search"/.test(one)).length,
+    "and every one of them is one of the three it is entitled to",
+    fields.filter(
+      (one) =>
+        !/aria-label="Agent name"/.test(one) &&
+        !/type="search"/.test(one) &&
+        !/aria-label=\{`Type a \$\{system\.displayName\} model id`\}/.test(one),
+    ).length,
     0,
   );
   /*

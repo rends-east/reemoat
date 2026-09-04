@@ -14,7 +14,10 @@
  * which is what it did before any of this existed.
  *
  * Measured 2026-08-01 against claude 2.1.220 / claude-agent-acp 0.63.0 and
- * kimi 0.29.2 — see `toolCallLineage` for what each one sends.
+ * kimi 0.29.2 — see `toolCallLineage` for what each one sends. Re-measured
+ * 2026-09-04 against claude 2.1.259 / claude-agent-acp 0.73.0: the spawn still
+ * arrives with `subagent: true` (titled `Task` now); the parent link was not
+ * exercised, since the subagent asked for made no tool calls of its own.
  */
 
 /** What a tool call's metadata said about its lineage. */

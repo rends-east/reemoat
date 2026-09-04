@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { installCommand } from "../enrollment";
 import { keyOf } from "../ids";
+import { machineQuotaNotice, mayAddMachine } from "../quota";
 import type { Route } from "../router";
 import type { AppState } from "../store";
+import { CommandLine } from "./CommandLine";
 import { SessionBrowser } from "./SessionBrowser";
 import { useKeyboard } from "./keyboard";
 import { LAYER } from "./overlay";
@@ -218,8 +221,39 @@ export function AppShell({
  *
  * Only ever seen at `lg`, where "the list" is already the rail — so the pane
  * beside it has nothing to show and should say so rather than repeating it.
+ *
+ * **Except on an empty fleet, where the pane is the right place for the one
+ * thing there is to do.** A newly-confirmed account lands here with no machine,
+ * and the rail — 280px wide — drew the one-line installer in a box it could not
+ * fit, scrollbar and all, beside a pane saying "Pick a session from the list"
+ * about a list with nothing in it. So at `lg` the rail keeps the sentence and
+ * the pane draws the instruction and the command at a width it can be read at;
+ * below `lg` there is no pane and the rail draws all of it (`SessionBrowser`).
+ * The command is the only door: a machine is added by running it, and nothing
+ * else — the by-name form that minted a code to carry by hand is gone. The same
+ * rule as every other site of this question — a door, or the sentence saying why
+ * there is not one, never neither — with `mayAddMachine` and
+ * `machineQuotaNotice` as the pair.
  */
-export function NothingSelected(): ReactNode {
+export function NothingSelected({ state }: { state: AppState }): ReactNode {
+  const probing = state.machines.some((m) => m.reach === "probing" || m.reach === "unknown");
+  if (state.machines.length === 0 && !probing) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+        <p className="text-sm text-muted">No machines yet.</p>
+        {mayAddMachine(state.me) ? (
+          <>
+            <p className="text-xs text-muted">Run this on the machine you want to use:</p>
+            <div className="w-full max-w-lg text-left">
+              <CommandLine command={installCommand(location.origin)} />
+            </div>
+          </>
+        ) : (
+          <p className="max-w-xs text-xs text-muted">{machineQuotaNotice(state.me)}</p>
+        )}
+      </div>
+    );
+  }
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center">
       <p className="text-sm text-muted">Pick a session from the list.</p>

@@ -209,12 +209,13 @@ export function MachineAgentsSection({
     // unreachable machine is one of the commonest reasons to be on a settings
     // screen, so the honest thing is to say which machine and why it is blank.
     // `failed`, because this arm really is the absence of an answer — the probe
-    // was made and nothing came back.
+    // was made and nothing came back. The trailing "so what it offers cannot be
+    // read or reordered" was cut on 2026-09-04 for fewer words; the machine's
+    // name and `reachText`'s reason are what was kept.
     return (
       <Empty failed>
         {machine.name} is not reachable right now —{" "}
-        {reachText(machine.reach, machine.offlineReason)}, so what it offers cannot be read or
-        reordered.
+        {reachText(machine.reach, machine.offlineReason)}.
       </Empty>
     );
   }
@@ -235,14 +236,15 @@ export function MachineAgentsSection({
        *
        * Drawn here rather than inside `StripEditor` because this is the component
        * that has the machine — and because the guards above it are the states in
-       * which it would be a promise about a list that is not there.
+       * which it would be a promise about a list that is not there. The wording
+       * was cut on 2026-09-04 for fewer words; what was kept is the name, the id,
+       * the order, which one is the default, and that removing signs nothing out.
        */}
       <p className="text-xs text-muted">
-        What the New session screen offers on {machine.name} (
-        <code className="text-muted/80">{machine.id}</code>), in the order it draws them — the first
-        one that can start is the <em>default</em> a new session opens on. Removing one takes its
-        tile off that screen and signs nothing out — a built-in agent can be added back here, and
-        one you assembled is built again from <em>Add an agent</em>.
+        What New session offers on {machine.name} (
+        <code className="text-muted/80">{machine.id}</code>), in this order — the first that can
+        start is the <em>default</em>. Removing one signs nothing out; an agent you assembled has to
+        be built again from <em>Add an agent</em>.
       </p>
       <StripEditor key={machineId} machineId={machineId} />
     </div>
@@ -292,7 +294,8 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
    * optimistically and restores `saved` when the daemon refuses, and the refusal
    * landed in the reserved line below in `text-2xs text-muted` — the same ink and
    * the same size as the informational "this daemon is older than this screen"
-   * notice sharing that element. So on a phone over a relay the row moved, and
+   * notice sharing that element (reworded 2026-09-04 to "too old to reorder
+   * agents — update it"; still the same element). So on a phone over a relay the row moved, and
    * 800ms later it moved back, with the only account of why sitting in the
    * quietest type on the screen. This is the other half of that fix: the row that
    * is not settled yet says so while the `PUT` is out.
@@ -711,7 +714,7 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
         {failure ??
           (supported
             ? ""
-            : "This machine's daemon is older than this screen. Update it to reorder its agents.")}
+            : "This machine's daemon is too old to reorder agents — update it.")}
       </p>
       {/*
        * ⚠ **The one remedy that is not already on screen** — `AgentBuilder`'s

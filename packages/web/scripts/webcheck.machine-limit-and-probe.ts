@@ -277,19 +277,26 @@ process.stdout.write("\nthe machine limit\n");
 
   {
     const src = strip(readFileSync(new URL("../src/ui/settings/MachinesSection.tsx", import.meta.url), "utf8"));
-    // The form is downstream of the check that it may be offered at all — the
+    // The door is downstream of the check that it may be offered at all — the
     // `asksMailUsable < promisesReset` idiom one section over, which guards both
     // operands with `>= 0` for the reason that idiom's neighbours record: dropping
     // the predicate makes the left side -1, and -1 is less than every real
     // position, so the ordering passes with the gate it is about deleted.
+    //
+    // ⚠ **The door is the one-line installer, and the by-name form is gone.**
+    // `<AddMachine` minted an enrollment code to carry to a host by hand; the
+    // decision (2026-09-04) is that a machine is added by running the script on
+    // it and nothing else, so the form's absence is asserted as the rule rather
+    // than left as a gap somebody might close by putting it back.
     const asks = src.indexOf("mayAddMachine(");
-    const form = src.indexOf("<AddMachine");
+    const door = src.indexOf("<CommandLine");
     check("the screen still asks whether a machine may be added", asks >= 0, true);
-    check("and still has a form to gate", form >= 0, true);
+    check("and the one-line installer is the door it gates", door >= 0, true);
+    check("with no by-name form beside it", /<AddMachine/.test(src), false);
     report(
-      "the add form is downstream of the check that it is offerable",
-      asks >= 0 && form >= 0 && asks < form,
-      `${asks} < ${form}`,
+      "the door is downstream of the check that it is offerable",
+      asks >= 0 && door >= 0 && asks < door,
+      `${asks} < ${door}`,
     );
     /*
      * Creating and retiring a machine move `machineCount`, which is the number
@@ -321,7 +328,20 @@ process.stdout.write("\nthe machine limit\n");
      * enrolled — but it must never mint a *second* one for a row.
      */
     check("the list never mints a code for a machine already on it", /mintEnrollment/.test(src), false);
-    check("adding a machine re-reads who you are", /machinesChanged\("machine-added"\)/.test(src), true);
+    /*
+     * ⚠ **A machine is added from a terminal now, and this tab learns of it by
+     * asking.** The by-name form that called `machinesChanged("machine-added")`
+     * is gone (2026-09-04); the one-line installer enrolls the machine from the
+     * host itself, so the poll re-lists an empty fleet every tick and re-reads
+     * `me` — the count the limit is enforced against — once the first machine
+     * lands. Both halves pinned on `store.ts`, since neither has a screen.
+     */
+    check("nothing on this screen adds a machine by name", /machinesChanged\("machine-added"\)|createMachine\(/.test(src), false);
+    {
+      const storeSrc = strip(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"));
+      check("an empty fleet is re-listed by the poll rather than waiting for a wake", /resume\(this\.snapshot\.phase === "loading" \? "cp-retry" : "awaiting-first-machine"\)/.test(storeSrc), true);
+      check("and the first machine landing re-reads who you are", /if \(this\.connections\.size > 0 && epoch === this\.epoch\) await this\.refreshMe\(\);/.test(storeSrc), true);
+    }
     /*
      * ⭐ **Retire, rename and the setup code moved onto the machine's own screen**,
      * so the regexes that pin them follow the code rather than the filename — a

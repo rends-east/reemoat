@@ -11,6 +11,7 @@ import { rememberPick, rememberRemoval } from "../agentPick";
 import { agentPath, navigate, newPath, useOrigin } from "../router";
 import { overlayKind, type AgentStep } from "../nav";
 import {
+  adoptModels,
   allModels,
   choiceRefusal,
   defaultAgentName,
@@ -40,6 +41,7 @@ import {
   ChoiceRow,
   DangerButton,
   Empty,
+  FIELD,
   Icon,
   IconButton,
   Menu,
@@ -225,6 +227,21 @@ export function AgentBuilder({
   /** The same list as ids, for the two readers that only need to iterate it. */
   const harnessIds = useMemo(() => harnessRows.map((one) => one.id), [harnessRows]);
   const [picked, setPicked] = useState<{ system: string; model: string } | null>(null);
+  /**
+   * Model ids somebody typed rather than picked, one per system.
+   *
+   * ⚠ **Held here and not in the picker, for the reason the draft is:** the
+   * picker is a route and unmounts on the way back, and a typed id that vanished
+   * with it would leave `picked` naming a row the listing no longer holds. It is
+   * fed to `adoptModels` in `listed` below, which is the whole of what it does —
+   * a typed id is a listing row and never a fourth kind of choice.
+   *
+   * **One per system, the newer replacing the older**, so a typo is corrected by
+   * typing again rather than by finding a control that removes a row. A replaced
+   * id somebody had already *picked* is not lost: it is then a pick no list holds,
+   * which the orphan pass under `catalogue` adopts by the same substitution.
+   */
+  const [typed, setTyped] = useState<readonly { system: string; model: string }[]>([]);
   const [name, setName] = useState("");
   /** Frozen the moment somebody types, so their name is not overwritten by a pick. */
   const [named, setNamed] = useState(false);
@@ -574,15 +591,26 @@ export function AgentBuilder({
    * So the key rule in `agents.ts` stays true of it word for word, and that
    * module learns nothing about where this app got the names.
    */
+  /*
+   * ⚠ **And a typed id goes in at the same site, by the same argument.** The
+   * daemon validates a routed model against nothing but a length — the table is a
+   * starting set, and every Moonshot id it shipped with had been retired for three
+   * months before anybody noticed — so a spelling somebody knows is substituted
+   * into the listing exactly as the catalogue's are, and reaches `allModels` as a
+   * table row. `adoptModels` holds the argument and the `routable` gate.
+   */
   const listed = useMemo(() => {
     if (systems === null) return null;
-    if (orModels === null || orModels.kind !== "ok") return systems;
-    return systems.map((one) =>
-      one.id === OPENROUTER_SYSTEM_ID ? { ...one, models: orModels.models } : one,
-    );
-  }, [systems, orModels]);
+    const read =
+      orModels === null || orModels.kind !== "ok"
+        ? systems
+        : systems.map((one) =>
+            one.id === OPENROUTER_SYSTEM_ID ? { ...one, models: orModels.models } : one,
+          );
+    return adoptModels(read, typed);
+  }, [systems, orModels, typed]);
 
-  const catalogue = useMemo(
+  const catalogueAsListed = useMemo(
     () =>
       listed === null || capabilities === null
         ? []
@@ -603,6 +631,42 @@ export function AgentBuilder({
           allModels(listed, capabilities, orModels?.kind === "ok" ? orModels.toolless : [], harness),
     [listed, capabilities, orModels, harness],
   );
+
+  /**
+   * The catalogue, with the chosen model in it even where no list names it.
+   *
+   * ⚠ **`current` is a lookup in the catalogue and Save is gated on `current`, so
+   * a stored preset whose model has left every list was a row that could not be
+   * renamed.** The catalogue moves under a preset three ways — the OpenRouter
+   * read drops a model, the daemon's table is refreshed, a CLI retires a name —
+   * and each of them drew `Choose` under a Model field that plainly held
+   * something, with the only way to Save being to re-point the agent at a model
+   * it was not made for.
+   *
+   * ⚠ **Adopted by the same substitution a typed id gets, and only when it is
+   * genuinely unlisted.** The test has to be made against the catalogue rather
+   * than against `listed`, because a pick can be a *published* row — opencode's
+   * own spelling of an OpenRouter model, which the table never held — and
+   * adopting that would hand `allModels` a table row of the same id, whose name
+   * then wins the dedupe and renames a perfectly good row to its slug. So the
+   * catalogue is read once as it stands, and a second time only over a pick it
+   * did not hold — the edit path with a vanished model, which is rare and is the
+   * one state this exists for. `adoptModels` refuses a non-routable system, so a
+   * native preset in that state still draws `Choose`; the daemon would refuse its
+   * start regardless, and this side may not offer a save for a row it cannot.
+   */
+  const catalogue = useMemo(() => {
+    if (picked === null || listed === null || capabilities === null) return catalogueAsListed;
+    const held = catalogueAsListed.some(
+      (one) => one.system.id === picked.system && one.modelId === picked.model,
+    );
+    if (held) return catalogueAsListed;
+    const orphan = adoptModels(listed, [picked]);
+    // `adoptModels` hands back the same system objects where it added nothing,
+    // which is how a refused (non-routable) pick is told from an adopted one.
+    if (orphan.every((one, index) => one === listed[index])) return catalogueAsListed;
+    return allModels(orphan, capabilities, orModels?.kind === "ok" ? orModels.toolless : [], harness);
+  }, [catalogueAsListed, picked, listed, capabilities, orModels, harness]);
 
   /**
    * What to say where the OpenRouter rows would have been, or `null`.
@@ -938,6 +1002,9 @@ export function AgentBuilder({
           if (!named) setName(defaultAgentName(choice.modelName));
           back();
         }}
+        onType={(system, model) =>
+          setTyped((was) => [...was.filter((one) => one.system !== system), { system, model }])
+        }
       />
     );
   }
@@ -1536,6 +1603,19 @@ const SOME_MODELS_UNREAD = "Some of this machine's models could not be read.";
 const MAX_AGENT_NAME_CHARS = 80;
 
 /**
+ * The longest model id the daemon stores; `MAX_MODEL_CHARS` in `src/server.ts`,
+ * and the **only** check a routed model id meets there.
+ *
+ * Held on the field for {@link MAX_AGENT_NAME_CHARS}'s reason exactly:
+ * `POST /custom-agents` spawns a harness to re-weigh the pairing before it reads
+ * the length, so an over-long id would cost seconds and come back as a sentence
+ * built for an API client. Written out rather than imported, because `src/` is
+ * the daemon and nothing here may import it; `webcheck` pins the two against each
+ * other.
+ */
+const MAX_MODEL_CHARS = 256;
+
+/**
  * A wait with words, for the two screens that have nothing else on them.
  *
  * ⚠ **`Spinner` is `aria-hidden` and says nothing**, so a screen that is only a
@@ -1806,6 +1886,7 @@ function ModelPicker({
   notice,
   value,
   onPick,
+  onType,
 }: {
   choices: readonly ModelChoice[];
   /** Read only to say which harnesses each row is for. See {@link Supports}. */
@@ -1860,6 +1941,14 @@ function ModelPicker({
   notice: string | null;
   value: { system: string; model: string } | null;
   onPick: (choice: ModelChoice) => void;
+  /**
+   * A model id typed under a routable system's group rather than picked.
+   *
+   * Reported and kept nowhere, like a pick: the builder substitutes it into the
+   * listing and it comes back down as a row of `choices`, drawn and weighed like
+   * any other. See {@link TypedModel}.
+   */
+  onType: (system: string, model: string) => void;
 }): ReactNode {
   const [query, setQuery] = useState("");
   const [system, setSystem] = useState<string | null>(null);
@@ -2274,6 +2363,26 @@ function ModelPicker({
                   );
                 })}
               </ul>
+              {/*
+                * ⚠ **Only under a system the daemon can route at, and the gate is
+                * the same one `adoptModels` applies.** A native system's models are
+                * whatever its CLI publishes, and a typed id there is refused at
+                * start with the CLI's own sentence — a box that only produces
+                * refusals. `routable` absent is an older daemon with no routed
+                * door, and draws nothing, which is this file's rule for every
+                * optional field.
+                */}
+              {group.system.routable === true && (
+                <TypedModel
+                  system={group.system}
+                  onCommit={(model) => {
+                    onType(group.system.id, model);
+                    // The row lands in this group, and a search that cannot match
+                    // it would hide the thing just typed. A narrowing, not a value.
+                    setQuery("");
+                  }}
+                />
+              )}
             </section>
             );
           })
@@ -2554,6 +2663,70 @@ function Reported({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * A model id typed under a provider, for the ids no list holds yet.
+ *
+ * ⚠ **Drawn in the search box's idiom and it is not a search.** `SEARCH_FIELD`
+ * without the magnifier, at the foot of a routable provider's group, because a
+ * second bordered pill in the strip at the top would be a second thing to tell
+ * apart from the box beside it — and the id belongs to a *provider*, so it is
+ * typed where the provider's rows are. Nothing is drawn optimistically: Enter or
+ * leaving the field reports the id, the builder substitutes it into the listing,
+ * and what comes back is a row with the same glyphs, the same subline and the
+ * same greying as every row above it. Picking it is a tap on that row, exactly as
+ * for one the table named.
+ *
+ * ⚠ **Escape abandons, and the ref is `NameLine`'s ref for `NameLine`'s reason:**
+ * unmounting or blurring on the way out of an Escape fires `onBlur`, and a blur
+ * that commits would turn the cancel into a row. While the field has focus Escape
+ * is the field's (`isTypingInto` in `overlay.ts`), so the sheet stays open.
+ *
+ * The field empties on commit: the id is a row now, and a box still holding it
+ * reads as something left undone. `maxLength` is the daemon's own bound, held
+ * here so it is not discovered by a round trip that starts an agent to find out.
+ */
+function TypedModel({ system, onCommit }: { system: SystemInfo; onCommit: (model: string) => void }): ReactNode {
+  const [draft, setDraft] = useState("");
+  const abandoned = useRef(false);
+  const commit = (): void => {
+    if (abandoned.current) {
+      abandoned.current = false;
+      return;
+    }
+    const id = draft.trim();
+    if (id.length === 0) return;
+    setDraft("");
+    onCommit(id);
+  };
+  return (
+    <input
+      type="text"
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          commit();
+        }
+        if (event.key === "Escape") {
+          abandoned.current = true;
+          setDraft("");
+          event.currentTarget.blur();
+        }
+      }}
+      aria-label={`Type a ${system.displayName} model id`}
+      placeholder="Or type a model id"
+      maxLength={MAX_MODEL_CHARS}
+      /* `SEARCH_FIELD` is a whole string and `pl-8` is the magnifier's room; with
+         no magnifier the box is `FIELD`'s shape — which is a whole string too, and
+         the one every text field on a sheet already wears. `w-full` beside it is
+         a width, which neither constant decides. */
+      className={`${FIELD} mt-2 w-full`}
+    />
   );
 }
 

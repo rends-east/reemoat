@@ -27,6 +27,19 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Added
 
+- `deploy/ci-freshness.sh`, run weekly by `.github/workflows/freshness.yml`,
+  compares each ACP adapter pin in `package.json` with what the npm registry
+  serves and writes the answer into the job summary. Being behind is a report
+  and never a failure (`FRESHNESS_MAX_BEHIND` is the margin that makes it one);
+  a pinned version the registry no longer lists fails the job, since it would
+  fail `pnpm install --frozen-lockfile` on the next machine the one-line
+  installer sets up; and a registry that could not be asked exits with its own
+  code rather than a verdict about the tree. `pnpm deploycheck` drives every
+  outcome offline through the `NPM_VIEW` seam.
+- `renovate.json`: pull requests proposing dependency bumps, the two ACP
+  adapters one each and the rest of the workspace grouped weekly, with exact
+  pins and no automerge — a person merges, and each machine still takes the
+  change through `deploy/deploy.sh`.
 - The daemon keeps the coding-agent CLIs current by itself. `deploy/agents.sh`
   installs what is missing — three with each vendor's own installer into the
   vendors' own directories (`~/.local/bin`, `~/.local/share/claude`, `~/.codex`,
@@ -42,6 +55,15 @@ it — so a citation here would be the one kind nothing checks.
   (`override`) or the copy found on PATH (`path`). The model picker draws it under
   the provider heading. Absent from older daemons; `null` where nothing was
   spawned.
+- The daemon announces which build of each agent CLI it would launch on the
+  tunnel handshake (`x-reemoat-agent-clis`, `claude=2.1.259;codex=0.153.1;kimi=-`),
+  beside its own version and under the same rule: recorded against the machine,
+  never acted on. `GET /v1/admin/fleet` answers it as `agents` per machine and
+  `cpctl admin fleet` prints it, offline machines included — so "which machines
+  are running a July claude" is answered without touching one. As fresh as the
+  machine's last dial; a daemon older than the header is listed with `null`, and
+  a value the relay cannot read is refused to `null` rather than costing the
+  tunnel.
 - `CLAUDE_CODE_EXECUTABLE` and `CODEX_PATH` are documented in `.env.example`; a
   harness named there runs as named, and the daily refresh leaves it alone.
 - `REEMOAT_AGENT_SOURCE=npm`, and the one-line installer's `--agent-source npm`:
@@ -53,18 +75,65 @@ it — so a citation here would be the one kind nothing checks.
   how a missing CLI is installed: one already on the machine keeps being refreshed
   the way it was installed, and under `npm` a vendor-installed copy is reported on
   every run until it is removed.
+- A model id can be **typed** under a routed provider in the agent builder — a
+  field at the foot of Moonshot's, Z.ai's, MiniMax's and OpenRouter's rows — for
+  an id the written-down list does not hold. It becomes a row like any other, with
+  the same key and pairing rules, and picking it names the agent after it. The
+  written-down lists are a starting set and were refreshed against each vendor's
+  documentation: Moonshot's three had all been retired (`kimi-k3`,
+  `kimi-k2.7-code`, `kimi-k2.6` now), Z.ai gains `glm-5.3` and `glm-4.7`, MiniMax
+  gains `MiniMax-M3` and `MiniMax-M2.7`. The same mechanism lets an assembled
+  agent whose model has since left every list be renamed and saved rather than
+  drawing an empty Model field.
 
 ### Changed
 
+- `@agentclientprotocol/claude-agent-acp` 0.63.0 → 0.73.0 and
+  `@agentclientprotocol/codex-acp` 1.1.9 → 1.8.0. Re-measured against `claude`
+  2.1.259 and `codex` 0.153.1: the model chip reads the model claude's `Default
+  (recommended)` stands for rather than the placeholder (the bullet below is the
+  rule that makes it so); codex answers `openai` as its provider id where 1.1.9
+  answered `custom-gateway`, and nothing had that written down; codex publishes a
+  collaboration-mode control and an `ultra` effort level, and claude an `Agent`
+  persona control wherever `.claude/agents/` has a file — each drawn as a plain
+  labelled control. `node_modules` is 230 MB on darwin-arm64 after the bump.
+- The model picker also collapses claude's `Default (recommended)` row onto the
+  model it stands for when the placeholder's description is that row's *name*,
+  which is what claude-agent-acp 0.73.0 publishes; 0.63.0 copies the row's blurb
+  instead, and that case still collapses. Without the second rule the placeholder
+  came back after the adapter bump and the chip read "Default (recommended)".
 - A session whose harness has no CLI on the machine yet is left waiting rather
   than given up on: the boot pass spends no attempt on it, runs the agent
   installer at once instead of in five minutes, and tries again when it
   completes. The daemon's log shows every completed agent update, with the
-  script's own notes under it.
+  script's own notes under it. Only a missing CLI is treated that way — a missing
+  adapter package or a plugin harness that is gone spends its attempts and settles
+  as before, since the installer cannot put either back — and only the first run
+  is pulled forward; after it the daily run is the retry. The session row says
+  "<agent> is not installed on <machine> — waiting for it to be installed" for
+  the wait, rather than the plain restart line.
+- An empty fleet is set up from the content pane on a wide screen: the one-line
+  installer and one line about it draw beside the rail rather than inside it, at
+  a width the command can be read at. The command box wraps instead of scrolling
+  sideways, on every screen that draws one.
+- A machine is added by running the one-line installer on it, and only that way.
+  The by-name form on Settings → Machines, which handed back a setup code to
+  carry to the host, is gone, and so is the "Add a machine" button that led to
+  it; `cpctl enroll` still mints a code for an operator who needs one. Since
+  nothing in the tab adds a machine any more, an empty fleet is re-listed on
+  every poll, so the machine the script enrols appears by itself.
+- Settings say less. Sentences that restated the control beside them, explained
+  a mechanism nobody acts on, or printed a URL already on screen were cut
+  across Account, Server, Users, Machines, Systems, Agents and Plugins; every
+  consequence a person cannot see stays.
+- The one-line installer unsets `REEMOAT_API_KEY` as soon as it has read it, so
+  the account key no longer reaches `pnpm install`'s lifecycle scripts or the
+  vendor installers `deploy/agents.sh` downloads and runs.
 - The coding-agent CLIs are no longer installed by `pnpm install`. The two ACP
   adapters stay pinned; the CLI platform packages they used to bring with them are
   excluded through `pnpm-workspace.yaml` overrides, and `node_modules` went from
-  907 MB to 217 MB on darwin-arm64. `deploy/agents.sh` installs the only copies
+  907 MB to 217 MB on darwin-arm64 (230 MB after the adapter bump above).
+  `deploy/agents.sh` installs the only copies
   there are, and the daemon runs an operator's override, else the first copy on
   PATH, then in the directories that script installs into — re-decided every ten
   minutes, so a refresh under a running daemon is picked up. A harness with no CLI

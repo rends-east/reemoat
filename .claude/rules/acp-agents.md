@@ -255,6 +255,14 @@ handed the tool. Q2.28.
   `kind: "allow_always"`, the first duplicate kind any agent has sent, and its
   `rawInput.command` is **double-quoted**, drawn as sent because trimming would be
   this client editing a command somebody is about to approve. Q6.55.
+- **codex may run a command with no permission request at all.** Measured
+  2026-09-04, codex-acp 1.8.0 / codex 0.153.1 in `agent` mode: a `curl` to the
+  network drew no `session/request_permission` — a `guardian_assessment:<id>`
+  tool call (title `Guardian Review`, kind `think`, content "Status: Approved …
+  Risk: low") arrived instead and the retried command ran with network. It is a
+  `tool_call` like any other and is drawn as one; nothing here reads it. Creating
+  a file inside the cwd drew nothing either, so the Q6.55 shape above is 1.1.9's
+  measurement and was not reachable from 1.8.0 on that day.
 - **codex emits `session_info_update` about five times a turn**, which becomes an
   `other` event — invisible rather than wrong, and still written to a log that is
   never truncated. Q6.100.
@@ -316,7 +324,9 @@ handed the tool. Q2.28.
   not trust: what survives is what the subagent *did* and what it *concluded*. Q6.4.
 - **`Task*` is not the Task tool.** `isTaskTool` matches
   `TaskCreate|TaskUpdate|TaskList|TaskGet`, so `shouldEmitToolCall("Task")` is true.
-  On claude 2.1.220 the tool is named `Agent`; the adapter maps both. Q6.5.
+  On claude 2.1.220 the tool is named `Agent`; the adapter maps both. Re-measured
+  2026-09-04, claude 2.1.259 under 0.73.0: the spawn arrives titled `Task`, `kind:
+  think`, `subagent: true`, and the adapter still maps both names. Q6.5.
 - **A subagent's `TodoWrite` would clobber the main agent's plan and cannot reach it
   today** — subagents have no `TodoWrite`, and a main-agent `plan` carries no `_meta`
   to attribute, which is why `PlanEvent` has no parent field. One `TodoWrite` emits

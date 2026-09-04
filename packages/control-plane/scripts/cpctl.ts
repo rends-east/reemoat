@@ -112,7 +112,9 @@ const USAGE = `cpctl — drive the Reemoat control plane
   admin revoke <machineId>                  revoke a machine
   admin relay                               tunnels connected, and how much each carried
   admin fleet                               what every machine is running, connected or not —
-                                            the inventory a protocol change is planned from
+                                            the daemon, the protocol and each agent CLI's
+                                            build, as of its last dial; the inventory a
+                                            protocol change or an agent rollout is planned from
 
   admin signingkeys                         the fleet's signing keys, and which one signs
   admin rotatekey                           mint a new one; both stay published
@@ -1214,6 +1216,8 @@ async function admin(args: string[]): Promise<void> {
           revoked: boolean;
           version: string | null;
           protocol: number | null;
+          /** Absent from a control plane older than the field, which is why it is optional here. */
+          agents?: Record<string, string | null> | null;
           seenAt: number | null;
         }[];
       }>("/v1/admin/fleet");
@@ -1225,6 +1229,34 @@ async function admin(args: string[]): Promise<void> {
         const counts = Object.entries(body.byProtocol).sort();
         if (counts.length > 0) {
           out(`machines by protocol: ${counts.map(([v, n]) => `v${v}=${n}`).join("  ")}`);
+        }
+        const seenLine = (seenAt: number | null): string =>
+          seenAt === null ? "never seen" : `${Math.round((Date.now() - seenAt) / 86400000)}d ago`;
+        /*
+         * Every machine and what it would launch, as of its last dial. This is the
+         * line "which machines are running a July claude" is answered from, and it
+         * is a per-machine list rather than a count because the answer is a set of
+         * hosts to visit. `not reported` is one silence for three facts — a daemon
+         * older than the header, one that has never dialled, and one with no CLI
+         * for any harness, which sends no header rather than an empty one — and
+         * they are deliberately not told apart here: the only way to would be to
+         * compare the daemon version against the release that added the header,
+         * and that version is branched on by nothing.
+         */
+        const live = body.machines.filter((machine) => !machine.revoked);
+        if (live.length > 0) {
+          out("");
+          out("what each machine would launch, as of its last dial:");
+          for (const machine of live) {
+            const agents = machine.agents ?? null;
+            const clis =
+              agents === null
+                ? "not reported"
+                : Object.entries(agents)
+                    .map(([id, version]) => `${id} ${version ?? "?"}`)
+                    .join("  ");
+            out(`  ${machine.name.padEnd(20)} ${(machine.version ?? "unknown").padEnd(12)} ${clis}  (${seenLine(machine.seenAt)})`);
+          }
         }
         /*
          * Named rather than counted, because this is the set somebody has to go
@@ -1239,10 +1271,9 @@ async function admin(args: string[]): Promise<void> {
           out("");
           out("behind the relay, and what raising the floor would cut off:");
           for (const machine of stale) {
-            const seen = machine.seenAt === null ? "never seen" : `${Math.round((Date.now() - machine.seenAt) / 86400000)}d ago`;
             out(
               `  ${machine.name.padEnd(20)} ${(machine.version ?? "unknown").padEnd(12)} ` +
-                `protocol ${machine.protocol === null ? "?" : `v${machine.protocol}`}  ${seen}`,
+                `protocol ${machine.protocol === null ? "?" : `v${machine.protocol}`}  ${seenLine(machine.seenAt)}`,
             );
           }
         }

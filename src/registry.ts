@@ -437,6 +437,35 @@ export function sameCommands(before: AgentCommands, after: AgentCommands): boole
  * a gap: there the placeholder is the only way back to the agent's own default and
  * removing it would remove the way back.
  *
+ * **Two arms, because the adapter changed what `default` carries, and the second
+ * shape is a better signal than the first.** Both read off `buildConfigOptions` in
+ * `dist/acp-agent.js`, and both are confined to {@link PLACEHOLDER_CHOICE_VALUES}:
+ *
+ *   - **claude-agent-acp 0.63.0** writes every row as
+ *     `description: m.description ?? undefined`, so `default`'s description is the
+ *     shared blurb — character for character the description of the row it
+ *     resolves to (`opus[1m]`, "Opus 5 with 1M context · Best for everyday"). The
+ *     first arm: a placeholder whose description equals another row's
+ *     *description* is an alias of it.
+ *   - **claude-agent-acp 0.73.0** (measured live 2026-09-04) special-cases `default`:
+ *     `description: namedMatch?.displayName ?? resolvedModel`, where `namedMatch`
+ *     is the non-`default` entry sharing its `resolvedModel` — and
+ *     `getAvailableModels` puts that same `displayName` into the concrete row's
+ *     `name`. So `default` reads "Opus (1M context)" while `opus[1m]` still reads
+ *     its blurb: no two descriptions match, the first arm finds nothing, the
+ *     placeholder survives, and `chipValue` in the web client — which mines a
+ *     description only past a `·` — draws "Default (recommended)", the exact
+ *     sentence this function exists to prevent. The second arm: a placeholder
+ *     whose description equals another row's *name* is an alias of it. The
+ *     fall-through matters too: when no named row shares the resolved model the
+ *     adapter writes the raw model id, which matches no name and collapses onto
+ *     nothing — right, since there is no row to collapse onto.
+ *
+ * The first arm is kept for the 0.63.0 shape rather than replaced, because which
+ * adapter a machine runs is a pin this repository moves and a plugin's agent may
+ * lag it. Neither arm looks at a concrete row's description against another's
+ * name: the placeholder set is the whole permission to drop anything.
+ *
  * The later row wins because that is the order agents use: placeholder first,
  * concrete after. Rewriting `value` onto it is a *rename of an equivalent*, not an
  * invention — and it is confined to the snapshot, which is a description of state
@@ -450,11 +479,15 @@ export function sameCommands(before: AgentCommands, after: AgentCommands): boole
  */
 export function dedupeAliasChoices(option: AgentConfigOption): AgentConfigOption {
   const lastByDescription = new Map<string, string>();
+  // Only concrete rows are candidates by name: a placeholder is what gets
+  // collapsed, never what something collapses onto, so its name is not a target.
+  const lastByName = new Map<string, string>();
   for (const choice of option.choices) {
+    const value = String(choice.value);
     const description = choice.description?.trim();
-    if (description !== undefined && description.length > 0) {
-      lastByDescription.set(description, String(choice.value));
-    }
+    if (description !== undefined && description.length > 0) lastByDescription.set(description, value);
+    const name = choice.name.trim();
+    if (name.length > 0 && !PLACEHOLDER_CHOICE_VALUES.has(value)) lastByName.set(name, value);
   }
 
   const aliasOf = new Map<string, string>();
@@ -470,13 +503,19 @@ export function dedupeAliasChoices(option: AgentConfigOption): AgentConfigOption
     //
     // `default` is a placeholder by construction rather than by guess: it is the
     // id an agent uses for "whatever I would pick", and no real model is named it.
-    // So the measured case — claude's `default` carrying `opus[1m]`'s description
-    // verbatim — still collapses, and nothing an agent offers uniquely can.
-    if (!PLACEHOLDER_CHOICE_VALUES.has(String(choice.value))) continue;
+    // So both measured cases — claude 0.63.0's `default` carrying `opus[1m]`'s
+    // description verbatim, and 0.73.0's carrying `opus[1m]`'s *name* — collapse,
+    // and nothing an agent offers uniquely can.
+    const value = String(choice.value);
+    if (!PLACEHOLDER_CHOICE_VALUES.has(value)) continue;
     const description = choice.description?.trim();
     if (description === undefined || description.length === 0) continue;
-    const keeper = lastByDescription.get(description);
-    if (keeper !== undefined && keeper !== String(choice.value)) aliasOf.set(String(choice.value), keeper);
+    // The description arm first (0.63.0), the name arm only where it found no
+    // other row (0.73.0). `lastByName` never holds a placeholder, so the second
+    // arm cannot answer with the row it is asking about.
+    const byDescription = lastByDescription.get(description);
+    const keeper = byDescription !== undefined && byDescription !== value ? byDescription : lastByName.get(description);
+    if (keeper !== undefined) aliasOf.set(value, keeper);
   }
   if (aliasOf.size === 0) return option;
 
@@ -563,9 +602,15 @@ export function withUltracode(config: AgentConfig, agent: AgentId, on: boolean):
              * The selection is ours because the agent cannot report this state at
              * all. Measured 2026-08-11 against claude-agent-acp 0.63.0: the effort
              * option's `currentValue` is built from `Settings.effortLevel`
-             * (`acp-agent.js:4405`), a *different* settings key from `ultracode`,
+             * (claude-agent-acp 0.63.0, `createSession` handing
+             * `settingsManager.getSettings().effortLevel` to `buildConfigOptions`),
+             * a *different* settings key from `ultracode`,
              * so a session running with the flag on still publishes
-             * `effort=default`. Passing that through would leave the row somebody
+             * `effort=default`. 0.73.0 hands `settingsEffortForModel(settings,
+             * currentModelInfo)` instead — per-model since 0.72.0, and still not
+             * the `ultracode` key: re-measured 2026-09-04 with the flag on, it
+             * published `effort=default` under the same id and `category`, with
+             * `xhigh` still offered. Passing that through would leave the row somebody
              * just chose permanently unticked — a control that answers "nothing
              * happened" every time it works.
              */
@@ -5188,8 +5233,16 @@ export class SessionRegistry {
              * this outcome and starts another pass when it completes. Spending
              * the budget here was measured on the dev stand: three sessions
              * `attempts_exhausted` over a binary that arrived five minutes later.
+             *
+             * ⚠ **Only the absence the installer repairs.** The class is also
+             * thrown for a missing adapter package, an unknown or uninstalled
+             * plugin harness and a contributed program that is gone — none of
+             * which `deploy/agents.sh` can put back — and deferring those left a
+             * session "reconnecting" for the daemon's life with the installer
+             * run for nothing. `installable` is the one bit that tells them
+             * apart; everything else spends attempts and settles as before.
              */
-            if (error instanceof AgentUnavailableError) {
+            if (error instanceof AgentUnavailableError && error.installable) {
               session.deferResume(described.code, described.message);
               report.deferred += 1;
               say({ sessionId: session.id, result: "agent_missing", attempt: session.resumeAttemptCount, detail: described.message });

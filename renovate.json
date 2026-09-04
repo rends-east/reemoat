@@ -1,0 +1,37 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Proposals only: Renovate opens the pull request, a person merges it after the drivers are green, and each machine still takes it through deploy/deploy.sh — nothing here deploys, and deploy/ci-freshness.sh says how stale a pin is whether or not the proposal was opened.",
+  "enabledManagers": ["npm"],
+  "rangeStrategy": "pin",
+  "automerge": false,
+  "dependencyDashboard": true,
+  "timezone": "UTC",
+  "schedule": ["before 6am on monday"],
+  "prConcurrentLimit": 3,
+  "prHourlyLimit": 2,
+  "lockFileMaintenance": { "enabled": false },
+  "packageRules": [
+    {
+      "description": "The two ACP adapters, one pull request each: a bump is measured adapter by adapter against the daemon's own readers before package.json moves, and pnpm pincheck names every other place the version is written.",
+      "matchPackageNames": ["@agentclientprotocol/claude-agent-acp", "@agentclientprotocol/codex-acp"],
+      "rangeStrategy": "pin",
+      "labels": ["adapter-pin"]
+    },
+    {
+      "description": "Everything else the root, control-plane and web manifests depend on, minors and patches grouped into one weekly proposal so a person reviews one diff rather than twenty.",
+      "matchPackageNames": ["!@agentclientprotocol/claude-agent-acp", "!@agentclientprotocol/codex-acp"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "workspace dependencies"
+    },
+    {
+      "description": "A major is never grouped: each one is its own proposal with its own changelog to read.",
+      "matchUpdateTypes": ["major"],
+      "labels": ["major"]
+    },
+    {
+      "description": "Not the pnpm pin. deploy/bootstrap.sh installs the pnpm the root manifest's packageManager names and deploycheck asserts the two agree, so a proposal that moved only the manifest would be red by construction — moving it is a two-file edit a person makes.",
+      "matchDepTypes": ["packageManager"],
+      "enabled": false
+    }
+  ]
+}

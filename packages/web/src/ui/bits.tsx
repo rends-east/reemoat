@@ -744,10 +744,24 @@ export function sessionNotice(
     };
   }
   if (waitingForDaemon(session)) {
+    /*
+     * **A wait with a reason says the reason.** The daemon defers a session whose
+     * harness has no CLI on the machine yet — `waiting`, no attempt spent, and
+     * the refusal on the snapshot — because its installer is already scheduled
+     * and the session comes back when the install lands. Drawn as the plain
+     * restart line, that read as a reconnect in progress for the whole wait:
+     * minutes at best, and for good on a machine whose updates are off. So the
+     * one waiting state that carries an error draws it — the short sentence
+     * `resumeFailureText` already has for the code, never `error.message`, which
+     * is the daemon's paragraph naming a script to run.
+     */
+    const deferred =
+      session.resume?.state === "waiting" && session.resume.attempts === 0 && session.resume.error?.code === "agent_unavailable";
     return {
       tone: "quiet",
-      text:
-        session.resume?.state === "running"
+      text: deferred
+        ? `${resumeFailureText("agent_unavailable", "", agent, machineName)} — waiting for it to be installed`
+        : session.resume?.state === "running"
           ? "reconnecting the agent…"
           : "the daemon restarted — reconnecting the agent",
       action: null,

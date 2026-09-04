@@ -57,7 +57,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 841 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 843 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -176,6 +176,9 @@ pnpm docscheck                       # the documentation, held to what it claims
                                      #   silently stops arriving
 pnpm imagecheck                      # the control plane's image, and both services it runs.
                                      #   NOT offline: needs docker + network
+deploy/ci-freshness.sh               # the adapter pins against the npm registry, weekly in CI: how
+                                     #   far behind each is. Report-only; exits non-zero only for a pin
+                                     #   the registry no longer serves. NOT offline; changes nothing
 pnpm daemon                          # needs REEMOAT_TOKEN; see .env.example
 deploy/agents.sh --check             # what the agent CLIs would install or refresh, changing nothing.
                                      #   Run for real by the installer once, by `deploy.sh` on every
@@ -230,7 +233,13 @@ which is how the permission machinery gets exercised at all wherever
 `~/.claude/settings.json` blanket-allows Bash. Nothing here asks for that and
 nothing here can rely on it: it is a per-agent default, `agent-full-access` is one
 of the three modes the session offers, and the paragraph above is still the
-honest description of what the daemon guarantees, which is nothing.
+honest description of what the daemon guarantees, which is nothing. ⚠ And the
+escalation half has already moved under it: measured 2026-09-04 on codex 0.153.1
+under codex-acp 1.8.0, a `curl` the sandbox had refused was re-run **with
+network** after a `Guardian Review` tool call of codex's own approved it, and no
+`session/request_permission` ever reached this daemon. So on a current codex the
+permission machinery may not be exercised at all, and "test it with kimi" below is
+the only reliable route — `acp-agents.md` records the shape.
 
 Three specifics, each a measurement before it was a policy, each of which reads
 as a bug if you find it without this section:

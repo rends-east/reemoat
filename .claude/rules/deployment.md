@@ -24,6 +24,8 @@ deploy/agents.sh --check             # what the agent CLIs would install or refr
                                      #   daemon update, and by the daemon daily
 deploy/agents.sh --source npm        #   the same four from the npm registry rather than the vendors'
                                      #   hosts — what the daemon passes under REEMOAT_AGENT_SOURCE=npm
+deploy/ci-freshness.sh               # the adapter pins against the registry: behind is a report,
+                                     #   unpublished is exit 2, unreachable is exit 3. Needs the network
 
 deploy/install.sh control-plane      # one-time, interactive: settings → image → start → admin key → first user
 deploy/install.sh daemon             #   same; enrolls itself against a local control plane if there is one
@@ -301,6 +303,25 @@ own argument against alpine applies word for word. `RELEASE_PLATFORMS` is the on
 variable, the way `REEMOAT_CP_IMAGE` is the one variable for pulled-against-built;
 earning arm64 costs one more matrix entry there **and** one in `check.yml`.
 
+**Freshness is a third `ci-*` script, and `freshness.yml` decides nothing
+either.** `deploy/ci-freshness.sh` reads every `@agentclientprotocol/*-acp` pin
+off `package.json` — the shape, never a copy of `pincheck`'s list — and asks the
+registry three questions per adapter through `NPM_VIEW`, which is the question
+`pincheck` cannot ask offline. **Behind is a report, not a failure**: exit 0 with
+the count of releases and a row in the job summary, because a weekly red for a
+pin somebody has chosen not to move yet teaches people to ignore red;
+`FRESHNESS_MAX_BEHIND` is the documented margin that turns it into a refusal. A
+pin the registry no longer lists is exit 2 — it fails `pnpm install
+--frozen-lockfile` on the next machine the one-liner sets up — and a registry
+that could not be asked is exit 3 with a sentence, so an outage never reads as a
+verdict about the tree. Weekly on `schedule` plus `workflow_dispatch`, a checkout
+and one call; `deploycheck` drives all five outcomes through the seams and reads
+the YAML back for the one property a workflow can be checked for offline. It is
+the first of the three workflows whose file is asserted to decide nothing; the
+other two state the rule in their headers and are read by nobody. `renovate.json`
+is the other half: proposals only, `rangeStrategy: pin`, no automerge — a person
+merges, and each machine still takes it through `deploy.sh`.
+
 **`deploy.sh` now does either, and `install.sh` still only builds.**
 `REEMOAT_CP_IMAGE` is the one variable: a registry-qualified ref pulls, a bare one
 builds, `cp_image_source` derives it and `REEMOAT_CP_SOURCE` overrides. There is
@@ -325,10 +346,11 @@ untouched, because that function inspects the *local* image either way.
 | `deploy/install.sh` | One-time setup for **one** service. A wizard on a terminal, a plain installer without one |
 | `deploy/ci-deploy.sh` | What a runner does before `deploy.sh`: the secrets it must have, the daemon it may not touch, the CI verdict it will not go around. A script rather than YAML so `deploycheck` can drive every branch, through `SSH` and `GH` as seams |
 | `deploy/ci-release.sh` | What a runner does to publish one: the six versions that must agree, the CI verdict it will not go around, the tag it will not move, and the labels it derives rather than writes. Four verbs, three seams, and every gate re-run by each |
+| `deploy/ci-freshness.sh` | What a runner does once a week to say how stale the adapter pins are: the pins read off `package.json` by shape, three registry questions per adapter through `NPM_VIEW`, and five outcomes with the exit code each earns written in its header — behind reports, unpublished refuses, unreachable is its own code. Driven by `deploycheck` with no network |
 | `deploy/deploy.sh` | The update path. Refuses a dirty tree, builds the image once, then restarts only what the diff touched — with `RELAY_INPUTS` as the one list that decides whether the fleet's tunnels drop. On the daemon it runs `deploy/agents.sh` **before** deciding the restart, with the source read off the env file and every prune withheld, so a machine upgraded from a release that vendored the CLIs comes back with its harnesses rather than five minutes later; a script that did not finish is a line on stderr, never a failed deploy |
 | `deploy/run-daemon.sh` | What the supervisor runs. Standalone by design — it must work when the environment is at its strangest |
 | `deploy/run-cp.sh` | ⚠ On no code path, and **kept until the last host has migrated**: a rendered unit's `@EXEC@` points here, so deleting it takes the fleet down at the next reboot rather than the next deploy |
-| `deploy/agents.sh` | The coding-agent CLIs — the only copies there are, since `pnpm install` vendors none (Q4.114): install what is missing, refresh what is there. `--source vendor` (the default) is each vendor's own installer into the vendors' own directories for three of them and the npm registry for kimi; `--source npm` is all four from the npm registry with everything under `~/.reemoat/toolchain`, and is what the daemon passes when `REEMOAT_AGENT_SOURCE=npm` — a choice, never a fallback. `--source` decides how an *absent* harness is installed and nothing about one that is present, which is refreshed through the door it came in by — `provenance` reads where the file is; the one case a switch cannot refresh, a vendor-installed copy under `npm`, is named on stderr until it is removed. One script, three callers — the bootstrap once, `deploy.sh` on every update, `src/agentupdate.ts` daily — `--check` to preview and `--skip <agent>` per live harness; always exit 0, so a vendor being down is a line on stderr rather than a failed install. The directories it writes into are `MANAGED_CLI_DIRS`, which `deploycheck` imports rather than restates |
+| `deploy/agents.sh` | The coding-agent CLIs — the only copies there are, since `pnpm install` vendors none (Q4.114): install what is missing, refresh what is there. `--source vendor` (the default) is each vendor's own installer into the vendors' own directories for three of them and the npm registry for kimi; `--source npm` is all four from the npm registry with everything under `~/.reemoat/toolchain`, and is what the daemon passes when `REEMOAT_AGENT_SOURCE=npm` — a choice, never a fallback. `--source` decides how an *absent* harness is installed and nothing about one that is present, which is refreshed through the door it came in by — `provenance` reads where the file is; the one case a switch cannot refresh, a vendor-installed copy under `npm`, is named on stderr until it is removed. One script, three callers — the bootstrap once, `deploy.sh` on every update, `src/agentupdate.ts` daily — `--check` to preview and `--skip <agent>` per live harness; always exit 0, so a vendor being down is a line on stderr rather than a failed install. Holds a `mkdir` lock under the toolchain so any two of those callers — or an orphan a previous daemon left running — serialise rather than prune each other's staging; ignores SIGPIPE so a run outlives the daemon that spawned it; and keeps the npm build it just replaced for one run, because the daemon's `--skip` list is sampled once at run start and a session that started mid-run resolved the launcher to the old build. The directories it writes into are `MANAGED_CLI_DIRS`, which `deploycheck` imports rather than restates |
 | `deploy/compose.sh` | `docker compose` with the project name, directory, env file and tag pinned. **Not** the repo root as project directory — compose would load the daemon's `.env` |
 | `deploy/docker/*` | The control plane as an image: a filtered install, the web bundle built in, a reachability walk that prunes what the root workspace dragged in — and **two services from that one image**, sharing a volume, with no `depends_on` between them |
 | `deploy/launchd/*.in`, `deploy/systemd/*.in` | One template per init system |

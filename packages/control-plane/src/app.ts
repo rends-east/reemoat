@@ -9,6 +9,7 @@ import { bearerToken, boundedInt, describeError, gzipResponses, jsonError, readJ
 import {
   RELAY_PROTOCOL_MIN_VERSION,
   RELAY_PROTOCOL_VERSION,
+  parseAgentClis,
 } from "../../../src/relay/protocol.js";
 import { signToken, type TokenClaims } from "../../../src/token.js";
 import {
@@ -4993,7 +4994,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   app.get("/v1/admin/fleet", requireAdmin, (c) => {
     const rows = db
       .prepare(
-        `SELECT m.id, m.name, m.daemon_version, m.daemon_protocol, m.daemon_seen_at, m.revoked_at,
+        `SELECT m.id, m.name, m.daemon_version, m.daemon_protocol, m.daemon_agents, m.daemon_seen_at, m.revoked_at,
                 mo.label AS label
            FROM machines m
            LEFT JOIN machine_owners mo ON mo.machine_id = m.id
@@ -5011,6 +5012,16 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       // has simply not been on. Nothing distinguishes them and nothing needs to.
       version: typeof row["daemon_version"] === "string" ? row["daemon_version"] : null,
       protocol: typeof row["daemon_protocol"] === "number" ? row["daemon_protocol"] : null,
+      /*
+       * Which build of each coding-agent CLI the machine would launch, as of the
+       * same dial — harness id → version, `null` for a binary that would not say.
+       * `null` for the whole field where the daemon predates `AGENT_CLIS_HEADER`,
+       * had no CLI to name, or sent something the grammar refused; the same "did
+       * not say" as `version`, and as fresh as the same handshake. The column
+       * holds `readAgentClisHeader`'s canonical spelling, so this parse cannot
+       * fail on anything the relay wrote — the guard is for a row edited by hand.
+       */
+      agents: typeof row["daemon_agents"] === "string" ? parseAgentClis(row["daemon_agents"]) : null,
       seenAt: typeof row["daemon_seen_at"] === "number" ? row["daemon_seen_at"] : null,
     }));
 

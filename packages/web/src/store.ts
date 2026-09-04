@@ -1648,10 +1648,23 @@ class AppStore implements StreamSink {
      * loop below is the retry, and re-listing the registry every four seconds for
      * ever would be a poll nobody asked for.
      */
-    if (this.connections.size === 0 && this.snapshot.phase === "loading") {
+    if (this.connections.size === 0) {
+      /*
+       * **And an empty fleet that is `ready` is re-listed too, for a newer
+       * reason.** The first machine used to be added from this tab — a name typed
+       * into Settings → Machines, and `machinesChanged` re-read the registry on
+       * the spot. That form is gone: a machine is added by running the one-line
+       * installer *on the machine*, from a terminal this tab knows nothing about,
+       * so the only way it can appear here is by asking again. Four seconds is
+       * the poll's own cadence, the request is one `GET /v1/machines` against a
+       * registry that answers from memory, and the state is transient by
+       * construction. `refreshMe` follows the first machine landing, because the
+       * count the machine limit is enforced against lives on `me`.
+       */
       // Through `resume`, not `runResume`, so it coalesces with a wake that lands
       // in the same tick rather than racing it and minting twice.
-      await this.resume("cp-retry");
+      await this.resume(this.snapshot.phase === "loading" ? "cp-retry" : "awaiting-first-machine");
+      if (this.connections.size > 0 && epoch === this.epoch) await this.refreshMe();
       return;
     }
 

@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import { MAX_DAEMON_VERSION_CHARS } from "../../../src/relay/protocol.js";
+import { MAX_DAEMON_VERSION_CHARS, formatAgentClis, parseAgentClis } from "../../../src/relay/protocol.js";
 import { newId } from "./keys.js";
 
 /**
@@ -502,9 +502,41 @@ export function readDaemonVersionHeader(raw: unknown): string | null {
   return cleaned.slice(0, MAX_DAEMON_VERSION_CHARS);
 }
 
+/**
+ * A daemon's announced CLI inventory, read off `AGENT_CLIS_HEADER`, as the string
+ * that is stored.
+ *
+ * The same shape as `readDaemonVersionHeader` — first entry of an array-valued
+ * header, `null` for absent — and one deliberate difference: **refused whole
+ * rather than cut**. A version is a label and a label cut short is still one; this
+ * is a list with a grammar, and a list cut mid-entry stores a version nothing on
+ * the machine reports. So the bound (`MAX_AGENT_CLIS_CHARS`), the character sets
+ * and the shape are all `parseAgentClis`'s, and anything it will not read lands
+ * on the same `null` as a daemon that predates the header. What is stored is the
+ * canonical re-spelling of what parsed, so a reader of the column never meets a
+ * value `parseAgentClis` would refuse.
+ *
+ * Nothing here decides on the value. A control character cannot arrive — the
+ * grammar has no room for one — which is why there is no scrub to mirror.
+ */
+export function readAgentClisHeader(raw: unknown): string | null {
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof value !== "string") return null;
+  const parsed = parseAgentClis(value.trim());
+  return parsed === null ? null : formatAgentClis(parsed);
+}
+
 export interface DaemonBuild {
   daemonVersion: string | null;
   protocolVersion: number;
+  /**
+   * The stored form of `AGENT_CLIS_HEADER`, or `null` — "did not say", whether
+   * because the daemon predates the header, has no CLI at all, or sent something
+   * the grammar refused. Written on every dial like the other two, so a redial
+   * that says less replaces a row that said more: the row describes the last
+   * handshake, never the best one.
+   */
+  agentClis: string | null;
   at: number;
 }
 
@@ -526,8 +558,8 @@ export interface DaemonBuild {
 export function recordDaemonBuild(db: DatabaseSync, machineId: string, build: DaemonBuild): void {
   try {
     db.prepare(
-      "UPDATE machines SET daemon_version = ?, daemon_protocol = ?, daemon_seen_at = ? WHERE id = ?",
-    ).run(build.daemonVersion, build.protocolVersion, build.at, machineId);
+      "UPDATE machines SET daemon_version = ?, daemon_protocol = ?, daemon_agents = ?, daemon_seen_at = ? WHERE id = ?",
+    ).run(build.daemonVersion, build.protocolVersion, build.agentClis, build.at, machineId);
   } catch {
     // Reporting, not deciding. See the docblock: a tunnel must not fail for this.
   }

@@ -156,7 +156,7 @@ export function PluginList({ machineId }: { machineId: MachineId }): ReactNode {
         </div>
       )}
       {plugins.length === 0 ? (
-        <Empty>Nothing installed on this machine.</Empty>
+        <Empty>Nothing installed.</Empty>
       ) : (
         <ul className="flex flex-col">
           {plugins.map((plugin) => (
@@ -248,7 +248,7 @@ function PluginRow({
         const up = answer.plugin.state === "running";
         toast(
           up ? "ok" : "error",
-          up ? `${plugin.name} is running again.` : `${plugin.name} did not start. Its row says what it printed.`,
+          up ? `${plugin.name} is running again.` : `${plugin.name} did not start — see its row.`,
         );
         onChanged();
       })
@@ -515,13 +515,12 @@ function PluginFailure({
           <Button size="sm" className="[@media(pointer:coarse)]:min-h-11" disabled={busy} onClick={onRestart}>
             {busy ? <Spinner /> : "Start it again"}
           </Button>
-          {/* The other two answers, named rather than drawn: both are one tap away
+          {/* The other two answers, neither named nor drawn: both are one tap away
               in the menu on the row above, and a Remove 44px from a start button
               is the adjacency `MachineInstalls` refuses on its own rows — there
-              the destructive one wins the overlap. */}
-          <span className="text-2xs text-muted">
-            or switch it off, or remove it — both in the menu on the row above.
-          </span>
+              the destructive one wins the overlap. The sentence that named them
+              here was cut on 2026-09-04 for fewer words; what is kept is that
+              nothing destructive is drawn beside this button. */}
         </div>
       )}
     </div>

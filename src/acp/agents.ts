@@ -1,4 +1,4 @@
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -118,10 +118,30 @@ export interface AgentLaunchConfig {
   authHint: string;
 }
 
+/**
+ * A harness that cannot be started on this machine, with one bit saying whether
+ * `deploy/agents.sh` is the remedy.
+ *
+ * ⚠ **`installable` is what the auto-resume pass defers on, and it is a subset of
+ * the class on purpose.** The pass used to defer every instance — a session is left
+ * `waiting` with no attempt spent, and the daemon runs the agent installer for it —
+ * but this class is thrown for four different absences, and the installer repairs
+ * exactly one: a built-in's *CLI* missing from PATH and `MANAGED_CLI_DIRS`. A
+ * missing ACP adapter is a `pnpm install` problem; an unknown or uninstalled plugin
+ * harness and a contributed harness whose program is gone are somebody's decision.
+ * Deferring those left the session "reconnecting" for the daemon's life with
+ * nothing that could ever fix it, where spending the attempts settles it to
+ * `failed` with the sentence and the Reconnect button the client already has. So
+ * only the four CLI-missing refusals say `installable: true`, and everything else
+ * costs attempts as it did before the installer existed.
+ */
 export class AgentUnavailableError extends Error {
-  constructor(message: string) {
+  readonly installable: boolean;
+
+  constructor(message: string, options: { installable?: boolean } = {}) {
     super(message);
     this.name = "AgentUnavailableError";
+    this.installable = options.installable ?? false;
   }
 }
 
@@ -609,7 +629,11 @@ export function credentialEnvNames(agent: BuiltinAgentId): readonly string[] {
 function isExecutable(path: string): boolean {
   try {
     accessSync(path, constants.X_OK);
-    return true;
+    // `X_OK` alone is satisfied by a directory, and the walk now reaches
+    // `MANAGED_CLI_DIRS`: a stray directory named `claude` under `~/.local/bin`
+    // would have been a permanent hit, written into `CLAUDE_CODE_EXECUTABLE`
+    // for the adapter to fail on at every spawn.
+    return statSync(path).isFile();
   } catch {
     return false;
   }
@@ -808,8 +832,9 @@ function noCli(agent: "claude" | "codex"): string {
  * `initialize` and rejects `session/new` with -32000 — kimi's shape, and the one
  * `502 agent_auth_required` already knows how to report.
  *
- * **Two version numbers, and they are different programs.** The adapter is 1.1.9
- * and pinned; the CLI it spawns is whatever `deploy/agents.sh` installed or an
+ * **Two version numbers, and they are different programs.** The adapter is
+ * pinned — 1.8.0 now, 1.1.9 when the measurement above was taken; the CLI it
+ * spawns is whatever `deploy/agents.sh` installed or an
  * operator named, and it moves daily. A measurement in this file names the pair it
  * was taken against, and `AgentCapabilities.cli` names the build a running daemon
  * actually used — that, rather than a pin, is what records it now (Q6.106).
@@ -848,7 +873,7 @@ export function resolveAgent(id: string, machine?: HarnessCatalogue): AgentLaunc
             "`npm i -g @agentclientprotocol/claude-agent-acp`).",
         );
       }
-      if (cliFor("claude") === null) throw new AgentUnavailableError(noCli("claude"));
+      if (cliFor("claude") === null) throw new AgentUnavailableError(noCli("claude"), { installable: true });
       return {
         id,
         displayName: "Claude (claude-agent-acp)",
@@ -881,6 +906,7 @@ export function resolveAgent(id: string, machine?: HarnessCatalogue): AgentLaunc
         throw new AgentUnavailableError(
           "kimi not found on PATH. Install it with `npm i -g @moonshot-ai/kimi-code` " +
             "(or `curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash`).",
+          { installable: true },
         );
       }
       return {
@@ -908,7 +934,7 @@ export function resolveAgent(id: string, machine?: HarnessCatalogue): AgentLaunc
             "`npm i -g @agentclientprotocol/codex-acp`).",
         );
       }
-      if (cliFor("codex") === null) throw new AgentUnavailableError(noCli("codex"));
+      if (cliFor("codex") === null) throw new AgentUnavailableError(noCli("codex"), { installable: true });
       return {
         id,
         displayName: "Codex (codex-acp)",
@@ -935,6 +961,7 @@ export function resolveAgent(id: string, machine?: HarnessCatalogue): AgentLaunc
         throw new AgentUnavailableError(
           "opencode not found on this daemon's PATH. deploy/agents.sh installs it " +
             "(or `curl -fsSL https://opencode.ai/install | bash`).",
+          { installable: true },
         );
       }
       return {

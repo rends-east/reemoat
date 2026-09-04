@@ -83,6 +83,13 @@ import { tmp } from "./tmp.js";
  * that the placeholder `app.ts` substitutes into is spelled there exactly once;
  * and that everything runs from one `main "$@"` on the last line, which is what
  * makes a truncated download define a function instead of running a prefix.
+ * Then, driven: `adopt_origin`'s refusals through `--url`, since every request
+ * appends `/v1/…` to what it accepts; `credential_body` against a password
+ * holding every character the shell and JSON disagree about, with `email` absent
+ * when it was not given; that `REEMOAT_API_KEY` leaves the environment on the
+ * line after it is read, before any child could inherit the account; and
+ * `--uninstall` on an install that died before the checkout existed — the case
+ * `nothing_installed` promises the toolchain will be removed for.
  *
  * **And two whose subject is `deploy.sh` rather than a function.**
  * `RELAY_INPUTS` decides whether the relay container is recreated, and getting
@@ -120,7 +127,13 @@ import { tmp } from "./tmp.js";
  * directions of a switched `--source` — an npm copy refreshed from npm under
  * `vendor`, a vendor copy named and counted under `npm`. Nothing here reaches a
  * vendor's host or the registry; what the fake cannot say is whether the real
- * ones still answer that shape.
+ * ones still answer that shape. Three more, each a way the daily run was
+ * measured going wrong around a process rather than a vendor: the build the
+ * symlink named when the run began outliving that run, because the daemon's
+ * `--skip` set is a snapshot and a session can start mid-run on a build it never
+ * named; a reader that leaves — the daemon on shutdown — no longer ending the run
+ * at its next `printf`, with the closed pipe driven for real; and the lock, held
+ * by a live pid, taken over from a dead one, and never needed by `--check`.
  *
  * `ask` is in that list and is driven at exactly one point of it, which is worth
  * one sentence rather than a silent exception: with stdin at EOF it returns the
@@ -954,6 +967,78 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   check("its directories are appended to PATH, never prepended", /^PATH="\$PATH:/m.test(agents), true);
   check("no installer is piped straight into a shell", /curl[^\n]*\|\s*(ba)?sh\b/.test(agents), false);
   check("and every download carries a deadline", /curl [^\n]*--max-time \d+/.test(agents), true);
+  /*
+   * And is https on every hop. `-L` follows a `Location:` to `http://` by default,
+   * and what is downloaded here is executed as this uid, so a vendor (or a hop in
+   * between) answering with a downgrade would run a plaintext script. Both flags
+   * on the one `curl` line: `--proto` holds the first request, `--proto-redir`
+   * every redirect after it.
+   */
+  check("and refuses a redirect off https", /curl [^\n]*--proto '=https' --proto-redir '=https'[^\n]*--max-time/.test(agents), true);
+  /*
+   * **A reader that leaves may not end the run.** The daemon spawns this script on
+   * pipes and `process.exit`s on shutdown; libuv gives the child default signal
+   * dispositions, so the next `printf` is a SIGPIPE and the run dies where it
+   * stands. `trap '' PIPE` before the first byte is written, and the three
+   * printers swallow the `EPIPE` that replaces it — under `set -e` a failed
+   * builtin would end the script just the same. In a subshell, because bash keeps
+   * what a failed write could not deliver in its stdio buffer and flushes it into
+   * the next `$( … )`: measured, the version read off the manifest came back as
+   * every note printed so far. Driven below; this pins the shape.
+   */
+  const pipeTrapAt = agentLines.findIndex((line) => line === "trap '' PIPE");
+  const parserAt = agentLines.findIndex((line) => line.startsWith('for _arg in "$@"; do'));
+  check("SIGPIPE is ignored before the first line that could print", [pipeTrapAt !== -1, pipeTrapAt < parserAt], [true, true]);
+  // `warn` redirects inside the subshell and in that order: a `2>/dev/null` on
+  // the subshell is applied first, and `>&2` inside it then dups `/dev/null` —
+  // measured as every warning in the file going nowhere.
+  check(
+    "and say, note and warn each tolerate a closed stream, in a subshell",
+    [
+      lineIn("agents.sh", agentLines, "say", "say()"),
+      lineIn("agents.sh", agentLines, "note", "note()"),
+      lineIn("agents.sh", agentLines, "warn", "warn()"),
+    ],
+    [
+      `say()  { ( printf '%s\\n' "$*" ) 2>/dev/null || :; }`,
+      `note() { ( printf '  %s\\n' "$*" ) 2>/dev/null || :; }`,
+      `warn() { ( printf '%s\\n' "$*" >&2 2>/dev/null ) || :; }`,
+    ],
+  );
+  /*
+   * **One run at a time.** The daemon's `running` guard is a field in its memory
+   * and `runScript` spawns detached, so a daemon that exits mid-run leaves the run
+   * going and its successor starts another beside it; `deploy.sh` and the
+   * bootstrap have no guard at all. The lock is a `mkdir` under the toolchain
+   * holding the owner's pid; `sh` holds one trap per signal, so releasing it
+   * shares the EXIT trap with `$TMP`, and only the run that took it removes it —
+   * `exit 0` on "in progress" must not take another run's lock down on its way
+   * out. `--check` takes none, so a preview is never refused by a run.
+   */
+  const finish = blockIn("agents.sh", agentLines, "finish", "finish() {", "}");
+  check(
+    "one EXIT trap releases the temporary directory and, only if held, the lock",
+    [
+      agentLines.filter((line) => /\btrap\b[^\n]*\bEXIT\b/.test(line)),
+      finish.includes('rm -rf "$TMP"'),
+      finish.includes('[ "$LOCK_HELD" = 1 ] && rm -rf "$LOCK"'),
+      lineIn("agents.sh", agentLines, "the lock path", "LOCK="),
+    ],
+    [["trap finish EXIT"], true, true, 'LOCK="$TOOLCHAIN/.agents.lock"'],
+  );
+  const takeLock = blockIn("agents.sh", agentLines, "take_lock", "take_lock() {", "}");
+  const mainBody = blockIn("agents.sh", agentLines, "main", "main() {", "}");
+  check(
+    "the lock is taken first in main, never under --check, by mkdir, and a live owner is a sentence and exit 0",
+    [
+      mainBody.split("\n")[1]?.trim(),
+      takeLock.split("\n")[1]?.trim(),
+      /^\s*if mkdir "\$LOCK" 2>\/dev\/null; then$/m.test(takeLock),
+      /kill -0 "\$_pid"/.test(takeLock),
+      takeLock.includes('warn "another run of deploy/agents.sh (pid $_pid) is in progress; nothing was changed"'),
+    ],
+    ["take_lock", '[ "$CHECK" = 1 ] && return 0', true, true, true],
+  );
   const overrides = AGENT_IDS.map((id) => AGENT_LOGIN[id].executableEnv).filter((one): one is string => one !== null);
   check(
     "a harness whose binary an operator named is left alone",
@@ -1143,6 +1228,41 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   check("the version is read as JSON by node first, then as the first version key on the file, then off the clock", [nodeRead !== -1, sedRead > nodeRead, clockRead > sedRead], [true, true, true]);
   check("with the node beside the npm that installed it", ensureNpmLines.includes('_node=$(dirname -- "$(command -v "$_npm")")/node'), true);
   /*
+   * **The build the symlink named when the run began is not this run's to prune.**
+   * The daemon reads `busy()` once, when it spawns the script, and a run is minutes
+   * long: a session starting during it resolves `$TOOLCHAIN/bin/<agent>` to the
+   * old build, which "every build but the one just linked" then deleted under it.
+   * Read with `readlink` before anything moves, and spared beside `$_build`.
+   */
+  const prevAt = at('_prev=$(readlink "$TOOLCHAIN/bin/$_agent" 2>/dev/null || true)');
+  check(
+    "ensure_npm reads the build the symlink named before anything moves, and the prune spares it",
+    [prevAt !== -1, prevAt < at('case "$(provenance "$_agent")" in'), ensureNpmLines.includes('_prev=${_prev%/bin/*}'), blockIn("agents.sh", agentLines, "prune_builds", "prune_builds() {", "}").includes('[ -d "$_d" ] && [ "$_d" != "$_build" ] && [ "$_d" != "$_prev" ] && rm -rf "$_d"')],
+    [true, true, true, true],
+  );
+  /*
+   * **A refresh asks before it stages.** Stage-then-compare wrote and deleted 126 MB
+   * per day per npm-installed harness to learn "nothing to do"; now the `refresh`
+   * verb reads the launcher's version and asks `npm view <pkg>@latest version`,
+   * stages nothing when they agree, and takes the old path — the measured-safe
+   * one — whenever `view` fails or answers anything else. Only the refresh verb,
+   * since an install has nothing to compare, and never under `--check`. The
+   * order is the pin: the question after the verb is known and before the stage.
+   */
+  const viewAt = at('_latest=$("$_npm" view "$_pkg@latest" version 2>/dev/null || true)');
+  check(
+    "a refresh asks the registry for the version before staging, and only a refresh",
+    [
+      viewAt !== -1,
+      at('if [ "$_verb" = refresh ] && [ -n "$_cur" ]; then') < viewAt,
+      viewAt < at('_stage=$(mktemp -d "$TOOLCHAIN/$_agent.stage.XXXXXX")'),
+      ensureNpmLines.includes('if [ -n "$_latest" ] && [ "$_latest" = "$_cur" ]; then'),
+      ensureNpmLines.includes('done_note "$_pad" current "$_agent"'),
+      at('if [ "$CHECK" = 1 ]; then') < viewAt,
+    ],
+    [true, true, true, true, true, true],
+  );
+  /*
    * The one arm that is a warning rather than a note, since it is the state in
    * which a harness rots: the vendor's own updater is the only thing that
    * refreshes this copy and `--source npm` was set because that updater's host
@@ -1199,6 +1319,27 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
     join(agentsStubs, "npm"),
     [
       "#!/bin/sh",
+      // Every call, one line of argv each, into `FAKE_LOG` when a case wants to
+      // know what the script asked rather than only what it left on disk.
+      '[ -z "${FAKE_LOG:-}" ] || printf \'%s\\n\' "$*" >> "$FAKE_LOG"',
+      // `view <pkg>@latest version` is the one question a refresh asks before
+      // staging: answered with the build the registry has, refused for the
+      // package `FAKE_FAIL` names (a registry that refuses refuses both verbs),
+      // and refused for every package under `FAKE_VIEW_FAIL=1` — the registry
+      // that cannot answer the question but can still serve the tarball.
+      'if [ "$1" = view ]; then',
+      '  [ "$#" = 3 ] && [ "$3" = version ] || { echo "fake npm: unexpected argv: $*" >&2; exit 3; }',
+      '  pkg=${2%@latest}',
+      '  [ "$pkg" != "$2" ] || { echo "fake npm: not @latest: $2" >&2; exit 3; }',
+      '  [ "$pkg" != "${FAKE_FAIL:-}" ] || exit 1',
+      '  [ "${FAKE_VIEW_FAIL:-}" != 1 ] || exit 1',
+      '  case "$pkg" in',
+      ...AGENT_IDS.map((id) => `    ${NPM_PACKAGES[id]}) ;;`),
+      '    *) echo "fake npm: unknown package $pkg" >&2; exit 3 ;;',
+      "  esac",
+      '  echo "${FAKE_VER:-1.0.0}"',
+      "  exit 0",
+      "fi",
       '[ "$#" = 5 ] && [ "$1" = i ] && [ "$2" = -g ] && [ "$3" = --prefix ] || { echo "fake npm: unexpected argv: $*" >&2; exit 3; }',
       'prefix=$4',
       'pkg=${5%@latest}',
@@ -1364,20 +1505,159 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
     [buildsOf(npmHome, "claude"), /^  claude\s+previous build kept: an agent is using it$/m.test(second.out)],
     [["claude-1.0.0", "claude-2.0.0"], true],
   );
-  check("and prunes the one nothing is on", ["codex", "opencode", "kimi"].map((id) => buildsOf(npmHome, id)), [["codex-2.0.0"], ["opencode-2.0.0"], ["kimi-2.0.0"]]);
+  /*
+   * And keeps the other three's previous build too, saying nothing, because the
+   * `--skip` set is a snapshot the daemon took when it spawned the run: a session
+   * that started on codex a minute in resolved the symlink to `codex-1.0.0`, and
+   * this run used to delete it under that process. The build the symlink named
+   * when the run began outlives the run; the one after prunes it.
+   */
+  check(
+    "and keeps the build the symlink named when the run began for the other three, without a note",
+    [["codex", "opencode", "kimi"].map((id) => buildsOf(npmHome, id)), (second.out.match(/previous build kept/g) ?? []).length],
+    [[["codex-1.0.0", "codex-2.0.0"], ["opencode-1.0.0", "opencode-2.0.0"], ["kimi-1.0.0", "kimi-2.0.0"]], 1],
+  );
 
   /*
-   * The run after that, with nothing newer: the build on disk is already the
-   * build the registry has, so nothing moves — asserted by inode rather than by
-   * name, since a stage renamed over the old directory would carry the same
-   * name — and the build kept last night, with no agent on it now, goes.
+   * The run after that, with nothing newer: the registry answers the version the
+   * launcher already names, so nothing is staged — the fake records every call,
+   * and none of them is an `npm i` — nothing moves (asserted by inode rather than
+   * by name, since a stage renamed over the old directory would carry the same
+   * name), the note says `current`, and the build kept last night, with no agent
+   * on it now, still goes.
    */
   const codexInode = statSync(join(toolchainOf(npmHome), "codex-2.0.0")).ino;
-  const third = runAgents(["--source", "npm"], { HOME: npmHome, FAKE_VER: "2.0.0" });
-  check("the same build again is a refresh that moves nothing", [third.status, third.err, saysEach(third.out, "refresh", "2.0.0")], [0, "", []]);
+  const thirdLog = join(sandbox, "agents-npm-third.log");
+  const third = runAgents(["--source", "npm"], { HOME: npmHome, FAKE_VER: "2.0.0", FAKE_LOG: thirdLog });
+  check("the same build again is current, and moves nothing", [third.status, third.err, saysEach(third.out, "current", "2.0.0")], [0, "", []]);
+  check(
+    "having asked the registry once per harness and staged nothing",
+    readFileSync(thirdLog, "utf8").trim().split("\n").sort(),
+    AGENT_IDS.map((id) => `view ${NPM_PACKAGES[id]}@latest version`).sort(),
+  );
   check("leaving the directory that was already there", statSync(join(toolchainOf(npmHome), "codex-2.0.0")).ino, codexInode);
   check("and exactly one build per harness, the kept one pruned now that nothing is on it", AGENT_IDS.map((id) => buildsOf(npmHome, id)), AGENT_IDS.map((id) => [`${id}-2.0.0`]));
   check("with every symlink where it was", AGENT_IDS.map((id) => linkOf(npmHome, id)), AGENT_IDS.map((id) => buildOf(npmHome, id, "2.0.0")));
+
+  /*
+   * A registry that cannot answer the question but can still serve the tarball
+   * — `view` refused, `i -g` honoured — is the old path: staged, compared, found
+   * to be the build on disk, and said as a refresh. What was measured safe costs
+   * what it always cost, and no more than that.
+   */
+  const viewFailLog = join(sandbox, "agents-npm-viewfail.log");
+  const viewFail = runAgents(["--source", "npm"], { HOME: npmHome, FAKE_VER: "2.0.0", FAKE_VIEW_FAIL: "1", FAKE_LOG: viewFailLog });
+  check(
+    "a view the registry refuses falls through to staging, and the same build is a refresh that moves nothing",
+    [viewFail.status, viewFail.err, saysEach(viewFail.out, "refresh", "2.0.0"), readFileSync(viewFailLog, "utf8").split("\n").filter((line) => line.startsWith("i -g ")).length, statSync(join(toolchainOf(npmHome), "codex-2.0.0")).ino, AGENT_IDS.map((id) => buildsOf(npmHome, id))],
+    [0, "", [], AGENT_IDS.length, codexInode, AGENT_IDS.map((id) => [`${id}-2.0.0`])],
+  );
+
+  /*
+   * **Three builds in a row, with no `--skip` anywhere**, which is the sequence
+   * that pins how long a superseded build lives: exactly one run. After v2, v1 is
+   * still there — it is the build the symlink named when the v2 run began, and a
+   * session the daemon's snapshot never saw may be on it. After v3, v1 is gone
+   * and v2 is the one spared. The same build again spares nothing older.
+   */
+  const prevHome = join(sandbox, "agents-prev-home");
+  mkdirSync(prevHome, { recursive: true });
+  const v1 = runAgents(["--source", "npm"], { HOME: prevHome, FAKE_VER: "1.0.0" });
+  const v2 = runAgents(["--source", "npm"], { HOME: prevHome, FAKE_VER: "2.0.0" });
+  check(
+    "after v1 then v2 with no --skip, v1 is still on disk and v2 is linked",
+    [v1.status, v2.status, v2.err, AGENT_IDS.map((id) => buildsOf(prevHome, id)), AGENT_IDS.map((id) => linkOf(prevHome, id))],
+    [0, 0, "", AGENT_IDS.map((id) => [`${id}-1.0.0`, `${id}-2.0.0`]), AGENT_IDS.map((id) => buildOf(prevHome, id, "2.0.0"))],
+  );
+  const v3Log = join(sandbox, "agents-prev-v3.log");
+  const v3 = runAgents(["--source", "npm"], { HOME: prevHome, FAKE_VER: "3.0.0", FAKE_LOG: v3Log });
+  check(
+    "after v3, v1 is gone, v2 — the build the symlink named when the run began — remains, and v3 is linked",
+    [v3.status, v3.err, AGENT_IDS.map((id) => buildsOf(prevHome, id)), AGENT_IDS.map((id) => linkOf(prevHome, id))],
+    [0, "", AGENT_IDS.map((id) => [`${id}-2.0.0`, `${id}-3.0.0`]), AGENT_IDS.map((id) => buildOf(prevHome, id, "3.0.0"))],
+  );
+  // A bump is asked about and then installed: one `view` and one `i -g` per harness.
+  check(
+    "a newer version on the registry is asked about, then staged",
+    [readFileSync(v3Log, "utf8").split("\n").filter((line) => line.startsWith("view ")).length, readFileSync(v3Log, "utf8").split("\n").filter((line) => line.startsWith("i -g ")).length, saysEach(v3.out, "refresh", "3.0.0")],
+    [AGENT_IDS.length, AGENT_IDS.length, []],
+  );
+  const v3againLog = join(sandbox, "agents-prev-v3again.log");
+  const v3again = runAgents(["--source", "npm"], { HOME: prevHome, FAKE_VER: "3.0.0", FAKE_LOG: v3againLog });
+  check(
+    "and the same build again is current, stages nothing, and prunes v2, since the symlink named v3 when it began",
+    [v3again.status, saysEach(v3again.out, "current", "3.0.0"), readFileSync(v3againLog, "utf8").split("\n").filter((line) => line.startsWith("i -g ")).length, AGENT_IDS.map((id) => buildsOf(prevHome, id))],
+    [0, [], 0, AGENT_IDS.map((id) => [`${id}-3.0.0`])],
+  );
+
+  /*
+   * **The reader leaves.** The daemon spawns this script on pipes and exits on
+   * shutdown without waiting; under default dispositions the next `printf` is a
+   * SIGPIPE. Driven exactly so — the script's stdout into a `head` that exits after
+   * one line, through `spawnSync`, which like the daemon gives the child default
+   * signals — the script before the trap ended with status 141, one build of four
+   * on disk and, under dash, `$TMP` still there. What is asserted is the whole of
+   * what the run should have done regardless of anybody reading it: every build,
+   * every symlink, exit 0 (read off stderr, since a pipeline's status is `head`'s),
+   * the temporary directory removed and the lock released.
+   */
+  const pipeHome = join(sandbox, "agents-pipe-home");
+  const pipeTmp = join(sandbox, "agents-pipe-tmp");
+  mkdirSync(pipeHome, { recursive: true });
+  mkdirSync(pipeTmp, { recursive: true });
+  const piped = spawnSync("sh", ["-c", '{ sh "$1" --source npm; echo "rc=$?" >&2; } | head -n 1', "sh", agentsPath], {
+    encoding: "utf8",
+    env: { HOME: pipeHome, PATH: `/usr/bin:/bin:${agentsStubs}`, TMPDIR: pipeTmp, FAKE_VER: "1.0.0" },
+    input: "",
+    timeout: 60_000,
+  });
+  check(
+    "a run whose reader exits after one line still installs all four, exits 0 and cleans up",
+    [
+      piped.stderr,
+      AGENT_IDS.map((id) => buildsOf(pipeHome, id)),
+      AGENT_IDS.map((id) => linkOf(pipeHome, id)),
+      readdirSync(pipeTmp),
+      existsSync(join(toolchainOf(pipeHome), ".agents.lock")),
+    ],
+    ["rc=0\n", AGENT_IDS.map((id) => [`${id}-1.0.0`]), AGENT_IDS.map((id) => buildOf(pipeHome, id, "1.0.0")), [], false],
+  );
+
+  /*
+   * **The lock.** A live pid — this driver's own — in a lock somebody else holds
+   * is a run in progress: one sentence on stderr naming the pid, exit 0 because
+   * every caller's contract is that this script never fails, nothing installed,
+   * not even the header printed, and the lock left exactly as found. `--check`
+   * walks past it, since a preview changes nothing. A dead pid — a shell that has
+   * already exited, whose pid the kernel may not have handed out again yet — is a
+   * run the daemon's SIGKILL ended with no trap, and is taken over: the run
+   * proceeds and releases the lock at its end. An empty pid file is the
+   * microsecond between `mkdir` and the write, or a crash inside it; given a
+   * second and still empty, it is the latter and is taken over too.
+   */
+  const lockHome = join(sandbox, "agents-lock-home");
+  const lockDir = join(toolchainOf(lockHome), ".agents.lock");
+  mkdirSync(lockDir, { recursive: true });
+  writeFileSync(join(lockDir, "pid"), `${process.pid}\n`);
+  const held = runAgents(["--source", "npm"], { HOME: lockHome, FAKE_VER: "1.0.0" });
+  check(
+    "a lock held by a live pid is a sentence naming it, exit 0, nothing changed and the lock left alone",
+    [held.status, held.err, held.out, AGENT_IDS.map((id) => buildsOf(lockHome, id)), readFileSync(join(lockDir, "pid"), "utf8")],
+    [0, `another run of deploy/agents.sh (pid ${process.pid}) is in progress; nothing was changed\n`, "", AGENT_IDS.map(() => []), `${process.pid}\n`],
+  );
+  const heldCheck = runAgents(["--source", "npm", "--check"], { HOME: lockHome });
+  check("while --check needs no lock and previews past one", [heldCheck.status, heldCheck.err, heldCheck.out.includes("nothing will be changed")], [0, "", true]);
+  const gone = spawnSync("sh", ["-c", 'echo "$$"'], { encoding: "utf8" }).stdout.trim();
+  writeFileSync(join(lockDir, "pid"), `${gone}\n`);
+  const stale = runAgents(["--source", "npm"], { HOME: lockHome, FAKE_VER: "1.0.0" });
+  check(
+    "a lock whose pid is gone is taken over, and released at the end",
+    [stale.status, stale.err, AGENT_IDS.map((id) => buildsOf(lockHome, id)), existsSync(lockDir)],
+    [0, "", AGENT_IDS.map((id) => [`${id}-1.0.0`]), false],
+  );
+  mkdirSync(lockDir, { recursive: true });
+  const empty = runAgents(["--source", "npm"], { HOME: lockHome, FAKE_VER: "2.0.0" });
+  check("and so is one with no pid in it, after a second's grace", [empty.status, empty.err, saysEach(empty.out, "refresh", "2.0.0"), existsSync(lockDir)], [0, "", [], false]);
 
   /*
    * A registry that refuses one refresh. What is true afterwards is that the
@@ -1392,7 +1672,7 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
     [0, true, true],
   );
   check("with the symlink still on that build and no stage left behind", [linkOf(npmHome, "codex"), buildsOf(npmHome, "codex")], [buildOf(npmHome, "codex", "2.0.0"), ["codex-2.0.0"]]);
-  check("and the other three refreshed regardless", saysEach(refused.out, "refresh", "2.0.0", ["claude", "opencode", "kimi"]), []);
+  check("and the other three current regardless", saysEach(refused.out, "current", "2.0.0", ["claude", "opencode", "kimi"]), []);
 
   /*
    * **The flag switched on a machine that already has its agents.** Every copy
@@ -1407,11 +1687,15 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
     [
       backThroughNpm.status,
       backThroughNpm.out.includes("with each vendor's own installer"),
+      // And says what a refresh would compare rather than asking the registry:
+      // a dry run makes no request, and the note names the build it would hold
+      // the answer against.
+      AGENT_IDS.filter((id) => !new RegExp(`^  ${id}: would ask the registry for ${NPM_PACKAGES[id].replace(/[@/.]/g, "\\$&")}@latest, and stage nothing if it is still 2\\.0\\.0$`, "m").test(backThroughNpm.out)),
       AGENT_IDS.filter((id) => !new RegExp(`^  ${id}: would run: \\S*npm i -g --prefix \\S*/${id}-<version> ${NPM_PACKAGES[id]}@latest, then repoint \\S*/bin/${id}$`, "m").test(backThroughNpm.out)),
       AGENT_IDS.filter((id) => !new RegExp(`^  ${id}\\s+would refresh$`, "m").test(backThroughNpm.out)),
       /would download|claude update|codex update|opencode upgrade/.test(backThroughNpm.out),
     ],
-    [0, true, [], [], false],
+    [0, true, [], [], [], false],
   );
 
   /*
@@ -3002,7 +3286,9 @@ process.stdout.write("\nwhat a deploy does to the agents\n");
   const envAt = armLines.indexOf("_daemon_env=$(env_file daemon)");
   const readsOff = armLines.indexOf(`_agent_updates=$(file_value "$_daemon_env" REEMOAT_AGENT_UPDATES | tr '[:upper:]' '[:lower:]')`);
   const offArm = armLines.indexOf("off | 0 | false | no | never)");
-  const readsSource = armLines.indexOf('_agent_source=$(file_value "$_daemon_env" REEMOAT_AGENT_SOURCE)');
+  // Lowercased like the switch above it: the daemon's `agentSourceFrom` lowercases,
+  // and a deploy that did not read `NPM` as npm ran the other arm off the same file.
+  const readsSource = armLines.indexOf(`_agent_source=$(file_value "$_daemon_env" REEMOAT_AGENT_SOURCE | tr '[:upper:]' '[:lower:]')`);
   const defaults = armLines.indexOf('[ "$_agent_source" = npm ] || _agent_source=vendor');
   const announces = armLines.indexOf('echo "  agents ($_agent_source)"');
   const callAt = armLines.findIndex((line) => line.startsWith('"$REPO_ROOT/deploy/agents.sh" --source "$_agent_source"'));
@@ -3825,6 +4111,255 @@ process.stdout.write("\nwhat a release does, driven without a registry\n");
 }
 
 /* ------------------------------------------------------------------ *
+ * What the freshness job does, driven without a registry
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nwhat the freshness job does, driven without a registry\n");
+
+/*
+ * `deploy/ci-freshness.sh` is the third `ci-*` script and the first whose
+ * subject is not this tree but the registry's opinion of it: how far behind
+ * `latest` each ACP adapter pin sits, and whether the pinned version is still
+ * served at all. `pincheck` cannot answer either offline, and every step of
+ * `check.yml`'s first job is offline by contract — so it is a workflow of its
+ * own on a schedule, and the same shape as the other two: a checkout and one
+ * call, with every decision in the script. Three seams:
+ *
+ *   NPM_VIEW              the registry. A stub answering canned versions per
+ *                         package, so the five outcomes are five cases and none
+ *                         of them opens a socket.
+ *   FRESHNESS_ROOT        the tree whose `package.json` is read. Synthetic, so
+ *                         "the report follows the pin" is a mutation and an
+ *                         observation rather than string equality against the
+ *                         real manifest — `labelFollows`'s argument one act over.
+ *   FRESHNESS_MAX_BEHIND  the margin. Unset is the documented default and the
+ *                         decision under test: behind is a report, and only this
+ *                         variable makes it a refusal.
+ *
+ * And the workflow file, read here for the one property a workflow can be
+ * checked for offline: that it decides nothing. `deploy.yml` and `release.yml`
+ * state the same rule in their own headers and nothing had ever read either
+ * back; this is the first of the three whose YAML is asserted, and the shape of
+ * the assertion — every `run:` is the script and nothing else, no `if:`, no
+ * trigger a push could fire — is the one the other two would take.
+ */
+{
+  const freshHome = tmp("cifresh-");
+  const freshBin = join(freshHome, "bin");
+  mkdirSync(freshBin, { recursive: true });
+
+  let stubSeq = 0;
+  const stub = (body: string): string => {
+    stubSeq += 1;
+    const path = join(freshBin, `npm-${stubSeq}`);
+    writeFileSync(path, `#!/bin/sh\n${body}\n`);
+    chmodSync(path, 0o755);
+    return path;
+  };
+
+  const CLAUDE = "@agentclientprotocol/claude-agent-acp";
+  const CODEX = "@agentclientprotocol/codex-acp";
+
+  interface Answer {
+    latest: string;
+    versions: string[];
+    deprecated?: string;
+  }
+
+  /**
+   * An `npm view` that answers three questions per package and refuses any it
+   * was not written for — so a script that started asking a fourth goes red
+   * here rather than reaching the network on a runner. Keyed on `$1 $2` for the
+   * reason the release stub gives: `versions` and `dist-tags.latest` are the
+   * same package and must not share an arm.
+   */
+  const registry = (answers: Record<string, Answer>): string => {
+    const arms = Object.entries(answers)
+      .map(
+        ([pkg, a]) =>
+          `  "${pkg} dist-tags.latest") echo "${a.latest}" ;;\n` +
+          `  "${pkg} versions") printf '%s\\n' '[' ${a.versions.map((v) => `'  "${v}",'`).join(" ")} ']' ;;\n` +
+          `  "${pkg}@"*" deprecated") ${a.deprecated === undefined ? ":" : `echo "${a.deprecated}"`} ;;\n`,
+      )
+      .join("");
+    return stub(`case "$1 $2" in\n${arms}  *) echo "unexpected question: $*" >&2; exit 9 ;;\nesac`);
+  };
+
+  /** A manifest carrying the given adapter pins beside things that are not adapters. */
+  const manifest = (pins: Record<string, string>): string => {
+    const dir = tmp("freshtree-");
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify(
+        {
+          name: "reemoat",
+          version: "0.1.0",
+          devDependencies: { ...pins, "@agentclientprotocol/sdk": "1.3.0", tsx: "^4.0.0" },
+        },
+        null,
+        2,
+      ),
+    );
+    return dir;
+  };
+
+  const current = registry({
+    [CLAUDE]: { latest: "0.63.0", versions: ["0.62.0", "0.63.0"] },
+    [CODEX]: { latest: "1.1.9", versions: ["1.1.8", "1.1.9"] },
+  });
+  const moved = registry({
+    [CLAUDE]: { latest: "0.73.0", versions: ["0.62.0", "0.63.0", "0.70.0", "0.73.0"] },
+    [CODEX]: { latest: "1.1.9", versions: ["1.1.8", "1.1.9"] },
+  });
+  const pinned = (): string => manifest({ [CLAUDE]: "0.63.0", [CODEX]: "1.1.9" });
+
+  const freshness = (env: Record<string, string> = {}, root: string = pinned(), ...args: string[]): Run => {
+    const result = spawnSync("sh", [join(repoRoot, "deploy", "ci-freshness.sh"), ...args], {
+      cwd: deployDir,
+      encoding: "utf8",
+      env: { PATH: baseEnv.PATH, HOME: freshHome, NPM_VIEW: current, FRESHNESS_ROOT: root, ...env },
+    });
+    return { status: result.status ?? -1, out: result.stdout ?? "", err: result.stderr ?? "" };
+  };
+
+  /*
+   * The workflow decides nothing. Comments stripped first, since the header
+   * names `push` and `if:` while explaining why neither is here.
+   */
+  const workflow = readFileSync(join(repoRoot, ".github", "workflows", "freshness.yml"), "utf8")
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line));
+  const runs = workflow.filter((line) => /^\s*run:/.test(line)).map((line) => line.trim());
+  check("freshness.yml runs the script and nothing else", runs, ["run: deploy/ci-freshness.sh"]);
+  check("and holds no condition of its own", workflow.filter((line) => /^\s*if:/.test(line)), []);
+  check("and fires on a schedule and a button, never on a push", [
+    workflow.some((line) => /^\s*schedule:/.test(line)),
+    workflow.some((line) => /^\s*workflow_dispatch:/.test(line)),
+    workflow.some((line) => /^\s*(push|pull_request):/.test(line)),
+  ], [true, true, false]);
+  check("and can write nothing back", workflow.filter((line) => /^\s+\w[\w-]*:\s*write\b/.test(line)), []);
+  check("and reads no secret", workflow.some((line) => line.includes("secrets.")), false);
+
+  /*
+   * The pins are read off the tree rather than restated. Two halves: the real
+   * manifest's adapters are what the script names, and a fixture whose pin moved
+   * moves the report — the second being the only form that tells "derived" from
+   * "transcribed".
+   */
+  const realManifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as {
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+  };
+  const realPins = Object.entries({ ...realManifest.dependencies, ...realManifest.devDependencies }).filter(([name]) =>
+    /^@agentclientprotocol\/.+-acp$/.test(name),
+  );
+  check("the real manifest pins the two adapters pincheck names", realPins.map(([name]) => name).sort(), [CLAUDE, CODEX]);
+  const onReal = freshness(
+    { NPM_VIEW: registry(Object.fromEntries(realPins.map(([name, v]) => [name, { latest: v, versions: [v] }]))) },
+    repoRoot,
+  );
+  check("against the real tree it names each adapter at the version package.json carries", [
+    onReal.status,
+    realPins.filter(([name, v]) => !onReal.out.includes(`${name}: ${v} is current`)),
+  ], [0, []]);
+  const movedPin = freshness({}, manifest({ [CLAUDE]: "0.62.0", [CODEX]: "1.1.9" }));
+  check("and a fixture whose pin moved moves the report", movedPin.out.includes(`${CLAUDE}: 0.62.0 is behind by 1 release(s); latest is 0.63.0`), true);
+
+  /* Current: exit 0, one line each. */
+  const green = freshness();
+  check("two current pins exit 0", green.status, 0);
+  check("naming each as current", [green.out.includes(`${CLAUDE}: 0.63.0 is current`), green.out.includes(`${CODEX}: 1.1.9 is current`)], [true, true]);
+
+  /*
+   * Behind: still exit 0, which is the decision. A weekly red for a pin somebody
+   * has chosen not to move yet is a red that teaches people to ignore red. The
+   * count is releases the registry lists after the pin, and the row reaches the
+   * job summary when a runner provides one.
+   */
+  const summaryFile = join(tmp("freshsum-"), "summary.md");
+  const behind = freshness({ NPM_VIEW: moved, GITHUB_STEP_SUMMARY: summaryFile });
+  check("a pin behind latest still exits 0", behind.status, 0);
+  check("and says by how many releases, and what latest is", behind.out.includes(`${CLAUDE}: 0.63.0 is behind by 2 release(s); latest is 0.73.0`), true);
+  const summary = readFileSync(summaryFile, "utf8");
+  check("the job summary carries a row per adapter", [
+    /\| `@agentclientprotocol\/claude-agent-acp` \| 0\.63\.0 \| 0\.73\.0 \| behind by 2 release\(s\) \|/.test(summary),
+    /\| `@agentclientprotocol\/codex-acp` \| 1\.1\.9 \| 1\.1\.9 \| current \|/.test(summary),
+  ], [true, true]);
+  check("and no summary is written where there is none to write", existsSync(join(freshHome, "summary.md")), false);
+
+  /* The margin, which is the only thing that makes behind a refusal. */
+  const overMargin = freshness({ NPM_VIEW: moved, FRESHNESS_MAX_BEHIND: "1" });
+  check("behind by more than FRESHNESS_MAX_BEHIND is refused", overMargin.status, 2);
+  check("naming the variable", overMargin.err.includes("FRESHNESS_MAX_BEHIND"), true);
+  check("while behind by exactly the margin is not", freshness({ NPM_VIEW: moved, FRESHNESS_MAX_BEHIND: "2" }).status, 0);
+  check("and a margin that is not a count is refused before the registry is asked", freshness({ FRESHNESS_MAX_BEHIND: "lots" }).status, 2);
+
+  /* Deprecated: reported, and not a failure — it still installs. */
+  const deprecated = freshness({
+    NPM_VIEW: registry({
+      [CLAUDE]: { latest: "0.63.0", versions: ["0.63.0"], deprecated: "use 0.73.0" },
+      [CODEX]: { latest: "1.1.9", versions: ["1.1.9"] },
+    }),
+  });
+  check("a deprecated pin exits 0", deprecated.status, 0);
+  check("and is reported with the registry's own message", deprecated.out.includes("deprecated: use 0.73.0"), true);
+
+  /*
+   * Unpublished: the one outcome that is nobody's choice. A version the registry
+   * does not list fails `pnpm install --frozen-lockfile` on the next machine the
+   * one-liner sets up, so this is a refusal — and every adapter is still reported
+   * first, so one bad pin does not hide the state of the other.
+   */
+  const gone = freshness({
+    NPM_VIEW: registry({
+      [CLAUDE]: { latest: "0.73.0", versions: ["0.62.0", "0.73.0"] },
+      [CODEX]: { latest: "1.1.9", versions: ["1.1.9"] },
+    }),
+    GITHUB_STEP_SUMMARY: join(tmp("freshgone-"), "summary.md"),
+  });
+  check("a pin the registry no longer lists is refused", gone.status, 2);
+  check("naming the package and version", gone.err.includes(`${CLAUDE}@0.63.0`), true);
+  check("and saying what it breaks", gone.err.includes("frozen-lockfile"), true);
+  check("with the other adapter still reported", gone.out.includes(`${CODEX}: 1.1.9 is current`), true);
+  /*
+   * ⚠ Matched as the quoted string with its dots escaped. A bare `0.6.0` would
+   * otherwise find itself inside `0.63.0` and call an unpublished pin published.
+   */
+  const prefix = freshness({ NPM_VIEW: registry({ [CLAUDE]: { latest: "0.63.0", versions: ["0.63.0"] }, [CODEX]: { latest: "1.1.9", versions: ["1.1.9"] } }) }, manifest({ [CLAUDE]: "0.6.0", [CODEX]: "1.1.9" }));
+  check("a pin that is a prefix of a published version is not thereby published", prefix.status, 2);
+
+  /*
+   * Unreachable: a distinct code with a sentence, and npm's own stderr under it.
+   * "The pin is bad" and "the network is down" answer different questions, and a
+   * scheduled job reporting the second as the first sends somebody to edit a
+   * manifest that is fine.
+   */
+  const down = freshness({ NPM_VIEW: stub(`echo "npm ERR! code ENOTFOUND registry.npmjs.org" >&2; exit 1`) });
+  check("a registry that cannot be asked exits 3, not 2", down.status, 3);
+  check("with a sentence saying it is about the run", down.err.includes("could not ask the registry"), true);
+  check("carrying npm's own reason", down.err.includes("ENOTFOUND"), true);
+  check("and never the word refusing, which is a verdict", down.err.includes("refusing"), false);
+  const silent = freshness({ NPM_VIEW: stub(`case "$2" in dist-tags.latest) ;; versions) echo '["0.63.0"]' ;; deprecated) ;; esac`) });
+  check("a registry that answers no latest at all is unreachable too", silent.status, 3);
+
+  /* The manifest, and the shapes of it that are refused before the registry is asked. */
+  const noPins = freshness({ NPM_VIEW: stub(`exit 9`) }, manifest({}));
+  check("a manifest with no adapter pin is refused rather than reported green", noPins.status, 2);
+  check("and says the pattern is what to fix", noPins.err.includes("pattern"), true);
+  const ranged = freshness({ NPM_VIEW: stub(`exit 9`) }, manifest({ [CLAUDE]: "^0.63.0", [CODEX]: "1.1.9" }));
+  check("a range is refused as not a pin", ranged.status, 2);
+  check("naming the package", ranged.err.includes(CLAUDE) && ranged.err.includes("range"), true);
+  check("a tree with no manifest is refused", freshness({ NPM_VIEW: stub(`exit 9`) }, tmp("freshempty-")).status, 2);
+  check("and an argument is a usage error, since there are none", freshness({}, pinned(), "--check").status, 2);
+
+  /* Nothing leaks: a registry token in the environment stays there. */
+  const SENTINEL = "npm_deploycheckSentinelMustNotBePrinted";
+  const withToken = freshness({ NPM_TOKEN: SENTINEL, NODE_AUTH_TOKEN: SENTINEL });
+  check("a registry token in the environment is not printed", withToken.out.includes(SENTINEL) || withToken.err.includes(SENTINEL), false);
+  check("and that run succeeded", withToken.status, 0);
+}
+
+/* ------------------------------------------------------------------ *
  * The one migration rule, asserted rather than asked for
  *
  * ⚠ **`migrate()`'s docblock said `deploycheck` asserted this and `deploycheck`
@@ -4331,6 +4866,75 @@ process.stdout.write("\nthe one-line installer\n");
   }
 
   /*
+   * **`REEMOAT_API_KEY` leaves the environment on the line after it is read.** The
+   * documented quiet form, `REEMOAT_API_KEY=rk_… sh -c "$(curl …)"`, exports the
+   * whole account's key to every child this script starts — `pnpm install`'s
+   * lifecycle scripts and the three vendor installers `deploy/agents.sh` downloads
+   * and runs — none of which has a use for it. `$API_KEY` is the only reader, so
+   * the line after the copy is the `unset`, and no executable line after it
+   * expands the name.
+   */
+  {
+    const copyAt = bootstrapLines.indexOf('API_KEY="${REEMOAT_API_KEY:-}"');
+    check("the API key is copied out of the environment once", copyAt !== -1, true);
+    check("and the next line takes it out of the environment", bootstrapLines[copyAt + 1], "unset REEMOAT_API_KEY");
+    check(
+      "with nothing after it reading the name",
+      bootstrapLines.slice(copyAt + 2).filter((line) => !/^\s*#/.test(line) && /\$\{?REEMOAT_API_KEY/.test(line)),
+      [],
+    );
+  }
+
+  /*
+   * **`adopt_origin`, through the flag that reaches it first.** Everything below
+   * it appends `/v1/…` to what it accepts, so a path lands every request somewhere
+   * else, a query or a fragment rides into each one, `user:pass@` puts a
+   * credential into the env file, and a scheme that is not http(s) is nothing
+   * curl here can speak. Each is exit 2 with the sentence and the value; the
+   * control is an origin with a trailing slash, which is stripped and passed on
+   * to fail on the network with no such sentence.
+   */
+  {
+    const originRefusal = (url: string): Run => runBootstrap(["--url", url, "--api-key", "rk_x", "--yes"]);
+    for (const bad of ["https://cp.example/v1", "https://a:b@cp.example", "https://cp.example?x", "https://cp.example#f", "ftp://cp.example"]) {
+      const run = originRefusal(bad);
+      // The sentence and the value are checked apart: `die "$2: $1"` puts a
+      // colon between them, and the value is the half that tells somebody which
+      // of their flags this was.
+      check(`${bad} is refused as an origin, naming it`, [run.status, run.err.includes("--url must be an http(s) origin, not"), run.err.includes(bad)], [2, true, true]);
+    }
+    const control = originRefusal("https://cp.example/");
+    check("while an origin with a trailing slash gets past that check", [control.status !== 0, control.err.includes("--url must be an http(s) origin")], [true, false]);
+  }
+
+  /*
+   * **`credential_body`, with a password the shell and JSON disagree about.** The
+   * function alone, extracted and run — never the file sourced — with this
+   * process's own node as `NODE_BIN`. The value goes NUL-separated on stdin, so
+   * what is asserted is that every character comes back intact through the parse:
+   * both quote marks, a backslash, a newline, a `$( … )` that must not run, and a
+   * character outside ASCII. `email` is a key only when an address was given.
+   */
+  {
+    const bodySource = blockIn("bootstrap.sh", bootstrapLines, "credential_body", "credential_body() {", "}");
+    const body = (...args: string[]): unknown => {
+      const run = spawnSync("sh", ["-c", `${bodySource}\ncredential_body "$@"`, "sh", ...args], {
+        encoding: "utf8",
+        env: { ...baseEnv, NODE_BIN: process.execPath },
+      });
+      try {
+        return JSON.parse(run.stdout);
+      } catch {
+        // Not JSON at all is the finding, and the raw text is what says why.
+        return `not JSON: ${run.stdout}${run.stderr}`;
+      }
+    };
+    const password = `p"a\\b'c\n$(x)é`;
+    check("credential_body carries a hostile password intact, with no email key", body("alice", password), { name: "alice", password });
+    check("and adds email only when one was given", body("alice", password, "a@example.test"), { name: "alice", password, email: "a@example.test" });
+  }
+
+  /*
    * **`main` is called once, on the last line.** That is not style: `curl … | sh`
    * executes bytes as they arrive, so a download cut off half-way runs a prefix
    * of the file — and `set -e` has nothing to say about it, because nothing
@@ -4449,12 +5053,17 @@ process.stdout.write("\nthe one-line installer\n");
       checkout: string;
       db: string;
     }
-    const fixture = (name: string, opts: { lib: boolean; worktree: boolean }): Fixture => {
+    const fixture = (name: string, opts: { lib: boolean; worktree: boolean; env?: boolean }): Fixture => {
       const h = join(sandbox, `uninstall-${name}`);
       rmSync(h, { recursive: true, force: true });
       mkdirSync(join(h, ".reemoat", "toolchain", "bin"), { recursive: true });
       writeFileSync(join(h, ".reemoat", "toolchain", ".installed-by-bootstrap"), "");
       writeFileSync(join(h, ".reemoat", "reemoat.db"), "");
+      // The env file `write_env_file` leaves, which is the evidence `do_uninstall`
+      // reads for "the install reached the service" when there is no checkout to
+      // ask. Present unless a case says otherwise, since every case but one is an
+      // install that got that far.
+      if (opts.env !== false) writeFileSync(join(h, ".reemoat", "daemon.env"), "REEMOAT_CONTROL_PLANE='https://cp.example'\n");
       mkdirSync(join(h, "co"), { recursive: true });
       if (opts.lib) {
         mkdirSync(join(h, "co", "deploy"), { recursive: true });
@@ -4479,7 +5088,8 @@ process.stdout.write("\nthe one-line installer\n");
      * exits 127 with `node: not found`, every ten seconds, for ever. The way in
      * is an install made with `--dir`, whose checkout this run cannot find, and
      * it used to delete the toolchain anyway and **exit 0** over it, which a
-     * provisioning script reads as a clean removal.
+     * provisioning script reads as a clean removal. The env file is what says
+     * this install reached the service: `write_env_file` runs before `hand_off`.
      */
     {
       const f = fixture("no-lib", { lib: false, worktree: false });
@@ -4487,6 +5097,27 @@ process.stdout.write("\nthe one-line installer\n");
       check("an uninstall that could not stop the service leaves the toolchain", existsSync(f.toolchain), true);
       check("and does not report success", run.status !== 0, true);
       check("and says which checkout would have worked", run.err.includes(f.checkout), true);
+    }
+    /*
+     * ⚠ **And the install that never reached the service.** `nothing_installed`
+     * promises, on every refusal after `ensure_node` — `409 machine_limit` at
+     * `create_machine` being the one people meet — that "there is a private node
+     * in $TOOLCHAIN, which `--uninstall` removes". That run died before the clone,
+     * so there is no checkout and no env file, and the arm above used to read the
+     * missing checkout as a service it could not stop: toolchain kept, exit 2,
+     * and a sentence asking for `--dir` to a checkout that never existed. No env
+     * file is the evidence that no unit was ever rendered, so there is nothing to
+     * stop and the promise is kept.
+     */
+    {
+      const f = fixture("never-installed", { lib: false, worktree: false, env: false });
+      const run = uninstall(f);
+      check(
+        "an uninstall with no checkout and no env file removes the toolchain and exits 0",
+        [run.status, existsSync(f.toolchain), run.out.includes("nothing to stop"), run.err.includes("Re-run with --dir")],
+        [0, false, true, false],
+      );
+      check("with the data left alone", existsSync(f.db), true);
     }
     // The control, without which the three above pass for a script that never
     // removes anything: given a lib.sh to stop the service through, it does.

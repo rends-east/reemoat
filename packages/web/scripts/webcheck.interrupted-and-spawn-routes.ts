@@ -338,6 +338,7 @@ process.stdout.write("\nsessions the daemon interrupted\n");
 process.stdout.write("\nwhat an interrupted session says\n");
 {
   const { resumeFailureText, resumeRetryable, sessionNotice, statusTone } = await import("../src/ui/bits.js");
+  const { resumeStalled, waitingForDaemon } = await import("../src/wire.js");
   const sessionOf = (over: Record<string, unknown>) => ({ ...snapshot, ...over }) as never;
 
   const stopped = sessionOf({
@@ -389,6 +390,32 @@ process.stdout.write("\nwhat an interrupted session says\n");
   check("nor names an exit reason", /daemon_shutdown|daemon_restarted/.test(waitingText), false);
   check("it says what is actually happening", waitingText, "the daemon restarted — reconnecting the agent");
   check("and offers no button, because nobody needs to press one", sessionNotice(deployed, "kimi", "box")?.action, null);
+
+  /*
+   * **The one waiting state that carries a reason draws it.** The daemon defers
+   * a session whose harness has no CLI on the machine yet — `waiting`, no attempt
+   * spent, the refusal on the snapshot — and its installer is already scheduled.
+   * Drawn as the restart line above, that read as a reconnect in progress for the
+   * whole wait, minutes at best and for good with updates off. The sentence is
+   * the short one for the code, never `error.message`: that is the daemon's
+   * paragraph naming a script, and it does not belong on a phone.
+   */
+  const deferredCli = sessionOf({
+    status: "interrupted",
+    exit: { reason: "daemon_restarted" },
+    agentSessionId: "a_1",
+    resume: {
+      state: "waiting",
+      attempts: 0,
+      error: { code: "agent_unavailable", message: "kimi is not on this daemon's PATH or in the directories deploy/agents.sh installs into" },
+      at: 0,
+    },
+  });
+  const deferredNotice = sessionNotice(deferredCli, "kimi", "box");
+  check("a session waiting for its CLI to be installed is waiting, not stalled", [waitingForDaemon(deferredCli), resumeStalled(deferredCli)], [true, false]);
+  check("and says so", deferredNotice?.text, "kimi is not installed on box — waiting for it to be installed");
+  check("quietly, with no button", [deferredNotice?.tone, deferredNotice?.action], ["quiet", null]);
+  check("and never the daemon's own paragraph", deferredNotice?.text.includes("deploy/agents.sh"), false);
 
   const stalledNotice = sessionNotice(stalled, "kimi", "box");
   check("a stalled one is warn-toned", stalledNotice?.tone, "warn");

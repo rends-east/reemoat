@@ -426,7 +426,10 @@ export class AcpClient {
    * `claude-agent-acp` 0.63.0 answers `{providerId: "main", supported:
    * ["anthropic","bedrock","vertex"]}`, `codex-acp` 1.1.9 answers
    * `{providerId: "custom-gateway", supported: ["openai"]}`, and `kimi acp`
-   * declares no capability and answers `-32601` to the call.
+   * declares no capability and answers `-32601` to the call. Re-measured
+   * 2026-09-04 with the pins at 0.73.0 / 1.8.0: claude unchanged, `codex-acp`
+   * 1.8.0 answers `{providerId: "openai", supported: ["openai"]}` — the id has
+   * moved once already, which is why it is read here and written down nowhere.
    *
    * ⚠ **Answers `null` rather than throwing, on every failure.** An agent that
    * cannot be routed is not a broken agent — it is two of the three — and the

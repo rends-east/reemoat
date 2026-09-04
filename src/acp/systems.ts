@@ -158,6 +158,22 @@ export interface SystemConfig {
    * publish `kimi-k2-thinking` and never will, so the names have to be written
    * down. What the two arms share is that neither is validated here — see
    * `Session.applySystem`.
+   *
+   * ⚠ **A written-down list is a *starting set*, never the set.** Nothing here
+   * validates a routed model against it — `MAX_MODEL_CHARS` in `server.ts` is the
+   * only check a stored id meets, and `ROUTED_MODEL_ENV` names whatever string it
+   * is handed — so the browser lets somebody **type** an id under a routable
+   * system and substitutes it into this list before the picker reads it
+   * (`adoptModels` in `packages/web/src/agents.ts`). What the rows below buy is a
+   * first screen with something on it; what they cost is going stale, which they
+   * did: all three Moonshot ids that stood here were retired on 2026-05-25 and
+   * nothing noticed until 2026-09-04. There is deliberately **no refresh
+   * mechanism** — a catalogue read by the daemon is a fourth `fetch` in `src/`
+   * (`compatibility.md` states the count as the property), and the three routed
+   * vendors' list endpoints all answer 401 unauthenticated (probed 2026-09-03),
+   * which fails Q3.501's two tests for the browser door. A plugin contributing
+   * the provider is the legal shape for a live list; the typed id is the answer
+   * until one exists.
    */
   models: readonly SystemModel[];
   /**
@@ -266,10 +282,18 @@ export const SYSTEMS: Record<BuiltinSystemId, SystemConfig> = {
     authHeader: { name: "authorization", prefix: "Bearer " },
     nativeHarness: "kimi",
     loginVia: "kimi",
+    /*
+     * Read off https://platform.kimi.ai/docs/models on 2026-09-04 (the
+     * `platform.moonshot.ai/docs` address 301s there now). `kimi-k2-thinking`,
+     * `kimi-k2-0905-preview` and `kimi-k2-turbo-preview` stood here and were all
+     * retired on 2026-05-25 — a starting set, see {@link SystemConfig.models};
+     * `kimi-k2.7-code-highspeed` is the fourth current id and is left to the
+     * typed box.
+     */
     models: [
-      { id: "kimi-k2-thinking", name: "Kimi K2 Thinking" },
-      { id: "kimi-k2-0905-preview", name: "Kimi K2" },
-      { id: "kimi-k2-turbo-preview", name: "Kimi K2 Turbo" },
+      { id: "kimi-k3", name: "Kimi K3" },
+      { id: "kimi-k2.7-code", name: "Kimi K2.7 Code" },
+      { id: "kimi-k2.6", name: "Kimi K2.6" },
     ],
     // Kimi's own list and Moonshot's are different products on different
     // endpoints — Q3.488 — so no prefix relates them and none is claimed.
@@ -285,7 +309,17 @@ export const SYSTEMS: Record<BuiltinSystemId, SystemConfig> = {
     // key box is the whole of the screen.
     nativeHarness: null,
     loginVia: null,
+    /*
+     * Read off https://docs.z.ai/guides/overview/pricing and
+     * https://docs.z.ai/scenario-example/develop-tools/claude on 2026-09-04:
+     * both of the two that stood here are still listed, and the Claude Code guide
+     * still maps Haiku to `glm-4.5-air`. `glm-5.3` is the current flagship and
+     * `glm-4.7` is what that guide maps Opus and Sonnet to. A starting set —
+     * `glm-5.3-flash`, `glm-5.2`, `glm-4.7-flash` and the rest are typed.
+     */
     models: [
+      { id: "glm-5.3", name: "GLM-5.3" },
+      { id: "glm-4.7", name: "GLM-4.7" },
       { id: "glm-4.6", name: "GLM-4.6" },
       { id: "glm-4.5-air", name: "GLM-4.5 Air" },
     ],
@@ -313,7 +347,20 @@ export const SYSTEMS: Record<BuiltinSystemId, SystemConfig> = {
     authHeader: { name: "authorization", prefix: "Bearer " },
     nativeHarness: null,
     loginVia: null,
-    models: [{ id: "MiniMax-M2", name: "MiniMax M2" }],
+    /*
+     * Read off https://platform.minimax.io/docs/guides/models-intro on
+     * 2026-09-04: `MiniMax-M3` and `MiniMax-M2.7` are current, `MiniMax-M2` is
+     * under the *Legacy* heading and still served. Case as documented — the ids
+     * are capitalised. The Claude Code guide there sets every `ANTHROPIC_*_MODEL`
+     * to `MiniMax-M3[1m]`; the suffix is Claude Code's own 1M-context marker and
+     * is not written here, since whether this endpoint reads it through
+     * `ANTHROPIC_MODEL` is unmeasured — somebody who wants it types it.
+     */
+    models: [
+      { id: "MiniMax-M3", name: "MiniMax M3" },
+      { id: "MiniMax-M2.7", name: "MiniMax M2.7" },
+      { id: "MiniMax-M2", name: "MiniMax M2" },
+    ],
     nativeModelPrefix: null,
     keyEnv: null,
   },
@@ -464,7 +511,8 @@ export const BUILTIN_CATALOGUE: MachineCatalogue = {
  *
  * ⚠ **`providerId` is read off this and never written down.** Measured
  * 2026-08-25 against the pinned adapters: `claude-agent-acp` 0.63.0 calls its
- * provider `main` and `codex-acp` 1.1.9 calls its `custom-gateway`. A daemon
+ * provider `main` and `codex-acp` 1.1.9 calls its `custom-gateway`; re-measured
+ * 2026-09-04, `codex-acp` 1.8.0 calls it `openai` and claude is unchanged. A daemon
  * that hardcoded either would configure one agent and hand the other an
  * `invalid_params` naming a provider it has never heard of. This is
  * `acp-agents.md`'s "found by `category`, never by `id`" rule in a second place.
@@ -503,11 +551,12 @@ export interface AgentRouting {
  *
  * ⚠ **The model id goes in the environment. The credential goes over stdio — and
  * then the adapter puts it in an environment anyway.** Measured against the
- * pinned `claude-agent-acp` 0.63.0: `createEnvForProvider` (dist/acp-agent.js:4569)
- * folds `providers/set`'s headers into
- * `ANTHROPIC_CUSTOM_HEADERS: "authorization: Bearer sk-…"` and spreads that into
- * the env it spawns the `claude` CLI with (:4128). Every Bash tool call is a child
- * of that process and inherits it.
+ * pinned `claude-agent-acp` 0.63.0 (both functions are still there by those
+ * names in the 0.73.0 pin, checked 2026-09-04): `createEnvForProvider` in
+ * `dist/acp-agent.js` folds `providers/set`'s headers into
+ * `ANTHROPIC_CUSTOM_HEADERS: "authorization: Bearer sk-…"` and `createSession`
+ * spreads its answer into the env it spawns the `claude` CLI with. Every Bash
+ * tool call is a child of that process and inherits it.
  *
  * So the honest statement is narrower than the one that stood here: **this daemon**
  * does not put a system key in an environment, and `agentEnv`'s strip cannot
@@ -533,7 +582,8 @@ export const ROUTED_MODEL_ENV: Partial<Record<AgentId, (model: string) => NodeJS
     ANTHROPIC_CUSTOM_MODEL_OPTION: model,
   }),
   // codex is absent and that is not a gap today: it accepts only `openai`
-  // (measured — `custom-gateway`, `supported: ["openai"]`), every routed system
+  // (measured — `supported: ["openai"]`, under the id `custom-gateway` on 1.1.9
+  // and `openai` on 1.8.0), every routed system
   // below is `anthropic`-shaped, so `hostable` already refuses the pairing one
   // test earlier. It becomes a gap the day an openai-shaped system is added, and
   // `hostable` is what will refuse it rather than let it run the wrong model.

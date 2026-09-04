@@ -221,8 +221,10 @@ export interface AgentCapabilities {
    * being absent. Reported off the same read, so the version on screen cannot
    * describe a different spawn than the rows under it.
    *
-   * `null` for a harness with no binary to name, and for a daemon that answered
-   * before this field existed — see the client's mirror, where it is optional.
+   * `null` for a harness with no binary to name. A daemon from before this field
+   * sends no `cli` key at all, which is why the client's mirror keeps it optional:
+   * `undefined` there is an older daemon, `null` is this sentence, and the two are
+   * different facts about different things.
    */
   cli: AgentCliChoice | null;
 }

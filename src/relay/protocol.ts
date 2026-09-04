@@ -132,6 +132,113 @@ export const DAEMON_VERSION_HEADER = "x-reemoat-daemon-version";
 export const MAX_DAEMON_VERSION_CHARS = 64;
 
 /**
+ * Which build of each coding-agent CLI the daemon would launch, announced on the
+ * handshake beside `DAEMON_VERSION_HEADER` and under exactly the same rule:
+ * **advisory, recorded, branched on by nothing.** A daemon that omits it — every
+ * daemon older than this header — dials, enrolls and is listed the same as one
+ * that sends it, with the field `null`.
+ *
+ * What it buys is the second half of the question the daemon version already
+ * answers: *which machines are running a July claude?* The CLIs move under a
+ * running daemon — `deploy/agents.sh` repoints them daily, an operator may pin one
+ * by hand, a copy dropped into `~/.local/bin` is the build within ten minutes
+ * (Q6.106) — so the daemon's own version says nothing about them, and until this
+ * header the only way to learn what a machine was running was to open a shell on
+ * it. `cpctl admin fleet` reads it back, offline machines included. A report,
+ * never a verb: nothing here is a step toward the control plane *changing* what a
+ * machine runs, which is its owner's act (Q7.42).
+ *
+ * The value is one compact string, `claude=2.1.259;codex=0.153.1;kimi=-`:
+ * harness id `=` version, `;`-separated, in the order the daemon ships its
+ * harnesses. A harness with **no CLI on the machine is absent**; one whose binary
+ * runs but would not say which build it is carries `-`. The grammar is
+ * `parseAgentClis`, shared with the relay rather than written twice, and it is a
+ * grammar rather than a label on purpose — `readDaemonVersionHeader` can *cut* an
+ * over-long version and store what is left, because a label cut short is still a
+ * label; an entry list cut short mid-version is a **false** version, so the relay
+ * refuses the whole value to `null` instead. Absence of the header and refusal of
+ * it land on the same `null`, and nothing needs to tell them apart: both read as
+ * "did not say".
+ *
+ * **As fresh as the last dial, and that is stated rather than fixed.** The
+ * handshake repeats on every (re)dial and never in between, and the daily agent
+ * update does not redial — a redial drops every live stream, so making the
+ * inventory current would cost every browser on the machine its socket for a
+ * report nobody is blocked on. The row therefore describes what the daemon would
+ * have launched *when it last connected*; a relay restart, a network blip or a
+ * daemon update refreshes it, and the daemon's own `GET /agents/capabilities`
+ * is the live answer for one machine.
+ */
+export const AGENT_CLIS_HEADER = "x-reemoat-agent-clis";
+
+/**
+ * How long an `AGENT_CLIS_HEADER` value may be before the relay refuses it whole.
+ *
+ * Four built-in harnesses at the widest id and version the grammar admits is
+ * under 400 characters; the bound is the same order as `MAX_DAEMON_VERSION_CHARS`
+ * scaled to a list, not a budget anything legitimate approaches.
+ */
+export const MAX_AGENT_CLIS_CHARS = 512;
+
+/** One harness id as the header carries it: what `AGENT_IDS` looks like, and no more. */
+export const AGENT_CLI_ID_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+
+/**
+ * One announced version. What `LocalRuntime.cliVersion` extracts is a dotted
+ * number, and a prerelease tag is the widest thing a vendor prints after it;
+ * `-` alone is "runs, but would not say". No space, no `=` and no `;`, so the
+ * value cannot be mistaken for the next entry.
+ */
+export const AGENT_CLI_VERSION_RE = /^[A-Za-z0-9._+-]{1,64}$/;
+
+/**
+ * Harness id → the build its CLI reports, `null` where the binary runs but would
+ * not say. A harness with no CLI has no entry at all.
+ */
+export type AgentClis = Record<string, string | null>;
+
+/**
+ * The header's value, from what the daemon resolved. The inverse of
+ * `parseAgentClis`, and the daemon's only spelling of it.
+ *
+ * Does not validate: the daemon feeds it ids from `AGENT_IDS` and versions that
+ * `announcedAgentClis` has already held to `AGENT_CLI_VERSION_RE`, so the one
+ * spelling and the one grammar cannot disagree. An empty map formats to the empty
+ * string, which the daemon turns into **no header** rather than an empty one.
+ */
+export function formatAgentClis(clis: AgentClis): string {
+  return Object.entries(clis)
+    .map(([id, version]) => `${id}=${version ?? "-"}`)
+    .join(";");
+}
+
+/**
+ * The header's value, read. `null` for anything that is not exactly the grammar
+ * above — too long, an id or version outside its character set, a duplicate id,
+ * a dangling separator, an empty value. Refusal of the whole thing rather than of
+ * the offending entry, for the reason in `AGENT_CLIS_HEADER`'s docblock: a
+ * partial list would be reported as if it were the inventory.
+ *
+ * Pure and shared: the relay reads with it on the dial, `GET /v1/admin/fleet`
+ * reads the stored string back with it, and `relaycheck` drives it with no
+ * socket.
+ */
+export function parseAgentClis(text: string): AgentClis | null {
+  if (text.length === 0 || text.length > MAX_AGENT_CLIS_CHARS) return null;
+  const clis: AgentClis = {};
+  for (const entry of text.split(";")) {
+    const at = entry.indexOf("=");
+    if (at === -1) return null;
+    const id = entry.slice(0, at);
+    const version = entry.slice(at + 1);
+    if (!AGENT_CLI_ID_RE.test(id) || !AGENT_CLI_VERSION_RE.test(version)) return null;
+    if (Object.hasOwn(clis, id)) return null;
+    clis[id] = version === "-" ? null : version;
+  }
+  return clis;
+}
+
+/**
  * Per-stream handshake headers, carried on the h2 CONNECT request.
  *
  * h2 request headers are already a negotiated key/value handshake per stream,

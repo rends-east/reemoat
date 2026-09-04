@@ -105,6 +105,69 @@ process.stdout.write("\nan agent's own placeholder choices\n");
   };
   check("blank descriptions do not make two choices aliases", dedupeAliasChoices(blank).choices.length, 2);
 
+  /*
+   * ⚠ The second shape, and why the description arm alone stopped being enough.
+   * Read off `dist/acp-agent.js` of claude-agent-acp 0.73.0, then measured live
+   * on 2026-09-04 once it became the pin (`default` → "Opus (1M context)",
+   * verbatim): its `buildConfigOptions` no longer copies the blurb onto `default` but
+   * writes `namedMatch?.displayName ?? resolvedModel` — the *name* of the concrete
+   * row sharing the placeholder's `resolvedModel`, which `getAvailableModels` puts
+   * into that row's `name` verbatim. So `default` reads "Opus (1M context)" while
+   * `opus[1m]` still reads "Opus 5 with 1M context · Best for everyday": no two
+   * descriptions match, the placeholder survives, and `chipValue` — which mines a
+   * description only past a `·` — draws "Default (recommended)" on the chip, the
+   * exact sentence `dedupeAliasChoices` exists to prevent.
+   */
+  const named = {
+    ...model,
+    choices: [
+      { value: "default", name: "Default (recommended)", description: "Opus (1M context)", group: null },
+      { value: "opus[1m]", name: "Opus (1M context)", description: "Opus 5 with 1M context · Best for everyday", group: null },
+      { value: "sonnet", name: "Sonnet", description: "Sonnet 5 · Efficient for routine tasks", group: null },
+    ],
+  };
+  const dedupedNamed = dedupeAliasChoices(named);
+  check("a placeholder whose description is another row's name leaves the menu", dedupedNamed.choices.map((c) => c.value), ["opus[1m]", "sonnet"]);
+  check("and the session is shown on that row", dedupedNamed.value, "opus[1m]");
+
+  // The negative, so neither arm can quietly become "a placeholder is always
+  // dropped". 0.73.0's fall-through writes the raw resolved model id when no named
+  // row shares it, and that matches no blurb and no name — there is no row to
+  // collapse onto, so the placeholder is the only way to that model and stays.
+  const unmatched = {
+    ...model,
+    choices: [
+      { value: "default", name: "Default (recommended)", description: "claude-opus-5[1m]", group: null },
+      { value: "opus[1m]", name: "Opus (1M context)", description: "Opus 5 with 1M context · Best for everyday", group: null },
+    ],
+  };
+  check("a placeholder whose description matches neither a blurb nor a name is kept", dedupeAliasChoices(unmatched).choices.length, 2);
+  check("and stays the selection", dedupeAliasChoices(unmatched).value, "default");
+
+  // And the name arm is confined to placeholders exactly as the description arm
+  // is: a concrete row whose description happens to be another row's name is two
+  // models the agent offers, not an alias.
+  const concrete = {
+    ...model,
+    value: "sonnet",
+    choices: [
+      { value: "opus[1m]", name: "Opus (1M context)", description: "Opus 5 with 1M context · Best for everyday", group: null },
+      { value: "sonnet", name: "Sonnet", description: "Opus (1M context)", group: null },
+    ],
+  };
+  check("a concrete row is never collapsed by the name arm", dedupeAliasChoices(concrete).choices.length, 2);
+  // Nor is a placeholder ever a *target*: two placeholders naming each other
+  // would otherwise collapse one onto the other, and the one kept is still a
+  // placeholder.
+  const twoPlaceholders = {
+    ...model,
+    choices: [
+      { value: "default", name: "Default", description: "Default", group: null },
+      { value: "opus[1m]", name: "Opus (1M context)", description: "Opus 5 with 1M context · Best for everyday", group: null },
+    ],
+  };
+  check("a placeholder's own name is not a target", dedupeAliasChoices(twoPlaceholders).choices.length, 2);
+
   /* ---------------------------------------------------------------- *
    * A session pinned to one system is offered that system's models
    *

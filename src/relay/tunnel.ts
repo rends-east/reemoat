@@ -2,6 +2,8 @@ import { createServer as createH2Server, type Http2Server, type ServerHttp2Strea
 import { connect as netConnect, type Socket } from "node:net";
 import { WebSocket, createWebSocketStream } from "ws";
 import {
+  AGENT_CLIS_HEADER,
+  AGENT_CLI_VERSION_RE,
   CONNECTION_WINDOW_BYTES,
   DAEMON_VERSION_HEADER,
   LOOPBACK_DIAL_TIMEOUT_MS,
@@ -23,9 +25,13 @@ import {
   TUNNEL_STABLE_AFTER_MS,
   TUNNEL_AUTH_HEADER,
   TUNNEL_VERSION_HEADER,
+  formatAgentClis,
   reconnectDelayMs,
+  type AgentClis,
 } from "./protocol.js";
 import { DAEMON_VERSION } from "../version.js";
+import { AGENT_IDS } from "../acp/agents.js";
+import type { SessionRuntime } from "../runtime/types.js";
 
 /**
  * The daemon's end of the relay tunnel.
@@ -71,8 +77,63 @@ export interface TunnelOptions {
    */
   local: { host: string; port: number };
   onEvent?: (kind: TunnelEventKind, detail: string) => void;
+  /**
+   * Which build of each coding-agent CLI this daemon would launch, asked once per
+   * dial and sent as `AGENT_CLIS_HEADER`. `announcedAgentClis` is the one
+   * implementation; the option is a function rather than a value because the
+   * answer moves under a running daemon and the handshake is the only moment it
+   * is carried, so it is read *at* the handshake rather than at start.
+   *
+   * Optional, and an absent one sends no header — which is also what an empty
+   * answer, an answer that throws, and one slower than `ANNOUNCE_TIMEOUT_MS` all
+   * send. None of the four may cost the dial: the header is a report, and this
+   * file's first property is that nothing here can break the daemon.
+   */
+  agentClis?: () => Promise<AgentClis>;
+  /** `ANNOUNCE_TIMEOUT_MS`, injectable so a driver can pin the bound without waiting three seconds on it. */
+  announceTimeoutMs?: number;
   /** Injectable so `relaycheck` can drive the backoff curve without waiting on it. */
   random?: () => number;
+}
+
+/**
+ * How long a dial waits for `agentClis` before dialling without it.
+ *
+ * The answer is normally a cache hit — `LocalRuntime.agentCli` holds a choice for
+ * ten minutes — and the miss costs up to four `--version` spawns, each bounded at
+ * `LOGIN_PROBE_TIMEOUT_MS` and run together. Three seconds is longer than any of
+ * them takes on a healthy machine and far shorter than the reachability a
+ * daemon would forfeit waiting for a hung binary: past it the dial proceeds with
+ * no header and the next dial carries what the probe has resolved by then.
+ */
+export const ANNOUNCE_TIMEOUT_MS = 3_000;
+
+/**
+ * The daemon's answer to `TunnelOptions.agentClis`, over the runtime that picks
+ * a build for a launch. The four built-in harnesses only: a contributed agent's
+ * CLI is a plugin's to describe, and this header is about what this repository
+ * ships and `deploy/agents.sh` moves.
+ *
+ * Reads `agentCli` rather than any cheaper probe so the report names **the build
+ * a session would get** — the override, else the first copy on PATH — and not a
+ * copy that happens to be installed somewhere. A harness with no CLI is left out;
+ * a version outside `AGENT_CLI_VERSION_RE` is sent as unknown rather than sent
+ * and refused whole by the relay, though `LocalRuntime.cliVersion` reduces a
+ * `--version` line to a dotted number and cannot produce one. The four are
+ * asked together, so a cold cache costs one probe's time rather than four.
+ *
+ * `scripts/daemoncheck` drives it over a fake runtime; `relaycheck` drives the
+ * whole path from a real `RelayTunnel` to the machine row.
+ */
+export async function announcedAgentClis(runtime: Pick<SessionRuntime, "agentCli">): Promise<AgentClis> {
+  const chosen = await Promise.all(AGENT_IDS.map((agent) => runtime.agentCli(agent)));
+  const clis: AgentClis = {};
+  AGENT_IDS.forEach((agent, index) => {
+    const choice = chosen[index] ?? null;
+    if (choice === null) return;
+    clis[agent] = choice.version !== null && AGENT_CLI_VERSION_RE.test(choice.version) ? choice.version : null;
+  });
+  return clis;
 }
 
 export class RelayTunnel {
@@ -211,6 +272,44 @@ export class RelayTunnel {
     // Reset per dial, not per instance: a reconnect may land on a different relay.
     this.agreedVersion = PRE_NEGOTIATION_PROTOCOL_VERSION;
 
+    /*
+     * The one asynchronous step before a socket exists, and it is bounded, never
+     * rejects, and cannot decide anything: the CLI inventory is asked for here so
+     * the handshake carries what the daemon would launch *now* rather than at
+     * boot. `stopped` is re-read after it, because `stop()` may have run in the
+     * gap and a socket opened after it would be one nothing tears down.
+     */
+    void this.announce().then((announced) => {
+      if (this.stopped) return;
+      this.open(target, announced);
+    });
+  }
+
+  /** `agentClis`, or nothing — on absence, on an empty answer, on a throw, on a timeout. */
+  private async announce(): Promise<string | null> {
+    const ask = this.options.agentClis;
+    if (ask === undefined) return null;
+    let clear = (): void => {};
+    const deadline = new Promise<null>((resolve) => {
+      const timer = setTimeout(() => resolve(null), this.options.announceTimeoutMs ?? ANNOUNCE_TIMEOUT_MS);
+      // The daemon must be able to exit without waiting for a report.
+      timer.unref?.();
+      clear = () => clearTimeout(timer);
+    });
+    try {
+      const value = await Promise.race<AgentClis | null>([ask(), deadline]);
+      if (value === null) return null;
+      const text = formatAgentClis(value);
+      return text.length === 0 ? null : text;
+    } catch {
+      // A report. The dial is what matters, and it goes ahead without one.
+      return null;
+    } finally {
+      clear();
+    }
+  }
+
+  private open(target: URL, announced: string | null): void {
     let ws: WebSocket;
     try {
       ws = new WebSocket(target, {
@@ -223,6 +322,10 @@ export class RelayTunnel {
           [TUNNEL_VERSION_HEADER]: String(RELAY_PROTOCOL_VERSION),
           // Advisory, recorded, never acted on. See `DAEMON_VERSION`.
           [DAEMON_VERSION_HEADER]: DAEMON_VERSION,
+          // The same rule, for the CLIs. Absent rather than empty when there is
+          // nothing to say, so a pre-header daemon and one with no CLI installed
+          // are the same silence on the wire. See `AGENT_CLIS_HEADER`.
+          ...(announced === null ? {} : { [AGENT_CLIS_HEADER]: announced }),
         },
         perMessageDeflate: false,
         // h2 frames are already framed and mostly incompressible.
@@ -247,10 +350,11 @@ export class RelayTunnel {
         maxPayload: MAX_TUNNEL_MESSAGE_BYTES,
       });
     } catch (error) {
-      // Unreachable with the scheme checked above, and caught anyway: this
-      // constructor is synchronous and the only statement in `dial` that talks to
-      // the outside world, so a throw here is the one that reaches `start()` on
-      // the boot path and `setTimeout` on the retry path — neither of which has
+      // Unreachable with the scheme checked in `dial`, and caught anyway: this
+      // constructor is the only statement on the dial path that talks to the
+      // outside world, and it now runs inside the `announce()` continuation, so a
+      // throw here would be an unhandled rejection rather than reaching `start()`
+      // on the boot path or `setTimeout` on the retry path — none of which has
       // anywhere to put it. Treated as an unusable URL, i.e. no retry: a
       // constructor that refuses these arguments will refuse them again.
       this.emit(

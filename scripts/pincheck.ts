@@ -345,8 +345,10 @@ const DECLARERS: readonly Declarer[] = [
  * the direct read works and the walk would be a longer way to the same file.
  *
  * ⚠ **What each declares is also not the same shape, and the disk check has to
- * know.** The SDK names its platforms outright — `"@anthropic-ai/claude-agent-sdk-darwin-arm64": "0.3.220"` — while codex names *aliases*:
- * `"@openai/codex-darwin-arm64": "npm:@openai/codex@0.145.0-darwin-arm64"`, six
+ * know.** The SDK names its platforms outright — `"@anthropic-ai/claude-agent-sdk-darwin-arm64": "0.3.257"`
+ * under the 0.73.0 pin (0.3.220 under 0.63.0) — while codex names *aliases*:
+ * `"@openai/codex-darwin-arm64": "npm:@openai/codex@0.152.1-darwin-arm64"` under
+ * codex-acp 1.8.0 (0.145.0 under 1.1.9), six
  * prerelease-suffixed versions of the shim's own name. Both spellings are the
  * keys `pnpm-workspace.yaml` overrides, so the comparison of lists is by key; where
  * the two part is {@link pnpmDirPrefix}.

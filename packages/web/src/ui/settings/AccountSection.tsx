@@ -99,8 +99,7 @@ export function AccountSection({
       <section className={SETTINGS_SECTION}>
         <h2 className={SETTINGS_HEADING}>Sign out</h2>
         <p className="mt-1 text-xs text-muted">
-          Ends this session on the control plane, not just on this device. Per-machine tokens are minted from it and
-          are the only thing a daemon ever sees.
+          Ends this session on the control plane, not just on this device.
         </p>
         <DangerButton icon={LogOut} className="mt-3" onClick={() => void store.signOut()}>
           Sign out
@@ -326,8 +325,7 @@ function Devices(): ReactNode {
       {rows !== null && rows.length > 0 && (
         <>
           <p className="mt-1.5 text-xs text-muted">
-            A browser and an address are what the sign-in said about itself, so treat them as a reminder rather than
-            as proof. Anything you do not recognise, end.
+            Browser and address are what each sign-in reported, not proof. End anything you do not recognise.
           </p>
           {/*
            * Shown only while a row that predates the recording is on screen, and
@@ -337,12 +335,13 @@ function Devices(): ReactNode {
            * reports a fact about our own deploy history in the middle of a list
            * about devices, and the reader's question is *did detection fail?* —
            * which it did not. A permanent caption would then outlive the rows it
-           * explains and become a second thing to wonder about.
+           * explains and become a second thing to wonder about. The wording was
+           * cut on 2026-09-04 for fewer words; what it keeps is that the row
+           * recorded nothing and that signing in again there fills it in.
            */}
           {rows.some((row) => !agentWasRecorded(row.userAgent)) && (
             <p className="mt-1.5 text-xs text-faint">
-              Sessions started before this update recorded nothing about themselves — that is not a browser we failed
-              to identify. Sign in again on that device and it will say what it is.
+              Sessions from before this update recorded nothing about the device; sign in again there and it will.
             </p>
           )}
 
@@ -488,7 +487,9 @@ function EmailForm({ me, config }: { me: Me; config: InstanceConfig | null }): R
      *
      * The remedy is named on the side the reader is on. An admin has the screen
      * that fixes it; everybody else has somebody to ask, and telling them to
-     * "configure SMTP" would be telling them to do something they cannot.
+     * "configure SMTP" would be telling them to do something they cannot. The
+     * wording was cut on 2026-09-04 for fewer words; what it keeps is the two
+     * arms, and "cannot send mail" verbatim, which `webcheck` pins.
      */
     return (
       <section className={SETTINGS_SECTION}>
@@ -500,11 +501,9 @@ function EmailForm({ me, config }: { me: Me; config: InstanceConfig | null }): R
           </p>
         )}
         <p className="mt-1 max-w-sm text-xs text-muted">
-          This control plane cannot send mail, so an address cannot be confirmed here and a lost password cannot be
-          reset from one.{" "}
-          {me.isAdmin
-            ? "Configure SMTP under Settings → Server and this comes back."
-            : "Whoever runs it can configure SMTP, and this comes back."}
+          This control plane cannot send mail, so an address cannot be confirmed and a password cannot be reset from
+          one.{" "}
+          {me.isAdmin ? "Configure SMTP under Server settings." : "Whoever runs it can configure SMTP."}
         </p>
       </section>
     );
@@ -538,8 +537,8 @@ function EmailForm({ me, config }: { me: Me; config: InstanceConfig | null }): R
       {!has && !editing && (
         <>
           <p className="mt-1 max-w-sm text-xs text-muted">
-            Add an address and confirm it, and you can reset your own password. Without one, a lost password is only
-            recoverable by whoever runs this control plane.
+            Add and confirm an address and you can reset your own password. Without one, only whoever runs this
+            control plane can.
           </p>
           <Button tone="primary" className="mt-3" onClick={() => setEditing(true)}>
             Add an address
@@ -677,15 +676,14 @@ function MyKeys({ me }: { me: Me }): ReactNode {
     <section className={SETTINGS_SECTION}>
       <h2 className={SETTINGS_HEADING}>API keys</h2>
       <p className="mt-1 max-w-sm text-xs text-muted">
-        For <code>cpctl</code>, a script, and getting back in if this service is rolled back. They never expire,
-        which is why this list exists.
+        For <code>cpctl</code> and scripts. They never expire.
       </p>
 
       {minted !== null && (
         <OneTimeSecret
           label="Your new API key"
           value={minted}
-          note="Shown once — only its hash is stored. It never expires; retire it here when you are done with it."
+          note="Shown once. Revoke it here when you no longer need it."
           onDone={() => setMinted(null)}
         />
       )}
@@ -718,10 +716,12 @@ function MyKeys({ me }: { me: Me }): ReactNode {
         The warning goes **before** the button, not after the surprise. Revoking
         the key this browser is holding is allowed and is sometimes the point —
         "this key leaked" is precisely the case where the leaked one is in your
-        hand — but it should not be a discovery.
+        hand — but it should not be a discovery. The wording was cut on
+        2026-09-04 for fewer words; what it keeps is the consequence, that this
+        tab is signed out.
       */}
       <p className="mt-2 max-w-sm text-xs text-muted">
-        Revoking the key this browser is signed in with signs this tab out on its next request.
+        Revoking the key this browser is signed in with signs this tab out.
       </p>
 
       {asking ? (

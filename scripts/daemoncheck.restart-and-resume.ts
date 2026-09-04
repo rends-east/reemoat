@@ -408,7 +408,11 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     // refusal there — before any spawn — so this is the shape the real refusal
     // takes, with its real class and its real sentence.
     rig.runtime.describe = (agent: AgentId): AgentLaunchConfig => {
-      if (!installed) throw new AgentUnavailableError("opencode not found on this daemon's PATH. deploy/agents.sh installs it (or `curl -fsSL https://opencode.ai/install | bash`).");
+      if (!installed) {
+        throw new AgentUnavailableError("opencode not found on this daemon's PATH. deploy/agents.sh installs it (or `curl -fsSL https://opencode.ai/install | bash`).", {
+          installable: true,
+        });
+      }
       return describe(agent);
     };
     const outcomes: string[] = [];
@@ -427,6 +431,34 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     check("the pass after the install brings it back", [second.considered, second.resumed, own.get("s_nocli")?.status], [1, 1, "idle"]);
     check("on its first attempt, since the deferral spent none", outcomes.at(-1), "resumed:1");
     check("and the snapshot has forgotten the wait", own.get("s_nocli")?.snapshot().resume ?? null, null);
+    await own.shutdown();
+  }
+
+  /*
+   * ⚠ **Only the absence the installer repairs is deferred.** `AgentUnavailableError`
+   * is also what a missing adapter package, an unknown plugin harness and a
+   * contributed program that is gone throw, and none of those is something
+   * `deploy/agents.sh` can put back. Deferred, such a session sat "reconnecting"
+   * for the daemon's life — no attempt spent, nothing to settle it, and the
+   * installer run for nothing on its account. So the plain class, with no
+   * `installable`, spends attempts and settles to `attempts_exhausted` exactly as
+   * it did before the installer existed, and the client's stalled sentence and
+   * Reconnect button are what a person sees.
+   */
+  {
+    const rig = rigWith({ resume: true });
+    const store = storeOf([interruptedRow("s_noadapter", "daemon_restarted", "a_noadapter")]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    rig.runtime.describe = (): AgentLaunchConfig => {
+      throw new AgentUnavailableError("claude-agent-acp not found on PATH; run `pnpm install` in the project root.");
+    };
+    const outcomes: string[] = [];
+    const report = await own.autoResume({ ...options, concurrency: 1, onOutcome: (one) => void outcomes.push(one.result) });
+    check("an absence the installer cannot repair spends the attempts as before", outcomes, ["failed", "failed", "attempts_exhausted"]);
+    check("and is failed rather than deferred", [report.considered, report.deferred, report.failed], [1, 0, 1]);
+    check("with the verdict on the snapshot", own.get("s_noadapter")?.snapshot().resume?.state, "failed");
+    check("and nothing spawned to reach it", rig.launches(), 0);
     await own.shutdown();
   }
 

@@ -120,10 +120,11 @@ export function MachineSystemsSection({
               directly above it now, at every width — it was the machine named twice
               within 40px. The id stays: it is the half a heading cannot carry, this
               screen is reached from a row that may have a twin, and everything below
-              writes to one daemon's database. */}
-          Credentials and settings live on <code className="text-muted/80">{machine.id}</code>, in
-          that daemon's database and that host's home. Nothing here is shared with your other
-          machines.
+              writes to one daemon's database. Cut on 2026-09-04 for fewer words:
+              the id and the not-shared fact are kept; the database and the home
+              are this comment's now. */}
+          Stored on <code className="text-muted/80">{machine.id}</code> only — not shared with your
+          other machines.
         </p>
       )}
 

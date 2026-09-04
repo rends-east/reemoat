@@ -1605,8 +1605,9 @@ export interface SystemInfo {
  * What a harness will let us do about which system it talks to.
  *
  * `null` where it will not let us do anything, which is kimi. ⚠ **`providerId`
- * is the agent's own and differs between them** — claude says `main`, codex says
- * `custom-gateway` — so nothing here may be written down client-side either.
+ * is the agent's own and differs between them** — claude says `main`, codex said
+ * `custom-gateway` under codex-acp 1.1.9 and `openai` under 1.8.0 — so nothing
+ * here may be written down client-side either.
  */
 export interface AgentRouting {
   providerId: string;

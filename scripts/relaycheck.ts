@@ -22,8 +22,12 @@ import {
   MAX_TUNNEL_BUFFERED_BYTES,
   MAX_TUNNEL_MESSAGE_BYTES,
   RECONNECT_MAX_MS,
+  AGENT_CLIS_HEADER,
   DAEMON_VERSION_HEADER,
+  MAX_AGENT_CLIS_CHARS,
   MAX_DAEMON_VERSION_CHARS,
+  formatAgentClis,
+  parseAgentClis,
   PRE_NEGOTIATION_PROTOCOL_VERSION,
   RELAY_PROTOCOL_MIN_VERSION,
   RELAY_PROTOCOL_VERSION,
@@ -61,7 +65,7 @@ import {
 } from "../packages/control-plane/src/keys.js";
 import { createControlPlaneApp } from "../packages/control-plane/src/app.js";
 import { applyControlPlaneSchema } from "../packages/control-plane/src/store.js";
-import { readDaemonVersionHeader, recordDaemonBuild } from "../packages/control-plane/src/machines.js";
+import { readAgentClisHeader, readDaemonVersionHeader, recordDaemonBuild } from "../packages/control-plane/src/machines.js";
 import { callerAddressOf, forwardingIgnored } from "../packages/control-plane/src/net.js";
 import { isBrowserReachable, parseRelayUrls } from "../packages/control-plane/src/relay/routing.js";
 import {
@@ -686,6 +690,123 @@ check(
   check("and an empty one reads as no answer rather than as a version", readDaemonVersionHeader("   "), null);
   check("and a header nobody sent reads the same way", readDaemonVersionHeader(undefined), null);
   check("and an array-valued header takes its first entry", readDaemonVersionHeader(["1.2.3", "9"]), "1.2.3");
+
+  /*
+   * The CLI inventory beside it, under the same rule and with one deliberate
+   * difference: a list is refused whole where a label is cut. Driven through the
+   * socket for the same reason as the version — the property is that the header
+   * survives the whole path — with the pure grammar asserted directly after.
+   */
+  const withClis = (clis: string | null): Promise<number | "connected"> =>
+    new Promise((resolve) => {
+      const headers: Record<string, string> = {
+        authorization: `Bearer ${myTunnelKey}`,
+        [TUNNEL_VERSION_HEADER]: String(RELAY_PROTOCOL_VERSION),
+        [DAEMON_VERSION_HEADER]: "9.9.9-clis",
+      };
+      if (clis !== null) headers[AGENT_CLIS_HEADER] = clis;
+      const ws = new WebSocket(`ws://127.0.0.1:${relayPort}${TUNNEL_PATH}`, { headers });
+      ws.on("open", () => {
+        ws.terminate();
+        resolve("connected");
+      });
+      ws.on("unexpected-response", (_req, res) => {
+        ws.terminate();
+        resolve(res.statusCode ?? 0);
+      });
+      ws.on("error", () => resolve(0));
+    });
+  const agentsRow = (): unknown => db.prepare("SELECT daemon_agents FROM machines WHERE id = ?").get(mine)?.["daemon_agents"];
+
+  check("a daemon announcing its CLIs still connects", await withClis("claude=2.1.259;codex=0.153.1;kimi=-"), "connected");
+  check("and the inventory is recorded against the machine that dialled", agentsRow(), "claude=2.1.259;codex=0.153.1;kimi=-");
+  check("beside the build that sent it", fleetRow()["daemon_version"], "9.9.9-clis");
+
+  check("a redial carrying a different inventory still connects", await withClis("claude=2.1.300"), "connected");
+  check("and the newer one wins — the row is the last handshake, never the best one", agentsRow(), "claude=2.1.300");
+
+  /* The pre-header daemon, which is every daemon in the fleet on the day this ships. */
+  check("a daemon that announces no inventory still connects", await withClis(null), "connected");
+  check("and is listed with none, replacing what an earlier dial said", agentsRow(), null);
+  check("while its build is still recorded", fleetRow()["daemon_version"], "9.9.9-clis");
+
+  /*
+   * Refused to `null`, never to a refused dial. The tunnel is the only way to
+   * reach the machine, and the header is a report.
+   */
+  await withClis("claude=2.1.300");
+  check("a malformed inventory does not cost the dial", await withClis("claude=2.1;;codex"), "connected");
+  check("and is refused whole rather than stored in part", agentsRow(), null);
+  await withClis("claude=2.1.300");
+  check("an over-long inventory does not cost the dial", await withClis(`claude=${"9".repeat(MAX_AGENT_CLIS_CHARS)}`), "connected");
+  check("and is refused whole rather than cut — a cut list is a false version", agentsRow(), null);
+  await withClis("claude=2.1.300");
+  check("a duplicated harness does not cost the dial", await withClis("claude=1.0.0;claude=2.0.0"), "connected");
+  check("and is refused, since two answers for one harness is no answer", agentsRow(), null);
+
+  /* The grammar, with no socket. */
+  check(
+    "the grammar reads the compact form back into harness → version",
+    parseAgentClis("claude=2.1.259;codex=0.153.1;kimi=-"),
+    { claude: "2.1.259", codex: "0.153.1", kimi: null },
+  );
+  check("and formats it the same way round", formatAgentClis({ claude: "2.1.259", codex: "0.153.1", kimi: null }), "claude=2.1.259;codex=0.153.1;kimi=-");
+  check("a prerelease tag is a version", parseAgentClis("opencode=1.0.0-beta.2"), { opencode: "1.0.0-beta.2" });
+  check("an empty value is no inventory rather than an empty one", parseAgentClis(""), null);
+  check("a dangling separator is refused", parseAgentClis("claude=2.1.259;"), null);
+  check("an entry with no version is refused", parseAgentClis("claude"), null);
+  check("an entry with an empty version is refused", parseAgentClis("claude="), null);
+  check("an id outside the harness alphabet is refused", parseAgentClis("Claude=2.1.259"), null);
+  check("a version with a space in it is refused", parseAgentClis("claude=2.1.259 (Claude Code)"), null);
+  check("a control character has no room in the grammar, so there is no scrub to mirror", parseAgentClis("claude=2.1\u0000.259"), null);
+  /* The length bound, with every entry well-formed, so it is the bound refusing and not the alphabet. */
+  const entries = (n: number): string => Array.from({ length: n }, (_, i) => `h${String(i).padStart(3, "0")}=1`).join(";");
+  check("the fixture sits either side of the bound", [entries(73).length <= MAX_AGENT_CLIS_CHARS, entries(74).length > MAX_AGENT_CLIS_CHARS], [true, true]);
+  check("a list over the bound is refused", parseAgentClis(entries(74)), null);
+  check("and one under it is read whole", Object.keys(parseAgentClis(entries(73)) ?? {}).length, 73);
+  check("the header reader takes the first of an array-valued header", readAgentClisHeader(["kimi=0.40.1", "codex=1"]), "kimi=0.40.1");
+  check("and trims what a proxy may pad", readAgentClisHeader("  kimi=0.40.1 "), "kimi=0.40.1");
+  check("and a header nobody sent reads as no inventory", readAgentClisHeader(undefined), null);
+
+  /*
+   * The daemon's end of the same path, through a real `RelayTunnel`: the two ways
+   * the announcement can fail that the header reader never sees, because they
+   * happen before a socket exists. Neither may cost the dial — `tunnel.ts`'s first
+   * property — and each lands on the same `null` as a daemon that never spoke.
+   */
+  const untilOffline = async (): Promise<void> => {
+    const gone = Date.now() + 5_000;
+    while (Date.now() < gone && registry.isOnline(mine)) await sleep(25);
+  };
+  const dialWith = async (options: { agentClis: () => Promise<Record<string, string | null>>; announceTimeoutMs?: number }): Promise<boolean> => {
+    // The raw dials above terminate on `open`, and the relay unregisters them a
+    // tick later — so "online" has to be *this* tunnel's, or the row read after
+    // it is the raw dial's and the assertion passes for the wrong reason.
+    await untilOffline();
+    const probe = RelayTunnel.start({ relayUrl, tunnelKey: myTunnelKey, local: { host: "127.0.0.1", port: daemonPort }, ...options });
+    const up = await waitForTunnel(mine);
+    await probe.stop();
+    await untilOffline();
+    return up;
+  };
+  await withClis("claude=2.1.300");
+  check(
+    "an announcement that throws still dials",
+    await dialWith({
+      agentClis: async () => {
+        throw new Error("no runtime");
+      },
+    }),
+    true,
+  );
+  check("and records nothing", agentsRow(), null);
+  await withClis("claude=2.1.300");
+  check(
+    "an announcement that never answers still dials, past the bound",
+    await dialWith({ agentClis: () => new Promise(() => {}), announceTimeoutMs: 50 }),
+    true,
+  );
+  check("and records nothing either", agentsRow(), null);
 }
 
 /* The pure half, asserted directly rather than through a socket. */
@@ -776,10 +897,33 @@ const tunnel = RelayTunnel.start({
   relayUrl,
   tunnelKey: myTunnelKey,
   local: { host: "127.0.0.1", port: daemonPort },
+  // What `scripts/daemon.ts` wires in, as a value: the tunnel everything below
+  // rides announces an inventory, and the row is read once it is up.
+  agentClis: async () => ({ claude: "2.1.259", codex: null }),
 });
 
 process.stdout.write("\nthe tunnel\n");
 check("the tunnel comes up", await waitForTunnel(mine), true);
+/*
+ * Polled rather than read once: the section above ends on a raw dial that the
+ * relay is still unregistering when this tunnel starts, so `waitForTunnel` can
+ * answer for that one. The row is written before the handshake completes, so
+ * once this tunnel is the one online the value is there.
+ */
+check(
+  "carrying the CLI inventory the daemon resolved, in the header's compact form",
+  await (async (): Promise<unknown> => {
+    const deadline = Date.now() + 5_000;
+    let seen: unknown = null;
+    while (Date.now() < deadline) {
+      seen = db.prepare("SELECT daemon_agents FROM machines WHERE id = ?").get(mine)?.["daemon_agents"];
+      if (seen === "claude=2.1.259;codex=-") break;
+      await sleep(25);
+    }
+    return seen;
+  })(),
+  "claude=2.1.259;codex=-",
+);
 
 process.stdout.write("\nauthorization, checked before a byte is forwarded\n");
 {
@@ -2840,6 +2984,37 @@ process.stdout.write("\nsigning in, sessions and passwords\n");
       await post(`/v1/admin/machines/${appended.machine?.id ?? "m_missing"}/enrollments`, {}, proxied)
     ).json()) as { controlPlaneUrl?: string };
     check("and a code an admin mints honours it too", adminMinted.controlPlaneUrl?.startsWith("https://"), true);
+    /*
+     * **Two hops, because at one hop "the entry `trustedHops` from the right" is
+     * the same entry as `entries.at(-1)`.** Every case above passes for a read that
+     * always takes the right-most value — and, with the header `installOrigin` is
+     * handed there, for the `[0]` read it replaced too. So a regression to either
+     * was green here; the address side already has its witness at "two hops steps
+     * one further left", and this is the scheme side's. Four headers, each drawn
+     * so that the three reads disagree on at least one of them: the right-most
+     * loses `evil, https, http` and `https, http`; the left-most loses
+     * `evil, https, http` (an entry that is neither scheme leaves `publicUrl`
+     * standing); and `http, https` under two hops *is* the client's own claim —
+     * `entries[0]` — which reads as a downgrade until you count the chain the
+     * operator declared: two proxies appended, and only two entries came, so the
+     * first is the outer proxy's and the client sent none. A lone `https` is one
+     * entry against two hops, and is not believed at all.
+     */
+    const twoHops = createControlPlaneApp({ db, issuer: ISSUER, tokenTtlSeconds: 300, relayUrl, relay: registry, trustedProxyHops: 2 });
+    const originUnder = async (name: string, proto: string): Promise<string | undefined> =>
+      (
+        (await (
+          await twoHops.request("/v1/machines", {
+            method: "POST",
+            headers: { ...admin, "x-forwarded-proto": proto },
+            body: JSON.stringify({ name }),
+          })
+        ).json()) as { controlPlaneUrl?: string }
+      ).controlPlaneUrl;
+    check("under two hops the entry two from the right wins, not the right-most", (await originUnder("two-hops-inner", "evil, https, http"))?.startsWith("https://"), true);
+    check("and a lone entry against two hops is not believed", (await originUnder("two-hops-lone", "https"))?.startsWith("http://"), true);
+    check("and with exactly two entries the first is the outer proxy's: `http, https` reads http", (await originUnder("two-hops-first-http", "http, https"))?.startsWith("http://"), true);
+    check("and `https, http` reads https", (await originUnder("two-hops-first-https", "https, http"))?.startsWith("https://"), true);
   }
 
   check("but /v1/jwks is still public", (await send("/v1/jwks")).status, 200);
@@ -9797,8 +9972,13 @@ process.stdout.write("\nthe fleet inventory, as the route answers it\n");
   machine("m_cur", "current", false);
   machine("m_quiet", "quiet", false);
   machine("m_gone", "gone", true);
-  recordDaemonBuild(fdb, "m_cur", { daemonVersion: "1.2.3", protocolVersion: RELAY_PROTOCOL_VERSION, at });
-  recordDaemonBuild(fdb, "m_gone", { daemonVersion: "0.0.1", protocolVersion: RELAY_PROTOCOL_VERSION, at });
+  recordDaemonBuild(fdb, "m_cur", {
+    daemonVersion: "1.2.3",
+    protocolVersion: RELAY_PROTOCOL_VERSION,
+    agentClis: "claude=2.1.259;codex=0.153.1;kimi=-",
+    at,
+  });
+  recordDaemonBuild(fdb, "m_gone", { daemonVersion: "0.0.1", protocolVersion: RELAY_PROTOCOL_VERSION, agentClis: null, at });
 
   const fleet = async (bearer: string | null): Promise<Response> =>
     Promise.resolve(
@@ -9813,7 +9993,14 @@ process.stdout.write("\nthe fleet inventory, as the route answers it\n");
   const body = (await answer.json()) as {
     relay: { protocol: number; oldestAccepted: number };
     byProtocol: Record<string, number>;
-    machines: { id: string; name: string; revoked: boolean; version: string | null; protocol: number | null }[];
+    machines: {
+      id: string;
+      name: string;
+      revoked: boolean;
+      version: string | null;
+      protocol: number | null;
+      agents: Record<string, string | null> | null;
+    }[];
   };
 
   check(
@@ -9826,12 +10013,27 @@ process.stdout.write("\nthe fleet inventory, as the route answers it\n");
   check("a machine that dialled reports the build it sent", byId.get("m_cur")?.version, "1.2.3");
   check("and the protocol it agreed", byId.get("m_cur")?.protocol, RELAY_PROTOCOL_VERSION);
   /*
+   * And which CLI builds it would launch, read back as harness → version rather
+   * than as the wire string, so `cpctl` and any later screen do not each carry
+   * the grammar. `null` for a binary that would not say, which is what `-` means.
+   */
+  check(
+    "and the CLI builds it would launch, as of the same dial",
+    byId.get("m_cur")?.agents,
+    { claude: "2.1.259", codex: "0.153.1", kimi: null },
+  );
+  check("a machine that said nothing about its CLIs answers null, not an empty list", byId.get("m_gone")?.agents, null);
+  /*
    * The one that has never dialled is the whole point of the route: it is listed,
    * with nulls, rather than omitted the way a report of what is *connected* would
    * omit it. That machine is the one that decides whether the floor can move.
    */
   check("a machine that has never dialled is listed rather than omitted", byId.has("m_quiet"), true);
-  check("and says nothing rather than guessing", [byId.get("m_quiet")?.version, byId.get("m_quiet")?.protocol], [null, null]);
+  check(
+    "and says nothing rather than guessing",
+    [byId.get("m_quiet")?.version, byId.get("m_quiet")?.protocol, byId.get("m_quiet")?.agents],
+    [null, null, null],
+  );
 
   /* A revoked machine still appears — it is inventory — but cannot hold the floor down. */
   check("a revoked machine is still listed", byId.get("m_gone")?.revoked, true);

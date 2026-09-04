@@ -777,6 +777,12 @@ export class LocalRuntime implements SessionRuntime {
      * ten minutes while the fresh one sits on disk.
      */
     this.cliChosen.clear();
+    // And a decision still in flight, which the generation fence keeps out of the
+    // cache but which `agentCli` would go on handing to every caller arriving in
+    // the seconds a `--version` takes — the pre-update answer, after the update.
+    // Its own `finally` only deletes the entry it still owns, so this is safe to
+    // clear under it.
+    this.cliInFlight.clear();
     // And the PATH walk's own memo, which is module-level and outlives every map
     // here: a hit never expires, and the daily agent update is the one event that
     // puts a binary where there was none.

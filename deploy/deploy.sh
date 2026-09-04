@@ -714,7 +714,11 @@ for svc in $TARGETS; do
           echo "  agents: off (REEMOAT_AGENT_UPDATES=$_agent_updates), so nothing is installed or refreshed here either"
           ;;
         *)
-          _agent_source=$(file_value "$_daemon_env" REEMOAT_AGENT_SOURCE)
+          # Lowercased, as the switch above is and as the daemon's `agentSourceFrom`
+          # reads it: `NPM` in the env file made this run install from the vendors
+          # while the daemon's daily run asked for the registry — the one env file
+          # read to two answers, which `.env.example` says cannot happen.
+          _agent_source=$(file_value "$_daemon_env" REEMOAT_AGENT_SOURCE | tr '[:upper:]' '[:lower:]')
           [ "$_agent_source" = npm ] || _agent_source=vendor
           _agent_claude=$(file_value "$_daemon_env" CLAUDE_CODE_EXECUTABLE)
           _agent_codex=$(file_value "$_daemon_env" CODEX_PATH)

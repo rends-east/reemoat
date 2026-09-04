@@ -258,7 +258,7 @@ function RecheckButton({ onClick, busy }: { onClick: () => void; busy: boolean }
 function StaleNotice(): ReactNode {
   return (
     <p className="text-xs text-muted">
-      Couldn&apos;t reach that machine just now — what&apos;s below may be out of date.
+      Couldn&apos;t reach that machine — what&apos;s below may be out of date.
     </p>
   );
 }
@@ -870,7 +870,7 @@ function CredentialSlot({
        * not sit at the same rhythm as the affirmative one beside it.
        */
       className="ml-1"
-      label={`Remove the saved ${label.name}`}
+      label={`Remove ${label.name}`}
       onClick={() => withDaemon((daemon) => daemon.clearCredential(agent.id, slot.envName), true)}
       disabled={busy}
     />
@@ -946,7 +946,7 @@ function CredentialSlot({
               autoCorrect="off"
               autoComplete="off"
               spellCheck={false}
-              placeholder={slot.set ? "paste a new key to replace it" : "paste the key"}
+              placeholder={slot.set ? "paste a new key" : "paste the key"}
               aria-label={label.name}
               className={`${FIELD} min-w-0 flex-1 font-mono`}
             />
@@ -1297,6 +1297,10 @@ function LoginWizard({
    * with no step 2 anywhere promises a sequence that does not exist, and the
    * imperative on its own is already the whole instruction. That is also the
    * `starting` case above, which is the state this was worst in.
+   *
+   * The page block's caption was cut on 2026-09-04 for fewer words: the ordinal
+   * now rides the link's own text, through the same `stepLabel` and the same
+   * `showPage` const that gates the block, so the counting invariant is unchanged.
    */
   const { url, code } = view;
   const showPage = url !== null;
@@ -1338,8 +1342,6 @@ function LoginWizard({
           screen that earns a real fill is the device code below, which is one of
           the three documented exceptions and takes `bg-raised`. */}
       {showPage && (
-        <div>
-          <div className="text-2xs text-muted">{stepLabel("page", "open this page")}</div>
         <a
           href={url}
           target="_blank"
@@ -1347,9 +1349,8 @@ function LoginWizard({
           className="tap press flex min-h-11 items-center gap-2 rounded-md border border-edge-strong bg-surface px-3 text-sm font-medium text-fg hover:bg-raised"
         >
           <Icon as={ExternalLink} size={14} />
-          Open the sign-in page
+          {stepLabel("page", "Open the sign-in page")}
         </a>
-        </div>
       )}
 
       {/* Same argument as `OneTimeSecret`: a device code expires in fifteen
@@ -1372,7 +1373,7 @@ function LoginWizard({
 
       {(view.phase === "acting" || view.phase === "waiting") && (
         <p className="text-xs text-muted">
-          You can leave this app and come back — this page will say when it&apos;s done.
+          You can leave — this page will say when it&apos;s done.
         </p>
       )}
 
@@ -1405,7 +1406,7 @@ function LoginWizard({
       )}
       {outcome === "notSignedIn" && (
         <p className="text-xs text-fg">
-          That didn&apos;t sign {displayName} in. The code may have run out of time, or the page
+          That didn&apos;t sign {displayName} in — the code may have expired, or the page
           wasn&apos;t finished.
         </p>
       )}
@@ -1424,7 +1425,7 @@ function LoginWizard({
       {showInput && (
         <div>
           <label className="text-2xs text-muted" htmlFor={`login-${agent}`}>
-            {stepLabel("input", "paste what the page gives you back here")}
+            {stepLabel("input", "paste the code from that page")}
           </label>
           <div className="mt-1 flex gap-3">
           <input
@@ -1438,8 +1439,6 @@ function LoginWizard({
               }
             }}
             disabled={loginId === null}
-            placeholder="paste the code from that page"
-            aria-label="Paste the code from that page"
             className={`${FIELD} min-w-0 flex-1 font-mono disabled:opacity-40`}
           />
           <Button onClick={send} disabled={loginId === null}>

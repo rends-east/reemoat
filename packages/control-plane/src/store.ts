@@ -265,6 +265,16 @@ function migrate(db: DatabaseSync): void {
   addColumn(db, has("daemon_version"), "ALTER TABLE machines ADD COLUMN daemon_version TEXT");
   addColumn(db, has("daemon_protocol"), "ALTER TABLE machines ADD COLUMN daemon_protocol INTEGER");
   addColumn(db, has("daemon_seen_at"), "ALTER TABLE machines ADD COLUMN daemon_seen_at INTEGER");
+  /*
+   * And which build of each coding-agent CLI it would launch, as the compact
+   * string `AGENT_CLIS_HEADER` carries (`claude=2.1.259;codex=0.153.1`), stored
+   * as text rather than as columns per harness because the harness list is the
+   * daemon's to grow and a column per name would put the relay back in lockstep
+   * with it. Nullable for the three reasons above and a fourth — a daemon that
+   * has a CLI for nothing sends no header at all — and, like the rest of the
+   * row, an addition an older build never selects.
+   */
+  addColumn(db, has("daemon_agents"), "ALTER TABLE machines ADD COLUMN daemon_agents TEXT");
 }
 
 /**

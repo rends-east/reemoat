@@ -12,7 +12,8 @@ import { agentEnv, type AgentId } from "./acp/agents.js";
  * argument.** `src/version.ts` states that a daemon does not update itself and is
  * never told to, and fleet rollout is a stated non-goal (Q7.42). Both still hold:
  * what moves here is a set of *third-party programs the daemon spawns*, out of tree,
- * fetched fresh at every session start. Nothing in this repository is replaced, no
+ * started fresh at every session start and fetched by `deploy/agents.sh` on the
+ * schedule below. Nothing in this repository is replaced, no
  * `pnpm install` runs, and — the part that separates it from every reason those
  * positions exist — **no daemon restart is needed**, so no turn in flight is
  * interrupted and no pending approval is dropped.
@@ -135,6 +136,8 @@ export class AgentUpdates {
   private timer: { cancel: () => void } | null = null;
   private stopped: Promise<void> | null = null;
   private running = false;
+  /** Whether any run has started — see {@link nudge} for what that ends. */
+  private ran = false;
 
   private constructor(private readonly options: AgentUpdateOptions) {}
 
@@ -172,9 +175,20 @@ export class AgentUpdates {
    * completion is what the caller wants and it is coming), or shut down. Never
    * a second run beside one in flight — that is the corruption `tick`'s guard
    * exists to prevent.
+   *
+   * ⚠ **And a no-op once any run has happened, which is what keeps this from
+   * being a loop.** The daemon starts a resume pass after every completed run,
+   * and that pass nudges again when a harness is still missing — so on a machine
+   * where the CLI never arrives (vendor hosts blocked, no npm, an installer that
+   * keeps failing; the script exits 0 for all of them) a nudge that merely pulled
+   * the *next* run forward ran three vendors' installers back-to-back for the
+   * daemon's life, with a log line and a cache flush per iteration. Found by six
+   * reviewers independently before it shipped. What a nudge is for is the
+   * five-minute delay on the *first* run; after that the day's timer is the
+   * retry, and the sentence the resume pass logs is the operator's cue.
    */
   nudge(): void {
-    if (this.stopped !== null || this.running || this.timer === null) return;
+    if (this.stopped !== null || this.running || this.ran || this.timer === null) return;
     this.timer.cancel();
     this.timer = null;
     void this.tick();
@@ -189,6 +203,16 @@ export class AgentUpdates {
      * half-written CLI happens, and awaiting it would spend up to twenty minutes of
      * a twenty-second shutdown budget. What it can no longer do is schedule another
      * one — `arm` checks `stopped`.
+     *
+     * ⚠ **"Not killed" took a measurement to make true.** The script runs on pipes
+     * this daemon holds, and `shutdown` ends in `process.exit`, which closes them;
+     * the script's next `printf` then got SIGPIPE — libuv resets dispositions in a
+     * child — and the run died at its next line of output, EXIT trap and all, with
+     * every harness after the current one skipped. The script now ignores SIGPIPE
+     * and its output helpers tolerate a closed stream (see `deploy/agents.sh`), so
+     * what is lost after this process is gone is the report, and only that. The
+     * lock the script holds is what keeps the next daemon's own first run from
+     * starting beside the orphan.
      */
   }
 
@@ -235,6 +259,7 @@ export class AgentUpdates {
   }
 
   private async runOnce(): Promise<void> {
+    this.ran = true;
     const script = join(PACKAGE_ROOT, "deploy", "agents.sh");
     const args: string[] = [];
     if (this.options.source === "npm") args.push("--source", "npm");

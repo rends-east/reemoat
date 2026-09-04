@@ -8,6 +8,7 @@ import {
   CLOSE_TUNNEL_BACKPRESSURE,
   CLOSE_TUNNEL_SUPERSEDED,
   CONNECTION_WINDOW_BYTES,
+  AGENT_CLIS_HEADER,
   DAEMON_VERSION_HEADER,
   MAX_CONCURRENT_STREAMS,
   MAX_TUNNEL_BUFFERED_BYTES,
@@ -23,7 +24,7 @@ import {
   TUNNEL_VERSION_HEADER,
   negotiateProtocolVersion,
 } from "../../../../src/relay/protocol.js";
-import { recordDaemonBuild, readDaemonVersionHeader } from "../machines.js";
+import { recordDaemonBuild, readAgentClisHeader, readDaemonVersionHeader } from "../machines.js";
 import { resolveTunnelKey } from "../keys.js";
 import { machineStanding } from "../quota.js";
 import { RelayTunnel, type TunnelRegistry } from "./registry.js";
@@ -199,6 +200,10 @@ export function createTunnelEndpoint(options: TunnelEndpointOptions): TunnelEndp
       recordDaemonBuild(db, machineId, {
         daemonVersion: readDaemonVersionHeader(req.headers[DAEMON_VERSION_HEADER]),
         protocolVersion: agreed,
+        // Refused to `null`, never to a refused dial: an unreadable inventory is
+        // a machine that "did not say", and the tunnel it is riding is the only
+        // way to reach that machine at all.
+        agentClis: readAgentClisHeader(req.headers[AGENT_CLIS_HEADER]),
         at: Date.now(),
       });
 

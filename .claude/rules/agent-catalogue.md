@@ -41,6 +41,30 @@ a table spelling in every sense that matters — it is what the endpoint answers
 when a harness is routed at it — so the key biconditional stays true of it word
 for word and `agents.ts` learns nothing about where the names came from.
 
+⚠ **A *typed* id is the same substitution at the same site, and the second row's
+table is a starting set rather than the set.** The daemon validates a routed
+model against nothing but `MAX_MODEL_CHARS` — `ROUTED_MODEL_ENV` names whatever
+string it is handed — and the written-down list goes stale in months: all three
+Moonshot ids it shipped with were retired on 2026-05-25 and nothing noticed until
+2026-09-04. So the builder draws a field at the foot of every **`routable`**
+provider's group; `adoptModels` puts the id into that system's `models` as
+`{id, name: id}` before `allModels` reads the listing, and the row then dedupes,
+greys, refuses and groups with no new arm — the native harness is refused it for
+the *name*, a routed one may use it, no key means the no-key sentence, and picking
+it seeds the agent's name with the id. The gate is `routable === true` and it is
+a refusal: a native pairing is validated at start against what its CLI just
+published, so a typed id under Anthropic or OpenAI is a box that only produces
+refusals. Refreshing the table is a hand edit against the vendors' documentation
+and **no refresh mechanism exists**, for the reason two paragraphs up — all three
+routed vendors' list endpoints answer 401 unauthenticated (probed 2026-09-03),
+which fails both of Q3.501's tests for the browser door, and the daemon door is
+the fourth `fetch`. A plugin contributing the provider is the legal shape.
+**The same substitution keeps a stored preset editable**: `current` is a lookup
+in the catalogue and Save is gated on it, so a preset whose model has left every
+list drew `Choose` under a filled field and could not be renamed; a pick the
+catalogue as listed does not hold is adopted the same way — and only then, since
+adopting a *published* pick would hand the dedupe a table row whose name wins.
+
 ⚠ **The document's `connect-src` has to name `https://openrouter.ai`, and
 unconditionally.** Every instance compiles in the same `SYSTEMS`, so every
 instance's picker makes that request. Omit it and the browser refuses its own
@@ -351,7 +375,7 @@ substituted into them are somebody else's prose, and always were.
 | What | Value |
 |---|---|
 | Catalogue | 417 models, 672 KiB raw; 348 with tools, 59 of those `:batch`, **289 kept**, 18.7 KiB as `{id,name}`. Re-read an hour later: 418 / 349 / 59 / 290 — no count here is a constant |
-| Longest id | 50 chars, against `MAX_MODEL_CHARS` 256 |
+| Longest id | 50 chars, against `MAX_MODEL_CHARS` 256 — the same number on the typed field's `maxLength`, pinned against `server.ts` by `webcheck` |
 | Read reused for | `OPENROUTER_TTL_MS`, ten minutes — the same clock as `MODELS_TTL_MS`, so the picker's two halves do not go stale on different ones |
 | Request deadline | `CATALOGUE_TIMEOUT_MS`, imported rather than respelled |
 | Picker rows for OpenRouter | 289 with no key; 358 with one, of which 68 are opencode's own spellings and 2 the table's alone |

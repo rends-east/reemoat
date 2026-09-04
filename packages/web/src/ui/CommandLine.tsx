@@ -21,10 +21,27 @@ import { copyText } from "./clipboard";
  * empty-fleet screens. It was moved verbatim — the two layout defects above
  * were paid for once and a second copy would have earned them again.
  *
- * The `<pre>` scrolls **inside its own box**. That matters where the second
- * caller draws it: `.claude/rules/web-shell.md` reserves the scrollbar gutter
- * on the transcript alone and names the rail as an exception that may not take
- * it back, and a contained scroller is not the rail scrolling.
+ * **The command fits on one line where the box is wide enough, and wraps at a
+ * space where it is not; it never scrolls.** It used to be an `overflow-x-auto`
+ * `<pre>`, and in the rail — 280px wide by default — the one-line installer
+ * showed `curl -fsSL 'https://app.reemoat.test,` with a scrollbar under it and
+ * the rest of the command, including the `| sh` that makes it one, off the
+ * right edge. A command somebody is about to paste into a terminal has to be
+ * readable whole before they do. No scroller at all is also the stronger reading
+ * of `.claude/rules/web-shell.md`'s rule that the rail may not take back the
+ * scrollbar gutter the transcript alone reserves.
+ *
+ * ⚠ **Sized to the narrowest box that draws it, measured.** Settings → Machines
+ * is a `max-w-2xl` sheet with a 224px nav beside the pane: 408px of column, and
+ * the installer is 52 characters. At `text-2xs` (12px, ~7.2px a character in
+ * this mono) that is 375px against a 340px field, and the first draft wrapped
+ * `install.s` / `h'` across two lines — `break-all` split the URL mid-word, which
+ * read as broken rather than long. Three things put it on one line: 11px with
+ * `tracking-tight` (~330px), `px-2.5` on the field, and a 36px copy control that
+ * widens to the 44px touch floor only under a coarse pointer. `overflow-wrap:
+ * anywhere` rather than `break-all`: a box that still cannot fit it — a 390px
+ * phone is 306px inside — breaks at the space before `| sh`, and breaks inside
+ * the URL only when the URL alone is wider than the box.
  */
 export function CommandLine({ command }: { command: string }): ReactNode {
   const [copied, setCopied] = useState(false);
@@ -44,7 +61,7 @@ export function CommandLine({ command }: { command: string }): ReactNode {
       * measurement to get wrong.
       */
     <div className="mt-3 flex min-h-9 items-stretch overflow-hidden rounded-md border border-edge-strong bg-ink [@media(pointer:coarse)]:min-h-11">
-      <pre className="flex min-w-0 flex-1 items-center overflow-x-auto px-3 font-mono text-2xs leading-5 text-fg">
+      <pre className="flex min-w-0 flex-1 items-center whitespace-pre-wrap px-2.5 py-2 font-mono text-[11px] leading-5 tracking-tight text-fg [overflow-wrap:anywhere]">
         {command}
       </pre>
       <button
@@ -55,7 +72,7 @@ export function CommandLine({ command }: { command: string }): ReactNode {
           });
         }}
         aria-label={copied ? "Copied" : `Copy ${command}`}
-        className="tap press relative flex w-11 shrink-0 items-center justify-center border-l border-edge-strong bg-surface text-muted hover:bg-raised hover:text-fg"
+        className="tap press relative flex w-9 shrink-0 items-center justify-center border-l border-edge-strong bg-surface text-muted hover:bg-raised hover:text-fg [@media(pointer:coarse)]:w-11"
       >
         <Icon
           as={Copy}

@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 120 | `###` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 121 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 79 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 287 | `####` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 288 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 53 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 109 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 66 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 127 | `###` |
-| | | **841** | |
+| | | **843** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 841 rather than the 445
+dividers. So the count is over **both** depths, and it says 843 rather than the 446
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -86,7 +86,10 @@ in words, for the same reason.
 Measurements throughout were taken against `claude-agent-acp` 0.63.0 with
 `claude` 2.1.220, `kimi` 0.29.2, `codex-acp` 1.1.9, and — where the ACP reference
 implementation is cited — `gemini-cli` 0.53.0. Where a version matters to the
-conclusion, the entry names it.
+conclusion, the entry names it. The pins moved to `claude-agent-acp` 0.73.0 and
+`codex-acp` 1.8.0 on 2026-09-04, with `claude` 2.1.259 and `codex` 0.153.1 on
+PATH; Q7.114 and Q7.115 carry the re-measurements, and an entry naming the older
+pair was measured against it and is not rewritten.
 
 ---
 ## Identity, reachability and trust
@@ -3058,6 +3061,56 @@ that is the other half of why this stayed invisible.
 `relaycheck` pins both directions on `POST /v1/machines` and on the enrollments
 route beside it; `imagecheck` still pins the installer's half from a real
 container.
+
+### Q1.628 — Which machines are running a July `claude`, answered without opening a shell on any of them
+
+**Question.** With the CLIs no longer vendored (Q4.114) and refreshed daily by each
+machine on its own, the fleet's builds are whatever each machine's last
+`deploy/agents.sh` run left, and the only place that fact existed was the
+machine itself: one machine's picker names the build under its model list
+(Q6.106), and nothing named it for the fleet. "Which machines are still on a
+July `claude`" was a shell on each host.
+
+**Decision.** The daemon announces which build of each built-in harness's CLI it
+*would launch* on the tunnel handshake, as `AGENT_CLIS_HEADER`
+(`x-reemoat-agent-clis`: `claude=2.1.259;codex=0.153.1;kimi=-`), beside
+`DAEMON_VERSION_HEADER` and under its rule — advisory, recorded in
+`machines.daemon_agents` by `recordDaemonBuild` on every dial, read back by
+`GET /v1/admin/fleet` and `cpctl admin fleet`, branched on by nothing. It is read
+off `LocalRuntime.agentCli`, the same choice a launch resolves through, so it names
+the build a session would get rather than a copy that happens to be installed. The
+grammar lives once, in `src/relay/protocol.ts` (`formatAgentClis` /
+`parseAgentClis`), which ships in the control plane's image, so the daemon's
+spelling and the relay's reading cannot drift.
+
+**As fresh as the machine's last dial, and that is the decision rather than a
+gap.** The daily `deploy/agents.sh` run calls `forgetAvailability()` and does not
+redial, because a redial drops every live stream on the machine — every browser
+socket — for a report nobody is blocked on; a relay deploy, a network blip or a
+daemon update refreshes it, and one machine's live answer is its own
+`GET /agents/capabilities`. A re-announce with no redial would need the daemon to
+*send* the control plane something outside a connection it opens anyway, which is
+the second control-plane request Q1.9 refuses.
+
+**Refused whole, never cut.** `readAgentClisHeader` mirrors `readDaemonVersionHeader`
+with one measured difference: the value is a list with a grammar, so an over-long,
+malformed or duplicate-id value is `null` rather than a prefix — a label cut short
+is still a label, a list cut mid-entry stores a version nothing reports. Absence, a
+refusal and "no CLI for any harness" all land on the same `null` on purpose:
+telling them apart would need a comparison on `DAEMON_VERSION`, which
+`compatibility.md`'s rule 1 forbids. Shipped daemon-first, because the daemon
+answers and the control plane asks; an older daemon dials, enrolls and is listed
+with the field `null` — `relaycheck` drives that, the redial where the newer value
+wins, and the malformed values that still connect.
+
+**Alternatives taken out.** A column per harness, which puts the relay back in
+lockstep with the daemon's harness list. Carrying it at enrollment, which freezes
+it for the life of the machine — `DAEMON_VERSION_HEADER`'s own argument against
+that. A "refresh" verb on the control plane, which is Q7.42: a report, never a verb.
+
+**Status.** Applied. `relaycheck` pins the row, the redial, the omission and the
+refusals; `daemoncheck` pins what the daemon sends and that an empty inventory sends
+no header at all.
 
 ## Session lifecycle, questions and attachments
 
@@ -15613,6 +15666,56 @@ at a server that does not serve it.
 
 **Status.** Applied.
 
+#### Q3.542 — A model id can be typed under a routed provider, and the written-down list is a starting set
+
+**Question.** `SYSTEMS[id].models` for Moonshot, Z.ai and MiniMax is a compiled-in
+list, and it went stale in the way a list does: all three Moonshot ids this
+repository shipped were retired by the vendor on 2026-05-25 and nothing noticed
+until 2026-09-04. The daemon already runs a routed pairing on any string —
+`ROUTED_MODEL_ENV.claude` names whatever it is handed and `MAX_MODEL_CHARS` (256)
+is the only check (Q7.115) — so what was missing was a way to *say* an id.
+
+**Decision.** Q3.501's mechanism, word for word: a typed id is substituted into the
+listing at the same site the OpenRouter catalogue is (`adoptModels`, in the
+builder's `listed` memo), as `{id, name: id}` on that system, **before**
+`allModels` sees it. No third `source` — a typed id is a table spelling, what the
+endpoint answers to when a harness is routed at it — so the key biconditional,
+both `pairFailure` arms, `hostable`, `readyFirst`, `groupModels` and
+`supportingHarnesses` apply with no new arm. Gated on `system.routable === true`:
+a native pairing is validated at start against what the CLI published, so a typed
+id under Anthropic or OpenAI is a box that only produces refusals, and a box that
+only refuses is worse than no box. Bounded client-side by `MAX_MODEL_CHARS` on the
+field, as the name is by `MAX_AGENT_NAME_CHARS`, because `POST /custom-agents`
+spawns a harness before it reads the body. Builder only: the in-session menu
+validates against the agent's published list, and a routed session is pinned by
+environment at spawn.
+
+**The same substitution fixes a live defect.** `current` is a catalogue lookup and
+Save is gated on it, so a stored preset whose model had left every list drew
+`Choose` under a non-empty Model field and could not even be renamed. A pick the
+catalogue *as listed* does not hold is adopted the same way — and only then,
+because adopting a published pick would let the table name win the dedupe and
+rename a good row to its slug.
+
+**The six literals were refreshed once** against each vendor's documentation and
+the table is described as a starting set. There is no refresh mechanism, and that
+is deliberate: a daemon-side catalogue read for these three is refused. All three
+list endpoints answer **401** unauthenticated (probed 2026-09-03), so the browser
+door is illegal by Q3.501's two tests — no credential, and
+`access-control-allow-origin: *` — and the daemon door is worse, since
+`compatibility.md` states the count of `fetch` calls in `src/` as the property and
+it would put the daemon's reachability in front of a list that has nothing to do
+with it. A live list would have to arrive through a plugin-contributed provider
+carrying its own catalogue, and `plugin-contributions.md` declines that too today
+— `connect-src` is built once at control-plane startup, so the browser fetches
+nothing a plugin author named. The typed id is the answer, not a stopgap.
+
+**Status.** Applied. `webcheck` pins the six shapes: exactly one `table` row from
+a typed id, the dedupe against a published row of the same id, the no-key
+sentence, the refusal under the native harness, Save kept for a stored-but-unlisted
+model, and the negative control that a system with `routable !== true` gets no
+field.
+
 ## Deployment, packaging and code layout
 
 ### Q4.1 — Is this one deployment or two, and why can the two services not be checked out separately?
@@ -20659,7 +20762,7 @@ opencode exports into a session's own environment, which is what
 `SESSION_SCOPED_ENV` would need; and whether `auth logout` behaves with a
 provider that is not configured. Neither is reachable without a real key.
 
-### Q6.106 — Which build of a CLI runs: the newest of an override, PATH and the vendored copy
+### Q6.106 — Which build of a CLI runs: an override, else the first on PATH and then in `MANAGED_CLI_DIRS`
 
 **Question.** Fable 5.1 did not appear in the model list. `SYSTEMS.anthropic.models`
 is `[]` on purpose; the list is what the `claude` binary publishes, and
@@ -24605,6 +24708,11 @@ not a config file under somebody's home.
 | `codex-acp` 1.1.9 | `{}` | `custom-gateway` | `openai` |
 | `kimi` 0.29.x | absent | — | `-32601 Method not found` |
 
+[Re-measured 2026-09-04 with the pins at 0.73.0 / 1.8.0: claude unchanged;
+`codex-acp` 1.8.0 answers `providerId: "openai"`, `supported: ["openai"]`. The id
+has moved once already and nothing here had to, which is the next paragraph's
+argument driven rather than argued.]
+
 Three things fall out and all three are load-bearing.
 
 **`providerId` is the agent's own and the two disagree.** `main` against
@@ -24669,6 +24777,21 @@ agent just published. Which door applies is the table's decision and never a cal
 site's — and a pairing that can be routed but cannot be pinned is **refused**, in
 `hostable`, because it would otherwise start, look correct, and run the
 endpoint's default model under somebody else's name.
+
+**Re-measured 2026-09-04 against 0.73.0** (claude 2.1.259 on PATH), by starting a
+bare `Session` with no prompt and reading the published model control. Baseline:
+`["default","opus[1m]","claude-fable-5-1[1m]","sonnet","haiku"]`, current
+`opus[1m]` — the third id is the CLI's (Q6.106), not the adapter's. With both
+variables set to `kimi-k2-thinking`: the same five **+** the id, published as
+`{name: "kimi-k2-thinking", description: "Custom model (kimi-k2-thinking)"}`,
+and current **is the id** — the two doors still compose. Two things moved beside
+the answer: the `fast` control is not published under the routed env (the custom
+model does not support it), and 0.73.0 publishes an `agent` control (category
+`null`, "Main-thread agent persona") wherever `.claude/agents/` holds a file,
+which the snapshot draws as a plain labelled control by the `category` rule. And
+`default` now carries the resolved row's *name* as its description — "Opus (1M
+context)" — which is the second arm of `dedupeAliasChoices`, measured live rather
+than read off `dist/` for the first time.
 
 **Status.** Built. The routed rows are derived from published endpoints and are
 not yet driven with a real key; a row that has not been run can still be wrong

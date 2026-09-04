@@ -29,7 +29,7 @@ import {
   SessionRegistry,
   type WorktreePolicy,
 } from "../src/registry.js";
-import { RelayTunnel } from "../src/relay/tunnel.js";
+import { RelayTunnel, announcedAgentClis } from "../src/relay/tunnel.js";
 import { createApp } from "../src/server.js";
 import { openStores, type StoreBundle, type StoredIdentity } from "../src/store/sqlite.js";
 import { Contributions } from "../src/plugins/contributions.js";
@@ -565,6 +565,10 @@ registry.setSessionLimits({
   refillMs: boundedInt(process.env["REEMOAT_SESSION_CREATE_REFILL_MS"], SESSION_CREATE_REFILL_MS),
 });
 
+// Every spelling of "no" the `mode:` note below accepts; `deploycheck` reads this
+// list off the source so `deploy.sh` honours the same ones.
+const AGENT_UPDATES_OFF: ReadonlySet<string> = new Set(["off", "0", "false", "no", "never"]);
+
 /**
  * Keeping the agent CLIs current, because not one of them does it itself.
  *
@@ -575,14 +579,12 @@ registry.setSessionLimits({
  *
  * ⚠ **`agentHandle` and not merely `terminal`.** What must not be taken away is a
  * build a *process* is executing; a session that is idle with no agent is holding
- * nothing. The handle includes one restored from before a restart, which may name a
- * pid that is gone — so this errs toward naming a harness, which is the safe
- * direction when what the name withholds is the pruning of a build a session may
- * still be on. The script decides what each name means: Q4.113.
+ * nothing. An `interrupted` session — one carried over from before a restart — has
+ * an exit record, so it is terminal and is *not* named here: the daemon that ran
+ * its agent killed it on the way out, and nothing is on that build any more. What
+ * this names is only a live process. The script decides what each name means:
+ * Q4.113.
  */
-const AGENT_UPDATES_OFF: ReadonlySet<string> = new Set(["off", "0", "false", "no", "never"]);
-
-
 const agentUpdates = AgentUpdates.start({
   busy: () => [
     ...new Set(
@@ -887,7 +889,11 @@ function resumeInterrupted(when: string): void {
        * minutes after start, so it does not race this very pass — and with this
        * pass over and sessions waiting on it, the wait is the whole cost. Run it
        * now; its completion starts the next pass. A no-op when updates are off,
-       * and then the sentence above is the operator's cue.
+       * and then the sentence above is the operator's cue — and a no-op once any
+       * run has happened, because that next pass lands here too: with a harness
+       * the script cannot install, honouring every nudge ran the installers
+       * back-to-back for the daemon's life. After the first run the day's timer
+       * is the retry.
        */
       if (missing > 0) agentUpdates.nudge();
     })
@@ -938,6 +944,11 @@ function startRelayTunnel(local: { host: string; port: number }): void {
     relayUrl: enrolledRelay.relayUrl,
     tunnelKey: enrolledRelay.tunnelKey,
     local,
+    // What this machine would launch, announced on every dial and read back by
+    // `cpctl admin fleet`. Off the same `agentCli` a session resolves through, so
+    // the report names the build a launch would get; the daily update above
+    // clears that cache but does not redial — see `AGENT_CLIS_HEADER`.
+    agentClis: () => announcedAgentClis(runtime),
     // Nothing in src/ prints; this is where the words come out.
     onEvent: (kind, detail) => {
       if (kind === "connected") console.log(`relay: tunnel up (${detail})`);

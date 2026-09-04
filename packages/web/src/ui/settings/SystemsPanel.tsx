@@ -147,9 +147,11 @@ function useSystems(machineId: MachineId): {
  * A constant rather than a component because the *margin* differs at the two call
  * sites — one lands inside a `space-y-2` box, the other is the first child of a
  * bare `<div>` — and layout stays with the caller for the reason `FIELD` gives.
- * As a string rather than JSX text it also keeps its own apostrophes.
+ * As a string rather than JSX text it also keeps its own apostrophes. The
+ * wording was cut on 2026-09-04 for fewer words; the noun "systems" and the
+ * "may be out of date" half are what it keeps.
  */
-const STALE_READ = "Couldn't check this machine's systems just now — what's below may be out of date.";
+const STALE_READ = "Couldn't re-check this machine's systems — what's below may be out of date.";
 
 /**
  * The way out of a failed read, drawn as the one thing to do about it.
@@ -222,7 +224,7 @@ export function SystemChooser({
       <Empty failed={supported} action={supported ? <Recheck onClick={refresh} busy={loading} /> : undefined}>
         {supported
           ? (error ?? "Could not read this machine's systems.")
-          : "This machine is running a build without systems. Update it to sign in here."}
+          : "Update this machine's daemon to sign in here."}
       </Empty>
     );
   }
@@ -374,7 +376,7 @@ export function SystemDetail({
       <Empty failed={supported} action={supported ? <Recheck onClick={refresh} busy={loading} /> : undefined}>
         {supported
           ? (error ?? "Could not read this machine's systems.")
-          : "This machine is running a build without systems. Update it to sign in here."}
+          : "Update this machine's daemon to sign in here."}
       </Empty>
     );
   }
@@ -599,12 +601,14 @@ export function KeyOnly({
            * builder there is no sign-in on the screen at all, and a sentence
            * pointing at one is a sentence pointing at nothing — the failure the
            * refusal strings one file over were rewritten for. What is true in both
-           * places is the fact, not its position.
+           * places is the fact, not its position. All three were cut on 2026-09-04
+           * for fewer words; what each keeps is which requests the key signs and
+           * whether a sign-in already covers it.
            */
           ? borrowed
-            ? `Signs the requests when another agent is pointed at ${system.displayName}. The key saved above covers this too, so there is nothing to add.`
-            : `Signs the requests when another agent is pointed at ${system.displayName}. Signing in to ${system.displayName}'s own CLI does not cover it.`
-          : `${system.displayName} has no sign-in program on this machine, so a key is the only way in.`}
+            ? `Signs requests when another agent is pointed at ${system.displayName} — the key saved above already covers it.`
+            : `Signs requests when another agent is pointed at ${system.displayName}. Signing in to its CLI does not cover it.`
+          : `${system.displayName} has no sign-in here, so a key is the only way in.`}
       </p>
 
       {borrowed && !overriding ? (
@@ -661,7 +665,7 @@ export function KeyOnly({
           // box at all is written down. The accessible name is that same string
           // rather than a second spelling of it, so what a screen reader is told
           // and what is written in the box cannot come apart.
-          placeholder={system.keySet ? `paste a new ${keyName} to replace it` : `paste the ${keyName}`}
+          placeholder={system.keySet ? `paste a new ${keyName}` : `paste the ${keyName}`}
           aria-label={keyName}
           className={`${FIELD} min-w-0 flex-1 font-mono`}
         />
@@ -694,12 +698,14 @@ export function KeyOnly({
            * Retire idiom, stated where somebody reads it *before* deciding rather
            * than crammed into a question they are already halfway through — and
            * the two-step `SignOutButton` shape underneath it, which is the same
-           * shape for a strictly less damaging act.
+           * shape for a strictly less damaging act. The sentence was cut on
+           * 2026-09-04 for fewer words; it keeps that sessions sign with the key,
+           * that the next one refuses to start, and that the refusal shows on the
+           * session rather than on this screen.
            */}
           <p className="text-xs text-muted">
-            Sessions pointed at {system.displayName} sign with this key. Removing it breaks nothing
-            on this screen: the next session pointed there refuses to start, and says so on the
-            session rather than here.
+            Sessions pointed at {system.displayName} sign with this key. Remove it and the next one
+            refuses to start — it says so on the session, not here.
           </p>
           {/*
            * ⚠ **The geometry this paragraph claimed was never on the screen, and

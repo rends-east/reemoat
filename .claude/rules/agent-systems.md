@@ -26,14 +26,14 @@ be undone. Writing `~/.codex/config.toml` was the alternative and is refused for
 the reason `acp/agents.ts` already gives about settings files under somebody's
 home.
 
-## Measured, 2026-08-25, against the pinned adapters
+## Measured, 2026-09-04, against the pinned adapters
 
 | Adapter | `agentCapabilities.providers` | `providerId` | `supported` |
 |---|---|---|---|
-| `claude-agent-acp` 0.63.0 | `{}` | **`main`** | `anthropic`, `bedrock`, `vertex` |
-| `codex-acp` 1.1.9 | `{}` | **`custom-gateway`** | `openai` |
-| `kimi` 0.29.x (`kimi acp`) | absent | — | `-32601` |
-| `opencode` 1.18.23 (`opencode acp`) | absent | — | `-32601` |
+| `claude-agent-acp` 0.73.0 | `{}` | **`main`** | `anthropic`, `bedrock`, `vertex` |
+| `codex-acp` 1.8.0 (1.1.9: `custom-gateway`) | `{}` | **`openai`** | `openai` |
+| `kimi` 0.29.x, 2026-08-25 | absent | — | `-32601` |
+| `opencode` 1.18.23, 2026-08-25 | absent | — | `-32601` |
 
 opencode is the native side of **two** rows, publishes them in one list, and has
 no sign-in at all; `agent-catalogue.md` owns both consequences.

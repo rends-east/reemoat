@@ -225,26 +225,31 @@ export function SessionBrowser({
             {mayAddMachine(state.me) ? (
               <>
                 {/*
-                  * The command comes first, because it is the whole answer: it
-                  * installs the daemon, asks for a credential on the terminal and
-                  * enrols the machine, where the button below leads to a screen
-                  * that hands back a code you then have to carry. Both stay —
-                  * somebody who already has a checkout wants the code.
+                  * The command is the whole answer: it installs the daemon, asks
+                  * for a credential on the terminal and enrols the machine. There
+                  * is no button beside it any more — it led to Settings → Machines,
+                  * which used to hand back a code to carry by hand and now draws
+                  * this same command, so the door opened onto the thing already on
+                  * screen.
                   *
                   * `location.origin` and not a constant: the page is served by
                   * the control plane it talks to, so this is the same address the
                   * server substitutes into the script it hands back. A
                   * self-hosted instance prints its own.
                   */}
-                <p className="mx-auto mt-3 max-w-xs text-xs text-muted">
-                  Run this on the machine you want to use:
-                </p>
-                <div className="mx-auto max-w-xs text-left">
-                  <CommandLine command={installCommand(location.origin)} />
+                {/*
+                  * Below `lg` only. At `lg` the rail is 280px and the pane beside
+                  * it is empty, so `NothingSelected` draws the command there at a
+                  * width it can be read at; here it is the whole screen and the
+                  * command takes the rail's width rather than a `max-w-xs` it
+                  * could not fit in.
+                  */}
+                <div className="lg:hidden">
+                  <p className="mt-3 text-xs text-muted">Run this on the machine you want to use:</p>
+                  <div className="text-left">
+                    <CommandLine command={installCommand(location.origin)} />
+                  </div>
                 </div>
-                <Button className="mt-3" onClick={() => navigate(settingsPath("machines"))}>
-                  Add a machine
-                </Button>
               </>
             ) : (
               <p className="mx-auto mt-2 max-w-xs text-xs text-muted">{machineQuotaNotice(state.me)}</p>

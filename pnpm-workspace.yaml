@@ -75,5 +75,5 @@ overrides:
 # are not free-floating — they are the second of the three places a pin is written
 # down, and a bump that edits one file and not the other fails there.
 minimumReleaseAgeExclude:
-  - '@agentclientprotocol/claude-agent-acp@0.63.0'
-  - '@agentclientprotocol/codex-acp@1.1.9'
+  - '@agentclientprotocol/claude-agent-acp@0.73.0'
+  - '@agentclientprotocol/codex-acp@1.8.0'

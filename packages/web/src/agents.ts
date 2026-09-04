@@ -348,6 +348,69 @@ function withoutProviderLabel(displayName: string, name: string): string {
  * for, from the daemon's table. Reading the wrong source produces an empty group
  * rather than an error, which is why the two are branched rather than merged.
  */
+/**
+ * A model id no list holds, put into the listing as a **table** row of the
+ * system it was typed under — before {@link allModels} reads it.
+ *
+ * ⚠ **Q3.501's mechanism, word for word, and deliberately not a third `source`.**
+ * The daemon already runs a routed pairing on any string: `ROUTED_MODEL_ENV`
+ * names whatever id it is handed and `MAX_MODEL_CHARS` is the only check, so the
+ * written-down `SYSTEMS[id].models` is a *starting set* that goes stale in months
+ * (all three Moonshot ids it shipped with were retired on 2026-05-25). What was
+ * missing was a way to *say* an id — and a typed one is a table spelling in every
+ * sense that matters: it is what the endpoint answers to when a harness is routed
+ * at it. So it is substituted into the listing at the same site the OpenRouter
+ * catalogue is, and everything downstream applies with no new arm: the dedupe
+ * against a published row of the same id (published wins the row, the table wins
+ * the name — so a typed id that a harness also publishes reads as what was
+ * typed), {@link keyMissing}'s biconditional, both of {@link pairFailure}'s arms,
+ * `hostable`, `readyFirst`, `groupModels` and `supportingHarnesses`. This module
+ * learns nothing about where the id came from.
+ *
+ * ⚠ **Only a `routable` system takes one, and the gate is a refusal rather than a
+ * courtesy.** A *native* pairing is validated against what the agent just
+ * published — `pinNativeModel`, at every launch — so a typed id under Anthropic or
+ * OpenAI would be offered, saved, and refused at start with the CLI's own
+ * sentence, and a box that produces only refusals is worse than no box. Under a
+ * routed system the string reaches the endpoint by name and the endpoint is what
+ * refuses a wrong one, which is the rule `agent-systems.md` already states for
+ * every routed id. `routable` absent — an older daemon — is `false` here as it is
+ * everywhere on this side; that daemon has no routed door for the row to use.
+ *
+ * ⚠ **The same substitution is what makes a stored preset editable after its
+ * model leaves every list.** `AgentBuilder`'s `current` is a lookup *in the
+ * catalogue* and Save is gated on it, so a preset whose model the catalogue no
+ * longer holds — a catalogue refresh, a table refresh, a CLI retiring a name —
+ * drew `Choose` under a filled Model field and could not so much as be renamed
+ * without being re-pointed. Adopted here, it is a row named by its id, which is
+ * the honest label for a spelling nothing else names. The residue is the gate
+ * above: such a preset on a native system stays unrenameable, because the daemon
+ * would refuse the start anyway and this side may not offer a save it cannot.
+ *
+ * Pure over the listing, so it is driven directly; `systems` objects it does not
+ * touch are returned as they were. The id is trimmed and an empty one ignored. An
+ * id the system's list already carries is not carried twice — the listed row,
+ * and its better name, stand. Bounding the length is the field's job
+ * (`maxLength`, the same stop the name has), because the round trip is expensive:
+ * `POST /custom-agents` spawns a harness before it reads the body's length.
+ */
+export function adoptModels(
+  systems: readonly SystemInfo[],
+  typed: readonly { system: string; model: string }[],
+): SystemInfo[] {
+  return systems.map((system) => {
+    if (system.routable !== true) return system;
+    const added: { id: string; name: string }[] = [];
+    for (const one of typed) {
+      const id = one.model.trim();
+      if (one.system !== system.id || id.length === 0) continue;
+      if (system.models.some((row) => row.id === id) || added.some((row) => row.id === id)) continue;
+      added.push({ id, name: id });
+    }
+    return added.length === 0 ? system : { ...system, models: [...system.models, ...added] };
+  });
+}
+
 export function allModels(
   systems: readonly SystemInfo[],
   capabilities: Readonly<Record<string, AgentCapabilities>>,

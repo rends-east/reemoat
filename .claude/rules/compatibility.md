@@ -15,7 +15,8 @@ Three things ship on three schedules, and nothing coordinates them:
 |---|---|---|
 | control plane + relay | weekly, from a tag | `VERSION` in `app.ts`, on `GET /v1/instance` |
 | **the web client** | **with the control plane** — it is built into that image | nothing |
-| a daemon | whenever its owner runs `deploy.sh` | `DAEMON_VERSION`, on the tunnel handshake and `GET /health` |
+| a daemon | whenever its owner runs `deploy.sh` | `DAEMON_VERSION`, on the tunnel handshake and `GET /health` — and which build of each agent CLI it would launch, `AGENT_CLIS_HEADER`, on the handshake only |
+| **an agent CLI** | **whenever `deploy/agents.sh` runs — daily, by the daemon, with nobody pressing anything** | nothing of its own; the daemon announces it beside its version |
 
 **The web client shipping inside the control plane's image is the fact that
 decides everything else here.** A weekly deploy hands a new browser client to
@@ -115,6 +116,31 @@ production never has. That is why applying the schema is a function now.
 included, because the machine that decides whether `RELAY_PROTOCOL_MIN_VERSION`
 can move is the one that has been dark for a month. The numbers come off the
 handshake, not from asking a daemon anything.
+
+**The same surface carries the agent CLIs, under rule 1's label half.**
+`AGENT_CLIS_HEADER` announces which build of each built-in harness's CLI the
+daemon would launch — `claude=2.1.259;codex=0.153.1;kimi=-`, read off the same
+`agentCli` a launch resolves through, so it names the build a session would get
+and not a copy that happens to be installed. The relay records it in
+`machines.daemon_agents` on dial, the fleet route answers it parsed (`agents`,
+harness → version, `null` for a binary that would not say), and `cpctl admin
+fleet` prints it per machine, which is what makes *"which machines are running a
+July claude"* answerable without opening a shell on any of them. **Announced,
+never negotiated, and optional on the reader**: a daemon older than the header
+dials, enrolls and is listed with `agents: null`, and so is one whose value
+`parseAgentClis` refused — refused **whole** to `null`, never cut, because a list
+cut mid-entry is a false version where a cut label is still a label; and a
+daemon with no CLI for any harness sends no header rather than an empty one, so
+those three are one silence on purpose, the only way to tell them apart being a
+comparison on `DAEMON_VERSION` that rule 1 forbids. It is **exactly as fresh as
+the machine's last dial**, and that is a decision rather than a gap: the daily
+agent update clears the daemon's ten-minute CLI cache and does not redial,
+because a redial drops every live stream on the machine — every browser socket —
+for a report nobody is blocked on. The row therefore says what the machine
+would have launched when it last connected; a relay deploy, a network blip or a
+daemon update refreshes it, and one machine's live answer is its own
+`GET /agents/capabilities`. Still a report, in the same direction as the version
+above, and nothing here moves a CLI — that is `deploy/agents.sh` on the host.
 
 ## Which side ships first
 

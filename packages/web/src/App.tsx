@@ -453,7 +453,7 @@ function content(state: ReturnType<typeof store.getSnapshot>, route: Route): Rea
             <SessionBrowser state={state} />
           </div>
           <div className="hidden flex-1 lg:block">
-            <NothingSelected />
+            <NothingSelected state={state} />
           </div>
         </>
       );

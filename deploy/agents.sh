@@ -79,6 +79,23 @@
 # POSIX sh. Fails on an unset variable as well as a non-zero exit.
 set -eu
 
+# ⚠ **SIGPIPE is ignored before the first byte is written, because the daemon is
+# a reader that leaves.** `src/agentupdate.ts` spawns this script on pipes
+# (`stdio: ["ignore", "pipe", "pipe"]`, detached) and `process.exit`s on shutdown
+# without waiting for it; libuv resets every signal disposition to its default in
+# the child, so the next `printf` after the daemon is gone is a SIGPIPE, and the
+# default action ends the script where it stands — mid-install, with the EXIT trap
+# never run and `$TMP` left behind. Measured with the fake registry and a reader
+# that exits after one line: status 141, three of the four builds missing, and
+# under dash the temporary directory still on disk (bash runs the EXIT trap on its
+# way out and loses only the builds). Ignored, a write to the closed pipe is `EPIPE` instead,
+# which `say`, `note` and `warn` swallow so `set -e` does not turn the failed
+# builtin into the same early end. The disposition is inherited by everything this
+# script runs — the three vendor installers and `npm` among them — which then see
+# `EPIPE` on a write like any program whose reader has gone, rather than dying on
+# a signal in a run whose *caller* has already stopped reading.
+trap '' PIPE
+
 CHECK=0
 SKIP=" "
 SOURCE=vendor
@@ -119,9 +136,30 @@ done
 # agent on that harness.
 skipped() { case "$SKIP" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
-say()  { printf '%s\n' "$*"; }
-note() { printf '  %s\n' "$*"; }
-warn() { printf '%s\n' "$*" >&2; }
+# Each tolerates a closed stream: with SIGPIPE ignored (above) a `printf` whose
+# reader has gone fails with `EPIPE`, and under `set -e` a failing builtin ends the
+# script as surely as the signal would have. The `2>/dev/null` sits *after* `>&2`
+# in `warn`, so the message still reaches stderr and only the shell's own "write
+# error" complaint is dropped. None of the three is read through `$( … )` — the
+# substitutions in `done_note` and `outside_note` are *arguments* to `note` — so
+# swallowing the status changes no value anything computes.
+#
+# ⚠ **In a subshell, and that is the measured half.** bash keeps the bytes a
+# failed builtin write could not deliver in its stdio buffer, and the next
+# `$( … )` — a forked copy of the same buffer — flushes them into the value it
+# captures: with stdout closed, `_ver=$("$_node" -p …)` came back as every note
+# printed so far with the version on the end, and `codex --version` "printed" the
+# claude line above it. dash discards on error and was clean. Forked, the dirty
+# buffer dies with the subshell and the parent's stays empty, on both.
+#
+# `warn`'s two redirections are inside the subshell and in that order, because a
+# `2>/dev/null` on the *subshell* is applied first and the `>&2` inside then dups
+# a stderr that is already `/dev/null`: measured as every warning in the file —
+# the "in progress" sentence, the vendor-copy remedy, the failure count — going
+# nowhere, with the run still exiting 0.
+say()  { ( printf '%s\n' "$*" ) 2>/dev/null || :; }
+note() { ( printf '  %s\n' "$*" ) 2>/dev/null || :; }
+warn() { ( printf '%s\n' "$*" >&2 2>/dev/null ) || :; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # **Kept in step with `MANAGED_CLI_DIRS` in `src/acp/agents.ts` by `deploycheck`,
@@ -147,7 +185,75 @@ TOOLCHAIN="$HOME_DIR/.reemoat/toolchain"
 
 # Where an installer script lands before it runs — see `download`.
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/reemoat-agents.XXXXXX") || { warn "  cannot make a temporary directory; nothing was changed"; exit 0; }
-trap 'rm -rf "$TMP"' EXIT
+
+# **One run at a time, whoever started it.** Three callers and nothing between
+# them: the daemon's timer, `deploy.sh` on the update that is about to restart
+# that daemon, the bootstrap — and a fourth nobody starts on purpose, the run a
+# previous daemon left behind. `src/agentupdate.ts`'s `running` guard is a field
+# in the daemon's memory, and `runScript` spawns this script *detached*, so a
+# daemon that exits mid-run leaves it going and the daemon that replaces it starts
+# another five minutes later beside the orphan. Two runs do not share a stage —
+# `mktemp` sees to that — but each prunes every build that is not its own,
+# including the one the other has just linked, both race on `$TOOLCHAIN/bin/<agent>`,
+# and two vendor installers write the same `~/.local/bin` file over each other.
+#
+# The lock is a directory, since `mkdir` is the one atomic create-or-fail POSIX
+# `sh` has, holding the pid of the run that owns it. A pid that no longer answers
+# `kill -0` is a run that was killed — the daemon's deadline is a `SIGKILL` to the
+# whole group, which runs no trap — and its lock is taken over; a pid that does
+# answer is a run in progress, and this one says so and exits 0, because every
+# caller's contract is that this script never fails. A pid file that is not there
+# yet is given one second, the window between `mkdir` and the write being
+# microseconds and a crash inside it being the only way to an owner with no pid.
+# The one hole is pid reuse: a stale pid handed to an unrelated process reads as
+# "in progress" until that process ends, and a run is skipped rather than doubled,
+# which is the right way round. `--check` changes nothing and takes no lock, so a
+# preview is never refused by a run.
+#
+# ⚠ **One EXIT trap, releasing both.** `sh` holds one trap per signal, so the
+# `rm -rf "$TMP"` that stood here alone is now the same function, and the lock is
+# released only by the run that took it — `exit 0` on the sentence above must not
+# remove another run's lock on its way out.
+LOCK="$TOOLCHAIN/.agents.lock"
+LOCK_HELD=0
+finish() {
+  rm -rf "$TMP"
+  [ "$LOCK_HELD" = 1 ] && rm -rf "$LOCK"
+  return 0
+}
+trap finish EXIT
+
+take_lock() {
+  [ "$CHECK" = 1 ] && return 0
+  mkdir -p "$TOOLCHAIN" 2>/dev/null || { warn "  cannot create $TOOLCHAIN; nothing was changed"; exit 0; }
+  _tries=0
+  while [ "$_tries" -lt 3 ]; do
+    _tries=$((_tries + 1))
+    if mkdir "$LOCK" 2>/dev/null; then
+      LOCK_HELD=1
+      printf '%s\n' "$$" > "$LOCK/pid"
+      return 0
+    fi
+    _pid=$(cat "$LOCK/pid" 2>/dev/null || true)
+    if [ -z "$_pid" ]; then
+      sleep 1
+      _pid=$(cat "$LOCK/pid" 2>/dev/null || true)
+    fi
+    case "$_pid" in
+      "" | *[!0-9]*) : ;;
+      *) if kill -0 "$_pid" 2>/dev/null; then
+           warn "another run of deploy/agents.sh (pid $_pid) is in progress; nothing was changed"
+           exit 0
+         fi ;;
+    esac
+    # Stale: the owner is gone. Taken over by removing it and going round again,
+    # so a second taker in the same instant loses the `mkdir` rather than both
+    # proceeding.
+    rm -rf "$LOCK"
+  done
+  warn "  could not take $LOCK after 3 tries; nothing was changed"
+  exit 0
+}
 
 failed=0
 
@@ -239,9 +345,55 @@ vendor_copy_stays() {
 # whole download or a failure. The deadline is what stops one stalled vendor holding
 # the daemon's run for its whole budget — and, on the bootstrap, spending the hour an
 # enrollment code lives.
+#
+# ⚠ **`https` in, `https` all the way, or nothing.** Every one of these URLs is
+# `https://`, and `-L` follows what the vendor answers — including a `Location:`
+# to `http://`, which curl follows by default, so a redirect on the vendor's side
+# (or on a path in between) would land a script this daemon then *executes* on a
+# plaintext hop. `--proto '=https'` holds the first request to https and
+# `--proto-redir '=https'` every hop after it; a downgrade is then curl exiting 1
+# and the harness "not installed until the next run", which is the failure this
+# script already knows how to say.
 download() {
   if [ "$CHECK" = 1 ]; then note "$1: would download $2"; return 0; fi
-  curl -fsSL --connect-timeout 30 --max-time 600 -o "$TMP/$1.sh" "$2" >/dev/null 2>&1
+  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 30 --max-time 600 -o "$TMP/$1.sh" "$2" >/dev/null 2>&1
+}
+
+# What an npm-installed harness leaves on disk after a run: every build but the
+# one linked now (`$_build`) and the one linked when the run began (`$_prev`) —
+# unless this harness is live, in which case nothing is pruned at all, the daemon
+# having said so with `--skip <agent>`. Reads those three from `ensure_npm`.
+#
+# ⚠ **The previous build is kept for one run even with no `--skip`, because the
+# daemon's `--skip` set is a snapshot.** `src/agentupdate.ts` reads `busy()` once,
+# when it spawns this script, and a run is minutes long: a session that starts
+# *during* it resolves `$TOOLCHAIN/bin/<agent>` to whatever the symlink names at
+# that instant — the old build until the `mv` in `ensure_npm`, and a build the
+# daemon's snapshot never named. Pruning "every build but `$_build`" then took the
+# tree a live process had just started from. Reading the symlink at the top of
+# `ensure_npm` is what names that build, and sparing it means a superseded build
+# survives the run that superseded it and goes on the next run with no `--skip`
+# — a day later, by which time the snapshot has had a chance to see the session.
+# Older builds still go now. A function rather than a paragraph inside
+# `ensure_npm`, because the run that found nothing newer prunes too: otherwise
+# the build spared yesterday would live until the next *release* rather than the
+# next run, and "one run" above would be false for every quiet week.
+prune_builds() {
+  if skipped "$_agent"; then
+    note "$_pad previous build kept: an agent is using it"
+  else
+    for _d in "$TOOLCHAIN/$_agent"-* "$TOOLCHAIN/$_agent".stage.*; do
+      [ -d "$_d" ] && [ "$_d" != "$_build" ] && [ "$_d" != "$_prev" ] && rm -rf "$_d"
+    done
+    for _l in "$TOOLCHAIN/bin/$_agent".new.*; do
+      [ -L "$_l" ] && rm -f "$_l"
+    done
+  fi
+  # ⚠ A function's status is its last command's, and that is a `for` whose last
+  # body command is an `&&` list — false on an unmatched glob. Inline, that status
+  # was discarded; as a function called bare under `set -e` it ended the run after
+  # the first harness, exit 1, nothing on stderr. Measured by `deploycheck`.
+  return 0
 }
 
 # One harness from the npm registry, into a directory of its own.
@@ -271,10 +423,37 @@ download() {
 # filesystem — and `$TOOLCHAIN/bin/<agent>` is repointed by renaming a fresh symlink
 # over the old one. A process already running keeps the directory it started from,
 # which is `~/.local/share/claude/versions/` one vendor over.
+#
+# ⚠ **A refresh asks the registry which version it has before staging anything.**
+# Written as stage-then-compare, every run wrote a whole install into a fresh
+# stage and only then found `[ -d "$_build" ]` — measured at 126 MB written and
+# deleted per day per npm-installed harness (kimi always; all four under
+# `--source npm`) to learn "nothing to do", which is the pattern the claude arm
+# already refuses in so many words ("downloads ~200 MB every time"). So for a copy
+# that is ours — the `refresh` verb; an install has nothing to compare — the build
+# the launcher names is read off `$_prev` and `npm view <pkg>@latest version` is
+# asked, one small request. Equal means nothing is staged, nothing moves and the
+# note says `current`; the prune still runs, for the reason `prune_builds` gives.
+# Anything else — a newer version, `view` failing, `view` answering nothing, a
+# build directory named by the clock — falls through to the path above, which is
+# the one that was measured safe, so a registry that cannot answer the question
+# costs exactly what every run cost before it was asked. No deadline of its own:
+# a stalled `view` holds the run no longer than the stalled `npm i` it replaces
+# could, and the daemon's deadline bounds both. Under `--check` the registry is
+# not asked at all; the note says what would be compared.
 ensure_npm() {
   _agent=$1
   _pkg=$2
   _pad=$3
+  # The build `$TOOLCHAIN/bin/<agent>` pointed at when this run began — its
+  # directory, `$TOOLCHAIN/<agent>-<version>` — read *before* anything moves, and
+  # never pruned by this run; see the prune below for why one previous build
+  # outlives the run that superseded it.
+  _prev=""
+  if [ -L "$TOOLCHAIN/bin/$_agent" ]; then
+    _prev=$(readlink "$TOOLCHAIN/bin/$_agent" 2>/dev/null || true)
+    _prev=${_prev%/bin/*}
+  fi
   case "$(provenance "$_agent")" in
     "") _verb=install ;;
     toolchain) _verb=refresh ;;
@@ -289,10 +468,26 @@ ensure_npm() {
   # one on PATH anyway, so this resolves wherever npm does.
   _node=$(dirname -- "$(command -v "$_npm")")/node
   [ -x "$_node" ] || _node=node
+  # The version part of `$TOOLCHAIN/<agent>-<version>`, or empty when the launcher
+  # names nothing of that shape.
+  _cur=""
+  case "$_prev" in "$TOOLCHAIN/$_agent-"?*) _cur=${_prev#"$TOOLCHAIN/$_agent-"} ;; esac
   if [ "$CHECK" = 1 ]; then
+    if [ "$_verb" = refresh ] && [ -n "$_cur" ]; then
+      note "$_agent: would ask the registry for $_pkg@latest, and stage nothing if it is still $_cur"
+    fi
     note "$_agent: would run: $_npm i -g --prefix $TOOLCHAIN/$_agent-<version> $_pkg@latest, then repoint $TOOLCHAIN/bin/$_agent"
     done_note "$_pad" "$_verb" "$_agent"
     return 0
+  fi
+  if [ "$_verb" = refresh ] && [ -n "$_cur" ]; then
+    _latest=$("$_npm" view "$_pkg@latest" version 2>/dev/null || true)
+    if [ -n "$_latest" ] && [ "$_latest" = "$_cur" ]; then
+      _build=$_prev
+      prune_builds
+      done_note "$_pad" current "$_agent"
+      return 0
+    fi
   fi
   mkdir -p "$TOOLCHAIN/bin"
   _stage=$(mktemp -d "$TOOLCHAIN/$_agent.stage.XXXXXX") || { warn "  $_pad install failed; cannot stage under $TOOLCHAIN"; failed=$((failed + 1)); return 0; }
@@ -336,20 +531,7 @@ ensure_npm() {
     failed=$((failed + 1))
     return 0
   fi
-  # Every build but the one just linked — unless this harness is live, in which case
-  # the one it replaced may be the tree that session started from, and the daemon
-  # says so with `--skip <agent>`. Pruned on the next run with none live, so a
-  # superseded build survives for as long as anything might be on it.
-  if skipped "$_agent"; then
-    note "$_pad previous build kept: an agent is using it"
-  else
-    for _d in "$TOOLCHAIN/$_agent"-* "$TOOLCHAIN/$_agent".stage.*; do
-      [ -d "$_d" ] && [ "$_d" != "$_build" ] && rm -rf "$_d"
-    done
-    for _l in "$TOOLCHAIN/bin/$_agent".new.*; do
-      [ -L "$_l" ] && rm -f "$_l"
-    done
-  fi
+  prune_builds
   done_note "$_pad" "$_verb" "$_agent"
 }
 
@@ -444,6 +626,7 @@ ensure_kimi() {
 }
 
 main() {
+  take_lock
   if [ "$SOURCE" = npm ]; then _how="from the npm registry"; else _how="with each vendor's own installer"; fi
   if [ "$CHECK" = 1 ]; then say "agents (--check: nothing will be changed; $_how)"; else say "agents ($_how)"; fi
   ensure_claude

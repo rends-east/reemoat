@@ -252,7 +252,10 @@ function Domains({
 
   return (
     <section className={SETTINGS_SECTION}>
-      <h2 className={SETTINGS_HEADING}>Allowed domains</h2>
+      {/* No `<h2>` of its own: the section *is* the one field, and `Field`'s
+          `<label>` — required, and the thing that names the input — already
+          wears `SETTINGS_HEADING`. A heading above it said the same two words
+          twice, one line apart; cut 2026-09-04. */}
       <Field
         label="Allowed domains"
         value={draft}
@@ -260,7 +263,7 @@ function Domains({
         field={field}
         onReset={() => write({ clear: ["registration.email_domains"] })}
         placeholder="reemoat.com"
-        hint="Comma-separated. Empty means any address. A refused address reads exactly like a malformed one — the list is never published."
+        hint="Comma-separated; empty allows any. Refused sign-ups are not told why."
       />
       {dirty && (
         <Button
@@ -500,9 +503,11 @@ function ProvisioningKey(): ReactNode {
                  * installed" — which is the one place it must never go: an agent
                  * on that host runs as its owner, and `agentEnv`'s strip is
                  * hygiene rather than a fence. Keep it where you provision
-                 * *from*; what travels to a host is the enrollment code.
+                 * *from*; what travels to a host is the enrollment code. The
+                 * wording was cut on 2026-09-04 for fewer words; what it keeps is
+                 * the place — the machine you provision from, never a daemon host.
                  */
-                note="Shown once — only its hash is stored. Keep it on the machine you provision from; never on a host that will run a daemon."
+                note="Shown once. Keep it on the machine you provision from, never on a host that runs a daemon."
                 onDone={() => setShown(null)}
               />
             </div>
@@ -658,11 +663,12 @@ function Email({
        * there is no recovery channel at all, so a forgotten password is an
        * account an admin has to delete and recreate — which leaves that person's
        * machines revoked. Kept on screen rather than moved to the docs, because
-       * this is the screen where somebody decides not to bother.
+       * this is the screen where somebody decides not to bother. The wording
+       * was cut on 2026-09-04 for fewer words; what it keeps is the two things
+       * nobody can do without it — confirm a sign-up, reset a lost password.
        */}
       <p className="mt-1 text-xs text-muted">
-        Without it there is no registration confirmation and no password reset — an account that loses its password has
-        no way back.
+        Without it nobody can confirm a sign-up or reset a lost password.
       </p>
 
       <Field
@@ -681,7 +687,7 @@ function Email({
         field={field("smtp.port")}
         onReset={() => resetField("smtp.port")}
         placeholder="587"
-        hint="587 for STARTTLS, 465 for TLS. Never 25 — every major cloud blocks it outbound, and a blocked port hangs rather than refuses."
+        hint="Not 25 — clouds block it outbound, and a blocked port hangs rather than refuses."
       />
 
       <label htmlFor={securityId} className={`mt-3 block ${SETTINGS_HEADING}`}>
@@ -693,9 +699,9 @@ function Email({
         onChange={(event) => edit({ security: event.target.value })}
         className={`mt-1 w-full max-w-sm ${FIELD}`}
       >
-        <option value="starttls">STARTTLS — upgrade a plain connection, usually port 587</option>
-        <option value="implicit_tls">TLS — encrypted from the first byte, usually port 465</option>
-        <option value="plaintext">None — plain SMTP, for a local relay only</option>
+        <option value="starttls">STARTTLS (port 587)</option>
+        <option value="implicit_tls">TLS (port 465)</option>
+        <option value="plaintext">None (local relay only)</option>
       </select>
 
       <Field
@@ -705,7 +711,7 @@ function Email({
         field={field("smtp.username")}
         onReset={() => resetField("smtp.username")}
         placeholder="register@example.com"
-        hint="Almost always the full mailbox address, not the part before the @."
+        hint="Usually the full address."
       />
 
       {/*
@@ -757,7 +763,6 @@ function Email({
         field={field("mail.from")}
         onReset={() => resetField("mail.from")}
         placeholder="register@example.com"
-        hint="Both the From header and the envelope sender."
       />
       <Field
         label="Public URL"
@@ -766,13 +771,12 @@ function Email({
         field={field("mail.public_url")}
         onReset={() => resetField("mail.public_url")}
         placeholder="https://cp.example.com"
-        hint="Where links in messages point — the address people open in a browser, not the API's bind address."
+        hint="The address people open in a browser; links in mail point here."
       />
 
       {senderMismatch(draft) && (
         <p className="mt-3 max-w-sm text-xs text-muted">
-          The from address is not the mailbox you sign in as. Many providers refuse that unless it is an alias of it
-          — a relay that authorises a whole domain is the case where it is fine.
+          The from address is not the mailbox you sign in as. Many providers refuse that unless it is an alias.
         </p>
       )}
       {problem !== null && <p className="mt-3 text-sm text-danger">{problem}</p>}

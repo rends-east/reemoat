@@ -486,9 +486,10 @@ process.stdout.write("\nis this agent signed in\n");
    * environment, which left the two facts that decide *which binary answers*
    * asserted nowhere: the resolved path, and the stream its answer is read from.
    * Both are table-driven now, and a table is only worth something if something
-   * checks it is read — reverting `resolveLoginBinary` to `agent === "claude"`
-   * kept every driver green while codex sessions ran one build and its login
-   * drove another.
+   * checks it is read — reverting the override lookup in `chooseCli` (then
+   * `resolveLoginBinary`, which decided the probe's binary before `agentCli`
+   * took that over) to `agent === "claude"` kept every driver green while codex
+   * sessions ran one build and its login drove another.
    */
   const spawned = new Map<string, { command: string; args: readonly string[]; stream: string }>();
   const probeAs = async (
@@ -1766,13 +1767,45 @@ process.stdout.write("\nkeeping the agent CLIs current\n");
   await new Promise((r) => setTimeout(r, 0));
   check("a nudge runs it now", ran.length, 1);
   check("and the next run is armed a day away as usual", [armed.length, armed[1]?.delay], [2, UPDATE_INTERVAL_MS]);
+  /*
+   * ⚠ **A second nudge runs nothing, and this line was the opposite.** It pinned
+   * "a second nudge runs it again, off the day's timer" — and the daemon nudges
+   * from the pass it starts after every completed run, so with a harness the
+   * script cannot install the two fed each other: run, pass, still missing,
+   * nudge, run, for the daemon's life, three vendors' installers back-to-back.
+   * A nudge pulls the *first* run forward and nothing else; after it the day's
+   * timer is the retry.
+   */
   nudged.nudge();
   await new Promise((r) => setTimeout(r, 0));
-  check("a second nudge runs it again, off the day's timer", ran.length, 2);
+  check("a second nudge runs nothing: the day's timer stands", [ran.length, armed.length, armed[1]?.delay], [1, 2, UPDATE_INTERVAL_MS]);
   await nudged.shutdown();
   nudged.nudge();
   await new Promise((r) => setTimeout(r, 0));
-  check("after shutdown a nudge runs nothing", ran.length, 2);
+  check("after shutdown a nudge runs nothing", ran.length, 1);
+  {
+    /*
+     * The loop itself, as the daemon wires it: `onUpdated` starts a resume pass
+     * whose end nudges when the harness is still missing. Modelled with the pass
+     * as a macrotask, which is the shape that made the real one tight — the timer
+     * is re-armed before the pass ends, so a nudge that honoured any armed timer
+     * ran again at once. It has to settle at one run.
+     */
+    ran.length = 0;
+    armed.length = 0;
+    let passes = 0;
+    const loop = make({
+      onUpdated: () => {
+        passes += 1;
+        setTimeout(() => loop.nudge(), 0);
+      },
+    });
+    loop.nudge();
+    await new Promise((r) => setTimeout(r, 20));
+    check("a pass that still finds no CLI does not run the installer again", [ran.length, passes], [1, 1]);
+    check("and the next run is the day's", [armed.length, armed[1]?.delay], [2, UPDATE_INTERVAL_MS]);
+    await loop.shutdown();
+  }
   {
     ran.length = 0;
     armed.length = 0;
@@ -1912,6 +1945,21 @@ process.stdout.write("\nkeeping the agent CLIs current\n");
   check("with the run counted as complete", echoed.ok, true);
   if (priorToken === undefined) delete process.env["REEMOAT_TOKEN"];
   else process.env["REEMOAT_TOKEN"] = priorToken;
+
+  /*
+   * **A script that cannot be spawned at all.** `spawn` emits `error` and then
+   * `close`, and `finish`'s `settled` guard is what keeps the promise from being
+   * resolved twice; driven with the real runner because the injected `run` that
+   * throws above never reaches that arm. Both spellings of "not runnable": no
+   * such file, and a file with no execute bit.
+   */
+  const gone = await runScript(join(sandbox, "no-such-agents.sh"), [], 1000);
+  check("a script that is not there is a failed run naming why", [gone.ok, gone.detail?.includes("ENOENT")], [false, true]);
+  const inert = join(sandbox, "agents-inert.sh");
+  writeFileSync(inert, "#!/bin/sh\necho never\n");
+  chmodSync(inert, 0o644);
+  const refused = await runScript(inert, [], 1000);
+  check("and so is one that cannot be executed", [refused.ok, refused.detail?.includes("EACCES")], [false, true]);
 
   /*
    * ⚠ **The deadline reaches the grandchild.** `execFile`'s own timeout signalled

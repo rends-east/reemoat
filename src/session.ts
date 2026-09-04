@@ -68,7 +68,8 @@ const AUTH_REQUIRED = -32000;
  * The lead worth measuring is `session/list`, which claude does advertise.
  *
  * **One caveat, and it is the adapter's rather than ours.** It maps *two* SDK
- * failures onto this code (`acp-agent.js:4287`): "No conversation found with
+ * failures onto this code (claude-agent-acp 0.63.0, `createSession`, in the
+ * `catch` around `q.initializationResult()`): "No conversation found with
  * session ID", which is settled, and "Query closed before response received",
  * which is a transport hiccup and is not. We cannot tell them apart from here,
  * so treating the code as settled can strand a session that a retry would have
@@ -2706,9 +2707,10 @@ function spawnEnvOf(options: SessionOptions): NodeJS.ProcessEnv {
  * because there are no neighbours.
  *
  * ⚠ **`providerId` comes off the agent's own answer.** Measured 2026-08-25:
- * claude calls it `main`, codex calls it `custom-gateway`. Written down, this
- * would configure one agent and hand the other an `invalid_params` about a
- * provider it has never heard of.
+ * claude calls it `main`, codex calls it `custom-gateway` — and `codex-acp`
+ * 1.8.0 calls it `openai` (2026-09-04), so the id has moved once already.
+ * Written down, this would configure one agent and hand the other an
+ * `invalid_params` about a provider it has never heard of.
  *
  * ⚠ **The credential goes here rather than into the environment this daemon
  * spawns — which is one hop, and not the secrecy an earlier draft claimed.** An

@@ -1654,3 +1654,196 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     "gone",
   );
 }
+
+process.stdout.write("\na model id typed rather than listed\n");
+{
+  const { adoptModels, allModels, choiceRefusal, groupModels, supportingHarnesses } = await import("../src/agents.js");
+
+  const system = (over: Partial<SystemInfo> = {}): SystemInfo => ({
+    id: "moonshot",
+    displayName: "Moonshot",
+    apiType: "anthropic",
+    routable: true,
+    nativeHarness: "kimi",
+    loginVia: "kimi",
+    models: [],
+    keySet: true,
+    keyUpdatedAt: 1,
+    ...over,
+  });
+  const claude = { providerId: "main", supported: ["anthropic", "bedrock", "vertex"] };
+  const kimiPublishes = (id: string, name: string) =>
+    ({ kimi: { models: [{ id, name, description: null, group: null }], routing: null, error: null } }) as never;
+  const none = {} as never;
+
+  /*
+   * ⚠ **Q3.501's mechanism and not a third `source`.** The typed id is
+   * substituted into the *listing* and `allModels` is never told; what comes out
+   * is one table row whose name is the id, because nothing else names it. The
+   * table is a starting set — all three Moonshot ids it shipped with were retired
+   * on 2026-05-25 and the daemon validates a routed id against nothing but a
+   * length — so this is the door for every id it does not hold.
+   */
+  const typed = allModels(adoptModels([system()], [{ system: "moonshot", model: "kimi-k2.7-code-highspeed" }]), none);
+  check(
+    "a typed id under a routable system is exactly one table row, named by its id",
+    typed.map((one) => [one.system.id, one.modelId, one.modelName, one.source]),
+    [["moonshot", "kimi-k2.7-code-highspeed", "kimi-k2.7-code-highspeed", "table"]],
+  );
+  check(
+    "trimmed, and an empty one is not a row",
+    allModels(adoptModels([system()], [{ system: "moonshot", model: "  kimi-k3 " }, { system: "moonshot", model: "   " }]), none).map((one) => one.modelId),
+    ["kimi-k3"],
+  );
+  check(
+    "one the table already names is not carried twice, and the table's name stands",
+    allModels(adoptModels([system({ models: [{ id: "kimi-k3", name: "Kimi K3" }] })], [{ system: "moonshot", model: "kimi-k3" }]), none).map((one) => `${one.modelId}:${one.modelName}`),
+    ["kimi-k3:Kimi K3"],
+  );
+  check(
+    "and nor is the same id typed twice",
+    adoptModels([system()], [{ system: "moonshot", model: "x" }, { system: "moonshot", model: "x" }])[0]?.models.length,
+    1,
+  );
+  check(
+    "a system it was not typed under is the same object it was",
+    adoptModels([system(), system({ id: "zhipu", displayName: "Z.ai (GLM)", nativeHarness: null, loginVia: null })], [{ system: "moonshot", model: "kimi-k3" }])[1] ===
+      undefined
+      ? "lost"
+      : "kept",
+    "kept",
+  );
+  /*
+   * ⚠ **Published wins the row, the table wins the name — the existing dedupe,
+   * with no new arm.** Its presence proves the native harness is keyed, so the
+   * row asks for no key; and the typed spelling is what the person will look for,
+   * so it is what the row says.
+   */
+  const dedupe = allModels(adoptModels([system()], [{ system: "moonshot", model: "kimi-k3" }]), kimiPublishes("kimi-k3", "K3"));
+  check(
+    "one a harness also publishes dedupes to one row: published wins the row, the typed id the name",
+    dedupe.map((one) => [one.modelId, one.modelName, one.source]),
+    [["kimi-k3", "kimi-k3", "published"]],
+  );
+  check("and that row needs no key", choiceRefusal(null, dedupe[0]!, null), null);
+  /*
+   * `keyMissing`'s biconditional, true of the typed row word for word: a table id
+   * runs only routed, routed signs with the pasted key.
+   */
+  const unkeyed = allModels(adoptModels([system({ keySet: false })], [{ system: "moonshot", model: "kimi-k3" }]), none)[0]!;
+  check("with no key saved it is greyed by the no-key sentence", choiceRefusal(null, unkeyed, null), "No Moonshot key on this machine.");
+  check("and with one it is not", choiceRefusal(null, typed[0]!, null), null);
+  /*
+   * `pairFailure`'s two arms: the native harness is refused a table spelling for
+   * the *name*, and a routed one may use it.
+   */
+  check("the native harness is refused it for the name", choiceRefusal("kimi", typed[0]!, null), "Kimi Code has no model called kimi-k2.7-code-highspeed.");
+  check("and a routed harness may use it", choiceRefusal("claude", typed[0]!, claude), null);
+  check(
+    "which is what the row's own glyphs say",
+    supportingHarnesses(typed[0]!, { claude: { models: [], routing: claude, error: null } } as never, ["claude", "kimi"]),
+    ["claude"],
+  );
+  check("and it sits in its provider's group like any other row", groupModels(typed).map((one) => [one.system.id, one.choices.length]), [["moonshot", 1]]);
+  /*
+   * ⚠ **The negative control, and it is the load-bearing half.** A native system's
+   * ids are whatever its CLI publishes; a typed one there is refused at start with
+   * the CLI's own sentence — a box producing only refusals. `routable` absent is an
+   * older daemon with no routed door.
+   */
+  check(
+    "no row where the system is not routable, and none where an older daemon never said",
+    [
+      adoptModels([system({ id: "anthropic", displayName: "Anthropic", routable: false, nativeHarness: "claude", loginVia: "claude" })], [{ system: "anthropic", model: "claude-opus-5" }])[0]?.models,
+      adoptModels([system({ routable: undefined })], [{ system: "moonshot", model: "kimi-k3" }])[0]?.models,
+    ],
+    [[], []],
+  );
+
+  /*
+   * ⚠ **The same substitution is what keeps Save alive over a stored preset whose
+   * model has left every list.** `current` is a lookup in the catalogue and Save is
+   * `disabled` on `current === null`, so such a preset drew `Choose` under a filled
+   * field and could not be renamed. The pure half: the adopted pick is a row the
+   * lookup finds. The wiring half is read off the builder below.
+   */
+  const stored = { system: "moonshot", model: "kimi-k2-thinking" };
+  const before = allModels([system({ models: [{ id: "kimi-k3", name: "Kimi K3" }] })], none);
+  const after = allModels(adoptModels([system({ models: [{ id: "kimi-k3", name: "Kimi K3" }] })], [stored]), none);
+  check(
+    "a stored model no list holds is absent from the catalogue as listed, and present once adopted",
+    [
+      before.some((one) => one.system.id === stored.system && one.modelId === stored.model),
+      after.filter((one) => one.system.id === stored.system && one.modelId === stored.model).map((one) => `${one.modelName}:${one.source}`),
+    ],
+    [false, ["kimi-k2-thinking:table"]],
+  );
+
+  const builder = stripComments(readFileSync(new URL("../src/ui/AgentBuilder.tsx", import.meta.url), "utf8"));
+  const between = (from: string, to: string): string => {
+    const start = builder.indexOf(from);
+    if (start === -1) return "";
+    const end = builder.indexOf(to, start + from.length);
+    return end === -1 ? "" : builder.slice(start, end);
+  };
+  const listed = between("const listed = useMemo(", "const catalogueAsListed");
+  const orphan = between("const catalogue = useMemo(", "const openRouterLine");
+  const field = between("<TypedModel", "/>");
+  check("the three regions were found", [listed.length > 0, orphan.length > 0, field.length > 0], [true, true, true]);
+  /*
+   * At the same site as the OpenRouter substitution and before `allModels` — the
+   * whole of Q3.501's mechanism is *where* the row goes in.
+   */
+  check(
+    "a typed id is substituted into the listing at the OpenRouter site, and `allModels` is not told",
+    [/adoptModels\(read, typed\)/.test(listed), /OPENROUTER_SYSTEM_ID/.test(listed), /allModels/.test(listed)],
+    [true, true, false],
+  );
+  /*
+   * ⚠ **Only a pick the catalogue does not hold is adopted, and the test is
+   * against the catalogue.** Adopting every pick would hand `allModels` a table
+   * row for a *published* one — opencode's spelling of an OpenRouter model — and
+   * the dedupe would rename it to its slug.
+   */
+  check(
+    "and a stored pick is adopted only when the catalogue as listed does not hold it",
+    [/catalogueAsListed\.some\(/.test(orphan), /adoptModels\(listed, \[picked\]\)/.test(orphan), /return catalogueAsListed;[\s\S]*adoptModels/.test(orphan)],
+    [true, true, true],
+  );
+  check(
+    "Save is still gated on `current`, which is a lookup in that catalogue",
+    [/disabled=\{busy \|\| current === null/.test(builder), /catalogue\.find\(/.test(builder)],
+    [true, true],
+  );
+  /*
+   * The control itself: under the group, behind the same gate `adoptModels`
+   * applies — `=== true`, so an older daemon's absent field draws nothing — and
+   * bounded on the field by the daemon's own number, read off the daemon so the
+   * two cannot drift.
+   */
+  check(
+    "the field is drawn only where the daemon said `routable`, and the id is bounded on the field",
+    [
+      /group\.system\.routable === true && \(\s*<TypedModel/.test(builder),
+      (builder.match(/<TypedModel/g) ?? []).length,
+      /maxLength=\{MAX_MODEL_CHARS\}/.test(builder),
+    ],
+    [true, 1, true],
+  );
+  const daemon = readFileSync(new URL("../../../src/server.ts", import.meta.url), "utf8");
+  check(
+    "and the bound is the daemon's",
+    [builder.match(/const MAX_MODEL_CHARS = (\d+);/)?.[1] ?? null, daemon.match(/const MAX_MODEL_CHARS = (\d+);/)?.[1] ?? null],
+    ["256", "256"],
+  );
+  /*
+   * The row is picked by a tap like any other, so the id seeds the name through
+   * the one door a pick has — `defaultAgentName(choice.modelName)`, and the typed
+   * row's name is its id. No second `setPicked` for a typed id exists.
+   */
+  check(
+    "typing reports the id and nothing else: no pick, no name, no navigation",
+    [/onType=\{\(system, model\) =>\s*setTyped\(/.test(builder), (builder.match(/setPicked\(/g) ?? []).length],
+    [true, 3],
+  );
+}

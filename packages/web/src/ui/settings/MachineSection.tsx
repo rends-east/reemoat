@@ -192,12 +192,14 @@ export function MachineSection({
        * prose at all here — the first takes `lede={false}`, the second has none
        * left to suppress. `ambiguousNames` stays a property of the list: a screen
        * has no siblings to be ambiguous against, which is why this names the id
-       * and not the machine.
+       * and not the machine. The wording was cut on 2026-09-04 for fewer words;
+       * what it keeps is the id, that nothing here is shared with the other
+       * machines, and that a plugin runs there as you — "one daemon's database and
+       * one host's home" is now this comment's fact rather than the sentence's.
        */}
       <p className="text-xs text-muted">
-        Sign-ins, agents and plugins belong to <code className="text-muted/80">{machine.id}</code> —
-        they live in that daemon's database and on that host's home, and a plugin runs there as you.
-        Nothing here is shared with your other machines.
+        Everything here belongs to <code className="text-muted/80">{machine.id}</code> and is not
+        shared with your other machines. A plugin runs there as you.
       </p>
 
       {/*
@@ -229,7 +231,11 @@ export function MachineSection({
        * ⚠ **Never minted on mount.** There is one live code per machine and
        * minting burns the previous one, so a screen that mints on entry destroys
        * a code on every visit and every reload. The button is offered; the code
-       * is not.
+       * is not. The sentence over the button was cut on 2026-09-04 for fewer
+       * words to the one fact that bears on pressing it — that it replaces any
+       * code already outstanding; single-use, shown-once and what redeeming does
+       * (identity, tunnel-key rotation) left the paragraph, and the first two are
+       * still said on the code itself once it is minted.
        *
        * ⚠ **It sits directly under Name, and it used to sit between Systems and
        * Retire on an argument that pointed the other way.** That argument was
@@ -244,19 +250,16 @@ export function MachineSection({
       {setupOffered && (
         <section className={SETTINGS_SECTION}>
           <h2 className={SETTINGS_HEADING}>Setup code</h2>
-          <p className="mt-2 text-xs text-muted">
-            Single-use and shown once — only its hash is stored. Redeeming it gives this host its
-            identity and rotates its tunnel key, and it replaces any code already outstanding.
-          </p>
+          <p className="mt-2 text-xs text-muted">Replaces any code already outstanding.</p>
           <Button className="mt-3" disabled={busy} onClick={mint}>
-            {busy ? <Spinner /> : "Setup code"}
+            {busy ? <Spinner /> : "Generate"}
           </Button>
           {code !== null && (
             <div className="mt-2">
               <OneTimeSecret
                 label={`Start the daemon on ${machine.name} with`}
                 value={enrollmentLines(code.url, code.code)}
-                note={`Single-use, ${enrollmentExpiryText(code.expiresAt, Date.now())}. Shown once — only its hash is stored.`}
+                note={`Single-use, ${enrollmentExpiryText(code.expiresAt, Date.now())}. Shown once.`}
                 onDone={() => setCode(null)}
               />
             </div>
@@ -315,13 +318,13 @@ export function MachineSection({
           <section className={SETTINGS_SECTION}>
             <h2 className={SETTINGS_HEADING}>Agents</h2>
             {/* No "on this machine": the lede at the top has already said which
-                daemon everything on this screen belongs to. */}
-            <p className="mb-2 text-xs text-muted">
-              Which agents the New session screen offers, and in what order.
-            </p>
+                daemon everything on this screen belongs to. The paragraph that
+                stood here was cut on 2026-09-04 for fewer words; the fact it
+                carried — that this is what New session offers — moved into the
+                row's own subline, still without the machine. */}
             <ChoiceRow
               title="Agents"
-              subline="Reorder, hide, add and edit"
+              subline="What New session offers — reorder, hide, add, edit"
               trailing={<Icon as={ChevronRight} size={16} className="shrink-0 text-faint" />}
               onClick={() => navigate(agentStripPath(machineId))}
             />
@@ -368,7 +371,7 @@ export function MachineSection({
              * neither the triangle nor the live region.
              */
             <Empty>
-              {machine.name} has not enrolled yet, so it has no systems, agents or plugins to list.
+              {machine.name} has not enrolled yet, so there is nothing to list.
               {setupOffered ? " Start its daemon with the setup code above." : ""}
             </Empty>
           ) : read === "asking" ? (
@@ -415,13 +418,14 @@ export function MachineSection({
         <section className="mt-12 border-t border-edge pt-5">
           <h2 className={RETIRE_HEADING}>Retire this machine</h2>
           {/* The consequence as prose above the control — `AccountSection`'s
-              own-keys idiom — rather than crammed into a confirmation. */}
+              own-keys idiom — rather than crammed into a confirmation. Cut on
+              2026-09-04 for fewer words; every consequence is kept: the name and
+              the slot come back, the setup code dies, sessions and issued tokens
+              do not, and adding it back is a new id that drops every share. */}
           <p className="mt-2 text-xs text-muted">
-            Frees the name and a slot against your machine limit, and stops any outstanding setup
-            code working. It mints no new id and deletes no sessions, and tokens already issued for
-            it keep verifying at the daemon until they expire. ⚠ Retiring and adding again is not a
-            re-install: the new machine has a new id, and everybody it was shared with loses it
-            silently.
+            Frees the name and a machine-limit slot and voids any outstanding setup code. Sessions
+            are kept; tokens already issued keep working until they expire. ⚠ Adding it back is not
+            a re-install: it gets a new id, and everybody it was shared with loses it silently.
           </p>
           {confirming ? (
             /* The answer that undoes the question is **last**: `.tap` removes the

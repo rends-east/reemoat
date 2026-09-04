@@ -991,7 +991,7 @@ process.stdout.write("\nthe three lines a daemon is started with\n");
       "the command is inside the door arm, not beside the notice",
       [
         /mayAddMachine\(state\.me\) \? \([\s\S]{0,1200}installCommand\(/.test(browser),
-        /canAdd && \([\s\S]{0,600}installCommand\(/.test(machines),
+        /canAdd && <CommandLine command=\{installCommand\(/.test(machines),
       ],
       [true, true],
     );

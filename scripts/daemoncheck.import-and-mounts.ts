@@ -15,9 +15,11 @@ import {
 import { forgetStalled, isStalled, listDirs, makeDir, PathError, probeExists, resolveCwd } from "../src/browse.js";
 import { isRemoteType, mountFor, parseBsdMounts, parseLinuxMounts, readMounts } from "../src/mounts.js";
 import { atOrUnder, atOrUnderResolved, containedIn, containedInResolved } from "../src/paths.js";
-import { RelayTunnel } from "../src/relay/tunnel.js";
+import { WebSocketServer } from "ws";
+import { RelayTunnel, announcedAgentClis } from "../src/relay/tunnel.js";
 import { DAEMON_VERSION } from "../src/version.js";
-import { RELAY_PROTOCOL_VERSION } from "../src/relay/protocol.js";
+import { AGENT_CLIS_HEADER, DAEMON_VERSION_HEADER, RELAY_PROTOCOL_VERSION, formatAgentClis } from "../src/relay/protocol.js";
+import type { AgentCliChoice } from "../src/runtime/types.js";
 import { check } from "./daemoncheck.env.js";
 import { sandbox, users, tokenWith, tokenFor, registry, app, get } from "./daemoncheck.fixtures.js";
 
@@ -975,4 +977,80 @@ process.stdout.write("\na relay URL this daemon cannot dial\n");
   check("a URL already stored in ws form is dialled rather than refused", wsForm.threw, null);
   check("and it really reached the dial", wsForm.events[0]?.split(" ")[0], "connecting");
   check("keeping the scheme it arrived with", wsForm.events[0]?.includes("ws://127.0.0.1:1"), true);
+}
+
+/* ------------------------------------------------------------------ *
+ * What the daemon announces about its CLIs, and off what
+ *
+ * `relaycheck` owns the far end — the header read, bounded, written to the row,
+ * answered by the fleet route. What is driven here is the daemon's half, which
+ * that driver reaches only as a value it hands in: that the inventory is read off
+ * `agentCli`, the same choice a launch resolves through, so the report names the
+ * build a session would get; that a harness with no CLI is left out rather than
+ * sent as anything; and that a daemon with nothing to announce sends **no
+ * header**, which is what makes it indistinguishable on the wire from one older
+ * than the header — the property the whole "optional on the reader" rule rests
+ * on. The last two are read off a bare WebSocket server rather than believed
+ * from the function, because the function's answer and the header's presence
+ * are two edits apart.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nwhat the daemon announces about its CLIs\n");
+{
+  const runtimeWith = (choices: Record<string, AgentCliChoice | null>): { agentCli: (agent: string) => Promise<AgentCliChoice | null> } => ({
+    agentCli: async (agent: string) => choices[agent] ?? null,
+  });
+  const choice = (version: string | null): AgentCliChoice => ({ path: "/usr/local/bin/x", version, source: "path" });
+
+  check(
+    "the inventory is read off agentCli, one entry per harness that has a CLI",
+    await announcedAgentClis(runtimeWith({ claude: choice("2.1.259"), codex: choice(null), kimi: null, opencode: choice("1.0.0") })),
+    { claude: "2.1.259", codex: null, opencode: "1.0.0" },
+  );
+  check(
+    "a version the grammar would refuse is sent as unknown rather than sent and refused whole",
+    await announcedAgentClis(runtimeWith({ claude: choice("2.1.259 (Claude Code)") })),
+    { claude: null },
+  );
+  check("a machine with no CLI for any harness announces nothing", await announcedAgentClis(runtimeWith({})), {});
+  check("in the order the harnesses ship, which is the order the header carries", Object.keys(await announcedAgentClis(runtimeWith({ opencode: choice("1"), claude: choice("2") }))), ["claude", "opencode"]);
+
+  /*
+   * The wire. A bare `ws` server standing in for the relay, reading the upgrade
+   * request's headers and nothing else — the handshake completes so the tunnel
+   * believes it connected, and is torn down at once.
+   */
+  const heard = async (options: { agentClis?: () => Promise<Record<string, string | null>> }): Promise<Record<string, string | undefined>> => {
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    await new Promise<void>((resolve) => server.on("listening", resolve));
+    const { port } = server.address() as { port: number };
+    const headers = new Promise<Record<string, string | undefined>>((resolve) => {
+      server.on("connection", (socket, request) => {
+        const seen = {
+          version: request.headers[DAEMON_VERSION_HEADER],
+          clis: request.headers[AGENT_CLIS_HEADER],
+        } as Record<string, string | undefined>;
+        socket.terminate();
+        resolve(seen);
+      });
+    });
+    const tunnel = RelayTunnel.start({ relayUrl: `ws://127.0.0.1:${port}`, tunnelKey: "tk_daemoncheck", local: { host: "127.0.0.1", port: 1 }, ...options });
+    const timeout = new Promise<Record<string, string | undefined>>((resolve) => setTimeout(() => resolve({ timeout: "yes" }), 5_000).unref());
+    const seen = await Promise.race([headers, timeout]);
+    await tunnel.stop();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    return seen;
+  };
+
+  const announced = await heard({ agentClis: async () => ({ claude: "2.1.259", codex: null }) });
+  check("the daemon's build rides the handshake", announced["version"], DAEMON_VERSION);
+  check("and the inventory rides beside it, in the header's compact form", announced["clis"], formatAgentClis({ claude: "2.1.259", codex: null }));
+  check("which is what the far end reads back", announced["clis"], "claude=2.1.259;codex=-");
+
+  const empty = await heard({ agentClis: async () => ({}) });
+  check("a daemon with no CLI to name sends no header at all, not an empty one", empty["clis"], undefined);
+  check("while still saying what build it is", empty["version"], DAEMON_VERSION);
+
+  const unwired = await heard({});
+  check("and a tunnel started with nothing to announce sends none either", unwired["clis"], undefined);
 }

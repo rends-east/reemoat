@@ -46,8 +46,8 @@
     "web:build": "pnpm --filter @reemoat/web build"
   },
   "dependencies": {
-    "@agentclientprotocol/claude-agent-acp": "0.63.0",
-    "@agentclientprotocol/codex-acp": "1.1.9",
+    "@agentclientprotocol/claude-agent-acp": "0.73.0",
+    "@agentclientprotocol/codex-acp": "1.8.0",
     "@agentclientprotocol/sdk": "1.3.0",
     "@hono/node-server": "^1.19.17",
     "@hono/node-ws": "^1.3.1",

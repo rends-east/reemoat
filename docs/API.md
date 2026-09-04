@@ -233,7 +233,7 @@ password change is refused all of it by a second positional gate.
 | `GET` · `POST /v1/admin/signing-keys` · `DELETE /v1/admin/signing-keys/:kid` | Rotate publishes **both**; retire once the fleet has re-enrolled |
 | `GET` · `POST /v1/admin/provisioning-key` | Minting is the only verb; nothing ever draws the key |
 | `GET /v1/admin/relay` | Which tunnels are up, and how long an offline machine has been that way |
-| `GET /v1/admin/fleet` | What every machine is *running*, connected or not — the inventory a protocol change is planned from |
+| `GET /v1/admin/fleet` | What every machine is *running*, connected or not — the daemon build, the protocol it agreed, and which build of each agent CLI it would launch (`agents`, harness → version, as of its last dial; `null` from a daemon older than the field). The inventory a protocol change or an agent rollout is planned from |
 
 ### The web UI
 

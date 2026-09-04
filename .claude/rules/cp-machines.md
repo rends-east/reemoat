@@ -148,22 +148,31 @@ nothing is how the quoting stops agreeing.
 
 **`installCommand` takes the origin the page is already on**, never a constant —
 `packages/web/src/cp.ts` has no base URL at all for the same reason, so a
-self-hosted instance prints a command that joins itself. It is drawn on the rail's
-empty state and on Settings → Machines, **inside the `mayAddMachine` arm on
-both**: a command that adds a machine, printed under the sentence saying there is
-no way to add one, would leave `machineQuotaNotice` literally `null`-iff-true
-while the property that pair exists for was gone. It is deliberately **not** in
-`NewSession.tsx`'s `MachineLine` — a field label in the composer strip on a 390px
-phone, beside a door that already leads to the screen that has it. `webcheck`
-asserts all three placements, because "put it in all three" is what a reader of
-the other two would reasonably do.
+self-hosted instance prints a command that joins itself. **It is the only way a
+machine is added from this app.** The by-name form on Settings → Machines, which
+minted an enrollment code to carry to a host by hand, went on 2026-09-04: two
+ways of doing one thing on a screen whose reader wants one, and the host with a
+checkout runs the same script. `cpctl enroll` still mints a code for an operator.
+It is drawn in three places — the rail's empty state below `lg`, the content
+pane's `NothingSelected` at `lg` (where the rail is 280px and the pane beside it
+was saying "pick a session" over an empty list), and Settings → Machines — and
+**inside the `mayAddMachine` arm on all three**: a command that adds a machine,
+printed under the sentence saying there is no way to add one, would leave
+`machineQuotaNotice` literally `null`-iff-true while the property that pair
+exists for was gone. It is deliberately **not** in `NewSession.tsx`'s
+`MachineLine` — a field label in the composer strip on a 390px phone, beside a
+door that already leads to the screen that has it. `webcheck` asserts the
+placements and the form's absence. Since nothing in the tab adds a machine any
+more, `store.ts`'s poll re-lists an empty fleet on every tick and re-reads `me`
+when the first machine lands, which is how the machine enrolled from a terminal
+appears without a wake.
 
 ## Layout
 
 | File | Holds |
 |---|---|
 | `packages/web/src/enrollment.ts` | The three lines a daemon is started with, **and `installCommand`**, as shell **data**: `controlPlaneUrl` comes from the request's own `Host`, and a backtick survives `URL.origin`. `webcheck` runs `cpctl.ts`'s own `enrollmentLines` body off disk, so the copies are compared by behaviour |
-| `packages/web/src/quota.ts` | How many machines *this person* may have, and what to say when they may not. `mayAddMachine` reads the control plane's own `canAddMachine` and **fails open** on absence, `AddMachine` being the only way to create a machine anywhere in this app; `webcheck` pins the pair — a notice is `null` **iff** the door is drawn. Also `machineLimitProblem`, the validator both admin screens call, and `machineLimitChangeNotice`, whose non-`null` **is** the decision to confirm a lowering |
+| `packages/web/src/quota.ts` | How many machines *this person* may have, and what to say when they may not. `mayAddMachine` reads the control plane's own `canAddMachine` and **fails open** on absence — it gates the one-line installer, the only way a machine is added from this app; `webcheck` pins the pair — a notice is `null` **iff** the door is drawn. Also `machineLimitProblem`, the validator both admin screens call, and `machineLimitChangeNotice`, whose non-`null` **is** the decision to confirm a lowering |
 | `packages/control-plane/src/machines.ts` | The label, the name that cannot collide, create-plus-grant in one transaction, `releaseOwner`, and `isUniqueViolation`, exported so a third caller one file over is not a third copy of a `"UNIQUE"` string match. `MAX_MACHINES_PER_USER` is the **ceiling** and lives here; the limit does not. `createOwnedMachine` takes the limit as a **required** argument, so both call sites are a compile error until they say which limit they mean |
 | `packages/control-plane/src/quota.ts` | **The rank rule and nothing else** — one SQL statement answering owner, position and override together, and the clamp that keeps a row written by a looser release from out-ranking this one's ceiling. `null` from `machineStanding` means *nobody owns it* and every caller must read that as allowed: `?.over ?? true` is the natural spelling and takes every pre-ownership machine offline. Its own statement cache, because the SQL and the rule that reads it are one rule |
 

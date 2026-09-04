@@ -114,8 +114,12 @@ relay's rows are cleared by its replacement at boot. Q4.35.
   path.** `machines`, `users`, `grants` and a ≤1/s-cached `signing_keys.public_jwk`
   per proxied request; `machine_tunnel_keys` on dial. The writes are
   `relay_tunnels`, on register, on unregister and on a 5s flush; and `machines`'
-  three `daemon_*` columns, **on dial only** — `recordDaemonBuild`, which is what
-  `cpctl admin fleet` reads back. Both are **best-effort, every statement
+  four `daemon_*` columns, **on dial only** — `recordDaemonBuild`, which is what
+  `cpctl admin fleet` reads back. The fourth is `daemon_agents`, the CLI
+  inventory off `AGENT_CLIS_HEADER`, read by `readAgentClisHeader` under
+  `readDaemonVersionHeader`'s rule with one difference: a list is refused
+  **whole** to `null` where a label is cut, because a list cut mid-entry stores a
+  version nothing reports. Neither refusal costs the dial. Both are **best-effort, every statement
   wrapped**, because a `SQLITE_BUSY` against the 250ms timeout the two processes
   share must cost one stale row rather than reach a tunnel's lifecycle. The flush
   stamps everything live with one timestamp and sweeps this relay's rows older
@@ -179,7 +183,7 @@ relay's rows are cleared by its replacement at boot. Q4.35.
 
 | File | Holds |
 |---|---|
-| `src/relay/protocol.ts` | The tunnel's shared vocabulary: version, handshake headers, close codes, bounds. Imported by the control plane — the one-way rule still holds |
+| `src/relay/protocol.ts` | The tunnel's shared vocabulary: version, handshake headers, close codes, bounds — and the one grammar of the CLI inventory, `parseAgentClis`/`formatAgentClis`, so the daemon's spelling and the relay's reading cannot drift. Imported by the control plane — the one-way rule still holds, which is why it may import nothing of the daemon's; `announcedAgentClis`, which needs `AGENT_IDS` and the runtime, lives in `tunnel.ts` |
 | `src/relay/tunnel.ts` | The daemon's end: dial out, run an h2 *server* on the socket it dialled, splice each CONNECT to loopback, reconnect with full jitter |
 | `packages/web/src/machine.ts` | One machine's token and reachability. `forgetRoute` drops the belief that it is up, never on an HTTP status. Also `missingRowReason` |
 | `packages/web/src/stream.ts` | One session's socket: rotation before expiry, the close-code table, the cursor |

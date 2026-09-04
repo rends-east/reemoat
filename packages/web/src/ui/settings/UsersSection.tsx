@@ -60,8 +60,7 @@ export function UsersSection({ me, config }: { me: Me | null; config: InstanceCo
   return (
     <div>
       <p className="text-xs text-muted">
-        Everybody here signs in with a name and a password, and adds their own machines. Sharing one machine between
-        two people is still <code className="font-mono">cpctl admin grant</code>.
+        Sharing one machine between two people is still <code className="font-mono">cpctl admin grant</code>.
       </p>
 
       <CreateUser
@@ -85,14 +84,13 @@ export function UsersSection({ me, config }: { me: Me | null; config: InstanceCo
         <OneTimeSecret
           label={`Password for ${created.name}`}
           value={created.password}
-          note="Shown once — only its hash is stored. They must replace it the first time they sign in."
+          note="Shown once. They must replace it the first time they sign in."
           onDone={() => setCreated(null)}
         />
       )}
       {created !== null && created.password === undefined && (
         <p className="mt-3 text-sm text-muted">
-          Invitation sent to {created.email}. They choose their own password from the link — nobody else ever
-          sees one.{" "}
+          Invitation sent to {created.email}.{" "}
           <button type="button" onClick={() => setCreated(null)} className="tap underline hover:text-fg">
             Dismiss
           </button>
@@ -251,8 +249,8 @@ function CreateUser({
             className={`mt-2 w-full max-w-sm ${FIELD}`}
           />
           <p className="mt-1 max-w-sm text-xs text-muted">
-            With an address they are invited and choose their own password. Without one you are handed a temporary
-            password to pass on, and they must replace it before they can do anything.
+            With an address they are invited to set their own password; without one you get a temporary password to
+            pass on.
           </p>
         </>
       )}
@@ -709,10 +707,11 @@ function UserRow({
                 // Said before the button rather than after the surprise: cp.ts
                 // makes the same point at `revokeMyKey`. There is no self-refusal
                 // on the server, deliberately — the account this most needs to
-                // work on is the one whose key just leaked.
+                // work on is the one whose key just leaked. The wording was cut
+                // on 2026-09-04 for fewer words; what it keeps is the consequence,
+                // that this tab is signed out.
                 <p className="mt-2 text-2xs text-faint">
-                  These are your own. Revoking the one this browser is holding signs this tab out on its next
-                  request.
+                  Revoking the key this browser is signed in with signs this tab out.
                 </p>
               )}
             </>
