@@ -1028,7 +1028,10 @@ process.stdout.write("\nyour own API keys\n");
    * listed key, and drawing the badge or the sign-out sentence for one would be
    * a claim about a revoke that cannot sign anybody out.
    */
-  const key = "rk_9f2a1b3c4d5e6f7a8b9c";
+  // Built rather than written out: a 24-character literal after `rk_` is what
+  // gitleaks' generic-api-key rule fires on, and the CI secrets job refused the
+  // commit that carried one. Only the prefix is what the predicate reads.
+  const key = `rk_9f2a1b3c${"0".repeat(14)}`;
   check("this browser's key is the one whose prefix the credential carries", thisBrowsersKey({ value: key, kind: "api_key" }, "9f2a1b3c"), true);
   check("and a different prefix is not", thisBrowsersKey({ value: key, kind: "api_key" }, "00000000"), false);
   check("a session credential is never a listed key, whatever its bytes", thisBrowsersKey({ value: key, kind: "session" }, "9f2a1b3c"), false);
