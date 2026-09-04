@@ -58,18 +58,18 @@ bug in the file.
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 123 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 79 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 295 | `####` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 297 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 53 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 109 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 66 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 127 | `###` |
-| | | **852** | |
+| | | **854** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 852 rather than the 448
+dividers. So the count is over **both** depths, and it says 854 rather than the 448
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -15994,6 +15994,43 @@ walks back to the table without minting.
 their titles, that Account holds no `editing` toggle above Devices, that the
 keys screen is a table whose New key navigates, and that no `CommandLine` is
 drawn there.
+
+#### Q3.550 — Is the Pinned section fleet-wide or per machine?
+
+**Decision.** Per machine. `pinnedFor` in `groups.ts` takes the whole `ListView`
+and cuts the pinned rows to `view.machine`; under All every pin is drawn, and a
+pin whose machine has no tab is drawn on every tab, which is `orphansFor`'s own
+rule for the same rows unpinned.
+
+**Why.** It was drawn fleet-wide — "this one, wherever it lives" — and the owner
+read the result as a bug: every machine tab showed the same pinned rows, which on
+a rail whose tabs *are* machines looks like the pins having been copied to each
+of them. A pin is a shortcut inside the list you are looking at, and the list you
+are looking at is one machine's. `waitingFloor` subtracts what the view draws, so
+a pinned blocked session on another machine now counts toward "waiting
+elsewhere", which is the truthful answer once it is off screen.
+
+**Status.** Applied. `webcheck` pins the three tabs: the selected machine's list
+with no other machine's pins, the pin leading its own machine's list after the
+floor, and every pin under All.
+
+#### Q3.551 — What does a model change do to the effort control?
+
+**Decision.** If the new model's effort choices differ from the old model's, the
+old level is dropped and the new model's default is set — the choice whose value
+is `default` where there is one, else the first choice. `effortFollowUp` in
+`agentConfig.ts` decides, pure and keyed on `category`; `applyConfigChange` sends
+the follow-up through itself, so the daemon is still asked in exactly one place
+and the choice is still recorded and released by the dispatcher.
+
+**Why.** kimi carries the level across a model switch, so switching K3 to a model
+whose list had grown a "Thinking on" row left the checkmark on "Thinking Max" in
+a list that no longer meant the same thing by it; reported with a screenshot. The
+same list means nothing to do, a model with no effort control means nothing to
+set, and an old model with none means the agent's own default already applies.
+
+**Status.** Applied. `webcheck` drives the rule with two option lists and pins
+the dispatcher's call-site shape.
 
 ## Deployment, packaging and code layout
 

@@ -151,7 +151,8 @@ have to enter. These are the rules a change here must not break:
   Both flicker on the four-second poll, and a list that reorders while a thumb is
   travelling is the one thing this cannot do. A machine with no sessions still gets
   a tab, which gives it a create button. A folder holding a waiting session does
-  **not** hoist; that fact rides its header as a count. Q3.224.
+  **not** hoist; that fact rides its header as a count. Q3.224. **Pinned is cut
+  to the selected machine**; every pin under All. Q3.550.
 - **A path is cut against the daemon's own `REEMOAT_ROOTS`, and drawn once.**
   `displayCwd` cuts the longest matching root (`~/thing`); under none, or with no
   roots yet, it falls back to `shortPath` — never an invented prefix. Fetched once

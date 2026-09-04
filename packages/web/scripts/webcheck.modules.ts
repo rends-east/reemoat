@@ -91,6 +91,7 @@ export const {
   slotFor,
   splitOptions,
   withChoice,
+  effortFollowUp,
 } = await import("../src/ui/agentConfig.js");
 export const { canCancelTurn, cancelInFlight, hasLiveAgent, isTerminal, showsWorking } = await import("../src/wire.js");
 export const {

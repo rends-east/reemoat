@@ -105,7 +105,7 @@ export function SessionBrowser({
   //
   // `folders` and `everything` below need no wrapping: both take `view`, which
   // carries the query, and filter internally.
-  const pinned = matching(pinnedFor(groups, filter), view.query);
+  const pinned = matching(pinnedFor(groups, view), view.query);
   const orphans = matching(orphansFor(groups, filter), view.query);
   const folders = foldersOf(groups, view);
   // The flat cross-fleet list. Empty unless the All tab is selected, so the JSX
@@ -949,8 +949,25 @@ function ChatSearch({ value }: { value: string }): ReactNode {
          * has exactly one identification left, and `edge` at 1.23:1 on ink is the
          * hairline `index.css` forbids for that job.
          */}
+        {/*
+         * ⚠ **The browser filled this box with an e-mail address.** Reported as
+         * a screenshot: the field blue with the autofill tint, holding the
+         * account's address, over "Nothing matches." — a `type="search"` input
+         * with no `autocomplete` is fair game for a password manager's username
+         * heuristics, and this one sits on the same screen as the account row.
+         * The needle is deliberately not persisted (see `groups.ts`), so a value
+         * nobody typed can only have come from the browser. `autoComplete="off"`
+         * plus the two vendor opt-outs; `name` is set so the heuristics have a
+         * word to read that is not "search".
+         */}
         <input
           type="search"
+          name="session-filter"
+          autoComplete="off"
+          autoCorrect="off"
+          spellCheck={false}
+          data-1p-ignore=""
+          data-lpignore="true"
           value={value}
           onChange={(event) => setQuery(event.target.value)}
           aria-label="Search sessions"

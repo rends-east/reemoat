@@ -9,6 +9,7 @@ import {
   choiceLabel,
   diffLines,
   drawnChoices,
+  effortFollowUp,
   formatLocation,
   hasInput,
   isTerminal,
@@ -1166,11 +1167,45 @@ process.stdout.write("\nthe agent config bar reads categories, not ids\n");
     // Not trivially true: the property is only worth anything while a second
     // caller exists to be covered by it.
     check("while still being a second caller", count(composerSrc, "applyConfigChange(") >= 1, true);
+    // The effort follow-up rides the same dispatcher: decided by the pure
+    // function, sent by recursion, never by a second request written inline.
+    check("and a model change asks the effort rule before returning", /effortFollowUp\(/.test(dispatcher), true);
+    check("sending the follow-up through the dispatcher itself", /return applyConfigChange\(sessionRef, followUp\.configId, followUp\.value\)/.test(dispatcher), true);
     check(
       "and the daemon is still asked in exactly one place",
       count(strip, "setConfig(") + count(composerSrc, "setConfig("),
       1,
     );
+  }
+
+  /*
+   * A model switch that changes the effort list drops the old level and sets
+   * the new model's default (the owner's rule, from a kimi screenshot with a
+   * checkmark on a level the new list had grown past). Pure, so it is driven
+   * with two option lists: the same list means nothing to do, a different list
+   * means the `default` choice where there is one and the first choice
+   * otherwise, and only a `model` change asks at all.
+   */
+  {
+    const model = { id: "model", name: "Model", description: null, category: "model", kind: "select", value: "k3", choices: [] };
+    const kimiOld = { ...effortOption, id: "thinking", value: "max", choices: [
+      { value: "low", name: "Thinking Low", description: null, group: null },
+      { value: "high", name: "Thinking High", description: null, group: null },
+      { value: "max", name: "Thinking Max", description: null, group: null },
+    ] };
+    const kimiNew = { ...kimiOld, choices: [
+      { value: "on", name: "Thinking on", description: null, group: null },
+      ...kimiOld.choices,
+    ] };
+    const before = [model, kimiOld] as never;
+    check("a model change onto a different effort list sets the first choice", effortFollowUp(model, before, [model, kimiNew] as never), { configId: "thinking", value: "on" });
+    check("and the `default` choice where the list has one", effortFollowUp(model, before, [model, { ...effortOption, value: "max" }] as never), { configId: "effort", value: "default" });
+    check("the same list means nothing to do", effortFollowUp(model, before, [model, kimiOld] as never), null);
+    check("nor a model with no effort control", effortFollowUp(model, before, [model] as never), null);
+    check("nor one whose old model had none, since the agent's own default applies", effortFollowUp(model, [model] as never, [model, kimiNew] as never), null);
+    check("nor when the default is already the value", effortFollowUp(model, before, [model, { ...kimiNew, value: "on" }] as never), null);
+    check("and only a model change asks", effortFollowUp(kimiOld, before, [model, kimiNew] as never), null);
+    check("an unknown option asks nothing", effortFollowUp(undefined, before, [model, kimiNew] as never), null);
   }
 
   /*

@@ -545,7 +545,7 @@ export function foldersOf(groups: SessionGroups, view: ListView): Folder[] {
  */
 export function allRows(groups: SessionGroups, view: ListView): SessionRow[] {
   if (!view.all) return [];
-  const pinned = new Set(pinnedFor(groups, view.filter).map((row) => row.key));
+  const pinned = new Set(pinnedFor(groups, view).map((row) => row.key));
   const rows: SessionRow[] = [];
   const seen = new Set<string>();
   for (const group of groups.groups) {
@@ -600,7 +600,7 @@ export function waitingFloor(groups: SessionGroups, view: ListView): SessionRow[
    * a blocked session appears in the floor even under the Ended filter.
    */
   const reachable = new Set<string>();
-  for (const row of matching(pinnedFor(groups, view.filter), view.query)) reachable.add(row.key);
+  for (const row of matching(pinnedFor(groups, view), view.query)) reachable.add(row.key);
   for (const row of matching(orphansFor(groups, view.filter), view.query)) reachable.add(row.key);
   // Under All the flat list *is* every machine, so everything is reachable and
   // this comes back empty — which is the correct answer rather than a special
@@ -651,7 +651,7 @@ export function visibleRows(groups: SessionGroups, view: ListView): SessionRow[]
   // for the same reason: you search, get a match, and it is inside something you
   // shut last month.
   if (searching || !isFolderCollapsed(PINNED_FOLDER)) {
-    out.push(...matching(pinnedFor(groups, view.filter), view.query));
+    out.push(...matching(pinnedFor(groups, view), view.query));
   }
   if (searching || !isFolderCollapsed(ALL_FOLDER)) {
     out.push(...allRows(groups, view));
@@ -673,9 +673,27 @@ export function visibleRows(groups: SessionGroups, view: ListView): SessionRow[]
   });
 }
 
-/** The pinned group's rows under a filter. */
-export function pinnedFor(groups: SessionGroups, filter: Filter): SessionRow[] {
-  return underFilter(groups.pinned, filter);
+/**
+ * The pinned group's rows under a view: the filter, **and the machine tab**.
+ *
+ * ⚠ **A pin belongs to the machine its session is on.** The section was drawn
+ * fleet-wide — "this one, wherever it lives" — so every machine tab showed the
+ * same pinned rows, which read as the pins being copied to each machine rather
+ * than as a shortcut across them; reported in those words. Under a machine tab
+ * only that machine's pins are drawn; under All, every pin. A pinned row whose
+ * machine is gone has no tab to be under and is drawn on every one, which is
+ * `orphansFor`'s own rule for the same rows unpinned.
+ *
+ * Takes the whole `ListView` for `visibleRows`' reason: three inputs deciding
+ * the order means three places to disagree, and `waitingFloor` subtracts what
+ * this draws — so a pin on another machine now counts toward "waiting elsewhere",
+ * which is the truthful answer once it is not on screen.
+ */
+export function pinnedFor(groups: SessionGroups, view: ListView): SessionRow[] {
+  const rows = underFilter(groups.pinned, view.filter);
+  if (view.all || view.machine === null) return rows;
+  const known = new Set(groups.groups.map((group) => group.id));
+  return rows.filter((row) => row.ref.machineId === view.machine || !known.has(row.ref.machineId));
 }
 
 /**

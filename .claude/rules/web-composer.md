@@ -214,6 +214,11 @@ beside a toast. **There is no spinner on this strip, and that is the whole of
 is bounded by that retraction. It is **not** the optimism `Composer`'s Stop control
 refuses, since nothing is being claimed about what the *agent* is doing. Q3.409.
 
+**A model change that changes the effort list drops the old level and sets the
+new model's default** — `effortFollowUp`, pure, `default` where the list has one
+and the first choice otherwise, sent by `applyConfigChange` through itself so the
+daemon is still asked in one place. Q3.551.
+
 **A control that is merely waiting is not drawn as damage.** One tap excludes the
 rest of the row — setting a model rebuilds the mode list, so two changes at once
 really do race — and that exclusion is `locked`: inert and undimmed. `disabled`
