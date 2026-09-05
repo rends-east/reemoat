@@ -584,6 +584,47 @@ process.stdout.write("\nwhat one agent's card says\n");
   );
 
   /*
+   * ⚠ **The caps, on the arms review D10 found over them** (Q3.544, plan §2): a
+   * screen line is 14 words, a field hint 8, a caveat about another product 10.
+   * Whitespace tokens, a dash counting as one and a two-word name as two — so
+   * `Claude Code` under `This machine` is what bounds the composed `unchecked`
+   * line, which ran to 24 when the paste instruction was appended to "Start a
+   * chat to find out" rather than standing in for it — and to fifteen on a
+   * two-word host after the first trim swept `darwin` alone (E11's review). The
+   * signed-out arm for darwin/claude is pinned verbatim elsewhere at sixteen and
+   * is deliberately not swept: it is the one sentence that survived the
+   * 2026-09-04 cut unshortened, for the reason its own comment gives.
+   */
+  const wordCount = (text: string): number => text.trim().split(/\s+/).length;
+  const overCap: string[] = [];
+  for (const id of AGENT_IDS) {
+    for (const stance of ["unchecked", "start_refused"] as const) {
+      for (const can of [true, false]) {
+        // Three hosts: the one-word `macOS`, and the two-word `This machine` that
+        // `osName` answers for Linux and for an older daemon reporting no
+        // platform at all.
+        for (const os of [undefined, "linux", "darwin"]) {
+          const line = stanceLine({ id }, stance, can, os);
+          if (line !== null && wordCount(line) > 14) overCap.push(line);
+        }
+      }
+    }
+    for (const can of [true, false]) {
+      const caveat = credentialCaveat(id, can);
+      if (caveat !== null && wordCount(caveat) > 10) overCap.push(caveat);
+    }
+  }
+  for (const { note } of Object.values(CREDENTIAL_LABELS)) if (wordCount(note) > 6) overCap.push(note);
+  check("every trimmed arm sits at or under its cap", overCap, []);
+  check(
+    "and a host that cannot run the sign-in is told to paste a key instead of to start a chat",
+    stanceLine({ id: "claude" }, "unchecked", false, "darwin"),
+    "Claude Code's sign-in state is unknown. macOS can't run sign-in; paste a key.",
+  );
+  check("and the two-word host sits exactly at the cap", wordCount(stanceLine({ id: "kimi" }, "unchecked", false, undefined) ?? ""), 14);
+  check("while one that can is told to start a chat", /Start a chat to find out\.$/.test(stanceLine({ id: "claude" }, "unchecked", true, "darwin") ?? ""), true);
+
+  /*
    * The credential labels, cross-checked against the daemon's own `envNames` read
    * as text — a fifth credential added there must be named here or a person meets
    * a raw variable again.
@@ -693,6 +734,28 @@ process.stdout.write("\nthe sign-in screens, cut\n");
   check("and the hook it shared with AgentDetail stays", /function useAgentAuth\(/.test(agentsPanel), true);
 
   /*
+   * **The sign-out's act is refused, not toasted, on a machine that has left
+   * the list** (E7's review). `SignOutButton` reads the daemon at render and
+   * hands `TwoStep` `disabled` on it, `KeyOnly`'s shape one card over. It used
+   * to answer the tap with a toast and return nothing — which the primitive
+   * reads as an act with no wait and closes the question on, a refusal drawn
+   * as a success, and the one migrated site whose failure did not stand beside
+   * its toast.
+   */
+  const signOut = agentsPanel.slice(agentsPanel.indexOf("function SignOutButton("), agentsPanel.indexOf("function CredentialSlot("));
+  check("SignOutButton was found", signOut.length > 0, true);
+  check(
+    "it reads the daemon at render, refuses the act without one, and never toasts a tap",
+    [
+      /const daemon = store\.daemonFor\(machineId\);/.test(signOut),
+      /disabled=\{daemon === undefined\}\s*onAct=\{run\}/.test(signOut),
+      /if \(daemon === undefined\) return undefined;/.test(signOut),
+      /not reachable/.test(signOut),
+    ],
+    [true, true, true, false],
+  );
+
+  /*
    * One spelling of "what is below may be stale", defined once in the pure module
    * both screens import from and drawn from there in both. Two definitions is the
    * defect: `SystemDetail` mounts `AgentDetail` directly under its own line.
@@ -711,6 +774,46 @@ process.stdout.write("\nthe sign-in screens, cut\n");
   check("the key input sits in a form that submits", [/<form[^>]*onSubmit=/.test(keyForm), /<Button type="submit"/.test(keyForm)], [true, true]);
   check("and no Enter handler is wired by hand", /onKeyDown/.test(keyForm), false);
   /*
+   * The key-box blurb's routed arm at the eleven-word cap (review D10), read off
+   * the template with the system's name as one word: it was twelve, and
+   * "doesn't" is what paid for the cut rather than any of the facts.
+   */
+  const routed = /`(For agents routed to \$\{system\.displayName\}[^`]*)`/.exec(systemsPanel)?.[1] ?? "";
+  check("the routed key-box blurb says whose sign-in does not cover it", /; its CLI sign-in doesn't cover this\.$/.test(routed), true);
+  check("at the eleven-word cap, the name as one word", routed.replace("${system.displayName}", "X").trim().split(/\s+/).length, 11);
+  /*
+   * ⭐ **Both key boxes are forms** (review D22). The harness card's was a `div`
+   * with a Save `onClick` beside `SystemsPanel`'s form, so Enter landed a
+   * provider key and did nothing to a harness key one screen over.
+   */
+  const slotForm = agentsPanel.slice(agentsPanel.indexOf("function CredentialSlot("), agentsPanel.indexOf("function loginKey("));
+  check("the harness card's key input sits in a form that submits", [/<form[^>]*onSubmit=/.test(slotForm), /type="submit"/.test(slotForm)], [true, true]);
+  check("and wires no Enter handler by hand either", /onKeyDown/.test(slotForm), false);
+  /*
+   * And the device-code box empties only once the daemon confirms the code
+   * landed (review D8): `setInput("")` inside `.then(` and nowhere before the
+   * write, so a failed write leaves the pasted code beside the toast that says
+   * to try again — `web-shell.md`'s rule that nothing is drawn optimistically,
+   * on the one value that is sent once and unrecoverable if it evaporates.
+   */
+  const sendBody = agentsPanel.slice(agentsPanel.indexOf("const send = (): void => {"), agentsPanel.indexOf("const close = (cancel: boolean)"));
+  check("the device-code box is cleared inside .then(", /\.writeLogin\(loginId, text\)\s*\.then\(\(\) => setInput\(""\)\)/.test(sendBody), true);
+  check("and not before the write", sendBody.indexOf('setInput("")') > sendBody.indexOf(".writeLogin("), true);
+  /*
+   * And once at a time (E9's review): moving the clear into `.then` took the
+   * optimistic paint away and left the round trip open to a second Enter, which
+   * re-sent the same code where it used to send an empty line. The guard is the
+   * early return — armed before the write, disarmed after it on either outcome —
+   * and the button says so. The box is deliberately not disabled: a focused
+   * input that is disabled drops its caret.
+   */
+  check("a second send during the round trip is refused", /if \(daemon === undefined \|\| loginId === null \|\| sending\) return;/.test(sendBody), true);
+  const arms = sendBody.indexOf("setSending(true);");
+  const writes = sendBody.indexOf(".writeLogin(");
+  check("armed before the write", arms >= 0 && writes >= 0 && arms < writes, true);
+  check("and disarmed after it, on either outcome", /\.finally\(\(\) => setSending\(false\)\)/.test(sendBody), true);
+  check("and the button says so", /<Button onClick=\{send\} disabled=\{loginId === null \|\| sending\}>/.test(agentsPanel), true);
+  /*
    * The removal names the key, and the consequence lives in the question rather
    * than at rest (decision 10A): nothing above the resting button says what a
    * removal costs.
@@ -721,6 +824,6 @@ process.stdout.write("\nthe sign-in screens, cut\n");
   /* The lede is gone from the systems screen, and the prop that gated it. */
   check("MachineSystemsSection takes no lede", /\blede\b/.test(machineSystems), false);
   check("and says nothing about where credentials are stored", /Stored on/.test(machineSystems), false);
-  check("while the unreachable sentence keeps its pinned half", /is not reachable right now/.test(machineSystems), true);
+  check("while the unreachable arm keeps its sentence, mounted rather than copied", /<NotReachable machine=\{machine\} \/>/.test(machineSystems), true);
   check("without the trailing clause about the system", /can be read or changed/.test(machineSystems), false);
 }

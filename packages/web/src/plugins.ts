@@ -372,7 +372,7 @@ export class ConsentBrokenError extends Error {
  * reachability sentence therefore named a remedy (wait for it, wake the host) for
  * a state that waking the host does not change.
  *
- * The words are the ones five machine screens already draw on the same fact —
+ * The words are the ones five machine screens draw on the same fact —
  * `MachineSection`, `MachineSystemsSection`, `MachineAgentsSection`,
  * `MachinePluginsSection` and `AgentBuilder`, each on its own
  * `state.machines.find(…)` coming back empty. A constant rather than a sixth
@@ -386,11 +386,38 @@ export class ConsentBrokenError extends Error {
  * imports is not a de-duplication**, and it is worse than the sixth transcription
  * would have been: the reader who finds it stops looking. Both screens import it
  * now, which is what makes the rest of this docblock a description rather than a
- * plan. `MachineInstalls` and `PluginSettings` still transcribe the string — they
- * were already saying the right words, so that is drift waiting rather than a lie
- * on screen, and it is why the sentence lives here rather than beside either.
+ * plan. ⚠ **And the five machine screens went on transcribing it for a release
+ * after that** — the right words, so drift waiting rather than a lie on screen,
+ * but five copies a wording change here would not have reached (review D7). All
+ * five import it now, and `webcheck` pins the import and the literal's absence
+ * from each rather than the literal's presence, which is the assertion that had
+ * let the copies stand. `MachineInstalls` and `PluginSettings` were the last
+ * two transcriptions, a release after that again: they answer it as a row's
+ * `message` when `daemonFor` comes back empty mid-act rather than draw it, so
+ * `{MACHINE_GONE}` was never the shape there and the sweep did not reach them.
+ * Both import it now, and the same pin holds them keyed on the shape each
+ * screen uses. The one line that *names* the machine — `PluginSettings`'
+ * excluded list, one entry per machine that left mid-act — is {@link machineGone}'s
+ * rather than a hand-spelled variant with the name substituted in, which is the
+ * last of the drift this constant is here to absorb: the pin over these files
+ * reads the fragment the two share, so neither wording can be retyped.
  */
-export const MACHINE_GONE = "That machine is not in your list any more.";
+export const MACHINE_GONE = `${machineGone("That machine")}.`;
+
+/**
+ * The same fact about a *named* machine, for a line that lists several.
+ *
+ * `PluginSettings` sums up which machines a fleet-wide save could not reach,
+ * one per line with the machine's name as the subject, where {@link MACHINE_GONE}
+ * has one subject and no name. One wording for both, so a change reaches the
+ * named form too; the constant above is this function's answer for "That
+ * machine", with the full stop a sentence on its own takes and a list item does
+ * not. A `function` rather than a `const` arrow so the constant can be written
+ * above it and still read first.
+ */
+export function machineGone(subject: string): string {
+  return `${subject} is not in your list any more`;
+}
 
 /** Which scope a `403 insufficient_scope` said it wanted, or `null` if it did not say. */
 function requiredScope(detail: unknown): string | null {

@@ -61,16 +61,21 @@ export function authFailure(error: unknown): AuthFailure | null {
    * also made `changePasswordError`'s "That is not your current password."
    * unreachable — the session was cleared before the message could be shown.
    *
-   * It is reachable from **three** routes, and they are not the three this used
-   * to name: the two admin routes it cited are deleted, and `proveSelf` with
-   * them. The three now are `POST /v1/me/password`, `POST /v1/me/keys` and
-   * `PUT /v1/me/email` — minting a permanent credential and repointing the reset
-   * channel both being acts that take the account, exactly like changing the
-   * password. Two of them ask through `proveCurrentPassword`; `/v1/me/password`
-   * verifies inline, because it is also the route that has to allow an account
-   * with no password row to set a first one. Every one of the three is a screen
-   * where being signed out for mistyping your own password is the same
-   * catastrophe.
+   * It is reachable from **two** routes, and not the ones this used to name:
+   * the admin routes it once cited are deleted, and `proveSelf` and
+   * `proveCurrentPassword` with them. `POST /v1/me/password` asks everybody,
+   * through `verifyCurrentPassword` — it is also the route that has to let an
+   * account with no password row set a first one. `PUT /v1/me/email` asks an
+   * API-key caller on an account that has a password, through the same helper,
+   * and a session nothing: the address is the reset channel, and review D13
+   * found a leaked `cpctl` key repointing it and locking the owner out, where a
+   * session is a person signed in and listed under Devices (Q1.630, amended
+   * 2026-09-05). `POST /v1/me/keys` never asks — cloning a key escalates
+   * nothing. Either route that asks is a screen where being signed out for
+   * mistyping your own password is the same catastrophe. From the email route
+   * the refusal is `cpctl`'s to meet rather than this client's: `setMyEmail`
+   * sends no `currentPassword`, so the one browser that presents a key — the
+   * adoption from `LEGACY_STORAGE` — is answered 400 there, never 401.
    *
    * `invalid_login` is here for the same reason and reachable by nobody: it comes
    * from `/v1/login`, which carries no credential and does not go through
@@ -170,12 +175,27 @@ export function signedOutText(failure: AuthFailure): string {
   }
 }
 
+/**
+ * What every screen says when a request to the control plane never got an
+ * answer.
+ *
+ * One sentence, because it is one fact: `fetch` rejected, nothing was refused,
+ * and the credential, the machines and the keys are all exactly as they were.
+ * The four error readers below return it for a non-`ApiError`, and the settings
+ * screens draw it in their `Empty failed` arm — `MachinesSection` said *"Control
+ * plane unreachable."* for the same state while `AccountSection` and
+ * `KeysSection` said this, two spellings of one outage a person may see seconds
+ * apart (review D7). A screen may follow it with its own second sentence, which
+ * is what the machine list does.
+ */
+export const CONTROL_PLANE_UNREACHABLE = "Cannot reach the control plane.";
+
 /** What the sign-in screen says about a sign-in that was refused. */
 export function signInError(error: unknown): string {
   if (!ApiError.isApiError(error)) {
     // Named apart from a wrong password on purpose: somebody whose password is
     // right and whose network is not should not go and change their password.
-    return "Cannot reach the control plane. This is not your password.";
+    return `${CONTROL_PLANE_UNREACHABLE} This is not your password.`;
   }
   switch (error.code) {
     case "invalid_login":
@@ -258,7 +278,7 @@ export function passwordProblemText(problem: PasswordProblem): string {
  * split them on screen.
  */
 export function linkError(error: unknown): string {
-  if (!ApiError.isApiError(error)) return "Cannot reach the control plane.";
+  if (!ApiError.isApiError(error)) return CONTROL_PLANE_UNREACHABLE;
   switch (error.code) {
     case "token_unusable":
       return "This link no longer works. It may have been used already, or it may have expired — ask for a new one.";
@@ -279,7 +299,7 @@ export function linkError(error: unknown): string {
 
 /** What the sign-up form says when the server refuses. */
 export function registerError(error: unknown): string {
-  if (!ApiError.isApiError(error)) return "Cannot reach the control plane.";
+  if (!ApiError.isApiError(error)) return CONTROL_PLANE_UNREACHABLE;
   switch (error.code) {
     case "name_taken":
       return "Somebody already has that name. Pick another.";
@@ -345,7 +365,7 @@ export function userStateText(state: NonNullable<UserState>): string {
 
 /** What the password form says when the server refuses. */
 export function changePasswordError(error: unknown): string {
-  if (!ApiError.isApiError(error)) return "Cannot reach the control plane.";
+  if (!ApiError.isApiError(error)) return CONTROL_PLANE_UNREACHABLE;
   switch (error.code) {
     case "invalid_password":
       return "That is not your current password.";
@@ -412,22 +432,6 @@ export function ageText(ms: number): string {
 }
 
 /**
- * The line a key row carries under its prefix.
- *
- * `lastUsedAt` is `undefined` off a control plane older than the column and
- * `null` for a key nothing has ever presented; both read "never used", because
- * the row cannot tell them apart and "unknown" is not a thing a person can act
- * on. At most eight words, which is the subline cap.
- */
-export function keySubline(record: { createdAt: number; lastUsedAt?: number | null }, now: number): string {
-  const made = `made ${ageText(now - record.createdAt)} ago`;
-  const used = record.lastUsedAt === undefined || record.lastUsedAt === null
-    ? "never used"
-    : `last used ${ageText(now - record.lastUsedAt)} ago`;
-  return `${made} · ${used}`;
-}
-
-/**
  * The order the keys screen draws: newest first, revoked last.
  *
  * The route answers `created_at ASC` because that is the order a database gives
@@ -450,11 +454,23 @@ export function orderKeys<K extends { createdAt: number; revokedAt: number | nul
  * api_key_revoked`, `cpFetch` signed the tab out, and the gate said "Your session
  * expired" about a thing the person had just done on purpose. Now the client
  * clears the credential itself, writes this under one `sessionStorage` name, and
- * the gate reads it **once** — `takeRevokedKeyNotice` deletes on read — so a
- * reload of the sign-in screen does not repeat it. `sessionStorage` rather than
- * `localStorage` because the notice belongs to the tab that did the revoking.
+ * the gate reads it **once** — `peekRevokedKeyNotice` reads it without deleting
+ * and `clearRevokedKeyNotice` deletes it, the gate calling the first from a
+ * state initialiser and the second from a mount effect — so a reload of the
+ * sign-in screen does not repeat it. `sessionStorage` rather than `localStorage`
+ * because the notice belongs to the tab that did the revoking.
  *
- * Both halves take the storage as an argument so they stay pure: `webcheck`
+ * ⚠ **Reading and deleting are two functions on purpose** (review D16). They
+ * were one, deleting on read inside a `useState` initialiser — correct on React
+ * 19, which keeps the first initialiser's result across StrictMode's double
+ * invocation, and resting on exactly that detail: an engine that kept the
+ * *second* result would have shown the notice zero times. Peek in the
+ * initialiser, clear in an effect, and "read once" is a property of the
+ * construction rather than of a React version: state survives StrictMode's
+ * simulated remount, so its double-fired effect deletes a value already in
+ * state, and a second peek before the effect answers the same line.
+ *
+ * All three take the storage as an argument so they stay pure: `webcheck`
  * drives them with a `Map`, and nothing here touches `window`.
  */
 export const REVOKED_KEY_NOTICE = "reemoat.revokedKey";
@@ -473,10 +489,14 @@ export function rememberRevokedKey(storage: NoticeStorage, prefix: string): void
   storage.setItem(REVOKED_KEY_NOTICE, prefix);
 }
 
-/** The notice, if a revoke wrote one, and it is gone the moment it is read. */
-export function takeRevokedKeyNotice(storage: NoticeStorage): string | null {
+/** The notice, if a revoke wrote one. Reading leaves it where it is. */
+export function peekRevokedKeyNotice(storage: NoticeStorage): string | null {
   const prefix = storage.getItem(REVOKED_KEY_NOTICE);
   if (prefix === null || prefix.length === 0) return null;
-  storage.removeItem(REVOKED_KEY_NOTICE);
   return revokedKeyNotice(prefix);
+}
+
+/** What consumes the notice: called once the value is in state, never before. */
+export function clearRevokedKeyNotice(storage: NoticeStorage): void {
+  storage.removeItem(REVOKED_KEY_NOTICE);
 }

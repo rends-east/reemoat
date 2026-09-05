@@ -18,6 +18,7 @@ import {
   RowAction,
   SETTINGS_HEADING,
   Spinner,
+  TwoStep,
 } from "../bits";
 import { toast } from "../Toast";
 
@@ -275,33 +276,31 @@ function PluginRow({
        * The question names the plugin: "Remove it?" over a list of three is a
        * question about whichever row the eye happened to be on.
        *
-       * Cancel is **last** and in the default tone. It was `tone="primary"` —
-       * the only filled button on the screen — which made the undo the loudest
-       * object in a row about deleting something. `BUTTON_TONE`'s rule is that a
-       * fill is the affirmative act inside a decision; here there is none to
-       * affirm, only one to decline.
+       * Cancel is **last** and in the default tone, and both are `TwoStep`'s
+       * rather than this row's. It was `tone="primary"` here once — the only
+       * filled button on the screen — which made the undo the loudest object in
+       * a row about deleting something. `BUTTON_TONE`'s rule is that a fill is
+       * the affirmative act inside a decision; here there is none to affirm,
+       * only one to decline. The act returns nothing: the wait is `pending`,
+       * drawn on this row's own subline, so the question closes on the tap.
        */}
       {confirming ? (
-        <div className="flex min-h-14 min-w-0 flex-wrap items-center gap-2 px-1 py-2.5">
-          <span className="min-w-0 flex-1 text-xs text-muted">
-            Remove <span className="font-medium text-fg">{plugin.name}</span> and its data?
-          </span>
-          <DangerButton
-            icon={Trash2}
-            size="sm"
-            className="[@media(pointer:coarse)]:min-h-11"
-            disabled={busy || daemon === undefined}
-            onClick={() => {
-              setConfirming(false);
-              if (daemon !== undefined) run(daemon.removePlugin(plugin.id), "Removing…", "Removed");
-            }}
-          >
-            Remove
-          </DangerButton>
-          <Button size="sm" className="[@media(pointer:coarse)]:min-h-11" onClick={() => setConfirming(false)}>
-            Cancel
-          </Button>
-        </div>
+        <TwoStep
+          armed
+          onArm={setConfirming}
+          align="end"
+          className="min-h-14 min-w-0 px-1 py-2.5"
+          question={
+            <>
+              Remove <span className="font-medium">{plugin.name}</span> and its data?
+            </>
+          }
+          act={{ label: "Remove", danger: true, icon: Trash2 }}
+          disabled={busy || daemon === undefined}
+          onAct={() => {
+            if (daemon !== undefined) run(daemon.removePlugin(plugin.id), "Removing…", "Removed");
+          }}
+        />
       ) : (
       <div className="flex min-w-0 items-center gap-1">
         {/*

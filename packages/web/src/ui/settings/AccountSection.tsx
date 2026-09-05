@@ -3,6 +3,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import {
   ageText,
   changePasswordError,
+  CONTROL_PLANE_UNREACHABLE,
   PASSWORD_MIN,
   passwordProblem,
   passwordProblemText,
@@ -26,6 +27,7 @@ import {
   SETTINGS_SECTION,
   SkeletonRow,
   Spinner,
+  TwoStep,
   shortDuration,
 } from "../bits";
 import { toast } from "../Toast";
@@ -38,9 +40,11 @@ import { toast } from "../Toast";
  * password form, with the address form, the key list and the device list one
  * scroll below it — so the first thing on "Account" was a form almost nobody
  * came to fill in. Every fact is a row now (its value, one subline, one verb),
- * and the form it stands for opens *in place* on the verb and gives the row
- * back on success or Cancel. What you came for is scannable; what you came to
- * do is one tap away.
+ * and the form it stands for is its own screen — `/settings/account/password`,
+ * `/settings/account/email`, each a `SettingsLeaf` the verb navigates to, with
+ * Done and Cancel walking back to this row by `replace` (Q3.549). Not a form
+ * opening in place: that is the screen jumping under a thumb. What you came for
+ * is scannable; what you came to do is one tap away.
  *
  * **API keys left.** They are a section of their own (`KeysSection`), because a
  * key is minted for `cpctl` on another machine and this screen is about you.
@@ -79,7 +83,7 @@ export function AccountSection({
             </Button>
           }
         >
-          Cannot reach the control plane.
+          {CONTROL_PLANE_UNREACHABLE}
         </Empty>
       ) : (
         <>
@@ -193,7 +197,8 @@ function FactRow({
 
 /**
  * The password as a row: when it was last changed, what changing it costs, and
- * the verb. The three-field form opens in place and gives the row back.
+ * the verb — which goes to `/settings/account/password` (`PasswordScreen`),
+ * whose Done and Cancel walk back to this row (Q3.549).
  *
  * Three values, decided from two fields on `Me`. `passwordChangedAt` is written
  * only by a change the person made themselves (`POST /v1/me/password` and the
@@ -542,7 +547,6 @@ function EmailForm({ onDone }: { onDone: () => void }): ReactNode {
 function Devices(): ReactNode {
   const [rows, setRows] = useState<SessionRecord[] | null>(null);
   const [failed, setFailed] = useState(false);
-  const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);
 
   const refresh = (): void => {
@@ -559,21 +563,16 @@ function Devices(): ReactNode {
 
   const others = rows === null ? 0 : rows.filter((row) => !row.current).length;
 
-  const signOutOthers = (): void => {
-    setBusy(true);
-    void cp
-      .revokeOtherSessions()
-      .then((count) => {
-        // The number the server actually revoked, not the number this button
-        // was labelled with — the list is a poll old, and `revokedCount` is
-        // the answer to what just happened.
-        toast("ok", count === 1 ? "1 device signed out." : `${count} devices signed out.`);
-        setConfirming(false);
-        refresh();
-      })
-      .catch((cause: unknown) => toast("error", errorText(cause)))
-      .finally(() => setBusy(false));
-  };
+  // Handed to `TwoStep`, which owns the wait: the question closes on the 200 and
+  // stands beside the toast on a failure.
+  const signOutOthers = (): Promise<void> =>
+    cp.revokeOtherSessions().then((count) => {
+      // The number the server actually revoked, not the number this button
+      // was labelled with — the list is a poll old, and `revokedCount` is
+      // the answer to what just happened.
+      toast("ok", count === 1 ? "1 device signed out." : `${count} devices signed out.`);
+      refresh();
+    });
 
   return (
     <section className={SETTINGS_SECTION}>
@@ -613,28 +612,24 @@ function Devices(): ReactNode {
 
           {/*
            * Ending every other sign-in is one act over N rows, so it confirms in
-           * place — the question names the count, and Cancel is last (Q3.218).
-           * The per-row Sign out stays one tap: it names one device the person
-           * has just read.
+           * place — the question names the count, and Cancel is last (Q3.218,
+           * `TwoStep`'s). The per-row Sign out stays one tap: it names one device
+           * the person has just read.
            */}
           {others > 0 && (
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              {confirming ? (
-                <>
-                  <span className="text-xs text-muted">{`Sign out ${others} other device${others === 1 ? "" : "s"}?`}</span>
-                  <DangerButton icon={LogOut} size="sm" disabled={busy} onClick={signOutOthers}>
-                    {busy ? <Spinner /> : "Sign out"}
-                  </DangerButton>
-                  <Button size="sm" disabled={busy} onClick={() => setConfirming(false)}>
-                    Cancel
-                  </Button>
-                </>
-              ) : (
-                <Button size="sm" disabled={busy} onClick={() => setConfirming(true)}>
+            <TwoStep
+              armed={confirming}
+              onArm={setConfirming}
+              className="mt-3"
+              question={`Sign out ${others} other device${others === 1 ? "" : "s"}?`}
+              act={{ label: "Sign out", danger: true, icon: LogOut }}
+              onAct={signOutOthers}
+              rest={
+                <Button size="sm" onClick={() => setConfirming(true)}>
                   {`Sign out ${others} other${others === 1 ? "" : "s"}`}
                 </Button>
-              )}
-            </div>
+              }
+            />
           )}
         </>
       )}
@@ -724,13 +719,13 @@ function DeviceRow({ row, onChanged }: { row: SessionRecord; onChanged: () => vo
  * thumb (`SettingsLeaf`).
  */
 export function PasswordScreen({ me }: { me: Me | null }): ReactNode {
-  if (me === null) return <Empty failed>Cannot reach the control plane.</Empty>;
+  if (me === null) return <Empty failed>{CONTROL_PLANE_UNREACHABLE}</Empty>;
   return <PasswordForm me={me} onDone={() => navigate(settingsPath("account"), true)} />;
 }
 
 /** `/settings/account/email`. Same shape; the mail-off arm is the row's own line. */
 export function EmailScreen({ me, config }: { me: Me | null; config: InstanceConfig | null }): ReactNode {
-  if (me === null) return <Empty failed>Cannot reach the control plane.</Empty>;
+  if (me === null) return <Empty failed>{CONTROL_PLANE_UNREACHABLE}</Empty>;
   if (!mailUsable(config)) return <p className="text-xs text-muted">This server cannot send mail.</p>;
   return <EmailForm onDone={() => navigate(settingsPath("account"), true)} />;
 }

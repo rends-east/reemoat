@@ -5,6 +5,7 @@ import { enrollmentExpiryText, enrollmentLines } from "../../enrollment";
 import { errorText } from "../../http";
 import type { MachineId } from "../../ids";
 import { daemonRead } from "../../machine";
+import { MACHINE_GONE } from "../../plugins";
 import { navigate } from "../../router";
 import { agentStripPath, settingsPath } from "../../settings";
 import { store, type AppState } from "../../store";
@@ -15,10 +16,11 @@ import {
   Empty,
   FIELD,
   Icon,
-  reachText,
+  NotReachable,
   SETTINGS_HEADING,
   SETTINGS_SECTION,
   Spinner,
+  TwoStep,
 } from "../bits";
 import { toast } from "../Toast";
 import { MachineSystemsSection } from "./MachineSystemsSection";
@@ -81,12 +83,12 @@ export function MachineSection({
 }): ReactNode {
   const machine = state.machines.find((candidate) => candidate.id === machineId) ?? null;
   /*
-   * Two flags, not one. A single `busy` disabled Retire's Cancel while a setup
-   * code minted — two acts on two sections, sharing a lock because they shared a
-   * file. Each section holds its own.
+   * Minting holds its own flag, and the retire's wait is `TwoStep`'s. A single
+   * `busy` once disabled Retire's Cancel while a setup code minted — two acts on
+   * two sections, sharing a lock because they shared a file — and with the
+   * confirmation owning its own busy the two cannot share one again.
    */
   const [minting, setMinting] = useState(false);
-  const [retiring, setRetiring] = useState(false);
   const [code, setCode] = useState<{ url: string; code: string; expiresAt: number } | null>(null);
   const [confirming, setConfirming] = useState(false);
 
@@ -100,7 +102,7 @@ export function MachineSection({
      * could not claim, and a machine that is not in your list is a settled
      * answer rather than a read that failed.
      */
-    return <Empty>That machine is not in your list any more.</Empty>;
+    return <Empty>{MACHINE_GONE}</Empty>;
   }
 
   const owned = machine.owned === true;
@@ -135,9 +137,10 @@ export function MachineSection({
       .finally(() => setMinting(false));
   };
 
-  const revoke = (): void => {
-    setRetiring(true);
-    void cp
+  // Handed to `TwoStep`: it owns the wait, and a failure leaves the question
+  // standing beside the toast.
+  const revoke = (): Promise<void> =>
+    cp
       .revokeMachine(machine.id)
       .then(() => {
         /*
@@ -149,19 +152,36 @@ export function MachineSection({
          * The toast is global and survives the navigation, which is what tells
          * them it worked.
          *
+         * **And the list is told at once, in the same flush as the navigation.**
+         * `forgetMachine` drops the row synchronously (the 200 has landed, so
+         * that is a fact and not a guess), where the re-list alone left the
+         * retired row on the list for a round trip (review D9). It is handed to
+         * `navigate` rather than called after it — ⚠ **and not for the sentence
+         * above, which the fix round claimed of the next-statement order and
+         * which cannot happen there**: `App` reads the route through
+         * `useSyncExternalStore` beside its store subscription, and `announce`
+         * writes the route before it opens a transition, so the render a store
+         * emit forces after `navigate` returns already carries the list. This
+         * screen was unmounted in the very render that dropped its machine, on
+         * both paths. What the shared flush buys is the ordering by
+         * construction, the drop landing where the route lands, and nothing a
+         * person sees today: the re-list below patches `resuming` in this same
+         * task, so on a phone `App` re-draws on the new route before the old
+         * frame is captured either way (`announce`'s docblock holds the
+         * reading). Kept because it is where the drop belongs, and pinned
+         * whole. `machinesChanged` still follows, for the count the limit is
+         * enforced against.
+         *
          * Three words. It used to add how many enrollment codes were burned and
          * when issued tokens expire — facts read from `answer` — and a toast is
          * the one place a fact cannot be re-read (decision D-U-1): the machine is
          * gone from every screen that could carry them, so they went too. The
          * confirmation above already said what retiring costs, before the tap.
          */
-        navigate(settingsPath("machines"), true);
+        navigate(settingsPath("machines"), true, () => store.forgetMachine(machine.id));
         toast("ok", `${machine.name} is retired.`);
         void store.machinesChanged("machine-revoked");
-      })
-      .catch((cause: unknown) => toast("error", errorText(cause)))
-      .finally(() => setRetiring(false));
-  };
+      });
 
   return (
     <div>
@@ -371,11 +391,14 @@ export function MachineSection({
             /*
              * Not `failed`, and asked first: this is the registry's own settled
              * answer rather than a probe that did not come back, so it takes
-             * neither the triangle nor the live region.
+             * neither the triangle nor the live region. Eight words with the
+             * remedy, the empty-state cap (review D10): the name went, since the
+             * pane's head is the name, and "Use" says what "Start its daemon
+             * with" said.
              */
             <Empty>
-              {machine.name} has not enrolled yet.
-              {setupOffered ? " Start its daemon with the setup code above." : ""}
+              Not enrolled yet.
+              {setupOffered ? " Use the setup code above." : ""}
             </Empty>
           ) : read === "asking" ? (
             /*
@@ -399,8 +422,7 @@ export function MachineSection({
              * name them was the position said again.
              */
             <Empty failed>
-              {machine.name} is not reachable right now —{" "}
-              {reachText(machine.reach, machine.offlineReason)}.
+              <NotReachable machine={machine} />
             </Empty>
           )}
         </section>
@@ -409,10 +431,10 @@ export function MachineSection({
       {owned && (
         /*
          * ⚠ **The one section here that is not another field, drawn so that it is
-         * not another field.** Six headings at one weight in this file — Name,
-         * Setup code, Systems, Agents, Plugins, Retire, and a seventh (Install)
-         * arriving inside the plugin list — gave the screen a rhythm rather than a
-         * shape, and the block that destroys a machine carried exactly the
+         * not another field.** Five headings at one weight in this file — Name,
+         * Setup code, Sign-ins, Plugins, Retire, with Install an `<h3>` inside the
+         * plugin list and no heading at all over the Agents row — gave the screen
+         * a rhythm rather than a shape, and the block that destroys a machine carried exactly the
          * typographic weight of the rename box. Two signals, written out rather
          * than appended: a wider break above it than the rule this screen repeats,
          * and {@link RETIRE_HEADING}. Neither is a fill and neither adds a second
@@ -428,38 +450,34 @@ export function MachineSection({
               the slot come back, re-adding is a new id, shares are lost. Sessions
               and issued tokens surviving, and the setup code dying, are true and
               are this comment's rather than the screen's. */}
-          {confirming ? (
-            /* The answer that undoes the question is **last**: `.tap` removes the
-               double-tap delay, and a second tap aimed at a control that looked
-               like it did nothing must land on Cancel. `md`/44px at both steps —
-               `BUTTON_SIZE` reserves `sm` for a confirmation that has replaced a
-               row's controls, which is the opposite of a section on a screen. */
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              {/* ⚠ **The name is in the question, not only in the resting label.**
-                  It read "Retire laptop" and then, at the moment of deciding,
-                  "Retire it?" — dropping the subject on the one screen where this
-                  app explicitly supports two machines called the same thing, and
-                  reversing what `SignOutButton` does with the identical pair of
-                  taps. A confirmation that does not name what it is about is a
-                  confirmation of nothing. */}
-              <span className="text-xs text-fg">
-                Retire {machine.name}?
-                <span className="block text-muted">
-                  Frees the name and a slot. Re-adding gives a new id; shares are lost.
-                </span>
-              </span>
-              <DangerButton icon={Trash2} disabled={retiring} onClick={revoke}>
-                {retiring ? <Spinner /> : "Retire"}
+          {/* `TwoStep` draws the pair: the answer that undoes the question is
+              **last**, so a second tap aimed at a control that looked like it
+              did nothing lands on Cancel. `md`/44px at both steps — this is a
+              section on a screen, not a confirmation that has replaced a row's
+              controls, and a mis-aimed trackpad click retires exactly as
+              irreversibly as a mis-aimed thumb. */}
+          {/* ⚠ **The name is in the question, not only in the resting label.**
+              It read "Retire laptop" and then, at the moment of deciding,
+              "Retire it?" — dropping the subject on the one screen where this
+              app explicitly supports two machines called the same thing, and
+              reversing what `SignOutButton` does with the identical pair of
+              taps. A confirmation that does not name what it is about is a
+              confirmation of nothing. */}
+          <TwoStep
+            armed={confirming}
+            onArm={setConfirming}
+            className="mt-3"
+            size="md"
+            question={<>Retire {machine.name}?</>}
+            consequence="Frees the name and a slot. Re-adding gives a new id; shares are lost."
+            act={{ label: "Retire", danger: true, icon: Trash2 }}
+            onAct={revoke}
+            rest={
+              <DangerButton icon={Trash2} onClick={() => setConfirming(true)}>
+                Retire {machine.name}
               </DangerButton>
-              <Button disabled={retiring} onClick={() => setConfirming(false)}>
-                Cancel
-              </Button>
-            </div>
-          ) : (
-            <DangerButton icon={Trash2} className="mt-3" disabled={retiring} onClick={() => setConfirming(true)}>
-              Retire {machine.name}
-            </DangerButton>
-          )}
+            }
+          />
         </section>
       )}
     </div>

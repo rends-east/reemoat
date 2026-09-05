@@ -1,10 +1,11 @@
 import type { ReactNode } from "react";
 import { daemonRead } from "../../machine";
 import type { MachineId } from "../../ids";
+import { MACHINE_GONE } from "../../plugins";
 import { navigate } from "../../router";
 import { harnessSigninPath, settingsPath } from "../../settings";
 import type { AppState } from "../../store";
-import { Button, Empty, reachText, Spinner } from "../bits";
+import { Button, Empty, NotReachable, Spinner } from "../bits";
 import { AgentDetail } from "./AgentsPanel";
 import { SystemChooser, SystemDetail } from "./SystemsPanel";
 
@@ -79,7 +80,7 @@ export function MachineSystemsSection({
           </Button>
         }
       >
-        That machine is not in your list any more.
+        {MACHINE_GONE}
       </Empty>
     );
   }
@@ -140,9 +141,10 @@ export function MachineSystemsSection({
            * `SystemDetail`, the only other thing that said which one you drilled
            * into; but a phone deep-linked here against an offline daemon still
            * cannot act on that name, and the machine's own sentence is what the
-           * reader can act on. `webcheck` pins the sentence's first half.
+           * reader can act on. The sentence is `NotReachable`'s, and `webcheck`
+           * pins this arm as that component inside `failed`.
            */}
-          {machine.name} is not reachable right now — {reachText(machine.reach, machine.offlineReason)}.
+          <NotReachable machine={machine} />
         </Empty>
       ) : signin !== null ? (
         /*

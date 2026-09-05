@@ -7,7 +7,7 @@ import { store } from "../../store";
 import type { AgentAuthInfo, SystemInfo } from "../../wire";
 import { anyKeySet, unspokenFor } from "../../agents";
 import { boundedName, harnessName, STALE_READ } from "../agentCard";
-import { Badge, Button, ChoiceRow, DangerButton, Empty, FIELD, Icon, Spinner } from "../bits";
+import { Badge, Button, ChoiceRow, DangerButton, Empty, FIELD, Icon, Spinner, TwoStep } from "../bits";
 import { toast } from "../Toast";
 import { AgentDetail } from "./AgentsPanel";
 
@@ -514,15 +514,29 @@ export function KeyOnly({
       .finally(() => setBusy(false));
   };
 
-  const remove = (): void => {
-    if (daemon === undefined || busy) return;
+  /*
+   * Handed to `TwoStep`, which owns the wait and leaves the question open on a
+   * failure, so the toast lands beside the question it failed to answer and the
+   * two ways on from it are still under a thumb. The `daemon` guard is for the
+   * type: the act is `disabled` on the same condition, so this arm is not
+   * reached, and returning nothing would merely close the question.
+   *
+   * **`busy` is this box's one lock, and it is held here for the removal's
+   * length.** The act is refused while a save is out (`disabled={busy …}`
+   * below), and the key form's Save reads the same flag — so it is refused
+   * while a removal is out only if the removal sets it. Handed over as a bare
+   * promise the lock read one way: Remove, then Enter in the form before the
+   * daemon answered, and a set and a remove of the same credential were in
+   * flight together, with the "key removed" toast free to land after a key had
+   * just been saved (E7's review). The primitive's own wait is the question's
+   * pair alone.
+   */
+  const remove = (): Promise<void> | undefined => {
+    if (daemon === undefined) return undefined;
     setBusy(true);
-    void daemon
+    return daemon
       .removeSystemKey(system.id)
       .then(() => {
-        // Left open on a failure, so the toast below lands beside the question it
-        // failed to answer and the two ways on from it are still under a thumb.
-        setConfirmingRemove(false);
         // Named apart for the same reason the save is: two credentials, two
         // destinations, and on this screen both boxes can be drawn at once.
         toast(
@@ -533,7 +547,6 @@ export function KeyOnly({
         );
         onChanged();
       })
-      .catch((cause: unknown) => toast("error", errorText(cause)))
       .finally(() => setBusy(false));
   };
 
@@ -554,15 +567,6 @@ export function KeyOnly({
   const borrowed = routing && system.keySet && system.keyUpdatedAt === null;
   const [overriding, setOverriding] = useState(false);
 
-  /*
-   * The removal's box, **one string rendered in both states**, which is what makes
-   * the ordering rule below a geometry rather than a sentence about one. It is
-   * `SignOutButton`'s own — `mt-3` rather than its `mt-2` because this one follows
-   * a paragraph rather than a row — and the argument for every part of it is at
-   * the confirmation itself.
-   */
-  const removeBox = "mt-3 flex flex-wrap items-center justify-center gap-2";
-
   return (
     <div className="mt-4 space-y-3">
       <div className="flex items-center gap-2">
@@ -577,8 +581,9 @@ export function KeyOnly({
       <p className="text-xs text-muted">
         {routing
           /*
-           * At most eleven words each (the plan's key-box cap). "above" is back
-           * in the borrowed arm and only there: that arm exists solely under a
+           * At most eleven words each (the plan's key-box cap) — the routed arm
+           * was twelve until review D10, and "doesn't" is what paid for it.
+           * "above" is back in the borrowed arm and only there: that arm exists solely under a
            * CLI sign-in on this screen — the builder draws no credential control
            * at all, which `webcheck` asserts — so the word points at something
            * real. The other two say which requests the key signs and whether a
@@ -587,7 +592,7 @@ export function KeyOnly({
            */
           ? borrowed
             ? "Covered by the key above."
-            : `For agents routed to ${system.displayName}. Its CLI sign-in does not cover this.`
+            : `For agents routed to ${system.displayName}; its CLI sign-in doesn't cover this.`
           : `Key only — ${system.displayName} has no sign-in.`}
       </p>
 
@@ -701,46 +706,43 @@ export function KeyOnly({
            * session pointed at this system signs with.
            *
            * Implemented rather than corrected, in `SignOutButton`'s shape — which
-           * is what the block above already said this control took. One class
-           * string in both states, so nothing else can move under a thumb, and
-           * `justify-center` rather than `justify-end`: that one shipped on this
-           * exact argument and drew a lone destructive button pinned to the right
-           * of an empty box, which is not what this state should look like.
-           * Centred, the resting button's own centre falls in the **gap** between
-           * the two answers, so a second tap — which `.tap` makes possible at all,
-           * by removing the 300ms double-tap delay — hits nothing. That is the safe
-           * outcome; what the rule protects is that it must not hit the
-           * irreversible half, and it cannot.
+           * is what the block above already said this control took, and which is
+           * `TwoStep`'s now: one box in both states, so nothing else can move
+           * under a thumb, and `align="center"` rather than `justify-end`: that
+           * one shipped on this exact argument and drew a lone destructive button
+           * pinned to the right of an empty box, which is not what this state
+           * should look like. Centred, the resting button's own centre falls in
+           * the **gap** between the two answers, so a second tap — which `.tap`
+           * makes possible at all, by removing the 300ms double-tap delay — hits
+           * nothing. That is the safe outcome; what the rule protects is that it
+           * must not hit the irreversible half, and it cannot.
            *
            * Cancel is still **last** and still takes the default tone rather than
            * the filled one, which is the only reading `BUTTON_TONE`'s prohibition
            * allows: the destructive button is never the filled one. The question
            * takes `basis-full text-center`, so it is always on its own line and the
            * two answers are never crushed on a 390px phone — in CSS, with no
-           * breakpoint anywhere.
+           * breakpoint anywhere. `mt-3` rather than `SignOutButton`'s `mt-2`
+           * because this one follows a paragraph rather than a row.
            */}
-          {confirmingRemove ? (
-            <div className={removeBox}>
-              <span className="basis-full text-center text-xs text-muted">
-                Remove the {keyName}? New sessions pointed at {system.displayName} will refuse to
-                start.
-              </span>
-              <DangerButton icon={Trash2} disabled={busy} onClick={remove}>
-                {busy ? <Spinner /> : "Remove"}
-              </DangerButton>
-              <Button disabled={busy} onClick={() => setConfirmingRemove(false)}>
-                Cancel
-              </Button>
-            </div>
-          ) : (
-            <div className={removeBox}>
-              {/* Named, because `SystemDetail` can draw this box beside the
-                  harness's own credential card and both of them offer a removal. */}
+          <TwoStep
+            armed={confirmingRemove}
+            onArm={setConfirmingRemove}
+            align="center"
+            size="md"
+            className="mt-3"
+            question={<>Remove the {keyName}? New sessions pointed at {system.displayName} will refuse to start.</>}
+            act={{ label: "Remove", danger: true, icon: Trash2 }}
+            disabled={busy || daemon === undefined}
+            onAct={remove}
+            rest={
+              /* Named, because `SystemDetail` can draw this box beside the
+                 harness's own credential card and both of them offer a removal. */
               <DangerButton icon={Trash2} disabled={busy} onClick={() => setConfirmingRemove(true)}>
                 Remove the {keyName}
               </DangerButton>
-            </div>
-          )}
+            }
+          />
         </div>
       )}
     </div>

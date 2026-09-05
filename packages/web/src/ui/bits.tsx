@@ -9,6 +9,7 @@ import {
   type RefObject,
 } from "react";
 import { AlertTriangle, Check, ChevronDown, ChevronRight, X } from "lucide-react";
+import { errorText } from "../http";
 import { listNavKey, nextOptionIndex } from "../keys";
 import { displayCwd, shortPath } from "../paths";
 import type { OfflineReason, Reach } from "../machine";
@@ -20,6 +21,16 @@ import {
   type SessionSnapshot,
 } from "../wire";
 import { LAYER, useDismissible } from "./overlay";
+/*
+ * `Toast.tsx` imports {@link Icon} from here, so this is a cycle, and a benign
+ * one: both sides reach into the other only from inside a function body —
+ * `toast()` from {@link TwoStep}'s default failure arm, `Icon` from the toast's
+ * render — and neither module body reads the other at evaluation time. It is
+ * here rather than passed in by every caller because "a failed act is a toast
+ * saying why" is the answer at fourteen of fifteen confirmations, and a default
+ * that thirteen callers restate is not a default.
+ */
+import { toast } from "./Toast";
 
 /**
  * The primitive set.
@@ -533,7 +544,7 @@ const OFFLINE_TEXT: Record<NonNullable<OfflineReason>, string> = {
   cp_unreachable: "control plane unreachable",
   // Not a reachability failure but a reachability *consequence* — the tunnel is
   // refused at dial. One entry here buys the machine row's subline and
-  // `MachineSystemsSection`'s "not reachable right now — …" line with no edit to
+  // {@link NotReachable}'s "not reachable right now — …" line with no edit to
   // either, which is what this table is for.
   over_limit: "over the machine limit",
   owner_disabled: "its owner is disabled",
@@ -559,7 +570,10 @@ const OFFLINE_TEXT: Record<NonNullable<OfflineReason>, string> = {
  * sentence, and `webcheck` pins that section as saying neither half — while
  * `MachineSection` itself and `AgentBuilder` had joined the set with this docblock
  * still naming three screens, one of which had left. The set is four, and
- * `webcheck`'s `REACH_SCREENS` is the copy that has to agree with this one.
+ * `webcheck`'s `REACH_SCREENS` is the copy that has to agree with this one. They
+ * compose nothing themselves any more: the sentence is {@link NotReachable}'s,
+ * written once below, and the four are the screens that branch on the partition
+ * and mount it on the arm that has measured a failure.
  *
  * "not checked yet" is the honest replacement, and it stays useful in the two
  * places that legitimately reach it: the machine row's subline, where it joins
@@ -580,6 +594,43 @@ export function reachText(reach: Reach, reason: OfflineReason): string {
   if (reach === "probing") return "probing…";
   if (reach === "unknown") return "not checked yet";
   return reason === null ? "unreachable" : OFFLINE_TEXT[reason];
+}
+
+/**
+ * The line a screen draws where a machine's lists would be, when the daemon was
+ * asked and did not answer.
+ *
+ * One component rather than four transcriptions. `MachineSection`,
+ * `MachineSystemsSection`, `MachineAgentsSection` and `AgentBuilder` each
+ * hand-composed `` `${machine.name} is not reachable right now — ${reachText(…)}` ``
+ * on their `daemonRead(reach) === "unreachable"` arm — four places for
+ * {@link reachText}'s substitution rule to be broken one at a time and four for
+ * the wording to drift (review D7). `webcheck`'s `REACH_SCREENS` still names the
+ * four, because what it asserts of them is the *branch* — this inside
+ * `<Empty failed>`, the wait inside a plain `Empty` — and a branch is the
+ * screen's own; what it asserts of this file is that the words live here and
+ * nowhere in those four.
+ *
+ * The sentence only, never the `Empty` around it: `AgentBuilder` adds an
+ * `action`, and the ending differs — three screens close with a full stop and
+ * the builder with a clause saying what cannot happen on the machine — so `tail`
+ * is the ending and the full stop is its default. This is the one arm that has
+ * earned the words "not reachable"; {@link reachText}'s docblock is why they may
+ * not be drawn over any other value of `reach`.
+ */
+export function NotReachable({
+  machine,
+  tail = ".",
+}: {
+  machine: { name: string; reach: Reach; offlineReason: OfflineReason };
+  tail?: ReactNode;
+}): ReactNode {
+  return (
+    <>
+      {machine.name} is not reachable right now — {reachText(machine.reach, machine.offlineReason)}
+      {tail}
+    </>
+  );
 }
 
 
@@ -972,10 +1023,16 @@ export function Skeleton({ rows = 3 }: { rows?: number }): ReactNode {
  * A sibling of {@link Skeleton} rather than `rows={1}` on it, and the difference
  * is the shape it stands in for. That one is a *session* row — a status dot and
  * two lines at `px-4 py-3.5` — and the four settings lists that draw this are
- * none of those things: a key, a device, a person, a machine, each one `min-h-11`
- * row with a title and a short subline. Standing the session shape in front of
- * them made the list jump on arrival, which is the one thing a placeholder is
- * for preventing.
+ * none of those things: a device and a person are each a `min-h-11` row with a
+ * title and a short subline; a key is a `KeyTable` row, `py-2` around its cells
+ * with no `min-h` of its own, so the 44px here stands in front of whatever that
+ * comes to (unmeasured); and a machine's row is `min-h-14`. Standing the
+ * session shape in front of them made the list jump on arrival, which is the
+ * one thing a placeholder is for preventing (Q3.548) — and so did standing an
+ * 11 in front of the 14: a 12px jump on the one list that carries a dot, a
+ * badge and a subline (review D9, fixed in E10). `tall` is that one row's
+ * height, asked for by the machines list only; the primitive takes a height and
+ * still no count.
  *
  * ⚠ **Exactly one row, and the primitive takes no count on purpose.** The
  * settings lists this is for commonly hold zero or one thing — your keys, your
@@ -992,9 +1049,9 @@ export function Skeleton({ rows = 3 }: { rows?: number }): ReactNode {
  * `bg-raised/50` is the transcript's own fill for "the shape of something
  * arriving" ({@link TranscriptSkeleton}), at the width of a short title.
  */
-export function SkeletonRow(): ReactNode {
+export function SkeletonRow({ tall = false }: { tall?: boolean } = {}): ReactNode {
   return (
-    <div aria-busy="true" className="flex min-h-11 items-center">
+    <div aria-busy="true" className={`flex ${tall ? "min-h-14" : "min-h-11"} items-center`}>
       <div aria-hidden="true" className="h-3 w-1/3 animate-pulse rounded-sm bg-raised/50" />
     </div>
   );
@@ -1059,7 +1116,9 @@ export type ButtonTone = "primary" | "plain" | "destructive" | "ghost";
  * approval filled on the right" — to every row of buttons anywhere here. Its
  * consequence is the part worth stating out loud, because it looks backwards: a
  * destructive button is **never** the filled one, so in a two-step confirmation
- * the filled button is **Cancel**.
+ * the only button that *may* take the fill is **Cancel** — and none does:
+ * {@link TwoStep} draws it `plain`, on the argument written there, and `webcheck`
+ * sweeps the settings screens for a filled Cancel.
  *
  * Without that rule "filled" would mean *the safe default* on the ask card and
  * *the irreversible one* in settings, which is worse than encoding nothing —
@@ -1267,7 +1326,8 @@ export function Button({
  * It is **not** the whole answer, and the other two halves are elsewhere by
  * necessity: the two-step confirmation with Cancel last (the property that was
  * actually measured — a second tap on a laggy connection lands on the undo), and
- * the rule at {@link BUTTON_TONE} that the filled button in that pair is Cancel.
+ * the rule at {@link BUTTON_TONE} that the only button in that pair which may be
+ * filled is Cancel — a licence {@link TwoStep} declines.
  */
 export function DangerButton({
   icon,
@@ -1277,14 +1337,17 @@ export function DangerButton({
   disabled = false,
   title,
   className = "",
+  ariaLabel,
 }: {
-  icon: ComponentType<{ size?: number | string; className?: string; "aria-hidden"?: boolean }>;
+  icon: DangerIcon;
   children: ReactNode;
   onClick?: () => void;
   size?: ButtonSize;
   disabled?: boolean;
   title?: string;
   className?: string;
+  /** Forwarded as `Button`'s: a confirming Revoke whose visible text is the bare verb names its key here. */
+  ariaLabel?: string;
 }): ReactNode {
   return (
     // `size` is forwarded rather than left to `className`, for the reason
@@ -1292,10 +1355,221 @@ export function DangerButton({
     // dropped, and this is one half of a confirming pair — a Delete that stayed
     // 44px beside a Cancel that shrank would break the ordering rule by making
     // the two answers different shapes.
-    <Button tone="destructive" size={size} onClick={onClick} disabled={disabled} title={title} className={className}>
+    <Button tone="destructive" size={size} onClick={onClick} disabled={disabled} title={title} className={className} ariaLabel={ariaLabel}>
       <Icon as={icon} size={13} />
       {children}
     </Button>
+  );
+}
+
+/** The glyph a destructive control leads with — {@link DangerButton}'s own type, named once. */
+export type DangerIcon = ComponentType<{ size?: number | string; className?: string; "aria-hidden"?: boolean }>;
+
+/**
+ * The act button of a {@link TwoStep}: its verb, and whether it takes the
+ * destructive look.
+ *
+ * `danger` **requires** the glyph, the way {@link DangerButton} does, and it is a
+ * union rather than two optional fields so that "must lead with an icon" is a
+ * compile error rather than a sentence. `ariaLabel` is forwarded to the button
+ * for the one confirmation whose visible verb has no subject of its own — a
+ * key's `Revoke`, whose prefix is a sibling span rather than its name (review
+ * D18).
+ */
+export type TwoStepAct =
+  | { label: string; danger: true; icon: DangerIcon; ariaLabel?: string }
+  | { label: string; danger?: false; icon?: undefined; ariaLabel?: string };
+
+/**
+ * What a confirmed act does to the question that asked it — the half of
+ * {@link TwoStep} that has no markup, so a driver can run it with a promise it
+ * controls.
+ *
+ * Two acts, told apart by what the caller returned:
+ *
+ * - **A promise** is a request this primitive owns the wait for. `setBusy(true)`
+ *   before anything else; on the 200, `setBusy(false)` and then `disarm` — and
+ *   **only** then, because the question standing until the server has answered
+ *   is what "nothing is drawn optimistically" means for a confirmation
+ *   (`web-shell.md`). A rejection calls `fail` and leaves the question exactly
+ *   where it was, so the person can retry or cancel beside the toast that says
+ *   why; a confirmation that closed on a failure would invite a second tap at
+ *   the pixels the act just left.
+ * - **Nothing** (`void`) is an act whose pending state belongs to somebody else
+ *   — a strip row whose parent holds the `DELETE`, a plugin row whose subline is
+ *   already saying `Removing…` — so the question closes on the tap and the
+ *   caller draws whatever comes next. `disarm` and the act land in the same
+ *   handler, which React batches into one render, so the order between them is
+ *   not observable and is not promised.
+ */
+export function twoStepAct(
+  outcome: Promise<unknown> | void,
+  hooks: { setBusy: (busy: boolean) => void; disarm: () => void; fail: (cause: unknown) => void },
+): void {
+  if (outcome === undefined) {
+    hooks.disarm();
+    return;
+  }
+  hooks.setBusy(true);
+  void outcome.then(
+    () => {
+      hooks.setBusy(false);
+      hooks.disarm();
+    },
+    (cause: unknown) => {
+      hooks.setBusy(false);
+      hooks.fail(cause);
+    },
+  );
+}
+
+/**
+ * The one box {@link TwoStep} draws in both arms — the class string the layout
+ * property rests on, named once.
+ *
+ * Exported for `MachineLimitPanel` alone, whose resting state is a form of four
+ * controls rather than one and so draws its own box under two `TwoStep`s that
+ * mount armed with no `rest`. It spelled the string by hand, and a property
+ * that must hold on every site and is re-derived on one is a property nothing
+ * asserts (Q3.552) — the reason the primitive exists, reproduced one file over.
+ * The alignment and the caller's `className` are appended after it.
+ */
+export const TWO_STEP_BOX = "flex flex-wrap items-center gap-2";
+
+/**
+ * The two-step confirmation, in one place.
+ *
+ * ⚠ **This shipped as thirteen hand-rolled copies, and the property they all had
+ * to hold was pinned in two of them** (review D6, 2026-09-05; Q3.552). Each was a
+ * `useState(false)` whose first tap swapped a control for a question, an act
+ * button and a Cancel, and each re-derived the layout rule by hand — which is
+ * how two of them (`SystemsPanel`, `AgentsPanel`) came to centre what the others
+ * pack, and how a Cancel once shipped filled. The rule lives here now and nowhere
+ * else, which is the whole reason this component exists; it is deliberately not
+ * a component library's "confirm dialog".
+ *
+ * **What it guarantees** (`web-shell.md`, Q3.218):
+ *
+ * - **One box, rendered in both arms.** The container below is the same element
+ *   with the same class string whether or not the question is showing, so the
+ *   last child of the confirming arm occupies the pixels the resting control had.
+ *   `.tap` removes the double-tap delay, so a second tap aimed at a control that
+ *   looked inert lands on the undo rather than on the irreversible half. That is
+ *   the safety property, and it is a geometry rather than a sentence about one.
+ *   The string is {@link TWO_STEP_BOX}, exported for the one site whose resting
+ *   state is a form rather than a control (`MachineLimitPanel`) and draws the
+ *   box itself.
+ * - **The act, then Cancel, and Cancel last** in DOM order — never the other way.
+ * - **Cancel is `plain`, never `primary`.** {@link BUTTON_TONE}'s rule says the
+ *   filled button in this pair would be Cancel, and every shipped confirmation
+ *   declines the fill: on a row about deleting something the undo must not be
+ *   the loudest object on the screen. It is disabled while the act is in flight.
+ * - **Busy is owned here** for a promise-returning act — both answers disabled,
+ *   a {@link Spinner} in the act's label, the question closed only on the 200 —
+ *   and a failure is `onFailure`, defaulting to a toast with `errorText`'s
+ *   sentence. See {@link twoStepAct}. ⚠ **It is the question's pair alone.** A
+ *   caller whose other controls share a flag with this act — a field's Reset
+ *   above the fleet limit, the SMTP form's Save and Resets, `KeyOnly`'s key
+ *   form, `AgentBuilder`'s Save — holds that flag around the promise it hands
+ *   over and passes it back as `disabled`, so the lock is one and reads both
+ *   ways; handed a bare promise, three of those greyed nothing of the caller's
+ *   for the length of a confirmed act and a second write could go out on the
+ *   same key (E7's review).
+ * - **The question names its subject** (Q3.545) — and that is the caller's to
+ *   compose, which is why `question` is a node and not a verb this primitive
+ *   would fill in. A `consequence` is drawn under it, muted, inside the same
+ *   span, and nowhere at rest.
+ *
+ * **What it deliberately does not own.** The **arming state**: `armed`/`onArm`
+ * are controlled, because the flag is per row (Q3.218 — these lists re-render
+ * on a poll), because a kebab-armed row arms from a menu item that is not in
+ * this box, and because two callers read it for their own paint (a row that
+ * stacks while confirming, a consequence drawn below the box). The caller's
+ * `setConfirming(true)` is synchronous, which the geometry above depends on.
+ * The **resting control**: `rest` is the caller's `Button` or `DangerButton`,
+ * whose tone at rest is a decision this primitive has no business making
+ * (`danger` on the first tap is the sign-out's, and not the retire's). And the
+ * **subject**, above.
+ *
+ * `align`: unset packs question and answers from the start; `"end"` lets the
+ * question grow so the answers sit where a row's kebab did; `"center"` puts the
+ * question on a line of its own, centred, so the resting button's own centre
+ * falls in the gap between the two answers — the shape two sites measured their
+ * way to and keep. `disabled` refuses the act alone (a write already out, a
+ * machine gone) and leaves Cancel live — deliberately, where the hand-rolled
+ * copies greyed both on the caller's flag: a Cancel only disarms, so nothing it
+ * does can collide with the write the caller is waiting on, and the way back
+ * stays under a thumb for exactly as long as the way forward is refused. `lead`
+ * is drawn first in both arms — a badge that is a fact about the state, not
+ * part of the question. `className` is appended to the one box.
+ */
+export function TwoStep({
+  armed,
+  onArm,
+  question,
+  consequence,
+  act,
+  onAct,
+  onFailure,
+  disabled = false,
+  rest,
+  size = "sm",
+  align,
+  lead,
+  className = "",
+}: {
+  armed: boolean;
+  onArm: (next: boolean) => void;
+  question: ReactNode;
+  consequence?: ReactNode;
+  act: TwoStepAct;
+  onAct: () => Promise<unknown> | void;
+  onFailure?: (cause: unknown) => void;
+  disabled?: boolean;
+  rest?: ReactNode;
+  size?: ButtonSize;
+  align?: "end" | "center";
+  lead?: ReactNode;
+  className?: string;
+}): ReactNode {
+  const [busy, setBusy] = useState(false);
+  const run = (): void =>
+    twoStepAct(onAct(), {
+      setBusy,
+      disarm: () => onArm(false),
+      fail: onFailure ?? ((cause) => toast("error", errorText(cause))),
+    });
+  const label = busy ? <Spinner /> : act.label;
+  return (
+    <div className={`${TWO_STEP_BOX} ${align === "center" ? "justify-center" : ""} ${className}`}>
+      {lead}
+      {armed ? (
+        <>
+          <span
+            className={`min-w-0 text-xs text-fg ${
+              align === "center" ? "basis-full text-center" : align === "end" ? "flex-1" : ""
+            }`}
+          >
+            {question}
+            {consequence !== undefined && <span className="block text-muted">{consequence}</span>}
+          </span>
+          {act.danger === true ? (
+            <DangerButton icon={act.icon} size={size} disabled={busy || disabled} onClick={run} ariaLabel={act.ariaLabel}>
+              {label}
+            </DangerButton>
+          ) : (
+            <Button tone="plain" size={size} disabled={busy || disabled} onClick={run} ariaLabel={act.ariaLabel}>
+              {label}
+            </Button>
+          )}
+          <Button size={size} disabled={busy} onClick={() => onArm(false)}>
+            Cancel
+          </Button>
+        </>
+      ) : (
+        rest
+      )}
+    </div>
   );
 }
 

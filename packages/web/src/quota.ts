@@ -20,8 +20,9 @@ import type { Me } from "./wire.js";
  * **It fails open on `unknown`**, with `mailUsable` and `showsGateLink` and
  * against `adminMayInvite`. The rule is *fail closed where the cost is a missing
  * screen, fail open where the cost is a locked-out person*, and this is the
- * second kind: `AddMachine` in `MachinesSection` is the **only** way to create a
- * machine anywhere in this app, `bootstrap`'s catch really does reach
+ * second kind: the one-line installer under the machine list in
+ * `MachinesSection` (`installCommand`, decision 3B) is the **only** way a
+ * machine is added from this app, `bootstrap`'s catch really does reach
  * `phase: "ready"` with `me === null`, and a control plane rolled back past this
  * release reaches it permanently. Failing closed there leaves somebody with
  * quota, no machines, and no route to one — which is no sessions, which is no
@@ -184,13 +185,17 @@ export function machineLimitChangeNotice(name: string, owned: number, next: numb
   const stopping = owned - next;
   if (stopping <= 0) return null;
   /*
-   * Sixteen words with two machines, two over the cap, and accepted: the pinned
-   * substrings — `newest N working` and `brings them back` — cost seven of them,
-   * and the count and the rule are the whole of what an admin is deciding on.
+   * Fourteen words with two machines, the confirmation cap (Q3.544): the pinned
+   * substrings — `newest N working` and `brings them back` — cost seven of
+   * them, and the count and the rule are the whole of what an admin is deciding
+   * on. It was seventeen (review D10): "A limit of" became "Limit", the dash
+   * that counted as a word became a semicolon, and "raising it" lost its
+   * object — the field being confirmed is what raising raises — which was the
+   * fifteenth word, accepted for one round and then not (E11's review).
    */
   return (
-    `${name} has ${owned}. A limit of ${next} stops the newest ` +
-    `${stopping === 1 ? "one" : String(stopping)} working — raising it brings ` +
+    `${name} has ${owned}. Limit ${next} stops the newest ` +
+    `${stopping === 1 ? "one" : String(stopping)} working; raising brings ` +
     `${stopping === 1 ? "it" : "them"} back.`
   );
 }
@@ -261,10 +266,12 @@ export function fleetMachineLimitNotice(current: string, next: string): string |
   const to = resolve(next);
   if (to >= from) return null;
   // Drawn only inside the confirmation (decision 10A), so it is read at the
-  // moment of deciding: the rule, and that it is reversible. Nothing else.
+  // moment of deciding: the rule, and that it is reversible. Nothing else —
+  // fourteen words, the confirmation cap, which "from ${from}" put it two over
+  // (review D10); the field it confirms still shows the value being left.
   return to === 0
     ? "Every machine on the server stops. Raising the limit brings them back."
-    : `Default drops from ${from} to ${to}; machines over it stop. Raising the limit brings them back.`;
+    : `Default drops to ${to}; machines over it stop. Raising the limit brings them back.`;
 }
 
 /**

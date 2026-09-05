@@ -474,9 +474,12 @@ export function stanceLine(
    * naming it here would be the self-reference this file keeps deleting.
    */
   if (stance === "start_refused") {
+    // Fourteen words with the remedies, the screen-line cap (review D10): "last
+    // time" went from both arms, since a refusal the daemon still reports is by
+    // construction the last one — `START_REFUSAL_TTL_MS` is what makes that true.
     return canSignIn
-      ? `${name} refused to start last time.`
-      : `${name} refused to start last time. Sign in on the machine, or paste a key.`;
+      ? `${name} refused to start.`
+      : `${name} refused to start. Sign in on the machine, or paste a key.`;
   }
   // Signed in, and signed out with a way in: the badge says it and the control
   // below does something about it. A sentence here can only be self-reference,
@@ -497,12 +500,22 @@ export function stanceLine(
   // sessions may still work, and a chat is how to find out. "That's normal" is
   // gone — reassurance about a state the sentence already declines to alarm
   // over is a second sentence saying the first one (decision 11A).
+  //
+  // ⚠ Fourteen words at the longest, the screen-line cap, with a two-word name
+  // counted as two — and a two-word *host*: `osName` answers "This machine" for
+  // Linux and for an older daemon that reports no platform, and the first trim
+  // (review D10) swept macOS alone and left that host at fifteen, "its" being
+  // the word (E11's review). This composed three clauses and ran to 24. Where
+  // the host cannot run the sign-in, the paste instruction *replaces* "Start a
+  // chat to find out" rather than following it — a chat would find out, but
+  // the key is the only remedy on the card, so it is the sentence.
   const why =
     agent.id === "kimi"
       ? `${name} doesn't report sign-in state.`
-      : `This machine couldn't check whether ${name} is signed in.`;
-  const cannotRun = canSignIn ? "" : ` ${host} can't run ${name}'s sign-in — paste a key.`;
-  return `${why} Start a chat to find out.${cannotRun}`;
+      : `${name}'s sign-in state is unknown.`;
+  return canSignIn
+    ? `${why} Start a chat to find out.`
+    : `${why} ${host} can't run sign-in; paste a key.`;
 }
 
 /**
@@ -513,15 +526,17 @@ export function stanceLine(
  * It survives as a `title` and as the wire key, and nowhere else.
  */
 export const CREDENTIAL_LABELS: Record<string, { name: string; note: string }> = {
-  // Every note at six words or fewer: it sits under a field that already has a
-  // name, so what is left to say is *where the value comes from* and, for the
-  // one slot that is not a website key, that it is not one.
-  CLAUDE_CODE_OAUTH_TOKEN: { name: "Claude subscription token", note: "Made on the machine, not a website." },
+  // Every note at six words or fewer, a dash counting as one: it sits under a
+  // field that already has a name, so what is left to say is *where the value
+  // comes from* and, for the one slot that is not a website key, that it is not
+  // one. Two carried seven (review D10): "Made on" is "From", like its
+  // neighbours, and the dash before "the free models" is a semicolon.
+  CLAUDE_CODE_OAUTH_TOKEN: { name: "Claude subscription token", note: "From the machine, not a website." },
   ANTHROPIC_API_KEY: { name: "Anthropic API key", note: "From your Anthropic account." },
   KIMI_API_KEY: { name: "Kimi API key", note: "From your Kimi account." },
   CODEX_API_KEY: { name: "OpenAI API key", note: "From your OpenAI account." },
   OPENROUTER_API_KEY: { name: "OpenRouter API key", note: "From your OpenRouter account." },
-  OPENCODE_API_KEY: { name: "OpenCode Zen key", note: "Optional — the free models need none." },
+  OPENCODE_API_KEY: { name: "OpenCode Zen key", note: "Optional; the free models need none." },
 };
 
 export function credentialLabel(envName: string): { name: string; note: string } {
@@ -553,9 +568,12 @@ export function credentialLabel(envName: string): { name: string; note: string }
  */
 export function credentialCaveat(id: string, canSignIn: boolean): string | null {
   if (id === "codex") {
+    // Ten words each, the caveat cap (review D10): the dash that made it eleven
+    // is a semicolon, and "sign in on the host" is "use the host's sign-in",
+    // the shape the wizard arm's remedy already has.
     return canSignIn
-      ? "A key won't sign Codex in — use Sign in above."
-      : "A key won't sign Codex in — sign in on the host.";
+      ? "A key won't sign Codex in; use Sign in above."
+      : "A key won't sign Codex in; use the host's sign-in.";
   }
   if (id === "kimi") {
     return "Kimi may prefer the key on the machine.";

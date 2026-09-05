@@ -1016,8 +1016,19 @@ process.stdout.write("\na login transcript, read as steps\n");
 process.stdout.write("\nyour own API keys\n");
 {
   const { stripComments } = await import("./webcheck.source.js");
-  const { keySubline, orderKeys, rememberRevokedKey, revokedKeyNotice, takeRevokedKeyNotice, thisBrowsersKey } =
-    await import("../src/account.js");
+  const {
+    changePasswordError,
+    clearRevokedKeyNotice,
+    CONTROL_PLANE_UNREACHABLE,
+    linkError,
+    orderKeys,
+    peekRevokedKeyNotice,
+    registerError,
+    rememberRevokedKey,
+    revokedKeyNotice,
+    signInError,
+    thisBrowsersKey,
+  } = await import("../src/account.js");
   const read = (file: string): string =>
     stripComments(readFileSync(new URL(`../src/ui/settings/${file}`, import.meta.url), "utf8"));
 
@@ -1050,11 +1061,85 @@ process.stdout.write("\nyour own API keys\n");
     check(`"${literal}" is drawn exactly once`, keyRow.split(literal).length - 1, 1);
     check(`and only under the guard`, keyRow.indexOf(literal) > firstGuard, true);
   }
+  // At the row's own size: the one sentence on the screen saying an act is
+  // irreversible was its smallest type (review D9).
+  check("and the consequence is drawn at text-xs", /<span className="text-xs text-muted">revoking it signs you out<\/span>/.test(keyRow), true);
   // The consequence at rest is allowed only beside a one-tap control (10A), and
   // the own-keys screen is the only caller that draws it.
   const keys = read("KeysSection.tsx");
   check("own keys are one tap", /confirm=\{false\}/.test(keys), true);
   check("and the screen decides this-browser from the credential in hand", /thisBrowsersKey\(credential,/.test(keys), true);
+  /*
+   * **Every Revoke names its key to a screen reader** (review D18): the prefix
+   * is two cells left of the button, so a column of buttons all reading
+   * "Revoke" is a column of one-tap acts with no subject. Both the bare button
+   * and the confirming act carry it — the latter's visible text is still the
+   * bare verb, the question naming the key being a sibling span. The confirming
+   * one is `TwoStep`'s `act.ariaLabel` (E7's review, Q3.552), forwarded to the
+   * `DangerButton` the primitive draws.
+   */
+  check("both Revoke buttons name their key", keyRow.split("`Revoke ${record.prefix}…`").length - 1, 2);
+  check(
+    "the resting one as its own prop, the confirming one through the primitive's act",
+    [
+      /ariaLabel=\{`Revoke \$\{record\.prefix\}…`\}/.test(keyRow),
+      /act=\{\{ label: "Revoke", danger: true, icon: Trash2, ariaLabel: `Revoke \$\{record\.prefix\}…` \}\}/.test(keyRow),
+    ],
+    [true, true],
+  );
+  check("and DangerButton forwards the name", /ariaLabel=\{ariaLabel\}/.test(read("../bits.tsx")), true);
+
+  /*
+   * **New key waits for the list, refuses at the ceiling, and not after a failed
+   * read** (review D11, D18). The three arms in the one `disabled` expression:
+   * `newKeyWaits` is `keys === null`, when the count is unknown and a tap during
+   * the skeleton could open the leaf only to be told 409; `atCeiling` is the
+   * mirror of the control plane's refusal (`pincheck` holds the two copies
+   * equal); `minting` is the request in flight. `"failed"` is deliberately not
+   * an arm — minting does not need the list.
+   */
+  check("New key is disabled while the list is unread, at the ceiling, and while minting", /disabled=\{newKeyWaits \|\| atCeiling \|\| minting\}/.test(keys), true);
+  check("where waiting is the list being unread", /newKeyWaits = keys === null;/.test(keys), true);
+  check("and a failed read is not a reason to wait", /newKeyWaits = [^;]*"failed"/.test(keys), false);
+  // The ceiling line is drawn beside the button, before the table, and reads
+  // "N of N; revoke one first." with N the screen's own mirror of the ceiling —
+  // six words, the consequence-at-rest cap, where the dash it carried counted as
+  // a seventh (review D10).
+  const ceiling = /^const MAX_KEYS = (\d+);$/m.exec(keys)?.[1] ?? null;
+  // The line is read off the screen, under its guard, rather than restated here:
+  // a literal this driver defines is one the source can drop or reword without
+  // the two checks on its text noticing (E12's review). Both operands of the
+  // ordering are guarded, the `>= 0` idiom.
+  const ceilingLine = /\{atCeiling && <p className="mt-1 text-xs text-muted">(\{`[^`]*`\})<\/p>\}/.exec(keys)?.[1] ?? null;
+  check("the ceiling is a readable constant", ceiling !== null, true);
+  check("the ceiling line is drawn under the guard", ceilingLine !== null, true);
+  const lineAt = ceilingLine === null ? -1 : keys.indexOf(ceilingLine);
+  const tableAt = keys.indexOf("<KeyTable>");
+  check("before the table", lineAt >= 0 && tableAt >= 0 && lineAt < tableAt, true);
+  const ceilingText = (ceilingLine ?? "").replaceAll("${MAX_KEYS}", ceiling ?? "").replace(/^\{`|`\}$/g, "");
+  check("and reads N of N", ceilingText, `${ceiling} of ${ceiling}; revoke one first.`);
+  check("in six words", ceilingText.split(/\s+/).length, 6);
+  /*
+   * **A failed read offers the retry beside the sentence** (review D12): `Empty
+   * failed` is the app's one failure shape, and the button re-runs `load`
+   * itself — not a reload, not `refreshMe`, which is the other arm's remedy for
+   * a control plane that could not say who you are.
+   */
+  check("a failed key read says so with Try again wired to load", /<Empty failed action=\{<Button size="sm" onClick=\{load\}>Try again<\/Button>\}>\s*Could not read your keys\.\s*<\/Empty>/.test(keys), true);
+  /*
+   * **The one-time secret, on its own source** (review D12). `onDone` is
+   * required — a caller that omitted it once shipped a card with no way to
+   * dismiss a secret. A copy that could not land says so rather than doing
+   * nothing, which on a plain-http LAN origin is the common case. "Copied" is
+   * the only confirmation the tap gets, so it is announced. And the value is
+   * `text-xs`: 10px monospace is where `0`/`O` stop being distinguishable, on
+   * the one string somebody transcribes into a terminal.
+   */
+  const secret = read("OneTimeSecret.tsx");
+  check("Done is required of every caller", [/onDone: \(\) => void;/.test(secret), /onDone\?:/.test(secret)], [true, false]);
+  check("a copy that failed says so", /toast\("error", "Could not copy — select it by hand\."\)/.test(secret), true);
+  check("and a copy that landed is announced", /<span aria-live="polite">\{copied \? "Copied" : "Copy"\}<\/span>/.test(secret), true);
+  check("with the value at text-xs, never smaller", /<pre className="[^"]*\bfont-mono text-xs\b[^"]*"/.test(secret), true);
 
   /*
    * 5A: revoking the key this tab holds signs out **on purpose**. The order is
@@ -1075,8 +1160,13 @@ process.stdout.write("\nyour own API keys\n");
   check("and no request can 401 its way there first", keys.indexOf("load()", remembers) === -1 || keys.indexOf("load()", remembers) > leaves, true);
 
   /*
-   * The gate's one-shot line: read once, gone. Driven with a `Map`, because both
-   * halves take the storage as an argument for exactly this reason.
+   * The gate's one-shot line: read once, gone — with reading and deleting as
+   * two calls (review D16). Deleting on read inside a `useState` initialiser
+   * was right only because React 19 keeps the first of StrictMode's two calls;
+   * peek in the initialiser and clear in an effect, and a second peek before
+   * the clear is the same line, which is the property that makes "once" a fact
+   * about the construction. Driven with a `Map`, because all three take the
+   * storage as an argument for exactly this reason.
    */
   const fake = new Map<string, string>();
   const jar = {
@@ -1084,11 +1174,25 @@ process.stdout.write("\nyour own API keys\n");
     setItem: (name: string, value: string): void => void fake.set(name, value),
     removeItem: (name: string): void => void fake.delete(name),
   };
-  check("no revoke, no notice", takeRevokedKeyNotice(jar), null);
+  check("no revoke, no notice", peekRevokedKeyNotice(jar), null);
   rememberRevokedKey(jar, "9f2a1b3c");
-  check("a revoke leaves one, naming the key", takeRevokedKeyNotice(jar), revokedKeyNotice("9f2a1b3c"));
+  check("a revoke leaves one, naming the key", peekRevokedKeyNotice(jar), revokedKeyNotice("9f2a1b3c"));
   check("which reads as an act, not an expiry", /revoked\. Sign in again\.$/.test(revokedKeyNotice("9f2a1b3c")), true);
-  check("and reading it is what deletes it", takeRevokedKeyNotice(jar), null);
+  check("reading it does not consume it: a second peek is the same line", peekRevokedKeyNotice(jar), revokedKeyNotice("9f2a1b3c"));
+  clearRevokedKeyNotice(jar);
+  check("and clearing is what deletes it", peekRevokedKeyNotice(jar), null);
+  // Clearing what was never written is not an error: the gate clears unconditionally.
+  clearRevokedKeyNotice(jar);
+  check("and clearing twice is nothing", peekRevokedKeyNotice(jar), null);
+  /*
+   * The gate's half, on its own source: the peek is in the state initialiser
+   * and the clear in an effect, each under the storage guard — and the guard is
+   * what the read side had that the write side did not (E3).
+   */
+  const app = stripComments(readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8"));
+  check("the gate peeks in a state initialiser", /useState<string \| null>\(\(\) => \{\s*try \{\s*return peekRevokedKeyNotice\(window\.sessionStorage\)/.test(app), true);
+  check("and clears in a mount effect", /useEffect\(\(\) => \{\s*try \{\s*clearRevokedKeyNotice\(window\.sessionStorage\)/.test(app), true);
+  check("with nothing left that deletes on read", /takeRevokedKeyNotice/.test(app), false);
 
   /*
    * Newest first, revoked last: the route answers `created_at ASC` and the
@@ -1104,24 +1208,62 @@ process.stdout.write("\nyour own API keys\n");
   check("live keys newest first, revoked last", orderKeys(rows).map((row) => row.id), ["d", "c", "a", "b"]);
 
   /*
-   * The subline's null arm: `undefined` is a control plane older than the
-   * column, `null` a key nothing has presented, and the row cannot tell them
-   * apart — so both say "never used" rather than one of them saying "unknown".
-   */
-  const now = 10 * 24 * 3600 * 1000;
-  check("a never-used key says so", keySubline({ createdAt: 0, lastUsedAt: null }, now), "made 10d ago · never used");
-  check("and so does one an older control plane answered without the field", keySubline({ createdAt: 0 }, now), "made 10d ago · never used");
-  check("a used one says when", keySubline({ createdAt: 0, lastUsedAt: now - 7200_000 }, now), "made 10d ago · last used 2h ago");
-
-  /*
    * And the move itself: the account screen mints and lists nothing any more.
    * Both calls have exactly one caller in the product, and it is the keys screen.
    */
   const account = read("AccountSection.tsx");
   check("the account screen lists no keys", /myKeys\(/.test(account), false);
   check("and mints none", /mintMyKey\(/.test(account), false);
+  /*
+   * The device list's failure arm and its one act over N rows (review D12).
+   * A failed read draws the same shape the keys screen does, with Try again
+   * wired to the read; and ending every other sign-in confirms in place —
+   * the question names the count, the `DangerButton` acts, Cancel is last, and
+   * both arms lay out in **one** box so the last child sits on the same pixels
+   * (Q3.218's safety property). The box, the ordering and the wait are
+   * `TwoStep`'s (E7's review, Q3.552): the question is its `question`, the
+   * resting button its `rest`, and the request is handed to it whole, so the
+   * question closes on the 200 and stands beside the toast otherwise.
+   */
+  check("a failed device read says so with Try again wired to refresh", /<Empty\s+failed\s+action=\{\s*<Button size="sm" onClick=\{refresh\}>\s*Try again\s*<\/Button>\s*\}\s*>\s*Could not read your sessions\.\s*<\/Empty>/.test(account), true);
+  const othersQuestion = account.indexOf("Sign out ${others} other device${others === 1 ? \"\" : \"s\"}?");
+  check("signing out the other devices asks, naming the count", othersQuestion >= 0, true);
+  const othersBox = othersQuestion >= 0 ? account.lastIndexOf("<TwoStep", othersQuestion) : -1;
+  // Where the element closes: its own `/>` on a line of its own, since a `<>…</>` fragment inside `question` carries a `/>` too.
+  const others = othersBox >= 0 ? account.slice(othersBox, othersQuestion + account.slice(othersQuestion).search(/^\s*\/>/m)) : "";
+  check("inside one box, the primitive's, with the resting button as its rest", othersBox >= 0 && /rest=\{\s*<Button size="sm" onClick=\{\(\) => setConfirming\(true\)\}>/.test(others), true);
+  check(
+    "with the DangerButton acting on the request itself, and Cancel last the primitive's",
+    [/act=\{\{ label: "Sign out", danger: true, icon: LogOut \}\}/.test(others), /onAct=\{signOutOthers\}/.test(others), /setConfirming\(false\)/.test(account)],
+    [true, true, false],
+  );
   check("the keys screen does both", /myKeys\(/.test(keys) && /mintMyKey\(/.test(keys), true);
   // Devices folded into Account (1B): one skeleton row, no sentence over it.
   check("the device list draws one skeleton row", account.split("<SkeletonRow").length - 1, 1);
   check("and no longer narrates its own loading", /reading your sessions/.test(account), false);
+
+  /*
+   * **One sentence for a control plane that did not answer** (review D7). The
+   * three error readers return it for a transport failure, the sign-in reader
+   * builds its two-sentence version on it, and both screens here draw the
+   * constant rather than the words — read with comments stripped, and asserted
+   * as the import plus the literal's absence, since presence is the check that
+   * lets a copy stand.
+   */
+  check("the constant is the sentence", CONTROL_PLANE_UNREACHABLE, "Cannot reach the control plane.");
+  const transport = new TypeError("Failed to fetch");
+  check(
+    "every error reader answers it for a transport failure",
+    [linkError(transport), registerError(transport), changePasswordError(transport)],
+    [CONTROL_PLANE_UNREACHABLE, CONTROL_PLANE_UNREACHABLE, CONTROL_PLANE_UNREACHABLE],
+  );
+  check("and the sign-in reader builds on it", signInError(transport).startsWith(`${CONTROL_PLANE_UNREACHABLE} `), true);
+  const draws = ([["AccountSection.tsx", account], ["KeysSection.tsx", keys]] as const).filter(
+    ([, src]) =>
+      !/import \{[^}]*\bCONTROL_PLANE_UNREACHABLE\b[^}]*\} from "\.\.\/\.\.\/account";/.test(src) ||
+      !/\{CONTROL_PLANE_UNREACHABLE\}/.test(src) ||
+      src.includes(CONTROL_PLANE_UNREACHABLE),
+  );
+  check("both screens import it, draw it, and hold no copy", draws.map(([name]) => name), []);
+  check("the account screen draws it on all three of its failed arms", account.split("{CONTROL_PLANE_UNREACHABLE}").length - 1, 3);
 }

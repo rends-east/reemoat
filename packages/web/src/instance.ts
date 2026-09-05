@@ -417,6 +417,81 @@ export interface SmtpDraft {
 }
 
 /**
+ * Which field of the draft each SMTP setting key fills.
+ *
+ * `smtp.password` is deliberately absent: the draft has no field for it, since
+ * the password is write-only and held in its own state on the screen. A key
+ * outside this table therefore changes nothing in {@link draftAfterClear}.
+ */
+export const SMTP_DRAFT_FIELD: Readonly<Record<string, keyof SmtpDraft>> = {
+  "smtp.host": "host",
+  "smtp.port": "port",
+  "smtp.security": "security",
+  "smtp.username": "username",
+  "mail.from": "from",
+  "mail.public_url": "publicUrl",
+};
+
+/**
+ * The draft after one key was cleared on the server, given what the server now
+ * says: **exactly that key's field takes the answer's value, and every other
+ * field keeps whatever was typed into it.**
+ *
+ * This is the repair for a Reset that did not survive the next Save (review
+ * D14). `save` sends all six fields from the draft, and the per-field Reset
+ * re-synced the draft only while the form had no edits — so with one field
+ * edited, Reset on another cleared it on the server, the draft still held the
+ * old value, and Save wrote it straight back. "Saved." was the only thing on
+ * screen. Patching one field is the whole fix: the other edits are still the
+ * person's, and the screen's re-sync effect keeps the full sync for a form with
+ * nothing of its own to lose.
+ *
+ * Pure so `webcheck` drives it with a dirty draft and a cleared key.
+ */
+export function draftAfterClear(draft: SmtpDraft, key: string, answerDraft: SmtpDraft): SmtpDraft {
+  const field = SMTP_DRAFT_FIELD[key];
+  if (field === undefined) return draft;
+  return { ...draft, [field]: answerDraft[field] };
+}
+
+/**
+ * The public URL a fresh server is offered: the origin this page was served
+ * from, **as a value rather than a placeholder**.
+ *
+ * `mailConfigured` on the control plane requires `mail.public_url`, and the
+ * screen drew the origin only as a placeholder — so an admin who filled in the
+ * SMTP fields and pressed Save still had a server refusing to send, with the
+ * one value it wanted sitting greyed in the box they had just looked at
+ * (review D15). On every ordinary deployment the origin *is* where links in
+ * mail should point, so it goes into the draft and the form is marked dirty:
+ * Save is live and sends it, and the provenance line under the field keeps
+ * saying "not set" until the 200 makes it true.
+ *
+ * Seeded only where nothing is set anywhere — a stored or environment value
+ * is somebody's decision — and only from an origin that would pass
+ * `smtpProblem`, since a `file:` or `null` origin seeded here would be a
+ * problem sentence over a value nobody typed. The screen calls this **once,
+ * at mount**, never on the re-sync after a save or a clear: a person who
+ * empties the field on purpose and saves must not watch it come back.
+ *
+ * And the screen keeps the server's `mail.problems` on screen while the seed is
+ * the form's only edit (`seeded` in `EmailSection`): the diagnosis is drawn
+ * under a clean form, and dirt nobody typed hid it on exactly the server this
+ * is for.
+ *
+ * Pure so `webcheck` drives both arms.
+ */
+export function seedPublicUrl(
+  draft: SmtpDraft,
+  field: ConfigField | undefined,
+  origin: string,
+): { draft: SmtpDraft; dirty: boolean } {
+  const unset = field === undefined || fieldOrigin(field) === "unset";
+  if (!unset || !/^https?:\/\//.test(origin)) return { draft, dirty: false };
+  return { draft: { ...draft, publicUrl: origin }, dirty: true };
+}
+
+/**
  * What is wrong with what has been typed, or `null`.
  *
  * A **typo catcher, not a validator** — the server is the only side that can

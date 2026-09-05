@@ -58,18 +58,18 @@ bug in the file.
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 123 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 79 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 297 | `####` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 298 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 53 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 109 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 66 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 127 | `###` |
-| | | **854** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 130 | `###` |
+| | | **858** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 854 rather than the 448
+dividers. So the count is over **both** depths, and it says 858 rather than the 451
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -801,8 +801,10 @@ and the same `PasswordBusyError` → `503`, about **the caller** and never about
 parameter, on the two `/v1/me/*` routes that are now the escalation this entry
 found: `POST /v1/me/keys` (minting a permanent credential from a borrowed session)
 and `PUT /v1/me/email` (the address is the reset channel, so repointing it *is*
-taking the account). `POST /v1/me/password` verifies inline, because it is also
-the route that must let an account with no password row set a first one.
+taking the account). `POST /v1/me/password` verified inline then — since
+2026-09-05 it goes through `verifyCurrentPassword`, shared with the email
+route's API-key arm (Q1.630, amended) — because it is also the route that must
+let an account with no password row set a first one.
 
 **The measurement above is the part worth keeping**, and it is why this is
 superseded rather than deleted: `POST /v1/admin/users/<self>/keys` answered `201`
@@ -811,8 +813,10 @@ outright, both asking nothing. That is what those routes did on the day somebody
 looked, and it is the evidence for removing them rather than hardening them.
 
 **Status.** Superseded — both routes are deleted; the question moved to
-`proveCurrentPassword` on `/v1/me/keys` and `/v1/me/email`, and on 2026-09-04
-left `/v1/me/keys` again by the owner's decision (Q1.630)
+`proveCurrentPassword` on `/v1/me/keys` and `/v1/me/email`, on 2026-09-04
+left `/v1/me/keys` again by the owner's decision (Q1.630), and on 2026-09-05
+`proveCurrentPassword` went too: `/v1/me/password` and the API-key arm of
+`/v1/me/email` share `verifyCurrentPassword` (Q1.630, amended)
 
 ### Q1.611 — Can an API key be revoked?
 
@@ -1914,7 +1918,9 @@ same rule; changing one side without the other was a `400` on screen.
 
 **Status.** Superseded — reversed on 2026-09-04 by the owner's decision, Q1.630: the
 route asks nothing again, the client predicate is deleted, and the chain above is
-open by choice rather than by accident.
+open by choice rather than by accident. Amended 2026-09-05 (Q1.630's amendment):
+the route asks an API-key caller again, reading `caller.via`, so the chain is open
+by choice for a session and closed for a key.
 
 ### Q1.403 — Should an admin be able to reset somebody's password?
 
@@ -3152,7 +3158,9 @@ value stops moving, and that a migrated file migrates twice harmlessly.
 **Decision.** No, neither. `POST /v1/me/keys` takes a session and nothing
 else; it reads no body, so a bodiless request and `{}` mint alike and a stray
 `currentPassword` is ignored rather than verified. `PUT /v1/me/email` takes the
-session and the address. `POST /v1/me/password` alone still asks, inline.
+session and the address. `POST /v1/me/password` still asks — as decided, alone
+and inline; since the amendment below neither word holds, because the API-key
+arm of `PUT /v1/me/email` asks too and both go through `verifyCurrentPassword`.
 `proveCurrentPassword` is deleted with its two callers.
 
 **The email half reopens Q1.402's chain, by decision.** With a stolen session
@@ -3180,9 +3188,36 @@ minutes, which is a rule nobody could predict from the screen. Keeping the
 gate and hiding the field behind a "use my session" toggle, which is the same
 tap count with a lie in it.
 
+**Amended 2026-09-05.** The email half is split by `caller.via`. "The session
+is enough" was decided about a session, and the route was reading no
+credential kind at all — `callerAuth` sets `via` to `"api_key"` for an `rk_`
+bearer, and the only read of it was `GET /v1/me` echoing it back — so the chain
+above was open to an **API key** as well, and `relaycheck` was driving it with
+one from `seedKey` under the words "the session alone". That is a different
+credential with a different failure: a session is a person signed in, listed
+under Devices and one tap to end, while a key is a machine credential that
+sits in `~/.reemoat/cpctl.env`, a backup or a CI log and can leak with no
+person anywhere in the chain — and there is no admin password reset behind it
+(Q1.403). So `PUT /v1/me/email` now asks an API-key caller for the current
+password, verified through `verifyCurrentPassword` — the helper
+`/v1/me/password` now verifies through as well, its once-inline check moved
+there so the two routes that ask cannot drift, spending the same
+`passwordChangeKey` because it is one password being guessed — and asks a
+session nothing. The no-password-row exemption stands for a key, and is
+unreachable by a session. `POST /v1/me/keys` is unchanged: cloning a key
+escalates nothing a key does not already have. The consequence for `cpctl` —
+an API-key caller unless `REEMOAT_CP_KEY` came from `cpctl login`, which
+prints a session token into the same variable — is that `cpctl email` keeps
+its password prompt for a key and asks nothing under a session, because
+`currentPasswordBody` reads `via` off `/v1/me` and sends what the route will
+read for whichever credential the shell holds, while `cpctl key` loses one the
+server never read.
+
 **Status.** Applied. `relaycheck` pins the 201 with no body, with `{}`, and
-with a wrong password in the body; the password gate stays pinned on the two
-routes that keep it.
+with a wrong password in the body; the password gate stays pinned on
+`POST /v1/me/password` and on the API-key arm of `PUT /v1/me/email` — refused
+without the password, refused with a wrong one, through with the right one,
+and the session and no-password-row arms through with none.
 
 ## Session lifecycle, questions and attachments
 
@@ -15855,7 +15890,32 @@ characters, which reward abbreviation. Localising the caps, which would make the
 about a language this app is not written in yet.
 
 **Status.** Current. The numbers live in the plan and here; nothing in the
-repository restates them.
+repository restates them. Two strings on `PluginConsent` stand over the ten-word
+cap by decision rather than oversight (review D10, and its fix round): the
+declaration — *A plugin runs on this machine as you, with your files. This is
+what it declared, not a limit on it.* — is the one sentence the consent stands
+on rather than a caveat about another product, and `webcheck` pins its opening
+words as the honest line; and the unreadable-file line carries the daemon's
+`reason` verbatim, which no cap on words written here can bound.
+
+**Amended 2026-09-05.** The two exemptions, verbatim and counted, so the next
+sweep finds the decision rather than the overrun — review D10 counted three
+`PluginConsent` lines at 19–25 against the ten-word caveat cap and its fix
+round allowed these two to stand. The declaration is twenty-one words: *A
+plugin runs on this machine as you, with your files. This is what it declared,
+not a limit on it.* The unreadable-file line on `PluginUnreadable` is, as
+written, *`{reason}`. Nothing has been sent. `{checker}` will still check it
+properly — but until it does, nobody can tell you what this plugin asks for.* —
+twenty-five words of its own with `{checker}` read as *This machine* (*Each
+machine* on the fleet-wide import), around a `reason` clause of five to ten
+that the daemon writes. Counted as whitespace tokens with a dash as one word,
+the count every other trim in that round used. Both stay
+over the cap because a consent screen's caveat is read once, before an
+irreversible install, and is the sentence the consent stands on rather than a
+note about another product; the prefix `webcheck` pins as the honest line — *A
+plugin runs on this machine as you* — spends eight of the ten by itself, and the
+`reason` is the daemon's to word. The third line D10 counted, the `http`
+caveat, was cut to nine and is not exempt.
 
 #### Q3.545 — Where may a consequence be drawn, and which CLI lines may a settings screen carry?
 
@@ -15895,8 +15955,10 @@ browser's and nothing on the screen says revoking could sign you out. Revoking
 that key signs out **on purpose** (5A): after the 200, `rememberRevokedKey` writes
 the prefix under one `sessionStorage` name, `clearSession` drops the credential,
 and the page reloads onto the gate, which draws "Key rk_…… revoked. Sign in again."
-once — `takeRevokedKeyNotice` deletes on read. No request is allowed to 401 its way
-there. Own keys stay one-tap in every case (4C), **including the last live key of
+once — `peekRevokedKeyNotice` in a state initialiser, `clearRevokedKeyNotice` from a
+mount effect, so "once" holds by construction rather than by React 19 keeping the
+first of StrictMode's two initialiser calls (review D16). No request is allowed to
+401 its way there. Own keys stay one-tap in every case (4C), **including the last live key of
 a password-less account**.
 
 **Why.** The old path was discovery: the next request answered `401
@@ -15941,10 +16003,12 @@ file draws no `role="switch"`.
 
 #### Q3.548 — What does a settings list draw while it is being read, and why is it one row?
 
-**Decision.** `SkeletonRow` — one `min-h-11` row with a `bg-raised/50` bar the
-width of a title, `aria-busy` on the wrapper and `aria-hidden` on the bar, and no
-sentence. Exactly one per list, and the primitive takes no count. Drawn by the
-keys, devices, users and machines lists while their first read is in flight.
+**Decision.** `SkeletonRow` — one row at `min-h-11`, or `min-h-14` under `tall`
+for the machines list, whose row is that height (review D9), with a
+`bg-raised/50` bar the width of a title, `aria-busy` on the wrapper and
+`aria-hidden` on the bar, and no sentence. Exactly one per list, and the
+primitive takes no count. Drawn by the keys, devices, users and machines lists
+while their first read is in flight.
 
 **Why.** "No keys yet." was drawn before the keys had been read, which is a false
 claim for the two seconds it takes to be refuted. `Skeleton` in `bits.tsx` is the
@@ -16031,6 +16095,103 @@ set, and an old model with none means the agent's own default already applies.
 
 **Status.** Applied. `webcheck` drives the rule with two option lists and pins
 the dispatcher's call-site shape.
+
+#### Q3.552 — Why is there one two-step primitive, and what does it own?
+
+**Decision.** Every two-step confirmation in the web client is `TwoStep`
+(`bits.tsx`) — fifteen mounts across fourteen sites, counted by `webcheck` as a
+table by file. It owns the layout property Q3.218 states: one container drawn in
+both arms, the act then Cancel with Cancel last in DOM order, Cancel `plain` and
+never `primary`, and — for an act that returns a promise — the wait: both
+answers disabled, a spinner in the act's label, the question closed only in
+`.then`, a failure handed to `onFailure` (default: a toast with `errorText`'s
+sentence) with the question left standing so the person can retry or cancel
+beside it. `twoStepAct` is that protocol as a pure function, so the driver runs
+it with a promise it settles itself. A `void` act closes the question on the tap
+and leaves the pending state to whoever owns it — the strip row's parent, the
+plugin row's subline. `align="center"` puts the question on its own line and
+centres the pair; `align="end"` lets the question grow so the answers sit where
+a row's kebab did; `disabled` refuses the act alone and leaves Cancel live, since
+a Cancel only disarms and cannot collide with anything; `lead` is drawn first in
+both arms; `className` is appended to the one box. The question is drawn
+`text-xs text-fg` with its `consequence` in `text-muted` under it — `MachineSection`'s
+idiom, generalised: eight sites had the question itself muted, `Registration` and
+`ProvisioningKey` had it at `text-sm`, and the fleet and per-user limit
+consequences moved from a paragraph above the pair into the box as the question.
+
+**The primitive's `busy` is the question's pair alone.** Where a site's other
+controls share a flag with the act — the fleet limit's field Reset, the SMTP
+form's Save and Resets, `KeyOnly`'s key form, `AgentBuilder`'s Save — the site
+holds that flag around the promise it hands over and passes it back as
+`disabled`, so the lock is one and reads both ways. The migration split three of
+those into a bare promise for the primitive and a flagged wrapper for the
+one-tap paths, which left the caller's flag off for the length of a confirmed
+act: a Reset live during a confirmed lowering, Save and every Reset live during
+the SMTP password's removal, the key form's Save live during a removal — a
+second write on the same key, and whichever answer landed last winning the draft
+(E7's review, 2026-09-05). The one-tap paths on both limit screens also put the
+arming flag back, since `confirming` outlives an `armed` that went false with the
+draft or a poll, and a flag left standing drew the question on the next lowering
+typed with no tap. `SignOutButton` is the one site whose behaviour the migration
+changed: it answered a tap on a machine gone from the list with a toast and a
+`void` return, which the primitive reads as an act with no wait and closes the
+question on — a refusal drawn as a success. It reads the daemon at render and
+refuses the act, `KeyOnly`'s shape one card over; the sentence it toasted is the
+screen's own failed state for the same condition.
+
+It deliberately does **not** own three things. The **arming state**: `armed` and
+`onArm` are controlled, because the flag is per row (Q3.218), because a
+kebab-armed row arms from a menu item that is not in the box, and because two
+sites read it for their own paint — `UserRow` stacks while confirming,
+`Registration` draws a consequence below the box. The **subject**: `question` is
+a node the caller composes, so "names its subject" (Q3.545) stays a fact about
+the site rather than a verb the primitive fills in. And the **resting control**:
+`rest` is the caller's, since whether the first tap wears `danger` is a decision
+(`SignOutButton` yes, `MachineSection` no). A site that needs only the armed
+arm mounts it armed with no `rest`. The three kebab-armed rows (`UserRow`,
+`PluginRow`, the strip row) draw the confirmation *in place of* the row's
+controls — one ternary, no shared box, which `decision-surfaces` pins for
+`PluginRow`. `MachineLimitPanel`'s two questions stand over one form of four
+controls, whose own box is `TWO_STEP_BOX`: the primitive's class string,
+exported for that one form, so the last-child geometry holds across a boundary
+the primitive cannot see and is one string rather than a copy of it — it was
+spelled by hand there with a docblock resting the property on the two being
+equal and nothing asserting that (E7's review).
+
+**Why.** Review D6 (2026-09-05) found thirteen hand-rolled copies, each a
+`useState(false)` whose first tap swapped a control for a question, an act and a
+Cancel, each re-deriving the ordering rule by hand, and the rule pinned in two of
+them (`UserRow`, `PluginRow`). Two had already drifted: `KeyOnly` and
+`SignOutButton` centre the pair where the others pack it, one of them after
+shipping `justify-end` on the same geometric argument and drawing a lone
+destructive button at the right of an empty box — a drift then pinned as
+deliberate, because centred the resting button's centre falls in the gap between
+the answers. A property that must hold on every site and is derived on each is a
+property nothing asserts; a fourteenth copy would have been written from
+whichever of the thirteen was open at the time.
+
+**Alternatives taken out.** A primitive that owned the flag too (`useState`
+inside), which loses the per-row rule and the kebab-armed sites, and which two
+callers cannot read. A `subject` string the primitive would phrase the question
+around — every site's question is a different sentence, and the fleet limit's is
+the consequence itself. A `busy` prop rather than an owned wait, which is the
+shape every copy had — each closed in its own `.then` and stood in its own
+`.catch`, correctly, thirteen times, which is the layout's argument again: a
+property re-derived per site rather than held once. A prop for the strip row's
+two-column geometry alone: its
+fixed-height question box and `2.5` margins sit on the `question` node it
+passes, and `align="end"` is what puts the answers in the kebab's slot, so the
+drag-measurement pin over that row still reads the classes it read before.
+
+**Status.** Applied. `webcheck` renders both arms under `react-dom/server` and
+asserts the order, the tones and the shared container on markup, drives
+`twoStepAct` with a promise it resolves and one it rejects, counts every `Cancel`
+token on every screen under `ui/settings/` plus `AgentBuilder` and
+`PluginConsent` against a named table (a `Cancel</Button>` count walked past a
+braced `{"Cancel"}` child and a raw `<button>`), holds the fifteen by file, pins
+the box string and the accessible name across the primitive, and re-points each
+site's own pin to what that site still decides — including, at the four sites
+with a shared flag, that the flag is held from the promise handed over.
 
 ## Deployment, packaging and code layout
 
@@ -23580,7 +23741,9 @@ required` on screen.
 **Status.** Fixed, then reversed on 2026-09-04: the condition was deleted and
 then the whole gate was, by the owner's decision (Q1.630). The measurement stands
 as what a stolen session can do again; `relaycheck` now pins the route taking the
-session alone.
+session alone — and, since 2026-09-05, asking an API key for the password
+(Q1.630's amendment), because the gate's absence had been read as applying to a
+credential the decision was never about.
 
 ### Q7.82 — Two fields rode the snapshot with no bound, behind a comment saying they did
 
@@ -25603,3 +25766,122 @@ the stronger, earlier claim, that is where it goes — and it would narrow the t
 *before* a first refusal rather than replacing what happens after one.
 
 **Status.** Declined.
+
+### Q7.128 — Revoked API-key rows have no ceiling
+
+**Question.** `MAX_KEYS_PER_USER` bounds a table that nothing bounded before
+self-service minting — ten live keys per account — but it counts
+`revoked_at IS NULL`. `apiKeyRows`, the projection both list routes answer
+with, has no `LIMIT`, and it keeps revoked rows **on purpose**: its docblock
+says the list answers "is the one that leaked dead yet", which a row that
+vanishes on revocation cannot. So a mint-and-revoke loop against
+`POST /v1/me/keys` and `DELETE /v1/me/keys/:keyId` is bounded only by
+`spendWrite` — sixty writes a minute per `<user, route>` — and every pass
+leaves a row that is never counted, never pruned, and always listed. Raised
+as D17 of the 2026-09-05 engineering review, as an outside voice.
+
+**What is known.** The likely caller is not an attacker; it is a person
+rotating a `cpctl` key on every install, which is what `deploy/install.sh`
+asks for. The cost is one row and one line in a list, and the list is drawn
+on the phone under a heading that promises the dead ones are there to be read.
+Nothing here is a security bound: a revoked row authenticates nothing, and the
+key screen's ceiling counts live keys only — `live` in `KeysSection` is the
+rows with `revokedAt === null`, and "10 of 10 — revoke one first." is drawn
+against that — so a revoked row never counts against `MAX_KEYS`.
+
+**Candidates, none chosen.** List the newest N revoked rows and end the list
+with an "N older not shown" line, which keeps the forensic answer for the
+recent case and loses it for a key revoked months ago. Or prune revoked rows
+after seven days — `REVOKED_RETENTION_MS`, the bound `pruneSessions` already
+applies to a revoked session — which keeps the answer exactly as long as the
+sessions table keeps its own and then stops being able to give it; a longer
+ninety would outlive that bound, on the argument that a key lives on a disk
+and the question about it is asked later than one about a tab. Either is one
+statement and a pin.
+
+**The measurement to take before choosing.** How many revoked rows one account
+accumulates on the dev stand over a month, and whether anybody scrolls past
+the fifth. A bound picked before that number exists is a guess about a
+problem nobody has reported, which is the shape Q7.31 warned against.
+
+**Status.** Open. Record the count when a month of the redesigned keys screen
+has been used.
+
+### Q7.129 — A global error envelope for the control plane
+
+**Question.** `http-and-routes.md` names the JSON error envelope every service
+in this system answers in, and the browser's `errorText` and `cpctl`'s
+reader both parse it. But `grep -rn 'onError:' packages/control-plane/src`
+finds eight hits, every one the option handed to `bodyLimit` on a route that
+carries a body limit (`onError: payloadTooLarge`), and `grep -rn app.onError`
+over the same tree finds no registration — only the comment in `callerAuth`
+that E1 wrote saying there is none. (A bare `onError` is the wrong grep: it
+matches inside every `jsonError(` call.) There is no `app.onError`, so any exception
+thrown out of a `/v1` handler or middleware falls to Hono's default, which is
+`c.text("Internal Server Error", 500)` (hono 4.13.2, `hono-base.js`) — a
+plain-text body no client here can read a code out of. E1 of the same review
+found one such throw on the authentication path itself, `touchKey.run` under
+`SQLITE_BUSY`, and guarded it at the call; the general case is untouched.
+Raised as D20 of the 2026-09-05 engineering review.
+
+**What stands against it, and it is a decision already taken.** Q1.50 chose
+*not* to add an `app.onError` envelope renderer for the 409 it was fixing,
+with the reason written down: a service-wide handler would mask the next
+unmapped throw, turning a bug somebody would have seen as a stack into a tidy
+`internal_error` nobody reads. That argument is about what the *developer*
+sees; the envelope is about what the *client* sees, and they are not the same
+audience. A handler that answers the envelope **and** reports the error
+through the injected callback — the `onWarning` shape everything in `src/`
+already reports through, since nothing there may write to stderr — masks
+nothing and answers in the vocabulary every client parses.
+
+**What it would have to be.** `app.onError` answering `jsonError(c, 500,
+"internal_error", …)` with a message that carries **neither the stack nor the
+SQL text** — `describeError` is the existing reader that answers a sentence
+and not a dump — and reports the full error out of band. Pinned by a
+`relaycheck` case that registers a route which throws on purpose and asserts
+the status, the code, the shape, and that the body contains no `at ` frame
+and no `SELECT`. Its own decision rather than a line in E1, because it
+changes what every unexpected error on this service looks like at once, and
+because Q1.50 is on record against it and has to be answered rather than
+overridden.
+
+**Status.** Open. Not a defect today: no client has been observed reading the
+plain-text body, and the one reachable throw on a hot path is guarded.
+
+### Q7.130 — Registration leaves `users.password_changed_at` NULL
+
+**Question.** Q1.629 added `password_changed_at` and named its writers:
+`markPasswordChanged`, called from `POST /v1/me/password` and from
+`POST /v1/reset`, and nowhere else — so an admin-issued temporary password
+reads "Set" on the Account row (`PasswordRow` in `AccountSection.tsx`, which
+draws "Set" for `null` beside `hasPassword`), meaning *issued and never
+replaced*. But the two registration arms — the no-mail arm of
+`POST /v1/register`, and `POST /v1/register/confirm` — are the person typing
+their **own** password, and both write `user_passwords` and leave the column
+`NULL` too. A self-registered account therefore reads "Set" until its first
+change, indistinguishable from one an admin issued and nobody has touched.
+Raised as D21 of the 2026-09-05 engineering review, as a TODO rather than a
+defect.
+
+**Why it is an owner question and not a bug.** "Set" is not false: the
+password is set. What is lost is the distinction the row was added to draw —
+Q1.629's own sentence is that "Set" on the Account row means *issued and never
+replaced*, and the reading this entry adds is that "Changed 3mo ago" is
+therefore a fact about the owner's own act. A self-registered password is
+their act too. Stamping it at registration would
+make the row say "Changed 2d ago" on a fresh account, which is true and
+reads oddly; leaving it says "Set", which is true and says less than it
+could. And `PasswordRow`'s docblock lists what `null` means — the bootstrap
+admin, a temporary one, a row from before the column — and does not list the
+registered account, which is the same gap in prose.
+
+**What it would cost.** One `markPasswordChanged` call inside each
+registration transaction, beside the `user_passwords` insert, and a
+`relaycheck` pin on `GET /v1/me` after each arm. If the answer is yes, the
+second question follows: whether "Set" must then be reserved for the
+admin-issued case alone, which means the bootstrap row and the sign-in
+rehash — the two other writers Q1.629 names as leaving it `NULL` — have to
+be argued about one at a time.
+
+**Status.** Open. An owner semantic; the review deferred it on purpose.

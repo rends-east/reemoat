@@ -57,7 +57,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 854 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 858 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -164,7 +164,9 @@ pnpm pincheck                        # every place a version is written down. Th
                                      #   served response. **None of them says a bump happened** —
                                      #   they agree with each other, never with a tag — plus
                                      #   SOURCE_URL against the repository package.json names,
-                                     #   which is the §13 offer's other half and was checked nowhere
+                                     #   which is the §13 offer's other half and was checked nowhere.
+                                     #   And one number that is not a version: the API-key ceiling,
+                                     #   written once on each side of the wire
 pnpm deploycheck                     # deploy/: quoting, env files, PATH, a unit for both init systems,
                                      #   and RELAY_INPUTS against the relay entry's own import closure
 pnpm docscheck                       # the documentation, held to what it claims about itself: this

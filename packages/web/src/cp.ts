@@ -477,9 +477,13 @@ export async function myKeys(): Promise<ApiKeyRecord[]> {
  *
  * Refusing that would be refusing the whole point: "this key leaked" is exactly
  * the case where the leaked key is the one in your hand. The consequence is
- * immediate and local — `cpFetch` sees the next request answer `401
- * api_key_revoked` and signs this tab out — which is the correct outcome and
- * worth knowing before wiring a button to it.
+ * immediate: once the 200 lands the key in this tab is dead. `KeysSection` does
+ * not wait to find that out from the next request — it records the notice,
+ * clears the credential and reloads, with no request in between (Q3.546,
+ * decision 5A) — because the other route to the gate, `cpFetch` seeing a `401
+ * api_key_revoked`, reads "Your session expired" about an act the person just
+ * chose. That arm is still the backstop for a key revoked from anywhere else: an
+ * admin, or another tab.
  */
 export function revokeMyKey(keyId: string): Promise<{ revoked: boolean }> {
   return cpFetch<{ revoked: boolean }>(`/v1/me/keys/${encodeURIComponent(keyId)}`, { method: "DELETE" });
@@ -508,9 +512,15 @@ export function mintMyKey(): Promise<{ apiKey: string }> {
 /**
  * Set or change it. A confirmation goes out; nothing is verified until it is used.
  *
- * The session is the whole proof (Q1.630): the route asked for the current
+ * A session is the whole proof (Q1.630): the route asked for the current
  * password until 2026-09-04 and the owner took that out, knowing the chain the
- * control plane's own docblock on `PUT /v1/me/email` records.
+ * control plane's own docblock on `PUT /v1/me/email` records. An API key is not
+ * (Q1.630, amended 2026-09-05): the route asks a key holder with a password for
+ * `currentPassword`, which this call never sends — `SignIn` takes no key, so the
+ * one browser that presents one is the legacy adoption from `LEGACY_STORAGE`,
+ * and on the email leaf it draws the server's 400 sentence with no field to
+ * answer it. Whether that adoption should drop an `rk_` key rather than adopt
+ * it as a bearer is an owner's call, recorded here rather than decided.
  */
 export function setMyEmail(email: string): Promise<{ email: string; verified: boolean }> {
   return cpFetch<{ email: string; verified: boolean }>("/v1/me/email", {

@@ -203,7 +203,7 @@ these, so a new route is private by doing nothing. "Public" is not
 | `POST /v1/me/password` | Requires the current one, even under a valid session |
 | `GET` · `DELETE /v1/me/sessions` · `DELETE /v1/me/sessions/:id` · `DELETE /v1/me/sessions/current` | Where you are signed in |
 | `GET` · `POST /v1/me/keys` · `DELETE /v1/me/keys/:keyId` | API keys |
-| `PUT /v1/me/email` · `POST /v1/me/email/verify` | The address is the recovery channel, so changing it proves the password |
+| `PUT /v1/me/email` · `POST /v1/me/email/verify` | The address is the recovery channel: a session changes it alone, an API key proves the password first |
 
 ### Machines and tokens
 

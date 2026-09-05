@@ -14,13 +14,14 @@ import { rememberRemoval } from "../../agentPick";
 import { ApiError, errorText } from "../../http";
 import type { MachineId } from "../../ids";
 import { daemonRead } from "../../machine";
+import { MACHINE_GONE } from "../../plugins";
 import { agentEditPath, agentFromHarnessPath, agentPath, navigate } from "../../router";
 import { settingsPath } from "../../settings";
 import { store, type AppState } from "../../store";
 import type { AgentId, AgentInfo, AgentStripEntry, CustomAgent, SystemInfo } from "../../wire";
 import { agentBadge, agentStance, harnessName, startsBare } from "../agentCard";
 import { AgentGlyph } from "../AgentIcons";
-import { Badge, Button, Empty, Icon, IconButton, Menu, reachText, RowAction, Spinner } from "../bits";
+import { Badge, Button, Empty, Icon, IconButton, Menu, NotReachable, RowAction, Spinner, TwoStep } from "../bits";
 
 /**
  * Which agents this machine's New session strip offers, and in what order.
@@ -170,7 +171,7 @@ export function MachineAgentsSection({
           </Button>
         }
       >
-        That machine is not in your list any more.
+        {MACHINE_GONE}
       </Empty>
     );
   }
@@ -211,11 +212,11 @@ export function MachineAgentsSection({
     // `failed`, because this arm really is the absence of an answer — the probe
     // was made and nothing came back. The trailing "so what it offers cannot be
     // read or reordered" was cut on 2026-09-04 for fewer words; the machine's
-    // name and `reachText`'s reason are what was kept.
+    // name and `reachText`'s reason are what was kept, and the sentence is
+    // `NotReachable`'s now rather than a copy of this screen's own.
     return (
       <Empty failed>
-        {machine.name} is not reachable right now —{" "}
-        {reachText(machine.reach, machine.offlineReason)}.
+        <NotReachable machine={machine} />
       </Empty>
     );
   }
@@ -237,13 +238,14 @@ export function MachineAgentsSection({
        * Drawn here rather than inside `StripEditor` because this is the component
        * that has the machine — and because the guards above it are the states in
        * which it would be a promise about a list that is not there. Cut to the
-       * screen-line cap (13 words, the id not counted): the name, the id, and the
-       * one rule the `default` badge below needs a reader to know. What removing
+       * screen-line cap (14 words, the name and the id one each): the name, the
+       * id, and the one rule the `default` badge below needs a reader to know.
+       * "What New session offers on" was a word over it (review D10). What removing
        * costs is said where it is decided — on the row's own confirmation for an
        * assembled agent, and by `Add back` staying on a hidden harness.
        */}
       <p className="text-xs text-muted">
-        What New session offers on {machine.name} (
+        New session's agents on {machine.name} (
         <code className="text-muted/80">{machine.id}</code>). The first that can start is the{" "}
         <em>default</em>.
       </p>
@@ -276,6 +278,17 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
    * again in `failure` below, which is the one line that draws either.
    */
   const [writeFailure, setWriteFailure] = useState<string | null>(null);
+  /**
+   * The assembled agent whose `DELETE` is out and unanswered, by id.
+   *
+   * The row's in-place confirm closes on the tap that fires the delete, so with
+   * nothing holding this the kebab was live again on a row whose `DELETE` had not
+   * come back — a second Remove → Remove would send it twice (review D8). Held
+   * here rather than on the row, because the row is keyed by id and the listing
+   * repaints under it; cleared in `finally`, since on success the row leaves the
+   * listing anyway and on failure it stays and has to be tappable again.
+   */
+  const [removing, setRemoving] = useState<string | null>(null);
   /** What the listing read answered, or `null` while it is pending and once it has landed. */
   const [readFailure, setReadFailure] = useState<string | null>(null);
   /**
@@ -579,6 +592,7 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
      * an orphan position, which `orderStrip` drops on sight and which the daemon's
      * own `DELETE` has already forgotten.
      */
+    setRemoving(id);
     void daemon
       .removeCustomAgent(id)
       .then(() => {
@@ -614,7 +628,8 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
         // landed while the DELETE was in flight is somebody's work.
         write(latest.current.filter((row) => !(row.kind === "custom" && row.id === id)));
       })
-      .catch((cause: unknown) => setWriteFailure(errorText(cause)));
+      .catch((cause: unknown) => setWriteFailure(errorText(cause)))
+      .finally(() => setRemoving((held) => (held === id ? null : held)));
   };
 
   /**
@@ -627,8 +642,10 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
    * operand somebody has to remember to add to.
    */
   const failure = writeFailure ?? readFailure;
+  // Ten words with the dash, the caveat cap (review D10): the fact, and the one
+  // remedy. "This machine's" went — the screen is the machine's.
   const statusText =
-    failure ?? (supported ? "" : "This machine's daemon is too old to reorder agents — update it.");
+    failure ?? (supported ? "" : "Daemon too old to reorder agents — update it.");
   /**
    * The status line's node, for the one scroll it is allowed — see its JSX.
    *
@@ -725,6 +742,7 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
               opensOn={opensOnKey === stripKey(row.kind, row.id)}
               pending={pending === stripKey(row.kind, row.id)}
               frozen={!supported}
+              removing={removing === row.id}
               lifted={drag?.from === index}
               sliding={drag !== null}
               shift={shiftFor(index)}
@@ -850,16 +868,20 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
  * inside the menu, and that is the point rather than a compromise — a *row* that
  * loses a control moves every control beside it, and on a list you are dragging
  * that is the one thing that must not happen, while a menu's panel is drawn on
- * demand and displaces nothing. So the harness rows keep a live kebab (they can
- * be hidden, which is the act somebody comes here for) and simply have no Edit or
- * Remove inside it.
+ * demand and displaces nothing. So every row keeps a live kebab, and what is
+ * inside it is the same two verbs on both kinds — Edit, which on a harness means
+ * *start from it*, and Remove — with `frozen` disabling only the item that
+ * writes the strip.
  *
  * ⚠ **One removal per row, and it is called the same thing on both kinds.** From
  * the picker's side "hide this harness" and "delete this assembled agent" are one
  * act — *this stops being offered* — and a harness is only an agent whose vendor
- * picked the model. What differs is the cost of undoing it, and the row says so
- * without a dialog: a harness keeps its row, dimmed, offering to put it back, and
- * an assembled agent is deleted, with `danger` on the item carrying that.
+ * picked the model. What differs is the cost of undoing it, and the row says so:
+ * a harness keeps its row, dimmed, offering to put it back, and an assembled
+ * agent confirms in place — "Remove <name>? Rebuild it from Add an agent.",
+ * Remove, Cancel last — and is deleted. Neither wears `danger`: that is for an
+ * act nothing brings back, and this one is rebuildable from the bar at the foot
+ * of the screen (`agent-strip.md`).
  *
  * ⚠ **A removed harness is dimmed in place rather than taken out of this list.**
  * Its position is the thing somebody came here to set, and removing the row would
@@ -877,6 +899,7 @@ function StripRowView({
   opensOn,
   pending,
   frozen,
+  removing,
   lifted,
   sliding,
   shift,
@@ -914,6 +937,8 @@ function StripRowView({
   pending: boolean;
   /** The daemon cannot store an order, so nothing here may pretend to change one. */
   frozen: boolean;
+  /** This row's `DELETE` is out and unanswered: the two controls that could send another wait. */
+  removing: boolean;
   /** This is the row under the pointer. */
   lifted: boolean;
   /** Some row is being dragged, so the shifts below are worth animating. */
@@ -955,7 +980,9 @@ function StripRowView({
    * one-tap act hiding a harness is (rebuilding one is a walk through the builder,
    * not `Add back`), and it is back **at the row's own height**: the question
    * takes the name column's box, the pair takes the kebab's slot, and the handle
-   * and glyph stay mounted. See the confirming arm below for the arithmetic.
+   * and glyph stay mounted. The pair is `TwoStep`'s, with `align="end"` so the
+   * question grows and the answers sit where the kebab did; see the confirming
+   * arm below for the arithmetic.
    *
    * State here rather than in the menu, which closes on the first tap: a menu
    * held open to hold a confirmation would be a second dismissable layer over the
@@ -1373,41 +1400,43 @@ function StripRowView({
           /*
            * ⚠ **The row's own height, by the row's own arithmetic.** The name
            * column below is `py-2.5` around a line box of `--text-sm--line-height`
-           * plus a subline of `--text-2xs--line-height`; this box is the sum of
-           * those two, so a row that is asking is exactly as tall as one that is
-           * not, and a drag past it measures what it measured before. The
-           * question wraps inside that box and is clipped rather than growing
-           * it. `items-center` keeps a 44px coarse-pointer button inside the same
-           * 60px content box the kebab already sat in.
+           * plus a subline of `--text-2xs--line-height`; the question's box is
+           * the sum of those two with the same `2.5` above and below it, so a
+           * row that is asking is exactly as tall as one that is not, and a drag
+           * past it measures what it measured before. The question wraps inside
+           * that box and is clipped rather than growing it. The margins sit on
+           * the question and **not** on `TwoStep`'s box, because the box also
+           * holds the two answers, and a 44px coarse-pointer button padded by
+           * 2.5 on each side would be 64px in a 60px row; `items-center` on the
+           * box keeps that button inside the content box the kebab already sat
+           * in. `align="end"` is what puts the question in the name column and
+           * the answers in the kebab's slot: the question grows from a zero
+           * basis, so it never wraps the answers onto a second line.
            *
-           * ⚠ **Cancel last, and no `danger`.** Q3.218's ordering: both arms lay
-           * out in the same slot, so a second tap on a laggy connection lands on
-           * the undo. No `DangerButton` because `danger` is for an act nothing
-           * brings back, and this one is rebuildable — the question says where.
+           * ⚠ **Cancel last, and no `danger`.** Q3.218's ordering is `TwoStep`'s
+           * now: both arms lay out in the same slot, so a second tap on a laggy
+           * connection lands on the undo. No `danger` because that is for an act
+           * nothing brings back, and this one is rebuildable — the question says
+           * where. The act returns nothing, so the question closes on the tap
+           * and the `DELETE`'s wait is the parent's `removing`, which also
+           * refuses a second Remove until the first has answered.
            */
-          <>
-            <span className="min-w-0 flex-1 py-2.5 pl-1">
-              <span className="flex h-[calc(var(--text-sm--line-height)+var(--text-2xs--line-height))] items-center overflow-hidden text-xs text-fg">
+          <TwoStep
+            armed
+            onArm={setConfirming}
+            align="end"
+            className="min-w-0 flex-1 pl-1 pr-1"
+            question={
+              <span className="my-2.5 flex h-[calc(var(--text-sm--line-height)+var(--text-2xs--line-height))] items-center overflow-hidden">
                 <span>
                   Remove <span className="font-medium">{name}</span>? Rebuild it from Add an agent.
                 </span>
               </span>
-            </span>
-            <span className="flex shrink-0 items-center gap-2 pr-1">
-              <Button
-                size="sm"
-                onClick={() => {
-                  setConfirming(false);
-                  onRemove();
-                }}
-              >
-                Remove
-              </Button>
-              <Button size="sm" onClick={() => setConfirming(false)}>
-                Cancel
-              </Button>
-            </span>
-          </>
+            }
+            act={{ label: "Remove" }}
+            disabled={removing}
+            onAct={onRemove}
+          />
         ) : (
         <>
         <span className="min-w-0 flex-1 py-2.5 pl-1">
@@ -1475,7 +1504,12 @@ function StripRowView({
               subline is: two kinds of row side by side with a different number of
               lines is a list whose rows are different heights, and a drag measures
               one row and applies it to all of them. */}
-          <span className="block min-h-[var(--text-2xs--line-height)] truncate text-2xs text-faint">
+          {/* `text-muted` on a live row: this line is where a fault displaces the
+              vendor — `not signed in`, `would not start` — and the one line that
+              says why a row has no tile was the faintest ink on it (review D9).
+              A hidden row's line goes to `faint` with its name, or the row's
+              ground and its ink disagree about whether anything happened. */}
+          <span className={`block min-h-[var(--text-2xs--line-height)] truncate text-2xs ${row.hidden ? "text-faint" : "text-muted"}`}>
             {under}
           </span>
         </span>
@@ -1585,8 +1619,10 @@ function StripRowView({
                * that is exactly the internal difference this screen is not supposed
                * to have an opinion about. It was also overclaiming on its own
                * terms: `danger` is for an act nothing brings back, and this one is
-               * rebuildable from the bar at the foot of this very screen, which is
-               * the same reason it has no confirmation.
+               * rebuildable from the bar at the foot of this very screen. It does
+               * confirm — in place on the row, Cancel last, one paragraph down —
+               * because a delete is a delete; what it does not do is wear the
+               * colour of one nothing brings back.
                *
                * What still differs is what the row *does* afterwards, and that is
                * unavoidable rather than a signal: a built-in stays, dimmed, with
@@ -1636,9 +1672,11 @@ function StripRowView({
                  * Hiding writes the strip and removing an assembled agent writes it
                  * after the `DELETE`, so both need the route; Edit and Check again
                  * do not. Disabling the whole menu for one item's sake left a row
-                 * with nothing behind its only control.
+                 * with nothing behind its only control. `removing` is the other
+                 * reason this one item waits: the confirm closed on the tap that
+                 * sent the `DELETE`, and this is the door to a second one.
                  */
-                disabled={frozen}
+                disabled={frozen || removing}
                 onClick={() => {
                   close();
                   if (harness) onToggle();

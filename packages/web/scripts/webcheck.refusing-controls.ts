@@ -482,31 +482,55 @@ process.stdout.write("\nno authorization on the Configure agent screen\n");
    * pixels" true; two strings that happen to match are the same screen until
    * somebody tunes one of them.
    *
-   * ⚠ **`justify-center`, and it is pinned because `justify-end` is the value that
+   * ⚠ **`align="center"`, and it is pinned because `justify-end` is the value that
    * was tried and reverted on the identical control one file over.** `AgentsPanel`'s
    * `SignOutButton` shipped trailing-aligned on exactly the geometric argument a
    * reader would restate — and what it drew was a Sign out button pinned to the
    * right of an empty box. Centring replaced it with the ordering rule intact, and
-   * this panel's docblock names that as the shape it took.
+   * this panel's docblock names that as the shape it took. The box is `TwoStep`'s
+   * now (E7's review, Q3.552) — one element in both arms, Cancel last its
+   * guarantee — so what this file holds is that the removal reaches the primitive
+   * centred, with a destructive act and the named button as its `rest`, and
+   * that no `justify-*` of this panel's own is written beside it.
    */
   {
-    const boxDecl = /const removeBox = "([^"]*)";/.exec(systems)?.[1] ?? "";
-    const asks = systems.indexOf("confirmingRemove ? (");
-    // Positional, and the anchors are the branch's own opening and the `</div>`
-    // that closes the box: a regex over the tag cannot be used here, because
-    // `onClick={() => …}` puts a `>` inside the props that `[^>]*` stops at — the
-    // trap the plugin-surface sweep tracks brace depth to avoid.
-    const asking = asks < 0 ? "" : systems.slice(asks, systems.indexOf("</div>", asks));
-    check("the confirming box is one string, and the question was found", [boxDecl.length > 0, asks >= 0], [true, true]);
+    const asks = systems.indexOf("Remove the {keyName}? New sessions pointed at");
+    const start = asks < 0 ? -1 : systems.lastIndexOf("<TwoStep", asks);
+    // Positional, and the anchors are the element's own opening and its `/>`: a
+    // regex over the tag cannot be used here, because `onClick={() => …}` puts a
+    // `>` inside the props that `[^>]*` stops at — the trap the plugin-surface
+    // sweep tracks brace depth to avoid.
+    const asking = start < 0 ? "" : systems.slice(start, asks + systems.slice(asks).search(/^\s*\/>/m));
+    const keyOnly = systems.slice(systems.indexOf("export function KeyOnly("));
+    check("the removal is the primitive's, and the question was found", [start >= 0, asks >= 0], [true, true]);
     check(
-      "rendered in both branches, centred rather than trailing, with Cancel last",
+      "one box in both arms, centred rather than trailing, with the named button at rest",
       [
-        (systems.match(/className=\{removeBox\}/g) ?? []).length,
-        /\bjustify-center\b/.test(boxDecl),
-        /\bjustify-end\b/.test(boxDecl),
-        asking.indexOf("Cancel") > asking.lastIndexOf("<DangerButton"),
+        /align="center"/.test(asking),
+        /\bjustify-(?:center|end)\b/.test(keyOnly),
+        /act=\{\{ label: "Remove", danger: true, icon: Trash2 \}\}/.test(asking),
+        /rest=\{[\s\S]*?<DangerButton icon=\{Trash2\} disabled=\{busy\} onClick=\{\(\) => setConfirmingRemove\(true\)\}>\s*Remove the \{keyName\}/.test(asking),
+        /setConfirmingRemove\(false\)/.test(keyOnly),
       ],
-      [2, true, false, true],
+      [true, false, true, true, false],
+    );
+    /*
+     * **One lock, both ways** (E7's review). The act is refused while a save
+     * is out — `disabled` on the box's `busy` — and the key form's Save reads
+     * the same flag, so it is refused while a removal is out only if `remove`
+     * sets it. Handed to the primitive as a bare promise the lock read one way:
+     * Remove, then Enter in the form before the daemon answered, and a set and
+     * a remove of the same credential were in flight together.
+     */
+    const removal = keyOnly.slice(keyOnly.indexOf("const remove = "), keyOnly.indexOf("const borrowed = "));
+    check(
+      "and the removal holds the box's busy, so the key form is refused while it is out",
+      [
+        /disabled=\{busy \|\| daemon === undefined\}/.test(asking),
+        /^const remove = \(\): Promise<void> \| undefined => \{\s*if \(daemon === undefined\) return undefined;\s*setBusy\(true\);\s*return daemon\s*\.removeSystemKey\(system\.id\)/.test(removal),
+        /onChanged\(\);\s*\}\)\s*\.finally\(\(\) => setBusy\(false\)\);\s*\};/.test(removal),
+      ],
+      [true, true, true],
     );
   }
   /*

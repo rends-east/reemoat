@@ -12,7 +12,7 @@ import type {
   AgentId,
   AgentLoginSupport,
 } from "../../wire";
-import { Badge, Button, DangerButton, Empty, FIELD, Icon, IconButton, Spinner } from "../bits";
+import { Badge, Button, DangerButton, Empty, FIELD, Icon, IconButton, Spinner, TwoStep } from "../bits";
 import { copyText } from "../clipboard";
 import { CommandLine } from "../CommandLine";
 import { loginOutcome, rawTranscriptIsOpen, readLoginTranscript, type LoginOutcome } from "../login";
@@ -557,16 +557,35 @@ function SignIn({
 /**
  * Two taps, with the undo **last**.
  *
- * The same shape and the same reason as retiring a machine or deleting a person:
- * both groups lay out left-to-right in one box so the last child occupies the
- * same pixels, and `.tap` removes the double-tap delay — so a second tap aimed at
- * a control that looked like it did nothing lands on Cancel rather than on the
- * irreversible half. Held per row, in the row's own component.
+ * The same shape and the same reason as retiring a machine or deleting a person,
+ * and the same primitive: `TwoStep` lays both groups out left-to-right in one
+ * box so the last child occupies the same pixels, and `.tap` removes the
+ * double-tap delay — so a second tap aimed at a control that looked like it did
+ * nothing lands on Cancel rather than on the irreversible half. Held per row, in
+ * the row's own component.
  *
  * `danger` on the **first** tap, unlike Retire on the machines list: retiring a
  * machine is undone by enrolling it again from the same screen, while signing out
  * ends the session on that host for every use of the CLI, not only for Reemoat,
- * and getting back in is a device-code flow through another tab.
+ * and getting back in is a device-code flow through another tab. That is the
+ * resting control's decision, which is why `rest` is this component's
+ * `DangerButton` and not the primitive's.
+ *
+ * **Centred, and Cancel still last.** This shipped `justify-end` on a geometric
+ * argument — the undo must occupy the pixels the resting button had, so a second
+ * tap on a laggy connection cannot land on the irreversible half — and the
+ * visible result was a Sign out button pinned to the right of an empty box,
+ * which is not what was asked for and not what this state should look like.
+ * The ordering rule survives the centring: Cancel is still the last child, so it
+ * takes the right-hand side of a centred pair, and the resting button's own
+ * centre falls in the **gap** between the two answers rather than on Sign out.
+ * A second tap there hits nothing, which is the safe outcome; the property the
+ * rule protects is that it must not hit the destructive half, and it does not.
+ * `align="center"` is that shape, and it also puts the question on its own line
+ * (`basis-full text-center`), so the answers are never crushed on a 390px phone
+ * — in CSS, with no breakpoint anywhere. (The `justify-end` this replaced argued
+ * the geometry the other way, and its paragraph sat here above `justify-center`
+ * code for a revision, stating a rule the box did not implement.)
  */
 function SignOutButton({
   machineId,
@@ -578,24 +597,39 @@ function SignOutButton({
   onChanged: () => void;
 }): ReactNode {
   const [confirming, setConfirming] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const daemon = store.daemonFor(machineId);
 
-  const run = (): void => {
-    const daemon = store.daemonFor(machineId);
-    if (daemon === undefined) {
-      toast("error", "That machine is not reachable.");
-      return;
-    }
-    setBusy(true);
-    void daemon
-      .signOut(agent.id)
-      .then(() => {
-        setConfirming(false);
-        onChanged();
-      })
+  /*
+   * Handed to `TwoStep`, which owns the wait. The `daemon` guard is for the
+   * type, the way `KeyOnly`'s is one card over: the act is `disabled` on the
+   * same condition, so this arm is not reached. It used to answer a toast and
+   * return nothing — which the primitive reads as an act with no wait, and
+   * closes the question on: a refusal drawn as a success, and the one site
+   * whose failure did not stand beside its toast (E7's review). A machine
+   * `daemonFor` cannot find has left the list (`dropMachine`) rather than gone
+   * quiet, which `refresh` above already says for the whole screen; a greyed
+   * act is what that fact looks like on a control.
+   */
+  const run = (): Promise<void> | undefined => {
+    if (daemon === undefined) return undefined;
+    return daemon.signOut(agent.id).then(onChanged);
+  };
+
+  return (
+    <TwoStep
+      armed={confirming}
+      onArm={setConfirming}
+      align="center"
+      size="md"
+      className="mt-2"
+      question={<>Sign {harnessName(agent)} out on this machine?</>}
+      act={{ label: "Sign out", danger: true, icon: LogOut }}
+      disabled={daemon === undefined}
+      onAct={run}
       /*
        * **Framed, not dumped** — the first of four writes on this screen that
-       * used to hand `errorText`'s answer straight to a toast.
+       * used to hand `errorText`'s answer straight to a toast, which is why this
+       * one does not take the primitive's default.
        *
        * That function answers in an `ApiError` message's register: lower case,
        * unpunctuated and with no subject, so that a caller cannot tell which arm
@@ -606,62 +640,13 @@ function SignOutButton({
        * carrying a sign-out, two key boxes and a sign-in wizard, naming none of
        * them. The call site is the only thing left that knows what was tried.
        */
-      .catch((cause: unknown) =>
-        toast("error", `Couldn't sign ${harnessName(agent)} out — ${errorText(cause)}.`),
-      )
-      .finally(() => setBusy(false));
-  };
-
-  /*
-   * **Centred, and Cancel still last.**
-   *
-   * This shipped `justify-end` on a geometric argument — the undo must occupy the
-   * pixels the resting button had, so a second tap on a laggy connection cannot
-   * land on the irreversible half — and the visible result was a Sign out button
-   * pinned to the right of an empty box, which is not what was asked for and not
-   * what this state should look like. The ordering rule survives the centring:
-   * Cancel is still the last child, so it takes the right-hand side of a centred
-   * pair, and the resting button's own centre falls in the **gap** between the two
-   * answers rather than on Sign out. A second tap there hits nothing, which is the
-   * safe outcome; the property the rule protects is that it must not hit the
-   * destructive half, and it does not.
-   *
-   * One box, rendered identically in both states, so nothing else on the row can
-   * move under a thumb — and the question takes `basis-full text-center`
-   * unconditionally, so it is always on its own line and the answers are never
-   * crushed on a 390px phone. In CSS, with no breakpoint anywhere.
-   *
-   * (The `justify-end` this replaced argued the geometry the other way, and its
-   * paragraph sat here above `justify-center` code for a revision, stating a rule
-   * the box did not implement.)
-   */
-  const box = "mt-2 flex flex-wrap items-center justify-center gap-2";
-
-  if (!confirming) {
-    return (
-      <div className={box}>
+      onFailure={(cause) => toast("error", `Couldn't sign ${harnessName(agent)} out — ${errorText(cause)}.`)}
+      rest={
         <DangerButton icon={LogOut} onClick={() => setConfirming(true)}>
           Sign out
         </DangerButton>
-      </div>
-    );
-  }
-
-  return (
-    <div className={box}>
-      <span className="basis-full text-center text-xs text-muted">
-        Sign {harnessName(agent)} out on this machine?
-      </span>
-      <DangerButton icon={LogOut} disabled={busy} onClick={run}>
-        {busy ? <Spinner /> : "Sign out"}
-      </DangerButton>
-      {/* Plain, not filled: `BUTTON_TONE`'s rule is a prohibition — a destructive
-          button is never the filled one — which `plain` satisfies, and all eight
-          shipped confirmations in this app use a default-tone Cancel. */}
-      <Button disabled={busy} onClick={() => setConfirming(false)}>
-        Cancel
-      </Button>
-    </div>
+      }
+    />
   );
 }
 
@@ -750,6 +735,14 @@ function CredentialSlot({
   // Exactly `MAX_CREDENTIAL_CHARS` in `src/server.ts`, not a guess under it: a
   // lower bound would refuse a key the daemon accepts, with a sentence that lies.
   const tooLong = value.length > 8192;
+  const canSave = !busy && value.trim().length > 0 && !tooLong;
+  // The form's submit, guarded by the same predicate that disables its button:
+  // implicit submission from the field fires the default button only while it
+  // is enabled, and stating the rule once here is what makes that not matter.
+  const save = (): void => {
+    if (!canSave) return;
+    withDaemon((daemon) => daemon.saveCredential(agent.id, slot.envName, value));
+  };
   const remove = (
     <IconButton
       icon={X}
@@ -842,7 +835,18 @@ function CredentialSlot({
             * back: matching the widths costs a whole row of height on every slot,
             * and there are two of them on this screen alone.
             */}
-          <div className="mt-3 flex gap-2">
+          <form
+            className="mt-3 flex gap-2"
+            /* A real form, as `SystemsPanel`'s key box already is: Enter submits
+               through the one path a browser owns and assistive technology knows.
+               This was a `div` with a Save `onClick` beside that form, so Enter
+               landed a provider key and did nothing to a harness key one screen
+               over (review D22). */
+            onSubmit={(event) => {
+              event.preventDefault();
+              save();
+            }}
+          >
             <input
               value={value}
               onChange={(event) => setValue(event.target.value)}
@@ -864,17 +868,17 @@ function CredentialSlot({
             />
             <Button
               size="sm"
+              type="submit"
               /* Shrunk with the field beside it and floored with it too. `min-w-20`
                  because `sm`'s `px-2.5` around four characters is a button narrower
                  than its own label is long. */
               className="min-w-20 [@media(pointer:coarse)]:min-h-11"
-              onClick={() => withDaemon((daemon) => daemon.saveCredential(agent.id, slot.envName, value))}
-              disabled={busy || value.trim().length === 0 || tooLong}
+              disabled={!canSave}
             >
               {busy ? <Spinner /> : "Save"}
             </Button>
             {slot.set && remove}
-          </div>
+          </form>
           {tooLong && <p className="mt-1 text-xs text-danger">That&apos;s too long to be a key.</p>}
         </>
       ) : (
@@ -946,6 +950,7 @@ function LoginWizard({
   const [output, setOutput] = useState("");
   const [done, setDone] = useState(false);
   const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
   const [trouble, setTrouble] = useState<Trouble | null>(null);
   const paneRef = useRef<HTMLPreElement | null>(null);
   /*
@@ -1150,14 +1155,31 @@ function LoginWizard({
 
   const send = (): void => {
     const daemon = store.daemonFor(machineId);
-    if (daemon === undefined || loginId === null) return;
+    if (daemon === undefined || loginId === null || sending) return;
     const text = input;
-    setInput("");
-    // Framed for `SignOutButton`'s reason: on this card a bare "the connection
-    // failed…" could be about the sign-in, the sign-out or either key box.
+    /*
+     * The box empties only once the daemon confirms the code landed. It was
+     * cleared before the write (review D8), which is the optimistic paint
+     * `web-shell.md` forbids: a device code is sent once and unrecoverable if it
+     * evaporates, so a failed write left an empty box beside a toast saying to
+     * try again, with nothing left to try with. Framed for `SignOutButton`'s
+     * reason: on this card a bare "the connection failed…" could be about the
+     * sign-in, the sign-out or either key box.
+     *
+     * **And once at a time.** `sending` refuses a second Enter or tap while the
+     * first is in flight: before the clear moved into `.then` the second send
+     * was an empty line, and after it the same code twice (E9's review). The
+     * early return is the guard and the button says so; the box stays enabled,
+     * because disabling a focused input drops the caret out of it. An *empty*
+     * send is still allowed on purpose — the daemon appends the newline, so it
+     * is a bare Enter, which a prompt may be waiting for.
+     */
+    setSending(true);
     void daemon
       .writeLogin(loginId, text)
-      .catch((cause: unknown) => toast("error", `Couldn't send that — ${errorText(cause)}.`));
+      .then(() => setInput(""))
+      .catch((cause: unknown) => toast("error", `Couldn't send that — ${errorText(cause)}.`))
+      .finally(() => setSending(false));
   };
 
   const close = (cancel: boolean): void => {
@@ -1345,8 +1367,8 @@ function LoginWizard({
             disabled={loginId === null}
             className={`${FIELD} min-w-0 flex-1 font-mono disabled:opacity-40`}
           />
-          <Button onClick={send} disabled={loginId === null}>
-            Send
+          <Button onClick={send} disabled={loginId === null || sending}>
+            {sending ? <Spinner /> : "Send"}
           </Button>
           </div>
         </div>

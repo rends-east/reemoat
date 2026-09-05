@@ -716,9 +716,19 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
 
 process.stdout.write("\nserver settings, and how stuck somebody is\n");
 {
-  const { canResetField, fieldOrigin, MAIL_BACKLOG_WARN_MS, mailTrouble, originText, secretFieldText, senderMismatch, smtpProblem } = await import(
-    "../src/instance.js"
-  );
+  const {
+    canResetField,
+    draftAfterClear,
+    fieldOrigin,
+    MAIL_BACKLOG_WARN_MS,
+    mailTrouble,
+    originText,
+    secretFieldText,
+    seedPublicUrl,
+    senderMismatch,
+    smtpProblem,
+    SMTP_DRAFT_FIELD,
+  } = await import("../src/instance.js");
   const { linkError, userState, userStateText } = await import("../src/account.js");
   const { navRows, GROUP_TITLES } = await import("../src/settings.js");
   const { ApiError } = await import("../src/http.js");
@@ -808,6 +818,65 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
   check("and matching is not", senderMismatch({ ...draft, username: "a@b", from: "A@B" }), false);
   check("a username that is not an address says nothing", senderMismatch({ ...draft, username: "apikey", from: "c@d" }), false);
 
+  /*
+   * ⭐ **A per-field Reset survives the next Save** (review D14). `save` sends
+   * all six fields from the draft, and the Reset used to re-sync the draft only
+   * while the form had no edits — so edit Host, Reset From, Save wrote the old
+   * From straight back under a "Saved." toast. The rule is one field: the
+   * cleared key takes the server's answer, every other field keeps its edit.
+   */
+  // Every field differs between the two, so "moves exactly one" below is a real
+  // claim on all six rather than on the three a blank fixture would leave equal.
+  const edited = { host: "typed.example", port: "2525", security: "plaintext", username: "typed", from: "typed@example", publicUrl: "https://typed.example" };
+  const answered = { host: "env.example", port: "587", security: "starttls", username: "env", from: "env@example", publicUrl: "https://env.example" };
+  check("a cleared key takes the server's value in a dirty draft", draftAfterClear(edited, "mail.from", answered).from, "env@example");
+  check("and every other field keeps its edit", draftAfterClear(edited, "mail.from", answered), { ...edited, from: "env@example" });
+  // The password is write-only and has no draft field, so clearing it moves nothing.
+  check("a key with no draft field changes nothing", draftAfterClear(edited, "smtp.password", answered), edited);
+  // Every key the form saves has a field, and each clear touches exactly one.
+  check(
+    "the table names the six keys Save sends",
+    Object.keys(SMTP_DRAFT_FIELD).sort(),
+    ["mail.from", "mail.public_url", "smtp.host", "smtp.port", "smtp.security", "smtp.username"],
+  );
+  for (const [key, name] of Object.entries(SMTP_DRAFT_FIELD)) {
+    const after = draftAfterClear(edited, key, answered);
+    const moved = (Object.keys(after) as (keyof typeof after)[]).filter((k) => after[k] !== edited[k]);
+    check(`clearing ${key} moves ${name} and nothing else`, moved, [name]);
+  }
+
+  /*
+   * **The public URL is a value on a fresh server, not a placeholder** (review
+   * D15). `mailConfigured` requires `mail.public_url`, and the screen offered
+   * the origin only greyed in the box — so a filled-in form saved into a server
+   * that still refused to send. Unset anywhere: the origin goes into the draft
+   * and the form is dirty, so Save is live and sends it. Set anywhere — here
+   * or in the environment — it is somebody's decision and nothing moves.
+   */
+  const origin = "https://cp.example";
+  const urlField = (over: Record<string, unknown>) => field({ key: "mail.public_url", ...over });
+  check("unset anywhere: the origin is seeded and the form is dirty", seedPublicUrl(draft, urlField({}), origin), {
+    draft: { ...draft, publicUrl: origin },
+    dirty: true,
+  });
+  check("a field the server did not send counts as unset", seedPublicUrl(draft, undefined, origin), {
+    draft: { ...draft, publicUrl: origin },
+    dirty: true,
+  });
+  const stored = { ...draft, publicUrl: "https://stored.example" };
+  check("stored here: untouched", seedPublicUrl(stored, urlField({ source: "database", value: stored.publicUrl }), origin), {
+    draft: stored,
+    dirty: false,
+  });
+  check(
+    "from the environment: untouched",
+    seedPublicUrl(stored, urlField({ source: "environment", envSet: true, value: stored.publicUrl }), origin),
+    { draft: stored, dirty: false },
+  );
+  // An origin `smtpProblem` would refuse is not offered: a seeded value under a
+  // problem sentence is worse than an empty box.
+  check("a non-http origin is not seeded", seedPublicUrl(draft, urlField({}), "null"), { draft, dirty: false });
+
   /* ---- whether mail is arriving, which is not whether it is configured ---- */
 
   /*
@@ -884,7 +953,11 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
   /*
    * `emailChangeNeedsProof` is gone (Q1.630): `PUT /v1/me/email` takes the
    * session alone by the owner's decision, and the predicate that decided when to
-   * draw the password field went with it. `relaycheck` pins the route's new shape.
+   * draw the password field went with it. An API-key caller proves the password
+   * (Q1.630, amended 2026-09-05), and this app still draws no field for it:
+   * `SignIn` takes no key, so the only browser presenting one is the legacy
+   * adoption, which sees the server's 400 sentence. `relaycheck` pins the route's
+   * shape for both credentials.
    */
   check("the email form asks no proof of its own", /emailChangeNeedsProof|account-email-proof/.test(
     readFileSync(new URL("../src/ui/settings/AccountSection.tsx", import.meta.url), "utf8"),
@@ -967,6 +1040,22 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
   const settingField = readFileSync(new URL("../src/ui/settings/SettingField.tsx", import.meta.url), "utf8");
   check("no settings field commits on blur", /onBlur=/.test(serverSection + emailSection + settingField), false);
   /*
+   * **Reset waits with the rest of the form** (review D8). `busy` is the flag
+   * Save and the password's Remove already read, and Reset was the one control
+   * on these two screens that stayed live during a write — a clear racing a
+   * Save, both answering with the whole table in an order nobody chose. Pinned
+   * on the primitive and on every call site: a field drawn without `busy`
+   * gets a Reset that is never disabled, with the prop defaulting to `false`.
+   */
+  // Stripped for the positive, as this file's other positives are: the raw read
+  // above is right for the fail-closed negative and wrong here, where a docblock
+  // quoting the JSX would satisfy the regex (E9's review).
+  const settingFieldCode = settingField.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  check("SettingField's Reset is disabled while the form is busy", /<Button size="sm" tone="ghost" disabled=\{busy\} onClick=\{onReset\}>/.test(settingFieldCode), true);
+  const fieldSites = (serverSection + emailSection).split("<SettingField").slice(1).map((site) => site.slice(0, site.indexOf("/>")));
+  check("the two screens draw fields through it", fieldSites.length > 0, true);
+  check("and every one of them passes busy", fieldSites.filter((site) => !/busy=\{busy\}/.test(site)).length, 0);
+  /*
    * And the password's state sentence is not rebuilt in the JSX. It was two
    * expressions — an existence test on `set` and an `originText` beside it — and
    * two expressions on one line are two things that can disagree, which they
@@ -988,24 +1077,77 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
   check("removing the stored password is gated on a row being stored", removeGate >= 0, true);
   check("and the gate reads `set` alone", /passwordStored = passwordField\?\.set === true/.test(emailCode), true);
   check("and the Remove is two-step, naming what goes", /Remove the stored password\?/.test(emailCode), true);
-  check("with Cancel last", /Remove the stored password\?[\s\S]*?"Remove"[\s\S]*?Cancel/.test(emailCode), true);
+  /*
+   * The pair is `TwoStep`'s (E7's review, Q3.552): a `plain` Remove — nothing
+   * here is irreversible, the password can be typed again — and Cancel last is
+   * the primitive's guarantee. What this file holds is the question and the act
+   * reaching it, the ghost Remove as its resting control, and the request handed
+   * over whole rather than run here with a flag of this form's own.
+   */
+  check(
+    "with a plain act, the ghost Remove at rest, and the request handed to the primitive",
+    [
+      /question="Remove the stored password\?"\s*act=\{\{ label: "Remove" \}\}\s*onAct=\{\(\) => clear\("smtp\.password"\)\}/.test(emailCode),
+      /rest=\{\s*<Button size="sm" tone="ghost" disabled=\{busy\} onClick=\{\(\) => setRemoving\(true\)\}>/.test(emailCode),
+      /setRemoving\(false\)/.test(emailCode),
+    ],
+    [true, true, false],
+  );
+  /*
+   * **The removal holds the form's one lock** (review D8; E7's review). `clear`
+   * is what both the confirmed Remove and a one-tap Reset go through, so `busy`
+   * is set there rather than in `clearKey`: held only by the one-tap wrapper it
+   * was off for the whole of a confirmed removal, and Save, Send and every Reset
+   * read enabled beside a request still out — a second `adminSaveSettings` and
+   * two answers re-syncing the draft in whichever order they landed, the D14
+   * class E4 had just closed. The primitive takes the flag back as `disabled`,
+   * so Remove is refused while a Save is out, which the hand-rolled act's
+   * `disabled={busy}` did.
+   */
+  check(
+    "and the removal holds the form's busy, from the promise it hands over",
+    [
+      /const clear = \(key: string\): Promise<void> => \{\s*setBusy\(true\);\s*return cp\s*\.adminSaveSettings\(\{ clear: \[key\] \}\)/.test(emailCode),
+      /setDraft\(\(current\) => \(dirty \? draftAfterClear\(current, key, synced\) : synced\)\);\s*\}\)\s*\.finally\(\(\) => setBusy\(false\)\);\s*\};/.test(emailCode),
+      /const clearKey = \(key: string\): void => \{\s*void clear\(key\)\.catch\(/.test(emailCode),
+      /onAct=\{\(\) => clear\("smtp\.password"\)\}\s*disabled=\{busy\}/.test(emailCode),
+    ],
+    [true, true, true, true],
+  );
   /*
    * **Registration is a badge and a verb, not a switch** (decision 7A). A
    * `role="switch"` promises a tap flips it, and opening waits behind a confirm.
    * Only the widening act is confirmed (Q3.220): the question text appears in
-   * one arm and the closing tap goes straight to `set(false)`.
+   * one arm and the closing tap goes straight to `close()`.
    */
   const serverCode = serverSection.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  /*
+   * **The badge is the server's answer and nothing else** (review D12). `open`
+   * is read off `answer.registration.enabled` on every render, no state holds a
+   * copy, and the only thing a 200 does is hand the answer up through
+   * `onChanged` — so the badge flips inside `.then`, after the server, never
+   * on the tap.
+   */
+  const registration = serverCode.slice(serverCode.indexOf("function Registration("), serverCode.indexOf("function Domains("));
+  check("the registration badge reads the answer", /const open = answer\.registration\.enabled;/.test(registration), true);
+  check("and is drawn from it", /<Badge tone="strong">\{open \? "Open" : "Closed"\}<\/Badge>/.test(registration), true);
+  check("with no state holding a copy", /useState\([^)]*registration|useState<boolean>\(open/.test(registration), false);
+  check("flipping only inside .then, through onChanged", /\.then\(\(updated\) => onChanged\(updated\)\)/.test(registration), true);
+  // And the question closes through the primitive alone, on that same promise
+  // (E7's review, Q3.552): nothing in this component puts the flag back itself.
+  check("and the question closes on that promise, through the primitive", [/onAct=\{\(\) => save\(true\)\}/.test(registration), /setConfirming\(false\)/.test(registration)], [true, false]);
   check("registration is not drawn as a switch", /role="switch"/.test(serverCode), false);
   check("opening registration asks first", (serverCode.match(/Open registration to anyone\?/g) ?? []).length, 1);
-  check("and closing does not", /open \? set\(false\) : setConfirming\(true\)/.test(serverCode), true);
+  check("and closing does not", /open \? close\(\) : setConfirming\(true\)/.test(serverCode), true);
   /*
    * **Remint is two-step** (decision 12A, Q3.219's mirror): the cost of a remint
    * lands on somebody else's provisioning script, not on the person tapping.
    * The first mint retires nothing and stays one tap.
    */
   check("reminting the provisioning key asks first", /Replace the provisioning key\?/.test(serverCode), true);
-  check("and the first mint does not", /minted \? \(\) => setConfirming\(true\) : mint/.test(serverCode), true);
+  // `mintNow` is the one-tap path with the panel's own wait; the remint hands
+  // `mint` itself to the primitive.
+  check("and the first mint does not", /minted \? \(\) => setConfirming\(true\) : mintNow\}/.test(serverCode), true);
   // Save buttons are drawn always and disabled until dirty: a button that
   // materialises on the first keystroke is a layout shift under the finger.
   check("Save is never gated on dirtiness in the JSX", /dirty && \(?\s*<Button/.test(serverCode + emailCode), false);
@@ -1109,6 +1251,41 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
     emailSection.split("useState<SmtpDraft>").length - 1,
     1,
   );
+  // And the screen asks that function on a clear, whether or not the form is
+  // dirty: the rule is pure, the placement is not, and this is the placement.
+  check("a clear patches the draft through draftAfterClear", /draftAfterClear\(current, key, synced\)/.test(emailCode), true);
+  /*
+   * And the seed is **load-only, by construction**: called exactly once, in a
+   * state initialiser ahead of the draft's own — never in the re-sync after a
+   * save or a clear, where a person who emptied the field on purpose would
+   * watch it come back.
+   */
+  check("the public URL is seeded exactly once", emailCode.split("seedPublicUrl(").length - 1, 1);
+  check("in a state initialiser", /useState\(\(\) => seedPublicUrl\(/.test(emailCode), true);
+  // Both operands guarded, the `>= 0` idiom: -1 is less than every real position.
+  const seedAt = emailCode.indexOf("seedPublicUrl(");
+  const draftAt = emailCode.indexOf("useState<SmtpDraft>");
+  check("ahead of the draft it seeds", seedAt >= 0 && draftAt >= 0 && seedAt < draftAt, true);
+  check("and nowhere after it — not a re-sync, a save or a clear", /seedPublicUrl\(/.test(emailCode.slice(emailCode.indexOf("useState<SmtpDraft>"))), false);
+  /*
+   * **The seed alone does not hide the server's diagnosis** (E14's review):
+   * `mail.problems` is drawn under a clean form, and the seed dirties it with a
+   * value nobody typed — so on exactly the server it is for, the sentence saying
+   * what was missing vanished. `seeded` starts as the seed's own dirtiness, and
+   * the first edit or a Save — dirt of the person's own — clears it.
+   */
+  check("the diagnosis is drawn while the seed is the only edit", /\{\(!dirty \|\| seeded\) &&\s*!answer\.mail\.configured &&\s*answer\.mail\.problems\.map\(/.test(emailCode), true);
+  check("seeded starts as the seed's own dirtiness", /const \[seeded, setSeeded\] = useState\(seed\.dirty\);/.test(emailCode), true);
+  check("the first edit clears it", /setDraft\(\(current\) => \(\{ \.\.\.current, \.\.\.patch \}\)\);\s*setDirty\(true\);\s*setSeeded\(false\);/.test(emailCode), true);
+  check("and so does a save", /setDirty\(false\);\s*setSeeded\(false\);/.test(emailCode), true);
+  /*
+   * **Why Send is off is said beside it** (review D12): a test sends with what
+   * is *stored*, so an unsaved form and an unconfigured server are the two
+   * reasons, each a sentence, and the button is disabled on either.
+   */
+  check("the two reasons a test cannot send", /const sendBlocked = dirty \? "Save first\." : !answer\.mail\.configured \? "Configure the server first\." : null;/.test(emailCode), true);
+  check("disable Send", /<Button disabled=\{busy \|\| sendBlocked !== null\} onClick=\{sendTest\}>/.test(emailCode), true);
+  check("and are drawn under it", /\{sendBlocked !== null && <p className="mt-2 text-xs text-muted">\{sendBlocked\}<\/p>\}/.test(emailCode), true);
   check("and that draft lives on the Email screen, not the Server one", /SmtpDraft/.test(serverSection), false);
 
   // The property rather than the rows, so a third group cannot arrive wrong.

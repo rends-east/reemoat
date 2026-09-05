@@ -263,7 +263,8 @@ round trip.
 - ⚠ **The `http` notice is a fact about a `system ` line.** Tested over every
   contributed line it fired on a harness argv — `args: ["--base",
   "http://127.0.0.1:8080"]` is an ordinary thing for a CLI to be handed — and drew
-  "one provider is reached over http" on a card with no provider on it.
+  the http caveat ("One provider uses http; its saved key travels unencrypted.",
+  then worded "one provider is reached over http") on a card with no provider on it.
 - ⚠ **A plugin adds a harness and a provider. It does not add an *agent*.**
   `standalone` let a manifest claim its harness was a whole answer by itself and is
   **removed** — from `HarnessContribution`, from `AgentAvailability`, from `wire.ts`

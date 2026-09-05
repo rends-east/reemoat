@@ -10,7 +10,6 @@ import type { Me } from "../../wire";
 import {
   Badge,
   Button,
-  DangerButton,
   Empty,
   FIELD,
   IconButton,
@@ -20,6 +19,8 @@ import {
   SETTINGS_SECTION,
   SkeletonRow,
   Spinner,
+  TWO_STEP_BOX,
+  TwoStep,
 } from "../bits";
 import { toast } from "../Toast";
 import { KeyRow, KeyTable } from "./KeyRow";
@@ -495,16 +496,18 @@ function UserRow({
           {atLimit && <Badge>{`${user.machines ?? 0} of ${user.machineLimit}`}</Badge>}
         </span>
 
-        <span
+        <div
           className={`flex shrink-0 items-center gap-1.5 ${confirming ? "w-full justify-end sm:w-auto" : ""}`}
         >
           {/*
            * **Two steps, and the order of the second one is the safety property.**
            *
            * Delete is the only irreversible act on this screen — there is an
-           * `enable` for a disable and nothing at all for this — and it sits one
-           * button away from "Reset password" on a row that is 44 pixels tall on a
-           * phone. So the first tap replaces the row's controls with the question
+           * `enable` for a disable and nothing at all for this — and it sits in
+           * the row's kebab one item under Enable/Disable, on a row that is 44
+           * pixels tall on a phone. ("Reset password" is gone with
+           * `adminResetPassword`; the mailed reset replaced it, Q7.61.) So the
+           * first tap replaces the row's controls with the question
            * and its two answers, drawn *in place of* the buttons they are about,
            * so there is nothing else on the row to hit by accident and the name
            * being deleted is right beside it, unmoved — and **named in the
@@ -520,7 +523,10 @@ function UserRow({
            * laggy connection — the ordinary response to a button that appears not
            * to have done anything — put the second tap on the confirm and deleted
            * a person irreversibly. Ending the confirm row with Cancel means the
-           * second tap lands on the one control that undoes the first.
+           * second tap lands on the one control that undoes the first. That
+           * ordering is `TwoStep`'s now (Q3.552) — this row was the copy the
+           * others were written from, and the pin over the primitive is the one
+           * that used to sit here.
            *
            * Inline rather than a modal because this app has none, and inventing
            * one for a settings row would be a second dismissal mechanism competing
@@ -542,35 +548,34 @@ function UserRow({
            * nothing adjacent to mis-hit.
            */}
           {confirming ? (
-            <>
-              <span className="text-xs text-muted">
-                Delete <span className="font-medium text-fg">{user.name}</span> for good?
-              </span>
-              <DangerButton
-                icon={Trash2}
-                size="sm"
-                disabled={busy}
-                onClick={() =>
-                  run(
-                    /*
-                     * "N machines they registered are off the network — enrolling
-                     * again brings them back" used to ride this toast. It was a
-                     * fact about machines that are no longer in any list an admin
-                     * can open, so nothing on screen could carry it as state; a
-                     * fact nobody can re-read is dropped rather than flashed
-                     * (D-U-1). The row is gone, and the toast says that.
-                     */
-                    cp.adminDeleteUser(user.id).then((answer) => toast("ok", `${answer.name} is gone.`)),
-                    () => setConfirming(false),
-                  )
-                }
-              >
-                {busy ? <Spinner /> : "Delete"}
-              </DangerButton>
-              <Button size="sm" onClick={() => setConfirming(false)} disabled={busy}>
-                Cancel
-              </Button>
-            </>
+            <TwoStep
+              armed
+              onArm={setConfirming}
+              question={
+                <>
+                  Delete <span className="font-medium">{user.name}</span> for good?
+                </>
+              }
+              act={{ label: "Delete", danger: true, icon: Trash2 }}
+              onAct={() =>
+                /*
+                 * "N machines they registered are off the network — enrolling
+                 * again brings them back" used to ride this toast. It was a
+                 * fact about machines that are no longer in any list an admin
+                 * can open, so nothing on screen could carry it as state; a
+                 * fact nobody can re-read is dropped rather than flashed
+                 * (D-U-1). The row is gone, and the toast says that.
+                 *
+                 * Not through `run`: that helper's `busy` greys the kebab, and
+                 * the kebab is not drawn while this question is. `TwoStep` owns
+                 * the wait, and `onChanged` drops the row on the 200.
+                 */
+                cp.adminDeleteUser(user.id).then((answer) => {
+                  toast("ok", `${answer.name} is gone.`);
+                  onChanged();
+                })
+              }
+            />
           ) : (
             /*
              * **Everything a row can do, behind one kebab.**
@@ -734,7 +739,7 @@ function UserRow({
               )}
             </Menu>
           )}
-        </span>
+        </div>
       </div>
 
       {panel === "keys" && (
@@ -811,6 +816,18 @@ function UserRow({
  * **same** validator `ServerSection` calls. Save is always drawn and disabled
  * until dirty, the same as every Save on the admin screens now: a button that
  * materialises on the first keystroke moves the row under the finger typing.
+ *
+ * **Two `TwoStep`s, each drawn only while it is the one asking, and the form
+ * drawn by this panel when neither is.** The primitive's `rest` is for one
+ * resting control; this panel's resting state is four (the number, Save, Use
+ * the default, Close), and two different questions can replace it. So each arm
+ * mounts a `TwoStep` armed with no `rest`, and the form's own box is the
+ * primitive's — `TWO_STEP_BOX`, the one class string it draws, exported for
+ * exactly this form — which is what keeps "the last child lands on the same
+ * pixels" true across a boundary the primitive cannot see. By name rather than
+ * spelled again here, because a property held on one site and derived on
+ * another is a property nothing asserts (Q3.552); `webcheck` reads the import
+ * and the use.
  */
 function MachineLimitPanel({
   user,
@@ -866,25 +883,44 @@ function MachineLimitPanel({
   const clearingUnknown =
     user.machineLimitSource === "override" && typeof user.machineLimitDefault !== "number";
 
-  const write = (work: Promise<cp.MachineLimitAnswer>): void => {
+  /*
+   * Every write goes through this, and it holds `busy` for the request's
+   * length — the confirmed acts hand it to `TwoStep`, which greys the question's
+   * pair and closes it on the 200 and reads nothing of this panel's flag, and the
+   * one-tap paths add a toast below. The flag is here rather than in `write`
+   * because the form can be drawn again while a confirmed act is still out: a
+   * poll that empties `consequence` swaps the question for the form, and a Save
+   * there with `busy` false was a second write on the same person (E7's review).
+   */
+  const apply = (work: Promise<cp.MachineLimitAnswer>): Promise<void> => {
     setBusy(true);
-    void work
+    return work
       .then((answer) => {
-        setConfirming(null);
         setDraft(String(answer.maxMachines));
-        /*
-         * Eight words, and the count is the only part that is not on the row: the
-         * "N machines off" badge carries the standing fact (D-U-1), and "nothing
-         * was deleted" is what the badge's own remedy — raise the limit — says.
-         */
+      /*
+       * Six words, the success-toast cap (review D10; it read nine while the
+       * comment above it said eight), and the count is the only part that is
+       * not on the row: the "N machines off" badge carries the standing fact
+       * (D-U-1), and "nothing was deleted" is what the badge's own remedy —
+       * raise the limit — says.
+       */
         if (answer.suspended.length > 0) {
           const n = answer.suspended.length;
-          toast("ok", `${n} machine${n === 1 ? "" : "s"} stopped. Raise the limit to restore ${n === 1 ? "it" : "them"}.`);
+          toast("ok", `${n} machine${n === 1 ? "" : "s"} stopped; raise the limit.`);
         }
         onChanged();
       })
-      .catch((cause: unknown) => toast("error", errorText(cause)))
       .finally(() => setBusy(false));
+  };
+  // The one-tap paths add the toast and put the arming flag back. `confirming`
+  // outlives a poll that empties the consequence — the form is drawn again with
+  // the flag still "save" — and a one-tap Save that left it there drew the
+  // question on the next lowering typed, with no tap. A confirmed act's close is
+  // `TwoStep`'s.
+  const write = (work: Promise<cp.MachineLimitAnswer>): void => {
+    void apply(work)
+      .then(() => setConfirming(null))
+      .catch((cause: unknown) => toast("error", errorText(cause)));
   };
 
   return (
@@ -896,47 +932,40 @@ function MachineLimitPanel({
       </p>
 
       {confirming === "save" && consequence !== null ? (
-        <>
-          <p className="mt-2 text-xs text-muted">{consequence}</p>
-          {/*
-           * `plain`, not `DangerButton` — that glyph is reserved for the
-           * irreversible, and this is the one destructive-looking act in the app
-           * that undoes itself the moment the number goes back up. Cancel is
-           * **last**, the ordering safety property every confirming row here
-           * shares: both groups occupy the same box, `.tap` removes the
-           * double-tap delay, and a second tap aimed at a control that looked
-           * inert must land on the undo.
-           */}
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <Button tone="plain" size="sm" disabled={busy} onClick={() => write(cp.adminSetMachineLimit(user.id, next))}>
-              {busy ? <Spinner /> : "Save limit"}
-            </Button>
-            <Button size="sm" disabled={busy} onClick={() => setConfirming(null)}>
-              Cancel
-            </Button>
-          </div>
-        </>
+        /*
+         * `plain`, not `danger` — that glyph is reserved for the irreversible,
+         * and this is the one destructive-looking act in the app that undoes
+         * itself the moment the number goes back up. The consequence sentence
+         * *is* the question. Cancel is **last**, the ordering safety property
+         * every confirming row here shares, and it is `TwoStep`'s.
+         */
+        <TwoStep
+          armed={confirming === "save"}
+          onArm={(next) => setConfirming(next ? "save" : null)}
+          disabled={busy}
+          className="mt-2"
+          question={consequence}
+          act={{ label: "Save limit" }}
+          onAct={() => apply(cp.adminSetMachineLimit(user.id, next))}
+        />
       ) : confirming === "clear" ? (
-        <>
-          {/*
-           * The same shape and the same Cancel-last ordering as the arm above.
-           * The sentence is `machineLimitChangeNotice` where the row told us what
-           * the default is, and the honest admission where it did not.
-           */}
-          <p className="mt-2 text-xs text-muted">
-            {clearingCost ?? "Drops to the default; machines over it stop. Raising it brings them back."}
-          </p>
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <Button tone="plain" size="sm" disabled={busy} onClick={() => write(cp.adminClearMachineLimit(user.id))}>
-              {busy ? <Spinner /> : "Use the default"}
-            </Button>
-            <Button size="sm" disabled={busy} onClick={() => setConfirming(null)}>
-              Cancel
-            </Button>
-          </div>
-        </>
+        /*
+         * The same shape and the same Cancel-last ordering as the arm above.
+         * The sentence is `machineLimitChangeNotice` where the row told us what
+         * the default is, and the honest admission where it did not.
+         */
+        <TwoStep
+          armed={confirming === "clear"}
+          onArm={(next) => setConfirming(next ? "clear" : null)}
+          disabled={busy}
+          className="mt-2"
+          question={clearingCost ?? "Drops to the default; machines over it stop. Raising it brings them back."}
+          act={{ label: "Use the default" }}
+          onAct={() => apply(cp.adminClearMachineLimit(user.id))}
+        />
       ) : (
-        <div className="mt-2 flex flex-wrap items-center gap-2">
+        /* The primitive's own box, by name rather than by copy: see the docblock. */
+        <div className={`${TWO_STEP_BOX} mt-2`}>
           <input
             value={draft}
             onChange={(event) => setDraft(event.target.value)}

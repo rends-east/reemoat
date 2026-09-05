@@ -32,6 +32,7 @@ import {
 } from "../openrouter";
 import type { MachineId } from "../ids";
 import { daemonRead } from "../machine";
+import { MACHINE_GONE } from "../plugins";
 import { store } from "../store";
 import { AGENT_IDS, type AgentCapabilities, type AgentId, type AgentInfo, type CustomAgent, type SystemInfo } from "../wire";
 import { AgentGlyph } from "./AgentIcons";
@@ -46,13 +47,14 @@ import {
   IconButton,
   Menu,
   MENU_HEADING,
-  reachText,
+  NotReachable,
   SEARCH_FIELD,
   SETTINGS_HEADING,
   SHEET_FOOT,
   SHEET_SCREEN,
   SHEET_SCROLL,
   Spinner,
+  TwoStep,
   menuRow,
 } from "./bits";
 
@@ -759,7 +761,7 @@ export function AgentBuilder({
     return (
       <div className={SHEET_SCREEN}>
         <div className={SHEET_SCROLL}>
-          <Empty>That machine is not in your list any more.</Empty>
+          <Empty>{MACHINE_GONE}</Empty>
         </div>
       </div>
     );
@@ -820,11 +822,10 @@ export function AgentBuilder({
               </Button>
             }
           >
-            {machine.name} is not reachable right now —{" "}
-            {reachText(machine.reach, machine.offlineReason)}
-            {preset === null
-              ? ", so nothing can be assembled on it."
-              : ", so this agent cannot be changed."}
+            <NotReachable
+              machine={machine}
+              tail={preset === null ? ", so nothing can be assembled on it." : ", so this agent cannot be changed."}
+            />
           </Empty>
         </div>
       </div>
@@ -1128,14 +1129,17 @@ export function AgentBuilder({
    * `isReplayable` in `machine.ts` already covers the verb, so a retry cannot
    * remove a second thing.
    */
-  const remove = (): void => {
-    if (preset === null || busy) return;
+  const remove = (): Promise<void> | undefined => {
+    if (preset === null) return undefined;
     // Held as a `const` because the hand-off below happens in a callback, and a
     // narrowing on a parameter does not survive into one.
     const going = preset;
+    // `busy` is still this screen's, shared with Save: one write at a time, and
+    // the foot's button greys while the row is going. `TwoStep` owns the
+    // question's own wait on top of it.
     setBusy(true);
     setWriteFailure(null);
-    void daemon
+    return daemon
       .removeCustomAgent(going)
       .then(() => {
         if (!alive.current) return;
@@ -1174,14 +1178,6 @@ export function AgentBuilder({
          */
         rememberRemoval(machineId, going);
         navigate(leave(), true);
-      })
-      .catch((cause: unknown) => {
-        if (!alive.current) return;
-        setWriteFailure(errorText(cause));
-        // Back to one control: a confirmation still open under a refusal invites a
-        // second tap at the same pixels, which is the pair `DangerButton` orders
-        // its buttons to prevent.
-        setConfirming(false);
       })
       .finally(() => {
         if (alive.current) setBusy(false);
@@ -1397,7 +1393,15 @@ export function AgentBuilder({
          * have been the only filled control on the screen, sitting on the answer
          * that does nothing. The view spends it now — Save, at the foot — and one
          * per view is the whole rule, so a second fill here would be this screen
-         * claiming two affirmative actions, one of which is a refusal.
+         * claiming two affirmative actions, one of which is a refusal. The pair
+         * is `TwoStep`'s, which holds all of that for every confirmation.
+         *
+         * ⚠ **A refusal closes the question here, against the primitive's
+         * default.** `TwoStep` leaves a failed question standing beside a toast;
+         * this screen reports a failed write as its own `writeFailure` line
+         * instead, and a confirmation still open under that line invites a
+         * second tap at the same pixels — so `onFailure` writes the line and
+         * disarms, and the person is back to one control.
          */}
         {stored !== null && (
           /* No heading over it. `Field`'s labels are the two above and a third one
@@ -1418,32 +1422,32 @@ export function AgentBuilder({
               Chats you started with it are not deleted — the next time one comes back it runs on{" "}
               {nameOf(stored.harness)} with its own model rather than this one.
             </p>
-            {confirming ? (
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                {/* "it", the way `MachineSection` asks the same question, and not
-                    the agent's own name: a name is 80 characters at the bound and
-                    this row has no `truncate` to give it — an unwrapped one would
-                    reach past the scroller, which computes `overflow-x` to `auto`
-                    the moment it sets `overflow-y`. What "it" refers to is the
-                    first line of this screen. */}
-                <span className="text-xs text-muted">Remove it?</span>
-                <DangerButton icon={Trash2} disabled={busy} onClick={remove}>
-                  {busy ? <Spinner /> : "Remove"}
+            {/* "it", the way `MachineSection` asks the same question, and not
+                the agent's own name: a name is 80 characters at the bound and
+                this row has no `truncate` to give it — an unwrapped one would
+                reach past the scroller, which computes `overflow-x` to `auto`
+                the moment it sets `overflow-y`. What "it" refers to is the
+                first line of this screen. */}
+            <TwoStep
+              armed={confirming}
+              onArm={setConfirming}
+              size="md"
+              className="mt-3"
+              question="Remove it?"
+              act={{ label: "Remove", danger: true, icon: Trash2 }}
+              disabled={busy}
+              onAct={remove}
+              onFailure={(cause) => {
+                if (!alive.current) return;
+                setWriteFailure(errorText(cause));
+                setConfirming(false);
+              }}
+              rest={
+                <DangerButton icon={Trash2} disabled={busy} onClick={() => setConfirming(true)}>
+                  Remove agent
                 </DangerButton>
-                <Button disabled={busy} onClick={() => setConfirming(false)}>
-                  Cancel
-                </Button>
-              </div>
-            ) : (
-              <DangerButton
-                icon={Trash2}
-                className="mt-3"
-                disabled={busy}
-                onClick={() => setConfirming(true)}
-              >
-                Remove agent
-              </DangerButton>
-            )}
+              }
+            />
           </div>
         )}
       </div>

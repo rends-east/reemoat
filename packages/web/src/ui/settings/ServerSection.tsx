@@ -3,7 +3,7 @@ import * as cp from "../../cp";
 import { errorText } from "../../http";
 import { MACHINE_LIMIT_KEY, fleetMachineLimitNotice, machineLimitProblem } from "../../quota";
 import { store } from "../../store";
-import { Badge, Button, Empty, SETTINGS_HEADING, SETTINGS_SECTION, Spinner } from "../bits";
+import { Badge, Button, Empty, SETTINGS_HEADING, SETTINGS_SECTION, Spinner, TwoStep } from "../bits";
 import { toast } from "../Toast";
 import { OneTimeSecret } from "./OneTimeSecret";
 import { SettingField, settingValue } from "./SettingField";
@@ -117,7 +117,8 @@ export function ServerSection(): ReactNode {
  *
  * **Asymmetric on purpose** (Q3.220): only the act that *widens* authority is
  * confirmed. Opening replaces the button with the question and its two answers,
- * Cancel last; closing is one tap. The badge flips on the 200 and never before.
+ * Cancel last (`TwoStep`'s, with the badge as its `lead` so it stands in both
+ * arms); closing is one tap. The badge flips on the 200 and never before.
  */
 function Registration({
   answer,
@@ -130,14 +131,15 @@ function Registration({
   const [busy, setBusy] = useState(false);
   const open = answer.registration.enabled;
 
-  const set = (next: boolean): void => {
-    setBusy(true);
-    void cp
+  const save = (next: boolean): Promise<void> =>
+    cp
       .adminSaveSettings({ set: { "registration.enabled": next ? "true" : "false" } })
-      .then((updated) => {
-        onChanged(updated);
-        setConfirming(false);
-      })
+      .then((updated) => onChanged(updated));
+  // Closing is one tap on the resting button, so its wait is this component's;
+  // opening's is `TwoStep`'s, which closes the question only on the 200.
+  const close = (): void => {
+    setBusy(true);
+    void save(false)
       .catch((cause: unknown) => toast("error", errorText(cause)))
       .finally(() => setBusy(false));
   };
@@ -145,31 +147,28 @@ function Registration({
   return (
     <section>
       <h2 className={SETTINGS_HEADING}>Registration</h2>
-      <div className="mt-2 flex min-h-11 flex-wrap items-center gap-2">
-        <Badge tone="strong">{open ? "Open" : "Closed"}</Badge>
-        {confirming ? (
-          /*
-           * The consequence lives here and nowhere at rest (decision 10A): a
-           * two-step control is a bare button until it is tapped, and its cost
-           * is the confirmation's text. Without mail nothing verifies who signs
-           * up — which is the one thing worth saying before opening the door.
-           */
-          <>
-            <span className="text-sm">Open registration to anyone?</span>
-            <Button tone="plain" size="sm" disabled={busy} onClick={() => set(true)}>
-              {busy ? <Spinner /> : "Open"}
-            </Button>
-            {/* Cancel last: the same pixels the confirming button occupied. */}
-            <Button size="sm" disabled={busy} onClick={() => setConfirming(false)}>
-              Cancel
-            </Button>
-          </>
-        ) : (
-          <Button size="sm" disabled={busy} onClick={() => (open ? set(false) : setConfirming(true))}>
+      {/*
+       * The consequence lives in the confirming arm and nowhere at rest
+       * (decision 10A): a two-step control is a bare button until it is tapped,
+       * and its cost is the confirmation's text. Without mail nothing verifies
+       * who signs up — which is the one thing worth saying before opening the
+       * door, and it is drawn below the box rather than inside the question
+       * because it is conditional on the mail settings, not on the act.
+       */}
+      <TwoStep
+        armed={confirming}
+        onArm={setConfirming}
+        className="mt-2 min-h-11"
+        lead={<Badge tone="strong">{open ? "Open" : "Closed"}</Badge>}
+        question="Open registration to anyone?"
+        act={{ label: "Open" }}
+        onAct={() => save(true)}
+        rest={
+          <Button size="sm" disabled={busy} onClick={() => (open ? close() : setConfirming(true))}>
             {busy ? <Spinner /> : open ? "Close registration" : "Open registration"}
           </Button>
-        )}
-      </div>
+        }
+      />
       {confirming && !answer.mail.configured && (
         <p className="mt-1 text-xs text-muted">Without email nobody is verified.</p>
       )}
@@ -228,6 +227,7 @@ function Domains({
         onChange={setDraft}
         field={field}
         onReset={() => write({ clear: ["registration.email_domains"] })}
+        busy={busy}
         placeholder="reemoat.com"
         hint="Comma-separated; empty allows any."
       />
@@ -293,23 +293,43 @@ function MachineLimit({
    */
   const consequence = dirty && problem === null ? fleetMachineLimitNotice(stored, draft) : null;
 
-  const write = (patch: { set?: Record<string, string>; clear?: string[] }): void => {
+  /*
+   * **One lock, held here, around every write.** The field's Reset, the one-tap
+   * Save and the confirmed lowering all go through this, so `busy` greys the
+   * Reset while a lowering is out, and the `TwoStep` below takes it back as
+   * `disabled` so the act is refused while a Reset is. That is E9's guard on
+   * `SettingField`'s Reset kept true across the primitive: `TwoStep`'s own wait
+   * greys the question's pair and closes it on the 200, and knows nothing of
+   * the field above it. Split into a bare promise for the primitive and a
+   * flagged wrapper for the one-tap paths, the Reset was live for the length of
+   * a confirmed lowering and a second write on the same key could go out, with
+   * whichever answer landed last winning the draft (E7's review) — so the flag
+   * is held beside the promise it hands over, the way `AgentBuilder`'s Remove
+   * holds that screen's.
+   */
+  const write = (patch: { set?: Record<string, string>; clear?: string[] }): Promise<void> => {
     setBusy(true);
-    void cp
+    return cp
       .adminSaveSettings(patch)
       .then((updated) => {
-        setConfirming(false);
         onChanged(updated);
         setDraft(settingValue(updated, MACHINE_LIMIT_KEY));
       })
-      .catch((cause: unknown) => toast("error", errorText(cause)))
       .finally(() => setBusy(false));
   };
+  // The one-tap paths — a reset, and a save that switches nothing off — add the
+  // toast and put the arming flag back. A Reset while the question stood left
+  // `confirming` true behind an `armed` that had gone false with the draft, and
+  // the next lowering typed drew the pair with no tap on Save. A lowering's
+  // toast and close are `TwoStep`'s.
+  const writeNow = (patch: { set?: Record<string, string>; clear?: string[] }): void => {
+    void write(patch)
+      .then(() => setConfirming(false))
+      .catch((cause: unknown) => toast("error", errorText(cause)));
+  };
 
-  const save = (): void =>
-    write(
-      draft.trim().length === 0 ? { clear: [MACHINE_LIMIT_KEY] } : { set: { [MACHINE_LIMIT_KEY]: draft.trim() } },
-    );
+  const savePatch = (): { set?: Record<string, string>; clear?: string[] } =>
+    draft.trim().length === 0 ? { clear: [MACHINE_LIMIT_KEY] } : { set: { [MACHINE_LIMIT_KEY]: draft.trim() } };
 
   return (
     <section className={SETTINGS_SECTION}>
@@ -322,43 +342,43 @@ function MachineLimit({
         value={draft}
         onChange={setDraft}
         field={field}
-        onReset={() => write({ clear: [MACHINE_LIMIT_KEY] })}
+        onReset={() => writeNow({ clear: [MACHINE_LIMIT_KEY] })}
+        busy={busy}
         placeholder="2"
       />
       {problem !== null && <p className="mt-2 text-sm text-danger">{problem}</p>}
-      {confirming && consequence !== null ? (
-        <>
-          <p className="mt-2 text-xs text-muted">{consequence}</p>
-          {/*
-           * `plain` and Cancel **last**, the same pair every confirming control
-           * in this app uses: both groups occupy one box so the last child lands
-           * on the pixels the tapped button just left, `.tap` removes the
-           * double-tap delay, and a second tap aimed at a control that looked
-           * inert must reach the undo rather than the act.
-           */}
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <Button tone="plain" size="sm" disabled={busy} onClick={save}>
-              {busy ? <Spinner /> : "Save limit"}
-            </Button>
-            <Button size="sm" disabled={busy} onClick={() => setConfirming(false)}>
-              Cancel
-            </Button>
-          </div>
-        </>
-      ) : (
-        <Button
-          tone="primary"
-          size="sm"
-          className="mt-2"
-          disabled={busy || !dirty || problem !== null}
-          // Raising costs nobody anything and lands at once; only a lowering,
-          // which switches machines off across the whole fleet, states itself
-          // first.
-          onClick={() => (consequence === null ? save() : setConfirming(true))}
-        >
-          {busy ? <Spinner /> : "Save"}
-        </Button>
-      )}
+      {/*
+       * `TwoStep` draws the consequence as the question — the sentence *is* the
+       * question here — then a `plain` Save limit and Cancel **last**, the pair
+       * every confirming control in this app uses: both arms occupy one box so
+       * the last child lands on the pixels the tapped button just left, and a
+       * second tap aimed at a control that looked inert reaches the undo rather
+       * than the act. At rest the box holds the primary Save alone. `disabled`
+       * is the section's `busy`, so the act is refused while the field's Reset
+       * above is out — the other half of the one lock `write` holds.
+       */}
+      <TwoStep
+        armed={confirming && consequence !== null}
+        onArm={setConfirming}
+        className="mt-2"
+        question={consequence}
+        act={{ label: "Save limit" }}
+        onAct={() => write(savePatch())}
+        disabled={busy}
+        rest={
+          <Button
+            tone="primary"
+            size="sm"
+            disabled={busy || !dirty || problem !== null}
+            // Raising costs nobody anything and lands at once; only a lowering,
+            // which switches machines off across the whole fleet, states itself
+            // first.
+            onClick={() => (consequence === null ? writeNow(savePatch()) : setConfirming(true))}
+          >
+            {busy ? <Spinner /> : "Save"}
+          </Button>
+        }
+      />
     </section>
   );
 }
@@ -415,15 +435,16 @@ function ProvisioningKey(): ReactNode {
   };
   useEffect(load, []);
 
-  const mint = (): void => {
+  const mint = (): Promise<void> =>
+    cp.adminMintProvisioningKey().then((answer) => {
+      setShown(answer.key);
+      setMinted(true);
+    });
+  // The first mint retires nothing and is one tap on the resting button, so its
+  // wait is this panel's; a remint's is `TwoStep`'s.
+  const mintNow = (): void => {
     setBusy(true);
-    void cp
-      .adminMintProvisioningKey()
-      .then((answer) => {
-        setShown(answer.key);
-        setMinted(true);
-        setConfirming(false);
-      })
+    void mint()
       .catch((cause: unknown) => toast("error", errorText(cause)))
       .finally(() => setBusy(false));
   };
@@ -455,24 +476,22 @@ function ProvisioningKey(): ReactNode {
            * turn provisioning off: it would be a third state for a fleet that
            * either hands out hosts or does not.
            */}
-          <div className="mt-2 flex min-h-11 flex-wrap items-center gap-2">
-            <Badge tone="strong">{minted ? "minted" : "none"}</Badge>
-            {minted && confirming ? (
-              <>
-                <span className="text-sm">Replace the provisioning key?</span>
-                <Button tone="plain" size="sm" disabled={busy} onClick={mint}>
-                  {busy ? <Spinner /> : "Replace"}
-                </Button>
-                <Button size="sm" disabled={busy} onClick={() => setConfirming(false)}>
-                  Cancel
-                </Button>
-              </>
-            ) : (
-              <Button size="sm" disabled={busy} onClick={minted ? () => setConfirming(true) : mint}>
+          <TwoStep
+            armed={minted && confirming}
+            onArm={setConfirming}
+            className="mt-2 min-h-11"
+            lead={<Badge tone="strong">{minted ? "minted" : "none"}</Badge>}
+            question="Replace the provisioning key?"
+            act={{ label: "Replace" }}
+            onAct={mint}
+            rest={
+              <Button size="sm" disabled={busy} onClick={minted ? () => setConfirming(true) : mintNow}>
                 {busy ? <Spinner /> : minted ? "Remint" : "Mint a key"}
               </Button>
-            )}
-          </div>
+            }
+          />
+          {/* Below the box rather than in the question: the badge and the pair
+              share a `min-h-11` line, and a second sentence there would grow it. */}
           {minted && confirming && (
             <p className="mt-1 text-xs text-muted">Retires the current key. Anything provisioning with it stops.</p>
           )}

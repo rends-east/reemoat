@@ -4,7 +4,7 @@ import { scopeSummary } from "../../install";
 import type { MachineState } from "../../machine";
 import { marketEntryPath, marketSettingsPath } from "../../market";
 import { paneAgreement, type PaneAgreement, type PaneReading } from "../../pane";
-import { pluginFailure, readView } from "../../plugins";
+import { MACHINE_GONE, machineGone, pluginFailure, readView } from "../../plugins";
 import { navigate } from "../../router";
 import { store, type AppState } from "../../store";
 import { ambiguousNames } from "../../wire";
@@ -214,7 +214,7 @@ function Pane({
       agreement.targets.map(async (id): Promise<readonly [MachineId, SaveOutcome]> => {
         const daemon = store.daemonFor(id);
         if (daemon === undefined) {
-          return [id, { kind: "failed", message: "That machine is not in your list any more." }];
+          return [id, { kind: "failed", message: MACHINE_GONE }];
         }
         try {
           /*
@@ -392,7 +392,7 @@ function Excluded({
   nameOf: (id: MachineId) => string;
 }): ReactNode {
   const said = [
-    ...gone.map((id) => `${nameOf(id)} is not in your list any more`),
+    ...gone.map((id) => machineGone(nameOf(id))),
     ...agreement.excluded.flatMap((one) => {
       if (one.reason === "unreadable") return [`${nameOf(one.machineId)} could not be read`];
       if (one.reason === "no_form") return [`${nameOf(one.machineId)} has no settings pane`];

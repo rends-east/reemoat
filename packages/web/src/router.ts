@@ -389,8 +389,36 @@ let navToken = 0;
  * screen appears with the old one still snapshotted over it, which reads as the
  * app having frozen rather than as a missing animation. Cleared on rejection as
  * well as fulfilment, so a transition that fails leaves nothing on the document.
+ *
+ * `alongside` is work that belongs in the **same render** as the route, and it
+ * runs inside that flush on both paths. One caller, `MachineSection`'s retire,
+ * which drops the retired machine from the store as it navigates to the list.
+ *
+ * ⚠ **It was added against a failure that cannot happen, and this paragraph is
+ * the correction rather than the claim.** The claim was that a store emit fired
+ * *after* `navigate` returned — flushed at the microtask checkpoint, while on
+ * the transition path the listeners are told a frame later inside the browser's
+ * callback — re-drew the machine's own screen with its machine gone and the
+ * transition snapshotted that as the outgoing frame. It does not: `current` is
+ * written at the top of this function, before `startViewTransition` is called,
+ * and `App` reads the route through `useSyncExternalStore` in the same
+ * component as its store subscription (`App.tsx`), so the render that emit
+ * forces reads the *new* route and passes it down — the machine's screen is
+ * unmounted in the very render that drops the machine, on either path. What
+ * the shared flush buys is the ordering by construction, the drop landing where
+ * the route lands, and nothing a person sees today: on the instant path both
+ * were one render already, and on the transition path the retire's own
+ * `machinesChanged` patches `resuming` before its first `await`, in the same
+ * task, so `App` re-draws on the new route before the browser captures the old
+ * frame whichever flush the drop is in — and with the drop deferred, that early
+ * frame still holds the retired row. By reading, not measured: this driver's
+ * `document` has no `startViewTransition`. Kept because a flush that holds the
+ * route and everything meant to land with it is what this callback is for and
+ * the pin holds the wiring whole; what would make it buy the slide is moving
+ * that re-list in here too, which is a change to measure rather than to read
+ * in. `popstate` passes none.
  */
-function announce(): void {
+function announce(alongside?: () => void): void {
   const previous = current.route;
   current = read();
   const move = navMove(previous, current.route);
@@ -400,6 +428,7 @@ function announce(): void {
     window.matchMedia("(prefers-reduced-motion: reduce)").matches
   ) {
     tell();
+    alongside?.();
     return;
   }
   const root = document.documentElement;
@@ -410,11 +439,14 @@ function announce(): void {
     delete root.dataset["nav"];
   };
   document.startViewTransition(() => {
-    flushSync(tell);
+    flushSync(() => {
+      tell();
+      alongside?.();
+    });
   }).finished.then(clear, clear);
 }
 
-window.addEventListener("popstate", announce);
+window.addEventListener("popstate", () => announce());
 
 /**
  * What an overlay opened at `target` is drawn over.
@@ -435,12 +467,18 @@ function underFor(target: string): string {
  * See their docblocks: the decision was here for one round, and a mutation run
  * showed it was the one part of this work no driver could reach.
  */
-export function navigate(path: string, replace = false): void {
+/**
+ * Go to `path`, pushing or replacing the entry, and tell the screen — with
+ * `alongside`, when given, flushed in the same render as the route rather than
+ * after it. See {@link announce} for what that buys, and for the failure it was
+ * wrongly said to prevent.
+ */
+export function navigate(path: string, replace = false, alongside?: () => void): void {
   const under = underFor(path);
   const origin = originFor(window.location.pathname, path, readOrigin());
   if (replace) window.history.replaceState({ under, origin }, "", path);
   else window.history.pushState({ under, origin }, "", path);
-  announce();
+  announce(alongside);
 }
 
 /**

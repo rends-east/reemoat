@@ -568,13 +568,43 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
   );
   /*
    * What an old daemon *does* take away is the one item that writes the strip —
-   * on the same line as the pinned label, so the two cannot come apart.
+   * on the same line as the pinned label, so the two cannot come apart. The
+   * other reason that item waits is `removing` (review D8): the row's confirm
+   * closes on the tap that sends the `DELETE`, so without it the kebab was the
+   * door to a second one before the first had answered.
    */
   check(
     "and only the item that writes the strip is what an old daemon disables",
-    /label=\{row\.hidden \? "Add back" : "Remove"\}\s*disabled=\{frozen\}/.test(pane),
+    /label=\{row\.hidden \? "Add back" : "Remove"\}\s*disabled=\{frozen \|\| removing\}/.test(pane),
     true,
   );
+  /*
+   * The in-flight id is held one level up, keyed by row id — the listing
+   * repaints under the row — set before the `DELETE` and cleared in `finally`,
+   * since on failure the row stays and has to be tappable again. The confirm's
+   * own Remove reads it too, for a confirm reopened during the flight.
+   */
+  /*
+   * The line under the name is where a fault displaces the vendor — `not signed
+   * in`, `would not start` — and it was the faintest ink on the row (review D9).
+   * `muted` on a live row; a hidden row's line goes to `faint` with its name,
+   * or the row's ground and its ink disagree about whether anything happened.
+   */
+  check(
+    "the under line is muted on a live row and faint only with a hidden name",
+    /truncate text-2xs \$\{row\.hidden \? "text-faint" : "text-muted"\}`\}>\s*\{under\}/.test(pane),
+    true,
+  );
+  check("the remove in flight is one id, held above the rows", /const \[removing, setRemoving\] = useState<string \| null>\(null\);/.test(pane), true);
+  const removeBody = pane.slice(pane.indexOf("const remove = (id: string): void => {"), pane.indexOf("const remove = (id: string): void => {") + 2000);
+  check("set before the DELETE goes out", removeBody.indexOf("setRemoving(id);") > 0 && removeBody.indexOf("setRemoving(id);") < removeBody.indexOf(".removeCustomAgent(id)"), true);
+  check("and cleared in finally, by id", /\.finally\(\(\) => setRemoving\(\(held\) => \(held === id \? null : held\)\)\)/.test(removeBody), true);
+  check("each row is told whether it is the one", /removing=\{removing === row\.id\}/.test(pane), true);
+  // The confirming pair is `TwoStep`'s (E7's review, Q3.552); `twoStep` is that
+  // one element, and the row's `removing` reaches it as the act's refusal.
+  // Where the element closes: its own `/>` on a line of its own, since a `<>…</>` fragment inside `question` carries a `/>` too.
+  const twoStep = pane.slice(pane.indexOf("<TwoStep"), pane.indexOf("<TwoStep") + pane.slice(pane.indexOf("<TwoStep")).search(/^\s*\/>/m));
+  check("and the confirm's Remove waits on it", pane.indexOf("<TwoStep") >= 0 && /disabled=\{removing\}/.test(twoStep) && /onAct=\{onRemove\}/.test(twoStep), true);
   /*
    * ⚠ **And both verbs are on both kinds now, which is the whole of "they must not
    * stand out".** Edit was absent from a built-in row on the argument that a
@@ -669,30 +699,44 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
    * Three things about the pair. It **names the agent** — "Remove <name>?" with
    * where to rebuild it — because a question that names nothing is answered by
    * reflex. **Cancel is last** (Q3.218: a second tap on a laggy connection lands on
-   * the undo). And it **holds the row's height** by the row's own arithmetic —
-   * the sum of the name line and the subline the normal column draws — which is
-   * the property the old confirmation broke: a drag measures one row at
-   * `pointerdown` and applies it to every neighbour, so a taller confirming row
-   * put an oversized step into `dropIndex`. The `danger` negative one check up
-   * still covers this pair.
+   * the undo) — `TwoStep`'s guarantee now, so what is pinned here is that the
+   * act reaches it as a plain `Remove` with no `danger`, and that the row draws
+   * no Cancel of its own. And it **holds the row's height** by the row's own
+   * arithmetic — the sum of the name line and the subline the normal column
+   * draws — which is the property the old confirmation broke: a drag measures
+   * one row at `pointerdown` and applies it to every neighbour, so a taller
+   * confirming row put an oversized step into `dropIndex`. The `danger` negative
+   * one check up still covers this pair.
    */
   check(
     "an assembled agent's removal asks in place, by name, with Cancel last",
     [
       /if \(harness\) onToggle\(\);\s*else setConfirming\(true\);/.test(pane),
-      /Remove <span className="font-medium">\{name\}<\/span>\? Rebuild it from Add an agent\./.test(pane),
-      /onRemove\(\);\s*\}\}\s*>\s*Remove\s*<\/Button>\s*<Button size="sm" onClick=\{\(\) => setConfirming\(false\)\}>\s*Cancel\s*<\/Button>/.test(pane),
+      /Remove <span className="font-medium">\{name\}<\/span>\? Rebuild it from Add an agent\./.test(twoStep),
+      /act=\{\{ label: "Remove" \}\}/.test(twoStep) && !/setConfirming\(false\)/.test(pane),
     ],
     [true, true, true],
   );
+  /*
+   * ⚠ **The `2.5` above and below the question sit on the question, not on the
+   * primitive's box.** The box also holds the two answers, and a 44px
+   * coarse-pointer button padded by 2.5 on each side is 64px in a 60px row —
+   * the exact arithmetic error this pin exists to catch, one element over.
+   * `align="end"` is what puts the question in the name column and the answers
+   * in the kebab's slot: the question grows from a zero basis, so it can never
+   * wrap the answers onto a second line and grow the row that way either.
+   */
   check(
     "and the question is drawn at the row's own height",
     [
       /h-\[calc\(var\(--text-sm--line-height\)\+var\(--text-2xs--line-height\)\)\]/.test(pane),
       /h-\[var\(--text-sm--line-height\)\]/.test(pane),
       /min-h-\[var\(--text-2xs--line-height\)\]/.test(pane),
+      /<span className="my-2\.5 flex h-\[calc\(var\(--text-sm--line-height\)\+var\(--text-2xs--line-height\)\)\] items-center overflow-hidden">/.test(twoStep),
+      /\bpy-2\.5\b/.test(twoStep),
+      /align="end"/.test(twoStep),
     ],
-    [true, true, true],
+    [true, true, true, true, false, true],
   );
   /*
    * ⚠ **44px of ink on the one control that now carries every act on the row.**
@@ -918,6 +962,16 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [true, false],
   );
+  /*
+   * At the screen-line cap since review D10 — fourteen, the name and the id one
+   * each: "What New session offers on" was a word over it. And the caveat under
+   * the list, for a daemon that cannot store an order, at the ten-word caveat
+   * cap with its dash counted; read off the source rather than restated.
+   */
+  check("and opens on what the list is rather than on a question", /New session's agents on \{machine\.name\} \(/.test(pane), true);
+  const tooOld = /supported \? "" : "([^"]+)"/.exec(pane)?.[1] ?? "";
+  check("the old-daemon caveat names the fact and the remedy", /^Daemon too old to reorder agents — update it\.$/.test(tooOld), true);
+  check("at the ten-word caveat cap, the dash counted", tooOld.length > 0 && tooOld.trim().split(/\s+/).length <= 10, true);
   /*
    * ⚠ **Removing an agent hands the removal to the strip whatever door it came
    * through, and the builder's copy of this was gated and permanently wrong.**

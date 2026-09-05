@@ -181,6 +181,25 @@ process.stdout.write("\nthe machine limit\n");
     (machineLimitChangeNotice("ada", 2, 1) ?? "").includes("newest one working"),
     machineLimitChangeNotice("ada", 2, 1) ?? "(null)",
   );
+  /*
+   * The caps (review D10): fourteen words is the confirmation cap and both
+   * consequence lines were over it — the per-user one at seventeen and the fleet
+   * one at sixteen, where the plan had counted them at sixteen and fourteen.
+   * Both are at the cap now: the per-user line stood at fifteen for a round,
+   * "accepted" in a comment with no owner behind it, and the fix round refused
+   * that (E11) — the pinned substrings above cost seven of its fourteen.
+   * Whitespace tokens, a dash counting as one, which is why both traded theirs
+   * for a semicolon.
+   */
+  {
+    const { fleetMachineLimitNotice } = await import("../src/quota.js");
+    const wordCount = (text: string): number => text.trim().split(/\s+/).length;
+    check("lowering onto two machines is at the fourteen-word cap", wordCount(machineLimitChangeNotice("ada", 3, 1) ?? ""), 14);
+    check("and onto one", wordCount(machineLimitChangeNotice("ada", 2, 1) ?? ""), 14);
+    check("the fleet line is at the fourteen-word cap", wordCount(fleetMachineLimitNotice("50", "5") ?? ""), 14);
+    check("and names only the value being set", /from 50/.test(fleetMachineLimitNotice("50", "5") ?? ""), false);
+    check("with the closing arm under it", wordCount(fleetMachineLimitNotice("50", "0") ?? "") <= 14, true);
+  }
 
   /* ---- the validator, shared by both screens ---- */
 
@@ -331,12 +350,34 @@ process.stdout.write("\nthe machine limit\n");
     check("one skeleton row stands in for the first listing", skeletons, 1);
     check("and it is asked before the empty state is claimed", src.indexOf("<SkeletonRow") < src.indexOf("No machines yet."), true);
     /*
+     * **And the outage arm says what every other screen says about the same
+     * outage** — `CONTROL_PLANE_UNREACHABLE`, imported rather than a second
+     * spelling: this list said "Control plane unreachable." while Account and
+     * Keys said "Cannot reach the control plane." (review D7). What is this
+     * screen's own is the second sentence, kept: an empty list under an outage is
+     * the one place the reader might think the fleet went with it. Read off the
+     * arm rather than restated here, and counted with the constant in front of
+     * it: "Your machines are not gone." made the pair ten words against the
+     * eight-word empty-state cap (E8's review).
+     */
+    const outageOwn = /<Empty failed>\{CONTROL_PLANE_UNREACHABLE\} ([^<{]+)<\/Empty>/.exec(src)?.[1] ?? null;
+    check("the outage arm draws the shared sentence and keeps its own second one", outageOwn !== null, true);
+    {
+      const { CONTROL_PLANE_UNREACHABLE } = await import("../src/account.js");
+      check("at the eight-word empty-state cap", `${CONTROL_PLANE_UNREACHABLE} ${outageOwn ?? ""}`.trim().split(/\s+/).length, 8);
+    }
+    check("imported from where the sibling sentences live", /import \{ CONTROL_PLANE_UNREACHABLE \} from "\.\.\/\.\.\/account";/.test(src), true);
+    check("and the old spelling is gone", /Control plane unreachable/.test(src), false);
+    /*
      * **Ownership is a badge, not a clause.** " · not yours to rename or retire"
      * rode the truncating subline, so on a phone the one fact that told you a row
      * was inert was the part that got cut. It is `shared` in a `shrink-0` badge
      * now, and at most one badge draws per row — a limit or enrolment badge wins.
      */
     check("a machine you do not own carries a `shared` badge", /"shared"/.test(src), true);
+    // The sentence is absent from the list — and present on the machine's own
+    // screen, asserted below once that file is read: a negative alone pointed at
+    // the file the sentence left (review D12).
     check("and no longer says so in the subline", /not yours to rename or retire/.test(src), false);
     check("with the state badge outranking it", /machineBadgeText\(machine\)[\s\S]{0,200}\?\? \(machine\.owned === true \? null : "shared"\)/.test(src), true);
     /*
@@ -393,6 +434,20 @@ process.stdout.write("\nthe machine limit\n");
       readFileSync(new URL("../src/ui/settings/MachineSection.tsx", import.meta.url), "utf8"),
     );
     check("a setup code is offered only before a machine has enrolled", /!machine\.enrolled &&/.test(machineSrc), true);
+    // Eight words with the remedy, the empty-state cap (review D10): the pane's
+    // head is the machine's name, so the sentence does not repeat it.
+    check(
+      "the not-enrolled state is eight words with its remedy",
+      /Not enrolled yet\.\s*\{setupOffered \? " Use the setup code above\." : ""\}/.test(machineSrc),
+      true,
+    );
+    check("and no longer names the machine or its daemon", /has not enrolled yet|Start its daemon/.test(machineSrc), false);
+    /*
+     * The ownership sentence moved here with Name and Retire (plan 3.5): on a
+     * machine somebody else owns, it is the one line explaining why those two
+     * sections are missing, so the negative above is only half a pin.
+     */
+    check("the machine's own screen says it is not yours to rename or retire", /This machine is not yours to rename or retire\./.test(machineSrc), true);
     check("retiring one re-reads who you are too", /machinesChanged\("machine-revoked"\)/.test(machineSrc), true);
     check(
       "neither goes through resume alone",
@@ -411,36 +466,71 @@ process.stdout.write("\nthe machine limit\n");
      * is *true*, so an unguarded comparison stays green with the property it
      * guards gone. The two `>= 0` lines fail naming the string that moved.
      */
-    const leavesScreen = machineSrc.indexOf("navigate(settingsPath(\"machines\"), true)");
+    /*
+     * **And the list is told at once** (review D9): `forgetMachine` drops the row
+     * synchronously — the 200 has landed, so it is a fact rather than a guess —
+     * where the re-list alone left the retired row on the list for a round trip.
+     * **Handed to `navigate`, in the route's own flush.** The fix round moved it
+     * there claiming that, as the next statement, the drop re-drew the machine's
+     * screen with the wrong sentence on the transition path; `App.tsx` says
+     * otherwise — the route is read through `useSyncExternalStore` beside the
+     * store subscription and `announce` writes it before any transition, so that
+     * render already carried the list (`announce`'s docblock holds the reading).
+     * The placement is kept as the ordering by construction, and what is pinned
+     * is the wiring rather than a failure: the one call whole, and the router's
+     * half beside it — `alongside` runs inside the same flush as `tell`, on both
+     * paths, which this driver's `document` (no `startViewTransition`) can read
+     * off the source and not take. The store half: it is `dropMachine`, what a
+     * re-list does for a revoked grant, plus the whole-snapshot `emit`.
+     */
+    const leavesScreen = machineSrc.indexOf("navigate(settingsPath(\"machines\"), true, () => store.forgetMachine(machine.id))");
     const dropsMachine = machineSrc.indexOf("machinesChanged(\"machine-revoked\")");
-    check("retiring still navigates away from the machine's screen", leavesScreen >= 0, true);
+    check("retiring navigates away from the machine's screen with the store's drop in the route's own flush", leavesScreen >= 0, true);
+    check("and drops it nowhere else", machineSrc.split("store.forgetMachine(").length - 1, 1);
     check("and still tells the store the machine is gone", dropsMachine >= 0, true);
     check(
-      "and retiring leaves the screen before the machine leaves the list",
+      "and retiring leaves the screen before the re-list",
       leavesScreen >= 0 && dropsMachine >= 0 && leavesScreen < dropsMachine,
       true,
     );
+    {
+      const routerSrc = strip(readFileSync(new URL("../src/router.ts", import.meta.url), "utf8"));
+      check("the router runs that work inside the flush that tells the route, under a transition", /flushSync\(\(\) => \{\s*tell\(\);\s*alongside\?\.\(\);\s*\}\);/.test(routerSrc), true);
+      check("and on the instant path", /tell\(\);\s*alongside\?\.\(\);\s*return;/.test(routerSrc), true);
+      check("and popstate passes none", /addEventListener\("popstate", \(\) => announce\(\)\)/.test(routerSrc), true);
+      const storeSrc = strip(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"));
+      check("and the store's forget is the re-list's own drop, published whole", /forgetMachine\(id: MachineId\): void \{\s*this\.dropMachine\(id\);\s*this\.emit\(\);\s*\}/.test(storeSrc), true);
+    }
     /*
      * **Retire names its subject and carries its cost only in the confirmation**
      * (decisions 10A and Q3.218). The 45-word paragraph at rest is gone; the
      * question names the machine — this app explicitly supports two machines
-     * called the same thing — and the consequence sentence appears after
-     * `confirming ?`, never before it.
+     * called the same thing — and the consequence sentence is `TwoStep`'s
+     * `consequence` (E7's review, Q3.552), which that primitive draws under the
+     * question and only while `armed`. So the pin is that the sentence reaches
+     * the primitive as that prop, on the element `armed={confirming}` opens.
      */
     const question = machineSrc.indexOf("Retire {machine.name}?");
-    const cost = machineSrc.indexOf("Frees the name and a slot.");
-    const branch = machineSrc.indexOf("confirming ?");
+    const cost = machineSrc.indexOf('consequence="Frees the name and a slot.');
+    const branch = machineSrc.indexOf("armed={confirming}");
     check("the retire confirmation names the machine", question >= 0, true);
     check("and states the cost", cost >= 0, true);
-    check("only inside the confirming arm", branch >= 0 && cost > branch, true);
+    // Where the element closes: its own `/>` on a line of its own, since a `<>…</>` fragment inside `question` carries a `/>` too.
+    check("only inside the confirming arm", branch >= 0 && cost > branch && cost < branch + machineSrc.slice(branch).search(/^\s*\/>/m), true);
     check("with nothing of it drawn at rest", /voids any outstanding setup code|loses it silently/.test(machineSrc), false);
     /*
      * **Two acts, two locks.** One `busy` flag disabled Retire's Cancel while a
-     * setup code minted. Each section holds its own now, and the confirming
-     * pair's Cancel reads the retire one.
+     * setup code minted. Minting holds its own flag now and the retire's wait is
+     * `TwoStep`'s (E7's review, Q3.552): the request is handed over whole, so
+     * the confirming pair's Cancel reads nothing of the mint's, and the resting
+     * Retire is not greyed by one either.
      */
-    check("minting and retiring hold separate flags", /setMinting\(/.test(machineSrc) && /setRetiring\(/.test(machineSrc), true);
-    check("and Retire's Cancel is locked by retiring alone", /disabled=\{retiring\} onClick=\{\(\) => setConfirming\(false\)\}/.test(machineSrc), true);
+    check(
+      "minting holds its own flag and the retire's wait is the primitive's",
+      [/setMinting\(/.test(machineSrc), /setRetiring\(/.test(machineSrc), /onAct=\{revoke\}/.test(machineSrc)],
+      [true, false, true],
+    );
+    check("and Retire's resting button is not locked by a mint", /rest=\{\s*<DangerButton icon=\{Trash2\} onClick=\{\(\) => setConfirming\(true\)\}>/.test(machineSrc), true);
     // The toast is three words: the facts it carried cannot be re-read once the
     // machine is gone from every screen, which is what a toast may not be the
     // only copy of.
@@ -452,6 +542,13 @@ process.stdout.write("\nthe machine limit\n");
   {
     const src = strip(readFileSync(new URL("../src/ui/settings/UsersSection.tsx", import.meta.url), "utf8"));
     check("the admin panel validates with the shared rule", /machineLimitProblem\(/.test(src), true);
+    // The success toast at the six-word cap (review D10), the count in it and
+    // the remedy after the semicolon.
+    check(
+      "the lowering toast is six words and names the count",
+      /`\$\{n\} machine\$\{n === 1 \? "" : "s"\} stopped; raise the limit\.`/.test(src),
+      true,
+    );
     check("and states the consequence before lowering", /machineLimitChangeNotice\(/.test(src), true);
     /*
      * **Whether to confirm is that function's answer**, not a `<` in the JSX.
@@ -464,8 +561,25 @@ process.stdout.write("\nthe machine limit\n");
       true,
     );
     // `DangerButton`'s glyph is reserved for the irreversible, and this undoes
-    // itself the moment the number goes back up.
+    // itself the moment the number goes back up — so the act is `TwoStep`'s
+    // `plain` one, with no `danger` on it.
     check("lowering is not dressed as irreversible", /DangerButton[\s\S]{0,200}Save limit/.test(src), false);
+    check("and both acts are plain", [/act=\{\{ label: "Save limit" \}\}/.test(src), /act=\{\{ label: "Use the default" \}\}/.test(src)], [true, true]);
+    /*
+     * **The panel's one lock is held around every write, and the one-tap paths
+     * put the arming flag back** (E7's review). `apply` is what both the
+     * confirmed acts and the one-tap Save go through, so `busy` is set there
+     * rather than in `write`: a poll can empty the consequence while a confirmed
+     * act is out, which draws the form again over a flag that read false. And
+     * `confirming` outlives that same poll, so a one-tap `write` that left it at
+     * "save" drew the question on the next lowering typed, with no tap.
+     */
+    check(
+      "every write holds the panel's busy, from the promise it hands over",
+      /const apply = \(work: Promise<cp\.MachineLimitAnswer>\): Promise<void> => \{\s*setBusy\(true\);\s*return work\s*\.then\(/.test(src) && /onChanged\(\);\s*\}\)\s*\.finally\(\(\) => setBusy\(false\)\);\s*\};/.test(src),
+      true,
+    );
+    check("and a one-tap write puts the arming flag back", /const write = \(work: Promise<cp\.MachineLimitAnswer>\): void => \{\s*void apply\(work\)\s*\.then\(\(\) => setConfirming\(null\)\)/.test(src), true);
     /*
      * **One key row for both lists.** `UsersSection` drew its own `KeyRow` and
      * `AccountSection` drew a second markup of the same key, and only one said
@@ -476,6 +590,21 @@ process.stdout.write("\nthe machine limit\n");
     check("the admin's key panel draws the shared row", /import \{ KeyRow, KeyTable \} from "\.\/KeyRow"/.test(src), true);
     check("and keeps no copy of its own", /function KeyRow\(/.test(src), false);
     check("with the two-step on, since it is somebody else's credential", /<KeyRow[\s\S]{0,200}confirm=\{true\}/.test(src), true);
+    /*
+     * **A failed listing is the first fact about this screen**, drawn above the
+     * form in the app's one failure shape with Try again wired to the read
+     * (review D12).
+     */
+    check("a failed user listing says so with Try again wired to refresh", /\{error !== null && \(\s*<Empty failed action=\{<Button size="sm" onClick=\{refresh\}>Try again<\/Button>\}>\s*\{error\}\s*<\/Empty>\s*\)\}/.test(src), true);
+    /*
+     * **One panel under a row at a time.** The keys list and the limit panel
+     * were two booleans, so both could open under one row and the second sat
+     * under a list that had just changed height. A union makes "both"
+     * unspellable, and a single state over it is what keeps that true.
+     */
+    check("the row's panels are one union", /type RowPanel = "keys" \| "limit" \| null;/.test(src), true);
+    check("held in one state per row", (src.match(/useState<RowPanel>\(null\)/g) ?? []).length, 1);
+    check("and each panel is gated on it", [/\{panel === "keys" && \(/.test(src), /\{panel === "limit" && \(/.test(src)], [true, true]);
     /*
      * **The admin checkbox precedes Create in DOM order.** It came after, so tab
      * order and reading order both reached the button before the one choice
@@ -513,8 +642,32 @@ process.stdout.write("\nthe machine limit\n");
      */
     check("saving a server setting re-reads the admin's own quota", /refreshMe\(\)/.test(src), true);
     // The fleet-wide consequence is drawn only once somebody is confirming
-    // (decision 10A): at rest this is a field and a disabled Save.
-    check("the fleet consequence is drawn only in the confirm arm", /confirming && consequence !== null \?/.test(src), true);
+    // (decision 10A): at rest this is a field and a disabled Save. The sentence
+    // is the primitive's `question`, and the arming is gated on it being there.
+    check("the fleet consequence is drawn only in the confirm arm", /armed=\{confirming && consequence !== null\}/.test(src) && /question=\{consequence\}/.test(src), true);
+    /*
+     * **One lock around every write** (E7's review). The confirmed lowering,
+     * the one-tap Save and the field's Reset all go through `write`, which
+     * holds `busy` for the request's length, and the primitive takes it back as
+     * `disabled` — so the Reset is greyed while a lowering is out and the act
+     * is refused while a Reset is. Split into a bare promise for the primitive
+     * and a flagged wrapper for the one-tap paths, the Reset was live for the
+     * length of a confirmed lowering and a second write on the same key could
+     * go out. And the one-tap paths put the arming flag back: a Reset while the
+     * question stood left `confirming` true, and the next lowering typed drew
+     * the pair with no tap on Save.
+     */
+    check(
+      "the limit's every write holds the section's busy, from the promise it hands over",
+      /const write = \(patch: \{ set\?: Record<string, string>; clear\?: string\[\] \}\): Promise<void> => \{\s*setBusy\(true\);\s*return cp\s*\.adminSaveSettings\(patch\)\s*\.then\([\s\S]*?\)\s*\.finally\(\(\) => setBusy\(false\)\);\s*\};/.test(src),
+      true,
+    );
+    check("and the primitive's act is refused while one is out", /onAct=\{\(\) => write\(savePatch\(\)\)\}\s*disabled=\{busy\}/.test(src), true);
+    check(
+      "and a one-tap write on the fleet limit puts the arming flag back",
+      /const writeNow = \(patch: \{ set\?: Record<string, string>; clear\?: string\[\] \}\): void => \{\s*void write\(patch\)\s*\.then\(\(\) => setConfirming\(false\)\)/.test(src),
+      true,
+    );
   }
 }
 
@@ -646,8 +799,8 @@ process.stdout.write("\na re-probe is not the host going away, and asking is not
   /*
    * ⚠ **Every phrase this function can return has to survive being substituted
    * into somebody else's sentence**, because that is the only way it is ever used:
-   * four screens compose `` `${name} is not reachable right now — ${reachText(…)}`
-   * `` and one of them ends the line with a full stop. The `unknown` arm was `"…"`,
+   * `NotReachable` composes `` `${name} is not reachable right now — ${reachText(…)}`
+   * `` once for four screens, and its default ending is a full stop. The `unknown` arm was `"…"`,
    * which is the failure this asserts against — swept over all four reaches times
    * all seven `OfflineReason` values rather than over the one arm that broke, since
    * a table entry emptied later fails exactly the same way and by hand.
@@ -687,6 +840,13 @@ process.stdout.write("\na re-probe is not the host going away, and asking is not
    * `MachineAgentsSection`, `MachineSection` and `AgentBuilder` composed the same
    * broken sentence with nothing watching them.
    *
+   * ⚠ **The sentence is composed once now, by `NotReachable` in `bits.tsx`, and
+   * none of the four may write it out again** (review D7). So the failing arm is
+   * found by the component's tag rather than by the words, and the words are
+   * asserted absent from every screen and present in the one place they live —
+   * the second half is what keeps a fifth transcription from passing on the
+   * strength of the four mounts.
+   *
    * ⚠ **`MachinePluginsSection` is deliberately absent and its absence is the
    * fix, not a gap.** It has exactly one caller, `MachineSection`, which now
    * branches above it and collapses all three lists into one sentence — so a
@@ -705,6 +865,7 @@ process.stdout.write("\na re-probe is not the host going away, and asking is not
   const claimsWithoutMeasuring: string[] = [];
   const failureNotMarked: string[] = [];
   const treatsProbingAsOutage: string[] = [];
+  const composesByHand: string[] = [];
   for (const file of REACH_SCREENS) {
     const src = stripComments(readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8"));
     const name = file.slice(file.lastIndexOf("/") + 1);
@@ -720,11 +881,15 @@ process.stdout.write("\na re-probe is not the host going away, and asking is not
      * four on the fourth, where an `action` sits between the prop and the words.
      */
     const waiting = src.indexOf("Checking whether");
-    const failing = src.indexOf("is not reachable right now");
+    const failing = src.indexOf("<NotReachable");
     const waitTag = src.slice(src.lastIndexOf("<Empty", waiting), waiting);
     const failTag = src.slice(src.lastIndexOf("<Empty", failing), failing);
     if (waiting < 0 || /\bfailed\b/.test(waitTag)) claimsWithoutMeasuring.push(name);
     if (failing < 0 || !/\bfailed\b/.test(failTag)) failureNotMarked.push(name);
+    // The composed shape, with its dash: `MachineAgentsSection`'s status line
+    // says "That machine is not reachable right now." about a write that did not
+    // land, which is a different sentence about a different event and stays.
+    if (/is not reachable right now —/.test(src)) composesByHand.push(name);
   }
   check("every screen that draws reachability asks the partition", asksTheBoolean, []);
   check("and none of them reads a measurement in progress as an outage", treatsProbingAsOutage, []);
@@ -736,14 +901,28 @@ process.stdout.write("\na re-probe is not the host going away, and asking is not
    */
   check("the wait is drawn as a wait", claimsWithoutMeasuring, []);
   check("and the failure is drawn as one", failureNotMarked, []);
+  check("and none of them composes the sentence by hand", composesByHand, []);
+  {
+    const bits = stripComments(readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8"));
+    const start = bits.indexOf("export function NotReachable(");
+    const body = start < 0 ? "" : bits.slice(start, bits.indexOf("\nexport ", start + 1));
+    check(
+      "the one place the sentence lives composes it through reachText",
+      /\{machine\.name\} is not reachable right now — \{reachText\(machine\.reach, machine\.offlineReason\)\}/.test(body),
+      true,
+    );
+    // The ending is the caller's, and it is a full stop unless the caller says
+    // otherwise — `AgentBuilder` closes with a clause about the draft.
+    check("and the full stop is the default ending", /tail = "\."/.test(body), true);
+  }
   {
     const plugins = stripComments(
       readFileSync(new URL("../src/ui/settings/MachinePluginsSection.tsx", import.meta.url), "utf8"),
     );
     check(
       "the section whose caller says it for it does not say it twice",
-      [/daemonRead\(/.test(plugins), /is not reachable right now/.test(plugins)],
-      [false, false],
+      [/daemonRead\(/.test(plugins), /is not reachable right now/.test(plugins), /NotReachable/.test(plugins)],
+      [false, false, false],
     );
   }
 

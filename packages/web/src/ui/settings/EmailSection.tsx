@@ -3,16 +3,18 @@ import * as cp from "../../cp";
 import { errorText } from "../../http";
 import {
   canResetField,
+  draftAfterClear,
   fieldOrigin,
   mailTrouble,
   originText,
   secretFieldText,
+  seedPublicUrl,
   senderMismatch,
   smtpProblem,
   type SmtpDraft,
 } from "../../instance";
 import { store } from "../../store";
-import { Button, Empty, FIELD, SETTINGS_HEADING, Spinner } from "../bits";
+import { Button, Empty, FIELD, SETTINGS_HEADING, Spinner, TwoStep } from "../bits";
 import { toast } from "../Toast";
 import { FIELD_LABEL, SettingField, settingValue } from "./SettingField";
 
@@ -91,10 +93,31 @@ function SmtpForm({
     publicUrl: settingValue(source, "mail.public_url"),
   });
 
-  const [draft, setDraft] = useState<SmtpDraft>(() => fromAnswer(answer));
+  const field = (key: string): cp.SettingsAnswer["settings"][number] | undefined =>
+    answer.settings.find((entry) => entry.key === key);
+
+  /*
+   * The draft starts from the server's answer with one value the app already
+   * knows filled in: on a server with no public URL anywhere, the origin this
+   * page was served from, and the form dirty so Save sends it (`seedPublicUrl`,
+   * review D15). **Load-only, by construction**: it is read in a state
+   * initialiser, which runs once at mount, and never in the re-sync after a
+   * save or a clear — a person who empties the field on purpose and saves must
+   * not watch it come back.
+   *
+   * `seeded` remembers that the seed is the form's only edit. The server's
+   * `mail.problems` are drawn under `!dirty`, since a dirty form may already
+   * hold the fix — but dirt nobody typed made them vanish on precisely the
+   * server the seed is for: an admin opened a pre-filled form with Save live
+   * and no sentence saying what had been missing (E14's review, against D15's
+   * "not silent"). The first edit or a Save clears it, since that dirt is theirs.
+   */
+  const [seed] = useState(() => seedPublicUrl(fromAnswer(answer), field("mail.public_url"), window.location.origin));
+  const [draft, setDraft] = useState<SmtpDraft>(seed.draft);
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
-  const [dirty, setDirty] = useState(false);
+  const [dirty, setDirty] = useState(seed.dirty);
+  const [seeded, setSeeded] = useState(seed.dirty);
   const [removing, setRemoving] = useState(false);
   const [testTo, setTestTo] = useState("");
   const [testResult, setTestResult] = useState<string | null>(null);
@@ -117,8 +140,6 @@ function SmtpForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [answer]);
 
-  const field = (key: string): cp.SettingsAnswer["settings"][number] | undefined =>
-    answer.settings.find((entry) => entry.key === key);
   const passwordField = field("smtp.password");
   /*
    * **Whether a password is stored here is `set` alone**, which is a narrower
@@ -134,6 +155,7 @@ function SmtpForm({
   const edit = (patch: Partial<SmtpDraft>): void => {
     setDraft((current) => ({ ...current, ...patch }));
     setDirty(true);
+    setSeeded(false);
   };
 
   const save = (): void => {
@@ -168,6 +190,7 @@ function SmtpForm({
       .adminSaveSettings({ set, clear })
       .then((updated) => {
         setDirty(false);
+        setSeeded(false);
         setDraft(fromAnswer(updated));
         onChanged(updated);
         setPassword("");
@@ -182,22 +205,44 @@ function SmtpForm({
 
   /*
    * A per-field reset or the password's Remove: one key cleared, **regardless of
-   * the form's dirtiness**. `dirty` is left alone rather than reset — the other
-   * fields' edits are still the person's and are not thrown away because one
-   * value went back to the environment. The re-sync effect above is what would
-   * have discarded them, and it is gated on `dirty` for exactly this reason.
+   * the form's dirtiness** — and the draft learns it either way.
+   *
+   * The property: **a Reset survives the next Save.** `save` sends all six fields
+   * from the draft, so the draft has to stop holding the value the server just
+   * dropped, or Save writes it straight back — which is what happened while this
+   * re-synced only when `!dirty` (review D14): edit Host, Reset From, Save, and
+   * From came back with "Saved." over it. `draftAfterClear` patches exactly the
+   * cleared key's field from the server's answer and nothing else, so the other
+   * fields' edits are still the person's; with no edits to lose the draft
+   * follows the whole answer, as the re-sync effect above already does. `dirty`
+   * is left alone rather than reset, for the same reason.
+   *
+   * **And `busy` is held here, around every clear** — the form's one lock (review
+   * D8), which Save, Send, the six Resets and the security Reset all read. The
+   * stored password's Remove is two-step and hands this promise to `TwoStep`,
+   * whose own wait greys the question's pair and closes it on the 200 and reads
+   * nothing of this form; held only by the one-tap `clearKey`, the flag was off
+   * for the whole of a confirmed removal, so a Reset tapped beside it sent a
+   * second `adminSaveSettings` and the two answers re-synced the draft in
+   * whichever order they landed — the D14 class one control over (E7's review).
+   * The `TwoStep` takes the flag back as `disabled`, so Remove is refused while
+   * a Save is out too.
    */
-  const clearKey = (key: string): void => {
+  const clear = (key: string): Promise<void> => {
     setBusy(true);
-    void cp
+    return cp
       .adminSaveSettings({ clear: [key] })
       .then((updated) => {
-        setRemoving(false);
         onChanged(updated);
-        if (!dirty) setDraft(fromAnswer(updated));
+        const synced = fromAnswer(updated);
+        setDraft((current) => (dirty ? draftAfterClear(current, key, synced) : synced));
       })
-      .catch((cause: unknown) => toast("error", errorText(cause)))
       .finally(() => setBusy(false));
+  };
+  // A field's Reset is one tap, so its toast is this form's; the password's
+  // Remove is `TwoStep`'s, which says a failure beside the question.
+  const clearKey = (key: string): void => {
+    void clear(key).catch((cause: unknown) => toast("error", errorText(cause)));
   };
 
   const sendTest = (): void => {
@@ -233,6 +278,7 @@ function SmtpForm({
         onChange={(next) => edit({ host: next })}
         field={field("smtp.host")}
         onReset={() => clearKey("smtp.host")}
+        busy={busy}
         placeholder="smtp.example.com"
       />
       <SettingField
@@ -241,6 +287,7 @@ function SmtpForm({
         onChange={(next) => edit({ port: next })}
         field={field("smtp.port")}
         onReset={() => clearKey("smtp.port")}
+        busy={busy}
         placeholder="587"
         hint="Not 25 — usually blocked."
       />
@@ -276,6 +323,7 @@ function SmtpForm({
         onChange={(next) => edit({ username: next })}
         field={field("smtp.username")}
         onReset={() => clearKey("smtp.username")}
+        busy={busy}
         placeholder="register@example.com"
       />
 
@@ -290,22 +338,22 @@ function SmtpForm({
           <label htmlFor={passwordId} className={`block ${FIELD_LABEL}`}>
             Password
           </label>
-          {passwordStored &&
-            (removing ? (
-              <span className="flex flex-wrap items-center justify-end gap-2">
-                <span className="text-xs text-muted">Remove the stored password?</span>
-                <Button size="sm" tone="plain" disabled={busy} onClick={() => clearKey("smtp.password")}>
-                  {busy ? <Spinner /> : "Remove"}
+          {passwordStored && (
+            <TwoStep
+              armed={removing}
+              onArm={setRemoving}
+              className="justify-end"
+              question="Remove the stored password?"
+              act={{ label: "Remove" }}
+              onAct={() => clear("smtp.password")}
+              disabled={busy}
+              rest={
+                <Button size="sm" tone="ghost" disabled={busy} onClick={() => setRemoving(true)}>
+                  Remove
                 </Button>
-                <Button size="sm" disabled={busy} onClick={() => setRemoving(false)}>
-                  Cancel
-                </Button>
-              </span>
-            ) : (
-              <Button size="sm" tone="ghost" disabled={busy} onClick={() => setRemoving(true)}>
-                Remove
-              </Button>
-            ))}
+              }
+            />
+          )}
         </div>
         <input
           id={passwordId}
@@ -330,6 +378,7 @@ function SmtpForm({
         onChange={(next) => edit({ from: next })}
         field={field("mail.from")}
         onReset={() => clearKey("mail.from")}
+        busy={busy}
         placeholder="register@example.com"
       />
       <SettingField
@@ -338,9 +387,11 @@ function SmtpForm({
         onChange={(next) => edit({ publicUrl: next })}
         field={field("mail.public_url")}
         onReset={() => clearKey("mail.public_url")}
+        busy={busy}
         // The value the app already knows: the origin this page was served
         // from is, on every ordinary deployment, the one links in mail should
-        // point at.
+        // point at. On a fresh server it is the *value*, seeded above; the
+        // placeholder is what is left after somebody empties the field.
         placeholder={window.location.origin}
         hint="Links in mail point here."
         type="url"
@@ -379,7 +430,7 @@ function SmtpForm({
         {/* Inline and persistent rather than a toast: an SMTP failure is a
             paragraph, and a toast is a dismissible paragraph. */}
         {testResult !== null && <p className="mt-2 max-w-sm text-sm">{testResult}</p>}
-        {!dirty &&
+        {(!dirty || seeded) &&
           !answer.mail.configured &&
           answer.mail.problems.map((sentence) => (
             <p key={sentence} className="mt-1 max-w-sm text-xs text-muted">

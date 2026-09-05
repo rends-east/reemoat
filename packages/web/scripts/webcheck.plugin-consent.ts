@@ -993,25 +993,70 @@ process.stdout.write("\nwhat somebody is shown before a plugin is sent anywhere\
       [],
     );
     /*
-     * ⚠ **And the words are the ones five machine screens already draw on the same
-     * fact**, which is the claim that makes this a constant rather than a sixth
-     * wording. Those five still transcribe the string — they were saying the right
-     * words already, which is drift waiting rather than a lie on screen — so the
-     * assertion is that they and the constant have not come apart.
+     * ⚠ **And the words are the ones five machine screens draw on the same fact**,
+     * which is the claim that makes this a constant rather than a sixth wording.
+     * Those five transcribed the string for a release after the constant existed,
+     * and the assertion here was that the literal appeared in each — which is
+     * exactly the check that lets a copy stand: it was green over five hand-typed
+     * copies and would have stayed green had the constant been deleted (review
+     * D7). So it is inverted. Each screen has to **import** the constant from
+     * `plugins.ts`, **draw** it as an expression, and hold **no** copy of the words
+     * — read with comments stripped, since `MachineSection` quotes the sentence in
+     * a comment about the order a retire leaves the screen in. Three lists rather
+     * than one boolean so a failure names which half came apart on which screen.
+     *
+     * ⚠ **And two more answer it rather than draw it.** `MachineInstalls` and
+     * `PluginSettings` put the sentence on a machine's own row as a `message`
+     * when `daemonFor` comes back empty mid-act, so `{MACHINE_GONE}` was never
+     * the shape there — which is how they stayed the last two transcriptions for
+     * a release after the five above were swept (review D7's leftover). The
+     * shape rides with the file rather than being one regex for all, so a screen
+     * that answers rather than draws is not a screen this pin cannot reach.
      */
     const SAME_FACT = [
-      "ui/settings/MachineSection.tsx",
-      "ui/settings/MachineSystemsSection.tsx",
-      "ui/settings/MachineAgentsSection.tsx",
-      "ui/settings/MachinePluginsSection.tsx",
-      "ui/AgentBuilder.tsx",
+      ["ui/settings/MachineSection.tsx", /\{MACHINE_GONE\}/],
+      ["ui/settings/MachineSystemsSection.tsx", /\{MACHINE_GONE\}/],
+      ["ui/settings/MachineAgentsSection.tsx", /\{MACHINE_GONE\}/],
+      ["ui/settings/MachinePluginsSection.tsx", /\{MACHINE_GONE\}/],
+      ["ui/AgentBuilder.tsx", /\{MACHINE_GONE\}/],
+      ["ui/plugins/MachineInstalls.tsx", /message: MACHINE_GONE\b/],
+      ["ui/plugins/PluginSettings.tsx", /message: MACHINE_GONE\b/],
     ] as const;
+    const notImporting: string[] = [];
+    const notDrawing: string[] = [];
+    const stillTranscribing: string[] = [];
+    for (const [file, shape] of SAME_FACT) {
+      const src = stripComments(readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8"));
+      const name = file.slice(file.lastIndexOf("/") + 1);
+      if (!/import \{[^}]*\bMACHINE_GONE\b[^}]*\} from "(\.\.\/)+plugins";/.test(src)) notImporting.push(name);
+      if (!shape.test(src)) notDrawing.push(name);
+      if (src.includes(MACHINE_GONE)) stillTranscribing.push(name);
+    }
+    check("every screen that says the same thing imports the one constant", notImporting, []);
+    check("and draws or answers it, in its own screen's shape", notDrawing, []);
+    check("and holds no copy of the words beside it", stillTranscribing, []);
+    /*
+     * ⚠ **And the line that names the machine is the same wording, by
+     * function.** `PluginSettings`' excluded list says the fact once per machine
+     * with the name as the subject — a copy the check above cannot see, since
+     * the constant's own subject is "That machine" (E-sweep's review). So the
+     * constant is `machineGone("That machine")` with a full stop, the list is
+     * `machineGone(name)`, and the fragment the two share appears in no screen.
+     */
+    const { machineGone } = await import("../src/plugins.js");
+    check("the constant is the named form's answer for an unnamed machine", MACHINE_GONE, `${machineGone("That machine")}.`);
+    const fragment = machineGone("").trim();
+    const stillSpelling: string[] = [];
+    for (const [file] of SAME_FACT) {
+      const src = stripComments(readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8"));
+      if (src.includes(fragment)) stillSpelling.push(file.slice(file.lastIndexOf("/") + 1));
+    }
+    check("and the fragment the two wordings share is spelled on no screen", stillSpelling, []);
+    const pluginSettings = stripComments(readFileSync(new URL("../src/ui/plugins/PluginSettings.tsx", import.meta.url), "utf8"));
     check(
-      "and every screen that says the same thing says it in the same words",
-      SAME_FACT.filter(
-        (file) => !readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8").includes(MACHINE_GONE),
-      ),
-      [],
+      "and the list that names each machine takes the function",
+      [/import \{[^}]*\bmachineGone\b[^}]*\} from "\.\.\/\.\.\/plugins";/.test(pluginSettings), /gone\.map\(\(id\) => machineGone\(nameOf\(id\)\)\)/.test(pluginSettings)],
+      [true, true],
     );
   }
 

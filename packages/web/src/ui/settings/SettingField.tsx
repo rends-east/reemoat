@@ -36,7 +36,11 @@ export const settingValue = (answer: cp.SettingsAnswer, key: string): string =>
  *
  * Reset is drawn **only** where `canResetField` — the one case where its absence
  * is unambiguous, because the line underneath says why. No confirmation:
- * retyping the value undoes it.
+ * retyping the value undoes it. **It waits with the rest of the form**: `busy`
+ * is the caller's in-flight flag, the one Save and the password's Remove already
+ * read, and Reset was the one control on these two screens that stayed live
+ * during a write (review D8) — a second clear racing a Save, both of them
+ * answering with the whole settings table, in an order nobody chose.
  *
  * `hint` sits directly under the input, above the provenance line, and is a
  * field hint in the copy table's sense: at most eight words, only where the
@@ -48,6 +52,7 @@ export function SettingField({
   onChange,
   field,
   onReset,
+  busy = false,
   placeholder,
   hint,
   type = "text",
@@ -57,6 +62,8 @@ export function SettingField({
   onChange: (next: string) => void;
   field: cp.SettingsAnswer["settings"][number] | undefined;
   onReset: () => void;
+  /** The caller's write in flight; Reset is disabled on it, like Save. */
+  busy?: boolean;
   placeholder?: string;
   hint?: string;
   type?: "text" | "url";
@@ -74,7 +81,7 @@ export function SettingField({
           {label}
         </label>
         {field !== undefined && canResetField(field) && (
-          <Button size="sm" tone="ghost" onClick={onReset}>
+          <Button size="sm" tone="ghost" disabled={busy} onClick={onReset}>
             Reset
           </Button>
         )}

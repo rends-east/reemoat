@@ -284,31 +284,32 @@ their own machine under Settings → Machines. Also **no workspace changes scree
 `/changes/diff`, are routes this client has never called. It polls `GET /sessions`
 per machine and holds a socket only for the three most recently viewed sessions.
 
-**The two-step confirmation is the only modal-shaped control on a settings *row*,
-and there are six of them** — deleting a person (`UserRow`), retiring a machine
-(`MachineSection`), signing an agent out (`SignOutButton`, which takes `danger` on
-the *first* tap: retiring a machine is undone by enrolling it again from the same
-screen, while a signed-out CLI needs a device-code flow in another tab), removing
-a plugin, removing the stored SMTP password (`EmailSection`), reminting the
-provisioning key (`ServerSection`, Q3.547), and revoking an API key — but
-**only somebody else's**. One `KeyRow` serves both lists and `confirm` is the
-prop: two-step in `UsersSection`; `KeysSection`'s *own* keys are a bare `Revoke`
-on one tap, the only consequence at rest being the `this browser` row's — decided
-by `thisBrowsersKey`, never under a session credential. Q3.219, Q3.545, Q3.546.
-**Every confirmation names its subject**, and a two-step control is a bare button
-at rest: its cost is the confirmation's text. The one confirming control not on a
-row is Registration in `ServerSection`, a `Badge` and a verb button rather than a
-`role="switch"`, asymmetric on purpose: **only the act that widens authority is
-confirmed**. Q3.220.
+**The two-step confirmation is the only modal-shaped control on a settings
+*row*, and every one of them is `TwoStep`** (Q3.552): `grep -c '<TwoStep'` over
+`ui/settings/*.tsx` and `AgentBuilder.tsx` counts **fifteen** (fourteen sites,
+two in `MachineLimitPanel`), a table `webcheck` holds by file. Revoking an API
+key is two-step **only for somebody else's**: one `KeyRow` serves both lists and
+`confirm` is the prop, so `KeysSection`'s *own* keys are a bare `Revoke` on one
+tap, the only consequence at rest being the `this browser` row's — decided by
+`thisBrowsersKey`, never under a session credential (Q3.219, Q3.545, Q3.546).
+Registration in `ServerSection` is a `Badge` and a verb rather than a
+`role="switch"` — **only the act that widens authority is confirmed**, Q3.220.
+Removing an assembled agent wears no `danger` (`agent-strip.md`). **Every
+confirmation names its subject**, and a two-step control is a bare button at
+rest: its cost is the confirmation's text.
 
-The first tap replaces the row's buttons with the question and its two answers, so
-nothing else on the row can be hit by accident. **The confirming row ends with
-Cancel, and that ordering is the safety property rather than a preference:** both
-groups lay out in the same box so the last child occupies the same pixels,
-`setConfirming(true)` is synchronous, and `.tap` removes the double-tap delay — so
-a second tap aimed at a button that looked inert lands on the undo rather than the
-irreversible half. State is **per row**, because these lists re-render on a poll.
-Q3.218.
+The first tap replaces the row's buttons with the question and its two answers,
+so nothing else on the row can be hit by accident. **The confirming row ends
+with Cancel, and that ordering is the safety property rather than a
+preference:** both groups lay out in one box so the last child occupies the same
+pixels, `setConfirming(true)` is synchronous, and `.tap` removes the double-tap
+delay — so a second tap aimed at a button that looked inert lands on the undo.
+State is **per row**, because these lists re-render on a poll. Q3.218. `TwoStep`
+holds all of that, Cancel `plain` never `primary`, and the wait (`twoStepAct`):
+closing only on the 200, standing on a failure. Two drifted sites keep
+`justify-center` as `align="center"`. The site keeps the arming flag
+(`armed`/`onArm`, controlled), the subject (`question`) and the resting control
+(`rest`). Q3.552.
 
 **Everything else a settings row can do sits behind one kebab**, the same square
 on every row, which takes the reserved trailing slot with it. The confirmation
@@ -374,7 +375,7 @@ primitive adds `tap` itself and carries its own entry.
 | `packages/web/src/ui/groups.ts` | Which machine tab is selected, which folders are collapsed, what has been typed into the search box — and every rule that follows: `foldersOf`, `machineTabs`, `waitingFloor`, and `visibleRows`, still the **single** source of render order, deduplicated by key |
 | `packages/web/src/ui/overlay.ts` | Who owns Escape, and what paints above what. A LIFO stack of dismissible layers, one capture-phase listener installed lazily inside `push()`, the `inert` refcount on `#root`, and `LAYER` — the z-order as full class strings, in one table a driver can assert. Also the **two** bare-key predicates |
 | `packages/web/src/ui/rail.ts` | How wide the rail is: the bounds, `clampRailWidth` — the one place a width is bounded, and four ways in — and the module state seeded from `localStorage`. Holds **no DOM**, so `webcheck` can import it. The `--rail-w` custom property is written by `AppShell`, the impure shell; the width travels as that property and must not become a React prop, which would snap back to the start of the drag on every poll |
-| `packages/web/src/ui/Sheet.tsx` | The large route-backed pop-up, portaled to `document.body`. A bottom sheet on a phone and a centred card above `sm`. It draws no waiting count (Q3.434). **One element serves every route-backed pop-up**, owned by `OverlaySheet`, so two of them cross-dissolve rather than one unmounting and the next replaying `animate-sheet` (Q3.484); `sheetTitle`/`sheetUpLabel` decide its head, and only a railless pop-up gets a ◀ there (Q3.432, Q3.473). `footer` suits one screen; with several, each draws its bar inside `SHEET_BODY` via `SHEET_SCREEN` or `sheet-body` morphs mid-slide (Q3.472). Its **box** is two strings in `bits.tsx`: `SHEET_PANEL` is a **definite** height, never a `max-h` it can shrink under, and `SHEET_BODY` is a **flex column**, without which both callers' `min-h-0 flex-1` children mean nothing. `webcheck` pins both. Q3.223 |
+| `packages/web/src/ui/Sheet.tsx` | The large route-backed pop-up, portaled to `document.body`. A bottom sheet on a phone and a centred card above `sm`. **One element serves every route-backed pop-up**, owned by `OverlaySheet`, so two of them cross-dissolve rather than one unmounting and the next replaying `animate-sheet` (Q3.484); `sheetTitle`/`sheetUpLabel` decide its head, and only a railless pop-up gets a ◀ there (Q3.432, Q3.473). `footer` suits one screen; with several, each draws its bar inside `SHEET_BODY` via `SHEET_SCREEN` or `sheet-body` morphs mid-slide (Q3.472). Its **box** is two strings in `bits.tsx`: `SHEET_PANEL` is a **definite** height, never a `max-h` it can shrink under, and `SHEET_BODY` is a **flex column**, without which both callers' `min-h-0 flex-1` children mean nothing. `webcheck` pins both. Q3.223 |
 | `packages/web/src/ui/ProfileMenu.tsx` | Who you are signed in as, and the two things you can do about it. The sidebar's footer, and the only copy of the name in the chrome |
 | `packages/web/src/ui/AppShell.tsx` | The adaptive layout, decided in CSS. The rail is always the sessions — it does not switch to settings, and it does not scroll: the scroll is inside `SessionBrowser` so the account row can sit at the bottom and its popover can open upward without being clipped |
 | `packages/web/src/ui/SessionBrowser.tsx` | The whole left column: logo, machine tabs, the waiting floor, the chat search, Pinned above the selected machine's folders, orphans, and the footer. Mounted twice — the `lg` aside and the `lg:hidden` screen — with the breakpoint answered only in those two class strings. A pinned row is drawn **once**, in Pinned, carrying its own path |

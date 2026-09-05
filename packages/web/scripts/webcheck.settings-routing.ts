@@ -394,10 +394,17 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check("the keys screen is a table", /<KeyTable>/.test(keysSrc), true);
   check("whose New key leaves the screen rather than opening under itself", /navigate\(settingsLeafPath\("new-key"\)\)/.test(keysSrc) && !/setAsking/.test(keysSrc), true);
   // The mint is the list's one tap and the screen only shows the answer: it
-  // calls `mintMyKey` nowhere, reads the handoff once, and leaves when empty.
+  // calls `mintMyKey` nowhere, peeks the handoff in its state initialiser,
+  // clears it from the effect once the value is in state (review D16: one call
+  // that nulled on read rested on React 19 keeping the first of StrictMode's
+  // two initialiser calls), and leaves when empty.
   const newKeyScreen = keysSrc.slice(keysSrc.indexOf("export function NewKeyScreen"));
   check("and the New key screen mints nothing itself", /mintMyKey\(/.test(newKeyScreen), false);
-  check("reads the handoff once", /useState<string \| null>\(takeHandoff\)/.test(newKeyScreen), true);
+  check("peeks the handoff in its state initialiser", /useState<string \| null>\(peekHandoff\)/.test(newKeyScreen), true);
+  check("clears it from the effect, first", /useEffect\(\(\) => \{\s*clearHandoff\(\);/.test(newKeyScreen), true);
+  // And clearing is the assignment itself: the seam a driver can read where the
+  // module variable cannot be reached (review D12).
+  check("and clearing nulls the handoff", /function clearHandoff\(\): void \{\s*handoff = null;\s*\}/.test(keysSrc), true);
   check("and walks back when there is nothing to show", /if \(minted === null\) back\(\);/.test(newKeyScreen), true);
   check("and the minted key is drawn once, with no second box of the same bytes", /CommandLine/.test(keysSrc), false);
   /*
@@ -407,16 +414,26 @@ process.stdout.write("\nwhich settings screen a URL names\n");
    * commonly hold zero or one thing — three placeholders collapsing to one
    * sentence is a layout shift that implied two items. Q3.548. Pinned on the
    * primitive's signature and on every settings file, so a `rows` prop or a
-   * second adjacent row cannot arrive quietly.
+   * second adjacent row cannot arrive quietly. It takes a **height** and still
+   * no count: `tall` is the machine row's `min-h-14`, and the default is the
+   * `min-h-11` of every other settings row — an 11 in front of the 14 was a
+   * 12px jump on arrival, the very thing Q3.548 exists to prevent (review D9).
    */
   const bitsSrc = stripComments(readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8"));
-  check("SkeletonRow takes no count", /export function SkeletonRow\(\): ReactNode/.test(bitsSrc), true);
+  check("SkeletonRow takes no count", /export function SkeletonRow\(\{ tall = false \}: \{ tall\?: boolean \} = \{\}\): ReactNode/.test(bitsSrc), true);
+  check("only a height, in the two settings-row sizes", /tall \? "min-h-14" : "min-h-11"/.test(bitsSrc), true);
   check("and stands the list in as busy, with the bar hidden", /aria-busy="true"[\s\S]{0,200}aria-hidden="true"/.test(bitsSrc), true);
   const settingsDir = new URL("../src/ui/settings/", import.meta.url);
   const twoInARow = readdirSync(settingsDir)
     .filter((name) => name.endsWith(".tsx"))
-    .filter((name) => /<SkeletonRow \/>\s*<SkeletonRow \/>|\.map\([^)]*<SkeletonRow/.test(stripComments(readFileSync(new URL(name, settingsDir), "utf8"))));
+    .filter((name) => /<SkeletonRow[^>]*\/>\s*<SkeletonRow[^>]*\/>|\.map\([^)]*<SkeletonRow/.test(stripComments(readFileSync(new URL(name, settingsDir), "utf8"))));
   check("no settings list draws two placeholder rows", twoInARow, []);
+  // The machines list is the one that asks for the tall row, and its row is the
+  // height the tall row stands in for — the pair, so neither can move alone.
+  const machinesSrc = stripComments(readFileSync(new URL("../src/ui/settings/MachinesSection.tsx", import.meta.url), "utf8"));
+  check("the machines list's skeleton is the tall one", /<SkeletonRow tall \/>/.test(machinesSrc), true);
+  check("and the machine row is min-h-14", /className="tap press flex w-full min-h-14 items-center/.test(machinesSrc), true);
+  check("while no other settings list asks for it", readdirSync(settingsDir).filter((name) => name !== "MachinesSection.tsx" && /<SkeletonRow tall/.test(readFileSync(new URL(name, settingsDir), "utf8"))), []);
   /*
    * `me` really is null while `phase` is "ready": `bootstrap`'s catch keeps that
    * phase when the control plane is unreachable but machines are already known,
@@ -1247,4 +1264,238 @@ process.stdout.write("\nwhich settings screen a URL names\n");
      */
     check("and it cannot be left out", [/^\s*paneName: string \| null;$/m.test(nav), /paneName\?:/.test(nav)], [true, false]);
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * The two-step confirmation is one primitive
+ *
+ * ⚠ **Thirteen hand-rolled copies, and the property every one had to hold was
+ * pinned in two of them** (review D6, 2026-09-05; Q3.552). The rule is in
+ * `web-shell.md`: both arms lay out in one box so the last child occupies the
+ * same pixels, Cancel is last in DOM order, Cancel is never the filled tone,
+ * `setConfirming(true)` is synchronous, and nothing closes the question before
+ * the server has answered. Re-derived by hand thirteen times it drifted twice
+ * (`justify-center` on two sites, pinned as deliberate) and was checked on two —
+ * so the property lives in `TwoStep` now and is pinned **here**, once, over the
+ * primitive itself, while each site's pin is narrowed to what the site still
+ * decides: the subject, the act's tone, the resting control.
+ *
+ * Rendered rather than read where a render can reach it: `react-dom/server`
+ * draws the armed arm and the resting arm, so the DOM order, the tones and the
+ * shared container are asserted on markup. The wait cannot be rendered — it is
+ * state a click sets, and there is no DOM to click in — so its half is
+ * `twoStepAct`, the pure protocol the component runs its act through, driven
+ * with a promise this driver settles itself. What is left as text over
+ * `bits.tsx` is the wiring between the two: that the component calls the
+ * protocol, that both buttons read `busy`, and what a failure defaults to.
+ * ---------------------------------------------------------------- */
+process.stdout.write("\nthe two-step confirmation is one primitive\n");
+{
+  const React = await import("react");
+  /*
+   * ⚠ **`tsx` compiles this package's `.tsx` under the root `tsconfig.json`,
+   * which names no `jsx`**, so esbuild emits the classic runtime and every
+   * element in `bits.tsx` is a `React.createElement(…)` call at render time.
+   * Nothing in this driver had rendered a component before — `bits.js` was
+   * imported for `sessionLabel` alone — so the free `React` this global provides
+   * was never missed. It is the one line that makes a render possible here, and
+   * it is deliberately not a `jsx` setting on the root config: that program
+   * holds no `.tsx` and would be carrying an option for a driver's sake.
+   */
+  (globalThis as Record<string, unknown>)["React"] = React;
+  const { createElement: h } = React;
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { TwoStep, twoStepAct, TWO_STEP_BOX } = await import("../src/ui/bits.js");
+  const { Trash2 } = await import("lucide-react");
+
+  const draw = (over: Partial<Parameters<typeof TwoStep>[0]>): string =>
+    renderToStaticMarkup(
+      h(TwoStep, {
+        armed: true,
+        onArm: () => {},
+        question: h("span", null, "Delete ", h("b", null, "ada"), " for good?"),
+        act: { label: "Delete", danger: true, icon: Trash2 },
+        onAct: () => Promise.resolve(),
+        className: "mt-3",
+        ...over,
+      }),
+    );
+
+  /* ---- the armed arm: question, act, Cancel, in that order, Cancel last ----
+   *
+   * Drawn *with* a `rest`, as every site passes one: read over a render with
+   * none, "Cancel is the last button" was true of a primitive that also drew
+   * the resting control after Cancel while armed — the leak was invisible in
+   * the very render the pin looked at (E7's review).
+   */
+  const rest = h("button", { type: "button" }, "Retire laptop");
+  const armed = draw({ rest });
+  const question = armed.indexOf("for good?");
+  const act = armed.indexOf("Delete</button>");
+  const cancel = armed.indexOf("Cancel</button>");
+  check("the armed arm draws the question, the act and Cancel", [question >= 0, act >= 0, cancel >= 0], [true, true, true]);
+  check("in that order", question < act && act < cancel, true);
+  check("and Cancel is the last button in the box", armed.indexOf("<button", cancel), -1);
+  check("and the resting control is not drawn while armed", armed.includes("Retire laptop"), false);
+  // The tones, read off the classes the buttons were drawn with: the act is the
+  // outlined destructive look with its glyph, and Cancel is `plain` — outlined,
+  // never `bg-fg`, which is the fill `BUTTON_TONE` reserves for a reversible act.
+  const actTag = armed.slice(armed.lastIndexOf("<button", act), act);
+  const cancelTag = armed.slice(armed.lastIndexOf("<button", cancel), cancel);
+  check("the act is destructive and leads with its glyph", [/text-danger/.test(actTag), /<svg/.test(actTag)], [true, true]);
+  check("and Cancel is plain, never filled", [/bg-fg/.test(cancelTag), /border-edge-strong/.test(cancelTag)], [false, true]);
+  check("neither is disabled before the act is tapped", /disabled=""/.test(armed), false);
+  // A plain act is the outlined `plain` button, and the union makes `danger`
+  // without a glyph a compile error rather than a check here.
+  const plain = draw({ act: { label: "Save limit" } });
+  const plainAct = plain.slice(plain.lastIndexOf("<button", plain.indexOf("Save limit</button>")), plain.indexOf("Save limit</button>"));
+  check("a plain act is outlined too, with no glyph and no red", [/<svg/.test(plainAct), /text-danger/.test(plainAct), /border-edge-strong/.test(plainAct)], [false, false, true]);
+  /*
+   * `act.ariaLabel` reaches the act's `<button>` on both arms. It exists for
+   * `KeyRow`'s confirming Revoke, whose subject is a sibling span (review D18,
+   * E12), and the E12 label was pinned on that site and on `DangerButton`'s
+   * forwarding — never across this primitive, so dropping it from both arms
+   * here stayed green (E7's review).
+   */
+  const actTagOf = (markup: string, label: string): string => markup.slice(markup.lastIndexOf("<button", markup.indexOf(`${label}</button>`)), markup.indexOf(`${label}</button>`));
+  const namedDanger = actTagOf(draw({ act: { label: "Revoke", danger: true, icon: Trash2, ariaLabel: "Revoke abc…" } }), "Revoke");
+  const namedPlain = actTagOf(draw({ act: { label: "Revoke", ariaLabel: "Revoke abc…" } }), "Revoke");
+  check("the act carries the caller's accessible name, on the danger arm and the plain one", [/aria-label="Revoke abc…"/.test(namedDanger), /aria-label="Revoke abc…"/.test(namedPlain)], [true, true]);
+  // The consequence sits inside the question's span, under it, muted.
+  const withCost = draw({ consequence: "Frees the name and a slot." });
+  check("a consequence is drawn under the question, muted, inside its span", /for good\?<\/span><span class="block text-muted">Frees the name and a slot\.<\/span><\/span>/.test(withCost), true);
+
+  /* ---- one box in both arms ---- */
+  const resting = draw({ armed: false, rest });
+  const box = (markup: string): string => /^<div class="([^"]*)">/.exec(markup)?.[1] ?? "";
+  check("the resting arm draws the caller's control and no question", [resting.includes("Retire laptop"), resting.includes("Cancel"), resting.includes("for good?")], [true, false, false]);
+  check("and the box is the same element with the same classes in both arms", [box(armed).length > 0, box(armed) === box(resting)], [true, true]);
+  check("with the caller's className appended to it", /\bmt-3$/.test(box(armed)), true);
+  /*
+   * The box's string is `TWO_STEP_BOX`, and the one form that draws the box
+   * itself — `MachineLimitPanel`, two questions over four resting controls —
+   * uses it by name. It spelled the string by hand, with a docblock resting the
+   * last-child geometry on the two being equal and nothing asserting that
+   * (E7's review): a copy of the one string the primitive exists to hold once.
+   */
+  check("the box is drawn from the exported string", box(armed).startsWith(`${TWO_STEP_BOX} `), true);
+  const users = stripComments(readFileSync(new URL("../src/ui/settings/UsersSection.tsx", import.meta.url), "utf8"));
+  check(
+    "and the one form that draws the box itself takes it by name",
+    [/import \{[^}]*\bTWO_STEP_BOX\b[^}]*\} from "\.\.\/bits"/.test(users), /<div className=\{`\$\{TWO_STEP_BOX\} mt-2`\}>/.test(users), /"mt-2 flex flex-wrap items-center gap-2"/.test(users)],
+    [true, true, false],
+  );
+  const led = { lead: h("i", null, "lead") };
+  check("a lead is drawn first in both arms", [draw(led).startsWith(`<div class="${box(armed)}"><i>lead</i>`), draw({ ...led, armed: false, rest: h("b", null, "rest") }).startsWith(`<div class="${box(armed)}"><i>lead</i>`)], [true, true]);
+
+  /* ---- the three alignments ---- */
+  const questionClasses = (markup: string): string => /<span class="([^"]*)">/.exec(markup)?.[1] ?? "";
+  check("unset packs from the start: no centring on the box, no growth on the question", [/justify-center/.test(box(armed)), /flex-1|basis-full/.test(questionClasses(armed))], [false, false]);
+  const centred = draw({ align: "center" });
+  check("center centres the box and puts the question on its own line", [/\bjustify-center\b/.test(box(centred)), /\bbasis-full text-center\b/.test(questionClasses(centred))], [true, true]);
+  const ended = draw({ align: "end" });
+  check("end lets the question grow so the answers sit at the end", [/justify-center/.test(box(ended)), /\bflex-1\b/.test(questionClasses(ended)), /basis-full/.test(questionClasses(ended))], [false, true, false]);
+
+  /* ---- the wait: the protocol, driven with a promise this driver settles ---- */
+  const log: string[] = [];
+  const hooks = {
+    setBusy: (busy: boolean): void => void log.push(`busy:${busy}`),
+    disarm: (): void => void log.push("disarm"),
+    fail: (cause: unknown): void => void log.push(`fail:${String(cause)}`),
+  };
+  twoStepAct(undefined, hooks);
+  check("a void act closes the question on the tap and never goes busy", log, ["disarm"]);
+  log.length = 0;
+  let settle!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
+  twoStepAct(pending, hooks);
+  check("a promise goes busy at once and closes nothing yet", log, ["busy:true"]);
+  settle();
+  await pending;
+  check("and on the 200 the wait ends and only then the question closes", log, ["busy:true", "busy:false", "disarm"]);
+  log.length = 0;
+  let refuse!: (cause: unknown) => void;
+  const failing = new Promise<void>((_, reject) => {
+    refuse = reject;
+  });
+  twoStepAct(failing, hooks);
+  refuse(new Error("boom"));
+  await failing.catch(() => undefined);
+  check("and a rejection ends the wait, says why, and leaves the question standing", log, ["busy:true", "busy:false", "fail:Error: boom"]);
+
+  /* ---- the wiring between the two, as text over the primitive ---- */
+  const bits = stripComments(readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8"));
+  const primitive = bits.slice(bits.indexOf("export function TwoStep("), bits.indexOf("export const SHEET_PANEL"));
+  check("the component runs its act through the protocol", /twoStepAct\(onAct\(\), \{\s*setBusy,\s*disarm: \(\) => onArm\(false\),/.test(primitive), true);
+  check("and a failure defaults to a toast with errorText's sentence", /fail: onFailure \?\? \(\(cause\) => toast\("error", errorText\(cause\)\)\)/.test(primitive), true);
+  check("both act arms are refused while busy or disabled", (primitive.match(/disabled=\{busy \|\| disabled\} onClick=\{run\}/g) ?? []).length, 2);
+  check("Cancel is refused while busy, puts the flag back, and names no tone", /<Button size=\{size\} disabled=\{busy\} onClick=\{\(\) => onArm\(false\)\}>\s*Cancel\s*<\/Button>/.test(primitive), true);
+  check("the act's label is the spinner while busy", /const label = busy \? <Spinner \/> : act\.label;/.test(primitive), true);
+  check("and the primitive never arms itself", /onArm\(true\)/.test(primitive), false);
+
+  /* ---- the sweep: every site is the primitive's, and no site hand-rolls one ----
+   *
+   * ⚠ Two negatives and two tables. A hand-rolled two-step is a Cancel whose
+   * click puts a confirm flag back, which is the shape all thirteen had; the
+   * first negative names that shape. The second is a census: **every `Cancel`
+   * token** in a swept file, comments stripped, is one of a named few — a leaf
+   * form's way back (`AccountSection`, twice), the sign-in wizard's abort
+   * (`AgentsPanel`, one `Close`/`Cancel` ternary) and the install flow's abort
+   * (`PluginsPanel`, twice) — none of them a confirmation's undo, and a new one
+   * has to be added here by name. Tokens rather than `Cancel</Button>` children,
+   * because a child count walked past two plausible copies: a braced handler
+   * with a `{"Cancel"}` child, and a raw `<button>` with a named handler (E7's
+   * review). The other table is the count `web-shell.md` states ("fifteen"): a
+   * confirmation added anywhere under `ui/settings/` changes it, and the rule
+   * file's number changes with it.
+   */
+  const settingsDir = new URL("../src/ui/settings/", import.meta.url);
+  const swept: (readonly [string, string])[] = [
+    ...readdirSync(settingsDir)
+      .filter((name) => name.endsWith(".tsx"))
+      .map((name) => [name, stripComments(readFileSync(new URL(name, settingsDir), "utf8"))] as const),
+    ["AgentBuilder.tsx", stripComments(readFileSync(new URL("../src/ui/AgentBuilder.tsx", import.meta.url), "utf8"))] as const,
+    ["PluginConsent.tsx", stripComments(readFileSync(new URL("../src/ui/PluginConsent.tsx", import.meta.url), "utf8"))] as const,
+  ];
+  check("the sweep found the settings screens", swept.length >= 12, true);
+  check(
+    "no settings screen hand-rolls a two-step's Cancel",
+    swept.filter(([, src]) => /onClick=\{\(\) => set\w+\((?:false|null)\)\}[^<]*>\s*Cancel\s*</.test(src)).map(([name]) => name),
+    [],
+  );
+  check(
+    "and every Cancel left, counted as a token, is a form's way back or an abort",
+    swept.map(([name, src]) => [name, (src.match(/\bCancel\b/g) ?? []).length] as const).filter(([, n]) => n > 0),
+    [["AccountSection.tsx", 2], ["AgentsPanel.tsx", 1], ["PluginsPanel.tsx", 2]],
+  );
+  check("and no Cancel anywhere on them is filled", swept.filter(([, src]) => /tone="primary"[\s\S]{0,160}?>\s*Cancel\s*</.test(src)).map(([name]) => name), []);
+  const sites = swept
+    .map(([name, src]) => [name, (src.match(/<TwoStep\b/g) ?? []).length] as const)
+    .filter(([, n]) => n > 0)
+    .sort(([a], [b]) => (a < b ? -1 : 1));
+  check(
+    "the fifteen confirmations are the primitive's, by file",
+    sites,
+    [
+      ["AccountSection.tsx", 1],
+      ["AgentBuilder.tsx", 1],
+      ["AgentsPanel.tsx", 1],
+      ["EmailSection.tsx", 1],
+      ["KeyRow.tsx", 1],
+      ["MachineAgentsSection.tsx", 1],
+      ["MachineSection.tsx", 1],
+      ["PluginsPanel.tsx", 1],
+      ["ServerSection.tsx", 3],
+      ["SystemsPanel.tsx", 1],
+      ["UsersSection.tsx", 3],
+    ],
+  );
+  check("fifteen in all", sites.reduce((sum, [, n]) => sum + n, 0), 15);
+  check(
+    "and every one of those files imports it from bits",
+    sites.filter(([name]) => !/import \{[^}]*\bTwoStep\b[^}]*\} from "\.\.?\/bits"/.test(swept.find(([n]) => n === name)?.[1] ?? "")).map(([name]) => name),
+    [],
+  );
 }

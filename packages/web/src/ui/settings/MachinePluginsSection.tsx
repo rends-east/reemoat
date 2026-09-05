@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { MachineId } from "../../ids";
+import { MACHINE_GONE } from "../../plugins";
 import type { AppState } from "../../store";
 import { Empty } from "../bits";
 import { PluginList } from "./PluginsPanel";
@@ -51,7 +52,7 @@ export function MachinePluginsSection({ state, machineId }: { state: AppState; m
      * out drawn here, unlike the systems screen's copy — this one is never the
      * whole screen, and the screen it sits in has already answered.
      */
-    return <Empty>That machine is not in your list any more.</Empty>;
+    return <Empty>{MACHINE_GONE}</Empty>;
   }
 
   return (

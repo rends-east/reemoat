@@ -289,7 +289,9 @@ export type DaemonRead = "readable" | "asking" | "unreachable";
  * that section as saying neither half — while `MachineSection` itself and
  * `AgentBuilder` had joined the set with nothing naming them. Four, and
  * `webcheck`'s `REACH_SCREENS` is the list this has to agree with, along with the
- * copy of this sentence at `reachText` in `ui/bits.tsx`.
+ * copy of this sentence at `reachText` in `ui/bits.tsx` — where the sentence is
+ * now composed once, by `NotReachable`, and the four screens mount it on their
+ * `unreachable` arm rather than each writing it out.
  *
  * This is {@link missingRowReason}'s fix in the shape that function already
  * proved out for `SessionView`, one screen over: the arm that was missing is

@@ -26,7 +26,7 @@ import {
   type TargetOutcome,
 } from "../../install";
 import type { MachineState } from "../../machine";
-import { ConsentBrokenError, pluginFailure } from "../../plugins";
+import { ConsentBrokenError, MACHINE_GONE, pluginFailure } from "../../plugins";
 import { machineBadgeText } from "../../quota";
 import { store, type AppState } from "../../store";
 import { ambiguousNames, type PluginSummary } from "../../wire";
@@ -553,7 +553,7 @@ export function MachineInstalls({
         write(
           id,
           // Not a broken consent: nothing was sent, so nothing gained anything.
-          { kind: "failed", message: "That machine is not in your list any more.", consent: false },
+          { kind: "failed", message: MACHINE_GONE, consent: false },
           mine.get(id) ?? 0,
         );
         continue;

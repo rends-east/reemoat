@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
-import { takeRevokedKeyNotice } from "./account";
+import { clearRevokedKeyNotice, peekRevokedKeyNotice } from "./account";
 import { isSheet, sheetTitle, sheetUpLabel, upFrom } from "./nav";
 import { navigate, parsePath, useOrigin, useRoute, useUnder, type Route } from "./router";
 import { setTelegramBack } from "./telegram";
@@ -80,20 +80,33 @@ export function App(): ReactNode {
    * The one-shot line a deliberate sign-out leaves behind: revoking the key this
    * browser was holding clears the credential and reloads onto the sign-in
    * screen, and without this the gate would say nothing about an act the person
-   * just chose. `takeRevokedKeyNotice` deletes on read, so it is read **once, in
-   * a state initialiser** — not in the render body, where the first signed-out
-   * paint would consume it and the config patch a moment later (`bootstrap`
-   * fires `loadConfig` before it settles the phase) would re-render to `null`.
+   * just chose. Read **once, by construction**: `peekRevokedKeyNotice` in a
+   * state initialiser, which leaves the storage alone, and
+   * `clearRevokedKeyNotice` in a mount effect, once the line is in state. Not
+   * in the render body, where the first signed-out paint would read it and the
+   * config patch a moment later (`bootstrap` fires `loadConfig` before it
+   * settles the phase) would re-render to `null`. And not deleting inside the
+   * initialiser (review D16): that was right only because React 19 keeps the
+   * first initialiser's result under StrictMode's double call, and a rule that
+   * holds by a version's grace is not a rule. State survives StrictMode's
+   * simulated remount, so the effect firing twice deletes a value already read.
    * Storage disabled is the same as no notice.
    */
   const [revoked] = useState<string | null>(() => {
     try {
-      return takeRevokedKeyNotice(window.sessionStorage);
+      return peekRevokedKeyNotice(window.sessionStorage);
     } catch {
       // Private browsing, or storage disabled: the sign-in screen is still right.
       return null;
     }
   });
+  useEffect(() => {
+    try {
+      clearRevokedKeyNotice(window.sessionStorage);
+    } catch {
+      // Private browsing, or storage disabled: nothing was read, nothing to clear.
+    }
+  }, []);
   const route = useRoute();
   const under = useUnder();
   // The other pop-up this one was opened from, for the way *up*. The ✕ is

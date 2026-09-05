@@ -203,11 +203,38 @@ function describe(error: unknown): string {
 function agoText(at: number | null | undefined): string | null {
   if (at === undefined) return null;
   if (at === null) return "never seen";
+  return `last seen ${coarseAge(at)}`;
+}
+
+/**
+ * The bucket table behind both "ago" phrases, so a machine's last dial and a
+ * key's last use are coarse in the same way and cannot drift apart.
+ */
+function coarseAge(at: number): string {
   const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
-  if (seconds < 90) return "last seen just now";
-  if (seconds < 5400) return `last seen ${Math.round(seconds / 60)}m ago`;
-  if (seconds < 129_600) return `last seen ${Math.round(seconds / 3600)}h ago`;
-  return `last seen ${Math.round(seconds / 86_400)}d ago`;
+  if (seconds < 90) return "just now";
+  if (seconds < 5400) return `${Math.round(seconds / 60)}m ago`;
+  if (seconds < 129_600) return `${Math.round(seconds / 3600)}h ago`;
+  return `${Math.round(seconds / 86_400)}d ago`;
+}
+
+/**
+ * When a key was last presented, as a phrase.
+ *
+ * **`undefined` and `null` are one answer here, unlike `agoText` above**, and
+ * that is Q1.629's decision rather than a shortcut: `lastUsedAt` is optional on
+ * the wire, the keys screen says "never used" for both, and cpctl says what the
+ * screen says. It holds for a key where it would not for a machine because of
+ * what each absence means. A control plane predating `machine_last_seen` may
+ * well have seen the machine and simply cannot say; a control plane predating
+ * `api_keys.last_used_at` adds the column `NULL` on every existing row the
+ * moment it is updated, so a use before the column reads "never" either way —
+ * the older control plane is the same statement one deploy earlier, and there
+ * is no fact being invented.
+ */
+function usedText(at: number | null | undefined): string {
+  if (at === undefined || at === null) return "never used";
+  return `last used ${coarseAge(at)}`;
 }
 
 function out(line = ""): void {
@@ -361,9 +388,26 @@ function printSettings(body: SettingsAnswer, did: string | null): void {
   for (const problem of body.mail.problems) out(`  ${problem}`);
 }
 
+/**
+ * `{currentPassword}` when the route will read one, `{}` when it will not.
+ *
+ * One caller now, `email`. `key` used to call it too and stopped, because
+ * `POST /v1/me/keys` reads no body (Q1.630) and a prompt the server never reads
+ * is a lie about what protects the account. `PUT /v1/me/email` does read it —
+ * for an API-key caller (Q1.630, amended 2026-09-05): the reset channel cannot
+ * be repointed from a leaked key without the password, so this prompt is the
+ * one thing standing between a key sitting in `~/.reemoat/cpctl.env` and the
+ * account. cpctl is that caller unless `REEMOAT_CP_KEY` came from `cpctl login`,
+ * which prints a session token into the same variable, and the route ignores a
+ * password from a session — so `via`, which `/v1/me` answers for exactly this
+ * reason, decides whether to ask at all, and a session gets `{}` rather than a
+ * prompt for something nothing would read. The other `{}` arm is the account
+ * with no password row, which the server lets through on the key alone.
+ */
 async function currentPasswordBody(): Promise<string> {
-  const me = await api<{ id: string; hasPassword: boolean }>("/v1/me");
+  const me = await api<{ id: string; hasPassword: boolean; via: "api_key" | "session" }>("/v1/me");
   if (!me.hasPassword) return JSON.stringify({});
+  if (me.via === "session") return JSON.stringify({});
   const currentPassword = await readSecret("your current password");
   return JSON.stringify({ currentPassword });
 }
@@ -556,10 +600,9 @@ async function main(): Promise<void> {
      * `deploy/install.sh` used to ask an admin to mint it for somebody else.
      */
     case "key": {
-      const body = await api<{ apiKey: string }>("/v1/me/keys", {
-        method: "POST",
-        body: await currentPasswordBody(),
-      });
+      // No body, and no prompt: the route reads none (Q1.630), and asking for
+      // a password it would then ignore claimed a protection that was not there.
+      const body = await api<{ apiKey: string }>("/v1/me/keys", { method: "POST" });
       show(body, () => {
         out(`API key: ${body.apiKey}`);
         out("Shown once — only its hash is stored. It never expires; retire it with: cpctl keys");
@@ -567,9 +610,9 @@ async function main(): Promise<void> {
       return;
     }
     case "keys": {
-      const list = await api<{ keys: { id: string; prefix: string; createdAt: number; revokedAt: number | null }[] }>(
-        "/v1/me/keys",
-      );
+      const list = await api<{
+        keys: { id: string; prefix: string; createdAt: number; revokedAt: number | null; lastUsedAt?: number | null }[];
+      }>("/v1/me/keys");
       const retire = values.revoke;
       if (typeof retire === "string") {
         const body = await api<{ revoked: boolean }>(`/v1/me/keys/${retire}`, { method: "DELETE" });
@@ -581,8 +624,12 @@ async function main(): Promise<void> {
           out("no API keys. Mint one with: cpctl key");
           return;
         }
+        // Last use beside the state, because "is the one that leaked dead yet"
+        // and "is this one still in use" are the two questions this list
+        // answers (Q1.629), and a revoked row keeps the value the revocation
+        // found it at.
         for (const key of list.keys) {
-          out(`${key.id}  ${key.prefix}…  ${key.revokedAt === null ? "live" : "revoked"}`);
+          out(`${key.id}  ${key.prefix}…  ${(key.revokedAt === null ? "live" : "revoked").padEnd(7)}  ${usedText(key.lastUsedAt)}`);
         }
         out("Retire one with: cpctl keys --revoke <id>");
       });
@@ -606,6 +653,9 @@ async function main(): Promise<void> {
         });
         return;
       }
+      // The password stays on this verb: the route asks an API-key caller for
+      // it (Q1.630, amended 2026-09-05), and `currentPasswordBody` is what knows
+      // whether this shell holds one or a session from `cpctl login`.
       const body = await api<{ email: string; verified: boolean }>("/v1/me/email", {
         method: "PUT",
         body: JSON.stringify({ email: address, ...JSON.parse(await currentPasswordBody()) }),

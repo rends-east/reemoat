@@ -25,6 +25,64 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+### Changed
+
+- `PUT /v1/me/email` asks an API-key caller with a password for `currentPassword`
+  — `400 bad_request` without it, `401 invalid_password` with a wrong one, and
+  nothing is written or mailed until it verifies. A session still changes the
+  address alone, and an account with no password row is still let through on
+  its key. The address is the reset channel; a key can leak from a disk with no
+  person anywhere in the chain and no admin reset behind it, where a session is
+  a person signed in, listed under Devices and one tap to end.
+- `cpctl key` no longer prompts for a password the route never read. `cpctl
+  email` still does when the shell holds an API key, and asks nothing when
+  `REEMOAT_CP_KEY` came from `cpctl login`, since the route ignores a password
+  from a session. `cpctl keys` prints when each key was last used.
+- Every two-step confirmation on a settings row is one control, `TwoStep`. The
+  first tap still replaces the row's buttons with the question, the act and
+  Cancel — Cancel last, on the same pixels, the question standing until the
+  server has answered — held in one place and pinned once rather than
+  re-derived on each of fourteen sites. The two centred confirmations keep
+  their shape; the question reads in the text colour everywhere, with its
+  consequence muted under it. Signing an agent out on a machine that has left
+  the list is refused, greyed, rather than answered with a toast.
+- Settings say less, again: the New session strip's lede, the two limit
+  consequences, the not-enrolled line, the agent card's unknown-sign-in line,
+  codex's two caveats and the plugin consent's `http` caveat are cut to the caps
+  the plan set, with the same facts in fewer words.
+
+### Fixed
+
+- A valid API-key request no longer answers a plain-text 500 when the
+  `last_used_at` bookkeeping write meets a busy database: the write is guarded
+  the way the session one already was, so a request that could not record its
+  own use still succeeds.
+- Reset on an Email field survives the next Save. Save sends every SMTP field
+  from the draft, and a Reset re-synced the draft only while the form had no
+  other edits — so edit Host, Reset From, Save wrote the old From straight back
+  under a "Saved." toast.
+- Public URL is filled in with the page's own origin on a fresh server, since
+  mail cannot be sent without it and the field drew the origin only as a
+  placeholder. Save is live at once; the provenance line says "not set" until
+  it lands. A value already stored or set in the environment is left alone.
+- New key waits for the key list to load rather than opening the leaf during
+  the skeleton only to be told the ceiling. A list that failed to load still
+  lets you mint.
+- Every Revoke on the keys screen and under a user's keys names its key to a
+  screen reader.
+- Three controls no longer stay live during the write they belong to: a
+  field's Reset while a Save is in flight, the strip's Remove while its delete
+  is out, and the device-code box, which empties after the code is written so a
+  failed send leaves it in the box beside the toast rather than gone.
+- The machines list no longer jumps on load: the loading row is the height of
+  the machine row it stands in for. And a retired machine leaves the list at
+  once rather than a round trip later.
+- Revoking the key this browser holds still signs the tab out when browser
+  storage is blocked. The one-shot notice for the sign-in screen was written
+  unguarded, and a browser with storage disabled threw there before the
+  credential was cleared — so the tab kept a dead key and the next request said
+  "Your session expired" about an act the person had just chosen.
+
 ## [0.6.0] - 2026-09-04
 
 ### Added

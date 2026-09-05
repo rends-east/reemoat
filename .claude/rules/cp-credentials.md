@@ -42,20 +42,27 @@ paths:
   password verified, which leaks nothing to somebody who does not already hold it.
   The body field is still `name` and takes either, bounded at `MAX_EMAIL_CHARS`
   rather than 200 — a legal address refused as `bad_request` would be its own oracle.
-- **A password change requires the current password even under a valid session**,
-  on `POST /v1/me/password` alone. `POST /v1/me/keys` and `PUT /v1/me/email` asked
-  too until 2026-09-04 and do not now: a session is enough, by the owner's decision
-  (Q1.630) — with the cost written at the email route, since repointing the reset
-  channel from a stolen session is a chain to a password the thief chose. What stands
-  in for the gate is that every key and every sign-in is listed and one tap to end.
-  `proveCurrentPassword` is deleted with its two callers;
-  `/v1/me/password` verifies inline, because it is also the route that must let an
-  account with no password row set a first one — that user is the one exception, their
-  API key being the proof, in one function and not three. `PUT /v1/me/email` asks
-  **unconditionally**, verified address or not (Q1.402), and `emailChangeNeedsProof` in
-  `packages/web/src/account.ts` is the client half: changing one without the other is a
-  `400` on screen. **There is no admin password reset** — an admin cannot enter
-  anybody's account at all. Q1.403.
+- **Three self-service routes, and which of them asks for the current password is
+  decided per route and, on one of them, per credential.** `POST /v1/me/password`
+  asks **always**, even under a valid session. `PUT /v1/me/email` asks **only an
+  API-key caller with a password**: a session adds or changes the address alone, by
+  the owner's decision (Q1.630, 2026-09-04) — with the cost written at the route,
+  since repointing the reset channel from a stolen session is a chain to a password
+  the thief chose, bounded by every sign-in being listed and one tap to end — while
+  a key is a machine credential that can leak from a disk with no person in the
+  chain and no admin reset behind it, so the same chain is closed to it (the
+  amendment of 2026-09-05; `caller.via` is what the route reads). `POST /v1/me/keys`
+  asks **never**: cloning a key escalates nothing. `proveCurrentPassword` is deleted
+  with its two callers; what the two routes that ask share is `verifyCurrentPassword`,
+  which takes the stored hash rather than looking one up, so that the one exception —
+  an account with **no password row**, whose API key is the proof, because it must be
+  let set a first one — is written at each route and cannot become an exemption the
+  helper carries on its own (Q7.81 is what that cost once). The email arm verifies
+  before any write and before any mail, so a wrong guess spends `passwordChangeKey`
+  and nothing else. The browser never sends a password on the email leaf, and does not
+  need to: `SignIn` takes no key, so a browser presenting one is the legacy adoption
+  and draws the server's `400` sentence. **There is no admin password reset** — an
+  admin cannot enter anybody's account at all. Q1.403.
 - **A guessing counter is keyed on a composed key and never on a name alone — and
   the address half is only as trustworthy as a proxy you configured.** The builders
   are `loginKey(name, address)`, `addressKey(address)`, `passwordChangeKey(userId)`,
@@ -119,8 +126,9 @@ paths:
 - **The client decides on the code, never the status.** `authFailure` returns `null`
   for `403 forbidden`, because `requireAdmin` answers that to every non-admin — and in
   the other direction for `401 invalid_password`, a 401 about the request *body*,
-  reachable from **one** route now (`/v1/me/password`): mistyping your own password on the screen that fixes a suspected
-  leak must not be what ends the tab. Q1.411.
+  reachable from `/v1/me/password` and from the API-key arm of `PUT /v1/me/email`:
+  mistyping your own password on the screen that fixes a suspected leak must not be
+  what ends the tab. Q1.411.
 - **A 401 signs you out only about the credential it was sent with.** `cpFetch`
   captures `const sent = credential` before building the header and tears down only
   while `credential === sent`; `setSession` always allocates, so identity is the whole
@@ -137,7 +145,7 @@ paths:
 
 | File | Holds |
 |---|---|
-| `packages/web/src/account.ts` | What a credential is and what a refusal of one means: `authFailure` on the **code**, `retryAfter`/`waitText`/`tooManyAttemptsText` off the **body**. Also the whole password and gate-error vocabulary — `PASSWORD_MIN`/`PASSWORD_MAX`, `passwordProblem`, one named reader per refusal (`signInError`, `linkError`, `registerError`, `changePasswordError`), `userState`/`userStateText` and `emailChangeNeedsProof`. Five screens import it — `SignIn`, `Gate`, `ForcedPasswordChange`, `AccountSection`, `UsersSection` — which is why the wording of a refusal lives here rather than five times |
+| `packages/web/src/account.ts` | What a credential is and what a refusal of one means: `authFailure` on the **code**, `retryAfter`/`waitText`/`tooManyAttemptsText` off the **body**. Also the whole password and gate-error vocabulary — `PASSWORD_MIN`/`PASSWORD_MAX`, `passwordProblem`, one named reader per refusal (`signInError`, `linkError`, `registerError`, `changePasswordError`), `userState`/`userStateText`. Five screens import it — `SignIn`, `Gate`, `ForcedPasswordChange`, `AccountSection`, `UsersSection` — which is why the wording of a refusal lives here rather than five times |
 | `packages/web/src/device.ts` | A `User-Agent` as two words somebody can recognise. The table is **ordered**, because these agents are subsets of each other on purpose. Recognition, never identification — and *nothing recorded* is a different sentence from *nothing readable* |
 | `packages/control-plane/src/password.ts` | The one credential a human chose: async scrypt, a self-describing hash, a decoy for the refusal path, and a semaphore bounded by memory |
 | `packages/control-plane/src/sessions.ts` | Signed-in browsers: `rs_` tokens, absolute and idle expiry, the two statements on the authentication path, and what each sign-in said about itself |

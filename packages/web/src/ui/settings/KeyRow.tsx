@@ -3,7 +3,7 @@ import { useState, type ReactNode } from "react";
 import { ageText } from "../../account";
 import type { ApiKeyRecord } from "../../cp";
 import { errorText } from "../../http";
-import { Badge, Button, DangerButton, Spinner } from "../bits";
+import { Badge, Button, Spinner, TwoStep } from "../bits";
 import { toast } from "../Toast";
 
 /**
@@ -45,9 +45,12 @@ export function KeyTable({ children }: { children: ReactNode }): ReactNode {
  * - `confirm` — whether Revoke is two-step. **Your own keys are one tap**
  *   (Q3.219, kept whole in decision 4C: every own key, the one this browser is
  *   holding included); **somebody else's is two**, with the question naming the
- *   key. The confirming pair replaces the button inside the same cell, and Cancel
- *   is last — Q3.218's ordering, which is the safety property rather than a
- *   preference.
+ *   key. The two-step arm is `TwoStep`'s: the pair replaces the button inside
+ *   the same cell, Cancel last — Q3.218's ordering, which is the safety property
+ *   rather than a preference, and which that primitive holds for every
+ *   confirmation rather than this row re-deriving it (Q3.552). The one-tap arm
+ *   is the resting `Button` with this row's own `busy`, since there the resting
+ *   button is the one that spins.
  * - `thisBrowser` — draws the `this browser` badge and the one consequence that
  *   is allowed at rest, "revoking it signs you out", because the control beside
  *   it is one-tap (decision 10A). The caller decides it from the credential it
@@ -55,6 +58,15 @@ export function KeyTable({ children }: { children: ReactNode }): ReactNode {
  *
  * `revoke` is the request; `onRevoked` is what the caller does with the 200 —
  * re-read the list, or for this browser's own key, sign out on purpose.
+ *
+ * **Every Revoke names its key to a screen reader.** Visually the prefix is two
+ * cells to the left; to a reader stepping through buttons, a table of them all
+ * reading "Revoke" is a table where the one-tap act on your own keys has no
+ * subject (review D18). Both the bare button and the confirming act carry
+ * `aria-label="Revoke <prefix>…"` — the confirming one through `TwoStep`'s
+ * `act.ariaLabel`, and it needs one too, because its visible text is still the
+ * bare verb and the question naming the key is a sibling span rather than its
+ * name.
  *
  * A revoked row keeps its place rather than vanishing: the question the table
  * answers is "is the one that leaked dead yet", and a row that disappears on
@@ -83,13 +95,12 @@ export function KeyRow({
       ? "never"
       : `${ageText(now - record.lastUsedAt)} ago`;
 
+  // The one-tap arm's request; the two-step arm's is handed to `TwoStep`, which
+  // owns that wait and closes the question only on the 200.
   const run = (): void => {
     setBusy(true);
     void revoke()
-      .then(() => {
-        setConfirming(false);
-        onRevoked();
-      })
+      .then(onRevoked)
       .catch((cause: unknown) => toast("error", errorText(cause)))
       .finally(() => setBusy(false));
   };
@@ -106,8 +117,10 @@ export function KeyRow({
             <>
               <Badge tone="strong">this browser</Badge>
               {/* The one consequence drawn at rest on the keys screen, and only
-                  here, because the button beside it acts on the first tap (10A). */}
-              <span className="text-2xs text-muted">revoking it signs you out</span>
+                  here, because the button beside it acts on the first tap (10A).
+                  `text-xs`, the row's own size: the one sentence on this screen
+                  that says an act is irreversible was its smallest type. */}
+              <span className="text-xs text-muted">revoking it signs you out</span>
             </>
           )}
         </span>
@@ -116,25 +129,28 @@ export function KeyRow({
       <td className="py-2 pr-3 text-xs whitespace-nowrap text-muted">{lastUsed}</td>
       <td className="py-2 text-right">
         {!revoked && (
-          <span className="inline-flex flex-wrap items-center justify-end gap-2">
-            {confirm && confirming ? (
-              <>
-                <span className="text-xs text-muted whitespace-nowrap">
-                  Revoke <span className="font-mono">{record.prefix}…</span>?
-                </span>
-                <DangerButton icon={Trash2} size="sm" disabled={busy} onClick={run}>
-                  {busy ? <Spinner /> : "Revoke"}
-                </DangerButton>
-                <Button size="sm" disabled={busy} onClick={() => setConfirming(false)}>
-                  Cancel
-                </Button>
-              </>
-            ) : (
-              <Button size="sm" disabled={busy} onClick={confirm ? () => setConfirming(true) : run}>
-                {busy && !confirm ? <Spinner /> : "Revoke"}
+          <TwoStep
+            armed={confirm && confirming}
+            onArm={setConfirming}
+            className="justify-end"
+            question={
+              <span className="whitespace-nowrap">
+                Revoke <span className="font-mono">{record.prefix}…</span>?
+              </span>
+            }
+            act={{ label: "Revoke", danger: true, icon: Trash2, ariaLabel: `Revoke ${record.prefix}…` }}
+            onAct={() => revoke().then(onRevoked)}
+            rest={
+              <Button
+                size="sm"
+                disabled={busy}
+                onClick={confirm ? () => setConfirming(true) : run}
+                ariaLabel={`Revoke ${record.prefix}…`}
+              >
+                {busy ? <Spinner /> : "Revoke"}
               </Button>
-            )}
-          </span>
+            }
+          />
         )}
       </td>
     </tr>

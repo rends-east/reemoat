@@ -1380,6 +1380,23 @@ class AppStore implements StreamSink {
   }
 
   /**
+   * A machine this account has just retired, dropped from the list at once.
+   *
+   * **Not optimistic**: the revoke has answered 200 and the control plane will
+   * never list it again, so this is the store catching up with a fact rather
+   * than drawing one ahead of the answer. Without it the machines list drew the
+   * retired row until `machinesChanged`'s re-list landed, a round trip later
+   * (review D9). `dropMachine` is exactly what a re-list does for a revoked
+   * grant; `emit` rather than `publish`, because the machine array's identity
+   * has to change for the list to notice. The re-list still follows, from the
+   * caller, for the count the limit is enforced against.
+   */
+  forgetMachine(id: MachineId): void {
+    this.dropMachine(id);
+    this.emit();
+  }
+
+  /**
    * The app signed you out without being asked. Registered on `cp.onSignedOut`.
    *
    * Connections are dropped rather than left behind: signing back in *as somebody

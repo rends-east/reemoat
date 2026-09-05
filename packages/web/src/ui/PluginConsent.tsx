@@ -238,10 +238,14 @@ export function PluginConsent({
        * strings are the whole of what this component has and are also what the two
        * consent checks compare — so a line that says `http` here is a line that
        * says `http` there.
+       *
+       * Nine words, under the caveat cap (review D10): it ran to nineteen, and
+       * what was cut — "reached over", "you save for it", "across that network"
+       * — restated `http` and "unencrypted", the two words that carry it.
        */}
       {inTheClear && (
         <p className="mt-1 text-xs text-fg">
-          One provider is reached over http, so a key you save for it is sent unencrypted across that network.
+          One provider uses http; its saved key travels unencrypted.
         </p>
       )}
       {/*

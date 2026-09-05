@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { orderKeys, rememberRevokedKey, thisBrowsersKey } from "../../account";
+import { CONTROL_PLANE_UNREACHABLE, orderKeys, rememberRevokedKey, thisBrowsersKey } from "../../account";
 import * as cp from "../../cp";
 import type { ApiKeyRecord } from "../../cp";
 import { navigate } from "../../router";
@@ -20,13 +20,25 @@ import { OneTimeSecret } from "./OneTimeSecret";
  * button after the 201, read **once** by the screen it navigates to, and gone
  * after that — so a reload of `/settings/keys/new` finds nothing and walks
  * back to the table rather than minting a second key nobody asked for.
+ *
+ * **Reading and clearing are two calls on purpose** (review D16). The screen
+ * peeks in its state initialiser and clears from its mount effect, once the
+ * value is in state. One call that nulled on read was right only because React
+ * 19 keeps the first initialiser's result under StrictMode's double call; with
+ * the two apart, "read once" is a property of the construction — state survives
+ * StrictMode's simulated remount, so the effect firing twice clears a value the
+ * screen already holds.
  */
 let handoff: string | null = null;
 
-function takeHandoff(): string | null {
-  const value = handoff;
+/** The minted key, left where it is: reading is not what consumes it. */
+function peekHandoff(): string | null {
+  return handoff;
+}
+
+/** What consumes it, from the screen's effect once the value is in state. */
+function clearHandoff(): void {
   handoff = null;
-  return value;
 }
 
 /**
@@ -78,7 +90,7 @@ export function KeysSection({ me }: { me: Me | null }): ReactNode {
           </Button>
         }
       >
-        Cannot reach the control plane.
+        {CONTROL_PLANE_UNREACHABLE}
       </Empty>
     );
   }
@@ -91,6 +103,15 @@ export function KeysSection({ me }: { me: Me | null }): ReactNode {
    * existed.
    */
   const atCeiling = live >= MAX_KEYS;
+  /*
+   * New key waits for the list and not for a failed read. While `keys === null`
+   * the count is unknown — `live` reads 0 — so a tap during the skeleton could
+   * open the leaf only to be answered `409 key_limit` (review D18). After a
+   * failed read it stays enabled **on purpose**: minting does not need the list,
+   * the control plane refuses at its own ceiling, and a screen that cannot read
+   * your keys should still let you make one for the machine that can.
+   */
+  const newKeyWaits = keys === null;
   const credential = cp.currentCredential();
 
   const revokeOwn = (record: ApiKeyRecord): (() => void) => {
@@ -101,9 +122,20 @@ export function KeysSection({ me }: { me: Me | null }): ReactNode {
      * `401 api_key_revoked`, and hand the gate "Your session expired" about an
      * act the person just chose. So: the notice, the clear, the reload — and no
      * request in between. `webcheck` pins the order.
+     *
+     * The notice is the optional third of the three; the clear and the reload
+     * are not. `sessionStorage` throws where the read side in `App.tsx` already
+     * guards for it, and unguarded here the throw skipped both — the tab kept a
+     * dead key and the next request 401ed into the very sentence this line
+     * exists to replace (D3). So only the notice is guarded, and losing it costs
+     * the gate one line rather than the sign-out.
      */
     return () => {
-      rememberRevokedKey(window.sessionStorage, record.prefix);
+      try {
+        rememberRevokedKey(window.sessionStorage, record.prefix);
+      } catch {
+        // Private browsing, or storage disabled: the sign-in screen is still right.
+      }
       cp.clearSession();
       window.location.href = "/";
     };
@@ -127,7 +159,7 @@ export function KeysSection({ me }: { me: Me | null }): ReactNode {
       .finally(() => setMinting(false));
   };
   const newKey = (
-    <Button tone="primary" size="sm" disabled={atCeiling || minting} onClick={mint}>
+    <Button tone="primary" size="sm" disabled={newKeyWaits || atCeiling || minting} onClick={mint}>
       {minting ? <Spinner /> : "New key"}
     </Button>
   );
@@ -138,8 +170,10 @@ export function KeysSection({ me }: { me: Me | null }): ReactNode {
         <p className="min-w-0 flex-1 text-xs text-muted">For cpctl and scripts. Never expire.</p>
         <span className="shrink-0">{newKey}</span>
       </div>
-      {/* Drawn beside the button rather than after a refused request. */}
-      {atCeiling && <p className="mt-1 text-xs text-muted">{`${MAX_KEYS} of ${MAX_KEYS} — revoke one first.`}</p>}
+      {/* Drawn beside the button rather than after a refused request. Six words
+          with the semicolon, the consequence-at-rest cap; the dash it carried
+          counted as a seventh (review D10). */}
+      {atCeiling && <p className="mt-1 text-xs text-muted">{`${MAX_KEYS} of ${MAX_KEYS}; revoke one first.`}</p>}
 
       {keys === null ? (
         <SkeletonRow />
@@ -171,9 +205,12 @@ export function KeysSection({ me }: { me: Me | null }): ReactNode {
  * The key you just made, once. `/settings/keys/new`.
  *
  * The mint happened on the list's button; this screen only shows what came
- * back, read once out of the module-level handoff. Arriving here with nothing
- * in hand — a reload, a bookmark, Back after Done — walks straight back to the
- * table in an effect, never minting: the screen has no verb of its own.
+ * back: peeked out of the module-level handoff in the state initialiser and
+ * cleared from the mount effect, so it is read once by construction rather
+ * than by React 19 keeping the first of StrictMode's two initialiser calls.
+ * Arriving here with nothing in hand — a reload, a bookmark, Back after Done —
+ * walks straight back to the table in that same effect, never minting: the
+ * screen has no verb of its own.
  *
  * No password anywhere on the way (Q1.630, the owner's call); what stands in
  * for the gate is the table, where every key is dated, this browser's is
@@ -184,10 +221,11 @@ export function KeysSection({ me }: { me: Me | null }): ReactNode {
  * reads rather than drawing a second box with the same bytes in it.
  */
 export function NewKeyScreen(): ReactNode {
-  const [minted] = useState<string | null>(takeHandoff);
+  const [minted] = useState<string | null>(peekHandoff);
   const back = (): void => navigate(settingsPath("keys"), true);
 
   useEffect(() => {
+    clearHandoff();
     if (minted === null) back();
   }, [minted]);
 
@@ -202,5 +240,9 @@ export function NewKeyScreen(): ReactNode {
   );
 }
 
-/** Mirrors `MAX_KEYS_PER_USER` on the control plane; see `atCeiling`. */
+/**
+ * Mirrors `MAX_KEYS_PER_USER` on the control plane; see `atCeiling`. The two
+ * copies are held equal by `pincheck`, which reads both declarations — this
+ * line's exact shape is what it captures.
+ */
 const MAX_KEYS = 10;

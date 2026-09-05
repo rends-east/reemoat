@@ -1,5 +1,6 @@
 import { ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
+import { CONTROL_PLANE_UNREACHABLE } from "../../account";
 import { installCommand } from "../../enrollment";
 import {
   machineAllowanceText,
@@ -109,9 +110,11 @@ export function MachinesSection({ state }: { state: AppState }): ReactNode {
              * having landed — so this screen is never mounted before the first
              * read. The arm exists because that gate is one file away and the
              * sentence below is the wrong thing to draw the day it moves. One
-             * `SkeletonRow`, never more: the expected count here is 0–1.
+             * `SkeletonRow`, never more: the expected count here is 0–1. `tall`,
+             * because the row it stands in for is `min-h-14` — a dot, a badge and
+             * a subline — and the default 11 was a 12px jump on arrival (Q3.548).
              */
-            <SkeletonRow />
+            <SkeletonRow tall />
           ) : state.machines.length === 0 ? (
             /*
              * **"No machines yet." is false while the control plane is
@@ -124,9 +127,14 @@ export function MachinesSection({ state }: { state: AppState }): ReactNode {
              * So an outage drew a confident empty state with a remedy that could
              * not work: the installer goes to the same service. `failed`, because
              * this is the absence of an answer rather than an answer of "none".
+             * The first sentence is every other screen's (`CONTROL_PLANE_UNREACHABLE`);
+             * the second is this list's own, because an empty list under an outage
+             * is the one place the reader might think the fleet went with it. Three
+             * words, so the pair sits at the eight-word empty-state cap (Q3.544):
+             * "Your machines are not gone." put it at ten (E8's review).
              */
             state.cpError !== null ? (
-              <Empty failed>Control plane unreachable. Your machines are not gone.</Empty>
+              <Empty failed>{CONTROL_PLANE_UNREACHABLE} Nothing is gone.</Empty>
             ) : (
               // The section under this one is how to add one, or why nothing can
               // be added, so the empty list need not say either.

@@ -166,8 +166,14 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
    * copies are redundant rather than wrong. Deleting them is safe **only** while
    * the `BUTTON_SIZE` check directly below stands, which is why that check was
    * added in the same change.
+   *
+   * ⚠ **And then seven became five** (E7's review, Q3.552): the confirming pair
+   * left this file for `TwoStep` in `bits.tsx`, whose two answers go through
+   * `BUTTON_SIZE.sm` with no `className` of their own — which is exactly the case
+   * the check below exists for, and the sweep above cannot see. What is left on
+   * this surface is `PluginView`'s four and `PluginsPanel`'s Restart.
    */
-  check("the plugin sweep actually found the controls", [tapped >= 1, small >= 6], [true, true]);
+  check("the plugin sweep actually found the controls", [tapped >= 1, small >= 5], [true, true]);
   check("nothing on a plugin's own surface is under 44px", shortPlugin, []);
   check("and every small control there keeps the coarse-pointer floor", bareSmall, []);
 
@@ -313,7 +319,11 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
    * menu row rather than a `DangerButton`.
    */
   {
-    const panel = readFileSync(new URL("../src/ui/settings/PluginsPanel.tsx", import.meta.url), "utf8");
+    // Comments stripped, as every other source read here is: the includes below
+    // are on JSX, and a docblock quoting a removed row (`label="Settings"` is
+    // the one this file argues against) would satisfy or fail them from prose
+    // (review D12).
+    const panel = stripComments(readFileSync(new URL("../src/ui/settings/PluginsPanel.tsx", import.meta.url), "utf8"));
     /*
      * ⚠ **`Settings` is deliberately *not* in this list any more, and the check
      * below is what stops it coming back.** A plugin's settings are on the
@@ -346,18 +356,25 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
      * **The remove confirmation names the plugin and replaces the row's
      * controls.** "Remove it and everything it kept?" was drawn *under* a row
      * whose link and kebab stayed live, and Cancel was the one filled button on
-     * the screen. Three pins: the question carries `plugin.name`; the confirming
-     * group ends with Cancel; and no Cancel in this file wears `tone="primary"`.
+     * the screen. The pair is `TwoStep`'s now (E7's review, Q3.552): Cancel
+     * last and in the default tone are that primitive's guarantees, pinned over
+     * it in `webcheck.settings-routing.ts`. What this file has to hold is that
+     * the question and the act reach it — the act as `danger` with the glyph,
+     * since uninstalling takes the plugin's data — that the row draws no Cancel
+     * of its own beside them, and that no Cancel in this file (the install
+     * flow's abort included) wears `tone="primary"`.
      */
     const confirmStart = panel.indexOf("and its data?");
     check("the remove question names the plugin", confirmStart >= 0 && /Remove <span[^>]*>\{plugin\.name\}<\/span> and its data\?/.test(panel), true);
-    const confirmEnd = panel.indexOf("</div>", confirmStart);
-    const confirmGroup = confirmStart >= 0 && confirmEnd >= 0 ? panel.slice(confirmStart, confirmEnd) : "";
-    check("and Cancel is the last button in the confirming group", /Cancel\s*<\/Button>\s*$/.test(confirmGroup), true);
+    const confirmBox = confirmStart >= 0 ? panel.lastIndexOf("<TwoStep", confirmStart) : -1;
+    // Where the element closes: its own `/>` on a line of its own, since a `<>…</>` fragment inside `question` carries a `/>` too.
+    const confirmGroup = confirmBox >= 0 ? panel.slice(confirmBox, confirmStart + panel.slice(confirmStart).search(/^\s*\/>/m)) : "";
+    check("and the pair is the primitive's, with the act destructive", /act=\{\{ label: "Remove", danger: true, icon: Trash2 \}\}/.test(confirmGroup), true);
+    check("and the row draws no Cancel of its own beside it", /setConfirming\(false\)/.test(panel), false);
     check("and Cancel wears the default tone", /tone="primary"[^>]*>\s*Cancel|<Button[^>]*tone="primary"[\s\S]{0,120}Cancel/.test(panel), false);
     // The confirmation is drawn *instead of* the link-and-kebab box, so the two
     // are the arms of one ternary rather than siblings: `confirming ? (…) : (…)`.
-    check("and the confirmation stands in for the row's controls rather than under them", /\{confirming \? \(\s*<div[^>]*>\s*<span[^>]*>\s*Remove/.test(panel), true);
+    check("and the confirmation stands in for the row's controls rather than under them", /\{confirming \? \(\s*<TwoStep\b/.test(panel), true);
     /*
      * ⚠ **The row is a link, and the link is the whole answer to "where are this
      * plugin's settings".** Without this, deleting the `Settings` entry above
@@ -745,6 +762,14 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
       /<Disclosure first=\{false\} label="Permissions" defaultOpen>/.test(consent),
       true,
     );
+    /*
+     * The http caveat at nine words, under the ten-word caveat cap (review D10):
+     * it ran to nineteen, and `http` and "unencrypted" are the two words that
+     * carry it, so both are asserted to survive whatever else is cut.
+     */
+    const clear = /<p className="mt-1 text-xs text-fg">\s*([^<]*http[^<]*)<\/p>/.exec(consent)?.[1]?.trim() ?? "";
+    check("the http caveat names the protocol and the consequence", /\bhttp\b/.test(clear) && /unencrypted/.test(clear), true);
+    check("in ten words or fewer", clear.length > 0 && clear.split(/\s+/).length <= 10, true);
   }
   {
     /*

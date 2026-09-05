@@ -8,12 +8,13 @@ import { AGENT_IDS } from "../src/acp/agents.js";
 /**
  * The regression driver for a number written down more than once.
  *
- * **Four subjects, and each widening was deliberate rather than incidental.** This
+ * **Five subjects, and each widening was deliberate rather than incidental.** This
  * file began as the driver for the agent adapters — three copies each — and it now
  * also holds this project's own version, which has six copies of which five are
- * read here; the plugin API and the one plugin this repository ships; and — the
- * newest, and a *list* rather than a number — the platform packages `pnpm install`
- * is told to leave out. They are one file because they are one question: *do the
+ * read here; the plugin API and the one plugin this repository ships; a *list*
+ * rather than a number — the platform packages `pnpm install` is told to leave
+ * out; and — the newest — the API-key ceiling, written once on each side of the
+ * wire. They are one file because they are one question: *do the
  * places a thing is written down agree with each other, and with what is actually
  * there?* The failure mode is identical in every half and is never a crash — it
  * is two copies that disagree while everything compiles. A second driver asking
@@ -668,6 +669,29 @@ check(
   true,
 );
 process.stdout.write("  note  app.ts's VERSION literal is checked by relaycheck, against the response rather than the file\n");
+
+
+process.stdout.write("\nthe API-key ceiling, on both sides of the wire\n");
+
+/*
+ * `MAX_KEYS_PER_USER` is the control plane's refusal — `409 key_limit` on
+ * `POST /v1/me/keys` — and `MAX_KEYS` on the keys screen is the same number
+ * **mirrored rather than fetched**, so a tap at the ceiling is refused on the
+ * screen instead of opening a leaf only to be told no. Mirrored on purpose: a
+ * wire addition for a number that has never moved buys nothing (review D11).
+ * What the mirror costs is a second copy, and a second copy is this file's
+ * whole subject — until this section no driver read both, so the screen could
+ * refuse at ten while the control plane allowed twelve, or worse the other way
+ * round, with `typecheck` and `webcheck` green. Both are read by the exact
+ * declaration, `capture`'s rule: a reformat that hides one fails here rather
+ * than passing an empty comparison.
+ */
+const keysSection = read("packages/web/src/ui/settings/KeysSection.tsx");
+const keyCeilingServer = capture(appTs, /^const MAX_KEYS_PER_USER = (\d+);$/m);
+const keyCeilingScreen = capture(keysSection, /^const MAX_KEYS = (\d+);$/m);
+check("the control plane's key ceiling is readable at all", keyCeilingServer !== null, true);
+check("and so is the keys screen's mirror of it", keyCeilingScreen !== null, true);
+check("the keys screen refuses at the number the control plane refuses at", keyCeilingScreen, keyCeilingServer);
 
 
 process.stdout.write("\nthe plugin API, and the one plugin in this repository\n");
