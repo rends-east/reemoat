@@ -122,10 +122,12 @@ export function announcePath(root: string): string {
  * environment: it cannot know `REEMOAT_DB`, so a path derived from it is a path
  * nothing can find. It *does* know the state root when it chose one — it passed
  * `REEMOAT_HOME` to every daemon it started, `~/.reemoat` for the server
- * `~/.reemoat/daemon.env` names and `~/.reemoat/servers/<server>/` for every
- * other — and it looks in the current server's root and then in `~/.reemoat`. A
- * daemon at any other root — `REEMOAT_HOME` pointed somewhere by hand — is
- * reachable through the relay only, which is what every other client uses.
+ * `~/.reemoat/daemon.env` names, `~/.reemoat/servers/<server>/` for every other,
+ * and `~/.reemoat/servers/<server>@<userId>/` for a further account on one — and it
+ * looks in the calling account's root and then, for a server's first account only,
+ * in `~/.reemoat` (Q7.149). A daemon at any other root — `REEMOAT_HOME` pointed
+ * somewhere by hand — is reachable through the relay only, which is what every
+ * other client uses.
  *
  * Two daemons sharing one root are still last-writer-wins, and that is safe
  * rather than merely tolerable — the file names a machine id, the client checks

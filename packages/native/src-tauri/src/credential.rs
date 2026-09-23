@@ -1,11 +1,20 @@
 //! The control-plane credential, at rest.
 //!
-//! **Keyed on the server's origin, and that is the whole of the scoping rule.**
-//! A browser gets this for free — one origin, one `localStorage` — and a native
-//! shell does not: there is one webview origin for every server somebody might
-//! point this app at. So the origin is the *lookup key*, which means a credential
-//! cannot be read for a server it was not issued by. Structurally, rather than
-//! because a code path remembered to clear it on a change.
+//! **Keyed on the account — `<origin>#<user id>` — and that is the whole of the
+//! scoping rule.** A browser gets the origin half for free — one origin, one
+//! `localStorage` — and a native shell does not: there is one webview origin for
+//! every server somebody might point this app at, and every account on each. So
+//! the account is the *lookup key*, which means a credential cannot be read for a
+//! server it was not issued by, nor for a second person on that same server.
+//! Structurally, rather than because a code path remembered to clear it on a
+//! change. Q1.651.
+//!
+//! ⚠ **Which account is the host's to say, never the page's.** Two commands write
+//! an entry, each only after `GET /v1/me` has said whose token it is:
+//! `host_credential_set`, for the webview that asked, and a legacy seat's
+//! `host_account_confirm`, moving a pre-accounts entry from the bare origin to the
+//! account it turns out to be (`accounts::bind`). One hands one over,
+//! `host_boot`, for the calling webview's own account and no other.
 //!
 //! What is never stored here: the person's password (there is no "remember me" —
 //! `POST /v1/me/password` asks for the current one whichever credential presents,
@@ -48,10 +57,15 @@ pub const CREDENTIAL: &str = "credential";
 
 /// The device's X25519 private key, base64url, 32 raw bytes.
 ///
-/// Scoped per origin like the credential beside it, because the row it names
-/// lives on one fleet: a key registered with one server means nothing to another,
-/// and reusing it across both would link the two installations to each other for
-/// no benefit.
+/// Scoped per account like the credential beside it, because the row it names
+/// belongs to one user on one fleet: a key registered with one server means
+/// nothing to another, and reusing it across both would link the two
+/// installations to each other for no benefit. ⚠ **That argument reaches two
+/// accounts on one server too**: one key on two users' device rows tells anybody
+/// who can see both that they are one computer, and the control plane has no
+/// uniqueness on the column to refuse it. So the key is per account, and the one
+/// that ever moves — a pre-accounts key under the bare origin — moves only to the
+/// account proved to own it (`device::copy_key`).
 pub const DEVICE_KEY: &str = "device_key";
 
 /// What a secret store has to do, and pointedly not more.
@@ -156,8 +170,11 @@ impl SecretStore for PlatformStore {
 
 /// `#` as the delimiter, chosen rather than defaulted: a URL origin cannot
 /// contain one, so "the key is the origin" needs no escaping to be unambiguous —
-/// and a later `credential#<origin>#<account>` is an extension of this shape
-/// rather than a migration away from it.
+/// and `credential#<origin>#<user id>` is an extension of this shape rather than a
+/// migration away from it. ⚠ **That extension is taken now** (Q1.651): a scope is
+/// `<origin>#<user id>`, the user id is refused if it could carry a `#` of its own
+/// (`accounts::is_user_id`), and a bare origin — an entry from before accounts —
+/// can therefore never equal an account's scope.
 fn account_for(key: &str, scope: &str) -> String {
     format!("{key}#{scope}")
 }
@@ -386,33 +403,38 @@ fn install_default_store() -> Result<(), String> {
 
 /* The control-plane credential, which is the only secret this app has. Thin
  * wrappers rather than the trait at every call site, because the commands read
- * better for it and the seam is still one type away. */
+ * better for it and the seam is still one type away.
+ *
+ * `scope` is an **account** — `<origin>#<user id>` — or, for an entry written
+ * before accounts existed and not yet attributed to anybody, the bare origin
+ * (`accounts.rs` has the rule). It is never something the page supplied: the
+ * host derives it from the webview that asked. */
 
-pub fn read(origin: &str) -> Option<String> {
-    PlatformStore.read(CREDENTIAL, origin)
+pub fn read(scope: &str) -> Option<String> {
+    PlatformStore.read(CREDENTIAL, scope)
 }
 
-pub fn write(origin: &str, value: &str) -> Result<(), String> {
-    PlatformStore.write(CREDENTIAL, origin, value)
+pub fn write(scope: &str, value: &str) -> Result<(), String> {
+    PlatformStore.write(CREDENTIAL, scope, value)
 }
 
-pub fn erase(origin: &str) -> Result<(), String> {
-    PlatformStore.erase(CREDENTIAL, origin)
+pub fn erase(scope: &str) -> Result<(), String> {
+    PlatformStore.erase(CREDENTIAL, scope)
 }
 
 /* The device key. Same store, same scoping, and deliberately the same three
  * verbs — `device.rs` owns every decision about what the value means. */
 
-pub fn read_device_key(origin: &str) -> Option<String> {
-    PlatformStore.read(DEVICE_KEY, origin)
+pub fn read_device_key(scope: &str) -> Option<String> {
+    PlatformStore.read(DEVICE_KEY, scope)
 }
 
-pub fn write_device_key(origin: &str, value: &str) -> Result<(), String> {
-    PlatformStore.write(DEVICE_KEY, origin, value)
+pub fn write_device_key(scope: &str, value: &str) -> Result<(), String> {
+    PlatformStore.write(DEVICE_KEY, scope, value)
 }
 
-pub fn erase_device_key(origin: &str) -> Result<(), String> {
-    PlatformStore.erase(DEVICE_KEY, origin)
+pub fn erase_device_key(scope: &str) -> Result<(), String> {
+    PlatformStore.erase(DEVICE_KEY, scope)
 }
 
 /// Whether this machine's store actually keeps what it is given.
@@ -462,6 +484,20 @@ mod tests {
         // The scheme is part of the identity, so these are two entries.
         assert_ne!(
             account_for("credential", "http://a.example"),
+            account_for("credential", "https://a.example")
+        );
+        // The account extension: two people on one server are two entries, and
+        // neither is the bare, pre-accounts one.
+        assert_eq!(
+            account_for("credential", "https://a.example#u_1"),
+            "credential#https://a.example#u_1"
+        );
+        assert_ne!(
+            account_for("credential", "https://a.example#u_1"),
+            account_for("credential", "https://a.example#u_2")
+        );
+        assert_ne!(
+            account_for("credential", "https://a.example#u_1"),
             account_for("credential", "https://a.example")
         );
     }

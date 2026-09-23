@@ -334,6 +334,13 @@ the script's `case` in **both** directions now: the `app` verb shipped with nine
 refusals, ~125 lines and no caller, and four documents described the wiring
 anyway.
 
+**Which server the apps open on is a repository *variable*, set in the forge and in
+no file.** Both app jobs' `app` step forward `${{ vars.… }}` of the one build-time
+name — a fork inherits no variables — and a step before each prints the value into
+the job summary. A variable, not a secret: `option_env!` puts it in the binary as
+plain text. Unset, it arrives empty, which is no default. `nativecheck` lets exactly
+that line through and asserts it in both jobs. Q4.127.
+
 ⚠ **`RELEASE_APP_TARGETS` names five, and each has a `check.yml` leg building the
 same bundle** — `native`'s four-leg matrix bundles for real, `android-apk` is
 android's. It is the one knob spelled `${VAR-…}`, an explicit empty being a

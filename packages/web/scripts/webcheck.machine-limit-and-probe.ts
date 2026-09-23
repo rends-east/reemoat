@@ -443,15 +443,16 @@ process.stdout.write("\nthe machine limit\n");
     check("and no sentence tells anybody to move ~/.reemoat/daemon.env", /move ~\/\.reemoat\/daemon\.env aside/.test(store), false);
     check("while a file in this server's own folder still has one", /~\/\.reemoat\/servers aside/.test(store), true);
     /*
-     * The server picker says what a switch does not cost any more: the previous
-     * server's daemon keeps running until the app quits — and says it only where a
-     * daemon could be running here at all.
+     * ⚠ **The server picker no longer says that the other accounts' daemons keep
+     * running** — the owner's call, 2026-09-24, on seeing it under the field of the
+     * add screen. It is still true (the host starts every account's daemon at
+     * launch, Q7.149); it is simply not this screen's to say, and the gate on it
+     * (`hostsDaemon`) went with it. `webcheck.gate-and-server-settings.ts` pins the
+     * sentence absent.
      */
     {
       const chooseServer = strip(readFileSync(new URL("../src/ui/ChooseServer.tsx", import.meta.url), "utf8"));
-      check("changing servers says the old server's daemon keeps running", /keeps running until you quit Reemoat/.test(chooseServer), true);
-      check("and only where this shell can host one", /\{hostsDaemon &&\s*" If Reemoat runs a daemon/.test(chooseServer), true);
-      check("which is the declared capability", /const hostsDaemon = nativeBoot\(\)\?\.canHostDaemon === true;/.test(chooseServer), true);
+      check("the server picker reads no daemon capability any more", /canHostDaemon/.test(chooseServer), false);
     }
 
     /*

@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 143 | `###` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 144 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 89 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 388 | `####` |
-| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 65 | `###` |
-| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 114 | `####` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 390 | `####` |
+| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 66 | `###` |
+| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 115 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 72 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 148 | `###` |
-| | | **1019** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 149 | `###` |
+| | | **1025** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1019 rather than the 517
+dividers. So the count is over **both** depths, and it says 1025 rather than the 520
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -3805,7 +3805,10 @@ the reversal rests on.]
 
 `#` as the delimiter because a URL origin cannot contain one, which makes the rule
 unambiguous with no escaping and makes a later `credential#<origin>#<account>` an
-extension of the shape rather than a migration away from it.
+extension of the shape rather than a migration away from it. [⚠ extended by
+Q1.651: it is that shape now — `credential#<origin>#<user id>` — and a
+`credential#<origin>` written before it is moved there once, after `GET /v1/me` has
+named its owner.]
 
 **Why not keep it only in the host process**, which is stronger on the face of it:
 `cpFetch` attributes a 401 by comparing `credential === sent` **by identity**, and
@@ -3948,7 +3951,10 @@ path.
 preferences file (`config.rs`). A device id has to survive a restart. Which one?
 
 **Decision. The configuration file**, as a map keyed on the server's origin
-beside `server`. `credential.rs` is untouched.
+beside `server`. `credential.rs` is untouched. [⚠ reversed by Q1.651 in its key: per
+account, `<origin>#<user id>`, because a device row belongs to one user and two
+accounts on one server took turns overwriting one entry. `credential.rs` gained the
+same scope and nothing else.]
 
 **Why, and it is a measurement rather than a preference.** `credential::probe`
 exists because a store that *accepts* a write and loses it is the failure that
@@ -4292,6 +4298,142 @@ that nothing reads it by name.
 do not depend on the feature existing, and this commit's parent holds every file.
 
 **Status.** Reversed an earlier decision — Q1.632.
+
+### Q1.651 — What an account is to this app, and why the host, not the page, decides which one a call is about
+
+**Question.** Q1.640 keyed the native credential on the server's origin, and
+Q7.148 made several servers ordinary. The owner then asked for Telegram's
+arrangement — several accounts in one app, switched from the drawer — and two of
+them may be on the same server. On one origin they collide on everything keyed by
+it: the keyring entry, the device id and key, the machine claim and the daemon
+root. What is an account, what is keyed on it, and who decides which one a given
+call is about?
+
+**Decision. An account is a pair — the normalized origin and the control plane's
+user id — and its key is `<origin>#<user id>`.** That key is the keyring scope,
+`credential#<origin>#<user id>` and `device_key#<origin>#<user id>`, both through
+`credential::account_for`: the extension Q1.640 reserved, taken rather than
+migrated to — no new `pub const`, and still no `list()`. It keys `server.json`'s
+`devices` and `device_keys` maps and `machine.json`'s claims. The list of accounts
+lives in `server.json` (`accounts`, `current`, `roots`, `legacy_root_holder`),
+because the keyring cannot be listed and that refusal stands.
+`accounts::is_user_id` admits 1–64 bytes of `[A-Za-z0-9_-]` — every id the control
+plane mints, `u_` and sixteen hex digits — so a user id can never carry the `#`
+that separates a scope, the `@` that names a guest root, or anything that walks a
+path; and a normalized origin carries no `#`, so a pre-accounts entry under the
+bare origin can never equal an account's scope. `MAX_ACCOUNTS` is ten (Q5's table).
+
+**The host decides, from the webview that asked.** A seat-scoped command takes the
+calling `tauri::Webview` and the `tauri::ipc::Request` it arrived on, and
+`Host::seat` resolves the account from the webview's label and the generation its
+document presents (Q5.120). No credential, device, daemon or `host_cp` command
+takes an account, an origin or a scope. The one command that names an account is
+`host_account_switch`, choosing among keys `host_accounts` listed, and nothing that
+names another account returns a credential. `host_cp`'s base is the seat's own
+origin; a probe override refuses a request carrying `authorization`, and so does a
+pending seat, both read through `proxy::carries_credential` — the same
+case-folding `proxy::send` forwards by, so the refusal and the allowlist cannot
+disagree.
+
+**The host proves whose a token is, itself.** `host_credential_set` takes `{value}`
+and nothing else. The host sends `GET /v1/me` with that token to the seat's own
+origin (`accounts::me`, through `proxy::get_json`) and keys on the answer, so a page
+that is wrong — or hostile — cannot file one person's token under another's account.
+`accounts::decide` settles the outcome before anything is written:
+
+- **`bound`** — a new account, or the seat's own signed in again. The page adopts
+  the token.
+- **`adopted`** — the account is already here and signed out. The token is written
+  into it, its webview reloads with it, and the page switches there.
+- **`existing`** — already here and signed in. **The host revokes the new
+  session** with the token it holds (`proxy::revoke`, `DELETE
+  /v1/me/sessions/current`), and the page switches.
+- **`refused`** — a signed-out account's seat, signed in to as somebody else. The
+  host revokes, and the page says so (`WrongAccount`): taking the token there would
+  register the first person's device key for the second and start the first
+  person's database under the second's sign-in.
+
+A failed `GET /v1/me` — unreachable, or anything but a 2xx carrying a usable id —
+is an `Err`, and `cp.login` adopts nothing: `setSession` runs only on `bound`. So no
+page path ever holds a bearer the host did not bind.
+
+**A sign-in offers no device any more.** `POST /v1/login` carried the stored device
+id and public key, one round trip rather than two. In the shell that id is an
+*account's*, and the account is exactly what the sign-in finds out — so the request
+would offer the last person's key to whoever signs in next, and the control plane's
+owner clause, which makes a foreign id harmless, copies the offered key onto the
+fresh row and links the two. So `login` sends `{name, password}`, and the bootstrap
+that follows in the same document registers through `POST /v1/me/devices`
+(`ensureDevice`, whenever the id is missing **or** `Boot.deviceBound` is false).
+`deviceBound` is false from the moment a credential is written until
+`host_device_set` stores the answer, which also makes a failed first registration
+retry at the next bootstrap. `registerDevice` is single-flight, because
+`ensureDevice` and a mint refused `device_key_required` can meet with a null id and
+would otherwise register two rows.
+
+**Nothing is inherited without proof.** A `server.json` from before accounts has no
+`accounts`; `config::read_accounts` derives a list for it in memory and writes
+nothing — the one keyring read it needs per origin is made by `lib.rs` once and
+passed in — and the first act that changes the list writes it
+(`config::materialize_accounts`). `server` becomes a legacy entry only on evidence
+of a sign-in: `devices` names it, `machine.json` claims a machine on it, or
+`credential#<server>` exists. Otherwise it is `Roster.pending` — a pending seat that
+keeps its `‹ Server`, rather than an account somebody would have to remove. The
+other bare `devices` keys and claim keys become legacy entries too. A legacy seat's
+page calls `host_account_confirm` at bootstrap (`Boot.legacy`); the host reads the
+bare credential itself, asks `GET /v1/me`, and moves it — written, read back, then
+erased (`accounts::bind` with a move). What sat beside it follows **only by proof**
+(`accounts::gather`, with the credential being bound, to the seat's own origin):
+
+- the device id and key, only if `GET /v1/me/devices` lists that id —
+  `device::copy_key` runs on a proven move and nowhere else;
+- the server's own daemon root and its bare machine claim, only if the root's
+  claimed or announced machine id is among the user's **owned** machines in
+  `GET /v1/machines` — a machine somebody shared is listed there too, and a grant is
+  not ownership of a database.
+
+Without a proof the account gets a fresh key, a fresh device and a root of its own,
+and the bare items wait for whoever can prove them. A proof that could not be
+reached sets `pending_proof`, which keeps `Boot.legacy` true, so the next bootstrap
+asks again. The same proofs apply when a new account meets a server root that is
+not empty and has no recorded owner. **`owner := roots[origin] == user` is
+recomputed on every bind**, never carried, so somebody who removed their account
+and signs in again gets their root — and the machine and database in it — back. A
+legacy entry removed while unconfirmed writes its root as owned by nobody (`""`), so
+the next new account on that server cannot take a root that may hold somebody
+else's database.
+
+**Why the user id and not the name.** A login name can be changed and then taken by
+somebody else; an id is never reused. The name is cached for the drawer
+(`accounts::clamp_name`) and refreshed by a confirm whenever `Me.name` no longer
+matches it (`confirmDue` in `slot.ts`).
+
+**Why the page still holds one account.** Each webview is a single-account app, so
+`cp.ts`'s one credential, the 401-by-identity rule (Q1.412) and the store singleton
+stand exactly as they were — Q7.149 has the argument against several credentials in
+one page.
+
+**Rejected.**
+
+- **An account argument on the commands.** It makes the page the thing that names
+  whose credential, device and daemon a call touches — exactly what a wrong page
+  gets wrong.
+- **The page supplying the user id** — `host_credential_set(value, user, name)`,
+  the first design. It let a page file one person's token under another person's
+  id, and the duplicate-account routing would then switch the real owner into it.
+  One request per sign-in is the price of the host asking itself.
+- **A locally minted account id.** That is Q7.136's device identity arriving by
+  accident, and it names nothing the control plane can confirm.
+- **The login name as the key** (above).
+- **Adopting the token when the bind fails**, the old setter's degraded-mode
+  posture. A keyring that keeps nothing is still `durable: false` and still binds;
+  what a rejection means now is a session nobody attributed.
+- **Handing a legacy seat's bare items to whoever signs in on it.** Upgrading while
+  signed out, or a second person on a shared computer, would have given one
+  person's device key and root to another.
+
+**Status.** Reversed an earlier decision — Q1.643's device id per server, which is
+per account now; Q1.640's keyring key is extended rather than reversed.
 
 
 ## Session lifecycle, questions and attachments
@@ -21685,6 +21827,9 @@ immediately above Sign out because changing servers *is* signing out plus a
 redirection. `state.pickingServer` carries it, so it rides the store the screen
 already subscribes to and adds no hook above `App.tsx`'s branching — where a
 recorded `Minified React error #310` says one must not appear.
+[⚠ reversed by Q3.643: that row shows the account's server and changes nothing;
+another server is another account, added from the menu drawer, and
+`state.pickingServer` is left to `‹ Server` on a window nobody has signed in to.]
 
 **It stays a phase, not a `Route` arm and not a `SettingsLeaf`.** Both are routes;
 `parseGateScreen` and `parseSettingsRoute` are shared with the web build, which
@@ -21697,7 +21842,8 @@ Cancel put it back exactly where it was, the URL never having moved.
 condition is what keeps the first-run state uncancellable, and it is the reason
 `signInReady` did not have to learn about servers: there is no path to a sign-in
 form with no server, so the guard is structural rather than a second predicate
-answering a question one arm above already answers.
+answering a question one arm above already answers. [⚠ amended by Q3.643: or an
+account to go back to — adding one is cancellable; a first run still is not.]
 
 **Three things the editing entrance made necessary that first run never did.** The
 field opens on the current value, because an editing screen that opens empty is
@@ -21898,7 +22044,10 @@ the test was overruled rather than re-read. This entry is the correction.
 **What follows for the next row.** The test is unchanged, so the bar is what it
 was: a destination, reached from nowhere else, about you. The head being inert is
 not a licence to duplicate a destination that is one tap away — it is the reason
-the head is a *heading*.
+the head is a *heading*. [⚠ reversed by Q3.642: in the shell the head is a
+disclosure over the accounts on this computer. It is still not a link — the rows it
+opens switch or add an account and go nowhere — so the test above and the rejection
+below stand.]
 
 **Rejected: make the head itself the link.** It keeps the panel's only destination
 on the one element that does not look like one, which is the discoverability
@@ -23652,6 +23801,174 @@ back through the same function and draws the name.
 
 **Status.** Current. Narrows Q3.410: the separator is necessary and no longer
 sufficient.
+
+#### Q3.642 — the drawer's head becomes the account switcher, and its rows are acts rather than destinations
+
+**Question.** The owner's brief, modelled on Telegram: the left drawer opens on a
+large face, then the name with a chevron; pressing it lists every account on this
+computer, the current one's face ringed, followed by *Add account*. Q3.612 made
+that head inert and wrote the test a drawer row must pass. What changes, and what
+does that test say about a row that is an account?
+
+**Decision.** In the shell the head is `AccountPanel`, defined below `MenuDrawer`
+and drawn **inside the scroller** — with ten accounts a fixed head of eleven rows
+would starve the scroller, and the `overflow-hidden` aside would clip Sign out off
+the bottom. Top to bottom:
+
+- **the face**, `Monogram` at `size="lg"` (`h-14 w-14 rounded-full text-xl`), and
+  **not a control** — it is who this window is, above a list of who else it could
+  be;
+- **the name, with the server under it**, as one disclosure button —
+  `aria-expanded` and `aria-controls` on a button that navigates nowhere. The server
+  is mono `text-2xs` through `serverLabel`, display only: the scheme dropped for
+  `https` alone, anything else drawn whole, and never compared or sent back. The
+  chevron is a `ChevronDown` that turns on its icon rather than on the button,
+  because `.tap`'s transition shorthand on the button would swallow a
+  `transition-transform`, and a trailing *right* chevron on a full-width row reads as
+  *goes to another screen*;
+- **the fold**, `Disclosure`'s `grid-rows-[0fr]`/`grid-rows-[1fr]` with `inert` on
+  the closed half, so a closed fold is neither a tab stop nor read out;
+- **this account's row**, a `<div aria-current>` and not a button — a control that
+  answers a tap with nothing is refused in this app — with its face ringed
+  `ring-2 ring-fg ring-offset-2 ring-offset-surface`. A box-shadow ring, never an
+  outline: `outline` is this app's focus ring, and a current mark drawn with it
+  would read as focus;
+- **a button for every other account**, *signed out* at its trailing edge in sans
+  where the host's persisted flag says so — a state word, not a change of family
+  halfway along the mono line;
+- **Add account**, while the host's `canAdd` says there is room.
+
+**Account rows are acts, not destinations.** Q3.612's test — a destination, reached
+from nowhere else, about you — is a test for *destinations*, and Sign out was
+already the one act beside them. An account row is that second kind: it calls
+`onClose()` and then a store verb (`switchAccount`, `addAccount`), never `go` and
+never `navigate`, because switching accounts is not a place in this window's URL.
+The three destinations and the single `navigate(` are unchanged, and the drivers
+still hold both. A refusal is a toast, because the panel it would be drawn on is
+already leaving.
+
+**The list is the host's, read live** — `nativeAccounts`, one IPC, no keyring — on
+every mount. Accounts are added and removed from other webviews while this one
+lives, and a list kept from launch would offer a switch to one that is gone. The
+panel unmounts on every close, so the fold is shut on every open (`TaskPanel`'s
+finished band is the precedent) and is **not persisted**: `localStorage` stays empty
+after a sign-in, which `docs/NATIVE.md` step 3 checks by hand. [⚠ reversed the next
+day, the owner's call on the first build (2026-09-24): the fold stays open until it
+is closed, as Telegram's does — `reemoat.accountsOpen`, read on every mount (every
+account's window is a page of its own on one data store, so no module copy), kept
+only while open, so step 3 still holds until somebody opens it. In the same pass:
+faces in the list at `row` (32px) under a 48px head, and a rule under the head
+whether or not the fold is open, with a second under the last row — what says the
+rows slid out of the head, and the room before the first of them.]
+
+**What it spends and does not:** no `tabIndex`, no weight on a row or a name, no
+second caps band.
+
+**The browser keeps the inert head exactly as it was.** It has no list of accounts:
+one origin is one sign-in (Q7.149).
+
+**Rejected.**
+
+- **A trailing chevron `IconButton` beside an inert head.** Two controls where every
+  multi-account client has one, and the name — the largest target on the panel —
+  would still do nothing.
+- **The face as the control.** It is the element that looks least like one, which
+  is Q3.612's own rejection of the head as a link.
+- **A persisted fold** (above) — [⚠ taken back, above: it is persisted now.]
+- **Rows through `go`.** A switch has no URL, and a destination whose arrival is a
+  different document is not a place.
+
+**Status.** Reversed an earlier decision — Q3.612's inert head, in the shell. Its
+row test, and its rejection of the head as a link, stand.
+
+#### Q3.643 — the server step opens locked on the build's server, and a server is changed by adding an account
+
+**Question.** The owner's brief: *Add account* opens the sign-in flow, whose first
+page's server field holds the default, disabled, with a small pencil to edit it; and
+Settings → Account → Server address becomes read-only. When is the field locked,
+and where does changing a server go once no screen repoints a signed-in window?
+
+**Decision. The field is locked only where it opens on the build's own
+suggestion**: `useState(!editing && suggested !== null)` — a first run or an add,
+with `defaultServer` non-null. Never on the `‹ Server` arrival, where the field
+holds this window's address and the reason for coming back is to change it; never
+where the build compiled no default, where there is nothing to confirm and the
+field is empty and editable, with no pencil.
+
+- **`disabled`, not `readOnly`.** A disabled field reads as not yours to edit until
+  you ask, takes no caret and raises no keyboard on a phone. A read-only one is
+  focusable, draws a caret, and reads as editable to everybody who then finds it is
+  not.
+- **The locked look is two `disabled:` variants and no opacity** —
+  `disabled:border-edge disabled:text-muted`. Without them a disabled `FIELD` draws
+  exactly like an editable one, because the preflight and `FIELD` set its ground,
+  boundary and ink themselves and the engines' own disabled styling never shows; an
+  opacity would take the address somebody is here to read down with it.
+- **The pencil is beside the field, not inside it** — `FIELD` already carries
+  `px-3` — an `IconButton` labelled *Edit server address* at `size="nav"`, whose
+  finger pad lands in the `gap-2` rather than over the field. It runs `flushSync`
+  unlock, then `focus()`, then `select()`, inside the tap: a disabled input cannot
+  take focus, and a focus that arrives in a later task is not one a phone raises its
+  keyboard for. Selected, because somebody who pressed it is about to type another
+  address. It unmounts once pressed.
+- **Continue carries `autoFocus={locked}`.** A disabled field takes no Enter, so
+  without it the first screen's whole job — confirm, press Enter — would need a
+  click.
+
+**Adding an account is this screen with another heading, not a screen of its own.**
+The host opens a pending webview (or rebinds this one); it arrives here exactly as a
+first run does, so the store has no "adding" phase. Which of the two it is comes
+from the host's **live** list (`useBackAccount`): a pending window on a computer that
+already holds an account is an add — heading *Add account*, a Cancel back to the
+account that was on screen (`switchAccount(null)`), and, where it is true, *Adding
+an account signs none of the others out* (gated on `durable`) and the daemon clause.
+Until the host answers, the screen draws an empty box rather than flashing a welcome
+at somebody with three accounts. [⚠ amended the next day, the owner's call on the
+first build (2026-09-24): **no Cancel anywhere in this flow** — a **‹** above the
+heading naming the account that was on screen, back to the interface from either
+arrival — and **neither sentence**, nor *That address is ours*; the footer keeps
+only a first run's explanation where no address was compiled in. And a **first
+sign-in has no way back at all**, `‹ Server` included, which knowingly reopens the
+one-way door Q3.607 closed for a wrong-but-reachable address; the probe still
+refuses anything that is not a Reemoat.]
+
+**The sign-in screen's ways off are one table**, `signInExits` in `slot.ts`, pure
+and driven: `‹ Server` only on a pending window; Cancel, last, where the live
+`back` names an account; *Remove account* on a window that is an account on the
+list. [⚠ since 2026-09-24: `‹ Server` only on a pending window *with* an account to
+return to, and `back` — a **‹** at the top naming that account — where Cancel was;
+never both.] Every control is `disabled={busy}`. The two screens that never reach the
+drawer — the loading screen of a server that cannot be reached, and
+`ForcedPasswordChange` — offer *Use another account* on the same live condition
+(`UseAnotherAccount`), because on a desktop the account shown at launch is the one
+shown last, and a server that is down would otherwise wall off every other account.
+[⚠ amended the same day, the owner's call on a build: an unreachable server is no
+longer a screen at all. `store.bootstrap`'s catch draws the shell — drawer included,
+so every other account is one tap away — and the outage is a line under the
+conversation's title in the list's own words (`CONTROL_PLANE_UNREACHABLE`), beside
+the notice above the list; the list does not call an unread registry empty, and
+setup waits for the registry rather than for the phase. `ForcedPasswordChange` is
+the one screen left that needs the button.]
+
+**Settings → Account → Server address states the server and changes nothing** —
+`action={null}`, with the subline *Another server is another account, from the
+menu.* An account is a server and a person: repointing a signed-in window would make
+it a different account wearing the old one's keyring entry, device and daemon root,
+and the host refuses it anyway (Q5.120). Sign out's subline in the shell adds that
+it takes this account off this computer.
+
+**Rejected.**
+
+- **Keeping *Change* under Settings.** It moves a signed-in account's server under
+  its credential, which the account key (Q1.651) makes a different account.
+- **`readOnly`** (above), and **the pencil inside the field's padding**.
+- **Deciding "add" from the boot payload.** A desktop webview's snapshot outlives
+  every add and remove after it, so it would offer no way back after an account was
+  added and a way back to one since removed.
+
+**Status.** Reversed an earlier decision — Q3.607's second entrance: the Server
+address row changes nothing now. Amends Q4.121's welcome, whose box opens locked on
+the default.
 
 ## Deployment, packaging and code layout
 
@@ -25756,7 +26073,10 @@ Environment at **compile** time rather than run time, because a bundle has no
 environment to read when Finder, Explorer or a desktop entry launches it.
 `build.rs` carries `cargo:rerun-if-env-changed` for the name, without which
 `option_env!` is baked into a cached object file and a fork that corrects its
-address gets a binary silently keeping the previous one.
+address gets a binary silently keeping the previous one. [⚠ amended by Q4.127: no
+file here gives it a value still, and `release.yml` forwards the repository variable
+of that name to both app jobs — the one form `nativecheck` lets through. The field
+opens on it locked, with a pencil beside it (Q3.643).]
 
 ⚠ **A suggestion for a form field, and written down by nothing — which is the
 third answer, both of the first two having been built and taken back out.**
@@ -26186,6 +26506,62 @@ ordinary first-run state as a fault.
 nothing now: that state reads *"No agent is set up on this machine yet."* and offers
 Agent settings, and the press is on the harness's card, opened by its row's Set up on
 the machine's Agents list. The reason for a sentence of its own is unchanged.
+
+### Q4.127 — Where a release's default server comes from, and why the repository still names none
+
+**Question.** The owner's decision: the released apps open on `app.reemoat.com`.
+Q4.121 made the default a compile-time suggestion and had `nativecheck` assert that
+no file here sets it, so that a fork inherits no address. How does this
+repository's own release get a default without the repository naming a server?
+
+**Decision. From a repository variable, forwarded by one line.** The `app` step of
+both app jobs in `release.yml` — `app` and `app-android` — carries exactly
+`REEMOAT_DEFAULT_SERVER: ${{ vars.REEMOAT_DEFAULT_SERVER }}`, and a `default server`
+step ahead of each writes the value into the job summary, or *none (the repository
+variable is unset)*. The value is set in the forge (`gh variable set`), not in a
+file, and a fork inherits no repository variables — so a fork's release opens on an
+empty box exactly as before, and this repository still names nobody's server.
+
+**A variable, not a secret.** `option_env!` puts the value in the binary as plain
+text. A secret would be masked in the logs while shipping in every download, which
+is a secret in name only, and it would make the one line that is allowed look like
+something it is not.
+
+**Unset is the empty string, not absence.** `${{ vars.X }}` of a variable nobody set
+expands to `""`, so `option_env!` answers `Some("")`. `default_server` already turned
+that into no default — `normalize_origin` refuses it — and
+`a_compiled_default_is_an_address` now skips a blank value, since it would otherwise
+fail every build made from an unset variable.
+
+**`nativecheck` holds both halves.** The sweep that used to read five files now reads
+every tracked file that is not prose (`git ls-files`), line by line — `build.rs`,
+`packages/native/scripts`, `deploy/`, `.github/` and any cargo `[env]` table
+included. A line is a setter when it names the variable followed by `=` or `:` and a
+value, unless it is that exact forward in `release.yml`. The predicate is driven
+against a table, so a loosened predicate goes red while no file tests it: a literal,
+a `secrets.` read, `vars.X || 'literal'`, a `cargo:rustc-env`, a `process.env`
+assignment and the same forward in `check.yml` are all setters, and the
+`rerun-if-env-changed` line is not. And it asserts the forward **is present** in both
+app jobs and that no other job reads the variable — a deleted forward is a release
+that silently opens empty, green in every other check here. The fixtures are exempt
+by living in `nativecheck` itself, and `config.rs`'s test message was reworded so it
+no longer reads as a setter.
+
+**Rejected.**
+
+- **A literal in `release.yml` or `deploy/ci-release.sh`.** An address in the
+  repository, which every fork's release then carries.
+- **A secret** (above).
+- **`${{ vars.X || 'https://…' }}`** — a literal with a step in front of it.
+- **A literal on the page**, `import.meta.env` — Q4.121's rejection stands.
+- **A protected `release` environment with required reviewers.** The critique's
+  point is real: a variable is edited outside code review, and a locked,
+  pre-filled field (Q3.643) makes it a trusted default somebody sends a password to.
+  Not added in this change; the job summary printing the value is detection, not
+  prevention. Recorded as open in Q7.149.
+
+**Status.** Current. Amends Q4.121: no file here names a server, and one line
+forwards a variable that does.
 
 ## Invariants — rules that were defects first
 
@@ -27760,6 +28136,7 @@ a clock.
 | Elicitation form | 24 fields, 24 options per field, **32 KiB** on the projected total, and an option value of 512 — all four **refusals**, because `clampBlob`'s `{truncated: true, bytes}` is fine above an Approve button and useless above a form. **Prose is carried whole** — the three character caps on `message`, a field title and a description were removed in Q2.214, because with several questions on one form the *question itself* is the field's description and a 300-character cap was a cap on it. Structure is refused; the byte total is the only bound left, and it is asserted against one enormous string as well as a thousand small ones. 32 KiB rather than a permission's 8 because the form does **not** ride the snapshot. An answer over 2048 characters is refused on the route and never cut, while the *log's* rendering of it is clipped, visibly. Measured 2026-08-06 against live claude: a two-question `AskUserQuestion` is 4 fields, 4 options each, longest value 19 characters, ~2.5 KiB, and the tool's own schema caps it at 4 questions — so every one of these bounds the pathological case rather than a real form |
 | Auto-resume | 3 attempts per session per **daemon life** — in memory, so a restart tries again, deliberately: a restart is new information and refusing to retry would make the deploy that fixes the bug fix nothing. 2 agents starting at once, because each is a node subprocess with a `claude` grandchild. Backoff 2s→60s with **full** jitter, since the attempts start together and a narrow band keeps them synchronised. The failure on the snapshot is capped at 64 characters of code and 512 of message — an order tighter than a pending permission's 8 KiB, because unlike a permission nothing here has to be *acted on* from the list, only recognised |
 | Shutdown | 20s for the graceful stops, then a **bounded** 3s parallel SIGKILL sweep, inside `daemon.ts`'s 25s hard exit. The sweep is a syscall per session rather than an exec, so the bound costs nothing — and it stays, because the reason a teardown is bounded does not depend on what it costs |
+| Accounts on one computer | **10 per installation** (`MAX_ACCOUNTS`) — past it *Add account* is not drawn and the host refuses `account_limit`. A bound on this computer rather than on a control plane: every account is a webview, a keyring scope and, once set up, a daemon of about 136 MB from launch to quit, and ten is what a laptop is asked to keep alive (Q7.149) |
 
 #### Q5.100 — Why do the containment predicates have a *resolved* form as well?
 
@@ -28395,7 +28772,11 @@ It is local, instant, cannot fail, and erases `credential#<old origin>` through
 the same call `host_set_server` was about to make one line later. [⚠ amended by
 Q7.148: it is `detachSession` now, the in-memory half, and neither side erases the
 old origin's entry — a switch keeps that server signed in. The order is unchanged
-and is still the rule; a refused switch re-adopts the copy it let go of.]
+and is still the rule; a refused switch re-adopts the copy it let go of.] [⚠ extended by
+Q5.120: a signed-in account's server never moves now — `host_set_server` refuses
+anything but a pending seat — so no path the app draws opens this window. The order
+stays as the belt, and wherever a webview is rebound to another account the host
+refuses the old document's commands instead.]
 
 **Priced, because the safe-looking order is the wrong one.** Clearing first costs
 one sign-in in the case where `setNativeServer` then fails on a full disk:
@@ -28569,6 +28950,89 @@ probes in the sections that build a bare `LocalRuntime` — `claude auth status`
 `grok models`. Those are Mach-O binaries that register nothing and draw no tile, and
 one of those sections exists precisely to `report` what this machine answers. The
 spawn that mattered was the ACP handshake, and it is gone.
+
+#### Q5.120 — A command is bound to the document that sent it, and a signed-in account's server never moves
+
+**The defect, which one webview holding two accounts creates.** Wherever a webview
+is *rebound* — every switch in the single-webview arm, and forgetting the last
+account in both arms (Q7.149) — its label outlives the document that was on it. A
+host that resolved the account from the label alone would answer the previous
+document about the next account, and three shapes of that were real before this
+rule:
+
+- a poll or a `cpFetch` in flight between the rebind and the reload hands account
+  A's bearer, through `host_cp`, to account B's server — Q5.116's disclosure,
+  crossing accounts;
+- a sign-out's fire-and-forget `host_credential_clear` lands after the rebind and
+  erases B's credential — the race Q7.148 recorded, crossing accounts;
+- Android's Back (the activity answers it with `goBack()`) or a back/forward-cache
+  restore revives A's document, and its `host_boot` would be handed B's credential,
+  because the per-page-load hand-over had been reset.
+
+**Rule 1 — every seat-scoped command presents the generation of the document that
+sent it, or is refused `stale_document`.** `host_boot` issues one per page load,
+sixteen random bytes; `lib.rs`'s `on_page_load(Started)` retires it
+(`Host::page_loaded`), and so does every rebind (`Host::move_seat`). The page sends
+it in the `reemoat-generation` invoke header (`GENERATION_HEADER` on both sides):
+`native.ts`'s `invoke` adds it to every command but `host_boot` (`withGeneration`,
+pure and driven), and answers the first `stale_document` with
+`window.location.replace("/")` — once, so a burst of refused calls queues one
+navigation. Each of the three shapes above is a document that is not the one its
+seat belongs to now, and each is now the same refusal.
+
+**Why a header.** It is the one field Tauri carries beside a command's arguments
+without the command's signature seeing it, so no command gains an account parameter
+(Q1.651). The comparison is plain equality: the page holds the value, so it binds a
+document rather than authenticating one.
+
+**`rebinding`, for the page load that trails.** Between a rebind and the new page
+load `host_boot` answers `rebinding: true` with no generation and no credential. On
+Android the page-load event is posted to the UI thread while the new document's
+first call can arrive first on the bridge's, so the page asks again with a doubling
+pause for `REBIND_PATIENCE_MS` (two seconds) before taking the answer as it stands —
+a sign-in form over a document whose first command is refused and reloads it, which
+is a recovery rather than a hang.
+
+**Account moves use `location.replace`, never `assign`**, so Back cannot bring the
+left account's document back to be refused again; `webcheck.native-bridge.ts`'s
+navigation sweep admits `location.replace` with a root-relative literal.
+
+**Rule 2 — `host_set_server` is refused unless the seat is pending**
+(`pending_seat`). An account is its server (Q1.651); the only window whose server may
+move is one nobody has signed in to — a first run, an account being added, or
+`‹ Server` on a pending sign-in. So Q5.116's window — a live bearer in the page while
+the host's base moves — is on no path the app draws now. `ChooseServer`'s `submit`
+keeps its detach-then-set order byte for byte, as the belt for the day an entrance
+holding a credential comes back, and Q5.116's index pins still hold on it.
+
+**No `detachSession` on a switch, and that absence is asserted.** A document is one
+account for its whole life. Where the host shows another webview, this page stays
+alive and hidden with its session, sockets and poll; where it rebinds this one,
+Rule 1 refuses whatever it still sends. A detach would strand a live hidden page
+with no credential in the first case and guard nothing in the second.
+
+**Defence in depth, not structure.** `host_cp` also refuses an `authorization`
+header from a pending seat and on a probe override (Q1.651). The CSP lets the page
+`fetch` anywhere, so these guard against a page that is *wrong* — a late poll, a
+stale bearer — and not against a hostile one; `script-src 'self'` is still what
+keeps a hostile one out.
+
+**Asserted.** `nativecheck`: every seat-scoped command takes the `Webview` and the
+`Request` and no account, origin or scope parameter; `host_boot` and
+`host_account_confirm` are the only bodies that read a credential, and only the
+first hands one to the page; the header's name matches on both sides; `host_set_server`'s
+pending guard; `host_cp`'s two refusals. `webcheck`: the header on every invoke but
+the first, the reload on `stale_document` once, no `detachSession` in
+`switchAccount`, and the bootstrap's order.
+
+⚠ **Closed by construction, measured on no device.** Whether a bfcache restore fires
+`Started` does not matter to the rule — either the restore retires the generation
+or the new document's did, and the old one's value matches neither — but whether
+`tauri::ipc::Request` headers reach a command, and when `Started` fires on Android,
+are Q7.149's spike items 14 and 9, and neither has been run.
+
+**Status.** Current. Extends Q5.116 to a rebind, and closes the race Q7.148
+recorded.
 
 ## Measured behaviour of the agents and the tools
 
@@ -35602,7 +36066,9 @@ Settings → Machines → *that machine*, beside the "This device" switch.
 **No way back to the compiled default.** Once somebody saves an address the file
 wins for ever, which is the whole point of seeding (Q4.121) and also means there
 is no "reset to the shipped server" control. Deleting `server` from the shell's
-config is the remedy, and nothing surfaces it. Left open rather than built: the
+config is the remedy, and nothing surfaces it. [⚠ amended by Q3.643: an account's server never
+changes, so there is nothing to reset; another server is another account, and
+*Add account* opens on the compiled default.] Left open rather than built: the
 population that needs it is a fork's users on a build whose default moved, and
 nobody has one yet.
 
@@ -35903,7 +36369,10 @@ question: *why not just restart the one daemon when the server changes — and w
 does it cost with three instances?*
 
 **Decision. Each server gets a state root of its own and a daemon of its own,
-started the first time the app opens that server and stopped when the app quits.**
+started the first time the app opens that server and stopped when the app quits.** [⚠ amended by Q7.149: per account — a server's first account keeps the root chosen
+below, every further one gets `~/.reemoat/servers/<server>@<user id>/` — and every
+listed account's set-up daemon starts with the app rather than when a page opens it;
+the host's supervisors are keyed by root.]
 
 - **Which root** is `state_root` in `daemon.rs`, first match wins: `~/.reemoat` when
   its `daemon.env` names this server (the launchd / `install.sh` daemon works exactly
@@ -36044,7 +36513,9 @@ is a fraction of the agents it runs, and those are per session, not per server.
 - **Scanning `servers/*` and starting every root at launch**, which would keep every
   fleet reachable from a phone while the app runs but spend a process on servers
   nobody opened. Only the servers opened in this run get one; the other shape is an
-  open question below rather than a default.
+  open question below rather than a default. [⚠ reversed by Q7.149 for accounts:
+  every listed account's root whose env file names its server starts at launch.
+  Still no scan of folders no listed account owns.]
 - **`REEMOAT_HOME` and `REEMOAT_PORT` written into the file.** Two more owned keys,
   a longer list of what a refreshed code may rewrite in a file `install.sh` wrote,
   and a second daemon's address turned into a setting somebody can copy into the one
@@ -36080,7 +36551,8 @@ is a fraction of the agents it runs, and those are per session, not per server.
   ephemeral port.
 - **Every server somebody signs in to gets this computer as a machine**, spending a
   quota slot and starting a daemon, which is today's first-server behaviour extended.
-  Whether a second server should be opt-in is open.
+  Whether a second server should be opt-in is open. [⚠ answered by Q7.149:
+  every account, and not opt-in.]
 - **The dev and the release build share `com.reemoat.app`**: open together, each
   adopts the other's child as `foreign`, and quitting the one that started it stops
   a daemon the other is using. Pre-existing, now per server. So is a force quit,
@@ -36105,7 +36577,8 @@ is a fraction of the agents it runs, and those are per session, not per server.
   way because that arm is the happy path, and a control plane that blinked between
   the spawn and the poll would draw a failure over a daemon that came up fine. A
   later bootstrap in the same run — a Retry — finds the child and says it; the next
-  relaunch is silent again.
+  relaunch is silent again. [⚠ closed by Q7.149 for accounts in this app: each
+  has a root of its own, and a server's own root changes hands only on proof.]
 
 **And a switch keeps the sign-in it leaves.** `host_set_server` erased
 `credential#<previous>` in the same act (Q1.640), on the argument that nothing
@@ -36134,7 +36607,11 @@ would sign everybody out on every launch. And a sign-out whose `DELETE` settles
 between a switch and its reload erases the *new* server's entry, since the
 credential and device commands act on whichever origin is current when they run —
 a race older than this change, which a kept credential makes cost a sign-in rather
-than nothing.
+than nothing. [⚠ closed by Q1.651 and Q5.120: `host_set_server` is refused for
+anything but a pending seat, a webview's commands answer about its own account and
+name no other, `host_boot` hands a credential over once per page load, and a
+document the host has moved past is refused rather than answered about the account
+that replaced it.]
 
 **Status.** Reversed an earlier decision: the one-slot announcement of Q7.137 —
 `daemon.json` under `homedir()`, removed by whoever stopped — is one per state root,
@@ -36142,3 +36619,256 @@ removed only by the daemon that wrote it; and Q1.22's 7887 no longer holds for t
 daemons the desktop app runs for a server other than the one `~/.reemoat/daemon.env`
 names, which get `0`; and Q1.640's erase of the previous server's credential on a
 switch.
+
+### Q7.149 — Several accounts on one computer: a webview, a keyring scope and a daemon per account
+
+**Question.** The owner asked for Telegram's arrangement: several accounts in one
+app, a switch that is fast, and work in the account left behind that keeps running.
+Two decisions came with it (2026-09-23): **every account gets this computer as a
+machine of its own**, with its own root and database, the first account on a server
+keeping today's root so `install.sh` stays compatible; and **every account's daemon
+runs from launch to quit**, whichever account is on screen. Q7.148 gave a daemon to
+each *server*, and the page is one credential, one store and one 401 rule. What does
+a second account on one computer cost, and where does it live?
+
+**Decision. Each account is a webview, a keyring scope and — once set up — a daemon
+of its own.** The account itself, and who decides which one a call is about, is
+Q1.651; binding a call to a document is Q5.120.
+
+- **A webview per account, on macOS.** `seats.rs` is the only file that builds a
+  webview. With `MULTI_WEBVIEW` — macOS only — there is one window, `main`, holding a
+  child webview per account, labelled `seat-<n>`, since an account key's `#` and `.`
+  are outside Tauri's label alphabet. At launch (`seats::open_at_launch`, which
+  writes nothing) the window is built hidden, the account shown last is added at
+  full size and the window shown, then every other account is added at zero size and
+  hidden: a webview has no visible flag, and none may flash over the one being
+  looked at. A switch is hide-then-show — nothing reloads, a page keeps its heap, its
+  sockets and a half-typed draft, and a turn in the account left goes on streaming
+  into a page nobody is looking at. A pending caller, an *Add account* that was
+  cancelled, is closed. It needs Tauri's `unstable` feature — `Window::add_child`,
+  `tauri::window::WindowBuilder`, `tauri::webview::WebviewBuilder`,
+  `Manager::get_webview` — which a `[target.'cfg(target_os = "macos")'.dependencies]`
+  table enables for macOS alone, because with it on even a plain `WebviewWindow` is
+  built as a window child with bounds of its own, a change nobody has measured
+  elsewhere.
+- **One webview everywhere else, rebound.** Windows, Linux and Android — and macOS
+  with `MULTI_WEBVIEW` flipped off — keep one `WebviewWindow`, `main`. A switch
+  moves its seat to the other account (`Host::move_seat`), the host answers
+  `AccountMove.reload`, and the page leaves with `location.replace("/")`. Linux is
+  here on purpose: tao packs a window's children into a `GtkBox` and ignores their
+  bounds, so two children split the height. Windows is here until a pass of its own
+  measures WebView2 building N webviews on the main thread at launch. The page never
+  branches on the arm; `reload` is the whole of what it knows.
+- **Every webview is built from `main`'s configuration, and guarded.** `from_config`
+  carries `dragDropEnabled: false` and the background colour into every child, and
+  `on_navigation(is_our_own)` is on every one; there is no `initialization_script`
+  anywhere. `nativecheck` asserts both of `seats.rs` and that nothing builds a
+  webview any other way.
+- **Each page is a single-account app.** `Boot` answers about the calling webview's
+  account — `server`, `credential` once per page load, the device fields and
+  `claimed`, plus `account`, `name`, `legacy`, `deviceBound`, `generation` and
+  `rebinding` — so `cp.ts`'s one credential, the 401-by-identity rule (Q1.412) and
+  the store singleton stand unchanged.
+- **A daemon per account, owned by the host.** A server's first account — its owner
+  in `server.json`'s `roots` — keeps the root Q7.148's `state_root` gives that server
+  (`daemon::owner_root`), which is `~/.reemoat` where `install.sh`'s file names it.
+  Every further account on that server gets `~/.reemoat/servers/<server>@<user id>/`
+  (`daemon::guest_root`): never the legacy root, so always on the kernel's port, and
+  injective, since `@` is in no slug and `accounts::is_user_id` refuses it. The host's
+  supervisor map keeps its type, keyed by the root's directory, so a legacy seat and
+  the account it becomes share one. At launch `daemon::start_configured_at_launch`
+  starts, on a thread of its own, every listed account's daemon whose env file
+  already names its server — the adoption path, no enrollment code and no machine
+  created — **whether or not a page is alive**: in the single arm only the account on
+  screen has a page, and macOS 14 and later suspends a hidden `WKWebView` after about
+  five minutes. Pages still create machines and enroll.
+- **Root selection is serialized.** Q7.148's third rule hands an empty `~/.reemoat`
+  to whoever asks, which is a fact about the disk at one instant — two owners of two
+  servers setting up together at launch could both see it empty, and the second
+  `Supervisor::start` would answer `Ok` over the first's child. `ROOT_LOCK` is held
+  from `state_root` through `Supervisor::start`, and `server.json`'s
+  `legacy_root_holder` records the origin that was handed the folder, so any other
+  origin asking the third rule is sent to one of its own. `machine.json` gained
+  `CLAIM_LOCK` and an atomic write for the same launch: eight webviews setting up at
+  once would otherwise interleave read-modify-writes and lose a claim — a quota slot
+  each.
+- **A guest reads its own announcement and nobody else's.** `announce_roots` answers
+  `[own]` for a guest and `[own, legacy]` for an owner or a legacy seat: `~/.reemoat`
+  is the owner's or `install.sh`'s, and a guest's page handed that daemon's machine
+  id would adopt another person's machine as its own and never get one.
+- **Taking an account off this computer stops its daemon.** Sign out
+  (`store.signOut`, then `cp.logout`, then `forgetNativeAccount`) and *Remove
+  account* both run `host_account_forget`, which acts on the caller only: erase its
+  credential; stop its root's supervisor unless another listed account shares the
+  root; drop the entry (`config::forget_account`, which keeps the device id, the key
+  and the `roots` record, so signing in again as the same person reuses the device
+  row and the root); then show the most recently shown other account — a hidden
+  caller closes itself and leaves the screen alone — or, with none left, rebind to a
+  sign-in on the same server. It is not started at the next launch, which starts only
+  listed accounts. A switch, an add, a confirm and a sign-in stop nothing, and
+  `nativecheck` pins both halves.
+- **A hidden webview cannot reach the screen.** Every page runs, shown or not, and
+  may be rendering agent output, so `host_account_switch`, `host_account_add`,
+  `host_save_file`, `host_pick_folder`, `host_open_external` and `host_copy_text`
+  are refused `not_shown` from any label but the one on screen.
+- **The lock rule.** No `Host` mutex but `changing` is held across a `Window` or
+  `Webview` call, and nothing on the main thread takes `changing`: creating, showing
+  and closing a webview run on the main thread and are waited for, and the main
+  thread runs `on_page_load`, which takes `seats`. `host_boot` became `(async)` for
+  the same launch — every account's webview boots at once, and on the main thread
+  each keyring read would queue in front of the shown page's first paint.
+- **`MAX_ACCOUNTS` is ten** (Q5's table); past it the host refuses `account_limit`
+  and the drawer draws no *Add account*.
+
+**Why not several credentials in one page.** `cpFetch` attributes a 401 by comparing
+`credential === sent` by identity (Q1.412), the store is a singleton owning one
+session's sockets and poll, and every screen reads *the* account. Giving all of them
+an account dimension is a rewrite of the client for something the host provides by
+building a webview.
+
+**What it costs.** Q7.148's measurement stands per daemon — about 136 MB of physical
+memory, idle at almost no CPU — so N set-up accounts cost about N × 136 MB from
+launch to quit, plus a hidden `WebContent` process per account on macOS, which has
+not been measured.
+
+**The multi-webview arm was measured before it shipped**, against `tauri` 2.11.5,
+`tauri-runtime-wry` 2.11.4 and `wry` 0.55.1 with `unstable` on the macOS target —
+the pair `nativecheck` pins as `MEASURED_TAURI`. The gate was these sixteen checks;
+`docs/NATIVE.md` steps 29–43 walk them by hand:
+
+1. hide and show are instant, and a hidden page keeps its heap and its sockets;
+2. `visibilitychange` fires and `resume()` runs on show;
+3. a webview hidden at launch still completes its bootstrap;
+4. auto-resize follows the window, full screen included, once a switch has reset
+   the zero-size bounds;
+5. `set_focus` moves the keyboard to the webview shown;
+6. the navigation guard applies to each child;
+7. an OS file drop reaches the Composer in each child;
+8. the caller's label reaches the host;
+9. `on_page_load(Started)` fires before the new document's first call — on Android
+   too;
+10. `add_child`, and a webview closing itself from an `(async)` command, do not
+    deadlock;
+11. closing the window reaches `RunEvent::Exit` and `stop_all`;
+12. the memory each hidden webview holds;
+13. a page hidden for more than ten minutes, with a live socket and a setup retry;
+14. `tauri::ipc::Request` headers are readable in a command — the generation rides
+    one;
+15. the locked `<input disabled>` has the computed style its classes promise, in
+    WebKit;
+16. a back/forward-cache restore after a switch.
+
+A pass is items 1–8, 10 and 11. If the arm fails, the fallback is one line —
+`MULTI_WEBVIEW = false` — which gives macOS the rebind-and-reload arm and keeps
+every other rule here.
+
+**Measured**, 2026-09-23, macOS 15.6, a bundled release build driven by itself
+through `Webview::eval` against a local control plane — the session had no
+Accessibility grant, so nothing could be clicked from outside — with an isolated
+`HOME` and keychain. **Pass: `MULTI_WEBVIEW` stays `true`.**
+
+- **1** A switch is 0.2–1.0 ms of host work and 9–22 ms from the tap to the other
+  page's `visible` (one outlier, 128 ms). The heap survived every check, and a
+  loopback WebSocket stayed open through 16 minutes hidden with no gap in 509 replies.
+- **2** Paired `hidden`/`visible` events on every switch; after 20 s or more hidden,
+  `resume()` ran on show and minted fresh tokens 258–410 ms later. ⚠ Measured with
+  WebKit's window-occlusion detection switched off in the throwaway harness: the
+  console screen was locked, which reports every page hidden. With it on and the
+  screen unlocked is a hand check.
+- **3** A seat created hidden at launch completed its bootstrap and drew its machine
+  list; `start_configured_at_launch` started both accounts' daemons in 63 ms, before
+  either page asked.
+- **4** Resizing with one seat hidden resized both, the hidden one included. Full
+  screen could not be entered on a locked session — a hand check.
+- **5** The shown `WKWebView` is the window's first responder after every switch and
+  the hidden one is not; `document.hasFocus()` needs an active app — a hand check.
+- **6** `location.href` to a foreign address was refused in a hidden and a shown seat.
+- **7** Not drivable without Accessibility — a hand check.
+- **8, 14** Every command carried its caller's label and the `reemoat-generation`
+  header; one sent without it was refused.
+- **9** On macOS, `Started` preceded the document's `host_boot` 20 times out of 20,
+  by 11.5–26.2 ms. Android is unmeasured.
+- **10** `add_child` took 4–5 ms inside `host_account_add`; a webview closing itself
+  from its own `(async)` command returned every time, with no deadlock.
+- **11** Closing the window reached `RunEvent::Exit` and `stop_all`, which stopped
+  two daemons in 60 ms and left no WebContent process.
+- **12** A seat's WebContent process holds 55–57 MB at launch and about 105–122 MB
+  after twenty minutes of use; a pending sign-in about 48 MB; each daemon 112–146 MB.
+- **13** Hidden for 982 s: throttled to about 0.5 Hz for the first 484 s, then
+  suspended by WebKit — timers frozen, the socket not closed. On show, all 248 queued
+  messages arrived in order and `resume()` ran. The setup-retry half is unmeasured.
+- **15** Locked: ink `--color-muted`, border `--color-edge`, opacity 1 — WebKit adds
+  no disabled styling of its own; the pencil unlocks, focuses and selects.
+- **16** Not applicable to this arm: a switch never navigates.
+
+**Two defects found by it, both fixed before this shipped.** The first build
+reloaded **728 times in twelve seconds** and drew nothing: `store.bootstrap` fires
+`loadConfig` before it awaits `hostReady`, that `host_cp` went out with no
+generation, was refused `stale_document`, and the refusal reloaded the page —
+`native.ts`'s `invoke` now waits for the boot while it is in flight, and
+`shouldLeave` reloads only on the refusal of a call that carried a generation. The
+second: `Webview::close` left a closed account's page running — a signed-out
+account's socket still answered 17 s later, and every cancelled add kept a
+WebContent process of about 48 MB until quit — so `seats.rs` sends the view
+WebKit's `_close` first (`end_page`), asked for with `respondsToSelector:` rather
+than assumed; `nativecheck` pins the order. A hidden seat added at zero size reports
+`innerHeight` −28 until it is first shown — the title bar's inset — which nothing
+here reads while hidden.
+
+**Rejected.**
+
+- **Several credentials in one page** (above).
+- **One daemon per server, shared by the accounts on it.** The daemon checks a
+  token's `aud` and never its subject (Q7.148), so two people's sessions in one
+  database are served to whoever holds a grant on either — Q7.148's argument from
+  servers, extended to people.
+- **A window per account.** A second presence in the dock and in window management
+  per account, for something a switch shows in place.
+- **Several accounts in the browser.** One origin is one `localStorage`; the web arm
+  and its three storage names stay byte-identical, and a browser reaches no machine
+  anyway (Q1.649).
+- **Starting daemons from pages**, the first design. It breaks the owner's decision
+  in the single-webview arm, and under macOS's suspension of hidden webviews.
+- **Keeping a removed account's daemon to the next quit.** It would go on serving
+  that account's phones and grantees, running agents as this person, under a screen
+  saying the account is gone.
+- **Namespacing `localStorage` per account now** — see the first limitation.
+
+**A deliberate non-goal: notifications and badges for accounts not on screen.** The
+drawer draws no unread count and no dot for another account, and nothing notifies
+across accounts. A hidden account's work still runs; what is not built is telling
+somebody about it. The owner's call, for this iteration.
+
+**Known limitations.**
+
+- **`localStorage` is shared by every account's webview.** One origin, one
+  `WKWebsiteDataStore`: `configMemory`, `machineOrder`, the groups and the
+  local-route switches are one set for every account, and one account's sign-out
+  `forgetAllConfig` clears the others' remembered controls. The sweep only ever
+  deletes, so a convenience is lost and nothing is disclosed, and a confirm that
+  finds its account already here deliberately does not sweep. The fix is a
+  per-account key prefix, or `data_store_identifier` once macOS 14 is the floor — the
+  bundle's minimum is 13.
+- **Every account's daemon shares `HOME`**, so the agent CLIs' own sign-ins
+  (`~/.claude` and the rest) and the toolchain are one set across accounts, as they
+  were across servers (Q7.148); an agent run for one account runs as the same uid as
+  every other's.
+- **Losing `server.json` orphans keyring entries.** The keyring cannot be listed, so
+  `accounts` is the only record of which entries exist; a deleted or quarantined file
+  leaves them until they expire, and the next sign-in makes fresh ones.
+- **A downgrade signs migrated accounts out.** An earlier build reads
+  `credential#<origin>`, which a migrated account no longer has, and knows nothing of
+  `accounts`. Its read-modify-write keeps the fields it does not know (`Stored.rest`),
+  so going forward again finds them.
+- **The single-webview arm reloads on every switch**, on Windows, Linux and Android,
+  and keeps no page state across one. A spike of their own is what moves them.
+- **No protected `release` environment for the default-server variable** (Q4.127).
+  Anybody who can write repository variables can repoint every new installation's
+  locked default outside code review; the job summary is detection, not prevention.
+- **`install.sh` reaches only the legacy root** (Q7.148), so a guest root's daemon
+  lives exactly as long as the app.
+
+**Status.** Reversed an earlier decision — Q7.148's root and daemon per server, which
+are per account now; its rejected "start every root at launch", since every listed
+account's set-up daemon starts with the app; and its recorded widening and race,
+both closed by Q1.651 and Q5.120.

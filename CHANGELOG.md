@@ -25,6 +25,26 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-23
+
+### Added
+
+- **Several accounts in one app.** The menu now opens on your face, your name and
+  the server the account is on; pressing the name lists every account on this
+  computer, the current one ringed, then **Add account**. Tapping another account
+  switches to it — on a Mac at once and exactly as you left it, with the work in the
+  account you left still running; on Windows, Linux and Android the app reloads
+  onto it. **Add account** signs in to another account, on the same server or
+  another one, while the others stay signed in — up to ten.
+- **Every account gets this computer as a machine of its own**: its own daemon,
+  database, sessions and working copies, running from when the app opens until it
+  quits whichever account is on screen, and using one of that account's machine
+  slots. The first account on a server keeps that server's folder; each further one
+  lives in `~/.reemoat/servers/<server>@<user id>/`.
+- **The server step opens on the server the app was built for**, greyed, with a
+  pencil beside it to change it. An app built without one opens on an empty box, as
+  before.
+
 ### Removed
 
 - **The "Rent a machine" link.** An instance whose control plane set
@@ -47,11 +67,20 @@ it — so a citation here would be the one kind nothing checks.
   in or would not start now has **Set up <agent>** in its menu. It opens that
   agent's own screen: install with the installer's output, then sign in. The
   list's own Install, which ran with no output, is gone.
-- **Switching servers no longer signs you out of the one you left.** The app kept
-  one sign-in and gave it up on every server change, so moving between two fleets
-  meant signing in again each way. Each server now keeps its own on this computer,
-  and switching back asks nothing. Signing out still signs out of the server you
-  are on, and only that one.
+- **Settings → Account → Server address shows your account's server and no longer
+  changes it.** Another server is another account: add it from the menu. A wrong
+  address typed while signing in is still corrected from **‹ Server** on the
+  sign-in screen.
+- **Signing out signs out of the account on screen and takes it off this
+  computer**, stopping its daemon; the app moves to the account you used before it,
+  or to the sign-in for that server if it was the last. Signing in as that person
+  again later brings back the same device and the same machine. An account whose
+  session ends by itself stays in the menu, marked *signed out*, and its sign-in
+  screen offers a way back to your other accounts and a way to remove it.
+- **Updating keeps you signed in.** The first launch asks the server whose sign-in
+  this computer holds and moves it to that account; the device and the machine
+  beside it move only where the server confirms they are that account's. Going
+  back to an earlier release afterwards asks you to sign in again.
 
 ### Fixed
 
@@ -69,20 +98,22 @@ it — so a citation here would be the one kind nothing checks.
   ("local-2405b5ea…") so only this computer reads "local". If you have dragged it
   somewhere in the list, it stays where you put it; if you had rearranged the
   machines before this release, it stays where it was until you move it.
-- **The app can set a computer up for more than one server.** Signed in to a
-  second server it used to refuse ("This computer could not be set up"), because
-  the daemon settings in `~/.reemoat` named the first. Each server now gets its own
-  daemon, database, sessions and working copies — `~/.reemoat` stays with the
-  server its `daemon.env` names, and every other lives under
-  `~/.reemoat/servers/<server>/` on a port the system picks — started the first
-  time the app opens that server and stopped when the app quits, all together.
-  Switching servers interrupts nothing: the other server's daemon, its running
-  turns and pending approvals, and a phone's way to this computer through it stay
-  up while the app runs. A second server starts empty — no plugins, system keys,
-  custom agents or pasted keys of its own — while the agent CLIs' sign-ins are
-  shared. `REEMOAT_AGENT_UPDATES`, `REEMOAT_AGENT_SOURCE` and
+- **The app can set a computer up for more than one server, and for more than one
+  account on each.** Signed in to a second server it used to refuse ("This
+  computer could not be set up"), because the daemon settings in `~/.reemoat` named
+  the first. Each account now gets its own daemon, database, sessions and working
+  copies — `~/.reemoat` stays with the server its `daemon.env` names, a server's
+  first account otherwise lives under `~/.reemoat/servers/<server>/`, and each
+  further account on a server under `~/.reemoat/servers/<server>@<user id>/`, on a
+  port the system picks. Every account that is set up has its daemon started when
+  the app opens, and all of them stop together when it quits. Switching accounts
+  interrupts nothing: the other account's daemon, its running turns and pending
+  approvals, and a phone's way to this computer through it stay up while the app
+  runs. A new account's daemon starts empty — no plugins, system keys, custom agents
+  or pasted keys of its own — while the agent CLIs' sign-ins are shared by every
+  account. `REEMOAT_AGENT_UPDATES`, `REEMOAT_AGENT_SOURCE` and
   `REEMOAT_AGENT_CHANNEL` in `~/.reemoat/daemon.env` do not yet reach the daemons
-  for other servers.
+  for other servers and accounts.
 - **A daemon running here for this server that the app did not start is no longer
   met with silence.** One whose machine is in your list is adopted as before; one
   your account cannot see is named in the setup notice.
@@ -93,8 +124,8 @@ it — so a citation here would be the one kind nothing checks.
   daemon removed `daemon.json` on its way out, whoever had written it; now only the
   one that wrote it does.
 - `install.sh --uninstall --purge` names the desktop app's daemons for other
-  servers before deleting them, and `--uninstall` lists them among the data it
-  keeps.
+  servers and accounts before deleting them, and `--uninstall` lists them among the
+  data it keeps.
 - **The model chip read "Newer version availa…" after Claude Code moved its
   `opus` alias.** Claude Code 2.1.280 describes a conversation resumed on a model
   an alias has since moved past with a notice instead of the model's name, and the

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { inflateSync } from "node:zlib";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -762,12 +763,38 @@ process.stdout.write("\nthe announcement, from both sides of it\n");
   const bootBody = flat(rustCode(between(commandsRs, "pub fn host_boot(", "pub fn host_device_dh(")));
   check("the boot command was found to read", bootBody.length > 0, true);
   check(
-    "it reads this app's claim for the server it boots on",
-    /let claimed = server\.as_deref\(\)\.and_then\(\|origin\| daemon::read_claim\(&host\.config_dir, origin\)\);/.test(bootBody),
+    "it reads this app's claim for the account it boots on",
+    /let claimed = scope\.as_deref\(\)\.and_then\(\|scope\| daemon::read_claim\(&host\.config_dir, scope\)\);/.test(bootBody),
     true,
   );
   check("and hands it over as the field", /\bclaimed,\s*\}/.test(bootBody), true);
   check("without proving a daemon to do it", /is_alive|read_announced|local::read|announce_roots/.test(bootBody), false);
+  /*
+   * ⚠ **The credential crosses the bridge once per page load, and for this
+   * webview's account only** (Q1.651, Q5.120). With a webview per account, one
+   * page that a script got into must not be able to keep asking — and the keyring
+   * entry read is the seat's own scope, resolved by `Host::boot` from the label.
+   * Three halves, because each alone is satisfied by the wrong code: the read is
+   * gated on the one-shot, it is the only read in the body, and the seat comes
+   * from the host rather than from anything the page sent.
+   */
+  check(
+    "it hands the credential over only on this page load's first boot",
+    /let credential = scope\.as_deref\(\)\.filter\(\|_\| seat\.hand\)\.and_then\(credential::read\);/.test(bootBody),
+    true,
+  );
+  check("and reads it exactly once", bootBody.split("credential::read").length - 1, 1);
+  check("about the seat the host holds for the calling webview", bootBody.split("host.boot(webview.label())").length - 1, 1);
+  const hostBoot = between(flat(rustCode(commandsRs)), "fn boot(&self, label: &str) -> Option<BootSeat> {", "fn seat_as(");
+  check(
+    "and the one-shot is the host's: a generation per page load, the credential handed once, nothing while rebinding",
+    [
+      /if seat\.rebinding \{ return Some\(BootSeat \{ slot: seat\.slot\.clone\(\), generation: None, hand: false, rebinding: true, \}\);/.test(hostBoot),
+      /let generation = seat\.generation\.get_or_insert_with\(new_generation\)\.clone\(\);/.test(hostBoot),
+      /let hand = !seat\.handed; seat\.handed = true;/.test(hostBoot),
+    ],
+    [true, true, true],
+  );
 }
 
 /* ------------------------------------------------------------------ *
@@ -844,6 +871,40 @@ process.stdout.write("\nthe announcement, from both sides of it\n");
       // the same module, so the pattern may not require an `export`.
       page: () => tsInterfaceKeys(capture(nativeTs, /\binterface CpAnswer \{([\s\S]*?)\n\}/) ?? ""),
     },
+    /*
+     * ⚠ **The four account payloads, and each is the same failure waiting.** A
+     * `Bound` whose `deviceId` lost its rename leaves the page registering a new
+     * device on every sign-in; an `AccountList` whose `canAdd` did would hide Add
+     * account for ever; an `AccountMove` whose `reload` did would leave a
+     * rebound Android page on a document the host refuses. Every one has at least
+     * one rename, so the negative control below is not vacuous for any of them —
+     * `AccountMove`'s one field is renamed for exactly that reason. The page's
+     * interfaces are flat, so `tsInterfaceKeys` reads them whole.
+     */
+    {
+      what: "a sign-in the host bound",
+      source: commandsRs,
+      struct: "Bound",
+      page: () => tsInterfaceKeys(capture(nativeTs, /export interface NativeBound \{([\s\S]*?)\n\}/) ?? ""),
+    },
+    {
+      what: "an account in the drawer",
+      source: commandsRs,
+      struct: "AccountSummary",
+      page: () => tsInterfaceKeys(capture(nativeTs, /export interface NativeAccountSummary \{([\s\S]*?)\n\}/) ?? ""),
+    },
+    {
+      what: "the accounts on this computer",
+      source: commandsRs,
+      struct: "AccountList",
+      page: () => tsInterfaceKeys(capture(nativeTs, /export interface NativeAccountList \{([\s\S]*?)\n\}/) ?? ""),
+    },
+    {
+      what: "an account move",
+      source: commandsRs,
+      struct: "AccountMove",
+      page: () => tsInterfaceKeys(capture(nativeTs, /export interface NativeAccountMove \{([\s\S]*?)\n\}/) ?? ""),
+    },
   ] as const;
 
   for (const payload of payloads) {
@@ -862,15 +923,27 @@ process.stdout.write("\nthe announcement, from both sides of it\n");
     /*
      * The same negative control `Boot` carries, and for the same reason: the
      * comparison above rests entirely on `rustJsonKeys` reading renames rather
-     * than assuming them. Each of these three has at least one camelCase field
-     * that exists **only** because of a `rename`, so a reader that silently
-     * answered the page's spellings would still pass the equality and fail here.
+     * than assuming them. Each of these has at least one field that exists
+     * **only** because of a `rename`, so a reader that silently answered the
+     * page's spellings would still pass the equality and fail here.
+     *
+     * ⚠ **Read as pairs — the name answered and the Rust spelling it replaced —
+     * rather than as "some key has a capital".** `AccountMove`'s one field is
+     * `reload_page` renamed to `reload`: a real rename with no capital in it, so
+     * the capital heuristic failed on a struct whose reader was working. What
+     * proves a rename was read is that the renamed name is answered and the Rust
+     * spelling is not, which holds for a capital and for no capital alike.
      */
-    const renames = [...(body ?? "").matchAll(/serde\(rename = "(\w+)"\)/g)].map((m) => m[1] ?? "");
+    const renamed = [...(body ?? "").matchAll(/serde\(rename = "(\w+)"\)\]\s*pub (\w+):/g)].map(
+      (m) => [m[1] ?? "", m[2] ?? ""] as const,
+    );
     report(
       `${payload.what}: the reader is reading renames rather than assuming them`,
-      renames.length > 0 && renames.every((name) => hostKeys.includes(name)) && hostKeys.some((k) => /[A-Z]/.test(k)),
-      renames.length === 0 ? "no rename in the struct at all" : `${renames.length}: ${renames.join(", ")}`,
+      renamed.length > 0 &&
+        renamed.every(([json, rust]) => hostKeys.includes(json) && (json === rust || !hostKeys.includes(rust))),
+      renamed.length === 0
+        ? "no rename in the struct at all"
+        : `${renamed.length}: ${renamed.map(([json, rust]) => `${rust} → ${json}`).join(", ")}`,
     );
 
     /*
@@ -972,6 +1045,198 @@ for (const file of readdirSync(join(ROOT, TAURI_DIR, "src"))) {
   if (new RegExp(COMMAND_ATTR).test(readFileSync(join(ROOT, TAURI_DIR, "src", file), "utf8"))) strayCommands.push(file);
 }
 check("and every command lives in commands.rs", strayCommands, []);
+
+/* ── which account a command is about ─────────────────────────────────────── */
+
+/**
+ * ⚠ **The host decides which account a command is about, from the webview that
+ * asked — and on a surface this size only a census can hold that.** Q1.651.
+ *
+ * A seat-scoped command takes the calling `tauri::Webview` and the invoke
+ * `Request`, and resolves its account through `Host::seat` from the label and
+ * the document's generation. So: every command is classified (a new one must be
+ * one of these kinds, or it is red here); every seat-scoped one takes both and
+ * asks `Host::seat`; **none takes an account, an origin or a scope** — the one
+ * command that names an account is `host_account_switch`, choosing among keys
+ * `host_accounts` listed; only `host_boot` and `host_account_confirm` read a
+ * credential, and `Bound` has no field that could carry one back.
+ *
+ * Read off the comment-stripped source, split at the attribute, for the command
+ * census's reason: `commands.rs`'s docblocks name every one of these rules, and a
+ * search over prose passes whether or not the code is there. Absence checks read
+ * the whole block — the command and every helper below it — and presence checks
+ * the command's own body, so neither can be satisfied by the wrong function.
+ */
+{
+  /*
+   * Comment-stripped the way `commandsCode` is further down — declared there for
+   * the `(async)` census, which runs after this — so the two cannot read the file
+   * differently.
+   */
+  const accountCode = commandsRs.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/[^\n]*$/gm, "");
+  const blocks = accountCode.split(/(?=#\[tauri::command)/).slice(1);
+  const nameOf = (block: string): string => /pub (?:async )?fn ([a-z0-9_]+)/.exec(block)?.[1] ?? "?";
+  const byName = new Map(blocks.map((block) => [nameOf(block), block] as const));
+  const bodyOf = (name: string): string => {
+    const block = byName.get(name) ?? "";
+    const at = block.search(/pub (?:async )?fn /);
+    const end = block.indexOf("\n}", at);
+    return at < 0 || end < 0 ? "" : flat(block.slice(at, end + 2));
+  };
+  const blockOf = (name: string): string => flat(byName.get(name) ?? "");
+  const paramsOf = (name: string): string => /pub (?:async )?fn [a-z0-9_]+\(([^)]*)\)/.exec(bodyOf(name))?.[1] ?? "";
+
+  const SCOPED = [
+    "host_account_add",
+    "host_account_confirm",
+    "host_account_forget",
+    "host_account_switch",
+    "host_accounts",
+    "host_cp",
+    "host_credential_clear",
+    "host_credential_set",
+    "host_daemon_log",
+    "host_daemon_start",
+    "host_daemon_state",
+    "host_daemon_stop",
+    "host_device_clear",
+    "host_device_dh",
+    "host_device_key_reset",
+    "host_device_set",
+    "host_local_daemon",
+    "host_set_server",
+  ];
+  // The two that surface something and touch no account, and the one that
+  // issues the generation the rest present.
+  const SURFACING = ["host_copy_text", "host_open_external", "host_pick_folder", "host_save_file"];
+  const BOOT = ["host_boot"];
+  check(
+    "every command is one kind: seat-scoped, surfacing, or the boot that issues the generation",
+    declared.filter((name) => ![...SCOPED, ...SURFACING, ...BOOT].includes(name)),
+    [],
+  );
+  check(
+    "and every seat-scoped one takes the calling webview and the request its document sent",
+    SCOPED.filter((name) => !/webview: tauri::Webview, request: tauri::ipc::Request<'_>/.test(paramsOf(name))),
+    [],
+  );
+  check(
+    "and resolves its account through the host, from those two alone",
+    SCOPED.filter((name) => !bodyOf(name).includes("host.seat(&webview, &request)")),
+    [],
+  );
+  check(
+    "no command takes an account, an origin, a scope or a label",
+    declared.filter(
+      (name) => name !== "host_account_switch" && /\b(?:account|origin|scope|label|server|user|key)\s*:/.test(paramsOf(name)),
+    ),
+    [],
+  );
+  check(
+    "but the switch names its target — a key from the list, or null for back",
+    /\baccount: Option<String>/.test(paramsOf("host_account_switch")),
+    true,
+  );
+  check(
+    "only the boot and a confirm read a sign-in out of the keyring",
+    // `credential::read` alone rather than a call: `host_boot` passes it as a
+    // function, and `read_device_key` is a different read.
+    blocks.filter((block) => /credential::read(?![_a-z])/.test(block)).map(nameOf).sort(),
+    ["host_account_confirm", "host_boot"],
+  );
+  check(
+    "and what a confirm answers has no field that could carry one back",
+    rustJsonKeys(capture(commandsRs, /pub struct Bound \{([\s\S]*?)\n\}/) ?? "credential: x").filter((key) =>
+      /credential|token|secret|value/i.test(key),
+    ),
+    [],
+  );
+  /*
+   * ⚠ **Every account's daemon runs from launch to quit (D2), so an account change
+   * stops none** — and removing an account stops its own, which is a different
+   * act: a removed account's daemon would otherwise go on serving that account's
+   * phones and grantees, running agents as this person, under a screen that says
+   * the account is gone (Q7.149). Both halves, since either alone is the other
+   * edit passing.
+   */
+  check(
+    "switching, adding, binding, confirming and choosing a server stop no daemon",
+    ["host_account_switch", "host_account_add", "host_account_confirm", "host_credential_set", "host_set_server"].filter(
+      (name) => /supervisor|stop_all|\.stop\(\)/.test(blockOf(name)),
+    ),
+    [],
+  );
+  check(
+    "while removing an account stops its own",
+    [/host\.supervisor_if\(&root\)/.test(bodyOf("host_account_forget")), /supervisor\.stop\(\);/.test(bodyOf("host_account_forget"))],
+    [true, true],
+  );
+  /*
+   * ⚠ **A hidden page runs, and may be rendering agent output** — so the six
+   * commands that move the screen or put something on it are refused from any
+   * webview but the one shown.
+   */
+  check(
+    "a hidden account's page can neither move the screen nor put anything on it",
+    ["host_account_switch", "host_account_add", ...SURFACING].filter((name) => !bodyOf(name).includes("require_shown(")),
+    [],
+  );
+  check(
+    "the add refuses at the cap",
+    [
+      /pub const MAX_ACCOUNTS: usize = 10;/.test(read(`${TAURI_DIR}/src/accounts.rs`)),
+      /accounts::MAX_ACCOUNTS/.test(bodyOf("host_account_add")),
+      /MAX_ACCOUNTS/.test(between(flat(rustCode(read(`${TAURI_DIR}/src/config.rs`))), "pub fn bind_account(", "pub fn claim_bare(")),
+    ],
+    [true, true, true],
+  );
+  /*
+   * ⚠ **The generation is what binds a command to a document rather than to a
+   * label** (Q5.120): a rebind or a page load retires it, and a document
+   * presenting any other is refused. The header name is written twice — here and
+   * in `native.ts`, which sends it on every invoke after boot — and a mismatch is
+   * every command refused, so the two are compared.
+   */
+  const hostCode = flat(accountCode);
+  const header = capture(accountCode, /const GENERATION_HEADER: &str = "([a-z-]+)";/);
+  check("the generation rides one header", header, "reemoat-generation");
+  check("and the page sends that header", new RegExp(`"${header ?? "?"}"`).test(rustCode(read("packages/web/src/native.ts"))), true);
+  const seatBody = between(hostCode, "fn seat(&self,", "fn boot(&self");
+  check(
+    "a command is refused unless its document presents the seat's generation, and never mid-rebind",
+    [
+      /\.get\(GENERATION_HEADER\)/.test(seatBody),
+      /\(Some\(held\), Some\(sent\)\) if !seat\.rebinding && held == sent => \{ Ok\(\(label, seat\.slot\.clone\(\)\)\) \}/.test(seatBody),
+      /_ => Err\(stale\(\)\),/.test(seatBody),
+    ],
+    [true, true, true],
+  );
+  check(
+    "a page load retires the generation and ends a rebind",
+    /pub fn page_loaded\(&self, label: &str\) \{ if let Ok\(mut seats\) = self\.seats\.lock\(\) \{ if let Some\(seat\) = seats\.get_mut\(label\) \{ seat\.generation = None; seat\.handed = false; seat\.rebinding = false; \} \} \}/.test(hostCode),
+    true,
+  );
+  check(
+    "and moving a webview to another account makes its document stale that instant",
+    /pub fn move_seat\(&self, label: &str, slot: Slot\) \{ if let Ok\(mut seats\) = self\.seats\.lock\(\) \{ if let Some\(seat\) = seats\.get_mut\(label\) \{ seat\.slot = slot; seat\.generation = None; seat\.handed = false; seat\.rebinding = true; \} \} \}/.test(hostCode),
+    true,
+  );
+  /*
+   * ⚠ **The lock rule's main-thread half**: `on_page_load` and the bare commands
+   * run on the thread that builds, shows and closes webviews, so none of them
+   * may wait on `changing`, which an account change holds across exactly those
+   * calls.
+   */
+  const bare = blocks.filter((block) => block.startsWith("#[tauri::command]") && !/pub async fn/.test(block)).map(nameOf).sort();
+  check("the main thread runs only these commands", bare, ["host_copy_text", "host_open_external"]);
+  check(
+    "and neither they nor a page load ever wait on an account change",
+    [...bare.map(blockOf), between(hostCode, "pub fn page_loaded(", "fn seat(&self,"), flat(rustCode(libRs))].filter((code) =>
+      /lock_changing|changing\.lock/.test(code),
+    ).length,
+    0,
+  );
+}
 
 /*
  * ⚠ **And the non-vacuity report for the widening itself.**
@@ -1318,6 +1583,36 @@ check(
 const lockedTauri = capture(read(`${TAURI_DIR}/Cargo.lock`), /\nname = "tauri"\nversion = "([^"]+)"\n/);
 check("Cargo.lock is committed and readable", lockedTauri !== null, true);
 check("and the locked tauri is the one Cargo.toml asks for", lockedTauri, cratePin);
+/*
+ * ⚠ **One window, a webview per account — on macOS only, by one table.**
+ * `seats.rs`'s multi-webview arm needs Tauri's `unstable` feature, and turned on
+ * for every target it would change how a plain `WebviewWindow` is built on
+ * Windows, Linux and Android, where nobody has measured it. So the feature is in
+ * a `cfg(target_os = "macos")` table and the plain dependency line asks for none —
+ * and the version on both is the one pin.
+ *
+ * ⚠ **And the lock is pinned to the pair the arm was built against.** An unstable
+ * API can change in a minor release, `2.11.5` is a caret requirement, and
+ * `cargo update` would move both crates without a word. Moving this pair is a
+ * re-run of the multi-webview checks `seats.rs` lists, not a routine bump.
+ */
+const tauriLines = [...cargoToml.matchAll(/^(\[[^\n]+\])\n(?:[^[\n][^\n]*\n)*?tauri = \{ version = "([^"]+)", features = \[([^\]]*)\] \}$/gm)].map(
+  (m) => [m[1], m[2], m[3]],
+);
+check(
+  "tauri's unstable feature is enabled for the macOS target alone, at the one pin",
+  tauriLines,
+  [
+    ["[target.'cfg(target_os = \"macos\")'.dependencies]", cratePin, '"unstable"'],
+    ["[dependencies]", cratePin, ""],
+  ],
+);
+const MEASURED_TAURI = ["2.11.5", "2.11.4"];
+check(
+  "and the lock holds tauri and tauri-runtime-wry at the pair the multi-webview arm was built against",
+  [lockedTauri, capture(read(`${TAURI_DIR}/Cargo.lock`), /\nname = "tauri-runtime-wry"\nversion = "([^"]+)"\n/)],
+  MEASURED_TAURI,
+);
 
 /* ------------------------------------------------------------------ *
  * Placement: out of the workspace, out of the image
@@ -2195,6 +2490,17 @@ check("and no notarization provider is either", mac["providerShortName"], null);
  * one deployment's address in everybody's binary. `cp-accounts.md` makes the same
  * argument for the two `REEMOAT_CP_*` addresses that reach the browser, and both
  * are for the same reason without a compiled-in default.
+ *
+ * ⚠ **Amended by Q4.127: a repository variable is not a value in the
+ * repository.** `release.yml` forwards `${{ vars.… }}` to both app jobs, so this
+ * repository's releases open on its owner's server and a fork's open on nothing
+ * — with no address in any file here, which is the whole of what the paragraph
+ * above protects. So the sweep at the foot of this section allows that one line
+ * and only verbatim: a literal, a secret, or a `vars.… || 'literal'` default
+ * each put an address back in the repository, and the predicate is driven
+ * against all three. The line is also asserted **present** in both jobs, because
+ * a deleted forward is a release that silently opens on an empty box — green
+ * everywhere, and the first anybody hears of it is a person typing an address.
  */
 const configRs = flat(read(`${TAURI_DIR}/src/config.rs`));
 check(
@@ -2233,8 +2539,27 @@ check(
  * the edit that would pass every other assertion in this file.
  */
 const shellRs = flat(read(`${TAURI_DIR}/src/lib.rs`));
-check("the shell reads the chosen server and nothing else", /config::read_server\(&dir\)/.test(shellRs), true);
-check("and never writes one at startup", /read_or_seed_server|write_server/.test(shellRs), false);
+check("the first-run seat reads the chosen server", /config::read_server\(&dir\)/.test(shellRs), true);
+/*
+ * ⚠ **And every account, with nothing written at startup** — the launch reads
+ * `server.json` twice and opens a webview per account, and a file from before
+ * accounts has its list *derived* rather than written: it reaches the disk with
+ * the first act that changes it. So the no-write sweep covers `seats.rs`, where
+ * the launch now builds its webviews, and the reader itself.
+ */
+check("and every account, through the one reader", /config::read_accounts\(&dir, &\|origin\| credential::read\(origin\)\.is_some\(\)\);/.test(shellRs), true);
+const startupCode = ["lib", "seats"].map((file) => flat(rustCode(read(`${TAURI_DIR}/src/${file}.rs`)))).join("\n");
+check(
+  "and never writes one at startup",
+  /read_or_seed_server|write_server|write_stored|config::(?:bind|show|forget|rename)_account|\bset_bound\(|\bset_signed_in\(|materialize_accounts|set_legacy_root_holder|claim_bare/.test(startupCode),
+  false,
+);
+{
+  const configCode = flat(rustCode(read(`${TAURI_DIR}/src/config.rs`)));
+  const reader = between(configCode, "pub fn read_accounts(", "pub fn materialize_accounts(");
+  check("the account reader was found to read", reader.length > 0, true);
+  check("and it writes nothing — the derivation included", /write_stored|fs::write|fs::rename|accounts_mut/.test(reader), false);
+}
 check("the suggestion is its own function", /pub fn default_server\(\) -> Option<String>/.test(configRs), true);
 check("and it writes nothing", /fn default_server[\s\S]{0,200}write_server/.test(configRs), false);
 /*
@@ -2246,23 +2571,99 @@ const commandsSrc = flat(read(`${TAURI_DIR}/src/commands.rs`));
 check("the suggestion crosses the bridge under its own name", /rename = "defaultServer"/.test(commandsSrc), true);
 check("and the chosen server is still a separate field", /pub server: Option<String>/.test(commandsSrc), true);
 /*
- * **And no file in this repository supplies a value.** The sweep is over every
- * place a build is described — the native package, the root manifest, `deploy/`
- * and the workflows — for the name followed by an assignment. The
- * `rerun-if-env-changed=` declaration above is safe because there the `=`
- * *precedes* the name.
+ * **And no file in this repository gives it a value — the one forward of a
+ * repository variable is not one.** Every file git tracks, and every new one it
+ * would, that is not prose, is read **line by line** for the name followed by an
+ * assignment: the manifests, every `tauri*.conf.json`, the workflows, `deploy/`,
+ * `build.rs` — where a `cargo:rustc-env=` line would set it — and
+ * `packages/native/scripts`, where a `process.env` assignment before
+ * `tauri build` would. The `rerun-if-env-changed=` declaration above is safe
+ * because there the `=` *precedes* the name.
+ *
+ * ⚠ **This paragraph said "every place a build is described — the native
+ * package, the root manifest, `deploy/` and the workflows" while the loop read
+ * five named files**, `deploy/` among none of them. A list of places is the thing
+ * that drifts from its own description, so the list is `git ls-files` now.
+ *
+ * **This file is exempt by name, and only it.** Its fixtures below are setters
+ * on purpose, and it is an input to no build.
  */
+const FORWARD = "REEMOAT_DEFAULT_SERVER: ${{ vars.REEMOAT_DEFAULT_SERVER }}";
+const RELEASE_YML = ".github/workflows/release.yml";
+const isSetter = (file: string, line: string): boolean =>
+  /REEMOAT_DEFAULT_SERVER\s*[=:]\s*\S/.test(line) && !(file === RELEASE_YML && line.trim() === FORWARD);
+/*
+ * The predicate driven against a table, `docscheck`'s `SKIP_PATH` idiom: a
+ * loosened predicate goes red here even while no file in the tree tests it.
+ */
+check(
+  "the one line allowed is the forward, verbatim, in release.yml — and every other way of setting it is a setter",
+  [
+    isSetter(RELEASE_YML, `          ${FORWARD}`),
+    isSetter(".github/workflows/check.yml", `          ${FORWARD}`),
+    isSetter(RELEASE_YML, "          REEMOAT_DEFAULT_SERVER: https://app.example"),
+    isSetter(RELEASE_YML, "          REEMOAT_DEFAULT_SERVER: ${{ secrets.REEMOAT_DEFAULT_SERVER }}"),
+    isSetter(RELEASE_YML, "          REEMOAT_DEFAULT_SERVER: ${{ vars.REEMOAT_DEFAULT_SERVER || 'https://app.example' }}"),
+    isSetter("deploy/ci-release.sh", "export REEMOAT_DEFAULT_SERVER=https://app.example"),
+    isSetter(`${TAURI_DIR}/build.rs`, '    println!("cargo:rustc-env=REEMOAT_DEFAULT_SERVER=https://app.example");'),
+    isSetter(`${NATIVE}/scripts/build-frontend.mjs`, 'process.env.REEMOAT_DEFAULT_SERVER = "https://app.example";'),
+    isSetter(`${TAURI_DIR}/build.rs`, '    println!("cargo:rerun-if-env-changed=REEMOAT_DEFAULT_SERVER");'),
+  ],
+  [false, true, true, true, true, true, true, true, false],
+);
+const sweptFiles = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], {
+  cwd: ROOT,
+  encoding: "utf8",
+})
+  .split("\0")
+  .filter((file) => file.length > 0 && !file.endsWith(".md") && file !== "scripts/nativecheck.ts")
+  .filter((file) => existsSync(join(ROOT, file)) && statSync(join(ROOT, file)).isFile());
 const setters: string[] = [];
-for (const file of [
-  "package.json",
-  `${NATIVE}/package.json`,
-  `${TAURI_DIR}/tauri.conf.json`,
-  ".github/workflows/check.yml",
-  ".github/workflows/release.yml",
-]) {
-  if (/REEMOAT_DEFAULT_SERVER\s*[=:]\s*\S/.test(read(file))) setters.push(file);
+for (const file of sweptFiles) {
+  read(file)
+    .split("\n")
+    .forEach((line, index) => {
+      if (isSetter(file, line)) setters.push(`${file}:${index + 1}`);
+    });
 }
-check("and no file in this repository sets one", setters, []);
+report("the sweep reads every tracked file that is not prose", sweptFiles.length > 100, `${sweptFiles.length} files`);
+check(
+  "including every place a build could be handed one",
+  [
+    "package.json",
+    `${NATIVE}/package.json`,
+    `${TAURI_DIR}/tauri.conf.json`,
+    `${TAURI_DIR}/build.rs`,
+    `${NATIVE}/scripts/build-daemon.mjs`,
+    "deploy/ci-release.sh",
+    ".github/workflows/check.yml",
+    RELEASE_YML,
+  ].filter((file) => !sweptFiles.includes(file)),
+  [],
+);
+check("and no file in this repository gives it a value; the one forward of a repository variable is not one", setters, []);
+/*
+ * ⚠ **And the forward is there, once per app job.** Its absence is green in
+ * every other check in this repository and opens every release on an empty box.
+ * Mapped to its job the way `deploycheck`'s `jobOf` does — a job id is the only
+ * two-space key with no value under `jobs:` — and the variable itself is read by
+ * those two jobs and no other, the summary line included.
+ */
+{
+  const release = read(RELEASE_YML);
+  const lines = release.slice(release.indexOf("\njobs:\n")).split("\n");
+  const forwards: string[] = [];
+  const readers = new Set<string>();
+  let job = "";
+  for (const line of lines) {
+    const head = /^ {2}([a-z][a-z0-9-]*):\s*$/.exec(line);
+    if (head) job = head[1] ?? "";
+    if (line.trim() === FORWARD) forwards.push(job);
+    if (line.includes("vars.REEMOAT_DEFAULT_SERVER")) readers.add(job);
+  }
+  check("release.yml forwards the repository variable to both app jobs and nowhere else", forwards, ["app", "app-android"]);
+  check("and no other job reads the variable at all", [...readers].sort(), ["app", "app-android"]);
+}
 
 /* ── the private key in a file, and the mode it is created at ─────────────── */
 
@@ -2457,7 +2858,7 @@ const giveUp = between(configCode, "pub fn give_up_device_key(", "pub fn normali
 check("the statement a re-key reaches was found to read", giveUp.length > 0, true);
 check(
   "giving up a file-held key drops the copy it supersedes, after the write that landed",
-  /erase_device_key_fallback\(dir, origin\)\?; discard_quarantine\(dir, origin\); Ok\(\(\)\)/.test(giveUp),
+  /erase_device_key_fallback\(dir, scope\)\?; discard_quarantine\(dir, scope\); Ok\(\(\)\)/.test(giveUp),
   true,
 );
 /*
@@ -2473,7 +2874,7 @@ check(
  */
 check(
   "and the removal is guarded by what those bytes name, in the same statement",
-  /fn discard_quarantine\(dir: &Path, origin: &str\) \{ if !quarantine_is_only_about\(dir, origin\) \{ return; \} let _ = fs::remove_file\(unreadable_file\(dir\)\); \}/.test(
+  /fn discard_quarantine\(dir: &Path, scope: &str\) \{ if !quarantine_is_only_about\(dir, scope\) \{ return; \} let _ = fs::remove_file\(unreadable_file\(dir\)\); \}/.test(
     configCode,
   ),
   true,
@@ -2500,10 +2901,10 @@ const deviceCode = flat(
 );
 const resetKey = between(deviceCode, "pub fn reset_key(", "pub fn diffie_hellman(");
 check("the re-key was found to read", resetKey.length > 0, true);
-check("a re-key gives up the quarantined copy too", /config::give_up_device_key\(dir, origin\)/.test(resetKey), true);
+check("a re-key gives up the quarantined copy too", /config::give_up_device_key\(dir, scope\)/.test(resetKey), true);
 const storeSecret = between(deviceCode, "fn store_secret(", "pub fn ensure_key(");
 check("the promotion was found to read", storeSecret.length > 0, true);
-check("and a promotion takes the other door", /config::erase_device_key_fallback\(dir, origin\)/.test(storeSecret), true);
+check("and a promotion takes the other door", /config::erase_device_key_fallback\(dir, scope\)/.test(storeSecret), true);
 check("and only that one", /give_up_device_key/.test(storeSecret), false);
 
 
@@ -2525,10 +2926,32 @@ check("and only that one", /give_up_device_key/.test(storeSecret), false);
  * against the account's limit on the way back. `cp-devices.md` is the argument.
  */
 const setServer = flat(read(`${TAURI_DIR}/src/commands.rs`));
-const setServerBody = between(setServer, "pub fn host_set_server", "pub fn host_credential_set");
+const setServerBody = between(setServer, "pub fn host_set_server(", "pub async fn host_credential_set(");
 check("the sweep can see host_set_server at all", setServerBody.length > 0, true);
 check("adopting a server keeps the previous one's sign-in", /credential::erase/.test(setServerBody), false);
 check("and never the device recorded for it", /erase_device/.test(setServerBody), false);
+/*
+ * ⚠ **Only a sign-in with no account moves** (D3, Q3.643): an account *is* its
+ * origin and a user id, and "changing its server" would be another account in
+ * its name, key, device and daemon. Enforced in the host, where the page cannot
+ * reach it — and it touches no credential at all, a pending seat having none.
+ */
+const setServerCode = between(
+  flat(rustCode(read(`${TAURI_DIR}/src/commands.rs`))),
+  "pub fn host_set_server(",
+  "pub async fn host_credential_set(",
+);
+check(
+  "and only a pending seat's server moves",
+  /let Slot::Pending \{ origin: held \} = slot else \{ return Err\(pending_seat\(/.test(setServerCode),
+  true,
+);
+check("and it touches no credential", /credential::/.test(setServerCode), false);
+check(
+  "and server.json is written only on a first run, with no account at all",
+  /if host\.roster\(\)\.accounts\.is_empty\(\) \{ config::write_server\(&host\.config_dir, &origin\)\?; \}/.test(setServerCode),
+  true,
+);
 /*
  * ⚠ **And never the previous server's daemon.** A supervisor per server is what
  * lets a switch interrupt nothing — the other fleet's turns go on and its phones
@@ -2539,40 +2962,301 @@ check("and never the device recorded for it", /erase_device/.test(setServerBody)
  */
 check("and leaves the previous server's daemon running", /supervisor|stop_all|\.stop\(\)/.test(setServerBody), false);
 
-/* ── a daemon per server ──────────────────────────────────────────────────── */
+/* ── a daemon per account ─────────────────────────────────────────────────── */
 
 /**
- * **One database is one machine on one server, so each server gets a root and a
- * supervisor of its own** — Q7.148 carries why re-enrolling one database back and
- * forth was refused. Two halves, and each is silent without the other: the host
- * keeps a map from origin to supervisor, and every command that answers about
- * "the daemon on this computer" asks which root the *current* server has rather
- * than reading `~/.reemoat` whoever it belongs to — which is what refused
- * production on a Mac whose launchd daemon served the dev stand.
+ * **One database is one machine on one server for one person, so each account
+ * gets a root and a supervisor of its own** — Q7.148 carries why re-enrolling one
+ * database back and forth was refused, and Q7.149 extends it from servers to
+ * people. Two halves, and each is silent without the other: the host keeps a map
+ * from root to supervisor, and every command that answers about "the daemon on
+ * this computer" asks which root the *calling webview's account* has rather than
+ * reading `~/.reemoat` whoever it belongs to — which is what refused production
+ * on a Mac whose launchd daemon served the dev stand.
  */
 {
   const commandsRs = read(`${TAURI_DIR}/src/commands.rs`);
   check(
-    "the host keeps a supervisor per server, each behind a lock of its own",
+    "the host keeps a supervisor per state root, each behind a lock of its own",
     /pub supervisors: Mutex<BTreeMap<String, Arc<Mutex<daemon::Supervisor>>>>/.test(commandsRs),
     true,
   );
   check("and the one-slot field is gone", /pub supervisor: Mutex</.test(commandsRs), false);
-  const flatCommands = flat(commandsRs);
+  check("and so is the one current server", /pub server: Mutex</.test(commandsRs), false);
+  const flatCommands = flat(rustCode(commandsRs));
+  const ROOT_CALL = /slot\.root\(&home, host\.holder\(\)\.as_deref\(\)\)/;
   const bodies: [string, string, RegExp][] = [
-    ["host_daemon_state", "pub fn host_daemon_start", /daemon::state_root\(&home, &origin\)/],
-    ["host_daemon_start", "pub fn host_daemon_stop", /daemon::state_root\(&home, &origin\)/],
-    ["host_local_daemon", "pub fn host_set_server", /daemon::announce_roots\(&home, host\.origin\(\)\.as_deref\(\)\)/],
+    ["host_daemon_state", "pub fn host_daemon_start", ROOT_CALL],
+    ["host_daemon_start", "pub fn host_daemon_stop", ROOT_CALL],
+    ["host_daemon_stop", "pub fn host_daemon_log", /host\.supervisor_if\(&root\)/],
+    ["host_daemon_log", "fn write_private", /host\.supervisor_if\(&root\)/],
+    [
+      "host_local_daemon",
+      "pub fn host_set_server",
+      /daemon::announce_roots\(&home, own\.as_ref\(\)\.map\(\|root\| root\.dir\.as_path\(\)\), !guest\)/,
+    ],
   ];
   check(
-    "and every command about the daemon here asks which root this server has",
+    "and every command about the daemon here asks which root this account has",
     bodies.filter(([name, next, pattern]) => !pattern.test(between(flatCommands, `pub fn ${name}`, next))),
     [],
+  );
+  /*
+   * ⚠ **One root chosen and one daemon started at a time**, since every account's
+   * page sets itself up at launch: the lock is taken before the root is chosen,
+   * and rule 3's empty `~/.reemoat` is recorded as one origin's before any env
+   * file is written into it.
+   */
+  const start = between(flatCommands, "pub fn host_daemon_start", "pub fn host_daemon_stop");
+  const locked = start.indexOf("let _roots = daemon::lock_roots();");
+  check(
+    "a start holds the root lock from the root's choice through the spawn",
+    [locked > 0, locked < start.indexOf("slot.root("), locked < start.indexOf(".start(&payload")],
+    [true, true, true],
+  );
+  check(
+    "and records which origin was handed the empty legacy root before writing into it",
+    start.indexOf("config::set_legacy_root_holder(&host.config_dir, &origin)?;") > 0 &&
+      start.indexOf("config::set_legacy_root_holder(") < start.indexOf("write_private(&env_file"),
+    true,
   );
   check(
     "none of them reads a home as if it were a root",
     /local::read\(&home\)|config_state\(&home/.test(flatCommands),
     false,
+  );
+
+  /*
+   * ⚠ **Which root an account gets is three arms, written out** (Q7.149): a
+   * pending seat has none, a legacy seat and its server's owner share the
+   * server's own — the install.sh-compatible `~/.reemoat` where it is theirs —
+   * and every other account has `servers/<server>@<user id>`, which is never the
+   * legacy root. An arm folded into another is two people in one database; so is
+   * a guest root that could be named like a server's own, which `@` — in no slug
+   * and in no user id — rules out.
+   */
+  const accountsCode = flat(rustCode(read(`${TAURI_DIR}/src/accounts.rs`)));
+  check(
+    "a legacy seat and its server's owner share the server's own root",
+    /Slot::Legacy \{ origin \} \| Slot::Account \{ origin, owner: true,\.\.\} => Some\(daemon::owner_root\(home, origin, holder\)\)/.test(accountsCode),
+    true,
+  );
+  check(
+    "and every other account has a root of its own",
+    /Slot::Account \{ origin, user, owner: false,? \} => Some\(daemon::guest_root\(home, origin, user\)\)/.test(accountsCode),
+    true,
+  );
+  check("and a pending seat has none", /Slot::Pending \{\.\.\} => None, Slot::Legacy/.test(accountsCode), true);
+  // The module above its tests: they write `machine.json` by hand, as fixtures.
+  const daemonSource = read(`${TAURI_DIR}/src/daemon.rs`);
+  const daemonCode = flat(rustCode(daemonSource.slice(0, daemonSource.indexOf("#[cfg(test)]\nmod tests"))));
+  const guest = between(daemonCode, "pub fn guest_root(", "pub fn announce_roots(");
+  check(
+    "a guest's root is named <server>@<user id> and is never the legacy one",
+    [/format!\("\{\}@\{user\}", server_slug\(origin\)\)/.test(guest), /legacy: false,/.test(guest)],
+    [true, true],
+  );
+  check(
+    "a user id may carry neither a scope's # nor a guest root's @",
+    /\.all\(\|b\| b\.is_ascii_alphanumeric\(\) \|\| b == b'_' \|\| b == b'-'\)/.test(between(accountsCode, "pub fn is_user_id(", "pub fn clamp_name(")),
+    true,
+  );
+  check(
+    "and a guest is answered its own announcement alone",
+    /\} else if include_legacy \{ vec!\[own\.to_path_buf\(\), legacy\] \} else \{ vec!\[own\.to_path_buf\(\)\] \}/.test(
+      between(daemonCode, "pub fn announce_roots(", "static ROOT_LOCK"),
+    ),
+    true,
+  );
+  /*
+   * ⚠ **Two locks the account era made required rather than tidy**, since every
+   * account's page sets itself up at launch: `machine.json`'s read-modify-write,
+   * where a lost claim is a machine bought again, and the root's choice, where
+   * two servers over an empty `~/.reemoat` would share it.
+   */
+  check(
+    "claims are written one at a time, and by rename rather than truncation",
+    [
+      /static CLAIM_LOCK: std::sync::Mutex<\(\)>/.test(daemonCode),
+      /pub fn write_claim\(dir: &Path, scope: &str, machine_id: &str\) -> Result<\(\), String> \{ let _held = CLAIM_LOCK\.lock\(\)/.test(daemonCode),
+      /pub fn move_claim\(dir: &Path, from: &str, to: &str\) -> Result<\(\), String> \{ let _held = CLAIM_LOCK\.lock\(\)/.test(daemonCode),
+      /std::fs::write\(claim_file/.test(daemonCode),
+      /crate::config::temp_name\("machine\.json"\)/.test(daemonCode),
+    ],
+    [true, true, true, false, true],
+  );
+  check(
+    "and every account's daemon is started at launch under the root lock, adopting only",
+    [
+      /pub fn start_configured_at_launch\(/.test(daemonCode),
+      /let _held = lock_roots\(\); if config_state\(&root\.dir, Some\(origin\)\) != CONFIG_HERE \{ continue; \}/.test(
+        between(daemonCode, "pub fn start_configured_at_launch(", "pub fn ensure_root("),
+      ),
+      /enroll|write_claim|env_rewritten|env_contents/.test(between(daemonCode, "pub fn start_configured_at_launch(", "pub fn ensure_root(")),
+    ],
+    [true, true, false],
+  );
+  /*
+   * ⚠ **A device key moves between scopes only by proof**: `copy_key` has one
+   * caller, and that caller runs it only where `server.json` recorded the device
+   * as inherited. Anywhere else it is one key on two users' rows — the linkage
+   * `credential.rs`'s `DEVICE_KEY` block forbids.
+   */
+  const copiers = readdirSync(join(ROOT, TAURI_DIR, "src"))
+    .filter((file) => file.endsWith(".rs") && file !== "device.rs")
+    .filter((file) => /copy_key\(/.test(rustCode(read(`${TAURI_DIR}/src/${file}`))));
+  check("a device key is copied from one place", copiers, ["accounts.rs"]);
+  check(
+    "and only where the device was proved this account's",
+    /if claimed\.device && matches!\(device::copy_key\(origin, scope\), Ok\(true\)\) \{ let _ = credential::erase_device_key\(origin\); \}/.test(accountsCode),
+    true,
+  );
+}
+
+/* ── one webview per account, and who builds it ──────────────────────────── */
+
+/**
+ * ⚠ **`seats.rs` is the only file that builds a webview, and every one it builds
+ * is `main`'s own configuration with the navigation guard on it.** `from_config`
+ * is what carries `dragDropEnabled: false` — this file's assertion with no other
+ * symptom — into every account's webview, and `on_navigation(is_our_own)` is the
+ * rule that keeps a page from being navigated away from this app's document
+ * inside a webview holding an account's credential. A builder written anywhere
+ * else, or a `new` rather than a `from_config`, is a webview with neither.
+ */
+{
+  const seatsCode = flat(rustCode(read(`${TAURI_DIR}/src/seats.rs`)));
+  check(
+    "every account's child webview is main's configuration, guarded",
+    /tauri::webview::WebviewBuilder::from_config\(&seat\)\.on_navigation\(is_our_own\)\.auto_resize\(\)/.test(seatsCode),
+    true,
+  );
+  check(
+    "and so is the one window of the single-webview arm",
+    /tauri::WebviewWindowBuilder::from_config\(app, config\)\?\.on_navigation\(is_our_own\)\.build\(\)\?;/.test(seatsCode),
+    true,
+  );
+  const sources = readdirSync(join(ROOT, TAURI_DIR, "src")).filter((file) => file.endsWith(".rs"));
+  const codeOf = (file: string): string => flat(rustCode(read(`${TAURI_DIR}/src/${file}`)));
+  check(
+    "no webview anywhere is built any other way, nor handed a script",
+    sources.filter((file) => /WebviewBuilder::new\(|Webview::builder\(|WebviewWindowBuilder::new\(|\.initialization_script\(/.test(codeOf(file))),
+    [],
+  );
+  check(
+    "and nothing but seats.rs builds, adds or configures one",
+    sources.filter((file) => /(?:WebviewWindowBuilder|WebviewBuilder|WindowBuilder)::from_config\(|\.add_child\(/.test(codeOf(file))),
+    ["seats.rs"],
+  );
+  check(
+    "one window, a webview per account — on macOS, by one constant",
+    /#\[cfg\(target_os = "macos"\)\] pub const MULTI_WEBVIEW: bool = true;/.test(seatsCode),
+    true,
+  );
+  /*
+   * ⚠ **Hide, then show** — two accounts are never on screen at once, and on a
+   * platform that packs children rather than stacking them a show first would be
+   * two half-height pages.
+   */
+  const present = between(seatsCode, "fn present(", "fn close(");
+  check(
+    "a switch hides every other account before it shows one",
+    present.indexOf("webview.hide()") > 0 && present.indexOf("webview.hide()") < present.indexOf("target.show()"),
+    true,
+  );
+  /*
+   * ⚠ **The lock rule's other half**: a webview call runs on the main thread and
+   * is waited for, and the main thread takes `seats` for every page load — so
+   * this file, which makes every such call, holds no lock at all and reads `Host`
+   * only through methods that answer copies.
+   */
+  check("and the file that makes every webview call holds no lock across one", /\.lock\(\)/.test(seatsCode), false);
+  /*
+   * ⚠ **A closed account's page is ended, not only detached.** `Webview::close`
+   * alone left the page running in the first bundled build — a signed-out
+   * account's socket still answering, a WebContent process per cancelled add —
+   * and nothing else in this file or on screen shows it. The order is the one
+   * measured: `_close` queued first, then Tauri's close.
+   */
+  const close = between(seatsCode, "fn close(", "fn end_page(");
+  check(
+    "a closed account's page is ended before its webview is closed",
+    close.indexOf("end_page(&webview);") > 0 && close.indexOf("end_page(&webview);") < close.indexOf("webview.close()"),
+    true,
+  );
+  check(
+    "by WebKit's own teardown, asked for rather than assumed",
+    /respondsToSelector: sel!\(_close\)\]; if answers\.as_bool\(\) \{ let _: \(\) = msg_send!\[view, _close\];/.test(seatsCode),
+    true,
+  );
+
+  /*
+   * ⚠ **A new page load retires the previous document** (Q5.120): the hook is on
+   * the builder, so it sees every webview's loads after its first.
+   */
+  const libCodeFlat = flat(rustCode(libRs));
+  check(
+    "a page load retires its document's generation",
+    [
+      /\.on_page_load\(\|webview, payload\| \{ if matches!\(payload\.event\(\), tauri::webview::PageLoadEvent::Started\) \{/.test(libCodeFlat),
+      /host\.page_loaded\(webview\.label\(\)\);/.test(libCodeFlat),
+    ],
+    [true, true],
+  );
+  check(
+    "and the launch opens every account and starts every set-up daemon, off the main thread",
+    [
+      /seats::open_at_launch\(app, &config, &roster, server\)\?;/.test(libCodeFlat),
+      /std::thread::spawn\(move \|\| \{[\s\S]*?daemon::start_configured_at_launch\(/.test(libCodeFlat),
+      /WebviewWindowBuilder|WebviewBuilder/.test(libCodeFlat),
+    ],
+    [true, true, false],
+  );
+}
+
+/* ── where a bearer may go ────────────────────────────────────────────────── */
+
+/**
+ * ⚠ **`host_cp` sends a credential only to the calling webview's own server, and
+ * only for an account** (Q5.116, Q5.120). A probe of a server somebody is still
+ * deciding about carries none; a pending seat — a sign-in with no account a
+ * bearer could belong to — carries none either. Both refusals read the headers
+ * through `proxy::carries_credential`, which folds them exactly as `send`
+ * forwards them, so the refusal and the allowlist cannot disagree.
+ */
+{
+  const cp = between(flat(rustCode(commandsRs)), "pub async fn host_cp(", "pub fn host_copy_text(");
+  check("the control-plane leg was found to read", cp.length > 0, true);
+  check(
+    "a server being tried is sent no credential",
+    /Some\(candidate\) => \{ if proxy::carries_credential\(&req\.headers\) \{ return Err\(/.test(cp),
+    true,
+  );
+  check(
+    "and neither is a sign-in with no account",
+    /None => \{ if matches!\(slot, Slot::Pending \{\.\.\}\) && proxy::carries_credential\(&req\.headers\) \{ return Err\(pending_seat\(/.test(cp),
+    true,
+  );
+  check("and every other call goes to the seat's own server", [/slot\.origin\(\)/.test(cp), /host\.origin\(/.test(cp)], [true, false]);
+  check(
+    "the refusal folds a header name the way the proxy forwards it",
+    /pub fn carries_credential\(headers: &\[\(String, String\)\]\) -> bool \{ headers\.iter\(\)\.any\(\|\(name, _\)\| name\.eq_ignore_ascii_case\("authorization"\)\) \}/.test(
+      flat(rustCode(read(`${TAURI_DIR}/src/proxy.rs`))),
+    ),
+    true,
+  );
+  /*
+   * ⚠ **And the quarantine a Re-key discards is this account's alone.** A key is
+   * kept per `<origin>#<user id>`, so the scan reads `https://a.example#u_b` as one
+   * token rather than a bare origin followed by noise, and counts the bare origin
+   * as this account's only where it inherited the bare device by proof.
+   */
+  const configFlat = flat(rustCode(read(`${TAURI_DIR}/src/config.rs`)));
+  const scan = between(configFlat, "fn quarantine_is_only_about(dir: &Path, scope: &str) -> bool {", "fn is_scheme_byte(");
+  check(
+    "the quarantine a Re-key discards is read per account",
+    [/if end < bytes\.len\(\) && bytes\[end\] == b'#'/.test(scan), /account\.key\(\) == scope && account\.inherited/.test(scan)],
+    [true, true],
   );
 }
 
@@ -4281,7 +4965,7 @@ check(
    * absence is an empty list, and the screen tells them apart from the state it
    * already has. A `Result` here would be a second empty-state vocabulary.
    */
-  check("the log command answers a list rather than a result", /pub fn host_daemon_log\(host: State<'_, Host>\) -> Vec<String>/.test(commandsRs), true);
+  check("the log command answers a list rather than a result", /pub fn host_daemon_log\([^)]*\) -> Vec<String>/.test(commandsRs), true);
 }
 
 /*

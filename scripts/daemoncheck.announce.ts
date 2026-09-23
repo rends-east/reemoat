@@ -19,8 +19,9 @@ import { ANNOUNCE_VERSION, announcedControlPlane, announcePath, removeAnnounce, 
  * compares the two shapes off disk, since neither language can see the other.
  *
  * Every call names the **state root** rather than a home — `~/.reemoat` for a
- * daemon started any ordinary way, `~/.reemoat/servers/<server>/` for one the
- * desktop app runs for a second server (Q7.148) — so the fixture is a home with a
+ * daemon started any ordinary way, `~/.reemoat/servers/<server>/` or
+ * `~/.reemoat/servers/<server>@<userId>/` for one the desktop app runs for another
+ * server or another account on it (Q7.148, Q7.149) — so the fixture is a home with a
  * `.reemoat` inside it, which is the shape both of those are.
  * ------------------------------------------------------------------ */
 

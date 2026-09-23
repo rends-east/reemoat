@@ -100,7 +100,7 @@ pub struct Announced {
 
 impl Announced {
     /// Whether the daemon says it enrolled with a control plane other than
-    /// `origin` — a canonical origin, `host.origin()`.
+    /// `origin` — a canonical origin, the calling webview's account's.
     ///
     /// ⚠ **Why a shared root needs asking.** `~/.reemoat` is the root of every
     /// daemon started without `REEMOAT_HOME`, and the announcement there is

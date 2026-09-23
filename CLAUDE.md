@@ -76,7 +76,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1019 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1025 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -293,8 +293,9 @@ pnpm --dir packages/native install   # the native shell's own node_modules. **Th
                                      #   a daemon host and a Tauri bump never moves the root lockfile
 pnpm native                          # tauri dev: Vite on 5173, the window over it
 pnpm native:build                    # → a macOS .app with packages/web inside the binary.
-                                     #   REEMOAT_DEFAULT_SERVER is the only build-time input and is
-                                     #   unset here, so a fork inherits no address; docs/NATIVE.md. **No .dmg**:
+                                     #   REEMOAT_DEFAULT_SERVER is the only build-time input, and no
+                                     #   file here gives it a value — release.yml forwards a repository
+                                     #   variable — so a fork inherits no address; docs/NATIVE.md. **No .dmg**:
                                      #   `bundle.targets` is `["app"]`, because tauri's `bundle_dmg.sh`
                                      #   drives Finder over AppleScript and times out anywhere nobody is
                                      #   logged in — `docs/NATIVE.md` has the measurement and the one-line
@@ -307,10 +308,11 @@ pnpm native:build                    # → a macOS .app with packages/web inside
 State lives in one SQLite file per daemon (`REEMOAT_DB`, default
 `$REEMOAT_HOME/reemoat.db`; `REEMOAT_HOME` is `~/.reemoat` unless set) and each
 session gets its own git worktree under that root's `worktrees/`. One database is
-one machine on one server, so the desktop app runs one daemon per server it has
-opened — `~/.reemoat` for the server its `daemon.env` names,
-`~/.reemoat/servers/<server>/` for every other — and stops them all when it quits
-(Q7.148). A daemon restart leaves every session it did not stop on purpose `interrupted` and
+one machine for one account on one server, so the desktop app runs one daemon per
+account it holds — a server's first account keeps `~/.reemoat` (for the server its
+`daemon.env` names) or `~/.reemoat/servers/<server>/`, and each further account on
+that server gets `~/.reemoat/servers/<server>@<user id>/` — starts every one that is
+set up when it launches, and stops them all when it quits (Q7.148, Q7.149). A daemon restart leaves every session it did not stop on purpose `interrupted` and
 puts an agent back on each by itself — see `.claude/rules/daemon-sessions.md`.
 
 **Traffic to a remote daemon is end-to-end encrypted and there is no other
@@ -479,7 +481,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `http-and-routes.md` | `src/server.ts`, `src/http.ts`, `src/cors.ts`, `packages/web/src/http.ts`, `packages/control-plane/src/app.ts` | The error envelope every service answers in · which non-2xx is not an error · what a route retry may replay · every `pnpm client` verb |
 | `auth-and-tokens.md` | `src/auth.ts`, `src/token.ts`, `src/enroll.ts`, `packages/control-plane/src/keys.ts` | What a signature proves and what it does not · why the daemon makes exactly one control-plane request, ever · every credential this fleet mints and how each stops being one |
 | `authority.md` | `packages/control-plane/src/app.ts`, `main.ts`, `store.ts`, `schema.sql` | What this service is responsible for and what may never arrive in it · the two ratchets that hold that line, and the one exception named by literal · why it serves no browser UI by default · the three rules a migration owes |
-| `cp-devices.md` | `packages/control-plane/src/devices.ts`, `sessions.ts`, `packages/web/src/ui/settings/DevicesSection.tsx`, `packages/native/src-tauri/src/config.rs` | What a device is and what it deliberately decides nothing about · why a retired id is ignored rather than refused · why the device check is a second statement and never a join · where the id lives on the client, and why not the keyring |
+| `cp-devices.md` | `packages/control-plane/src/devices.ts`, `sessions.ts`, `packages/web/src/ui/settings/DevicesSection.tsx`, `packages/native/src-tauri/src/config.rs` | What a device is and what it deliberately decides nothing about · why a retired id is ignored rather than refused · why the device check is a second statement and never a join · where the id lives on the client, why not the keyring, and why per account |
 | `cp-accounts.md` | `packages/control-plane/src/app.ts`, `settings.ts`, `registration.ts`, `packages/web/src/ui/gate/` | Who may exist and who may sign up · disable against delete · the settings table and which side won · every `cpctl` verb |
 | `cp-credentials.md` | `packages/control-plane/src/password.ts`, `sessions.ts`, `throttle.ts`, `net.ts` | The positional gate · what a password change must prove · what a guessing counter is keyed on and what the address half is worth · which 401 signs you out |
 | `cp-machines.md` | `packages/control-plane/src/machines.ts`, `quota.ts`, `packages/web/src/quota.ts` | Who owns a machine and what a name may collide with · the ceiling against the limit · what a revoke gives back · adding a daemon for somebody else |
@@ -489,7 +491,8 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `ask-card.md` | `packages/web/src/ui/AskCard.tsx`, `PermissionCard.tsx`, `ElicitationCard.tsx`, `packages/web/src/permission.ts`, `ask.ts`, `elicitation.ts` | The one card for "the agent is waiting on you" · where it sits and what it may cover · which plan-mode requests are curated and which are drawn as sent · what may be picked, how many, and why nothing you typed is ever erased |
 | `web-composer.md` | `packages/web/src/ui/Composer.tsx`, `CommandMenu.tsx`, `AgentConfigBar.tsx`, `packages/web/src/keys.ts` | Which key sends · what a `/` opens · why a control never leaves the strip · what a chip may claim before the daemon has answered |
 | `legal-pages.md` | `packages/web/src/legal.ts`, `legal/`, `ui/legal/`, `ui/gate/Gate.tsx`, `GateCard.tsx` | Why the documents are a route rather than a sixth gate screen · why a policy is data and never markdown · whose terms a fork serves · what the consent box gates and what it deliberately does not record |
-| `native-shell.md` | `packages/native/src-tauri/`, `packages/web/src/native.ts`, `cp.ts`, `ui/ChooseServer.tsx`, `scripts/nativecheck.ts` | Which one leg of this client leaves the webview, and the four reasons the others may not · what crosses the bridge and what a join does not check · why a credential is keyed on a server's origin · the synchronous read, and the two answers that were refused · why the server picker is a phase rather than a route · one rule, three copies, and what compares them · the one workspace line three deploy behaviours depend on |
+| `native-shell.md` | `packages/native/src-tauri/`, `packages/web/src/native.ts`, `cp.ts`, `ui/ChooseServer.tsx`, `scripts/nativecheck.ts` | Which one leg of this client leaves the webview, and the four reasons the others may not · what crosses the bridge and what a join does not check · why a credential is keyed on a server and an account · the synchronous read, and the two answers that were refused · why the server picker is a phase rather than a route · one rule, three copies, and what compares them · the one workspace line three deploy behaviours depend on |
+| `native-accounts.md` | `packages/native/src-tauri/src/accounts.rs`, `seats.rs`, `commands.rs`, `config.rs`, `daemon.rs`, `packages/web/src/slot.ts`, `native.ts`, `store.ts`, `ui/MenuDrawer.tsx`, `ChooseServer.tsx`, `SignIn.tsx` | What an account is on this computer, and why its key is the server *and* the user · why the host decides which account a call is about and the page never names one · the bridge contract, in one table · a document rather than a label, and what a generation refuses · a webview per account on macOS, a rebind and a reload everywhere else · what adding, switching and signing out each keep and give up · a daemon per account, and which one keeps `~/.reemoat` · what the first launch after the update moves, and only on proof |
 | `native-packaging.md` | `packages/native/src-tauri/tauri.*.conf.json`, `packages/native/scripts/`, `deploy/ci-release.sh` | Which platforms carry a daemon inside them and which carry a client · the one JSON file a profile is, and the measurement that made it one rather than a cargo feature · what an overlay may say, and why the list is that short · why the staging script refuses a Windows triple by name |
 | `web-typography.md` | `packages/web/src/index.css`, `ui/bits.tsx`, `paths.ts`, `ui/settings/` | Which strings are monospace and which are prose · the one surface where a path is a name instead · the scale, and the single arbitrary size that is allowed to exist · one caps idiom, three constants, and why the choice between them is a colour · what the landing page shares and what nothing can check |
 | `docked-panels.md` | `packages/web/src/ui/paneWidth.ts`, `rail.ts`, `taskWidth.ts`, `PaneHandle.tsx`, `leaving.ts`, `TaskPanel.tsx` | How wide a draggable pane is, and which custom property the panel actually spends · who owns the separator's keyboard path · how a layer leaves |

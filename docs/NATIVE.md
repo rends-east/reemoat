@@ -57,10 +57,10 @@ Five things a webview cannot do for itself:
 | | |
 |---|---|
 | the `/v1/*` leg | the control plane mounts **no CORS at all**, so that one request goes through the host process. Everything else — the relay, the daemons, the WebSocket — is the same webview `fetch`/`XMLHttpRequest`/`WebSocket` the browser client uses |
-| the credential | in the operating system's credential store, keyed on the server's origin, never in `localStorage` |
+| the credential | in the operating system's credential store, keyed on the server's origin **and** the account's user id — one entry per account on this computer — never in `localStorage` |
 | a link | opened in the real browser, through `ui/links.ts`'s own three-scheme allowlist |
 | a download | written through the platform's save panel |
-| a daemon on this computer | read out of the current server's `daemon.json` (`~/.reemoat/`, or `~/.reemoat/servers/<server>/` for a daemon the app runs for a second server) and then `~/.reemoat`'s, which a webview cannot open. The host answers a finished loopback origin and refuses any other |
+| a daemon on this computer | read out of the calling account's `daemon.json` (`~/.reemoat/`, `~/.reemoat/servers/<server>/` for a daemon the app runs for a second server, or `servers/<server>@<user id>/` for a further account on one) and then, for a server's first account, `~/.reemoat`'s, which a webview cannot open. The host answers a finished loopback origin and refuses any other |
 
 The fifth is what makes the app more than a window: a daemon on the same machine is
 reached over loopback rather than out to the relay and back. ⚠ **It changes what a
@@ -74,7 +74,7 @@ already holds the daemon's database, its signing keys and every transcript.
 `docs/DECISIONS.md` Q7.137.
 
 Not built, on purpose: no device identity, no updater, no menu bar, no tray, no
-notifications.
+notifications, and no badge for an account that is not on screen (Q7.149).
 
 ## Developing
 
@@ -92,9 +92,19 @@ cd packages/native/src-tauri && cargo test && cargo clippy -- -D warnings
 REEMOAT_DEFAULT_SERVER=https://app.example pnpm native:build
 ```
 
-**Unset in this repository, deliberately** — a fork inherits no address, which is
-`signingIdentity: null`'s rule applied to the question *which fleet does this
-binary join*. `nativecheck` asserts no file here sets it.
+**Set by no file in this repository, deliberately** — a fork inherits no address,
+which is `signingIdentity: null`'s rule applied to the question *which fleet does
+this binary join*. `nativecheck` asserts no file here gives it a value.
+
+**This repository's own releases set it from a repository variable.** `release.yml`
+forwards `${{ vars.REEMOAT_DEFAULT_SERVER }}` to both app jobs, and each job's
+summary prints what it compiled in. The variable is set in the forge — Settings →
+Secrets and variables → Actions → Variables, or `gh variable set
+REEMOAT_DEFAULT_SERVER --body https://app.reemoat.com` — so this repository's releases
+open on its owner's server and a fork's open on an empty box, forks inheriting no
+variables. `nativecheck` allows that one `${{ vars.… }}` line in those two jobs and
+no other form of it anywhere, and asserts it is there. Unset, it expands to the
+empty string, which is no default. Q4.127.
 
 It is baked in by `option_env!` and is therefore **not a secret**: it ends up in
 the binary as a string. `build.rs` carries `cargo:rerun-if-env-changed` for the
@@ -102,7 +112,8 @@ name, without which cargo has no reason to recompile when the value moves.
 
 ⚠ **It is a suggestion for the welcome screen's field and is written down by
 nothing.** The first screen is a welcome either way; with a default compiled in,
-its address box opens already holding it, and **Continue** is what adopts it.
+its address box opens holding it — greyed and disabled, with a pencil beside it that
+unlocks it (Q3.643) — and **Continue** is what adopts it.
 Setting this variable therefore changes what somebody confirms, never what they
 skip — a build cannot decide which fleet an installation joins. A malformed value
 is no default: the box opens empty and the screen asks. A fork's typo fails its
@@ -190,8 +201,9 @@ machine and is not fine in an application people install.
 
 ⚠ **The override runs whatever that checkout says, including about where its state
 lives.** The app starts every daemon with `REEMOAT_HOME` naming the root it chose for
-the server — `~/.reemoat` for the one `~/.reemoat/daemon.env` names,
-`~/.reemoat/servers/<server>/` for every other (Q7.148). A checkout older than that
+the account — `~/.reemoat` for the server `~/.reemoat/daemon.env` names,
+`~/.reemoat/servers/<server>/` for every other, `servers/<server>@<user id>/` for a
+further account on one (Q7.148, Q7.149). A checkout older than that
 change ignores the variable, so pointed at a second server with the launchd daemon
 stopped it would enroll `~/.reemoat/reemoat.db` — the first server's identity — with
 the second server's code. Keep the override on a checkout that reads `REEMOAT_HOME`.
@@ -471,13 +483,18 @@ The parts that need a window, a fleet or an agent, and therefore no driver:
    regression is distinguishable from a broken control plane.
 2. `pnpm native:build`, run the app. The first screen is the **welcome** — a
    greeting, one sentence about what a server is, and an address box. This build
-   compiles no default, so the box is empty; a typo is refused with a sentence and
-   leaves you here, and there is no Cancel, there being nothing to go back to.
-   Build once more with `REEMOAT_DEFAULT_SERVER` set: the same screen, with the
-   box already holding that address. **Continue**, and the sign-in form is next —
-   which names no server, that question having just been answered.
-3. Sign in. Then, in the webview inspector: `localStorage.length === 0`. **That is
-   the one property no offline assertion can reach.**
+   compiles no default, so the box is empty and editable, with no pencil; a typo is
+   refused with a sentence and leaves you here, and there is no way back, there
+   being no account to go back to. Build once more with `REEMOAT_DEFAULT_SERVER` set: the
+   same screen, with the box holding that address, greyed and disabled, a pencil to
+   its right, and **Continue** focused — Enter adopts it. Press the pencil: the box
+   unlocks with its text focused and selected, and the pencil is gone. **Continue**,
+   and the sign-in form is next — which names no server, that question having just
+   been answered, and on a first run offers no **‹ Server** either (Q3.643).
+3. Sign in. Then, in the webview inspector: `localStorage.length === 0` — until the
+   drawer's account list is opened, which is kept as `reemoat.accountsOpen` while
+   open and removed when shut. **That is the one property no offline assertion can
+   reach.**
 4. The empty-fleet screen's install command names **the server you chose**, not
    `tauri://localhost`.
 5. Enrol a daemon, `pnpm daemon`. The row goes online — which is the one assumption
@@ -498,27 +515,32 @@ The parts that need a window, a fleet or an agent, and therefore no driver:
 11. Wifi off for ~30 s mid-turn, then on: it reattaches, the turn continues, and
     **you are not signed out**.
 12. Zero CSP violations in the inspector console throughout.
-13. Quit and relaunch: still signed in, same server, machine reconnects. Then sign
-    out, relaunch, and confirm
-    `security find-generic-password -s com.reemoat.app -a 'credential#<origin>'`
-    answers *item could not be found*.
-14. Point the picker at a second control plane, sign in, quit, relaunch, switch
-    back. Each server keeps its own credential.
-15. On the sign-in screen, tap **‹ Server**. The welcome screen comes back with
-    the current address in the box and a **Cancel** that returns here — this is
-    the only route back for somebody who confirmed a reachable but wrong address,
-    Settings needing a session they cannot get. Then tap **Create one**. The **system browser** opens
-    `<server>/register` — not a window inside the app, and the app's own window is
-    unchanged behind it. Same for **Forgot password?**.
-16. Signed in: Settings → Account → **Server address** → Change. The screen
-    replaces the whole sheet, opens on the current address and offers **Cancel**,
-    which returns to the settings sheet still open at the same section. Submit the
-    address unchanged: nothing reloads and nothing is signed out. Then change it
-    for real and confirm the app reloads onto the second server (signed out there
-    the first time), and that
-    `security find-generic-password -s com.reemoat.app -a 'credential#<the first origin>'`
-    still finds the first server's entry — a switch keeps it (Q7.148). Switch back:
-    the first server opens signed in. Sign out there: only its entry is gone.
+13. Quit and relaunch: still signed in, same account, machine reconnects.
+    `security find-generic-password -s com.reemoat.app -a 'credential#<origin>#<user id>'`
+    finds the entry — the user id is in `server.json`'s `accounts` — and
+    `-a 'credential#<origin>'` alone answers *item could not be found*. Then sign
+    out: the account leaves this computer and the app opens on a sign-in to the same
+    server. Relaunch, and the scoped entry is gone too.
+14. **Add account** from the drawer on a second control plane — the pencil, its
+    address, **Continue** — sign in, quit, relaunch, and switch back from the drawer.
+    Each account keeps its own credential.
+15. On the sign-in form of an account being added, tap **‹ Server**: the server
+    screen comes back with the address in the box and a **‹ a1** at its top that
+    returns to the interface — never a Cancel. A first run's sign-in form has no
+    **‹ Server** at all. A signed-out *account's* sign-in form has no **‹ Server**
+    either — its server cannot move (Q5.120) — and offers **Remove account**, and a
+    **‹** naming the account shown before it where another account exists. Then tap
+    **Create one**. The **system browser** opens `<server>/register` — not a window
+    inside the app, and the app's own window is unchanged behind it. Same for
+    **Forgot password?**.
+16. Signed in: Settings → Account → **Server address** states the server, with
+    *Another server is another account, from the menu.* and no **Change**. **Add
+    account** on the second server from the drawer, and confirm that
+    `security find-generic-password -s com.reemoat.app -a 'credential#<the first origin>#<user id>'`
+    still finds the first account's entry — adding keeps every other account
+    (Q7.148, Q7.149). Switch back from the drawer: the first account opens signed in,
+    and on macOS nothing reloads. Sign out there: only its entry is gone, and the app
+    shows the other account.
 17. The app carries no sign-up form at all:
     `grep -c "Create an account" packages/web/dist/assets/*.js` answers `0`.
 
@@ -542,11 +564,11 @@ The parts that need a window, a fleet or an agent, and therefore no driver:
     keeps 7887 too.
 22. *this device* appears on the second server's machine, and Settings → Logs shows
     that child's ring.
-23. Start a long turn on the second server, then switch the server back to the
-    first. The launchd machine is adopted with no notice, and
+23. Start a long turn on the second server, then switch to the first server's
+    account from the drawer. The launchd machine is adopted with no notice, and
     `ps -o pid,ppid,command -ax | grep scripts/daemon.ts` shows the second server's
     child with the same pid. Switch back: the turn was not interrupted, and neither
-    switch asked for a sign-in — each server kept its own.
+    switch asked for a sign-in — each account kept its own.
 24. Quit with ⌘Q, and separately with ⌘W: every child the app started is gone
     within seconds, and launchd's daemon is still running.
 25. `kill -9` the app while both children run, relaunch, and check `ps`: the
@@ -556,16 +578,91 @@ The parts that need a window, a fleet or an agent, and therefore no driver:
     . <the moved file>; set +a; pnpm daemon`, since `pnpm daemon` reads no env file
     of its own — so it runs on `~/.reemoat`'s database with no env file there. The
     app adopts it for its server and creates no machine.
-27. Sign in to the first server as a second account with no grant on the launchd
-    machine. The setup notice says *A Reemoat daemon for this server is already
-    running on this computer, as a machine this account cannot see* — checked in
-    WebKit, not Chromium.
+27. **Add account** on the first server as a second user with no grant on the
+    launchd machine. The expectation reversed with Q7.149: it gets
+    `~/.reemoat/servers/<server>@<user id>/`, a machine of its own and **no** setup
+    notice — the launchd daemon is its server's first account's, and a further
+    account is answered its own root alone. The notice — *A Reemoat daemon for this
+    server is already running on this computer, as a machine this account cannot
+    see* — is left for a root whose owner could not be proved: a pre-accounts sign-in
+    whose confirm cannot reach the control plane. Where one can be arranged, check it
+    in WebKit, not Chromium.
 28. With the launchd daemon up, run `pnpm daemon` from a checkout with no
     `REEMOAT_HOME`, its own `REEMOAT_DB` and `REEMOAT_PORT`, enrolled with a local
     `pnpm cp`, and open the app on the launchd daemon's server. No setup notice
     appears, `~/.reemoat/daemon.json` names the local control plane as
     `controlPlane`, and Settings → Logs says the daemon it found here is for a
     different server.
+
+**Several accounts on one computer** (Q7.149), from a bundle built with
+`REEMOAT_DEFAULT_SERVER` pointing at a local `pnpm cp` (A), a second control plane
+(B), users a1 and a2 on A and b1 on B. On macOS these are also the hand checks for
+the multi-webview arm — Q7.149's *Measured* paragraph names the ones a self-driven
+build could not reach (a file drop, full screen, focus and typing after a switch,
+occlusion on an unlocked screen); add what you see there, with the date and the
+macOS version:
+
+29. The drawer. In the shell it opens on a large face that is not a button, then
+    the name with A's host under it in mono and a chevron, then a rule; pressing the
+    name lists a1 with a smaller face, ringed, then **Add account**, then a second
+    rule. Close the drawer and open it again: the list is still open, until the
+    name is pressed again. In a browser (`pnpm web`) the head
+    is as it was — no chevron, no list.
+30. **Add account**: a new screen headed *Add account*, a **‹ a1** above the
+    heading, the box holding A's address, greyed, with a pencil beside it, and no
+    sentence between the box and **Continue**. **‹ a1**: back to a1 exactly as left,
+    and no half-added row in the drawer. Add again, **Continue**, sign in as
+    a2.
+31. `security dump-keychain | grep -E '"acct"<blob>="(credential|device_key)#'` lists
+    four entries — `credential#` and `device_key#` for `<A>#<a1 id>` and
+    `<A>#<a2 id>` — and no bare `credential#<A>`.
+32. Start a long turn as a1, switch to a2 from the drawer, and back. No reload and
+    no sign-in; the transcript, the scroll position and a half-typed draft are as
+    left, and the turn streamed on while hidden. Resize the window and enter full
+    screen on each account, and type straight away after a switch: the keyboard is
+    in the account shown.
+33. One daemon per account: `ls -la ~/.reemoat/servers` shows `<A>@<a2 id>` at
+    `0700`; `sqlite3 -readonly ~/.reemoat/servers/<A>@<a2 id>/reemoat.db 'select
+    machine_id, control_plane from identity'` names A with a machine id other than
+    a1's; `ps -o pid,ppid,command -ax | grep scripts/daemon.ts` shows one child per
+    account; and each account's Settings → Logs shows its own ring.
+34. Leave a2 hidden for more than ten minutes: its daemon is still in `ps`, and on
+    show its page catches up without a reload. Quit and relaunch: every account comes
+    back with the one shown last on top, every set-up account's daemon is in `ps`
+    before any of its pages is shown, and a phone signed in as a1 reaches this
+    computer while a2 is on screen.
+35. **Add account**, the pencil, B's address, **Continue**. On the sign-in form
+    **‹ Server** is there, and on the server screen **‹ a2** returns to a2 with no
+    half-added row. Add
+    b1 for real: its root is `~/.reemoat/servers/<B>/`, with no `@`, since b1 is B's
+    first account.
+36. The same account twice: **Add account** and sign in as a1 again. The app lands on
+    a1's existing webview, the drawer has one a1 row, and a1's Settings → Signed in
+    shows no extra session.
+37. Sign out as a2 (Settings → Account): its row leaves the drawer, the account shown
+    before it comes back, its daemon leaves `ps`, `credential#<A>#<a2 id>` is gone
+    and `device_key#<A>#<a2 id>` is still there. Add a2 again: Settings → Devices on
+    A shows one row for this computer, not two, and `servers/<A>@<a2 id>` is reused.
+38. End a1's session from another client. a1's webview lands on the sign-in form
+    with **‹** *the account shown before* and **Remove account** and no **‹ Server**, and the other
+    accounts' drawers draw a1 *signed out*. Sign in there as a2: *That is a
+    different account — add it from Add account, or remove this one*, nothing is
+    adopted, and a2's Settings → Signed in shows no new session.
+39. Ten accounts on the local control plane: **Add account** is gone from the drawer.
+40. In each account's webview inspector: `localStorage.length === 0` after its
+    sign-in, the drawer's list shut; `location.href = "https://example.com"` goes nowhere; a file dropped on
+    the Composer attaches; `window.__TAURI__` exists. And a hidden account cannot
+    reach the screen: start a download in a1's transcript and switch to a2 before its
+    save panel opens — no panel appears over a2 (`not_shown`).
+41. Upgrade from 0.10.1 signed in to A: still signed in, the same machine,
+    `security dump-keychain` shows no bare `credential#<A>` left, and Settings →
+    Devices shows one row for this computer. A server 0.10.1 kept signed in but was
+    not showing opens as an account too, confirmed the first time its page boots.
+42. Android: switching reloads onto the other account and asks nothing; Back does not
+    bring the previous account's page back; **Add account** → **‹** returns.
+43. A release artifact built with the repository variable set, and the config
+    directory moved aside: the box holds that server, greyed, with the pencil.
+    `strings <binary> | grep -F <value>` is the offline check.
 
 ## Open measurements
 
@@ -663,4 +760,5 @@ part that goes stale first.
 | the app dials nothing it was not told to | with no server chosen it runs, draws the picker, opens **zero** sockets and writes **no** file |
 | the webview loaded a document | a `com.apple.WebKit.WebContent` process appears beside the app's own within a second of launch |
 | the Rust rules | `cargo test`: the origin-escape table, the normalization that makes one server one key, the keyring scope, and what this window may navigate to |
+| a webview per account on macOS | **measured 2026-09-23 on macOS 15.6**, self-driven through `Webview::eval` (Q7.149): switching, hidden pages, launch, the guard, labels, `add_child`, exit. **Still by hand:** a file drop (step 40), full screen, `document.hasFocus()` and typing after a switch, and occlusion on an unlocked screen |
 | everything else in the checklist above | **needs a person at a logged-in session.** `screencapture` from a non-interactive shell returns the desktop with no windows, and Automation is refused the same way the disk image's Finder step is — so nothing here has *seen* the server picker, only the process that drew it |

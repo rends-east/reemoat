@@ -312,8 +312,9 @@ class GateStore implements SignInAuth {
   /**
    * Structurally unreachable here, and a body rather than a throw.
    *
-   * `SignIn` draws the control that calls this only under `inNativeShell()`, which
-   * is false in a browser for ever — this bundle is served over HTTP, so the server
+   * `SignIn` draws the control that calls this only on a window the shell says
+   * nobody has signed in to (`signInExits`), and there is no shell in a browser for
+   * ever — this bundle is served over HTTP, so the server
    * *is* the origin that served the page and there is nothing to choose. It is the
    * same dead arm `AppState.host` and `AppState.pickingServer` already document in
    * the app's store, seen from the other side.
@@ -324,6 +325,24 @@ class GateStore implements SignInAuth {
    * doing nothing is what the screen already does when the control is not drawn.
    */
   pickServer(): void {}
+
+  /**
+   * Structurally unreachable here, for {@link GateStore.pickServer}'s reason.
+   *
+   * `SignIn` draws Cancel only where the shell's live list of accounts names one
+   * to go back to, and a browser has no shell and so no list: `nativeAccounts()`
+   * answers `null` there before anything is drawn. Resolving rather than
+   * rejecting, because a rejection is drawn as a sentence and there is nothing
+   * true to say about a control that is not on screen.
+   */
+  async switchBack(): Promise<void> {}
+
+  /**
+   * Structurally unreachable here, for the same reason: Remove account is drawn
+   * only on a window the shell says is an account, and in a browser there is no
+   * such window.
+   */
+  async forgetAccount(): Promise<void> {}
 }
 
 /**

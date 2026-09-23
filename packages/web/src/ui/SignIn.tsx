@@ -2,9 +2,12 @@ import { ChevronLeft } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
 import { signInError, signInReady } from "../account";
 import { gateNotice, showsGateLink } from "../gate";
-import { controlPlaneOrigin, inNativeShell, nativeBoot } from "../native";
+import { errorText } from "../http";
+import { controlPlaneOrigin, nativeBoot } from "../native";
 import { signInAuth } from "../signInAuth";
+import { signInExits } from "../slot";
 import type { InstanceConfig } from "../instance";
+import { useBackAccount } from "./backAccount";
 import { Button, FIELD, Icon, LINK, SETTINGS_HEADING } from "./bits";
 
 /**
@@ -76,6 +79,24 @@ export function SignIn({
    * would name an installer that joins nothing.
    */
   const authority = controlPlaneOrigin();
+  /*
+   * ⚠ **The ways off this screen, beside signing in, and each exists only where
+   * its far side does.** ‹ Server on a window nobody has signed in to, when there is
+   * an account to return to from there; ‹ *that account* on a signed-out account's
+   * own window; Remove account on a window that is an account on that list. **One
+   * chevron at most, and no Cancel** — the owner's call, 2026-09-24: a way back is
+   * drawn the one way this app draws one, naming where it goes, and a first
+   * sign-in has none. The table is `slot.ts`'s, pure and driven by
+   * `webcheck`, so three screens cannot read one payload three ways — and all
+   * three are `false` in a browser and in the gate, where a window is not one of
+   * several.
+   *
+   * `back` is asked of the host when this screen is drawn, never read out of the
+   * boot payload: this is the screen an involuntary sign-out lands on, hours into
+   * a session in which accounts may have been added or removed.
+   */
+  const back = useBackAccount();
+  const exits = signInExits(nativeBoot(), back === undefined ? undefined : (back?.key ?? null));
 
   const submit = (event: FormEvent): void => {
     event.preventDefault();
@@ -86,6 +107,27 @@ export function SignIn({
       .login(name.trim(), password)
       .catch((cause: unknown) => setError(signInError(cause)))
       .finally(() => setBusy(false));
+  };
+
+  /*
+   * The two new ways off, and why neither is guarded by a confirmation. ‹ *that
+   * account* shows another account and changes nothing about this one. Remove account is
+   * one tap on a screen that is already signed out: nothing is lost that signing
+   * in again does not restore, because this computer keeps the account's device
+   * and its daemon's root. A refusal is a sentence where the form's own errors
+   * go, rather than a control that silently did nothing.
+   */
+  const leave = (): void => {
+    setError(null);
+    void signInAuth()
+      .switchBack()
+      .catch((cause: unknown) => setError(errorText(cause)));
+  };
+  const remove = (): void => {
+    setError(null);
+    void signInAuth()
+      .forgetAccount()
+      .catch((cause: unknown) => setError(errorText(cause)));
   };
 
   // Chrome from `FIELD`, layout here. This screen's fields are the ones the
@@ -118,23 +160,55 @@ export function SignIn({
           because that is the screen it opens, and deliberately not the address,
           which is the line the owner rejected on this screen.
 
-          Shell only. In a browser the server is the origin that served the page,
-          so there is no screen to go back to and no control offering one.
+          ⚠ **Only on a window nobody has signed in to — no longer on every
+          window in the shell.** An account is a server and a person, so a
+          signed-out account's sign-in screen may not repoint its server: that
+          would make it a different account wearing the old one's keyring entry,
+          device and daemon, and the host refuses it (Q5.120). Another server is
+          another account, from the menu.
+
+          ⚠ **And no longer on a first sign-in, which is the case it was built
+          for** — the owner's call, 2026-09-24: a first sign-in has no way back.
+          What that gives up is named rather than hidden: a reachable but wrong
+          address, typed on first run, is a sign-in form with nowhere else to go.
+          The server step's probe still refuses anything that is not a Reemoat
+          control plane, so the address that strands somebody is somebody else's
+          working server. On an add it stays, with the server screen's own ‹
+          leading back to the account that was on screen.
+
+          Never in a browser, where the server is the origin that served the
+          page and there is no screen to go back to.
         */}
-        {inNativeShell() && (
+        {exits.server && (
           <button
             type="button"
             onClick={() => signInAuth().pickServer()}
             /* ⚠ **Not while a sign-in is in flight.** `App.tsx` tests
                `pickingServer` above `phase`, so a login that succeeds behind this
                screen would leave somebody on the server form with a live session
-               — recoverable through Cancel, and still a screen nobody asked for.
+               — recoverable through its own ‹, and still a screen nobody asked for.
                The one control that leaves mid-request is the one that should not. */
             disabled={busy}
             className="tap -ml-1 mb-3 flex items-center gap-0.5 text-sm text-muted hover:text-fg disabled:text-faint"
           >
             <Icon as={ChevronLeft} size={14} />
             Server
+          </button>
+        )}
+        {/*
+          The way back from a signed-out account's own sign-in, to the account
+          that was on screen before it — named, as ‹ Server names its far side.
+          `disabled={busy}` for the reason above.
+        */}
+        {exits.back && back != null && (
+          <button
+            type="button"
+            onClick={leave}
+            disabled={busy}
+            className="tap -ml-1 mb-3 flex max-w-full items-center gap-0.5 text-sm text-muted hover:text-fg disabled:text-faint"
+          >
+            <Icon as={ChevronLeft} size={14} />
+            <span className="truncate">{back.label}</span>
           </button>
         )}
 
@@ -152,8 +226,9 @@ export function SignIn({
 
           It has its own screen instead — the welcome, which is the first thing
           anybody sees and whose whole subject is that one question — and a row
-          under Settings → Account for afterwards. Owner's call, 2026-09-16, on
-          seeing it shipped.
+          under Settings → Account for afterwards, which states it and no longer
+          offers to change it (Q3.643). Owner's call, 2026-09-16, on seeing it
+          shipped.
         */}
 
         {/* The involuntary case only — an expired or revoked session. A refused
@@ -210,14 +285,11 @@ export function SignIn({
 
           {error !== null && <p className="mt-2 text-sm text-danger">{error}</p>}
 
-          <Button
-            type="submit"
-            tone="primary"
-            disabled={busy || !signInReady(name, password)}
-            className="mt-4 w-full"
-          >
-            {busy ? "Signing in…" : "Sign in"}
-          </Button>
+          <div className="mt-4 flex gap-2">
+            <Button type="submit" tone="primary" disabled={busy || !signInReady(name, password)} className="flex-1">
+              {busy ? "Signing in…" : "Sign in"}
+            </Button>
+          </div>
         </form>
 
         {/*
@@ -303,6 +375,25 @@ export function SignIn({
             </p>
           )}
           {gateNotice(config) !== null && <p>{gateNotice(config)}</p>}
+          {/*
+            Last in the foot, and an act rather than a navigation — so it does not
+            wear the link look the two doors above wear, and those stay the only
+            two. Drawn only on a window that is an account on this computer's list;
+            a window nobody has signed in to is discarded by leaving it, and is not
+            on the list to take off.
+          */}
+          {exits.remove && (
+            <p>
+              <button
+                type="button"
+                onClick={remove}
+                disabled={busy}
+                className="tap text-muted hover:text-fg disabled:text-faint"
+              >
+                Remove account
+              </button>
+            </p>
+          )}
         </div>
       </div>
     </div>

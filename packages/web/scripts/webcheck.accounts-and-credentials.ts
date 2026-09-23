@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { check, report, sleep, storage } from "./webcheck.env.js";
+import { srcFile, stripComments } from "./webcheck.source.js";
 
 /* ------------------------------------------------------------------ *
  * When a failed control-plane call ends the session
@@ -535,8 +536,39 @@ process.stdout.write("\nleaving the loading screen without a reload\n");
   // exactly the path under test. Stopped here so each step below is the one this
   // driver asked for.
   internals.stopPolling();
-  check("a control plane that is down leaves the app loading", store.getSnapshot().phase, "loading");
+  /*
+   * ⚠ **A control plane that is down draws the app anyway**, reversing what this
+   * line asserted until 2026-09-23. With several accounts on one computer the
+   * loading screen — no drawer — made one server's outage lock every other account
+   * out, and the drawer is the only way to them. The outage is said under the
+   * conversation's title and above the list instead, and never as a screen.
+   */
+  check("a control plane that is down still draws the app, drawer and all", store.getSnapshot().phase, "ready");
   report("and says so", store.getSnapshot().cpError !== null, `cpError: ${String(store.getSnapshot().cpError)}`);
+  {
+    const view = stripComments(srcFile("ui/SessionView.tsx"));
+    const browser = stripComments(srcFile("ui/SessionBrowser.tsx"));
+    const app = stripComments(srcFile("App.tsx"));
+    const loadingArm = app.slice(
+      app.indexOf('if (state.phase === "loading")'),
+      app.indexOf("if (state.me?.mustChangePassword === true)"),
+    );
+    report("the loading arm was found", loadingArm.includes("<Spinner />"), `${loadingArm.length} chars`);
+    check(
+      "under the conversation's title, in the list's own words",
+      [
+        /subtitle=\{\s*state\.cpError !== null \? \(\s*<span className="truncate">\{CONTROL_PLANE_UNREACHABLE\}<\/span>/.test(view),
+        /\{CONTROL_PLANE_UNREACHABLE\}/.test(browser),
+      ],
+      [true, true],
+    );
+    check(
+      "and the list does not call an unread registry empty",
+      /state\.machines\.length === 0 && !probing && state\.cpError === null && \(/.test(browser),
+      true,
+    );
+    check("and the loading screen says nothing about an outage, which never reaches it", /cpError/.test(loadingArm), false);
+  }
 
   /*
    * It answers again, with **nothing in it** — the account that owns no machines,

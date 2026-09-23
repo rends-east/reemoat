@@ -5,6 +5,7 @@ import { store } from "../store";
 import type { Me } from "../wire";
 import { Button, FIELD, SETTINGS_HEADING } from "./bits";
 import { GateCard } from "./gate/GateCard";
+import { UseAnotherAccount } from "./UseAnotherAccount";
 
 /**
  * The wall an admin-created account lands on, and the only way past it.
@@ -31,6 +32,14 @@ import { GateCard } from "./gate/GateCard";
  * are clearing site data. `ghost` rather than `DangerButton` — `--color-danger`
  * is for at most one control in a view, this view's one real decision is the
  * password, and signing out is the most *reversible* thing on screen.
+ *
+ * **And in the shell, a way to another account, before Sign out.** An account added
+ * from the menu with a temporary password lands here with no drawer, so without it
+ * every other account on this computer is behind a form somebody may not be ready
+ * to fill in. It bypasses nothing — the wall is about this account and stays in
+ * front of it — and it is drawn only where the host names an account to go back
+ * to (`UseAnotherAccount`). Sign out stays last, and in the shell it now also takes
+ * this account off this computer.
  */
 export function ForcedPasswordChange({ me }: { me: Me }): ReactNode {
   const [current, setCurrent] = useState("");
@@ -78,9 +87,12 @@ export function ForcedPasswordChange({ me }: { me: Me }): ReactNode {
       title="Choose your own password"
       lead="This account was created for you with a temporary password. It has to be replaced before you can go any further."
       footer={
-        <Button tone="ghost" onClick={() => void store.signOut()}>
-          Sign out
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <UseAnotherAccount />
+          <Button tone="ghost" onClick={() => void store.signOut()}>
+            Sign out
+          </Button>
+        </div>
       }
     >
       <form onSubmit={submit}>

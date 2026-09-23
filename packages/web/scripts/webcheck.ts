@@ -74,6 +74,9 @@ await import("./webcheck.agent-install.js");
 await import("./webcheck.settings-routing.js");
 await import("./webcheck.shell-and-enrollment.js");
 await import("./webcheck.gate-and-server-settings.js");
+// Beside the server screen it extends: several accounts on one computer, the table
+// every sign-in screen reads, and the store's half of the host's rules.
+await import("./webcheck.accounts-on-this-computer.js");
 await import("./webcheck.legal-and-consent.js");
 await import("./webcheck.machine-limit-and-probe.js");
 await import("./webcheck.navigation.js");

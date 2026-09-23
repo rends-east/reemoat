@@ -39,6 +39,7 @@ import { Header } from "./Header";
 import { ElicitationCard } from "./ElicitationCard";
 import { PermissionCard } from "./PermissionCard";
 import { RenameField, resumeSession, SessionMenu } from "./SessionMenu";
+import { CONTROL_PLANE_UNREACHABLE } from "./SessionBrowser";
 import { toast } from "./Toast";
 import { TASK_PANEL_GUTTER } from "./TaskPanel";
 import {
@@ -381,11 +382,22 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
           </>
         }
         subtitle={
-          <WorkspaceLine
-            machineName={machineDisplayName({ id: sessionRef.machineId, name: row.machineName }, state.localMachineId)}
-            workspace={session.workspace}
-            roots={state.rootsByMachine.get(sessionRef.machineId) ?? []}
-          />
+          /*
+           * ⚠ **An unreachable server is said here, under the conversation's name,
+           * and nowhere as a screen of its own** — the owner's call, 2026-09-23,
+           * Telegram's "Connecting…" in the same place. The line it replaces for the
+           * moment is where this session runs; the words are the list's own
+           * (`CONTROL_PLANE_UNREACHABLE`), one state and one wording.
+           */
+          state.cpError !== null ? (
+            <span className="truncate">{CONTROL_PLANE_UNREACHABLE}</span>
+          ) : (
+            <WorkspaceLine
+              machineName={machineDisplayName({ id: sessionRef.machineId, name: row.machineName }, state.localMachineId)}
+              workspace={session.workspace}
+              roots={state.rootsByMachine.get(sessionRef.machineId) ?? []}
+            />
+          )
         }
         close
       >

@@ -131,12 +131,22 @@ export function AccountSection({
        *
        * "On the server too" rather than "everywhere": other devices keep their
        * sign-ins, and the Devices list above is where those are ended.
+       *
+       * ⚠ **In the shell it says the second thing signing out does there**: the
+       * account leaves this computer's list and its daemon stops, and the account
+       * shown before it comes back (`store.signOut`). Said as *takes this account
+       * off this computer* — never as the computer itself being signed out, which
+       * the other accounts on it would make false.
        */}
       <ServerRow />
 
       <section className={SETTINGS_SECTION}>
         <h2 className={SETTINGS_HEADING}>Sign out</h2>
-        <p className="mt-1 text-xs text-muted">Ends this sign-in on the server too.</p>
+        <p className="mt-1 text-xs text-muted">
+          {nativeBoot() !== null
+            ? "Ends this sign-in on the server too, and takes this account off this computer."
+            : "Ends this sign-in on the server too."}
+        </p>
         <DangerButton icon={LogOut} className="mt-3" onClick={() => void store.signOut()}>
           Sign out
         </DangerButton>
@@ -204,27 +214,25 @@ function FactRow({
  * ------------------------------------------------------------------ */
 
 /**
- * The control plane this installation talks to, and the way to change it.
+ * The control plane this account is on — stated, and no longer changed from here.
  *
- * **Immediately above Sign out, and no longer the same kind of act.** Changing
- * servers used to *be* signing out, plus a redirection: `host_set_server` erased
- * `credential#<previous>` in the same act. It keeps it now (Q7.148), so each
- * server stays signed in on this computer and switching back asks nothing; the
- * row stays beside Sign out because both answer "which fleet is this window on",
- * and Sign out is still the one that gives a sign-in up.
+ * ⚠ **This was the second entrance to `ChooseServer`, and it is gone (Q3.643).**
+ * An account is a server and a person: repointing a signed-in window at another
+ * server would quietly make it a different account, carrying the old one's keyring
+ * entry, device and daemon root into a fleet that never issued them. So changing
+ * server *is* adding an account now, from the menu, and the host refuses a server
+ * change for anything but a window nobody has signed in to (Q5.120). What is left
+ * is the fact: the full origin, in mono, because it is the string somebody compares
+ * against the address they meant — and a subline saying where the other door is.
  *
- * **The second of the screen's two entrances**, the first being the control on
- * the sign-in screen. Before both, `setNativeServer` had exactly one call site —
- * `state.host.server === null` — so a server that had been chosen could not be
- * changed from inside the app at all, and signing out did not help: `clearSession`
- * deliberately leaves the server alone.
+ * **Immediately above Sign out**, because both answer "which fleet is this window
+ * on", and Sign out is still the one that gives a sign-in up.
  *
  * ⚠ **Not a `SettingsLeaf`, and it must not become one.** A leaf is a *route*,
  * `parseSettingsRoute` is shared with the web build, and every argument
- * `ChooseServer`'s own docblock makes against a `Route` arm applies unchanged.
- * `store.pickServer()` sets state and `App.tsx` returns the screen above
- * `<AppShell>`, so the sheet is replaced rather than nested — which means Cancel
- * puts it back exactly where it was, the URL never having moved.
+ * `ChooseServer`'s own docblock makes against a `Route` arm applies unchanged —
+ * the day this row offers an act again, it is state and a screen above
+ * `<AppShell>`, not a URL.
  *
  * ⚠ **"Server address", not "Server".** The admin band already has a section
  * called Server — registration, the domains, the machine limit — and two things
@@ -243,12 +251,8 @@ function ServerRow(): ReactNode {
       <h2 className={SETTINGS_HEADING}>Server address</h2>
       <FactRow
         value={<span className="truncate font-mono">{server}</span>}
-        subline="Each server keeps its own sign-in on this computer."
-        action={
-          <Button size="sm" onClick={() => store.pickServer()}>
-            Change
-          </Button>
-        }
+        subline="Another server is another account, from the menu."
+        action={null}
       />
     </section>
   );

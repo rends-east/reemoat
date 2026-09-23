@@ -218,18 +218,21 @@ export function App(): ReactNode {
    * env var and no route that reaches it, because in a browser the server is the
    * origin that served this page.
    *
-   * **Two states, one screen.** `server === null` is first run; `pickingServer` is
-   * somebody asking to change it — from the sign-in screen's own control, or from
-   * Settings → Account with a live session behind it. The second is why this arm
-   * had to widen rather than stay a first-run branch.
+   * **Two states, one screen.** `server === null` is a window nobody has given a
+   * server — first run, or an account being added from the menu; `pickingServer`
+   * is somebody asking to change it from the sign-in screen's ‹ Server, on a window
+   * nobody has signed in to yet. The second is why this arm had to widen rather
+   * than stay a first-run branch. Settings → Account used to be a third way in,
+   * with a live session behind it, and is not any more: another server is another
+   * account (Q3.643).
    *
    * Above the documents, because nothing on any screen below can be fetched until
    * this is answered. `App` waits on `state.config` for a document route and
    * `config` comes from `GET /v1/instance`, which needs a server — so below this,
    * `/terms` would spin for ever. ⚠ **That was a sentence about a freshly
-   * installed app and is now a standing one**: with the picker reachable while
-   * signed in, "there is no usable config" is every frame it is open, not just
-   * the first ones after an install.
+   * installed app and is now a standing one**: with the picker reachable after an
+   * install — from ‹ Server, and on every account added — "there is no usable
+   * config" is every frame it is open, not just the first ones after an install.
    *
    * Below every hook, which is the ⚠ two docblocks up: a render taking this arm must
    * run exactly as many hooks as one that does not.
@@ -322,14 +325,17 @@ export function App(): ReactNode {
   }
 
   if (state.phase === "loading") {
+    /*
+     * ⚠ **Only while the first answer is on its way — never an outage.** An
+     * unreachable control plane used to keep the app here, with a sentence and,
+     * in the shell, a way to another account under it. It draws the shell now
+     * (`store.bootstrap`'s catch): this screen has no drawer, and the drawer is
+     * the one way to every other account on this computer, so a server that is
+     * down may not stand between somebody and a server that is up.
+     */
     return (
       <div className="flex min-h-full flex-col items-center justify-center gap-3 p-6">
         <Spinner />
-        {state.cpError !== null && (
-          <p className="max-w-xs text-center text-sm text-muted">
-            Cannot reach the control plane. Retrying — sessions already running are unaffected.
-          </p>
-        )}
       </div>
     );
   }

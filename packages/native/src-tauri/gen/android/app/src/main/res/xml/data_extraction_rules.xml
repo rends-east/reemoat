@@ -8,9 +8,9 @@
   re-run orphans this file silently and Auto Backup is on again.
   `nativecheck` asserts the attribute and this file as a pair.
 
-  ⚠ The app-private directory holds `server.json` — which carries the chosen
-  control plane, the device id, and, on the path where the Android Keystore could
-  not be reached, the device **private key** itself. Auto Backup and `adb backup`
+  ⚠ The app-private directory holds `server.json` — which carries the accounts,
+  each account's device id, and, on the path where the Android Keystore could
+  not be reached, each account's device **private key** itself. Auto Backup and `adb backup`
   would both carry that off the device and onto Google's servers or a laptop,
   which is the one thing `credential.rs`'s whole scoping rule exists to prevent.
 

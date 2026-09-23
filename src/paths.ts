@@ -35,14 +35,16 @@ export function expandHome(value: string): string {
  * (`daemon.json`) all default to a name inside it, and an explicit `REEMOAT_DB` or
  * `REEMOAT_*_ROOT` still wins over the default it would have given.
  *
- * ⚠ **One database is one machine on one server, so one computer on two servers
- * is two of these.** The `identity` row is a single row, and re-enrolling
- * overwrites it; and the daemon checks a token's `aud` and never its subject, so
- * everything one database holds is served to whoever holds a grant on the machine
- * it currently is. The desktop app therefore gives each server it runs a daemon
- * for a root of its own — `~/.reemoat` for the server `~/.reemoat/daemon.env`
- * names, `~/.reemoat/servers/<server>/` for every other — and passes it here at
- * spawn rather than writing it into a file. Q7.148.
+ * ⚠ **One database is one machine for one person on one server, so one computer
+ * holding two accounts is two of these.** The `identity` row is a single row, and
+ * re-enrolling overwrites it; and the daemon checks a token's `aud` and never its
+ * subject, so everything one database holds is served to whoever holds a grant on
+ * the machine it currently is. The desktop app therefore gives each account it runs
+ * a daemon for a root of its own — a server's first account keeps `~/.reemoat` for
+ * the server `~/.reemoat/daemon.env` names and `~/.reemoat/servers/<server>/` for
+ * every other, and each further account on that server gets
+ * `~/.reemoat/servers/<server>@<userId>/` — and passes it here at spawn rather than
+ * writing it into a file. Q7.148, Q7.149.
  *
  * **It is not where the agent CLIs live.** `~/.reemoat/toolchain` is per *user*,
  * one copy shared by every daemon this account runs (`MANAGED_CLI_DIRS`), and it

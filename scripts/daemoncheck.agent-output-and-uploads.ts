@@ -797,11 +797,13 @@ process.stdout.write("\nwhere uploads live\n");
 /*
  * The state root every default above is derived from.
  *
- * `REEMOAT_HOME` is what the desktop app sets for each server it runs a daemon
- * for — `~/.reemoat` for the one `~/.reemoat/daemon.env` names and
- * `~/.reemoat/servers/<server>/` for every other (Q7.148) — so one computer on two
- * servers is two databases, two worktree trees and two upload trees rather than
- * one identity re-enrolled back and forth. Unset has to keep meaning exactly what
+ * `REEMOAT_HOME` is what the desktop app sets for each account it runs a daemon
+ * for — a server's first account keeps `~/.reemoat` (for the server
+ * `~/.reemoat/daemon.env` names) or `~/.reemoat/servers/<server>/`, and every
+ * further account on it `~/.reemoat/servers/<server>@<userId>/` (Q7.148, Q7.149) —
+ * so one computer on two servers, or two people on one, is two databases, two
+ * worktree trees and two upload trees rather than one identity re-enrolled back
+ * and forth. Unset has to keep meaning exactly what
  * it always did, because every daemon started any other way reads it that way.
  */
 process.stdout.write("\nthe root those defaults sit under\n");

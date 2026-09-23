@@ -106,6 +106,14 @@ same table `app_triple` and `app_artifacts` are columns of, so adding a target i
 separate because it is the only target that reads a signing key and a matrix
 cannot scope a secret to one entry; the four secrets are named in that job alone.
 
+**Which server the apps open on is a repository variable, and checking it is a step
+before the tag.** `release.yml` forwards `REEMOAT_DEFAULT_SERVER` from
+`${{ vars.… }}` to both app jobs, and each job's summary prints the value it
+compiled in. It is set in the forge, never in a file, so `gh variable list` before
+`git tag` is the only place to see it: unset, every app built from that tag opens on
+an empty, editable server box rather than on this repository's server, and nothing
+fails. A fork inherits no repository variables, which is the point. Q4.127.
+
 ⚠ **`RELEASE_APP_TARGETS` is empty today, so a tag still publishes only the
 installer.** That is the gate rather than a gap: `deploycheck` asserts every name
 in that list is built by a `check.yml` job, so a platform is added to it in the

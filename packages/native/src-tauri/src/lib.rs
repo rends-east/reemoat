@@ -9,7 +9,15 @@
 //! credential store, open a link in the real browser, and write a file through a
 //! save panel. Everything else — the relay, the daemons, the WebSocket, every
 //! retry rule — stays in the webview and is the same code the browser client runs.
+//!
+//! **One window, and a webview per account in it** where the platform allows
+//! (`seats.rs`): each account's page is a single-account app, exactly as a browser
+//! tab is, and switching is showing another one. **The host decides which account
+//! a command is about, by the webview that asked** — its label and the generation
+//! its document presents — and never by anything the page sends (`commands.rs`,
+//! `accounts.rs`). Q1.651, Q7.149.
 
+mod accounts;
 mod commands;
 mod config;
 mod credential;
@@ -17,22 +25,21 @@ mod daemon;
 mod device;
 mod local;
 mod proxy;
-
-use std::collections::BTreeMap;
-use std::sync::Mutex;
+mod seats;
 
 use tauri::Manager;
 
 use commands::Host;
 
-/// Where the window is allowed to *navigate*, which is not the same question as
-/// where a link may open.
+/// Where every account's webview is allowed to *navigate*, which is not the same
+/// question as where a link may open.
 ///
 /// Only this app's own document. A link in agent output is opened by
 /// `host_open_external`, in the browser, with its own allowlist; this refuses the
 /// other shape — a script assigning `location.href`, or a form posting away —
 /// which would otherwise replace the running app with somebody else's page inside
-/// a window holding the fleet's credential.
+/// a webview holding an account's credential. `seats.rs` puts it on every webview
+/// it builds, and it builds every one.
 ///
 /// The dev server is here because `tauri dev` loads the frontend from Vite, and a
 /// rule that only worked in a packaged build is a rule nobody develops against —
@@ -52,7 +59,7 @@ use commands::Host;
 ///
 /// `tauri.localhost` stays in every build: it is the *bundle's* own origin on
 /// Windows and Android, not a server's.
-fn is_our_own(url: &url::Url) -> bool {
+pub(crate) fn is_our_own(url: &url::Url) -> bool {
     match url.scheme() {
         // macOS and Linux serve the bundle from `tauri://localhost`.
         "tauri" => true,
@@ -102,12 +109,37 @@ pub fn run() {
             commands::host_device_clear,
             commands::host_device_dh,
             commands::host_device_key_reset,
+            commands::host_accounts,
+            commands::host_account_switch,
+            commands::host_account_add,
+            commands::host_account_forget,
+            commands::host_account_confirm,
             commands::host_cp,
             commands::host_copy_text,
             commands::host_open_external,
             commands::host_save_file,
             commands::host_pick_folder,
         ])
+        /*
+         * ⚠ **A new page load is a new document, and the one place the host can
+         * see one start.** `Host::page_loaded` retires the previous document's
+         * generation, clears what was handed to it and ends a rebind — so a
+         * document from before, revived by Android's Back or a back/forward-cache
+         * restore, is refused rather than answered about whichever account the
+         * webview holds now (Q5.120).
+         *
+         * The global hook looks the webview up by label and silently skips one not
+         * registered yet (`tauri`'s `manager/webview.rs`), so a webview's very first
+         * load may not be seen here. That is safe: a label that has never loaded
+         * has never been issued a generation or handed a credential.
+         */
+        .on_page_load(|webview, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                if let Some(host) = webview.try_state::<Host>() {
+                    host.page_loaded(webview.label());
+                }
+            }
+        })
         .setup(|app| {
             /*
              * The configuration directory, from Tauri rather than hand-built.
@@ -118,31 +150,53 @@ pub fn run() {
              * owner.
              */
             let dir = app.path().app_config_dir()?;
+            /*
+             * ⚠ **Two reads and no write.** `read_server` is the server a first run
+             * chose, which is the pending seat's when there is no account at all;
+             * `read_accounts` is every account. A file from before accounts has its
+             * list derived rather than written: the evidence for its server is one
+             * keyring read here, once, and the list reaches the disk only with the
+             * first act that changes it.
+             */
             let server = config::read_server(&dir);
-            app.manage(Host {
-                server: Mutex::new(server),
-                client: proxy::client(),
-                config_dir: dir,
-                durable: credential::probe(),
-                supervisors: Mutex::new(BTreeMap::new()),
-            });
+            let roster = config::read_accounts(&dir, &|origin| credential::read(origin).is_some());
+            app.manage(Host::new(dir, credential::probe(), &roster));
 
             /*
              * The window is declared in `tauri.conf.json` with `create: false` and
-             * built here, so every setting stays in the configuration file and
-             * this adds only the one thing a configuration cannot express.
+             * built by `seats.rs`, so every setting stays in the configuration file
+             * and that module adds only what a configuration cannot express: a
+             * webview per account, and the navigation guard on every one.
              */
-            let config = app
-                .config()
-                .app
-                .windows
-                .iter()
-                .find(|window| window.label == "main")
-                .cloned()
+            let config = seats::main_config(app.handle())
                 .ok_or("tauri.conf.json declares no window labelled main")?;
-            tauri::WebviewWindowBuilder::from_config(app, &config)?
-                .on_navigation(is_our_own)
-                .build()?;
+            seats::open_at_launch(app, &config, &roster, server)?;
+
+            /*
+             * ⚠ **Every account's daemon, from launch, whether or not its page is
+             * alive** (D2). On a thread of its own: starting one runs a login shell
+             * for its `PATH`, which is seconds, per root, before a first paint that
+             * should not wait for any of it.
+             */
+            if commands::CAN_HOST_DAEMON {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let host = handle.state::<Host>();
+                    let Ok(home) = handle.path().home_dir() else {
+                        return;
+                    };
+                    let Some(payload) = daemon::Payload::locate(
+                        &commands::resource_dir(&handle),
+                        &commands::exe_path(),
+                    ) else {
+                        return;
+                    };
+                    let roots = host.launch_roots(&home, &roster);
+                    daemon::start_configured_at_launch(&payload, &home, &roots, &|root| {
+                        host.supervisor_for(root).ok()
+                    });
+                });
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -184,11 +238,11 @@ pub fn run() {
              * tray" rather than something this comment claimed was already true.
              *
              * ⚠ **Every daemon it started, signalled together and waited on once.**
-             * There is one per server this app has opened (Q7.148), and a server
-             * change leaves the previous one running — so this is the only place
-             * they stop, and stopping them in turn would make a quit worth one
-             * `STOP_DEADLINE` per server. `daemon::stop_all` signals all, then
-             * reaps all against one deadline. A server whose supervisor is poisoned
+             * There is one per account (D2, Q7.149), every one runs from launch, and
+             * a switch leaves each running — so this is the only place they stop
+             * together, and stopping them in turn would make a quit worth one
+             * `STOP_DEADLINE` per account. `daemon::stop_all` signals all, then
+             * reaps all against one deadline. A root whose supervisor is poisoned
              * is skipped rather than blocking the rest; its child is orphaned, which
              * is the failure this block exists to prevent, for that one only.
              */

@@ -227,8 +227,41 @@ export function signedOutText(failure: AuthFailure): string {
  */
 export const CONTROL_PLANE_UNREACHABLE = "Cannot reach the control plane.";
 
+/**
+ * A sign-in the control plane accepted and this computer would not keep: the
+ * sign-in screen of a signed-out account, signed in to as **somebody else**.
+ *
+ * ⚠ **Refused rather than adopted, and not by the page.** That window is one
+ * account's — its keyring entry, its device and its daemon root — and taking a
+ * different person's session there would register the first person's device key
+ * for the second, which is the linkage a device key exists to prevent, and start
+ * the first person's database under the second's sign-in. So the host asks the
+ * control plane whose the token is before it writes anything, answers `refused`,
+ * and revokes the session it was handed; `cp.login` turns that into this, and
+ * nothing is adopted anywhere (Q1.651).
+ *
+ * A class of its own rather than a string, for the same reason every other refusal
+ * here keys on a code: the sentence is the screen's, and the fact is this.
+ */
+export class WrongAccount extends Error {
+  constructor() {
+    super("that sign-in belongs to a different account");
+    this.name = "WrongAccount";
+  }
+}
+
 /** What the sign-in screen says about a sign-in that was refused. */
 export function signInError(error: unknown): string {
+  /*
+   * First, and before the transport arm below that every non-`ApiError` would
+   * otherwise fall into: this one was *answered*, and "this is not your password"
+   * is exactly backwards — the password was right, for another account. The
+   * sentence names both ways forward, because both are real: the other account
+   * belongs on the list as itself, and this one may be the one to let go.
+   */
+  if (error instanceof WrongAccount) {
+    return "That is a different account — add it from Add account, or remove this one.";
+  }
   if (!ApiError.isApiError(error)) {
     // Named apart from a wrong password on purpose: somebody whose password is
     // right and whose network is not should not go and change their password.

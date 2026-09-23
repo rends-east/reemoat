@@ -1,16 +1,20 @@
-import { LogOut, Puzzle, Settings as SettingsIcon } from "lucide-react";
-import { useSyncExternalStore, type ReactNode } from "react";
+import { ChevronDown, LogOut, Plus, Puzzle, Settings as SettingsIcon } from "lucide-react";
+import { useEffect, useId, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { errorText } from "../http";
 import { marketPath } from "../market";
+import { nativeAccounts, type NativeAccountList, type NativeAccountSummary } from "../native";
 import { pluginPath, screenPlugins } from "../plugins";
 import { navigate } from "../router";
 import { settingsPath } from "../settings";
+import { serverLabel } from "../slot";
 import { sessionGroups, store, type AppState } from "../store";
 import { APP_VERSION } from "../version";
 import { Icon, Monogram, personEmoji } from "./bits";
 import { currentView, groupsVersion, subscribeGroups } from "./groups";
 import { useLeaving } from "./leaving";
 import { LAYER, useDismissible } from "./overlay";
+import { toast } from "./Toast";
 
 /**
  * The **longest** the panel may outlive a close, and it is one number in two files.
@@ -109,6 +113,13 @@ const DRAWER_HEADING = "px-3 py-1.5 text-2xs font-semibold tracking-wider text-f
  * why there is no `Account` row: Account is `DEFAULT_SECTION`, so Settings already
  * opens on it, and a row here would be the same door drawn twice. The head of this
  * panel is who you are; Settings is where you change it.
+ *
+ * **Two kinds of row now, and the test above is the first kind's.** Destinations
+ * still pass it, and go through `go`. *Acts* about you are the second kind — Sign
+ * out, and in the shell the accounts under the head (`AccountPanel`, below this
+ * component): each closes the panel and then calls the store, never `go` or
+ * `navigate`, because switching or adding an account is not a place in this
+ * window's URL. Q3.642 is the entry for the panel.
  *
  * **What has not changed.** There is no Language row and no ellipsis of extras —
  * this app has no i18n and `index.css` explicitly refuses a theme switcher. `Sign
@@ -240,7 +251,25 @@ export function MenuDrawer({
   if (!shown) return null;
 
   const me = state.me;
-  const name = me?.name ?? null;
+  // The name this computer last saw for the account where `me` has not answered —
+  // an unreachable server draws the shell with no `me` (`store.bootstrap`).
+  const name = me?.name ?? state.host?.name ?? null;
+  /*
+   * Whether this is the shell, where this window is one account of several and the
+   * head becomes the account panel. `state.host` rather than `inNativeShell()` for
+   * `AppState.host`'s reason: it is `null` in a browser for ever, and it is what the
+   * rest of this app already reads for "the shell answered".
+   */
+  const native = state.host !== null;
+  /*
+   * The one extra fact worth a line, and only when it is true. Not `me.id` — an
+   * opaque `u_…` under a name is noise. `via` earns its place because it changes
+   * what this panel can do: `cp.logout` has no session to delete for a key, and
+   * clears locally in its `finally`. The same line under either head.
+   */
+  const keyLine = me?.via === "api_key" && (
+    <p className="shrink-0 px-3 pb-2 text-2xs text-faint">signed in with an API key</p>
+  );
   /*
    * ⚠ **Only the selected machine's, and only the ones that draw a screen and are
    * usable.** A plugin that is switched off or has failed is not offered rather
@@ -333,9 +362,20 @@ export function MenuDrawer({
          * The head: who you are.
          *
          * **The identity half is not a control.** There is no Account row below it
-         * for the reason the docblock gives, and making the monogram or the name
-         * pressable would put the panel's only destination on the one element that
-         * does not look like one.
+         * for the reason the docblock gives, and making the monogram pressable
+         * would put the panel's only destination on the one element that does not
+         * look like one. In a browser the name beside it is not one either.
+         *
+         * ⚠ **In the shell the name is a disclosure, which reverses Q3.612's inert
+         * head there (Q3.642).** This window is one account of several on this
+         * computer, and the place every multi-account client puts the others is
+         * under the name: it opens this computer's accounts in place and navigates
+         * nowhere. The face stays outside any control, and grows (`lg`), because it
+         * is who this window *is* above a list of who else it could be. That head is
+         * `AccountPanel` and it lives **inside the scroller**, as Telegram's does —
+         * with ten accounts open, a fixed head of eleven rows would starve the
+         * scroller and the `overflow-hidden` aside would clip Sign out off the
+         * bottom. The browser keeps this head exactly as it was.
          *
          * ⚠ **There was a ✕ here and it is gone by the owner's call. The gap it
          * covered is real, narrow, and recorded rather than smoothed over.** This
@@ -357,21 +397,20 @@ export function MenuDrawer({
          * A ✕ is the shape that works, which is what makes putting it back a
          * one-line change rather than a redesign. Q3.628.
          */}
-        <div className="flex shrink-0 items-center gap-3 px-3 pt-3 pb-4">
-          <Monogram name={name} glyph={personEmoji(name)} size="md" className="bg-raised" />
-          <span className="min-w-0 flex-1 truncate text-base">{name ?? "Signed in"}</span>
-        </div>
-        {/*
-         * The one extra fact worth a line, and only when it is true. Not `me.id` —
-         * an opaque `u_…` under a name is noise. `via` earns its place because it
-         * changes what this panel can do: `cp.logout` has no session to delete for
-         * a key, and clears locally in its `finally`.
-         */}
-        {me?.via === "api_key" && (
-          <p className="shrink-0 px-3 pb-2 text-2xs text-faint">signed in with an API key</p>
+        {!native && (
+          <div className="flex shrink-0 items-center gap-3 px-3 pt-3 pb-4">
+            <Monogram name={name} glyph={personEmoji(name)} size="md" className="bg-raised" />
+            <span className="min-w-0 flex-1 truncate text-base">{name ?? "Signed in"}</span>
+          </div>
         )}
+        {!native && keyLine}
 
         <div className="min-h-0 flex-1 overflow-y-auto px-1.5">
+          {native && (
+            <AccountPanel name={name} server={state.host?.server ?? null} onClose={onClose}>
+              {keyLine}
+            </AccountPanel>
+          )}
           {me !== null && (
             <button type="button" onClick={() => go(settingsPath())} className={`${DRAWER_ROW} text-fg hover:bg-raised`}>
               <Icon as={SettingsIcon} size={18} />
@@ -450,5 +489,219 @@ export function MenuDrawer({
       </aside>
     </>,
     document.body,
+  );
+}
+
+/**
+ * Who this window is, and the other accounts on this computer — the shell's head
+ * for the panel above (Q3.642).
+ *
+ * **Below `MenuDrawer`, and the placement is asserted rather than tidy.** `webcheck`
+ * reads that component's first mount guard and its first `aria-hidden` element off
+ * this file by position, so a component above it would be read in their place. It
+ * also keeps the drawer's own body free of hooks it did not have: this state lives
+ * and dies with the panel, which unmounts on every close — so the list is asked for
+ * again on every open, which is what it has to be.
+ *
+ * ⚠ **The fold is remembered, and it was not.** It shut again on every open —
+ * `TaskPanel`'s finished band's precedent — until the owner's call on the first
+ * build (2026-09-24): open stays open until somebody closes it, as Telegram's does.
+ * So it is read from `localStorage` on every mount rather than held in module
+ * state: every account's window is a page of its own on one data store, and a
+ * module copy would answer for the window it was set in and not the one being
+ * opened. Written only while open — closing removes the key — so a computer
+ * where nobody has opened it still holds nothing (`docs/NATIVE.md` step 3).
+ *
+ * **The list is the host's, read live** (`nativeAccounts`, one IPC, no keyring):
+ * accounts are added and removed from other windows while this one lives, and a
+ * list kept from launch would offer a switch to one that is gone. Until it answers
+ * the fold holds nothing, which is the same as a list of one.
+ *
+ * What it draws, top to bottom:
+ *
+ *   - the face, `lg`, **not a control** — who this window is;
+ *   - the name and the server, as **one disclosure** — `aria-expanded` and
+ *     `aria-controls` on a button that navigates nowhere, the chevron turning on
+ *     its icon rather than on the button, because `.tap`'s transition shorthand on
+ *     the button would swallow a `transition-transform` there (Disclosure's
+ *     placement) — and a `ChevronDown` rather than Disclosure's `ChevronRight`,
+ *     because a trailing right chevron on a full-width row reads as *goes to
+ *     another screen*;
+ *   - a rule under the head, always — Telegram's, and the owner's ask: it is what
+ *     says the rows below it slid out of the head rather than being more of the
+ *     menu, and it is the room between the head and the first of them;
+ *   - the fold: `Disclosure`'s `0fr`/`1fr` grid with `inert` on the closed half,
+ *     so a closed fold is not a tab stop and is not read out, closed by a second
+ *     rule under its last row;
+ *   - rows with faces at `row`, smaller than the head's, so a list reads as one;
+ *   - this account's row, a `<div aria-current>` and **not a button** — a control
+ *     that answers a tap with nothing is refused in this app — with its face ringed
+ *     rather than outlined, because `outline` is the focus ring here and a current
+ *     mark drawn with it would read as focus;
+ *   - a button for every other account, "signed out" at its trailing edge where
+ *     the host says so;
+ *   - "Add account" while there is room for one — the host's `canAdd`, which is
+ *     where the ceiling of ten lives.
+ *
+ * **Every act closes the panel first and then asks the store** — Sign out's shape,
+ * never `go`, since a switch is not a place in this window's URL. A refusal is a
+ * toast, because the panel it would have been drawn on is already leaving.
+ *
+ * **What it spends and does not:** no `tabIndex`, no weight on a row or a name, no
+ * caps band — the typography census holds this file at one of each.
+ */
+function AccountPanel({
+  name,
+  server,
+  onClose,
+  children,
+}: {
+  name: string | null;
+  server: string | null;
+  onClose: () => void;
+  /** The API-key line, drawn under the name as it is under the browser's head. */
+  children: ReactNode;
+}): ReactNode {
+  const [expanded, setExpanded] = useState(readAccountsOpen);
+  const [accounts, setAccounts] = useState<NativeAccountList | null>(null);
+  const id = useId();
+  useEffect(() => {
+    let live = true;
+    void nativeAccounts().then((list) => {
+      if (live) setAccounts(list);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+  const act = (verb: () => Promise<void>): void => {
+    onClose();
+    void verb().catch((cause: unknown) => toast("error", errorText(cause)));
+  };
+
+  return (
+    <div className="pt-3">
+      <div className="px-3 pb-1">
+        <Monogram name={name} glyph={personEmoji(name)} size="lg" className="bg-raised" />
+      </div>
+      <button
+        type="button"
+        onClick={() => {
+          setExpanded(!expanded);
+          writeAccountsOpen(!expanded);
+        }}
+        aria-expanded={expanded}
+        aria-controls={id}
+        className={`${DRAWER_ROW} text-fg hover:bg-raised`}
+      >
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-base">{name ?? "Signed in"}</span>
+          {server !== null && <span className="block truncate font-mono text-2xs text-muted">{serverLabel(server)}</span>}
+        </span>
+        <Icon
+          as={ChevronDown}
+          size={18}
+          className={`text-muted transition-transform duration-200 ease-out ${expanded ? "rotate-180" : ""}`}
+        />
+      </button>
+      {children}
+      <div className="mt-2 border-t border-edge" />
+      <div
+        id={id}
+        inert={!expanded}
+        className={`grid transition-[grid-template-rows] duration-200 ease-out ${expanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]"}`}
+      >
+        <div className="overflow-hidden">
+          <div className="mb-1.5 border-b border-edge py-1.5">
+            {(accounts?.accounts ?? []).map((account) =>
+              account.current ? (
+                <div key={account.key} aria-current="true" className={`${DRAWER_ROW} text-fg`}>
+                  <Monogram
+                    name={account.name}
+                    glyph={personEmoji(account.name)}
+                    size="row"
+                    className="bg-raised ring-2 ring-fg ring-offset-2 ring-offset-surface"
+                  />
+                  <AccountLines account={account} />
+                </div>
+              ) : (
+                <button
+                  key={account.key}
+                  type="button"
+                  onClick={() => act(() => store.switchAccount(account.key))}
+                  className={`${DRAWER_ROW} text-fg hover:bg-raised`}
+                >
+                  <Monogram name={account.name} glyph={personEmoji(account.name)} size="row" className="bg-raised" />
+                  <AccountLines account={account} />
+                </button>
+              ),
+            )}
+            {accounts?.canAdd === true && (
+              <button
+                type="button"
+                onClick={() => act(() => store.addAccount())}
+                className={`${DRAWER_ROW} text-fg hover:bg-raised`}
+              >
+                <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center">
+                  <Icon as={Plus} size={18} />
+                </span>
+                Add account
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * One account's two lines, and its state.
+ *
+ * The name in the row's own sans, and the server under it in mono — a
+ * machine-written string somebody may compare against the address they typed,
+ * which is `web-typography.md`'s test — at the step below, as every mono run under
+ * a sans line is. A kept sign-in nobody has attributed yet has no name, and draws
+ * its server as its name rather than a blank.
+ *
+ * "signed out" is a **state word at the trailing edge, in sans**: putting it on the
+ * mono line would change that line's family halfway, which is the row this app's
+ * typography refuses. It is what the host last knew rather than a fresh read of
+ * every keyring entry — `NativeAccountSummary` carries why.
+ */
+/** Where the account fold's state is kept; see `AccountPanel`. */
+const ACCOUNTS_OPEN_KEY = "reemoat.accountsOpen";
+
+function readAccountsOpen(): boolean {
+  try {
+    return window.localStorage.getItem(ACCOUNTS_OPEN_KEY) === "1";
+  } catch {
+    // A store that refuses a read (a private window, a blocked origin) remembers
+    // nothing, and a fold that opens shut is the honest drawing of that.
+    return false;
+  }
+}
+
+function writeAccountsOpen(open: boolean): void {
+  try {
+    if (open) window.localStorage.setItem(ACCOUNTS_OPEN_KEY, "1");
+    else window.localStorage.removeItem(ACCOUNTS_OPEN_KEY);
+  } catch {
+    // Not kept: the fold still opens and shuts for this sitting, which is all a
+    // refused write can cost.
+  }
+}
+
+function AccountLines({ account }: { account: NativeAccountSummary }): ReactNode {
+  return (
+    <>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate">{account.name ?? serverLabel(account.origin)}</span>
+        {account.name !== null && (
+          <span className="block truncate font-mono text-2xs text-muted">{serverLabel(account.origin)}</span>
+        )}
+      </span>
+      {!account.signedIn && <span className="shrink-0 text-2xs text-faint">signed out</span>}
+    </>
   );
 }

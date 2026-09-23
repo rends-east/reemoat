@@ -346,7 +346,9 @@ export function SessionBrowser({
 
           {/* Names a remedy the reader can act on, rather than describing something
               somebody else has not done. */}
-          {state.machines.length === 0 && !probing && (
+          {/* Not while the registry is unreadable: "no machines" would be a guess
+              drawn as a fact, under a notice that says the list could not be asked. */}
+          {state.machines.length === 0 && !probing && state.cpError === null && (
             <div className="px-4 py-6 text-center">
               <p className="text-sm text-muted">No machines yet.</p>
               {/*
@@ -2200,11 +2202,22 @@ export function SetupNotice({ setup }: { setup: SetupState }): ReactNode {
   );
 }
 
+/**
+ * What an unreachable control plane is called, in the two places it is said: this
+ * notice above the list, and the line under a conversation's title
+ * (`SessionView`). One state, one wording.
+ *
+ * ⚠ **It used to add "running on tokens already issued", which a cold start made
+ * false**: with the loading screen gone for an outage (`store.bootstrap`'s catch),
+ * the shell is drawn before any token was ever issued, and the sentence would have
+ * promised sessions it could not reach.
+ */
+export const CONTROL_PLANE_UNREACHABLE = "Server unreachable — retrying…";
+
 export function ControlPlaneNotice(): ReactNode {
   return (
     <div className="mx-3 mb-2 shrink-0 rounded-md border border-edge-strong bg-raised px-3 py-2 text-xs text-fg">
-      Control plane unreachable — running on tokens already issued. Sessions are unaffected until
-      they expire.
+      {CONTROL_PLANE_UNREACHABLE}
     </div>
   );
 }

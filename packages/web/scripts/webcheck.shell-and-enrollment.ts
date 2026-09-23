@@ -2085,21 +2085,133 @@ process.stdout.write("\nthe menu, the machines and the build\n");
     true,
   );
   /*
-   * The head is who you are and it is **not** a control — that is what the Account
-   * row below it is for, and a pressable identity plus a row naming the account is
-   * the same door drawn twice.
+   * The head is who you are and the face is **not** a control — that is what the
+   * Account row below it is for, and a pressable identity plus a row naming the
+   * account is the same door drawn twice.
+   *
+   * ⚠ **Read over whole `<button>…</button>` bodies, because the pattern this
+   * replaced was blind.** It was `<button[^>]*>\s*<Monogram`, and `[^>]*` ends at
+   * the `>` of `onClick={() => …}` — which every button in this file carries — so
+   * it could not have seen a face inside a button had there been one. The positive
+   * control below is exactly that shape. What it pins now: the shell's large face
+   * is in no button, while the account rows *are* buttons holding a face at the
+   * list's size, which is right — a row is pressed, a face at the head is not.
    */
+  const buttons = [...drawer.matchAll(/<button\b[\s\S]*?<\/button>/g)].map((m) => m[0]);
+  report(
+    "the button reader sees a face inside a button written with an arrow",
+    [...'<button onClick={() => x}>\n<Monogram size="lg" />\n</button>'.matchAll(/<button\b[\s\S]*?<\/button>/g)].some((m) =>
+      /size="lg"/.test(m[0]),
+    ),
+    "positive control",
+  );
+  report("the drawer's buttons were found", buttons.length >= 6, `${buttons.length} buttons`);
   check(
-    "it opens with who you are, and that is not itself a control",
-    [/<Monogram /.test(drawer), /<button[^>]*>\s*<Monogram/.test(drawer)],
-    [true, false],
+    "it opens with who you are, and the face is not itself a control",
+    [/<Monogram /.test(drawer), /<Monogram [^>]*size="lg"/.test(drawer), buttons.filter((b) => /size="lg"/.test(b)).length],
+    [true, true, 0],
   );
   /*
    * The head is an avatar rather than an initial, and the face is derived from the
-   * name. The pure half — that it is derived at all, rather than rolled — is
-   * asserted below; this is only that the drawer asks for one.
+   * name — every face in the panel, the rows' included. The pure half — that it is
+   * derived at all, rather than rolled — is asserted below; this is only that the
+   * drawer asks for one.
    */
   check("and it draws a face rather than a letter", /personEmoji\(name\)/.test(drawer) && /size="md"/.test(drawer), true);
+  check("and every account's row draws one too", /personEmoji\(account\.name\)/.test(drawer), true);
+
+  /* ---- the account panel, in the shell ---- */
+
+  /*
+   * ⚠ **In the shell the name under the face is a disclosure, reversing Q3.612's
+   * inert head there (Q3.642)** — this computer's accounts open under it, in place,
+   * and nothing navigates. A browser keeps its head exactly as it was, so the
+   * panel is gated on the shell having answered.
+   */
+  check("the account panel is the shell's alone", /const native = state\.host !== null;/.test(drawer), true);
+  check(
+    "and the browser keeps its plain head",
+    /\{!native && \(\s*<div className="flex shrink-0 items-center gap-3 px-3 pt-3 pb-4">/.test(drawer),
+    true,
+  );
+  check(
+    "a disclosure over a fold that is inert while closed",
+    [/aria-expanded=\{expanded\}/.test(drawer), /aria-controls=\{id\}/.test(drawer), /inert=\{!expanded\}/.test(drawer), /grid-rows-\[0fr\]/.test(drawer)],
+    [true, true, true, true],
+  );
+  check(
+    "and it navigates nowhere",
+    buttons.filter((b) => /aria-expanded/.test(b) && /navigate\(|\bgo\(/.test(b)).length,
+    0,
+  );
+  /*
+   * **Acts, not destinations: close first, then the store.** A switch is not a place
+   * in this window's URL, so the rows never touch `go` or `navigate` — the
+   * destination list above is unchanged by them, which is asserted where it is.
+   */
+  check("acts close the panel before they ask the store", /const act = [\s\S]{0,80}?onClose\(\);/.test(drawer), true);
+  check(
+    "switching and adding go through the store",
+    [/act\(\(\) => store\.switchAccount\(account\.key\)\)/.test(drawer), /act\(\(\) => store\.addAccount\(\)\)/.test(drawer)],
+    [true, true],
+  );
+  check("and Add account only while the host has room for one", /accounts\?\.canAdd === true && \(/.test(drawer), true);
+  check("the list is the host's, read when the panel opens", /nativeAccounts\(\)\.then/.test(drawer), true);
+  /*
+   * ⚠ **The current account is ringed, never outlined** — `outline` is this app's
+   * focus ring, so a current mark drawn with it would read as focus — **and it is
+   * not a button**: a control that answers a tap with nothing is refused here.
+   */
+  check(
+    "the current account is ringed rather than outlined, and marked current",
+    [/ring-2 ring-fg ring-offset-2 ring-offset-surface/.test(drawer), /\boutline-/.test(drawer), /aria-current="true"/.test(drawer)],
+    [true, false, true],
+  );
+  check("and it is a row, not a button", buttons.filter((b) => /aria-current/.test(b)).length, 0);
+  /*
+   * ⚠ **The owner's three asks on the first build (2026-09-24), each an absence
+   * nothing else would notice.** Faces in the list are smaller than the head's; a
+   * rule under the head says the rows slid out of it and gives the room before the
+   * first; and the fold stays open until somebody closes it — read from storage on
+   * every mount, written only while open.
+   */
+  check(
+    "the list's faces are smaller than the head's",
+    [(drawer.match(/size="row"/g) ?? []).length >= 2, /personEmoji\(account\.name\)\} size="md"/.test(drawer)],
+    [true, false],
+  );
+  check("a rule under the head, drawn whether or not the fold is open", /\{children\}\s*<div className="mt-2 border-t border-edge" \/>/.test(drawer), true);
+  check(
+    "and the fold is remembered: read on every mount, kept only while open",
+    [
+      /useState\(readAccountsOpen\)/.test(drawer),
+      /if \(open\) window\.localStorage\.setItem\(ACCOUNTS_OPEN_KEY, "1"\);\s*else window\.localStorage\.removeItem\(ACCOUNTS_OPEN_KEY\);/.test(drawer),
+      /setExpanded\(!expanded\);\s*writeAccountsOpen\(!expanded\);/.test(drawer),
+    ],
+    [true, true, true],
+  );
+  /*
+   * ⚠ **The chevron turns on its icon, never on the row** — `.tap`'s transition
+   * shorthand on the button would swallow a `transition-transform` there, which is
+   * `Disclosure`'s placement — and the row's own class string carries no transition
+   * at all.
+   */
+  check(
+    "the chevron turns on the child, not the row",
+    [/<Icon\s+as=\{ChevronDown\}[\s\S]{0,120}?transition-transform[\s\S]{0,80}?rotate-180/.test(drawer), /transition/.test(/const DRAWER_ROW = "([^"]*)"/.exec(drawer)?.[1] ?? "transition")],
+    [true, false],
+  );
+  /*
+   * The server under a name is mono at the step below — a string somebody compares
+   * against the address they meant — and a "signed out" state word is sans at the
+   * trailing edge, never on the mono line.
+   */
+  check(
+    "each account's server is drawn in mono at the step below its name",
+    (drawer.match(/font-mono text-2xs text-muted">\{serverLabel\(/g) ?? []).length,
+    2,
+  );
+  check("and signed out is a word at the trailing edge, where the host says so", /\{!account\.signedIn && <span className="shrink-0 text-2xs text-faint">signed out<\/span>\}/.test(drawer), true);
   /*
    * ⚠ **Derived, never rolled.** A face that changed between renders would be the
    * one thing on this screen that moves for no reason — and this rail re-renders
@@ -2172,6 +2284,19 @@ process.stdout.write("\nthe menu, the machines and the build\n");
     [/font-/.test(rowClasses), /font-/.test(nameRow), /font-semibold/.test(headingClasses)],
     [false, false, true],
   );
+  /*
+   * ⚠ **Every name, not the first one.** The shell draws this window's name in its
+   * disclosure and every account's under it, and a weight on any of them is the
+   * emphasis the owner took out; reading only the first match would pass over all
+   * but the browser's head. Floored, so a rename of the expression cannot make the
+   * sweep empty.
+   */
+  const names = [
+    ...[...drawer.matchAll(/<span className="([^"]*)">\{name \?\? "Signed in"\}/g)].map((m) => m[1] ?? ""),
+    ...[...drawer.matchAll(/<span className="([^"]*)">\{account\.name \?\? serverLabel\(account\.origin\)\}/g)].map((m) => m[1] ?? ""),
+  ];
+  report("every name the drawer draws was read", names.length >= 3, `${names.length} names`);
+  check("and none of them carries a weight", names.filter((n) => /font-/.test(n)), []);
   check("the one extra fact is still drawn only when it is true", /me\?\.via === "api_key"/.test(drawer), true);
   /*
    * The way out is last, separated, and the only row here that is not a

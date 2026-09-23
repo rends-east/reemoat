@@ -155,14 +155,31 @@ report("there are files to sweep at all", files.length >= 50, `${files.length} m
    * serving from. A computed one would be a value an agent's output could reach.
    * The CSP cannot help here: there is no `navigate-to` directive, and neither
    * `form-action` nor `base-uri` constrains `location.assign`.
+   *
+   * ⚠ **`location.replace` is swept too, and it is new rather than exempt.** An
+   * account move reloads with `replace`, never `assign` — the document left
+   * behind is another account's, and Back must not bring it back to be refused —
+   * and so does a document the host refused as stale. Both are the same kind of
+   * navigation this sweep exists for, so they are held to the same literal rather
+   * than let through by a verb the pattern did not know.
    */
   const sites: string[] = [];
   for (const file of files) {
     const body = stripComments(src(file));
-    for (const match of body.matchAll(/location\.(?:assign\(|href\s*=)\s*([^;)]*)/g)) {
+    for (const match of body.matchAll(/location\.(?:assign\(|replace\(|href\s*=)\s*([^;)]*)/g)) {
       sites.push(`${file}: ${(match[1] ?? "").trim()}`);
     }
   }
+  report(
+    "the sweep sees a replace as a navigation",
+    /location\.(?:assign\(|replace\(|href\s*=)/.test('window.location.replace("/")'),
+    "positive control",
+  );
+  check(
+    "and the account moves are among what it found",
+    sites.filter((site) => site.startsWith("store.ts:") || site.startsWith("native.ts:")).length >= 5,
+    true,
+  );
   report("there are navigations to check", sites.length > 0, `${sites.length} assignments`);
   check(
     "every navigation this app makes is a root-relative literal",
@@ -190,12 +207,20 @@ report("there are files to sweep at all", files.length >= 50, `${files.length} m
     ),
   ].sort();
   /*
-   * Two command names are built by a conditional rather than written as a literal
-   * — the credential set/clear pair and the device set/clear pair, each an
-   * `invoke(value === null ? "…_clear" : "…_set", …)` — so they are named here
-   * too. Written out rather than pattern-matched: a name this census cannot see
-   * is a name the pin does not cover, and saying which ones is cheaper than a
-   * cleverer regex.
+   * One pair of command names is built by a conditional rather than written as a
+   * literal — the device set/clear pair, an
+   * `invoke(value === null ? "…_clear" : "…_set", …)` — so it is named here too.
+   * Written out rather than pattern-matched: a name this census cannot see is a
+   * name the pin does not cover, and saying which ones is cheaper than a cleverer
+   * regex.
+   *
+   * ⚠ **There were two pairs, and the credential pair left the conditional.** A
+   * sign-in in the shell is now *filed under an account* the host proves, awaited
+   * and answered (`bindNativeCredential`), while erasing one names nothing and is
+   * fire-and-forget (`clearNativeCredential`) — two different calls with two
+   * different contracts, each a literal the `called` pattern above sees directly.
+   * So the pattern narrowed to the device pair, and a credential name matching it
+   * again would mean the two had been folded back into one setter.
    *
    * ⚠ **This list is the thing to edit when a conditional pair is added**, and it
    * is easy to miss because the failure names the *shell* — "a command the shell
@@ -205,11 +230,21 @@ report("there are files to sweep at all", files.length >= 50, `${files.length} m
    */
   const conditional = [
     ...new Set(
-      [...native.matchAll(/"(host_(?:credential|device)_(?:set|clear))"/g)]
+      [...native.matchAll(/"(host_device_(?:set|clear))"/g)]
         .map((m) => m[1])
         .filter((c): c is string => c !== undefined),
     ),
   ];
+  check(
+    "the one conditional pair left is the device's, both halves",
+    [...conditional].sort(),
+    ["host_device_clear", "host_device_set"],
+  );
+  check(
+    "and the credential's two are literal calls of their own",
+    [called.includes("host_credential_set"), called.includes("host_credential_clear")],
+    [true, true],
+  );
   const wanted = [...new Set([...called, ...conditional])].sort();
 
   const rust = readFileSync(new URL("../../native/src-tauri/src/lib.rs", SRC), "utf8");
@@ -224,7 +259,7 @@ report("there are files to sweep at all", files.length >= 50, `${files.length} m
   check("and every command the shell registers is called", registered.filter((c) => !wanted.includes(c)), []);
   /*
    * A computed command name makes the census above vacuous, so it is refused
-   * outright — the two `host_credential_*` names are picked by a ternary over two
+   * outright — the two `host_device_*` names are picked by a ternary over two
    * *literals*, which this still sees.
    */
   check("no command name is assembled from a variable", /invoke(?:<[^>]*>)?\(\s*[^"a-z]/.test(native.replace(/invoke<T>\(command/g, "")), false);
@@ -324,6 +359,12 @@ const holder = (globalThis as Record<string, unknown>)["window"] as Record<strin
 interface Call {
   command: string;
   args: Record<string, unknown>;
+  /**
+   * The invoke headers the page sent, or `null` for none — which is where the
+   * document's generation rides, so every section below can see whether a call
+   * claimed one.
+   */
+  headers: Record<string, string> | null;
 }
 const calls: Call[] = [];
 let answer: (call: Call) => Promise<unknown> = async () => undefined;
@@ -331,8 +372,8 @@ let answer: (call: Call) => Promise<unknown> = async () => undefined;
 function enterShell(): void {
   holder["__TAURI__"] = {
     core: {
-      invoke: async (command: string, args: unknown): Promise<unknown> => {
-        const call = { command, args: (args ?? {}) as Record<string, unknown> };
+      invoke: async (command: string, args: unknown, options?: { headers?: Record<string, string> }): Promise<unknown> => {
+        const call = { command, args: (args ?? {}) as Record<string, unknown>, headers: options?.headers ?? null };
         calls.push(call);
         return await answer(call);
       },
@@ -367,8 +408,15 @@ process.stdout.write("\nthe credential, in the shell\n");
 
   cp.setSession("rs_native");
   check("the credential is held in memory exactly as in a browser", cp.currentCredential()?.value, "rs_native");
-  check("and handed to the operating system's store", calls.map((c) => c.command), ["host_credential_set"]);
-  check("with the value and nothing else", calls[0]?.args, { value: "rs_native" });
+  /*
+   * ⚠ **And asks the store for nothing — the write moved to `login`.** In the shell
+   * a credential is filed under the account it belongs to, and only the sign-in
+   * finds out which: so the keyring write is `login`'s awaited
+   * `bindNativeCredential`, answered by a host that asked the control plane itself
+   * (driven in the next section). A `setSession` that still wrote would be a second
+   * writer with no idea whose account it was writing for.
+   */
+  check("and asks the store for nothing: the write is login's, which knows the account", calls.length, 0);
   /*
    * ⚠ **The assertion this whole section exists for.** All three names, because the
    * two pre-rename ones are read on the next page load in preference to nothing —
@@ -385,6 +433,12 @@ process.stdout.write("\nthe credential, in the shell\n");
   cp.clearSession();
   check("signing out clears the memory copy", cp.currentCredential(), null);
   check("and asks the store to forget it", calls.map((c) => c.command), ["host_credential_clear"]);
+  /*
+   * **Naming nobody.** The host erases the entry of the account this *document*
+   * is, which it knows from the window and the generation; a clear that named an
+   * account would be a page able to erase somebody else's sign-in.
+   */
+  check("and names no account: the host reads the calling window's", calls[0]?.args, {});
   check("still touching no browser storage", [...storage.keys()], []);
   /*
    * ⚠ **The other half, and the one a server change takes (Q7.148).** Switching
@@ -399,6 +453,253 @@ process.stdout.write("\nthe credential, in the shell\n");
   check("a server change lets go of the memory copy", cp.currentCredential(), null);
   check("and asks the store for nothing, so that server stays signed in", calls.length, 0);
   check("and touches no browser storage either", [...storage.keys()], []);
+  leaveShell();
+}
+
+/* ------------------------------------------------------------------ *
+ * Signing in, in the shell: the host decides whose account it is
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nsigning in, in the shell: the host decides whose account it is\n");
+{
+  /*
+   * ⚠ **Every rule about a sign-in in the shell is driven here, over the real
+   * `cp.login`, because each fails in silence.** The page adopts a token only when
+   * the host has *bound* it — having asked the control plane itself whose it is —
+   * and every other answer, every unknown one and every rejection leaves it holding
+   * nothing. The failure each arm guards is an identity rather than a screen: a
+   * token adopted in a window that is somebody else's account registers that
+   * account's device key for this person and starts its daemon under their sign-in.
+   *
+   * The request itself names no device any more, and the store is handed the
+   * token and nothing else — no user, no name, no account — because a page that
+   * named the user could file one person's session under another's account.
+   */
+  const { WrongAccount, signInError } = await import("../src/account.js");
+  const LOGIN_ANSWER = {
+    status: 200,
+    statusText: "OK",
+    body: JSON.stringify({
+      token: "rs_login",
+      sessionId: "s_1",
+      expiresAt: 0,
+      user: { id: "u_ada", name: "ada", isAdmin: false },
+    }),
+  };
+  const boundAs = (outcome: string): Record<string, unknown> => ({
+    outcome,
+    account: "https://cp.example#u_ada",
+    name: "ada",
+    deviceId: "dv_ada",
+    devicePublicKey: null,
+    deviceKeyAtRest: null,
+  });
+  /** One sign-in, with the host answering `set` for the bind, from a clean slate. */
+  const signInWith = async (set: () => Promise<unknown>): Promise<unknown> => {
+    storage.clear();
+    cp.clearSession();
+    calls.length = 0;
+    answer = async (call) => {
+      if (call.command === "host_cp") return LOGIN_ANSWER;
+      if (call.command === "host_credential_set") return await set();
+      return undefined;
+    };
+    return await cp.login("ada", "correct horse battery").catch((error: unknown) => error);
+  };
+
+  enterShell();
+
+  const signedIn = await signInWith(async () => boundAs("bound"));
+  check("a sign-in the host binds is this window's", (signedIn as { name?: string }).name, "ada");
+  check("the request, then the bind, and nothing else", calls.map((c) => c.command), ["host_cp", "host_credential_set"]);
+  const loginRequest = calls[0]?.args["req"] as { path?: string; body?: string } | undefined;
+  check("the first is the sign-in itself", loginRequest?.path, "/v1/login");
+  check(
+    "and it names no device: the device is an account's, and the account is what this finds out",
+    Object.keys(JSON.parse(loginRequest?.body ?? "{}") as Record<string, unknown>).sort(),
+    ["name", "password"],
+  );
+  check("the store is handed the token and nothing else", calls[1]?.args, { value: "rs_login" });
+  check("and only then does the page hold it", cp.currentCredential()?.value, "rs_login");
+  check(
+    "still never in localStorage",
+    ["reemoat.credential", "remoslop.credential", "remoslop.apiKey"].map((k) => storage.has(k)),
+    [false, false, false],
+  );
+
+  /*
+   * **Already here and signed in: the host revoked the fresh session, and the
+   * window goes there.** The page never held the token, so it sends nothing with
+   * it — the revoke is the host's, which already had the token in hand.
+   */
+  const duplicate = await signInWith(async () => boundAs("existing"));
+  check("an account already open is a named rejection", duplicate instanceof cp.AccountAlreadyOpen, true);
+  check("naming the account the host keyed it on", (duplicate as { account?: string }).account, "https://cp.example#u_ada");
+  check("and the page adopted nothing", cp.currentCredential(), null);
+  check("nor sent anything with a bearer it never held", calls.map((c) => c.command), ["host_cp", "host_credential_set"]);
+
+  /* Already here and signed *out*: the host gave it this sign-in; the window moves there. */
+  const adopted = await signInWith(async () => boundAs("adopted"));
+  check("an account signed out elsewhere here takes the sign-in, and the window moves", adopted instanceof cp.AccountAlreadyOpen, true);
+  check("and this window adopted nothing", cp.currentCredential(), null);
+
+  /*
+   * ⚠ **A different person on a signed-out account's screen is refused, and says
+   * so.** Adopting it here is the one path to two identities in one window.
+   */
+  const stranger = await signInWith(async () => boundAs("refused"));
+  check("somebody else on this account's screen is refused", stranger instanceof WrongAccount, true);
+  check("and nothing is adopted", cp.currentCredential(), null);
+  check("and the screen says which way forward", /different account/.test(signInError(stranger)), true);
+
+  /*
+   * ⚠ **A rejection fails the sign-in, and this is the reversal.** The old setter
+   * was fire-and-forget and memory was a usable degraded mode; for an attributed
+   * sign-in it is not one — a token the host could not attribute may be somebody
+   * else's account in this window.
+   */
+  const unreachable = await signInWith(async () => {
+    throw "could not ask the control plane whose this is";
+  });
+  check("a bind the host could not make fails the sign-in", unreachable instanceof Error || typeof unreachable === "string", true);
+  check("and leaves the page holding nothing", cp.currentCredential(), null);
+
+  /* And an outcome this page does not know adopts nothing either: `wire.ts`'s rule, failing toward safe. */
+  const unknown = await signInWith(async () => boundAs("merged"));
+  check("an answer this page does not know is not a success", unknown instanceof Error, true);
+  check("and adopts nothing", cp.currentCredential(), null);
+
+  /* The positive control for all of the above: the same stub, bound, does adopt. */
+  await signInWith(async () => boundAs("bound"));
+  report("and the stub itself adopts when bound, so the nulls above are the page's", cp.currentCredential()?.value === "rs_login", "bound adopts");
+
+  cp.clearSession();
+  answer = async () => undefined;
+  leaveShell();
+  storage.clear();
+}
+
+/* ------------------------------------------------------------------ *
+ * Which document a command comes from
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nwhich document a command comes from\n");
+{
+  /*
+   * ⚠ **The generation is how a late command from a document the host has moved
+   * past is refused rather than landing on the account that replaced it** — the
+   * old bearer to the new account's server, a stale clear erasing the new
+   * account's sign-in. The rule is pure and driven; the wiring is read off the
+   * source, because `hostReady` settles once at import and in this driver it
+   * settled with no shell, so the module's own generation is `null` for the run.
+   */
+  const bridge = await import("../src/native.js");
+  check(
+    "a command after boot carries the document's generation",
+    bridge.withGeneration("host_cp", "g_1"),
+    { headers: { "reemoat-generation": "g_1" } },
+  );
+  check("host_boot never does: it is how a document learns one", bridge.withGeneration("host_boot", "g_1"), undefined);
+  check("and nothing is claimed before the host has answered", bridge.withGeneration("host_cp", null), undefined);
+  check(
+    "a caller's own headers ride beside it",
+    bridge.withGeneration("host_save_file", "g_1", { headers: { "x-reemoat-filename": "a%20b" } }),
+    { headers: { "x-reemoat-filename": "a%20b", "reemoat-generation": "g_1" } },
+  );
+  check(
+    "and cannot overwrite the value the host issued",
+    bridge.withGeneration("host_cp", "g_1", { headers: { "reemoat-generation": "forged" } }),
+    { headers: { "reemoat-generation": "g_1" } },
+  );
+
+  const source = stripComments(src("native.ts"));
+  check(
+    "every command goes out through that one rule",
+    /held\.invoke<T>\(command, args, withGeneration\(command, sent, options\)\)/.test(source),
+    true,
+  );
+  /*
+   * ⚠ **Nothing goes out before the host has named this document**, and the
+   * first bundled build is why: `store.bootstrap` fires `loadConfig` before it
+   * awaits `hostReady`, the early `host_cp` carried no generation, was refused,
+   * and the refusal reloaded the page — 728 loads in twelve seconds, nothing drawn.
+   * The wait and what is sent are both source here, because `hostReady` settles at
+   * import in this driver and there is no shell to be early against.
+   */
+  check(
+    "every command but host_boot waits for the host to have answered, while it has not",
+    /if \(command !== "host_boot" && generation === null && hydrating\) await hostReady;/.test(source),
+    true,
+  );
+  check(
+    "and what it sends is read after that wait, never before it",
+    source.indexOf("await hostReady;") < source.indexOf('const sent = command === "host_boot" ? null : generation;') &&
+      source.indexOf("await hostReady;") >= 0,
+    true,
+  );
+  check("with the generation the boot answer issued", /generation = answer\.generation \?\? null;/.test(source), true);
+  check("under the name the host reads", /const GENERATION_HEADER = "reemoat-generation";/.test(source), true);
+  check("and a rebinding answer is asked again rather than drawn", /answer\.rebinding !== true/.test(source), true);
+
+  enterShell();
+  calls.length = 0;
+  answer = async () => null;
+  await bridge.nativeAccounts();
+  check(
+    "in a document the host never answered, no command claims a generation",
+    calls.map((c) => [c.command, c.headers]),
+    [["host_accounts", null]],
+  );
+
+  /*
+   * ⚠ **A stale document goes, once.** A burst of refused calls — the poll, a
+   * socket, a panel — would otherwise queue a navigation each; and `replace`, so
+   * Back cannot bring the refused document back to be refused again. The rejection
+   * still reaches the caller, so it stops rather than carrying on.
+   */
+  check(
+    "a stale refusal is known by its code, whoever words the rest",
+    [
+      bridge.isStaleDocument("stale_document: this window shows another account now"),
+      bridge.isStaleDocument(new Error("stale_document")),
+      bridge.isStaleDocument("not_shown"),
+    ],
+    [true, true, false],
+  );
+  const location = holder["location"] as Record<string, unknown>;
+  const replaced: unknown[] = [];
+  location["replace"] = (to: unknown): void => {
+    replaced.push(to);
+  };
+  answer = async () => {
+    throw "stale_document: this window shows another account now";
+  };
+  const swallowed = await bridge.nativeAccounts();
+  const refused = await bridge.switchNativeAccount(null).catch((error: unknown) => error);
+  await bridge.nativeAccounts();
+  check("a wrapper that swallows still answers what it always did", swallowed, null);
+  check("and one that rejects still rejects, so the caller stops", String(refused).startsWith("stale_document"), true);
+  check(
+    "a document the host never named reloads on nothing — that is the loop the first build made",
+    replaced,
+    [],
+  );
+  check(
+    "only a refusal of a call that carried a generation sends the document away",
+    [
+      bridge.shouldLeave("g_1", "stale_document: this window shows another account now"),
+      bridge.shouldLeave(null, "stale_document: this window shows another account now"),
+      bridge.shouldLeave("g_1", "not_shown"),
+    ],
+    [true, false, false],
+  );
+  check(
+    "and the document is replaced by the app's own root, once",
+    [/if \(!leaving && shouldLeave\(sent, error\)\) \{\s*leaving = true;\s*window\.location\.replace\("\/"\);/.test(source)],
+    [true],
+  );
+  delete location["replace"];
+  answer = async () => undefined;
   leaveShell();
 }
 

@@ -1,6 +1,12 @@
 /**
- * The two acts the sign-in screen performs, named once so that screen can be
- * drawn by either bundle without naming either store.
+ * The acts the sign-in screen performs, named once so that screen can be drawn by
+ * either bundle without naming either store.
+ *
+ * Four now: signing in, the one that was always here; ‹ Server; and the two ways
+ * off a signed-out account's sign-in screen that the shell added when a computer
+ * began to hold several accounts — back to the one shown before, and taking this
+ * one off. The last three are live in the app and structurally dead in the gate,
+ * for `pickServer`'s reason below.
  *
  * ## Why this module exists at all
  *
@@ -62,11 +68,27 @@ export interface SignInAuth {
   /**
    * Open the screen that says which control plane this installation talks to.
    *
-   * Reached from a control `SignIn` draws only under `inNativeShell()`, so this
-   * is live in the app and structurally dead in the gate — which is served over
-   * HTTP from the one origin it could possibly talk to.
+   * Reached from a control `SignIn` draws only on a window nobody has signed in to
+   * (`signInExits` in `slot.ts`), which exists only in the shell — so this is live
+   * in the app and structurally dead in the gate, which is served over HTTP from
+   * the one origin it could possibly talk to.
    */
   pickServer(): void;
+  /**
+   * Back to the account this computer showed before this one.
+   *
+   * Cancel on the sign-in screen, drawn only where the host's live list names one.
+   * **Rejects with the host's sentence** rather than reporting, for `login`'s
+   * reason: `SignIn` draws it beside the control that failed.
+   */
+  switchBack(): Promise<void>;
+  /**
+   * Take the account this window is off this computer.
+   *
+   * Remove account, on the sign-in screen of an account that is on the list and
+   * signed out. Rejects, for the same reason.
+   */
+  forgetAccount(): Promise<void>;
 }
 
 let provided: SignInAuth | null = null;

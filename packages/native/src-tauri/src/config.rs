@@ -1,13 +1,24 @@
-//! Which control plane this installation talks to, and what that server calls it.
+//! Which accounts this installation holds, on which control planes, and what each
+//! server calls this installation.
 //!
-//! **Not a secret, and deliberately not in the keyring.** A server address is a
-//! preference; the credential for it is the secret, and it lives in
-//! `credential.rs` keyed on the origin this file stores. Keeping them apart is
-//! what makes a machine whose keyring is unusable still remember *which* server
-//! it was pointed at — it just asks for the password again.
+//! **Not a secret, and deliberately not in the keyring.** A server address and an
+//! account list are preferences; the credential for each account is the secret,
+//! and it lives in `credential.rs` keyed on the account (`<origin>#<user id>`)
+//! this file lists. Keeping them apart is what makes a machine whose keyring is
+//! unusable still remember *which* accounts it had — it just asks for the
+//! password again.
+//!
+//! ⚠ **The list lives here because the keyring cannot be listed**, and that is a
+//! refusal `credential.rs` makes on purpose. So `accounts` is the only record of
+//! which `credential#…` entries exist, and losing this file orphans every one of
+//! them until they expire — a limit recorded in Q7.149 rather than a reason to
+//! grow a `list()`. A file written before accounts existed has no list; one is
+//! **derived** from what it does have (`read_accounts`) and written down by the
+//! first act that needs it, never at startup.
 //!
 //! **The device id is here for exactly that reason, and not beside the
-//! credential.** It is an identifier the control plane handed back, not a secret:
+//! credential**, one per account. It is an identifier the control plane handed
+//! back, not a secret:
 //! holding one authorizes nothing, because every request still carries the
 //! session token and the id is only read *after* that token has resolved. Put it
 //! in the keyring instead and the cost lands precisely on the machines
@@ -138,11 +149,14 @@ static WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
 /// **What it can cost is bounded, which is what makes it safe to take from the
 /// main thread.** Nothing holds this across a network call, a platform panel, a
 /// keyring round trip or a child process — the whole critical section is a parse,
-/// a field change, a serialize and a durable rename. `host_boot` is the one
-/// *command* that reaches it from the main thread (`commands.rs`'s census says
-/// why); `lib.rs`'s single `read_server` at setup is the other main-thread caller
-/// and runs before any command can exist. So that bound is the whole of what
-/// either can be made to wait for.
+/// a field change, a serialize and a durable rename. ⚠ **No command reaches it
+/// from the main thread any more.** `host_boot` did, and was the reason this
+/// paragraph existed; it carries `(async)` since one webview per account boots at
+/// launch (`commands.rs` has the census). What is left on the main thread is
+/// `lib.rs`'s setup — `read_server` and `read_accounts`, two reads before any
+/// command can exist — and the evidence `read_accounts` is handed is called with
+/// this lock held, so it may not reach for it: it is a keyring read at setup and
+/// a map lookup in `Host` afterwards, and neither touches this file.
 static CONFIG_LOCK: Mutex<()> = Mutex::new(());
 
 /// The whole file, read under `CONFIG_LOCK`, with the lock still held — and
@@ -225,7 +239,14 @@ struct Stored {
     /// refuse to parse, which this file answers by moving it aside.
     #[serde(default)]
     server: Option<String>,
-    /// The device this app is registered as, per server.
+    /// The device this app is registered as, per **account** — keyed on the
+    /// scope, `<origin>#<user id>`, or the bare origin for an entry from before
+    /// accounts that nothing has proved yet.
+    ///
+    /// ⚠ **Per account, because two accounts on one server are two people.** A
+    /// device row names a user on the control plane (`cp-devices.md`'s owner
+    /// clause), so one id offered for a second user registers a fresh row and the
+    /// two accounts drift toward the twenty-device cap on every re-registration.
     ///
     /// **A map rather than one current value.** `host_set_server` used to erase
     /// the previous origin's *credential* and keeps it since Q7.148; it never
@@ -234,7 +255,8 @@ struct Stored {
     /// anything here, so forgetting the id leaves an installation the person can
     /// no longer recognise in their own list and spends a second slot the next
     /// time they point back. Retaining it leaks nothing, because it is not a
-    /// secret.
+    /// secret — and forgetting an *account* keeps it too, so signing in as the
+    /// same person again reuses the row.
     ///
     /// `BTreeMap` rather than `HashMap` so the file is stable on disk — a
     /// preferences file that reorders itself on every write is one nobody can
@@ -243,12 +265,40 @@ struct Stored {
     /// never registered is indistinguishable from one upgrading, correctly.
     #[serde(default)]
     devices: BTreeMap<String, String>,
-    /// The device's X25519 private key, per server — **only on a machine whose
+    /// The device's X25519 private key, per account — **only on a machine whose
     /// keyring will not keep one**. See `read_device_key_fallback` for why a
     /// private key is in a file at all, and `write_stored` for what stops that
     /// file being world-readable, which for four releases nothing did.
     #[serde(default)]
     device_keys: BTreeMap<String, String>,
+    /// Every account on this computer, in the order they were added — the
+    /// drawer's order. `None` is a file written before accounts existed, and is
+    /// the one state `read_accounts` derives a list for rather than reading one.
+    ///
+    /// ⚠ **`skip_serializing_if`, so a file stays pre-accounts until an act
+    /// changes that.** Serializing `None` as `null` would be indistinguishable
+    /// from an empty list to an older build's `rest`, and would make "derived" a
+    /// state no write could leave.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    accounts: Option<Vec<StoredAccount>>,
+    /// The key of the account shown last, which is the one the next launch shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    current: Option<String>,
+    /// Which user owns each server's own daemon root: origin → user id, or `""`
+    /// for "nobody may take it without proof".
+    ///
+    /// ⚠ **Kept when an account is forgotten**, so a person who signs out and in
+    /// again gets their root — and the machine and database in it — back rather
+    /// than a guest root and a second machine: `owner := roots[origin] == user` is
+    /// recomputed on every bind. Q7.149.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    roots: BTreeMap<String, String>,
+    /// Which origin holds `~/.reemoat`, once one has been handed it for being
+    /// empty — `daemon::owner_root` reads it so that the rule is decided once. Two
+    /// servers set up together over an empty computer would otherwise both be
+    /// answered the legacy root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_root_holder: Option<String>,
     /// Every key in this file that this build has never heard of.
     ///
     /// ⚠ **Without it, a read-modify-write by an older build is a downgrade that
@@ -264,6 +314,61 @@ struct Stored {
     /// instead of reordering itself on every write.
     #[serde(flatten)]
     rest: BTreeMap<String, serde_json::Value>,
+}
+
+/// One account as `server.json` holds it.
+///
+/// ⚠ **`rest` for `Stored.rest`'s reason**: an account written by a later build
+/// with a field this one has never heard of keeps it through this build's
+/// read-modify-write rather than losing it.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct StoredAccount {
+    origin: String,
+    /// `None` for an entry from before accounts that nothing has attributed yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user: Option<String>,
+    /// The name the control plane last answered, cached for the drawer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    /// Whether this account's device id is bound to its current sign-in —
+    /// `Boot.deviceBound`, and what tells the page it need not register again.
+    #[serde(default)]
+    bound: bool,
+    /// Whether a credential for it is in the keyring, as last known.
+    ///
+    /// ⚠ **Persisted so that listing accounts reads no keyring.** The drawer asks
+    /// for every account; a keychain read per row, on an ad-hoc-signed build, is a
+    /// prompt per row.
+    #[serde(default)]
+    signed_in: bool,
+    /// A counter, larger for the more recently shown — "back" and the forget
+    /// fallback are the largest other than the caller's.
+    #[serde(default)]
+    seen: u64,
+    /// A proof about this origin's bare items could not be reached when it was
+    /// bound, so `Boot.legacy` asks again at the next bootstrap.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pending_proof: bool,
+    /// Whether this account's device came from the bare, pre-accounts entry by
+    /// proof — which is what makes a quarantine naming the bare origin this
+    /// account's to discard (`quarantine_is_only_about`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    inherited: bool,
+    #[serde(flatten)]
+    rest: BTreeMap<String, serde_json::Value>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl StoredAccount {
+    fn key(&self) -> String {
+        match &self.user {
+            Some(user) => crate::accounts::scope_of(&self.origin, user),
+            None => self.origin.clone(),
+        }
+    }
 }
 
 pub fn server_file(dir: &Path) -> PathBuf {
@@ -288,6 +393,13 @@ pub fn server_file(dir: &Path) -> PathBuf {
 /// `build.rs` carries `cargo:rerun-if-env-changed` for this name. Without it
 /// `option_env!` is baked into a cached object file and a fork that changes the
 /// value gets a binary that silently keeps the previous address.
+///
+/// ⚠ **This repository's own releases set it, from a repository variable** —
+/// `release.yml` forwards `${{ vars.… }}`, which is not a value in any file here,
+/// and `nativecheck` allows that one line and no other (Q4.127). Where the
+/// variable is unset the expansion is the **empty string**, so this answers
+/// `Some("")` rather than `None`, and `default_server` below turns that into no
+/// default, which is right.
 const DEFAULT_SERVER: Option<&str> = option_env!("REEMOAT_DEFAULT_SERVER");
 
 /// The server a build suggests, normalized — or `None`.
@@ -306,12 +418,16 @@ const DEFAULT_SERVER: Option<&str> = option_env!("REEMOAT_DEFAULT_SERVER");
 ///
 /// A malformed default is no default: the field opens empty and the setup screen
 /// asks, which is this file's posture everywhere — an app that cannot start
-/// because of a value one form re-enters is the worse failure.
+/// because of a value one form re-enters is the worse failure. **An empty one is
+/// no default either**, and that is the ordinary case rather than a typo: it is
+/// what an unset repository variable arrives as.
 pub fn default_server() -> Option<String> {
     normalize_origin(DEFAULT_SERVER?).ok()
 }
 
-/// The stored origin, or `None`.
+/// The stored origin, or `None` — the server the account shown last is on, or,
+/// with no account at all, the one a first run chose. `lib.rs` reads it for the
+/// second: a pending seat's server when there is nothing else to open.
 ///
 /// Every failure answers `None` — an unreadable or corrupt file is "no server
 /// chosen", which lands on the setup screen. The alternative is an app that
@@ -331,9 +447,17 @@ pub fn read_server(dir: &Path) -> Option<String> {
     normalize_origin(&server).ok()
 }
 
+/// The server a first run chose, written before any account exists.
+///
+/// ⚠ **It pins the accounts era.** A file with no `accounts` is read as one from
+/// before accounts and has a list derived for it, so a first-run choice written
+/// without one would come back on the next launch as a derived legacy entry for a
+/// server nobody has signed in to. Materializing the (empty) list here is what
+/// makes a relaunch find a pending seat instead.
 pub fn write_server(dir: &Path, origin: &str) -> Result<(), String> {
     let mut stored = read_stored(dir);
     stored.server = Some(origin.to_string());
+    accounts_mut(&mut stored, dir);
     write_stored(dir, &stored)
 }
 
@@ -447,8 +571,20 @@ fn quarantine(dir: &Path) -> bool {
 /// **Only ever after a write that landed**, which is what keeps this on the right
 /// side of `quarantine`'s own rule: a refusal must never be the thing that
 /// removes the copy it refused on behalf of.
-fn discard_quarantine(dir: &Path, origin: &str) {
-    if !quarantine_is_only_about(dir, origin) {
+///
+/// ⚠ **Per account now rather than per server, and the owner allowance is the
+/// one departure.** A key is kept per `<origin>#<user id>`, so a Re-key for one
+/// account supersedes that account's copies and nobody else's — including a
+/// second account on the *same* server. What makes that hard is the bare origin:
+/// a quarantined file from before accounts names a device key under
+/// `https://a.example`, and whether those bytes are this account's depends on who
+/// inherited the bare device. `quarantine_is_only_about` answers it from the live
+/// file's `inherited` flag, and anything it cannot settle is a refusal — so a
+/// guest, or any account on a server another account also holds, keeps the
+/// quarantine. That regresses the discard for them only, and in the direction
+/// that costs a superseded key at `0600` rather than somebody's last copy.
+fn discard_quarantine(dir: &Path, scope: &str) {
+    if !quarantine_is_only_about(dir, scope) {
         return;
     }
     // Ignored rather than propagated: there is nothing a caller could do with it
@@ -476,12 +612,35 @@ fn discard_quarantine(dir: &Path, origin: &str) {
 /// the wrong default, authorize the destruction of.
 ///
 /// The token is delimited the way a URL is and nothing more: scheme characters
-/// leftwards from `://`, then host and port rightwards, stopping at the quote
-/// serde put there. A truncated token simply is not equal to `origin` and keeps
-/// the file, which is the direction that costs nobody anything.
-fn quarantine_is_only_about(dir: &Path, origin: &str) -> bool {
+/// leftwards from `://`, then host and port rightwards — **and then an account's
+/// `#` and user id**, so `https://a.example#u_b` is one token rather than a bare
+/// origin followed by noise — stopping at the quote serde put there. A truncated
+/// token simply is not equal to `scope` and keeps the file, which is the
+/// direction that costs nobody anything.
+///
+/// A token counts as this scope's when it **is** the scope, or when it is the
+/// scope's bare origin and either the scope is itself that bare origin (a legacy
+/// entry's Re-key) or the live file records this account as having `inherited`
+/// the bare device by proof. Everything else — another account on the same
+/// server, the bare origin for an account that inherited nothing — is a refusal.
+fn quarantine_is_only_about(dir: &Path, scope: &str) -> bool {
     let Ok(bytes) = fs::read(unreadable_file(dir)) else {
         return false;
+    };
+    let (origin, bare) = match scope.split_once('#') {
+        Some((origin, _)) => (origin, false),
+        None => (scope, true),
+    };
+    // Asked lazily, and only for an account's own scope: `read_stored` takes
+    // `CONFIG_LOCK`, which every caller of this function has already released.
+    let mut inherited: Option<bool> = None;
+    let mut owns_bare = || {
+        *inherited.get_or_insert_with(|| {
+            read_stored(dir).accounts.as_ref().is_some_and(|list| {
+                list.iter()
+                    .any(|account| account.key() == scope && account.inherited)
+            })
+        })
     };
     const MARK: &[u8] = b"://";
     let mut named = 0usize;
@@ -499,10 +658,18 @@ fn quarantine_is_only_about(dir: &Path, origin: &str) -> bool {
         while end < bytes.len() && is_authority_byte(bytes[end]) {
             end += 1;
         }
+        if end < bytes.len() && bytes[end] == b'#' {
+            end += 1;
+            while end < bytes.len() && is_user_byte(bytes[end]) {
+                end += 1;
+            }
+        }
         match std::str::from_utf8(&bytes[start..end]) {
-            Ok(token) if token == origin => named += 1,
-            // Another server, a truncated spelling of this one, or bytes that are
-            // not text at all: none of those is this call's to give up.
+            Ok(token) if token == scope => named += 1,
+            Ok(token) if token == origin && (bare || owns_bare()) => named += 1,
+            // Another server, another account, a truncated spelling of this one,
+            // or bytes that are not text at all: none of those is this call's to
+            // give up.
             _ => return false,
         }
         i = end;
@@ -519,6 +686,11 @@ fn is_scheme_byte(b: u8) -> bool {
 /// Host and port, including the brackets an IPv6 literal is written in.
 fn is_authority_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b':' | b'[' | b']')
+}
+
+/// A user id after an account's `#` — `accounts::is_user_id`'s alphabet.
+fn is_user_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')
 }
 
 /// The whole file, or its defaults — with `CONFIG_LOCK` held.
@@ -833,10 +1005,14 @@ fn write_stored(dir: &Path, stored: &Guarded) -> Result<(), String> {
      * `server.json` nobody has looked at. The sentence names the path because
      * that is the only thing a person can act on.
      *
-     * ⚠ **It reaches a person from two of the four writers, not all four.**
-     * `host_set_server` (`native.ts`'s `setNativeServer`, awaited) and
-     * `host_device_key_reset` (`hostDeviceKeyReset`, awaited and drawn by the
-     * Devices screen's re-key toast) surface it. `host_device_set` and
+     * ⚠ **It does not reach a person from every writer.** `host_set_server`
+     * (`native.ts`'s `setNativeServer`, awaited), `host_device_key_reset`
+     * (`hostDeviceKeyReset`, awaited and drawn by the Devices screen's re-key
+     * toast) and the account acts — a sign-in's bind, a confirm, a forget —
+     * surface it, each through a command the page awaits. What a sign-out, a boot
+     * and a switch record afterwards — the signed-in flag, the account shown last
+     * — is written with the refusal discarded: a note the drawer reads is not worth
+     * failing the act it is about. `host_device_set` and
      * `host_device_clear` do not: their only caller is `setNativeDevice`, which is
      * `void invoke(...).catch(() => undefined)` — deliberately fire-and-forget,
      * because it runs inside sign-in and sign-out where a device id is
@@ -869,10 +1045,11 @@ fn write_stored(dir: &Path, stored: &Guarded) -> Result<(), String> {
     }
     let text = serde_json::to_string_pretty(&stored.file).map_err(|e| e.to_string())?;
     let target = server_file(dir);
-    // The commands that reach this writer run on the async runtime —
-    // `host_set_server`, `host_device_set`, `host_device_clear` and
-    // `host_device_key_reset`, plus `host_boot` on the one launch that generates a
-    // device key — so they genuinely do overlap. `CONFIG_LOCK` is what makes that
+    // The commands that reach this writer run on the async runtime — every
+    // account act, `host_set_server`, `host_credential_clear`, the device
+    // commands, and `host_boot` where it generates a key or corrects a signed-in
+    // flag — and with a webview per account booting at launch they genuinely do
+    // overlap. `CONFIG_LOCK` is what makes that
     // safe and the name is the second line behind it. Built by `temp_name` rather
     // than spelled out here, because `commands.rs`'s writer needs the same
     // discipline and has no lock at all: two copies of one rule is how one of
@@ -925,32 +1102,50 @@ fn write_stored(dir: &Path, stored: &Guarded) -> Result<(), String> {
     Ok(())
 }
 
-/// The device this installation is registered as on `origin`, or `None`.
+/// The device this installation is registered as for one account — `scope` is
+/// `<origin>#<user id>`, or a bare origin from before accounts — or `None`.
 ///
 /// Keyed on the **canonical** origin, exactly as the keyring account is, so one
 /// server is one entry however its address was typed. A value stored under a
 /// spelling `normalize_origin` no longer produces is simply never read — which is
 /// the same cost a credential under a stale key already carries.
-pub fn read_device(dir: &Path, origin: &str) -> Option<String> {
-    read_stored(dir).devices.get(origin).cloned()
+pub fn read_device(dir: &Path, scope: &str) -> Option<String> {
+    read_stored(dir).devices.get(scope).cloned()
 }
 
-pub fn write_device(dir: &Path, origin: &str, device: &str) -> Result<(), String> {
+/// Record the device this account registered as — which also records that it is
+/// bound to the account's current sign-in, since registering is what binds it.
+///
+/// ⚠ **A derived list is not materialized for this**: an entry from before
+/// accounts reads its `bound` off `devices` anyway, so the map entry is the whole
+/// of the record until an account act writes the list down.
+pub fn write_device(dir: &Path, scope: &str, device: &str) -> Result<(), String> {
     let mut stored = read_stored(dir);
-    stored
-        .devices
-        .insert(origin.to_string(), device.to_string());
+    stored.devices.insert(scope.to_string(), device.to_string());
+    mark_bound(&mut stored, scope, true);
     write_stored(dir, &stored)
 }
 
-/// Give up the device recorded for one server.
+/// Flip an existing entry's `bound`, where the list has been written down.
+fn mark_bound(stored: &mut Stored, scope: &str, bound: bool) {
+    if let Some(entry) = stored
+        .accounts
+        .as_mut()
+        .and_then(|list| list.iter_mut().find(|account| account.key() == scope))
+    {
+        entry.bound = bound;
+    }
+}
+
+/// Give up the device recorded for one account — and with it the account's
+/// record that a device is bound to its sign-in.
 ///
 /// Called when the control plane says that installation has been retired — at
 /// which point keeping the id is actively harmful, because the next sign-in would
 /// offer it again. The server refuses to bind a retired id and registers a fresh
 /// device instead, so this is belt rather than the only guard; what it buys is
 /// that the app stops presenting something it has been told is finished.
-pub fn erase_device(dir: &Path, origin: &str) -> Result<(), String> {
+pub fn erase_device(dir: &Path, scope: &str) -> Result<(), String> {
     let mut stored = read_stored(dir);
     /*
      * ⚠ **The `replaceable` half is what stops "nothing to remove" being said
@@ -960,9 +1155,10 @@ pub fn erase_device(dir: &Path, origin: &str) -> Result<(), String> {
      * `host_device_clear` reported success over an id still on disk. Falling
      * through hands it to `write_stored`, whose refusal says which file and why.
      */
-    if stored.replaceable && stored.devices.remove(origin).is_none() {
+    if stored.replaceable && stored.devices.remove(scope).is_none() {
         return Ok(());
     }
+    mark_bound(&mut stored, scope, false);
     write_stored(dir, &stored)
 }
 
@@ -986,21 +1182,21 @@ pub fn erase_device(dir: &Path, origin: &str) -> Result<(), String> {
 /// at `0644` on precisely the shared hosts the fallback exists for. It is
 /// `write_stored` that makes it true now, and the tests at the foot of this file
 /// are what keep it from quietly becoming prose again. The app **says which of
-/// the two it used**, per server, so a person on such a machine is told rather
+/// the two it used**, per account, so a person on such a machine is told rather
 /// than having it decided for them that they get no remote access at all.
-pub fn read_device_key_fallback(dir: &Path, origin: &str) -> Option<String> {
-    read_stored(dir).device_keys.get(origin).cloned()
+pub fn read_device_key_fallback(dir: &Path, scope: &str) -> Option<String> {
+    read_stored(dir).device_keys.get(scope).cloned()
 }
 
-pub fn write_device_key_fallback(dir: &Path, origin: &str, key: &str) -> Result<(), String> {
+pub fn write_device_key_fallback(dir: &Path, scope: &str, key: &str) -> Result<(), String> {
     let mut stored = read_stored(dir);
     stored
         .device_keys
-        .insert(origin.to_string(), key.to_string());
+        .insert(scope.to_string(), key.to_string());
     write_stored(dir, &stored)
 }
 
-/// Take the file-held device key for one server out of `server.json`.
+/// Take the file-held device key for one account out of `server.json`.
 ///
 /// Reached from exactly two places: `device::store_secret`, once a keyring write
 /// has been read back and verified, and `device::reset_key`, arriving through
@@ -1027,12 +1223,12 @@ pub fn write_device_key_fallback(dir: &Path, origin: &str, key: &str) -> Result<
 ///
 /// So this writes `server.json` and nothing else, and `give_up_device_key` is the
 /// statement a deliberate give-up goes through.
-pub fn erase_device_key_fallback(dir: &Path, origin: &str) -> Result<(), String> {
+pub fn erase_device_key_fallback(dir: &Path, scope: &str) -> Result<(), String> {
     let mut stored = read_stored(dir);
     // `replaceable` for `erase_device`'s reason, and it matters more here: an
     // empty map on the unread path would report a key given up while the bytes
     // holding it are still on disk.
-    if stored.replaceable && stored.device_keys.remove(origin).is_none() {
+    if stored.replaceable && stored.device_keys.remove(scope).is_none() {
         return Ok(());
     }
     write_stored(dir, &stored)
@@ -1057,9 +1253,9 @@ pub fn erase_device_key_fallback(dir: &Path, origin: &str) -> Result<(), String>
 /// only ever in the keyring still supersedes the quarantined copy. **The act is
 /// what supersedes those bytes, not the removal of a map entry** — which is also
 /// why this is a second function rather than a flag on the first.
-pub fn give_up_device_key(dir: &Path, origin: &str) -> Result<(), String> {
-    erase_device_key_fallback(dir, origin)?;
-    discard_quarantine(dir, origin);
+pub fn give_up_device_key(dir: &Path, scope: &str) -> Result<(), String> {
+    erase_device_key_fallback(dir, scope)?;
+    discard_quarantine(dir, scope);
     Ok(())
 }
 
@@ -1120,12 +1316,612 @@ pub fn normalize_origin(raw: &str) -> Result<String, String> {
     Ok(origin)
 }
 
+/* ── the accounts on this computer ────────────────────────────────────────── */
+
+/// origin → the user id that owns that server's own daemon root, or `""`.
+pub type Roots = BTreeMap<String, String>;
+
+/// One account, as the host reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Account {
+    pub origin: String,
+    /// `None` for an entry from before accounts that nothing has attributed yet.
+    pub user: Option<String>,
+    pub name: Option<String>,
+    pub bound: bool,
+    pub signed_in: bool,
+    pub seen: u64,
+    pub pending_proof: bool,
+}
+
+impl Account {
+    /// `<origin>#<user id>`, or the bare origin for a legacy entry — the scope,
+    /// and the key the page is shown.
+    pub fn key(&self) -> String {
+        match &self.user {
+            Some(user) => crate::accounts::scope_of(&self.origin, user),
+            None => self.origin.clone(),
+        }
+    }
+
+    fn from_stored(stored: &StoredAccount) -> Account {
+        Account {
+            origin: stored.origin.clone(),
+            user: stored.user.clone(),
+            name: stored.name.clone(),
+            bound: stored.bound,
+            signed_in: stored.signed_in,
+            seen: stored.seen,
+            pending_proof: stored.pending_proof,
+        }
+    }
+}
+
+/// What `server.json` says about accounts, read once.
+#[derive(Clone, Debug, Default)]
+pub struct Roster {
+    pub accounts: Vec<Account>,
+    /// The key of the account shown last.
+    pub current: Option<String>,
+    /// A server a file from before accounts was pointed at with **no evidence of
+    /// an account on it** — chosen and never signed in to. It opens as a pending
+    /// seat, which keeps its `‹ Server` rather than inventing an account somebody
+    /// would have to remove.
+    pub pending: Option<String>,
+    pub roots: Roots,
+    pub legacy_root_holder: Option<String>,
+    /// Whether `accounts` was derived from a file from before accounts rather
+    /// than read — nothing about it is on disk yet.
+    pub derived: bool,
+}
+
+impl Roster {
+    pub fn find(&self, key: &str) -> Option<&Account> {
+        self.accounts.iter().find(|account| account.key() == key)
+    }
+
+    /// The most recently shown account other than `except`.
+    pub fn recent(&self, except: Option<&str>) -> Option<&Account> {
+        self.accounts
+            .iter()
+            .filter(|account| except != Some(account.key().as_str()))
+            .max_by_key(|account| account.seen)
+    }
+
+    /// The account a launch shows: the one shown last where the file names one,
+    /// otherwise the most recent.
+    pub fn shown(&self) -> Option<&Account> {
+        self.current
+            .as_deref()
+            .and_then(|key| self.find(key))
+            .or_else(|| self.recent(None))
+    }
+}
+
+/// Every account on this computer — **and it writes nothing**.
+///
+/// A file written by this build is read as it is. A file from before accounts
+/// has a list **derived** for it, in memory, from what it holds as evidence that
+/// somebody signed in:
+///
+/// 1. `server`, but only where `devices` names it, `machine.json` claims a
+///    machine on it, or `evidence(server)` — the keyring holding a
+///    `credential#<server>` — says so. A server that was chosen and never signed
+///    in to is `pending` instead, so it opens as the sign-in it was.
+/// 2. Every other bare origin `devices` names, then every bare origin
+///    `machine.json` claims a machine on.
+///
+/// Deduplicated and capped at `MAX_ACCOUNTS`, each as a legacy entry with no
+/// user. `evidence` also answers each one's `signed_in`, once per origin.
+///
+/// ⚠ **`evidence` is what keeps this pure while still asking the keyring.** The
+/// read happens in the caller — `lib.rs` at setup, once, for a file from before
+/// accounts, and `Host`'s memory of that answer afterwards — so this function is
+/// a function of its arguments and a test can drive every derivation without a
+/// keychain. It is called with `CONFIG_LOCK` held, so it must not reach for it.
+pub fn read_accounts(dir: &Path, evidence: &dyn Fn(&str) -> bool) -> Roster {
+    let stored = read_stored(dir);
+    let (list, current, pending, derived) = match &stored.accounts {
+        Some(list) => (list.clone(), stored.current.clone(), None, false),
+        None => {
+            let claims = crate::daemon::claim_scopes(dir);
+            let (list, current, pending) = derive(&stored, &claims, evidence);
+            (list, current, pending, true)
+        }
+    };
+    Roster {
+        accounts: list.iter().map(Account::from_stored).collect(),
+        current,
+        pending,
+        roots: stored.roots.clone(),
+        legacy_root_holder: stored.legacy_root_holder.clone(),
+        derived,
+    }
+}
+
+/// The list a file from before accounts implies. See `read_accounts`.
+fn derive(
+    stored: &Stored,
+    claims: &[String],
+    evidence: &dyn Fn(&str) -> bool,
+) -> (Vec<StoredAccount>, Option<String>, Option<String>) {
+    let mut asked: BTreeMap<String, bool> = BTreeMap::new();
+    let mut ask = |origin: &str| -> bool {
+        *asked
+            .entry(origin.to_string())
+            .or_insert_with(|| evidence(origin))
+    };
+    // A key counts as an origin only where it is already the one spelling
+    // `normalize_origin` gives it — a hand-edited key is not an account.
+    let bare = |key: &str| !key.contains('#') && normalize_origin(key).ok().as_deref() == Some(key);
+    let server = stored
+        .server
+        .as_deref()
+        .and_then(|raw| normalize_origin(raw).ok());
+
+    let mut candidates: Vec<String> = Vec::new();
+    let mut pending = None;
+    if let Some(server) = &server {
+        if stored.devices.contains_key(server) || claims.contains(server) || ask(server) {
+            candidates.push(server.clone());
+        } else {
+            pending = Some(server.clone());
+        }
+    }
+    for key in stored.devices.keys().chain(claims.iter()) {
+        if bare(key) && !candidates.contains(key) {
+            candidates.push(key.clone());
+        }
+    }
+    candidates.truncate(crate::accounts::MAX_ACCOUNTS);
+
+    let count = candidates.len() as u64;
+    let list = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, origin)| StoredAccount {
+            origin: origin.clone(),
+            bound: stored.devices.contains_key(origin),
+            signed_in: ask(origin),
+            // `server` first and most recent: it is what that build was showing.
+            seen: count - index as u64,
+            ..StoredAccount::default()
+        })
+        .collect();
+    let current = server.filter(|server| candidates.contains(server));
+    (list, current, pending)
+}
+
+/// The list, written down: a no-op where it already is.
+///
+/// Called by the host before the first act of the accounts era changes anything,
+/// with the same `evidence` the launch derived from, so what is written is what
+/// the drawer was already showing.
+pub fn materialize_accounts(dir: &Path, evidence: &dyn Fn(&str) -> bool) -> Result<(), String> {
+    let mut stored = read_stored(dir);
+    if stored.accounts.is_some() {
+        return Ok(());
+    }
+    let claims = crate::daemon::claim_scopes(dir);
+    let (list, current, _) = derive(&stored, &claims, evidence);
+    stored.accounts = Some(list);
+    stored.current = current;
+    write_stored(dir, &stored)
+}
+
+/// The list, materialized if it was not — with no keyring evidence, so a
+/// derived entry reads as signed out. The host materializes with its evidence
+/// first (`materialize_accounts`); this is the backstop for a writer that did not.
+fn accounts_mut<'a>(stored: &'a mut Stored, dir: &Path) -> &'a mut Vec<StoredAccount> {
+    if stored.accounts.is_none() {
+        let claims = crate::daemon::claim_scopes(dir);
+        let (list, current, _) = derive(stored, &claims, &|_| false);
+        stored.current = current;
+        stored.accounts = Some(list);
+    }
+    stored.accounts.get_or_insert_with(Vec::new)
+}
+
+/// A proof about a bare item, as the host found it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Proof {
+    /// Nothing bare to prove, or nothing this account could take.
+    NotAsked,
+    /// The control plane says it is this user's.
+    Proven,
+    /// It answered, and it is not.
+    Disproven,
+    /// It could not be asked; `Boot.legacy` asks again next time.
+    Unreachable,
+}
+
+/// What the host learned about an origin's bare items before binding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Evidence {
+    /// The server's own root holds no daemon and no machine was claimed for it:
+    /// nothing in it for anybody to lose.
+    pub root_empty: bool,
+    /// Its claimed or announced machine id is one this user owns.
+    pub root: Proof,
+    /// The bare device id is this user's.
+    pub device: Proof,
+    /// …and it is the one bound to the session being bound.
+    pub device_current: bool,
+}
+
+impl Evidence {
+    /// Nothing known and nothing to take — a bind that inherits nothing.
+    pub const NONE: Evidence = Evidence {
+        root_empty: false,
+        root: Proof::NotAsked,
+        device: Proof::NotAsked,
+        device_current: false,
+    };
+}
+
+/// What was inherited by proof.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Claimed {
+    /// The server's own root, and with it the bare machine claim.
+    pub root: bool,
+    /// The bare device id and, where it is file-held, its key.
+    pub device: bool,
+    /// A proof could not be reached, so this is not settled.
+    pub pending: bool,
+}
+
+/// Take what `evidence` allows for `key`, inside one read-modify-write.
+///
+/// ⚠ **The root is taken only by proof, or where there is nothing in it**, and
+/// never from another user: a server's root is its owner's for good, which is
+/// what gives a returning owner their machine back. "Nothing in it" also needs no
+/// other unconfirmed legacy entry on the origin (`free`), whose owner may be the
+/// person that root was about to be set up for.
+///
+/// ⚠ **The device moves only by proof, and only into an account that has none.**
+/// Moving it anywhere else is the linkage `credential.rs`'s `DEVICE_KEY` block
+/// forbids: one key on two users' rows.
+fn claim_into(
+    stored: &mut Stored,
+    key: &str,
+    origin: &str,
+    user: &str,
+    evidence: &Evidence,
+    free: bool,
+) -> Claimed {
+    let record = stored.roots.get(origin).cloned();
+    let mine = record.as_deref() == Some(user);
+    let someone_elses =
+        matches!(record.as_deref(), Some(owner) if !owner.is_empty() && owner != user);
+    let root = !mine
+        && !someone_elses
+        && (evidence.root == Proof::Proven || (evidence.root_empty && free));
+    if root {
+        stored.roots.insert(origin.to_string(), user.to_string());
+    }
+
+    let device = evidence.device == Proof::Proven
+        && stored.devices.contains_key(origin)
+        && !stored.devices.contains_key(key);
+    if device {
+        if let Some(id) = stored.devices.remove(origin) {
+            stored.devices.insert(key.to_string(), id);
+        }
+        if !stored.device_keys.contains_key(key) {
+            if let Some(held) = stored.device_keys.remove(origin) {
+                stored.device_keys.insert(key.to_string(), held);
+            }
+        }
+    }
+
+    let owned = mine || root;
+    Claimed {
+        root,
+        device,
+        pending: (evidence.root == Proof::Unreachable && !owned && !someone_elses)
+            || evidence.device == Proof::Unreachable,
+    }
+}
+
+/// A verified sign-in to bind.
+pub struct BindRequest<'a> {
+    /// The legacy entry being attributed, for a legacy seat; `None` for a new one.
+    pub from: Option<&'a str>,
+    pub origin: &'a str,
+    pub user: &'a str,
+    pub name: &'a str,
+    /// A sign-in that just happened, whose session has no device bound yet.
+    pub fresh: bool,
+    pub evidence: &'a Evidence,
+}
+
+/// An account bound to this computer.
+#[derive(Debug, PartialEq, Eq)]
+pub struct BoundAccount {
+    pub key: String,
+    pub owner: bool,
+    pub claimed: Claimed,
+}
+
+/// What `bind_account` came to.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Bind {
+    /// That user is already here, and nothing was written.
+    Existing {
+        key: String,
+        signed_in: bool,
+    },
+    Bound(BoundAccount),
+}
+
+/// Bind a verified sign-in: re-key the legacy entry it came from, or add one.
+///
+/// One read-modify-write, and the one place the cap is enforced for a new
+/// entry — `MAX_ACCOUNTS`, refused as `account_limit` rather than evicting
+/// anybody. A legacy entry being attributed is re-keyed in place, so it does not
+/// count twice.
+///
+/// ⚠ **`owner` is recomputed, never inherited from the call**:
+/// `roots[origin] == user` after whatever `claim_into` took. That is what gives a
+/// person who forgot their account and signs in again their root back, and what
+/// keeps a second user on the same server a guest whatever order things happened
+/// in.
+///
+/// `bound` is `false` for a fresh sign-in — its session has no device yet, and
+/// the page registers one — and for a move, is whether the proven device is the
+/// one bound to the session being moved.
+pub fn bind_account(dir: &Path, request: &BindRequest<'_>) -> Result<Bind, String> {
+    let mut stored = read_stored(dir);
+    accounts_mut(&mut stored, dir);
+    let key = crate::accounts::scope_of(request.origin, request.user);
+    let list = stored.accounts.as_deref().unwrap_or_default();
+    if let Some(found) = list.iter().find(|account| {
+        account.origin == request.origin && account.user.as_deref() == Some(request.user)
+    }) {
+        return Ok(Bind::Existing {
+            key,
+            signed_in: found.signed_in,
+        });
+    }
+    let from = request.from.and_then(|from| {
+        list.iter()
+            .position(|account| account.user.is_none() && account.origin == from)
+    });
+    if from.is_none() && list.len() >= crate::accounts::MAX_ACCOUNTS {
+        return Err(format!(
+            "account_limit: this computer holds {} accounts, which is the most it keeps. Remove one first.",
+            crate::accounts::MAX_ACCOUNTS
+        ));
+    }
+    let free = !list.iter().enumerate().any(|(index, account)| {
+        Some(index) != from && account.user.is_none() && account.origin == request.origin
+    });
+    let seen = list.iter().map(|account| account.seen).max().unwrap_or(0) + 1;
+    let rest = from
+        .and_then(|index| list.get(index))
+        .map(|account| account.rest.clone())
+        .unwrap_or_default();
+
+    let claimed = claim_into(
+        &mut stored,
+        &key,
+        request.origin,
+        request.user,
+        request.evidence,
+        free,
+    );
+    let entry = StoredAccount {
+        origin: request.origin.to_string(),
+        user: Some(request.user.to_string()),
+        name: Some(request.name.to_string()).filter(|name| !name.is_empty()),
+        bound: !request.fresh && claimed.device && request.evidence.device_current,
+        signed_in: true,
+        seen,
+        pending_proof: claimed.pending,
+        inherited: claimed.device,
+        rest,
+    };
+    let list = stored.accounts.get_or_insert_with(Vec::new);
+    match from {
+        Some(index) => list[index] = entry,
+        None => list.push(entry),
+    }
+    stored.current = Some(key.clone());
+    stored.server = Some(request.origin.to_string());
+    let owner = stored.roots.get(request.origin).map(String::as_str) == Some(request.user);
+    write_stored(dir, &stored)?;
+    Ok(Bind::Bound(BoundAccount {
+        key,
+        owner,
+        claimed,
+    }))
+}
+
+/// Give an account already here what `evidence` proves is its — the second half
+/// of finding a legacy sign-in to be somebody already on this computer, and the
+/// retry for an account whose proof could not be reached at bind time.
+///
+/// `from` is a legacy entry the same person's token came through, which does not
+/// count against taking an empty root. `bound` is what to record where the
+/// device moves in, which is `false` unless the proof was made with this
+/// account's own session.
+pub fn claim_bare(
+    dir: &Path,
+    key: &str,
+    from: Option<&str>,
+    evidence: &Evidence,
+    bound: bool,
+) -> Result<Claimed, String> {
+    let mut stored = read_stored(dir);
+    accounts_mut(&mut stored, dir);
+    let list = stored.accounts.as_deref().unwrap_or_default();
+    let Some(index) = list.iter().position(|account| account.key() == key) else {
+        return Err("that account is not on this computer".into());
+    };
+    let (origin, Some(user)) = (list[index].origin.clone(), list[index].user.clone()) else {
+        return Err("an account from before accounts has nobody to give anything to".into());
+    };
+    let free = !list.iter().enumerate().any(|(other, account)| {
+        other != index
+            && account.user.is_none()
+            && account.origin == origin
+            && Some(account.origin.as_str()) != from
+    });
+    let before = list[index].pending_proof;
+    let claimed = claim_into(&mut stored, key, &origin, &user, evidence, free);
+    let entry = &mut stored.accounts.get_or_insert_with(Vec::new)[index];
+    entry.pending_proof = claimed.pending;
+    if claimed.device {
+        entry.inherited = true;
+        entry.bound = bound;
+    }
+    if !claimed.root && !claimed.device && before == claimed.pending {
+        return Ok(claimed);
+    }
+    write_stored(dir, &stored)?;
+    Ok(claimed)
+}
+
+/// Refresh a cached name. Writes only where it changed, and answers whether it
+/// did.
+pub fn rename_account(dir: &Path, key: &str, name: &str) -> Result<bool, String> {
+    let mut stored = read_stored(dir);
+    accounts_mut(&mut stored, dir);
+    let Some(entry) = stored
+        .accounts
+        .as_mut()
+        .and_then(|list| list.iter_mut().find(|account| account.key() == key))
+    else {
+        return Err("that account is not on this computer".into());
+    };
+    let wanted = Some(name.to_string()).filter(|name| !name.is_empty());
+    if entry.name == wanted {
+        return Ok(false);
+    }
+    entry.name = wanted;
+    write_stored(dir, &stored)?;
+    Ok(true)
+}
+
+/// Record that an account is the one on screen: the next launch shows it, and
+/// "back" from any other is it.
+///
+/// ⚠ **Only ever after the switch has happened.** The file decides which account
+/// opens next time and nothing else, so a failure here is not a failed switch.
+pub fn show_account(dir: &Path, key: &str) -> Result<(), String> {
+    let mut stored = read_stored(dir);
+    accounts_mut(&mut stored, dir);
+    let list = stored.accounts.get_or_insert_with(Vec::new);
+    let seen = list.iter().map(|account| account.seen).max().unwrap_or(0) + 1;
+    let Some(entry) = list.iter_mut().find(|account| account.key() == key) else {
+        return Err("that account is not on this computer".into());
+    };
+    entry.seen = seen;
+    let origin = entry.origin.clone();
+    stored.current = Some(key.to_string());
+    stored.server = Some(origin);
+    write_stored(dir, &stored)
+}
+
+/// Whether an account's device is bound to its current sign-in.
+pub fn set_bound(dir: &Path, key: &str, bound: bool) -> Result<(), String> {
+    update(dir, key, |entry| {
+        let changed = entry.bound != bound;
+        entry.bound = bound;
+        changed
+    })
+}
+
+/// Whether an account is signed in, as the drawer is told without a keyring
+/// read. Signing out also unbinds its device: the session that device was bound
+/// to is the one that ended.
+pub fn set_signed_in(dir: &Path, key: &str, signed_in: bool) -> Result<(), String> {
+    update(dir, key, |entry| {
+        let changed = entry.signed_in != signed_in || (!signed_in && entry.bound);
+        entry.signed_in = signed_in;
+        if !signed_in {
+            entry.bound = false;
+        }
+        changed
+    })
+}
+
+/// One entry's read-modify-write, skipping the write where nothing changed.
+fn update(
+    dir: &Path,
+    key: &str,
+    change: impl FnOnce(&mut StoredAccount) -> bool,
+) -> Result<(), String> {
+    let mut stored = read_stored(dir);
+    accounts_mut(&mut stored, dir);
+    let Some(entry) = stored
+        .accounts
+        .as_mut()
+        .and_then(|list| list.iter_mut().find(|account| account.key() == key))
+    else {
+        return Ok(());
+    };
+    if !change(entry) {
+        return Ok(());
+    }
+    write_stored(dir, &stored)
+}
+
+/// Take an account off this computer, and answer the one to show instead.
+///
+/// ⚠ **The device id, the key and the root record are kept**, so a person who
+/// signs in as the same user again reuses their device row and gets their root —
+/// and the machine and database in it — back. What goes is the entry, and with it
+/// the account's place in the drawer and at launch.
+///
+/// ⚠ **A legacy entry that nobody confirmed leaves its root to nobody.** Where the
+/// origin has no owner recorded, it is written as `""`: that root's owner was
+/// never proved, and without the record the next new account on that server would
+/// be free to take a root that may hold somebody else's database. A later proof
+/// still takes it (`claim_into`).
+pub fn forget_account(dir: &Path, key: &str) -> Result<Option<String>, String> {
+    let mut stored = read_stored(dir);
+    accounts_mut(&mut stored, dir);
+    let list = stored.accounts.get_or_insert_with(Vec::new);
+    let Some(index) = list.iter().position(|account| account.key() == key) else {
+        return Ok(list
+            .iter()
+            .max_by_key(|account| account.seen)
+            .map(StoredAccount::key));
+    };
+    let gone = list.remove(index);
+    let next = list
+        .iter()
+        .max_by_key(|account| account.seen)
+        .map(StoredAccount::key);
+    if gone.user.is_none() {
+        stored.roots.entry(gone.origin.clone()).or_default();
+    }
+    if stored.current.as_deref() == Some(key) {
+        stored.current = next.clone();
+    }
+    write_stored(dir, &stored)?;
+    Ok(next)
+}
+
+/// Record that `origin` has been handed `~/.reemoat`, where nobody holds it yet.
+pub fn set_legacy_root_holder(dir: &Path, origin: &str) -> Result<(), String> {
+    let mut stored = read_stored(dir);
+    if stored.legacy_root_holder.is_some() {
+        return Ok(());
+    }
+    stored.legacy_root_holder = Some(origin.to_string());
+    write_stored(dir, &stored)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        default_server, erase_device, erase_device_key_fallback, give_up_device_key,
-        normalize_origin, read_device, read_device_key_fallback, read_server, server_file,
-        temp_name, unreadable_file, write_device, write_device_key_fallback, write_server,
+        bind_account, claim_bare, default_server, erase_device, erase_device_key_fallback,
+        forget_account, give_up_device_key, materialize_accounts, normalize_origin, read_accounts,
+        read_device, read_device_key_fallback, read_server, rename_account, server_file, set_bound,
+        set_signed_in, show_account, temp_name, unreadable_file, write_device,
+        write_device_key_fallback, write_server, Bind, BindRequest, Evidence, Proof,
         DEFAULT_SERVER,
     };
     use std::path::Path;
@@ -1191,12 +1987,23 @@ mod tests {
     /// default asserts over `None` while a fork that typed its address wrong fails
     /// this test on its own `cargo test`. It is the one thing standing between
     /// that typo and a build that silently has no default at all.
+    ///
+    /// ⚠ **A blank value is skipped, because it is what an unset repository
+    /// variable arrives as.** `release.yml` forwards `${{ vars.… }}`, which expands
+    /// to the empty string where the variable does not exist, so `option_env!`
+    /// answers `Some("")` rather than `None` — and `default_server()` already turns
+    /// that into no default, which is the behaviour wanted. Asserted on, the
+    /// release of any fork that has not set the variable would fail here for
+    /// being exactly right. Q4.127.
+    ///
+    /// The message names the value without the variable's own name beside an `=`,
+    /// because `nativecheck` sweeps every tracked file for that shape as a setter.
     #[test]
     fn a_compiled_default_is_an_address() {
-        if let Some(raw) = DEFAULT_SERVER {
+        if let Some(raw) = DEFAULT_SERVER.filter(|raw| !raw.trim().is_empty()) {
             assert!(
                 default_server().is_some(),
-                "REEMOAT_DEFAULT_SERVER={raw} is not an address this can reach"
+                "the compiled-in default server {raw} is not an address this can reach"
             );
         }
     }
@@ -1240,6 +2047,462 @@ mod tests {
         );
         // Erasing what is not there is the outcome the caller wanted.
         erase_device(&dir, "https://a.example").unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /* ── accounts ─────────────────────────────────────────────────────────── */
+
+    const A: &str = "https://a.example";
+    const B: &str = "https://b.example";
+
+    /// A request as the tests below mean it; each overrides what it is about.
+    fn request<'a>(
+        from: Option<&'a str>,
+        user: &'a str,
+        fresh: bool,
+        evidence: &'a Evidence,
+    ) -> BindRequest<'a> {
+        BindRequest {
+            from,
+            origin: A,
+            user,
+            name: user,
+            fresh,
+            evidence,
+        }
+    }
+
+    fn bound(result: Result<Bind, String>) -> super::BoundAccount {
+        match result {
+            Ok(Bind::Bound(bound)) => bound,
+            Ok(Bind::Existing { key, .. }) => panic!("{key} was answered as already here"),
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    const EMPTY: Evidence = Evidence {
+        root_empty: true,
+        root: Proof::NotAsked,
+        device: Proof::NotAsked,
+        device_current: false,
+    };
+
+    /// ⚠ **The upgrade, read and not written.** A file from before accounts has a
+    /// list derived for it — its server, then every other origin a device id or a
+    /// machine claim names — and the bytes on disk are exactly what they were:
+    /// nothing is written at startup.
+    #[test]
+    fn a_file_from_before_accounts_reads_as_legacy_accounts_and_writes_nothing() {
+        let dir = scratch("derive");
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = format!(
+            r#"{{"server":"{A}","devices":{{"{A}":"dv_a","{B}":"dv_b","not an origin":"x"}}}}"#
+        );
+        std::fs::write(server_file(&dir), &text).unwrap();
+        std::fs::write(
+            dir.join("machine.json"),
+            r#"{"machines":{"https://c.example":"m_c"}}"#,
+        )
+        .unwrap();
+
+        let roster = read_accounts(&dir, &|_| false);
+        assert!(roster.derived);
+        let keys: Vec<String> = roster.accounts.iter().map(|a| a.key()).collect();
+        assert_eq!(keys, vec![A, B, "https://c.example"]);
+        assert!(roster.accounts.iter().all(|a| a.user.is_none()));
+        assert_eq!(roster.current.as_deref(), Some(A));
+        assert_eq!(roster.shown().map(|a| a.key()).as_deref(), Some(A));
+        assert!(roster.accounts[0].bound && roster.accounts[1].bound);
+        assert!(!roster.accounts[2].bound, "a claim is not a bound device");
+        assert_eq!(
+            std::fs::read_to_string(server_file(&dir)).unwrap(),
+            text,
+            "derivation wrote nothing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ⚠ **A server that was chosen and never signed in to is not an account.**
+    /// Deriving one would open the upgrade on a sign-in form whose only way out is
+    /// "Remove account" for an account that never existed; a pending seat keeps
+    /// `‹ Server`. The keyring is the evidence that decides, handed in.
+    #[test]
+    fn a_phantom_server_is_a_pending_sign_in() {
+        let dir = scratch("phantom");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(server_file(&dir), format!(r#"{{"server":"{A}"}}"#)).unwrap();
+
+        let without = read_accounts(&dir, &|_| false);
+        assert!(without.accounts.is_empty());
+        assert_eq!(without.pending.as_deref(), Some(A));
+
+        let with = read_accounts(&dir, &|origin| origin == A);
+        assert_eq!(with.accounts.len(), 1);
+        assert_eq!(with.pending, None);
+        assert!(
+            with.accounts[0].signed_in,
+            "and the evidence is its signed-in flag"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_first_run_derives_no_account_and_a_chosen_server_pins_the_accounts_era() {
+        let dir = scratch("firstrun");
+        let fresh = read_accounts(&dir, &|_| true);
+        assert!(fresh.accounts.is_empty() && fresh.pending.is_none());
+        assert!(!server_file(&dir).exists());
+
+        write_server(&dir, A).unwrap();
+        let text = std::fs::read_to_string(server_file(&dir)).unwrap();
+        assert!(text.contains("\"accounts\": []"), "{text}");
+        let pinned = read_accounts(&dir, &|_| true);
+        assert!(!pinned.derived);
+        assert!(
+            pinned.accounts.is_empty(),
+            "a relaunch finds a pending seat, never a derived legacy one"
+        );
+        assert_eq!(read_server(&dir).as_deref(), Some(A));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The first account on a server with nothing in its root takes that root;
+    /// the second is a guest, whatever it proves about nothing.
+    #[test]
+    fn the_first_account_on_a_server_owns_it_and_the_second_is_a_guest() {
+        let dir = scratch("owner");
+        write_server(&dir, A).unwrap();
+        let first = bound(bind_account(&dir, &request(None, "u_a", true, &EMPTY)));
+        assert!(first.owner && first.claimed.root);
+        let second = bound(bind_account(&dir, &request(None, "u_b", true, &EMPTY)));
+        assert!(!second.owner && !second.claimed.root);
+        let proven = Evidence {
+            root: Proof::Proven,
+            ..EMPTY
+        };
+        let third = bound(bind_account(&dir, &request(None, "u_c", true, &proven)));
+        assert!(
+            !third.owner,
+            "a root already somebody's is theirs for good, proof or no proof"
+        );
+        let roster = read_accounts(&dir, &|_| false);
+        assert_eq!(roster.roots.get(A).map(String::as_str), Some("u_a"));
+        assert_eq!(roster.current.as_deref(), Some("https://a.example#u_c"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ⚠ **Forgetting keeps the root record, so the owner comes back an owner.**
+    /// Computing `owner` from what a bind *took* would hand a returning owner a
+    /// guest root: a new machine, a spent quota slot and their database orphaned.
+    #[test]
+    fn a_returning_user_gets_its_root_back() {
+        let dir = scratch("return");
+        write_server(&dir, A).unwrap();
+        assert!(bound(bind_account(&dir, &request(None, "u_a", true, &EMPTY))).owner);
+        forget_account(&dir, "https://a.example#u_a").unwrap();
+        // The root is no longer empty — the owner's daemon lived there — and
+        // nothing was asked: the record alone is the answer.
+        let again = bound(bind_account(
+            &dir,
+            &request(None, "u_a", true, &Evidence::NONE),
+        ));
+        assert!(again.owner && !again.claimed.root);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A legacy seat whose token's user is proved to own the bare device and the
+    /// root: the device id and a file-held key move to the account, it is bound
+    /// where the proof says the device is this session's, and the entry is
+    /// re-keyed rather than added.
+    #[test]
+    fn a_proven_inherit_moves_what_the_server_held() {
+        let dir = scratch("proven");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            server_file(&dir),
+            format!(
+                r#"{{"server":"{A}","devices":{{"{A}":"dv_a"}},"device_keys":{{"{A}":"KEY"}}}}"#
+            ),
+        )
+        .unwrap();
+        materialize_accounts(&dir, &|_| true).unwrap();
+        let proven = Evidence {
+            root_empty: false,
+            root: Proof::Proven,
+            device: Proof::Proven,
+            device_current: true,
+        };
+        let moved = bound(bind_account(&dir, &request(Some(A), "u_a", false, &proven)));
+        assert!(moved.owner && moved.claimed.root && moved.claimed.device);
+        let key = "https://a.example#u_a";
+        assert_eq!(read_device(&dir, key).as_deref(), Some("dv_a"));
+        assert_eq!(
+            read_device(&dir, A),
+            None,
+            "the bare id is gone, not copied"
+        );
+        assert_eq!(read_device_key_fallback(&dir, key).as_deref(), Some("KEY"));
+        assert_eq!(read_device_key_fallback(&dir, A), None);
+        let roster = read_accounts(&dir, &|_| false);
+        assert_eq!(roster.accounts.len(), 1, "re-keyed in place");
+        assert!(roster.accounts[0].bound);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ⚠ **Without proof nothing moves**: the account gets a guest root and no
+    /// device, and the bare items stay for whoever can prove them. A proof that
+    /// could not be reached is marked so the next bootstrap asks again.
+    #[test]
+    fn an_unproven_inherit_takes_nothing() {
+        let dir = scratch("unproven");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            server_file(&dir),
+            format!(r#"{{"server":"{A}","devices":{{"{A}":"dv_a"}}}}"#),
+        )
+        .unwrap();
+        materialize_accounts(&dir, &|_| true).unwrap();
+        let disproven = Evidence {
+            root_empty: false,
+            root: Proof::Disproven,
+            device: Proof::Unreachable,
+            device_current: false,
+        };
+        let moved = bound(bind_account(
+            &dir,
+            &request(Some(A), "u_b", true, &disproven),
+        ));
+        assert!(!moved.owner && !moved.claimed.root && !moved.claimed.device);
+        assert!(moved.claimed.pending, "an unreachable proof is asked again");
+        assert_eq!(read_device(&dir, A).as_deref(), Some("dv_a"));
+        assert_eq!(read_device(&dir, "https://a.example#u_b"), None);
+        let roster = read_accounts(&dir, &|_| false);
+        assert!(roster.accounts[0].pending_proof);
+        assert_eq!(roster.roots.get(A), None, "and the root is still nobody's");
+
+        // The retry: proved this time, so what was waiting is handed over.
+        let proven = Evidence {
+            root_empty: false,
+            root: Proof::NotAsked,
+            device: Proof::Proven,
+            device_current: false,
+        };
+        let later = claim_bare(&dir, "https://a.example#u_b", None, &proven, false).unwrap();
+        assert!(later.device && !later.pending);
+        assert_eq!(
+            read_device(&dir, "https://a.example#u_b").as_deref(),
+            Some("dv_a")
+        );
+        assert!(!read_accounts(&dir, &|_| false).accounts[0].pending_proof);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ⚠ **A new sign-in beside an unconfirmed legacy entry takes nothing of it**
+    /// — not the device, and not an empty root either: the legacy entry's owner may
+    /// be the person that root was about to be set up for.
+    #[test]
+    fn a_fresh_bind_beside_a_legacy_entry_leaves_its_items_alone() {
+        let dir = scratch("beside");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            server_file(&dir),
+            format!(
+                r#"{{"server":"{A}","devices":{{"{A}":"dv_a"}},"device_keys":{{"{A}":"KEY"}}}}"#
+            ),
+        )
+        .unwrap();
+        materialize_accounts(&dir, &|_| true).unwrap();
+        let fresh = bound(bind_account(&dir, &request(None, "u_b", true, &EMPTY)));
+        assert!(!fresh.owner && !fresh.claimed.root && !fresh.claimed.device);
+        assert_eq!(read_device(&dir, A).as_deref(), Some("dv_a"));
+        assert_eq!(read_device_key_fallback(&dir, A).as_deref(), Some("KEY"));
+        assert_eq!(read_accounts(&dir, &|_| false).accounts.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Already here is answered, never added twice — with whether it is signed in,
+    /// which is the difference between `existing` and `adopted`.
+    #[test]
+    fn an_account_already_here_is_answered_rather_than_added_twice() {
+        let dir = scratch("existing");
+        write_server(&dir, A).unwrap();
+        bound(bind_account(&dir, &request(None, "u_a", true, &EMPTY)));
+        let key = "https://a.example#u_a".to_string();
+        assert_eq!(
+            bind_account(&dir, &request(None, "u_a", true, &EMPTY)),
+            Ok(Bind::Existing {
+                key: key.clone(),
+                signed_in: true
+            })
+        );
+        set_signed_in(&dir, &key, false).unwrap();
+        assert_eq!(
+            bind_account(&dir, &request(None, "u_a", true, &EMPTY)),
+            Ok(Bind::Existing {
+                key,
+                signed_in: false
+            })
+        );
+        assert_eq!(read_accounts(&dir, &|_| false).accounts.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ten_accounts_is_the_most() {
+        let dir = scratch("cap");
+        write_server(&dir, A).unwrap();
+        for i in 0..crate::accounts::MAX_ACCOUNTS {
+            bound(bind_account(
+                &dir,
+                &request(None, &format!("u_{i}"), true, &EMPTY),
+            ));
+        }
+        let refused = bind_account(&dir, &request(None, "u_x", true, &EMPTY)).unwrap_err();
+        assert!(refused.starts_with("account_limit"), "{refused}");
+        assert_eq!(
+            read_accounts(&dir, &|_| false).accounts.len(),
+            crate::accounts::MAX_ACCOUNTS
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forgetting_an_account_keeps_its_device_and_its_root() {
+        let dir = scratch("forget");
+        write_server(&dir, A).unwrap();
+        bound(bind_account(&dir, &request(None, "u_a", true, &EMPTY)));
+        let key = "https://a.example#u_a";
+        write_device(&dir, key, "dv_a").unwrap();
+        assert_eq!(forget_account(&dir, key).unwrap(), None);
+        let roster = read_accounts(&dir, &|_| false);
+        assert!(roster.accounts.is_empty() && roster.current.is_none());
+        assert_eq!(read_device(&dir, key).as_deref(), Some("dv_a"));
+        assert_eq!(roster.roots.get(A).map(String::as_str), Some("u_a"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ⚠ **An unconfirmed legacy entry's root goes to nobody on a forget** — its
+    /// owner was never proved — until somebody proves it.
+    #[test]
+    fn forgetting_an_unconfirmed_legacy_account_leaves_its_root_to_nobody() {
+        let dir = scratch("tombstone");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            server_file(&dir),
+            format!(r#"{{"server":"{A}","devices":{{"{A}":"dv_a"}}}}"#),
+        )
+        .unwrap();
+        materialize_accounts(&dir, &|_| true).unwrap();
+        forget_account(&dir, A).unwrap();
+        assert_eq!(
+            read_accounts(&dir, &|_| false)
+                .roots
+                .get(A)
+                .map(String::as_str),
+            Some("")
+        );
+        let occupied = Evidence {
+            root_empty: false,
+            ..Evidence::NONE
+        };
+        assert!(!bound(bind_account(&dir, &request(None, "u_b", true, &occupied))).owner);
+        let proven = Evidence {
+            root: Proof::Proven,
+            ..occupied
+        };
+        assert!(
+            bound(bind_account(&dir, &request(None, "u_c", true, &proven))).owner,
+            "a proof still takes it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_forget_returns_to_the_account_shown_last() {
+        let dir = scratch("back");
+        write_server(&dir, A).unwrap();
+        for user in ["u_a", "u_b", "u_c"] {
+            bound(bind_account(&dir, &request(None, user, true, &EMPTY)));
+        }
+        show_account(&dir, "https://a.example#u_a").unwrap();
+        assert_eq!(
+            forget_account(&dir, "https://a.example#u_c")
+                .unwrap()
+                .as_deref(),
+            Some("https://a.example#u_a")
+        );
+        let roster = read_accounts(&dir, &|_| false);
+        assert_eq!(
+            roster
+                .recent(Some("https://a.example#u_a"))
+                .map(|a| a.key())
+                .as_deref(),
+            Some("https://a.example#u_b")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_device_write_marks_its_account_bound_and_set_bound_clears_it() {
+        let dir = scratch("bound");
+        write_server(&dir, A).unwrap();
+        bound(bind_account(&dir, &request(None, "u_a", true, &EMPTY)));
+        let key = "https://a.example#u_a";
+        let is_bound = || read_accounts(&dir, &|_| false).accounts[0].bound;
+        assert!(!is_bound(), "a fresh sign-in has no device bound");
+        write_device(&dir, key, "dv_a").unwrap();
+        assert!(is_bound());
+        set_bound(&dir, key, false).unwrap();
+        assert!(!is_bound());
+        write_device(&dir, key, "dv_a").unwrap();
+        erase_device(&dir, key).unwrap();
+        assert!(!is_bound());
+        write_device(&dir, key, "dv_a").unwrap();
+        set_signed_in(&dir, key, false).unwrap();
+        assert!(!is_bound(), "a session that ended took its binding with it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `StoredAccount.rest`, for `Stored.rest`'s reason one level down.
+    #[test]
+    fn an_account_field_another_build_wrote_survives() {
+        let dir = scratch("tomorrow-account");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            server_file(&dir),
+            format!(r#"{{"server":"{A}","accounts":[{{"origin":"{A}","user":"u_a","tomorrow":{{"k":1}}}}]}}"#),
+        )
+        .unwrap();
+        assert!(rename_account(&dir, "https://a.example#u_a", "ada").unwrap());
+        assert!(!rename_account(&dir, "https://a.example#u_a", "ada").unwrap());
+        let text = std::fs::read_to_string(server_file(&dir)).unwrap();
+        assert!(text.contains("tomorrow") && text.contains("ada"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two people on one server are two devices, and neither is the bare,
+    /// pre-accounts one.
+    #[test]
+    fn a_device_is_scoped_to_its_account() {
+        let dir = scratch("device-account");
+        write_device(&dir, "https://a.example#u_a", "dv_a").unwrap();
+        write_device(&dir, "https://a.example#u_b", "dv_b").unwrap();
+        write_device(&dir, A, "dv_bare").unwrap();
+        assert_eq!(
+            read_device(&dir, "https://a.example#u_a").as_deref(),
+            Some("dv_a")
+        );
+        assert_eq!(
+            read_device(&dir, "https://a.example#u_b").as_deref(),
+            Some("dv_b")
+        );
+        assert_eq!(read_device(&dir, A).as_deref(), Some("dv_bare"));
+        erase_device(&dir, "https://a.example#u_a").unwrap();
+        assert_eq!(read_device(&dir, A).as_deref(), Some("dv_bare"));
+        assert_eq!(
+            read_device(&dir, "https://a.example#u_b").as_deref(),
+            Some("dv_b")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1842,6 +3105,66 @@ mod tests {
             unreadable_file(&dir).exists(),
             "a.example is named in there too, and b.example's re-key does not supersede it"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ⚠ **Per account, and a second account on the same server is "another".**
+    /// The token scan reads `https://a.example#u_b` as one token, so the other
+    /// account's key is seen for what it is rather than as this server's origin
+    /// followed by noise.
+    #[test]
+    fn a_re_key_for_one_account_keeps_a_quarantine_naming_another_on_its_server() {
+        let dir = scratch("otheraccount");
+        let quarantined = quarantine_holding_a_key(
+            &dir,
+            &[
+                ("https://a.example#u_a", "AAAA"),
+                ("https://a.example#u_b", "BBBB"),
+            ],
+        );
+        assert!(
+            quarantined.contains("https://a.example#u_b"),
+            "the precondition"
+        );
+        give_up_device_key(&dir, "https://a.example#u_a").unwrap();
+        assert!(
+            unreadable_file(&dir).exists(),
+            "the other account's key is not this re-key's to take"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The owner's Re-key, where the owner inherited the bare key by proof: a
+    /// quarantine naming only it and its server's bare origin is superseded.
+    #[test]
+    fn the_owners_re_key_takes_a_quarantine_naming_only_it_and_its_server() {
+        let dir = scratch("inheritor");
+        quarantine_holding_a_key(&dir, &[(A, "AAAA"), ("https://a.example#u_a", "CCCC")]);
+        std::fs::write(
+            server_file(&dir),
+            format!(r#"{{"accounts":[{{"origin":"{A}","user":"u_a","inherited":true}}]}}"#),
+        )
+        .unwrap();
+        give_up_device_key(&dir, "https://a.example#u_a").unwrap();
+        assert!(!unreadable_file(&dir).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ⚠ **A guest's Re-key keeps a quarantine naming its server bare** — the bare
+    /// key in there is somebody's who is not proved to be this account. Fails
+    /// closed, which regresses the discard for guests and costs a superseded key at
+    /// `0600`, rather than a person's last recoverable copy.
+    #[test]
+    fn a_guests_re_key_keeps_a_quarantine_naming_its_server_bare() {
+        let dir = scratch("guestkey");
+        quarantine_holding_a_key(&dir, &[(A, "AAAA"), ("https://a.example#u_b", "BBBB")]);
+        std::fs::write(
+            server_file(&dir),
+            format!(r#"{{"accounts":[{{"origin":"{A}","user":"u_b"}}]}}"#),
+        )
+        .unwrap();
+        give_up_device_key(&dir, "https://a.example#u_b").unwrap();
+        assert!(unreadable_file(&dir).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

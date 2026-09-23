@@ -1,20 +1,34 @@
-import { useState, type FormEvent, type ReactNode } from "react";
+import { ChevronLeft, Pencil } from "lucide-react";
+import { useRef, useState, type FormEvent, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import * as cp from "../cp";
+import { errorText } from "../http";
 import { parseInstanceConfig } from "../instance";
 import { nativeBoot, probeServer, setNativeServer } from "../native";
 import { store } from "../store";
-import { Button, FIELD, SETTINGS_HEADING } from "./bits";
+import { useBackAccount } from "./backAccount";
+import { Button, FIELD, Icon, IconButton, SETTINGS_HEADING } from "./bits";
 
 /**
  * Which Reemoat this application talks to.
  *
- * **Two entrances, and neither is a URL.** `state.host.server === null` is first
- * run; `state.pickingServer` is the control on the sign-in screen and the row
- * under Settings → Account. The second one is new ground rather than polish:
- * `setNativeServer` had exactly one call site and `clearSession` deliberately
- * leaves the server alone, so **a server that had been chosen could not be
- * changed from inside the app at all** — signing out returned you to the same
- * one, and the only remedy was deleting the shell's config file by hand.
+ * **Two entrances, and neither is a URL.** `state.host.server === null` is a
+ * window nobody has given a server — first run, or an account being added from the
+ * menu; `state.pickingServer` is ‹ Server on the sign-in screen, drawn only on a
+ * window nobody has signed in to yet. Both are a *pending* window: an account is a
+ * server and a person, so a signed-in one may not be repointed, and the row that
+ * used to offer that under Settings → Account is gone (Q3.643). The screen still
+ * exists for the reason the second entrance was added: `setNativeServer` had
+ * exactly one call site, so **a server that had been chosen could not be changed
+ * from inside the app at all**. ‹ Server now reaches it only while an account is
+ * being added: a first sign-in has no way back (the owner's call, 2026-09-24).
+ *
+ * **Adding an account is this screen with a different heading**, not a screen of
+ * its own. The host opens a fresh pending window for it, which arrives here exactly
+ * as a first run does; what differs is that this computer already holds accounts,
+ * so the screen says *Add account* and opens on a ‹ back to the one that was on
+ * screen, named. Which of the two it is comes from the host's live list, never from
+ * the boot payload — see `useBackAccount`.
  *
  * **Reached by state, not by a URL**, which is why it is filed beside `SignIn.tsx`
  * rather than in `ui/gate/`. `ForcedPasswordChange` is the precedent and the
@@ -85,12 +99,13 @@ async function probe(address: string): Promise<Found> {
 
 export function ChooseServer(): ReactNode {
   /*
-   * ⚠ **The field opens on the current value, and Cancel exists only where there
-   * is one.** Those two lines are what turn a first-run screen into an editing
-   * one, and the second is load-bearing beyond politeness: with no server chosen
-   * there is nothing to go back *to*, so the screen offers no way off — which is
-   * what keeps "a sign-in form is never drawn without a server" true by
-   * construction, and is why `signInReady` did not have to learn about servers.
+   * ⚠ **The field opens on the current value, and the way back exists only where
+   * there is an account to go back to.** The second rule is load-bearing beyond
+   * politeness: with no other account on this computer there is nothing to go back
+   * *to*, so the screen offers no way off — which is what keeps "a sign-in form is
+   * never drawn without a server" true by construction, and is why `signInReady`
+   * did not have to learn about servers. An add is the one arrival with somewhere
+   * to go, and its ‹ goes there — to the interface, from either arrival.
    *
    * Read from `nativeBoot()` rather than taken as a prop, matching `durable`
    * below and for its reason: this screen exists only in the shell, and the shell
@@ -109,30 +124,60 @@ export function ChooseServer(): ReactNode {
    */
   const suggested = nativeBoot()?.defaultServer ?? null;
   /*
-   * ⚠ **Whether there is a sign-in to lose, which is not the same as whether
-   * there is a server.** This screen is reached from Settings with a live session
-   * *and* from the back control on the sign-in form with none — and in the second
-   * state the sentence about forgetting this computer's sign-in describes
-   * something that does not exist. Read at render from the module that owns it;
-   * `cp.currentCredential()` is synchronous and is the same value `cpFetch`
-   * compares by identity.
+   * ⚠ **No sentence here is about a sign-in the screen holds any more, because no
+   * entrance reaches it holding one.** It used to be drawn from Settings with a
+   * live session behind it, so a `signedIn` read decided whether "this computer
+   * stays signed in" described something that existed. Both entrances are a
+   * pending window now, and the host refuses a server change for anything else
+   * (Q5.120) — so the read, and the sentence it guarded, went together. The
+   * ordering in `submit` that protected a live bearer stays, as the belt for the
+   * day an entrance with one comes back.
    */
-  const signedIn = cp.currentCredential() !== null;
   /*
-   * Whether this shell can run a daemon here at all, which is the one condition on
-   * the third sentence below: on a phone there is nothing to keep running, and a
-   * sentence about it would be a promise about nothing. `canHostDaemon` is the
-   * declared capability, never a guess from `platform`.
-   *
-   * ⚠ `=== true`, the reverse of `canHostDaemonHere`'s `!== false`, for the
-   * reverse reason: there silence would cost the local route, here it costs one
-   * sentence, and a sentence is a claim that should be left out when unsure.
+   * ⚠ **Adding, which is decided by the host's live list and not by anything on
+   * this screen.** A pending window on a computer that already holds an account is
+   * an account being added; on one that holds none it is a first run. `back` is
+   * the account Cancel returns to, so *there is somewhere to go back to* and *this
+   * is an add* are one fact. `undefined` until the host answers — see the hold
+   * below the handlers.
    */
-  const hostsDaemon = nativeBoot()?.canHostDaemon === true;
+  const back = useBackAccount();
+  const adding = back !== null && back !== undefined;
   const [address, setAddress] = useState(current ?? suggested ?? "");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const durable = nativeBoot()?.durable !== false;
+  /*
+   * ⚠ **Locked only where the field opens on the build's own suggestion and there
+   * is no truth to show instead** — the owner's call (Q3.643): the address a build
+   * was made for is what most people are here to confirm, so it is drawn as settled,
+   * with a pencil beside it for the few who run their own. Never on the ‹ Server
+   * arrival, where the field holds the address this window already has and the
+   * reason for coming back is to change it; never where the build compiled no
+   * suggestion in, where there is nothing to confirm.
+   *
+   * **`disabled`, not `readOnly`, and both were weighed.** A disabled field reads
+   * as not yours to edit until you ask, takes no caret and raises no keyboard on a
+   * phone, and is announced as unavailable beside a pencil that is labelled. A
+   * read-only one is focusable, draws a caret and reads as editable to everybody
+   * who then finds it is not. What `disabled` costs is focus — and so Enter from
+   * the field — which Continue taking the focus while it is locked repays.
+   */
+  const [locked, setLocked] = useState(!editing && suggested !== null);
+  const field = useRef<HTMLInputElement>(null);
+
+  /*
+   * ⚠ **Byte for byte what it was, including the arguments inside it that are
+   * about an entrance that no longer exists** — and that is on purpose, not
+   * neglect. Its ⚠ blocks reason about a settings screen with a live session behind
+   * it, which was the Settings → Account entrance; no entrance reaches this screen
+   * holding a credential now (both are a pending window, and the host refuses a
+   * server change for anything else, Q5.120), so `held` is `null` on every path
+   * that runs today and the detach and re-adopt are no-ops. They stay — and stay
+   * unedited, so the index pins on them keep meaning what they were written to
+   * mean — as the belt for the day an entrance with a credential comes back: the
+   * order they encode is still the only safe one if it does.
+   */
 
   const submit = (event: FormEvent): void => {
     event.preventDefault();
@@ -239,25 +284,83 @@ export function ChooseServer(): ReactNode {
     })();
   };
 
-  // Chrome from `FIELD`, layout here — `SignIn`'s line, and the two screens are
-  // read one after the other.
-  const field = `mt-1 w-full ${FIELD}`;
+  /*
+   * The pencil: unlock, then focus and select, in that order and inside the tap.
+   *
+   * ⚠ **`flushSync`, because a disabled input cannot take focus.** Setting the
+   * state alone commits it after this handler returns, so the `focus()` below would
+   * land on a field that is still disabled and do nothing. Committing inside the tap
+   * is also what lets a phone raise its keyboard: a focus that arrives in a later
+   * task is not one the platform treats as the person's, which is `router.ts`'s
+   * precedent for the same call. Selected, because somebody who pressed the pencil
+   * is about to type a different address, not edit this one a character at a time.
+   *
+   * The pencil unmounts once pressed — one way, the redundant control deleted —
+   * and the field, the `flex-1` sibling, takes the room it leaves.
+   */
+  const unlock = (): void => {
+    flushSync(() => setLocked(false));
+    field.current?.focus();
+    field.current?.select();
+  };
+
+  /*
+   * ‹ on an add: back to the account that was on screen. The host discards
+   * this pending window by leaving it — closes it, or rebinds it and asks for a
+   * reload — so there is nothing here to tidy. A refusal is a sentence under the
+   * field rather than a silent no-op.
+   */
+  const leave = (): void => {
+    setError(null);
+    void store.switchAccount(null).catch((cause: unknown) => setError(errorText(cause)));
+  };
+
+  /*
+   * ⚠ **Nothing drawn until the host has said whether this is an add.** The two
+   * answers are two different screens — a welcome that explains what a server is,
+   * against *Add account* with a Cancel — and drawing the first while the list is
+   * one IPC away would flash a welcome at somebody who already has three accounts.
+   * The box keeps its place, so the arrival is a paint rather than a jump, and the
+   * field is mounted with the answer in hand, which is what lets `autoFocus` be the
+   * right one on the first try.
+   */
+  if (back === undefined) return <div className="flex min-h-full items-center justify-center p-6" />;
 
   return (
     <div className="flex min-h-full items-center justify-center p-6">
       <div className="w-full max-w-sm">
         {/*
-          ⚠ **Two arrivals, two headings, and the first one is a *welcome* rather
-          than a question.** This is the screen somebody sees before anything else
-          in the product, on a machine where nothing has happened yet — so it
-          greets, says what is about to happen, and asks one thing. Reached from
-          Settings it is the opposite: a change to something that already works,
-          where a welcome would read as having forgotten who you are.
+          ⚠ **Three arrivals, three headings, and the first one is a *welcome*
+          rather than a question.** This is the screen somebody sees before
+          anything else in the product, on a machine where nothing has happened yet
+          — so it greets, says what is about to happen, and asks one thing. Adding
+          an account is the opposite of a first run — somebody who is already in —
+          so it names the act rather than greeting, and ‹ Server from the sign-in
+          screen is a correction to an address, where a welcome would read as
+          having forgotten what was just typed.
         */}
-        <h1 className="text-xl font-semibold">{editing ? "Server" : "Welcome to Reemoat"}</h1>
+        {/*
+          ⚠ **The way back is a chevron that names where it goes, and it goes to
+          the interface** — the owner's call, 2026-09-24, replacing a Cancel beside
+          Continue: `SignIn`'s ‹ Server is the shape, and on this screen, from the
+          first arrival or back from the sign-in form, it returns to the account
+          that was on screen. A first run has none.
+        */}
+        {adding && (
+          <button
+            type="button"
+            onClick={leave}
+            disabled={busy}
+            className="tap -ml-1 mb-3 flex max-w-full items-center gap-0.5 text-sm text-muted hover:text-fg disabled:text-faint"
+          >
+            <Icon as={ChevronLeft} size={14} />
+            <span className="truncate">{back.label}</span>
+          </button>
+        )}
+        <h1 className="text-xl font-semibold">{adding ? "Add account" : "Welcome to Reemoat"}</h1>
         <p className="mt-1 text-sm text-muted">
-          {editing
-            ? "Change which server this connects to."
+          {adding
+            ? "Choose the server the account is on."
             : "One thing to set up, and then you are in. Reemoat keeps your account and your machines on a server — this one, or your own."}
         </p>
 
@@ -265,95 +368,80 @@ export function ChooseServer(): ReactNode {
           <label htmlFor="server-address" className={`mt-4 block ${SETTINGS_HEADING}`}>
             Server address
           </label>
-          <input
-            id="server-address"
-            name="url"
-            value={address}
-            onChange={(event) => setAddress(event.target.value)}
-            /* `url` rather than `off`: a password manager offering the address you
-               typed last time is the right behaviour on a screen somebody reaches
-               once per machine. */
-            autoComplete="url"
-            autoCapitalize="off"
-            autoCorrect="off"
-            spellCheck={false}
-            enterKeyHint="go"
-            inputMode="url"
-            placeholder="app.reemoat.com"
-            /* The first screen of the product is one field; focusing it is the
-               whole of what somebody is here to do. **Not when editing**: that
-               arrival replaces a sheet that has already placed focus, and taking
-               it is the defect `Sheet`'s own `[screen]` effect exists to avoid. */
-            autoFocus={!editing}
-            className={field}
-          />
+          {/*
+            The field and, while it is locked, the pencil that unlocks it. Chrome
+            from `FIELD`, layout here — `SignIn`'s line, and the two screens are
+            read one after the other.
+
+            ⚠ **The locked look is two `disabled:` variants and no opacity.** With
+            none, a disabled `FIELD` would draw exactly like an editable one:
+            Tailwind's preflight already sets inputs to inherit their colour on a
+            transparent ground at full opacity, and `FIELD` sets the ground and the
+            boundary itself, so the engines' own disabled styling — WebKit's mixed
+            ink, Chromium's grey — never shows. So the ink dims to `text-muted` and
+            the boundary steps back to `edge`, which is the refusing-controls idiom
+            this app uses everywhere a control says *not now* without compositing
+            itself away; an opacity would take the value somebody is here to read
+            down with it.
+
+            `nav` for the pencil, not `sm`: beside a field at `gap-2`, `nav`'s
+            finger pad lands inside the gap, where `sm`'s would lie over the field.
+          */}
+          <div className="mt-1 flex items-center gap-2">
+            <input
+              ref={field}
+              id="server-address"
+              name="url"
+              value={address}
+              onChange={(event) => setAddress(event.target.value)}
+              disabled={locked}
+              /* `url` rather than `off`: a password manager offering the address you
+                 typed last time is the right behaviour on a screen somebody reaches
+                 once per machine. */
+              autoComplete="url"
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+              enterKeyHint="go"
+              inputMode="url"
+              placeholder="app.reemoat.com"
+              /* The field takes focus only where it can be typed in: a first run or
+                 an add with no suggestion, where it is the one thing somebody is here
+                 to fill. **Not while locked** — a disabled field cannot hold it, and
+                 Continue takes it instead, below. **Not on the ‹ Server arrival**,
+                 where most who come back are confirming the address above a phone's
+                 keyboard they did not ask for. */
+              autoFocus={!editing && !locked}
+              className={`min-w-0 flex-1 ${FIELD} disabled:border-edge disabled:text-muted`}
+            />
+            {locked && (
+              <IconButton icon={Pencil} label="Edit server address" size="nav" onClick={unlock} disabled={busy} />
+            )}
+          </div>
 
           {error !== null && <p className="mt-2 text-sm text-danger">{error}</p>}
 
           {/*
-            ⚠ **What changing servers costs, said before rather than discovered
-            after — and the first sentence used to be a cost.** `host_set_server`
-            erased `credential#<previous>` in the same act, so pointing somewhere
-            else was signing out of here. It keeps it now (Q7.148): `submit` drops
-            this page's copy and nothing else, and switching back asks nothing.
+            ⚠ **What adding costs the accounts already here is not said on this
+            screen any more** — the owner's call, 2026-09-24, on seeing it: two
+            sentences between the field and the button, both about the absence of a
+            cost (Q7.149 has it). And the way back is the ‹ above, not a Cancel here.
 
-            It stays exactly true for the reason the old second sentence was:
-            **nothing here ends the session on the old server.** No `DELETE
-            /v1/me/sessions/current` is sent, and deliberately not — it is a
-            network call to a server somebody is leaving, which is often the
-            reason they are leaving, and it must not stand in front of a server
-            change. Leaving it for good is signing out while on it.
-
-            ⚠ **The third is what a switch does *not* cost, which it used to.**
-            Each server has a daemon of its own on this computer now (Q7.148), and
-            `host_set_server` touches none of them: the one for the server being
-            left goes on running — its turns, its pending approvals, a phone's way
-            in — until Reemoat quits. Conditional on purpose, because whether this
-            copy started one for that server is not something this screen knows.
-          */}
-          {/*
-            ⚠ **"Stays signed in" is said only where it is true.** On a computer
-            whose credential store does not keep what it is given (`durable`
-            false), switching back *does* ask again, and the sentence under the
-            buttons already says so; drawing both would be two answers to one
-            question with only one of them right.
-          */}
-          {editing && signedIn && (durable || hostsDaemon) && (
-            <p className="mt-3 text-sm text-muted">
-              {durable && (
-                <>
-                  This computer stays signed in to{" "}
-                  <span className="font-mono text-fg">{current}</span>, so switching back does not
-                  ask again.
-                </>
-              )}
-              {hostsDaemon &&
-                " If Reemoat runs a daemon on this computer for that server, it keeps running until you quit Reemoat."}
-            </p>
-          )}
-
-          {/*
-            Cancel last, which is the ordering rule `TwoStep` already argues on
-            every settings row: both controls lay out in one box, so the last
-            child occupies the same pixels whichever set is drawn, and a second
-            tap aimed at a control that looked inert lands on the way out rather
-            than on the act. `plain`, never `primary` — the affirmative here is
-            adopting a server, and two primaries is no primary.
+            ⚠ **Continue takes the focus while the field is locked**, which is the
+            other half of the lock: a disabled input takes none, so without this
+            the first screen's whole job — confirm the address, press Enter — would
+            need a click.
           */}
           <div className="mt-4 flex gap-2">
             <Button
               type="submit"
               tone="primary"
+              autoFocus={locked}
               disabled={busy || address.trim().length === 0}
               className="flex-1"
             >
-              {busy ? "Checking…" : editing ? "Save" : "Continue"}
+              {busy ? "Checking…" : "Continue"}
             </Button>
-            {editing && (
-              <Button type="button" onClick={() => store.cancelServerPick()} disabled={busy}>
-                Cancel
-              </Button>
-            )}
           </div>
         </form>
 
@@ -369,21 +457,25 @@ export function ChooseServer(): ReactNode {
             paragraph**, because on a welcome screen the explanation belongs above
             the field rather than below the button. What is left here is the one
             thing the lead cannot carry: that running your own is a real option
-            and not a footnote. First run only — somebody who arrived from
-            Settings has a working server and is not asking what one is.
+            and not a footnote. On the first arrival only, of a first run or an
+            add — somebody who came back through ‹ Server has already chosen once
+            and is correcting an address, not asking what one is. And on an add
+            too, deliberately: the account being added may well be on a server of
+            its own, which is exactly what this line is for.
           */}
-          {!editing &&
-            (suggested === null ? (
-              <p>
-                A server holds your account and the machines you add. Use one somebody runs for you, or run your own
-                with <span className="font-mono">install.sh control-plane</span>.
-              </p>
-            ) : (
-              <p>
-                That address is ours. Run your own with <span className="font-mono">install.sh control-plane</span> and
-                point this at it instead.
-              </p>
-            ))}
+          {/*
+            ⚠ **"That address is ours" is gone** — the owner's call, 2026-09-24:
+            the lead already says a server is "this one, or your own", and a build
+            with an address compiled in is one whose owner chose it. What is left is
+            the one case that line cannot carry: a build with no address at all, on
+            a first run, where somebody has to be told what a server is.
+          */}
+          {!editing && !adding && suggested === null && (
+            <p>
+              A server holds your account and the machines you add. Use one somebody runs for you, or run your own with{" "}
+              <span className="font-mono">install.sh control-plane</span>.
+            </p>
+          )}
           {/*
             ⚠ **The same sentence `cp.ts` already has for a browser with storage
             disabled, because it is the same state.** There a private window has no

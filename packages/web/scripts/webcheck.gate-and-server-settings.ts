@@ -754,6 +754,30 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
     [appClosure.has("ui/agentInstall.ts"), gateClosure.has("ui/agentInstall.ts")],
     [true, false],
   );
+  /*
+   * ⚠ **And the account panel, and every door that moves a window to another
+   * account, are the app's alone** — they need the shell and the store, and the
+   * gate has neither. What the gate *does* carry is the pure table the shared
+   * sign-in screen reads and the store-free read of the host's list, both of which
+   * answer "nothing to offer" in a browser before anything is drawn; the moves
+   * themselves reach it only through `SignInAuth`, where the gate's store answers
+   * with an empty body.
+   */
+  check(
+    "the account panel and the doors that switch accounts ship in the app and not in the gate",
+    [
+      appClosure.has("ui/MenuDrawer.tsx"),
+      gateClosure.has("ui/MenuDrawer.tsx"),
+      appClosure.has("ui/UseAnotherAccount.tsx"),
+      gateClosure.has("ui/UseAnotherAccount.tsx"),
+    ],
+    [true, false, true, false],
+  );
+  check(
+    "while the sign-in screen's pure table and its store-free read ship in both",
+    [appClosure.has("slot.ts"), gateClosure.has("slot.ts"), appClosure.has("ui/backAccount.ts"), gateClosure.has("ui/backAccount.ts")],
+    [true, true, true, true],
+  );
 
   const TRANSPORT = ["e2ee.ts", "machine.ts", "stream.ts", "daemon.ts", "store.ts"];
   const gateValues = closure("gate-main.tsx", true);
@@ -853,9 +877,38 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
     /catch \(cause: unknown\) \{\s*if \(held !== null\) cp\.adoptHydratedCredential\(held\.value\);/.test(refused),
     true,
   );
-  check("and says it stays signed in only where the keyring keeps it", /\{durable && \(/.test(chooseServer), true);
+  /*
+   * ⚠ **Neither sentence of the add screen's footer is drawn any more** — the
+   * owner's call, 2026-09-24, on seeing the build: what adding costs the accounts
+   * already here (nothing, and that their daemons keep running), and "that address
+   * is ours". Pinned absent, because an absence is the whole of the decision and
+   * nothing else would notice either coming back.
+   */
+  check(
+    "the add screen says nothing about what adding costs, nor whose the address is",
+    [/signs none of the others out/.test(chooseServer), /keeps running until you quit Reemoat/.test(chooseServer), /That address is ours/.test(chooseServer)],
+    [false, false, false],
+  );
   const accountSection = readFileSync(new URL("../src/ui/settings/AccountSection.tsx", import.meta.url), "utf8");
   check("and Settings no longer says a switch signs this computer out", /signs this computer out/.test(accountSection), false);
+  /*
+   * ⚠ **Settings states the server and offers no way to change it (Q3.643).** That
+   * row was the second entrance to this screen, with a live session behind it;
+   * repointing a signed-in account would quietly make it a different account. Both
+   * halves, since an absence alone passes on a file that lost the row entirely.
+   */
+  const accountCode = accountSection.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  check(
+    "Settings shows the server and offers no way to change it",
+    [/Server address/.test(accountCode), /store\.pickServer\(\)/.test(accountCode), /action=\{null\}/.test(accountCode)],
+    [true, false, true],
+  );
+  check("and says where the other door is", /Another server is another account, from the menu\./.test(accountCode), true);
+  check(
+    "and Sign out says, in the shell, that it takes the account off this computer",
+    /nativeBoot\(\) !== null\s*\?\s*"Ends this sign-in on the server too, and takes this account off this computer\."/.test(accountCode),
+    true,
+  );
   /*
    * The field opens on the current value, and Cancel exists only where there is
    * one — which is what keeps the first-run state uncancellable, and is why
@@ -876,28 +929,103 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
   );
   check("the suggestion is read as itself and never as the server", /defaultServer/.test(chooseServer), true);
   check("and the first screen greets rather than interrogating", /Welcome to Reemoat/.test(chooseServer), true);
+  check("while an account being added is named as that", /adding \? "Add account" : "Welcome to Reemoat"/.test(chooseServer), true);
+  /*
+   * ⚠ **Which of the two it is comes from the host's live list, and nothing is
+   * drawn until it answers.** A welcome flashed at somebody who already has three
+   * accounts is the one-frame version of the bug a snapshot would make permanent.
+   */
+  check(
+    "an add is decided by the live list, and the screen waits for it",
+    [/const back = useBackAccount\(\);/.test(chooseServer), /const adding = back !== null && back !== undefined;/.test(chooseServer), /if \(back === undefined\) return/.test(chooseServer)],
+    [true, true, true],
+  );
   /*
    * ⚠ **Two sentences on this screen were true in one of its states and false in
    * another, which is the class of bug a screen with two entrances grows.**
    *
    * *"That address is ours"* is nonsense on a build that compiled no default in —
    * which is every build from this repository, where the field opens empty. And
-   * *"stays signed in to"* describes something that does not exist when the
-   * screen is reached by the back control on the sign-in form, where there is no
-   * session at all. Each is now gated on the fact it claims.
+   * *"stays signed in to"* described something that did not exist when the screen
+   * was reached by the back control on the sign-in form, where there was no
+   * session at all — and now describes something no entrance reaches, since the
+   * one with a session behind it is gone. So the first is gated on the fact it
+   * claims, and the second is gone with the read that guarded it.
    */
-  check("the explainer knows whether there is an address above it", /suggested === null \?/.test(chooseServer), true);
-  check("and the sign-in it says is kept is one that exists", /editing && signedIn &&/.test(chooseServer), true);
+  check(
+    "the explainer is drawn only where there is no address above it, on a first run",
+    /\{!editing && !adding && suggested === null && \(/.test(chooseServer),
+    true,
+  );
+  check("no sentence here is about a sign-in the screen holds: no entrance reaches it with one", /signedIn/.test(chooseServer), false);
   /*
-   * One field, first screen — and deliberately not when editing, where the sheet
-   * has already placed focus and taking it is the defect `Sheet`'s own effect
-   * exists to avoid.
+   * The field takes focus where it can be typed in, and Continue does while it is
+   * locked — a disabled input takes none, so without the second the first screen's
+   * whole job, confirm and press Enter, would need a click. Neither on the ‹ Server
+   * arrival, where the screen is a correction and a phone's keyboard over the
+   * address is the cost.
    */
-  check("the first screen focuses the one thing it asks for", /autoFocus=\{!editing\}/.test(chooseServer), true);
-  check("cancel is offered only where there is a server to go back to", /editing && \(/.test(chooseServer), true);
-  check("it says what changing servers keeps", /stays signed in to/.test(chooseServer), true);
+  check(
+    "the field takes focus where it can be typed in, and Continue does while it is locked",
+    [/autoFocus=\{!editing && !locked\}/.test(chooseServer), /autoFocus=\{locked\}/.test(chooseServer)],
+    [true, true],
+  );
+  /*
+   * ⚠ **The way back is a chevron that names the account it returns to, and there
+   * is no Cancel** — the owner's call, 2026-09-24: one shape for a way back, the
+   * sign-in screen's own ‹ Server, and on this screen it goes to the interface from
+   * either arrival. A first run has none, which keeps it uncancellable.
+   */
+  check(
+    "the way back is drawn only on an add, and names the account it returns to",
+    [
+      /\{adding && \(\s*<button[^>]*onClick=\{leave\}/.test(chooseServer),
+      /<span className="truncate">\{back\.label\}<\/span>/.test(chooseServer),
+      /store\.switchAccount\(null\)/.test(chooseServer),
+    ],
+    [true, true, true],
+  );
+  check("and there is no Cancel beside Continue", />\s*Cancel\s*</.test(chooseServer), false);
+  check("it no longer claims a switch keeps a sign-in it may not have", /stays signed in to/.test(chooseServer), false);
   check("and no longer that it forgets a sign-in", /forgets this computer/.test(chooseServer), false);
   check("and the probe carries no credential", /probeServer\([^)]*authorization/i.test(chooseServer), false);
+
+  /* ---- the locked field ---- */
+
+  /*
+   * ⚠ **The build's suggestion is drawn as settled, with a pencil beside it — the
+   * owner's call (Q3.643), pinned as a call.** Locked only where the field opens on
+   * the suggestion and there is no truth to show instead; `disabled` and never
+   * `readOnly`, which is focusable, draws a caret and reads as editable; and the
+   * pencil unlocks, focuses and selects inside the tap, `flushSync` first, because
+   * a still-disabled field ignores a `focus()`.
+   */
+  check("the field is locked only on the build's own suggestion", /useState\(!editing && suggested !== null\)/.test(chooseServer), true);
+  check("by disabling it, never by making it read-only", [/disabled=\{locked\}/.test(chooseServer), /readOnly/.test(chooseServer)], [true, false]);
+  check(
+    "with a labelled pencil beside it while it is",
+    /\{locked && \(\s*<IconButton icon=\{Pencil\} label="Edit server address" size="nav"/.test(chooseServer),
+    true,
+  );
+  check(
+    "which unlocks, then focuses, then selects, inside the tap",
+    /flushSync\(\(\) => setLocked\(false\)\);\s*field\.current\?\.focus\(\);\s*field\.current\?\.select\(\);/.test(chooseServer),
+    true,
+  );
+  /*
+   * ⚠ **The locked look is two `disabled:` variants and no opacity** — without them
+   * a disabled `FIELD` draws exactly like an editable one (preflight and `FIELD`
+   * override every engine's own disabled styling), and an opacity would take the
+   * address somebody came to read down with it. The floor: the class string was
+   * found at all.
+   */
+  const fieldClass = /className=\{`min-w-0 flex-1 \$\{FIELD\}([^`]*)`\}/.exec(chooseServer)?.[1] ?? "";
+  report("the field's own class string was found", fieldClass.length > 0, fieldClass.trim());
+  check(
+    "the locked field dims its ink and steps its boundary back, with no opacity anywhere here",
+    [/disabled:border-edge\b/.test(fieldClass), /disabled:text-muted/.test(fieldClass), /opacity/.test(chooseServer)],
+    [true, true, false],
+  );
 
   /*
    * **The picker outranks everything, and its reason grew.** It was "a document
@@ -1617,11 +1745,67 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
   check("but it offers a way back to the screen that sets one", /pickServer\(\)/.test(signInBody), true);
   check("and that control names a destination rather than an address", /https?:\/\//.test(signInBody), false);
   /*
-   * Shell only. In a browser the server is the origin that served the page, so
-   * there is no screen to go back to — and a control that navigates nowhere is
-   * worse than none.
+   * Shell only, and now only on a window nobody has signed in to. In a browser the
+   * server is the origin that served the page, so there is no screen to go back
+   * to; and a signed-out *account* may not repoint its server, since that would
+   * make it a different account — the host refuses it, and a control it refuses is
+   * worse than none. `signInExits` in `slot.ts` is the table, driven in
+   * `webcheck.accounts-on-this-computer.ts`; this is that the screen asks it.
    */
-  check("and it is drawn only where there is somewhere to go", /inNativeShell\(\) && \(/.test(signInBody), true);
+  check("and it is drawn only where there is somewhere to go", /\{exits\.server && \(/.test(signInBody), true);
+  check("and it asks the table rather than the shell", /inNativeShell\(\)/.test(signInBody), false);
+
+  /*
+   * ⚠ **The two new ways off a signed-out account's screen, and every control here
+   * waits for a sign-in in flight.** ‹ *that account* goes back to the account
+   * shown before, read from the host's *live* list and named on the control;
+   * Remove account takes this one off. Both act through the seam the gate answers
+   * with nothing. ⚠ **There is no Cancel** — the owner's call, 2026-09-24: a way
+   * back is the chevron at the top, named, and never a second button beside Sign
+   * in. Remove account is an act and not a link, so the link look stays on the two
+   * doors alone (the `LINK` count above).
+   */
+  check(
+    "the way back and Remove account act through the seam, never the store",
+    [
+      /signInAuth\(\)\s*\.switchBack\(\)/.test(signInBody),
+      /signInAuth\(\)\s*\.forgetAccount\(\)/.test(signInBody),
+      /from "\.\.\/store"|\bstore\.\w+\(/.test(signInBody),
+    ],
+    [true, true, false],
+  );
+  check(
+    "and are drawn from the table, with the live answer",
+    [
+      /const back = useBackAccount\(\);/.test(signInBody),
+      /signInExits\(nativeBoot\(\), back === undefined \? undefined : \(back\?\.key \?\? null\)\)/.test(signInBody),
+      /\{exits\.back && back != null && \(/.test(signInBody),
+      /\{exits\.remove && \(/.test(signInBody),
+    ],
+    [true, true, true, true],
+  );
+  check("the way back names the account it returns to", /<span className="truncate">\{back\.label\}<\/span>/.test(signInBody), true);
+  check("and there is no Cancel beside Sign in", />\s*Cancel\s*</.test(signInBody), false);
+  /*
+   * An opening tag read *through* an arrow: `[^>]*` stops at the `>` of
+   * `onClick={() => …}`, which is exactly where every handler on this screen sits
+   * and exactly before the `disabled` that follows it — so a naive pattern reports
+   * the controls as unguarded, or, written the other way, sees nothing to check.
+   * The positive control is that shape.
+   */
+  const OPENING = /<(?:button|Button)\b(?:=>|[^>])*?>/g;
+  report(
+    "the tag reader reads past an arrow",
+    [...'<button onClick={() => go()} disabled={busy}>'.matchAll(OPENING)].map((m) => m[0]).join("").includes("disabled={busy}"),
+    "positive control",
+  );
+  const controls = [...signInBody.matchAll(OPENING)].map((m) => m[0]);
+  report("the sign-in screen's controls were found", controls.length >= 4, `${controls.length} controls`);
+  check(
+    "every control on it waits for a sign-in in flight",
+    controls.filter((c) => !/disabled=\{busy/.test(c)),
+    [],
+  );
 
   /*
    * ⚠ **The identifier field says both, because the route takes both.** `/v1/login`

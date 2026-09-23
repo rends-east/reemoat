@@ -1654,10 +1654,11 @@ do_uninstall() {
       tty_say "and these working copies, which may hold uncommitted work:"
       tty_say "$_copies"
     fi
-    # ⚠ **And the desktop app's daemons for other servers**, which live inside
-    # $REEMOAT_HOME and so go with it: one folder per server under `servers/`,
-    # each its own database, sessions and working copies (Q7.148). Named rather
-    # than taken silently, for the reason the worktrees above are — somebody
+    # ⚠ **And the desktop app's daemons for other servers and accounts**, which
+    # live inside $REEMOAT_HOME and so go with it: one folder per server under
+    # `servers/`, and one per further account on a server, `<server>@<user id>`,
+    # each its own database, sessions and working copies (Q7.148, Q7.149). Named
+    # rather than taken silently, for the reason the worktrees above are — somebody
     # purging the install.sh daemon may not know the app put a second one here.
     #
     # ⚠ **And said to be possibly live, because `_stopped` cannot see them.**
@@ -1670,7 +1671,7 @@ do_uninstall() {
     _servers=$(ls -1 "$REEMOAT_HOME/servers" 2>/dev/null | sed 's/^/  /')
     if [ -n "$_servers" ]; then
       tty_say ""
-      tty_say "and the desktop app's daemons for these other servers, each with its own sessions and working copies:"
+      tty_say "and the desktop app's daemons for these other servers and accounts, each with its own sessions and working copies:"
       tty_say "$_servers"
       tty_say "Quit Reemoat first: it may be running these right now."
     fi
@@ -1689,7 +1690,7 @@ do_uninstall() {
     # ends the run with nothing said — the hazard `prune_builds` in `agents.sh`
     # records, measured.
     if [ -d "$REEMOAT_HOME/servers" ]; then
-      note "$REEMOAT_HOME/servers                     the desktop app's daemons for other servers"
+      note "$REEMOAT_HOME/servers                     the desktop app's daemons for other servers and accounts"
     fi
     note "$CHECKOUT"
     say ""

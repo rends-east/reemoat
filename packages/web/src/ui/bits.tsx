@@ -679,6 +679,15 @@ export function personEmoji(name: string | null): string {
  * person, so it keeps its initial, and `sm` is the size the rail's tiles were built
  * around.
  *
+ * **`lg` is the same person at the head of the drawer, and `row` in the account
+ * list under it**, where the shell lists several: the one at the top — who this
+ * window *is* — is drawn larger than the rows beneath it, as every multi-account
+ * client draws it, and the rows are smaller than the browser's `md` head so a list
+ * of them reads as a list rather than a column of heads (the owner's call,
+ * 2026-09-24, both sizes brought down on seeing the first build). `text-xl` is the
+ * scale's top step, so no arbitrary size is spent on a glyph. Still two subjects,
+ * not four: a person is round at every size, and a machine is square.
+ *
  * The first *grapheme*, not the first char: a name starting with an emoji or a
  * combining pair renders half a character under `name[0]`, and `[...name]` is the
  * one spelling that iterates code points rather than UTF-16 units.
@@ -696,18 +705,25 @@ export function Monogram({
   name: string | null;
   /** Drawn instead of the initial. The account's face; a machine has none. */
   glyph?: string;
-  size?: "sm" | "md";
+  size?: "sm" | "row" | "md" | "lg";
   className?: string;
 }): ReactNode {
   const letter = name === null ? "" : [...name.trim()][0]?.toUpperCase() ?? "";
   /*
    * The radius travels with the size because it is really travelling with the
-   * *subject*: `md` is a person and is round, the way an avatar is everywhere;
-   * `sm` is a machine and keeps the rounded square, which is the shape the rail's
-   * folders are drawn in. One prop rather than two, because there is no caller
-   * that wants a round machine or a square person.
+   * *subject*: `md` and `lg` are a person and are round, the way an avatar is
+   * everywhere; `sm` is a machine and keeps the rounded square, which is the shape
+   * the rail's folders are drawn in. One prop rather than two, because there is no
+   * caller that wants a round machine or a square person.
    */
-  const box = size === "md" ? "h-10 w-10 rounded-full text-lg" : "h-7 w-7 rounded-md text-2xs font-semibold";
+  const box =
+    size === "lg"
+      ? "h-12 w-12 rounded-full text-xl"
+      : size === "md"
+        ? "h-10 w-10 rounded-full text-lg"
+        : size === "row"
+          ? "h-8 w-8 rounded-full text-base"
+          : "h-7 w-7 rounded-md text-2xs font-semibold";
   return (
     <span
       aria-hidden="true"
@@ -1572,6 +1588,7 @@ export function Button({
   title,
   className = "",
   ariaLabel,
+  autoFocus,
 }: {
   children: ReactNode;
   onClick?: () => void;
@@ -1582,6 +1599,17 @@ export function Button({
   title?: string;
   className?: string;
   ariaLabel?: string;
+  /**
+   * Take focus when drawn.
+   *
+   * For one screen, and the reason is a disabled field: `ChooseServer` opens on the
+   * build's suggested server *locked*, and a disabled input takes no focus — so no
+   * keystroke from it can reach the form, and Enter would submit nothing. Continue
+   * takes the focus instead while the field is locked, which is what keeps "type
+   * nothing, press Enter" the whole of the first screen. Forwarded rather than
+   * reached for with a ref, because this primitive forwards none.
+   */
+  autoFocus?: boolean;
 }): ReactNode {
   return (
     <button
@@ -1590,6 +1618,7 @@ export function Button({
       disabled={disabled}
       title={title}
       aria-label={ariaLabel}
+      autoFocus={autoFocus}
       className={`tap press inline-flex items-center justify-center gap-1.5 rounded-md font-medium ${BUTTON_SIZE[size]} ${BUTTON_TONE[tone]} ${className}`}
     >
       {children}

@@ -1,9 +1,16 @@
 import type { AuthFailure } from "./account";
-import { authFailure } from "./account";
+import { authFailure, WrongAccount } from "./account";
 import { ApiError, readJson, withTimeout } from "./http";
 import { parseInstanceConfig } from "./instance";
 import type { CpInit } from "./native";
-import { cpSend, inNativeShell, nativeBoot, setNativeCredential, setNativeDevice } from "./native";
+import {
+  bindNativeCredential,
+  clearNativeCredential,
+  cpSend,
+  inNativeShell,
+  nativeBoot,
+  setNativeDevice,
+} from "./native";
 import type { ConfigField, InstanceConfig } from "./instance";
 import type {
   AdminUser,
@@ -158,9 +165,12 @@ export function authHeader(credential: Credential | null): Record<string, string
  * might point that app at.** A browser hands out one storage area per origin and
  * therefore scopes a credential to a server for free; a custom scheme does not. So
  * the credential lives in the operating system's credential store under a key that
- * *is* the server's origin (`packages/native/src-tauri/src/credential.rs`), which
- * means it cannot be read for a server it was not issued by — structurally, rather
- * than because a code path remembered to clear it on a change.
+ * *is* the account — the server's origin and the person the control plane says the
+ * token is (`credential#<origin>#<userId>`, `packages/native/src-tauri/src/credential.rs`)
+ * — which means it cannot be read for a server it was not issued by, nor for a
+ * second person on the same server, structurally rather than because a code path
+ * remembered to clear it on a change. Which account a window is, the host decides;
+ * this module holds one credential, because a window is one account (Q1.651).
  *
  * That store is async and this assignment is not, so the native arm starts empty
  * and `store.bootstrap()` fills it through {@link adoptHydratedCredential} after
@@ -244,11 +254,16 @@ export function setSession(token: string): void {
    * copy sitting beside it would be the unprotected one somebody later reads.
    * `webcheck` asserts the absence under all three names rather than trusting this
    * comment.
+   *
+   * ⚠ **And it writes nothing through the bridge either — this is memory only.**
+   * In the shell a credential is stored *against the account it belongs to*, and
+   * the account is exactly what the sign-in finds out: so the keyring write is
+   * `login`'s awaited `bindNativeCredential`, which the host answers only after
+   * asking the control plane whose the token is. By the time this runs the host
+   * has already filed it, and a second write from here would be a second writer
+   * with no idea which account it was writing for.
    */
-  if (inNativeShell()) {
-    setNativeCredential(credential.value);
-    return;
-  }
+  if (inNativeShell()) return;
   try {
     window.localStorage.setItem(CREDENTIAL_STORAGE, credential.value);
     /*
@@ -276,8 +291,12 @@ export function clearSession(): void {
   // live. Clearing it would make every sign-out register a second device for one
   // machine, which walks an account into its device limit. `forgetDevice` is the
   // separate act, called on `device_revoked` alone.
+  //
+  // In the shell the host erases *this window's account's* entry and nobody
+  // else's — it knows which from the window and the document, and the page names
+  // none (`clearNativeCredential`).
   if (inNativeShell()) {
-    setNativeCredential(null);
+    clearNativeCredential();
     return;
   }
   try {
@@ -308,6 +327,17 @@ export function clearSession(): void {
  * keyring entry is keyed on its own origin and the page reloads on the new one,
  * so a kept credential is still never read for any other server. Signing out is
  * still `clearSession`, and still erases the current server's entry alone.
+ *
+ * ⚠ **Switching *accounts* deliberately does not call this**, and that is not an
+ * oversight next to `ChooseServer`'s call. A document is one account for its whole
+ * life: where the host shows another account it shows another *window*, and this
+ * one stays alive and hidden with its session, sockets and poll intact; where it
+ * rebinds this window instead, it rotates the document's generation, so every late
+ * command this document still sends is refused rather than landing on the account
+ * that replaced it (Q5.120). A detach there would strand a live hidden page with no
+ * credential, which is the one outcome worse than the race it would be guarding.
+ * `ChooseServer` still needs it because a pending window's server moves *under* the
+ * same document, which is the one move that is not a new one.
  */
 export function detachSession(): void {
   credential = null;
@@ -331,6 +361,22 @@ export function currentDevice(): string | null {
     // session instead, which is the same degraded mode the credential has.
     return null;
   }
+}
+
+/**
+ * Whether the stored device is bound to the session this page holds.
+ *
+ * `true` in a browser, and that is not a claim about a browser's device: a browser
+ * registers none, so there is nothing for this to gate. In the shell it is the
+ * host's own flag ({@link NativeBoot.deviceBound}) — `false` from the moment a
+ * credential is written until `host_device_set` stores what the control plane
+ * answered — so a sign-in in this document is followed by a registration even
+ * though the account's device id is already known. **A shell that has not answered
+ * is not evidence either way**, and reads as bound: the id it would be checked
+ * against is `null` there anyway, which already registers.
+ */
+export function deviceBound(): boolean {
+  return !inNativeShell() || nativeBoot()?.deviceBound !== false;
 }
 
 /** Remember the device the control plane just bound this session to. */
@@ -531,37 +577,85 @@ export function consumePasswordReset(token: string, newPassword: string): Promis
  * ------------------------------------------------------------------ */
 
 /**
+ * The account a sign-in turned out to be is already on this computer.
+ *
+ * Two of the host's answers arrive as this — `existing`, where that account is
+ * signed in and the host revoked the session just made, and `adopted`, where it
+ * was signed out and the host gave it this one — and both mean the same thing to
+ * the page: **this window is not where that account lives, so go there.** A named
+ * rejection rather than a return value, so `SignIn` and the gate's store keep the
+ * one-promise shape `login` has always had, and only the app's store, which can
+ * move windows, has to know it exists.
+ *
+ * `account` is the key the host answered with, and is only ever handed back to
+ * it (`switchNativeAccount`); `null` there falls back to the account shown before.
+ */
+export class AccountAlreadyOpen extends Error {
+  constructor(readonly account: string | null) {
+    super("that account is already on this computer");
+    this.name = "AccountAlreadyOpen";
+  }
+}
+
+/**
  * Deliberately not through `cpFetch`: there is no credential yet, and routing it
  * through the function whose first act is to refuse without one would need a
  * special case in exactly the place that must not have any.
  */
 export async function login(name: string, password: string): Promise<Me> {
   /*
-   * The installation, named in the same request that signs in.
+   * ⚠ **The request names no device, and it used to — one round trip rather than
+   * two, the argument `GET /v1/me` makes for `canAddMachine`.** That argument was
+   * sound while a device belonged to a computer. In the shell it belongs to an
+   * *account*, and the account is exactly what this request finds out: offering
+   * the stored id, and above all its public key, would hand whoever signs in next
+   * the device of whoever signed in last. The control plane's owner clause makes a
+   * foreign *id* harmless — it registers a fresh row — but it copies the offered
+   * *key* onto that row, and one key on two accounts' rows links them, which is
+   * the thing `credential.rs` keeps a key per account to prevent.
    *
-   * **One round trip rather than two**, which is the argument `GET /v1/me` already
-   * makes for computing `canAddMachine` server-side: this is the cold-start path
-   * and a second call to bind a device would sit on it every time.
-   *
-   * The stored id is offered rather than asserted — the control plane adopts it
-   * where it is this account's and still live, and **registers a fresh one
-   * otherwise rather than refusing**. That is what stops a retired id closing a
-   * sign-in loop, so a client must never treat its own id as the answer:
-   * `body.deviceId` is what to keep.
-   *
-   * Absent in a browser with storage disabled and in a shell whose configuration
-   * could not be read, both of which simply register.
+   * So registration moves one round trip later, to `ensureDevice` in the
+   * bootstrap that follows in this same document, after the host has said whose
+   * account this is and handed back that account's own id and key. In a browser
+   * nothing changes: `describeDevice()` answered `null` there, so this body was
+   * already these two fields.
    */
-  const device = describeDevice();
   const response = await cpSend("/v1/login", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(device === null ? { name, password } : { name, password, device }),
+    body: JSON.stringify({ name, password }),
     signal: withTimeout(CP_TIMEOUT_MS),
   });
-  const body = await readJson<SessionToken & { deviceId?: string | null }>(response);
+  const body = await readJson<SessionToken>(response);
+  if (inNativeShell()) {
+    /*
+     * ⚠ **In the shell nothing is adopted until the host has filed it.** The host
+     * asks the control plane whose the token is — against this window's own
+     * origin, with the token itself — and answers what it did with it. Only
+     * `bound` makes it this window's; every other answer, every unknown answer and
+     * every rejection leaves the page holding nothing (Q1.651).
+     *
+     * The rejection is the case that used to be forgiven. The old setter was
+     * fire-and-forget, because a keyring that would not keep a write is the
+     * `durable: false` state and memory is a usable degraded mode for *that*. It is
+     * not one for this: a token the host could not attribute — the control plane
+     * unreachable from the host, a refusal — is a session in a window that may be
+     * somebody else's account, and adopting it would register that account's
+     * device for this person and start its daemon under their sign-in. A failed
+     * sign-in costs a retry; the other costs an identity. Nothing revokes that
+     * token: the host could not reach the server it would revoke on, and a pending
+     * window may not send a bearer at all — it is bounded by the per-account
+     * session cap and idle expiry instead.
+     *
+     * `existing` and `refused` were revoked by the host, which already held the
+     * token; the page sends no request with a bearer it never adopted.
+     */
+    const bound = await bindNativeCredential(body.token);
+    if (bound.outcome === "adopted" || bound.outcome === "existing") throw new AccountAlreadyOpen(bound.account);
+    if (bound.outcome === "refused") throw new WrongAccount();
+    if (bound.outcome !== "bound") throw new Error("this computer did not keep that sign-in");
+  }
   setSession(body.token);
-  if (typeof body.deviceId === "string") rememberDevice(body.deviceId);
   return body.user;
 }
 
@@ -610,16 +704,36 @@ function describeDevice(): { id?: string; name: string; platform: string; public
 /**
  * Register this installation, or adopt the one it already holds.
  *
- * Called by `store.bootstrap()` when a session was restored from storage rather
- * than just minted — `login` binds one itself, so this is the path for a client
- * that came back with a credential and no device, which is every client upgrading
- * to this release.
+ * ⚠ **How every native sign-in is bound now, not only a restored one.** It used to
+ * be the path for a session that came back from storage with no device, `login`
+ * binding its own in the request that signed in. `login` names no device any more
+ * (its own block says why), so `store.bootstrap()` calls this whenever the stored
+ * id is missing *or not bound to this session* — right after a sign-in, in the
+ * same document, and before anything mints a capability. It is also the retry for
+ * a first registration that failed, because the bound flag stays `false`.
+ *
+ * ⚠ **Single-flight, because it has two callers that can meet.** `ensureDevice`
+ * runs it after a sign-in, and a mint refused with `device_key_required` runs it
+ * again (`machine.ts`); with a `null` id both would describe *no* id and the
+ * control plane would register two rows for one computer. A second caller waits
+ * on the first's answer instead. Released when it settles, never latched, so a
+ * key reset later in the same document registers again.
  *
  * Answers `null` where there is nothing to register: a browser, or a shell that
  * could not describe itself. The caller treats that as "no device", which is an
  * ordinary state rather than a failure.
  */
-export async function registerDevice(): Promise<string | null> {
+export function registerDevice(): Promise<string | null> {
+  registering ??= registerOnce().finally(() => {
+    registering = null;
+  });
+  return registering;
+}
+
+/** The registration in flight, shared by whoever asks while it is. */
+let registering: Promise<string | null> | null = null;
+
+async function registerOnce(): Promise<string | null> {
   const device = describeDevice();
   if (device === null) return null;
   const body = await cpFetch<{ id: string; hasKey?: boolean }>("/v1/me/devices", {

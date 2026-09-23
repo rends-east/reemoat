@@ -52,9 +52,11 @@ a way the old direct path went wrong:
   so a 200 from it is a stranger's 200.
 - **A daemon says where it is; nothing guesses.** `src/announce.ts` writes
   `daemon.json` at 0600 into its state root — `~/.reemoat`, or
-  `~/.reemoat/servers/<server>/` for a daemon the app runs for a second server,
-  every level 0700 — and a clean stop removes it only if its own `instanceId` is
-  in it. The host reads the current server's file, then `~/.reemoat`'s. Q7.148.
+  `~/.reemoat/servers/<server>/` for a daemon the app runs for a second server, or
+  `servers/<server>@<user id>/` for a further account on one, every level 0700 —
+  and a clean stop removes it only if its own `instanceId` is in it. The host reads
+  the calling account's file, then `~/.reemoat`'s — the second only for a server's
+  owner or a legacy seat, never for another account on it. Q7.148, Q7.149.
   ⚠ **The file is the security argument, not a convenience.** Probing a well-known port was built and
   taken back out: the probe has to carry a machine token to prove anything, so it
   hands a 300-second bearer — spendable through the relay from anywhere — to

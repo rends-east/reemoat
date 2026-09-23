@@ -115,23 +115,36 @@ file stayed green.
 ## Where the id is kept on the client
 
 ⚠ **Not the keyring**, and `config.rs`'s own header is the argument: *"Not a
-secret, and deliberately not in the keyring. A server address is a preference; the
-credential for it is the secret."* A device id is an identifier, not a secret, and
-the cost of getting this wrong lands exactly on the machines `credential::probe`
-exists to detect — a Linux box with no unlocked collection silently discards every
+secret, and deliberately not in the keyring. A server address and an account list
+are preferences; the credential for each account is the secret."* A device id is
+an identifier, not a secret, and the cost of getting this wrong lands exactly on the
+machines `credential::probe` exists to detect — a Linux box with no unlocked collection silently discards every
 keyring write, so that installation would register a new device on **every launch**
 and burn the account's limit without ever reading one back. It would also put a
 second keychain read on the first-paint path.
 
-So: `config.rs`'s `Stored.devices`, a `BTreeMap` keyed on origin, beside `server`.
-A map rather than one current value because `host_set_server` **erases nothing
-here** — the row on the old server still exists, so forgetting the id leaves an
-installation nobody can recognise in their own list and spends a second slot on
-the way back. The credential is kept across a change too since Q7.148, so the two
-no longer differ there; each is given up only by its own act.
+So: `config.rs`'s `Stored.devices`, a `BTreeMap` keyed on the **account** —
+`<origin>#<user id>`, the scope the credential is keyed on — beside the account
+list. **Per account because of the owner clause above**: two accounts on one server
+sharing an entry overwrote each other's id at every sign-in, and every re-login then
+registered a fresh row against the cap. A map rather than one current value because
+**nothing but `device_revoked` forgets an id** — not a switch, not a sign-out, not
+removing the account from this computer: the row on the server still exists, so
+forgetting the id leaves an installation nobody can recognise in their own list and
+spends a second slot on the way back. Q1.651.
 
-`credential.rs` is untouched: `CREDENTIAL` stays a set of one, `read`/`write` keep
-carrying a `String`, there is still no `list()`. **Q7.136 is reversed only in its
+**In the shell a sign-in offers no device.** The stored id belongs to an account,
+and the sign-in is what finds out which — so offering it would hand the last
+person's public key to whoever signs in next, and the owner clause, which makes a
+foreign *id* harmless, copies the offered *key* onto the fresh row and links the
+two. `login` sends `{name, password}`; the bootstrap that follows registers the
+account's own id and key through `POST /v1/me/devices` (`ensureDevice`), and
+`Boot.deviceBound` — false from the moment a credential is written — makes the next
+bootstrap retry a registration that failed. A browser registers none, as before.
+
+`credential.rs` gained a scope and nothing else: `CREDENTIAL` stays a set of one,
+`read`/`write` keep carrying a `String`, there is still no `list()` — which accounts
+exist is `server.json`'s to say. **Q7.136 is reversed only in its
 narrowest half** — *"no first-run generated device id"* — and the keyring seam
 stays reserved for the device **key**, which cannot use a `String` interface at
 all. `webcheck.devices.ts` asserts all of it off disk.
@@ -174,7 +187,7 @@ the new section.
 | `packages/control-plane/src/sessions.ts` | `mintSession`'s required `deviceId`, the device check placed *first*, and the docblock refusing the join |
 | `packages/web/src/cp.ts` | `currentDevice`/`rememberDevice`/`forgetDevice`, and the rule that `clearSession` keeps the device while `device_revoked` gives it up |
 | `packages/web/src/ui/settings/DevicesSection.tsx` | The list, the retired rows, and the two limits as sentences. The one `TwoStep` in this app offered on your **own** row |
-| `packages/native/src-tauri/src/config.rs` | Where the id lives, and the argument for it not being in the keyring |
+| `packages/native/src-tauri/src/config.rs` | Where the id lives, the argument for it not being in the keyring, and why it is per account |
 
 ## Bounds
 

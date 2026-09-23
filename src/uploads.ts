@@ -395,9 +395,10 @@ export function contentDispositionFor(name: string): string {
  * area as a `cwd`.
  *
  * The default is `uploads` inside the state root — `~/.reemoat` unless
- * `REEMOAT_HOME` names another, which is how the desktop app gives each server's
- * daemon its own (`resolveStateRoot`, Q7.148). That root is dot-prefixed whenever
- * the desktop app chose it — `~/.reemoat`, `~/.reemoat/servers/<server>` — and
+ * `REEMOAT_HOME` names another, which is how the desktop app gives each account's
+ * daemon its own (`resolveStateRoot`, Q7.148, Q7.149). That root is dot-prefixed
+ * whenever the desktop app chose it — `~/.reemoat`, `~/.reemoat/servers/<server>`,
+ * `~/.reemoat/servers/<server>@<userId>` — and
  * `resolveStateRoot` refuses `~` itself, the one value that would put this beside
  * somebody's own folders. ⚠ **What it does not stop is an undotted
  * `REEMOAT_HOME` set by hand**, and the picker will offer that root's children as

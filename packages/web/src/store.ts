@@ -12,14 +12,20 @@ import type { InstanceConfig } from "./instance";
 import { keyOf, machineId, refOf, sessionId, type MachineId, type SessionKey, type SessionRef } from "./ids";
 import { describe, MachineConnection, type MachineState } from "./machine";
 import {
+  addNativeAccount,
+  confirmNativeAccount,
   DAEMON_CONFIG,
   DAEMON_EXIT,
   daemonState,
+  forgetNativeAccount,
   hostReady,
   localDaemon,
+  nativeBoot,
   nativeHydrating,
   startLocalDaemon,
+  switchNativeAccount,
   type NativeBoot,
+  type NativeBound,
 } from "./native";
 import { isTruncationMarker } from "./permission";
 import { hostPlatform, localNetworkDetail } from "./platform";
@@ -27,6 +33,7 @@ import { mayAddMachine } from "./quota";
 import { machineDisplayName, machineOrder, machineOrderVersion, orderMachines } from "./machineOrder";
 import { mergeOptimistic } from "./sessionOrder";
 import { provideSignInAuth } from "./signInAuth";
+import { confirmDue } from "./slot";
 import { SessionStream, type StreamSink, type StreamStatus } from "./stream";
 import {
   countsAsLive,
@@ -1134,13 +1141,31 @@ const FOREIGN_ENV_DETAIL =
  * Said when a daemon for this server is running here as a machine this account cannot see.
  *
  * ⚠ **This used to be silence**, and silence here is a computer that never becomes
- * a machine with nothing saying why. Two statuses reach it. `foreign`: a daemon
- * this app did not start is up in this server's root — `deploy/install.sh`'s, or
- * one a second account on this server enrolled. `running`: this app's own child,
- * enrolled by the account signed in before this one — a sign-out reloads the page
- * and leaves the host and its children up. When the machine is in this account's
- * list, adopting it without a word is right; when it is not, this account cannot
- * reach it and must not start a second daemon over its database either.
+ * a machine with nothing saying why. When the machine is in this account's list,
+ * adopting it without a word is right; when it is not, this account cannot reach
+ * it and must not start a second daemon over its database either.
+ *
+ * ⚠ **Rarer since every account became a machine of its own, and what still
+ * reaches it changed.** Each account on a server now has a daemon root of its own
+ * — the first one on a server keeps the per-server root, every other one gets
+ * `servers/<server>@<userId>` — and ownership of a root is recorded rather than
+ * inferred, so a sign-out no longer hands one account's running child to the next
+ * account to sign in, and removing an account stops its daemon (Q7.149). Two
+ * statuses still reach this:
+ *
+ *   - `foreign` in the per-server root: a daemon this app did not start —
+ *     `deploy/install.sh`'s, or one run by hand — enrolled as a machine this
+ *     account cannot see. `install.sh` knows nothing of accounts and never writes to
+ *     an `@<userId>` root, so this is its territory alone.
+ *   - `running` where the root's ownership was attributed to the wrong account:
+ *     the first launch after this computer began to hold accounts, where the root
+ *     was enrolled by somebody other than the person the kept sign-in turned out to
+ *     be. The host moves a root only on proof, so this is the case proof could not
+ *     yet be had for.
+ *
+ * ⚠ **The first sentence is quoted elsewhere and is kept word for word**; only the
+ * remedy moved, from "sign in with the account that set it up" — which on this
+ * computer now means *switch to it, or add it* — to exactly that.
  *
  * ⚠ **Never for a `stranger`** — a daemon that says it enrolled with another
  * control plane. The legacy root is shared by every daemon started without
@@ -1149,7 +1174,8 @@ const FOREIGN_ENV_DETAIL =
  */
 const FOREIGN_DAEMON_DETAIL =
   "A Reemoat daemon for this server is already running on this computer, as a machine this account cannot see, " +
-  "so Reemoat left it alone. Sign in with the account that set it up, or ask its owner to share it with you.";
+  "so Reemoat left it alone. The account that set it up can use it — switch to it, or add it, from the menu — " +
+  "or its owner can share it with you.";
 
 /** Said when another daemon holds this server's root on this computer and ours could not start. */
 const ANOTHER_DAEMON_DETAIL =
@@ -1323,8 +1349,14 @@ export interface AppState {
    * **`null` in a browser and for ever**, which is what makes the server picker
    * structurally unreachable in the web build: there is no flag to set, no route to
    * type and no env var to flip — the field is non-null only where a Tauri global
-   * was injected before the first script ran. `App.tsx` branches on it, and that
-   * branch is the only place it is read.
+   * was injected before the first script ran.
+   *
+   * Read where the shell changes what is drawn, and nowhere it changes a rule:
+   * `App.tsx`'s picker arm, the drawer's account panel (a browser keeps its plain
+   * head), and the setup flow that makes this computer a machine. **It is this
+   * window's account's**, re-read from `nativeBoot()` at every bootstrap rather
+   * than kept from the first answer — a sign-in in this document binds the window
+   * to an account, and the payload `hostReady` settled with is from before that.
    */
   host: NativeBoot | null;
   /**
@@ -1337,8 +1369,15 @@ export interface AppState {
    * State rather than a route, which is `ChooseServer`'s whole argument — a
    * `Route` arm would be parsed by the web build too, offering a screen that can
    * do nothing there, and would take a silent new arm in three switches. It lives
-   * here rather than in the component because two entrances reach it: the control
-   * on the sign-in screen, and Settings → Account once somebody is signed in.
+   * here rather than in the component because the sign-in screen is where it is
+   * set and `App.tsx` is where it is read.
+   *
+   * ⚠ **One entrance now, where there were two.** Settings → Account's *Change*
+   * is gone: an account is a server and a person, so repointing a signed-in window
+   * would quietly make it a different account, and another server is another
+   * account, added from the menu (Q3.643). What is left is ‹ Server on the sign-in
+   * screen, drawn only on a window nobody has signed in to yet — the one kind whose
+   * server may still move, and the only kind the host lets move (Q5.120).
    */
   pickingServer: boolean;
   /**
@@ -1752,7 +1791,13 @@ class AppStore implements StreamSink {
     const boot = await hostReady;
     if (boot !== null) {
       cp.adoptHydratedCredential(boot.credential);
-      this.patch({ host: boot });
+      /*
+       * **The live snapshot, never the first answer.** `hostReady` settled once, at
+       * import; a sign-in in this document has since bound the window to an account
+       * (`bindNativeCredential`), and this bootstrap is the one that follows it — so
+       * the account, its name and its device are the snapshot's, not the payload's.
+       */
+      this.patch({ host: nativeBoot() ?? boot });
       /*
        * **Which computer this is, from the boot payload, before anything asks a
        * daemon.** The live read below cannot answer on a cold launch — the app
@@ -1825,6 +1870,7 @@ class AppStore implements StreamSink {
       for (const [id, connection] of this.connections) {
         if (!this.daemons.has(id)) this.daemons.set(id, new DaemonClient(connection));
       }
+      this.registryKnown = true;
       // The live answer again, now that "a machine of ours" has a list to mean.
       this.weighLocalMachine();
       this.patch({ phase: "ready", me, cpError: null, authError: null });
@@ -1842,32 +1888,31 @@ class AppStore implements StreamSink {
        */
       if (authFailure(error) !== null) return;
       /*
-       * The control plane is unreachable. If we already know about machines and
-       * hold valid tokens for them, that is a degraded state, not a dead app —
-       * every daemon and every agent is still running and still reachable.
+       * The control plane is unreachable, and **the app is drawn anyway** — with
+       * the machines it already knows, or none.
        *
-       * `connections.size > 0` belongs to *this* arm and must not be read as the
-       * general rule for what a usable app is. It is what can be salvaged from a
-       * fetch that **failed**: with no registry there is nothing to show and
-       * nothing to say about it. `runResume`'s promotion is the opposite case —
-       * the fetch resolved — so it asks only whether we are still on the spinner,
-       * and an empty registry there is an answer rather than an absence. The two
-       * were once the same expression, and that is what left a machineless
-       * account loading for ever.
+       * ⚠ **It used to stay on the loading screen when no machine was known**,
+       * which is every cold start: a spinner and a sentence, and no drawer. With
+       * several accounts on one computer that made one server's outage lock
+       * every other account out — the one way to another account is the menu,
+       * and the menu is part of the shell (owner's report, 2026-09-23). So the
+       * outage is a line under the conversation's title and a notice above the
+       * list, never a screen of its own, and `tick` re-lists the registry every
+       * four seconds while no machine is known, whatever the phase. `me` stays
+       * null until then — `visibleSections` fails closed on it — and
+       * `runResume` asks for it the moment the listing answers.
        */
-      this.patch({
-        phase: this.connections.size > 0 ? "ready" : "loading",
-        cpError: describe(error),
-      });
+      this.patch({ phase: "ready", cpError: describe(error) });
     }
 
     /*
      * ⚠ **Here, and the placement is three constraints at once.**
      *
      * *After* the `try`, because a throw inside it lands in the catch above, which
-     * sets `cpError` and — with no connections, which is exactly the empty-fleet
-     * case this exists for — forces `phase` back to `"loading"`. Setting a machine
-     * up must never be able to put the app on the spinner.
+     * sets `cpError` — and a machine failing to set up would then be drawn as the
+     * control plane being unreachable, under every conversation's title. (It used
+     * to put the whole app back on the spinner, before an outage stopped being a
+     * screen of its own.)
      *
      * *After* `phase: "ready"`, so the app is usable while this runs. It talks to
      * the control plane and then waits on a daemon starting; none of that is
@@ -1876,6 +1921,22 @@ class AppStore implements StreamSink {
      * *Before* `resume("bootstrap")`, so a machine created here is in the registry
      * by the time the first resume runs rather than four seconds later.
      */
+    /*
+     * Ask the host to prove whose account this window is, where it owes a proof.
+     *
+     * ⚠ **First of the three, and the order is the host's, not a preference.**
+     * Confirming a kept sign-in is what moves its device id and key under the
+     * account it turns out to be, and records whose the daemon root is — so a
+     * registration before it would describe the device of nobody in particular,
+     * and a setup before it would start a database whose owner nobody has proved.
+     * After the `try`, for `beginSetUp`'s reason below: it is bookkeeping, and it
+     * never touches `phase`.
+     *
+     * `true` means this document is leaving — the account it held turned out to
+     * be one already added here — and nothing below may run for a window that is
+     * about to be closed or reloaded onto another account.
+     */
+    if (await this.confirmAccount()) return;
     /*
      * Make sure this installation is registered, if it is one.
      *
@@ -1889,9 +1950,14 @@ class AppStore implements StreamSink {
      * `beginSetUp` is awaited and can throw; a rejection here would reach the same
      * place by a different route.
      *
-     * `login` binds a device itself, in the request that signs in, so this is the
-     * path for a session restored from storage — which is every client on the
-     * release this ships in, and every launch after a restart.
+     * ⚠ **This is how every native sign-in is bound now, not only a restored
+     * one.** `login` used to bind a device in the request that signed in; in the
+     * shell that request cannot know which account it is for, so it names none
+     * (its own block says why), and the bootstrap that follows it in the same
+     * document registers here — before `beginSetUp`, `startPolling` and `resume`,
+     * so before anything mints a capability. The same path is still the one for a
+     * session restored from storage, and the retry for a first registration that
+     * failed.
      */
     await this.ensureDevice();
 
@@ -1902,11 +1968,19 @@ class AppStore implements StreamSink {
   }
 
   /**
-   * Register this installation with the control plane, once, if it has none.
+   * Register this installation with the control plane, once per sign-in, where it
+   * is not bound to this one.
+   *
+   * ⚠ **"Has an id" stopped being enough.** In the shell a device id is an
+   * account's, known before the sign-in that uses it — so the id alone says which
+   * row to *offer*, and {@link cp.deviceBound} says whether the control plane has
+   * bound that row to the session this page now holds. A browser registers none and
+   * reads as bound, so this is the check it always was there.
    *
    * Silent on every failure. What a refusal costs is one unregistered launch: the
    * app works, the sessions list simply describes this client through its
-   * `User-Agent` rather than by name, and the next start asks again.
+   * `User-Agent` rather than by name, and the next start asks again — because the
+   * bound flag stays `false`.
    *
    * ⚠ **`password_change_required` is not a failure here and must not become
    * one.** The route is registered *above* the control plane's second gate so an
@@ -1915,13 +1989,55 @@ class AppStore implements StreamSink {
    * `cp.machines()` makes the identical allowance in `bootstrap` above.
    */
   private async ensureDevice(): Promise<void> {
-    if (cp.currentDevice() !== null) return;
+    if (cp.currentDevice() !== null && cp.deviceBound()) return;
     try {
       await cp.registerDevice();
     } catch {
       // Bookkeeping. A device is how somebody *recognises* this client in a list;
       // nothing in the app depends on having one.
     }
+  }
+
+  /**
+   * Have the host prove whose account this window is, where a proof is owed.
+   * `true` when this document is leaving and the bootstrap must stop.
+   *
+   * **The host does the proving; this only says when.** `confirmDue` in `slot.ts`
+   * decides that — a kept sign-in from before this computer held accounts, or a
+   * cached name the control plane no longer gives — and the host then reads the
+   * kept credential itself, asks `GET /v1/me` with it, and moves what it can prove
+   * under the account that answer names (Q1.651). The page passes nothing.
+   *
+   * ⚠ **`existing` is a sign-out, and a narrower one than {@link AppStore.signOut}.**
+   * It means the kept sign-in belongs to an account that was already added on this
+   * computer, in its own window: this window is a second copy of it. So its session
+   * is revoked (`cp.logout`, which also erases the kept credential) and the window
+   * is taken off the list — and the remembered controls are deliberately **not**
+   * swept: `forgetAllConfig` is about leaving a browser to whoever comes next, and
+   * nobody is leaving here; the same person's other window is still open on them.
+   * A refused forget still reloads, onto a sign-in, which is signed out either way.
+   *
+   * Every other failure is swallowed: this is bookkeeping, the window reads as it
+   * did, and the host asks again at the next launch while the proof is still owed.
+   */
+  private async confirmAccount(): Promise<boolean> {
+    if (!confirmDue(nativeBoot(), this.snapshot.me)) return false;
+    let answer: NativeBound;
+    try {
+      answer = await confirmNativeAccount();
+    } catch {
+      // Unreachable control plane, or a host that would not say. Nothing moved,
+      // and `legacy` stays `true` in the next launch's payload, which asks again.
+      return false;
+    }
+    if (answer.outcome === "existing") {
+      await cp.logout();
+      const moved = await forgetNativeAccount().catch(() => ({ reload: true }));
+      if (moved.reload) window.location.replace("/");
+      return true;
+    }
+    this.patch({ host: nativeBoot() });
+    return false;
   }
 
   /**
@@ -1935,6 +2051,18 @@ class AppStore implements StreamSink {
    * first one made and adopts it.
    */
   private settingUp: Promise<void> | null = null;
+
+  /**
+   * Whether `GET /v1/machines` has answered at least once in this document.
+   *
+   * ⚠ **Not `phase === "ready"`, which it used to be read off.** An unreachable
+   * control plane no longer keeps the app on the loading screen — it draws the
+   * shell, because a spinner with no drawer left every other account on this
+   * computer out of reach — so "ready" now includes "the registry has never been
+   * read". What setup needs to know is the second thing: without the list, this
+   * computer's own daemon would be described as a machine this account cannot see.
+   */
+  private registryKnown = false;
 
   private beginSetUp(): Promise<void> {
     this.settingUp ??= this.setUpThisComputer().finally(() => {
@@ -1982,8 +2110,9 @@ class AppStore implements StreamSink {
        *
        * The host used to read `~/.reemoat` whoever it belonged to, so a daemon for
        * a *different* server read as this one's `foreign` and the setup returned
-       * here without a word. It reads this server's root now (Q7.148), and there
-       * are three answers. A machine in this account's list is adopted silently —
+       * here without a word. It reads this server's root now (Q7.148) — this
+       * *account's*, where a second account on one server has a root of its own
+       * (Q7.149) — and there are three answers. A machine in this account's list is adopted silently —
        * the store already holds a connection to it. One that is not is a daemon
        * this account cannot reach, and that is a sentence rather than silence.
        *
@@ -1998,13 +2127,17 @@ class AppStore implements StreamSink {
        * than `absent`, so nothing below starts a second daemon over a database
        * this server's own unit may be holding.
        *
-       * ⚠ **`running` owes the same answer.** A sign-out reloads the page and
-       * leaves the host and its children up, so the next account on this server
-       * finds the child the last one enrolled — a machine it cannot see, which
-       * returned below without a word. Only here, in the first read: the settle
-       * loop's `running` is the happy path, where a control plane that blinked
-       * between the spawn and the poll would draw a failure over a daemon that
-       * came up fine.
+       * ⚠ **`running` owes the same answer.** It was reached by a sign-out, which
+       * reloaded the page and left the host and its children up, so the next
+       * account on this server found the child the last one enrolled. That door is
+       * closed now — each account has a root of its own, its ownership is recorded,
+       * and taking an account off this computer stops its daemon (Q7.149) — and
+       * what is left is a root attributed to the wrong account on the first launch
+       * after this computer began to hold accounts, before a proof could be had
+       * ({@link FOREIGN_DAEMON_DETAIL} lists both). Only here, in the first read:
+       * the settle loop's `running` is the happy path, where a control plane that
+       * blinked between the spawn and the poll would draw a failure over a daemon
+       * that came up fine.
        *
        * ⚠ **Only once the machine list is in hand.** `bootstrap`'s catch leaves no
        * connections when the control plane could not be reached, and this runs
@@ -2015,6 +2148,7 @@ class AppStore implements StreamSink {
       if (state.status === "foreign" || state.status === "running") {
         if (state.stranger) return;
         if (this.snapshot.phase !== "ready") return;
+        if (!this.registryKnown) return;
         if (state.machineId !== null && this.connections.has(machineId(state.machineId))) return;
         this.patch({ setup: { step: "failed", said: FOREIGN_DAEMON_DETAIL } });
         return;
@@ -2457,11 +2591,86 @@ class AppStore implements StreamSink {
   /**
    * Sign in. Rejects rather than reporting — `SignIn` shows its own error, beside
    * the field it is about.
+   *
+   * ⚠ **One answer is not a failure and not this window's either.** In the shell
+   * the host may say the account was already on this computer
+   * (`cp.AccountAlreadyOpen`) — added before, in a window of its own. The sign-in
+   * then belongs there, so this window goes to it rather than becoming a second
+   * copy: a pending one is discarded by being left, and on a platform with one
+   * window the host rebinds it and asks for a reload. Every other rejection,
+   * including `WrongAccount`, is the screen's to draw.
    */
   async login(name: string, password: string): Promise<void> {
-    const me = await cp.login(name, password);
+    let me: Me;
+    try {
+      me = await cp.login(name, password);
+    } catch (cause) {
+      if (!(cause instanceof cp.AccountAlreadyOpen)) throw cause;
+      await this.switchAccount(cause.account);
+      return;
+    }
     this.patch({ me, authError: null });
     await this.bootstrap();
+  }
+
+  /**
+   * Show another account on this computer: the one named, or with `null` the one
+   * shown before this.
+   *
+   * ⚠ **No `detachSession` here, and `ChooseServer` has one — the difference is
+   * the whole design.** A document is one account for its whole life. Where the
+   * host can show another account it shows another *window*, and this page stays
+   * alive and hidden with its session, sockets and poll intact, which is what makes
+   * a switch instant and keeps an agent in the account left behind running and
+   * reachable. Where it cannot, it rebinds this window and rotates the document's
+   * generation, so anything this page still sends after the switch — a late poll,
+   * a fire-and-forget clear — is refused rather than landing on the account that
+   * replaced it (Q5.120). Detaching would strand the hidden page with no
+   * credential in the first case and guard nothing in the second.
+   *
+   * **It reloads only when told**, and with `replace`, never `assign`: the
+   * document left behind is another account's, and Back must not bring it back to
+   * be refused. The page never branches on which of the two the host did.
+   */
+  async switchAccount(account: string | null): Promise<void> {
+    const moved = await switchNativeAccount(account);
+    if (moved.reload) window.location.replace("/");
+  }
+
+  /** Cancel, wherever an account's own screens offer it: back to the one before. */
+  switchBack(): Promise<void> {
+    return this.switchAccount(null);
+  }
+
+  /**
+   * Begin a sign-in for another account.
+   *
+   * **No state for it here, and none is needed.** On either platform the host
+   * answers with a fresh document: a new window nobody has signed in to, shown in
+   * front of this one, or this window rebound and reloaded as one. That document
+   * starts where every first run starts — the server step, then the sign-in — so
+   * there is no "adding" phase to draw, and nothing in this page to tidy when the
+   * person changes their mind and presses Cancel. Refused at ten accounts.
+   */
+  async addAccount(): Promise<void> {
+    const moved = await addNativeAccount();
+    if (moved.reload) window.location.replace("/");
+  }
+
+  /**
+   * Take this window's account off this computer.
+   *
+   * Remove account, on the sign-in screen of an account that has been signed out
+   * — so there is no session left to revoke, and the remembered controls were
+   * already swept by the sign-out that brought this screen up. The host erases
+   * what the keyring holds, stops the account's daemon and shows the account
+   * before it, or a sign-in to the same server where none is left. One tap, no
+   * confirmation: nothing is lost that signing in again does not restore, because
+   * the device id, its key and the daemon's root are kept (Q7.149).
+   */
+  async forgetAccount(): Promise<void> {
+    const moved = await forgetNativeAccount();
+    if (moved.reload) window.location.replace("/");
   }
 
   /*
@@ -2650,6 +2859,12 @@ class AppStore implements StreamSink {
    * else* in the same tab would otherwise paint the previous user's fleet for a
    * frame, and every one of them holds a token minted from a credential that is
    * now gone.
+   *
+   * In the shell the account stays on this computer's list — an involuntary
+   * sign-out is not a decision to remove it — and the `clearSession` that brought
+   * this here is also what tells the host it is signed out, so the other accounts'
+   * drawers draw it that way. Its sign-in screen then offers the two ways off it
+   * that a listed account has: back to another, or Remove account.
    */
   handleSignedOut(failure: AuthFailure): void {
     this.stopPolling();
@@ -2705,6 +2920,19 @@ class AppStore implements StreamSink {
    * That state is then discarded a line later by the reload, which is the whole
    * point of reloading. Nothing needs to suppress it: the two paths agree about
    * the outcome and disagree only about how much work they do to reach it.
+   *
+   * ⚠ **In the shell, signing out also takes the account off this computer.** The
+   * session is revoked and the keyring entry erased as before, and then the host is
+   * asked to forget the account: its daemon is stopped and not started again at
+   * launch, it leaves the list, and the account shown before it is shown instead —
+   * or, where none is left, a sign-in to the same server, which is what signing out
+   * of the only account always led to. **Its device id, key and daemon root are
+   * kept**, so signing in again as the same person reuses the same device row and
+   * the same machine (Q7.149). A refused forget still reloads: this window is
+   * signed out whatever the host said, and a sign-in is what a reload draws.
+   *
+   * The browser arm is untouched and still a plain navigation — there is no list
+   * of accounts in a browser, and one origin is one sign-in.
    */
   async signOut(): Promise<void> {
     await cp.logout();
@@ -2718,20 +2946,36 @@ class AppStore implements StreamSink {
      *
      * Not in `cp.logout`'s `finally`: that clears the *credential*, which is its
      * subject, and this is the app's own cache of what it drew.
+     *
+     * ⚠ **In the shell every account's window shares one storage origin**, so this
+     * also sweeps the other accounts' remembered controls on this computer. A
+     * convenience lost rather than a disclosure made — the sweep only ever deletes
+     * — and recorded as a known limit until the keys are namespaced per account
+     * (Q7.149).
      */
     forgetAllConfig();
-    window.location.href = "/";
+    if (this.snapshot.host === null) {
+      window.location.href = "/";
+      return;
+    }
+    const moved = await forgetNativeAccount().catch(() => ({ reload: true }));
+    if (moved.reload) window.location.replace("/");
   }
 
   /**
    * Open the screen that says which control plane this installation talks to.
    *
-   * Two callers and one of them is new ground: the sign-in screen's own control,
-   * and Settings → Account for somebody already signed in. Before this there was
-   * exactly one way to reach `ChooseServer` — `state.host.server === null` — so a
-   * server that had been chosen **could not be changed from inside the app at
-   * all**, and signing out did not help, `clearSession` deliberately leaving the
-   * server alone. The only remedy was deleting the shell's config file by hand.
+   * One caller now, the sign-in screen's ‹ Server, on a window nobody has signed
+   * in to. There were two: Settings → Account offered it to somebody already
+   * signed in, and that is gone, because an account *is* a server and a person —
+   * repointing a signed-in window would quietly make it another account — and the
+   * host refuses a server change for anything but a pending window (Q5.120).
+   * Another server is another account, from the menu (Q3.643). Before either
+   * existed there was exactly one way to reach `ChooseServer` —
+   * `state.host.server === null` — so a server that had been chosen **could not be
+   * changed from inside the app at all**, and the only remedy was deleting the
+   * shell's config file by hand; ‹ Server is what still answers that, for the
+   * window where it can be true.
    *
    * **Nothing is torn down here, and that is what makes Cancel honest.** The poll
    * keeps running, the sockets stay up, the transcript stays where it was; this
@@ -2859,8 +3103,21 @@ class AppStore implements StreamSink {
            * section until they reloaded.
            */
           const promote = this.snapshot.phase === "loading";
+          const firstListing = !this.registryKnown;
+          this.registryKnown = true;
           this.patch(promote ? { cpError: null, phase: "ready" } : { cpError: null });
-          if (promote) void this.refreshMe();
+          /*
+           * `me` too wherever it is missing, not only on a promotion: an outage at
+           * launch now draws the shell with no `me`, so the promotion this used to
+           * ride on no longer happens.
+           */
+          if (promote || this.snapshot.me === null) void this.refreshMe();
+          /*
+           * And setting this computer up, which waited for the list: `bootstrap`
+           * ran it once, during the outage, and it returned where it needed a
+           * registry it did not have. `beginSetUp` coalesces with a run in flight.
+           */
+          if (firstListing) void this.beginSetUp();
           /*
            * And the instance config, **only if it is still unknown**.
            *

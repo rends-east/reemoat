@@ -480,5 +480,5 @@ same globs as this file. It is a file of its own because this one reached
 - **Two daemons on one database file** is refused by the single-row `daemon` table,
   checked before restore — otherwise each would reap the other's agents. Two on one
   *account* are ordinary: one per state root (`REEMOAT_HOME`), which is how the
-  desktop app runs one per server — Q7.148.
+  desktop app runs one per account it holds — Q7.148, Q7.149.
 - **The daemon crashes with a raw `EADDRINUSE` stack** if the port is taken. Not fixed.
