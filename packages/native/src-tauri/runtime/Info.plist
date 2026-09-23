@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  The Info.plist of Contents/Helpers/Reemoat Runtime.app, the nested bundle
+	  the Node runtime lives in on macOS. build-daemon.mjs copies it there when it
+	  stages the runtime and signs the helper around it.
+
+	  ⚠ LSUIElement is the reason this bundle exists at all. libuv registers a
+	  process with LaunchServices the moment it sets process.title, and npm sets
+	  one ("npm exec …") for every MCP server an agent starts through npx. For a
+	  binary in Reemoat.app/Contents/MacOS that registration adopted Reemoat.app
+	  as the process's bundle, which carries no LSUIElement, so each one became a
+	  Foreground application of com.reemoat.app with a blank "exec" tile in the
+	  Dock. Measured with lsappinfo on 0.10.1: the bundled node with a title set is
+	  type="Foreground"; the same bytes in this bundle are type="UIElement".
+
+	  Its own identifier, deliberately. Sharing com.reemoat.app would make two
+	  bundles claim one identity, which is the confusion this file ends.
+
+	  Parsed by LaunchServices and bound into the helper's signature, so nothing
+	  here is decoration. nativecheck asserts the four keys that decide how
+	  LaunchServices files the process against this file with its comments
+	  stripped, and asserts that no comment in a plist beside it carries a double
+	  hyphen, which AMFI refuses as malformed XML while plutil accepts it.
+	-->
+	<key>CFBundleIdentifier</key>
+	<string>com.reemoat.app.runtime</string>
+	<key>CFBundleName</key>
+	<string>Reemoat Runtime</string>
+	<key>CFBundleExecutable</key>
+	<string>node</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>LSUIElement</key>
+	<true/>
+</dict>
+</plist>

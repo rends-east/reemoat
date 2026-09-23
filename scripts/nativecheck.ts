@@ -1460,18 +1460,84 @@ const STAGE = "packages/native/scripts/build-daemon.mjs";
 const stage = read(STAGE);
 
 /*
- * **The runtime is an `externalBin` and the payload is a `resources` entry, and
- * swapping them is the failure this pair exists to catch.**
+ * **The runtime is a helper app in `Contents/Helpers` and the payload is a
+ * `resources` entry, and swapping them is the failure this pair exists to catch.**
  *
- * `externalBin` lands in `Contents/MacOS/` and is signed as nested code;
- * `resources` lands in `Contents/Resources/` and is not reliably signed at all.
- * `node` is the only Mach-O in the payload — everything else is JavaScript, since
- * `node:sqlite` is built in and the whole dependency set is pure JS — so it is the
- * only thing that has to be in the first list, and putting the JS tree there
- * instead would put 200 MB through a code-signing walk that has nothing to sign.
+ * The helper lands in `Contents/Helpers/`, where codesign treats it as nested
+ * code — a bundle with its own signature, which the app's seal records and
+ * `--verify --deep` walks; `resources` lands in `Contents/Resources/` and is not
+ * reliably signed at all. `node` is the only Mach-O in the payload — everything
+ * else is JavaScript, since `node:sqlite` is built in and the whole dependency set
+ * is pure JS — so it is the only thing that has to be nested code, and putting the
+ * JS tree there instead would put 200 MB through a code-signing walk that has
+ * nothing to sign.
+ *
+ * ⚠ **A helper rather than an `externalBin`, and the Dock is why.** An
+ * `externalBin` lands in `Contents/MacOS/`, and to LaunchServices a binary there
+ * *is* Reemoat.app: libuv registers a process when `process.title` is set, npm sets
+ * one for every MCP server an agent starts through `npx`, and each became a
+ * Foreground application of `com.reemoat.app` with a blank "exec" tile in the
+ * Dock. Measured with `lsappinfo` on 0.10.1; `build-daemon.mjs` carries the table.
+ * So `externalBin` is asserted **absent**, and not only for the Dock: a runtime
+ * there as well would be the 122 MB shipped twice that the shim assertion below
+ * exists to prevent.
+ *
+ * The helper's source is asserted as the staging path because that path is a
+ * decision: `target/` stands where `Contents/` stands, which is what lets one
+ * relative path reach the runtime from the payload and from the executable in a
+ * bundle and in `tauri dev` alike.
  */
-const externalBin = (bundle["externalBin"] ?? []) as string[];
-check("the runtime is an external binary", externalBin, ["binaries/node"]);
+check("nothing is an external binary, so Contents/MacOS holds the app alone", "externalBin" in bundle, false);
+const macFiles = (((bundle["macOS"] ?? {}) as Record<string, unknown>)["files"] ?? {}) as Record<string, unknown>;
+const helperEntries = Object.entries(macFiles).filter(([dest]) => dest.startsWith("Helpers/"));
+check("the runtime is exactly one helper in Contents/Helpers", helperEntries.length, 1);
+const [helperDest, helperSource] = helperEntries[0] ?? ["", ""];
+const RUNTIME_HELPER = helperDest.slice("Helpers/".length);
+check(
+  "and it is an application bundle, staged where Contents/ stands",
+  [/^[^/]+\.app$/.test(RUNTIME_HELPER), helperSource],
+  [true, `target/Helpers/${RUNTIME_HELPER}`],
+);
+/*
+ * ⚠ **`LSUIElement` is the whole fix, and it is one key in a file no build reads
+ * until a person is looking at the Dock.** Measured on 0.10.1 with the same bytes
+ * each time: the runtime in `Contents/MacOS` with a title set is
+ * `type="Foreground"`, the same runtime in a helper carrying this key is
+ * `type="UIElement"`. Nothing compiles, links or signs differently without it — so
+ * it is asserted here, off the committed file `build-daemon.mjs` copies, with the
+ * comment layer stripped because that file's prose names every key it carries.
+ *
+ * Its own identifier as well: sharing `com.reemoat.app` would make two bundles
+ * claim one identity, which is the confusion the helper exists to end.
+ *
+ * ⚠ **And the app's own `Info.plist` must not carry the key**, which is the
+ * obvious one-line fix and the rejected one: it would take Reemoat's own Dock icon
+ * and menu bar away along with the blank ones.
+ */
+const helperPlistRaw = read(`${TAURI_DIR}/runtime/Info.plist`);
+const helperPlist = xmlCode(helperPlistRaw);
+check(
+  "the helper's Info.plist survived the comment strip",
+  helperPlistRaw.length > helperPlist.length && helperPlist.includes("<dict>"),
+  true,
+);
+const plistValue = (xml: string, key: string): string | null =>
+  capture(xml, new RegExp(`<key>${key}</key>\\s*(<true/>|<false/>|<string>[^<]*</string>)`));
+check("and it keeps the runtime out of the Dock: LSUIElement is true", plistValue(helperPlist, "LSUIElement"), "<true/>");
+check(
+  "and it is an application of its own identity whose executable is the runtime",
+  [
+    plistValue(helperPlist, "CFBundleIdentifier"),
+    plistValue(helperPlist, "CFBundleExecutable"),
+    plistValue(helperPlist, "CFBundlePackageType"),
+  ],
+  [`<string>${String(conf["identifier"])}.runtime</string>`, "<string>node</string>", "<string>APPL</string>"],
+);
+check(
+  "while the app's own Info.plist does not carry the key, or Reemoat would leave the Dock too",
+  /LSUIElement/.test(xmlCode(read(`${TAURI_DIR}/Info.plist`))),
+  false,
+);
 /*
  * ⚠ **The map form, not the list form.** `resource_relpath` in `tauri-utils` maps
  * `..` to a literal `_up_` path segment, so a list entry reaching out of
@@ -1500,13 +1566,15 @@ const stageDest = Object.keys((bundle["resources"] ?? {}) as Record<string, unkn
 check("and it is staged under target/, which both sweeps already skip", stageDest.startsWith("target/"), true);
 check("the staging script is where the config expects it", existsSync(join(ROOT, STAGE)), true);
 /*
- * **Staged by its own step, never by `beforeBuildCommand`.** Resources and
- * external binaries are copied from inside `build.rs`, so they are read by *cargo*
- * — `cargo clippy`, `cargo test` and `tauri build --no-bundle` all fail with
- * `ResourcePathNotFound` if the directory is absent, and the `native` CI job runs
- * all three. A `beforeBuildCommand` runs for `tauri build` alone and would leave
- * those three broken on a clean checkout. Both manifests are asserted because the
- * root script is what CI calls and the package script is what actually stages.
+ * **Staged by its own step, never by `beforeBuildCommand`.** Resources are copied
+ * from inside `build.rs` by `tauri-build`, and this crate's own `build.rs` refuses a
+ * macOS build whose runtime helper is missing or staged for the other
+ * architecture, so both are read by *cargo* — `cargo clippy`, `cargo test` and
+ * `tauri build --no-bundle` all fail if the directory is absent, and the `native`
+ * CI job runs all three. A `beforeBuildCommand` runs for `tauri build` alone and
+ * would leave those three broken on a clean checkout. Both manifests are asserted
+ * because the root script is what CI calls and the package script is what
+ * actually stages.
  */
 check(
   "the root exposes a staging step",
@@ -1648,7 +1716,7 @@ check("the payload refuses to contain a symlink", /function assertNoSymlinks/.te
  * The payload needs a `node` inside `node_modules/.bin` — the package shims test
  * `$basedir/node`, and `deploy/agents.sh` resolves the runtime as the node *beside*
  * npm. Copying the binary there satisfies both and costs **122 MB, byte-identical
- * to the `externalBin` copy**: measured at 360 MiB projected for the bundle against
+ * to the bundled runtime**: measured at 360 MiB projected for the bundle against
  * 244 MiB without it. Nothing failed, nothing warned, and the only symptom was a
  * download twice the size it needed to be.
  *
@@ -1656,10 +1724,19 @@ check("the payload refuses to contain a symlink", /function assertNoSymlinks/.te
  * what sits there is a shim. Asserted as "writes a shim, does not copy the binary"
  * rather than by measuring the staged tree, because this driver has to pass on a
  * clean checkout where nothing has been staged yet.
+ *
+ * ⚠ **The shim's first candidate is the helper, four levels up from `.bin`**,
+ * which is `Contents/` in a bundle and `target/` in a development build — the
+ * resource map above puts the payload at `daemon` directly under each. Matched
+ * against the template as written, so a candidate that drifts from the helper's
+ * name in the configuration is a red line rather than a daemon whose `npx` finds
+ * no runtime.
  */
 check(
   "the runtime is placed once and reached by a shim",
-  /for candidate in .*MacOS\/node/.test(stage) && !/cpSync\(node, join\(binDir/.test(stage),
+  new RegExp(
+    `for candidate in "\\$basedir/\\.\\./\\.\\./\\.\\./\\.\\./Helpers/\\$\\{RUNTIME_HELPER\\}/Contents/MacOS/node"`,
+  ).test(stage) && !/cpSync\(node, join\(binDir/.test(stage),
   true,
 );
 /*
@@ -1695,6 +1772,72 @@ check(
   "and its last word is a refusal rather than a PATH lookup",
   [/exec node "\$@"/.test(stageCode), /exit 127/.test(stageCode)],
   [false, true],
+);
+/*
+ * ⚠ **One helper name, four copies, and a mismatch between any two is a bundle
+ * that builds, signs and starts no daemon.** `bundle.macOS.files` says where the
+ * bundler puts it, `build-daemon.mjs` stages it and writes the shim's path to it,
+ * `build.rs` checks it and places it for a development build, and `daemon.rs`
+ * spawns what is inside it. Nothing compiles one against another — a string in
+ * JSON, one in JavaScript and two in Rust — so they are read here and compared,
+ * each off its code rather than its prose, since every one of those files explains
+ * the helper by name in a comment.
+ */
+check(
+  "the helper's name is one string in the config, the staging script, build.rs and daemon.rs",
+  [
+    capture(stageCode, /const RUNTIME_HELPER = "([^"]+)";/),
+    capture(rustCode(read(`${TAURI_DIR}/build.rs`)), /const RUNTIME_HELPER: &str = "([^"]+)";/),
+    capture(rustCode(read(`${TAURI_DIR}/src/daemon.rs`)), /pub const RUNTIME_HELPER: &str = "([^"]+)";/),
+  ],
+  [RUNTIME_HELPER, RUNTIME_HELPER, RUNTIME_HELPER],
+);
+/*
+ * ⚠ **Signed by the staging step, inside out, because the bundler will not.**
+ * tauri-bundler 2.11 signs the app, its frameworks and its `externalBin` entries —
+ * every one with the app's entitlements — and copies `bundle.macOS.files` as it
+ * finds them before sealing the app around them. A helper that arrives unsigned is
+ * sealed over as it is, and `codesign --verify --deep --strict` then refuses the
+ * whole app: *"In subcomponent: …/Helpers/Reemoat Runtime.app"*, measured. So the
+ * staging script signs it, with `entitlements-node.plist` and the hardened
+ * runtime, verifies what it signed, and refuses the one configuration where the
+ * identity it needs does not exist yet — `APPLE_CERTIFICATE`, which the bundler
+ * imports into a keychain of its own during `tauri build`.
+ *
+ * Read off the code, and only as far as a regex can: whether the signature is
+ * *accepted* is `codesign`'s to say, and a macOS build runs it on every stage.
+ */
+check(
+  "the helper is signed with the runtime's own entitlements under the hardened runtime, then verified",
+  [
+    /cpSync\(join\(tauriRoot, "runtime", "Info\.plist"\)/.test(stageCode),
+    /"--entitlements",\s*join\(tauriRoot, "entitlements-node\.plist"\)/.test(stageCode),
+    /"--options",\s*"runtime"/.test(stageCode),
+    /run\("codesign", \["--verify", "--strict", helper\]\)/.test(stageCode),
+    /identity === "-" && process\.env\.APPLE_CERTIFICATE/.test(stageCode),
+  ],
+  [true, true, true, true, true],
+);
+/*
+ * ⚠ **And `build.rs` refuses a helper staged for the other architecture, which is
+ * the check the runtime's file name used to make for free.** While the runtime was
+ * an `externalBin`, `tauri-build` resolved `binaries/node-<target-triple>`, so an
+ * Intel build staged on an Apple-silicon machine failed on a missing file. A fixed
+ * path in `bundle.macOS.files` copies whatever is there — an arm64 `node` in an
+ * Intel app, a daemon that never starts on the machines it was built for — so the
+ * header of the binary is read instead. Both CPU types are pinned, because a table
+ * that lost one arm would refuse that architecture's every build rather than
+ * checking it.
+ */
+const buildRsCode = rustCode(read(`${TAURI_DIR}/build.rs`));
+check(
+  "build.rs reads the staged runtime's CPU type and knows both macOS architectures",
+  [
+    /runtime_helper\(\);\s*tauri_build::build\(\)/.test(buildRsCode),
+    /"aarch64" => \(0x0100_000c_u32,/.test(buildRsCode),
+    /"x86_64" => \(0x0100_0007_u32,/.test(buildRsCode),
+  ],
+  [true, true, true],
 );
 /*
  * ⚠ **The 552 MB that must not come back.** The two ACP adapters each pull a
@@ -1790,13 +1933,15 @@ report(
   `${protocolImporters.length} value importer(s) under src/: ${protocolImporters.sort().join(", ")}`,
 );
 /*
- * **The runtime binary is a build input and never a tracked file.** 122 MB, and
- * the one staged artifact that cannot live under `target/` — `externalBin`
- * resolves relative to `src-tauri`, not to the cargo profile directory.
+ * **The runtime binary is a build input and never a tracked file.** 122 MB. On
+ * macOS it is staged under `target/Helpers`, which the `target/` line already
+ * keeps out; for any other triple it is still `binaries/node-<target-triple>`,
+ * the name an `externalBin` resolves — which is why that line stays.
  */
 check(
   "the staged runtime is gitignored",
-  /^packages\/native\/src-tauri\/binaries\/$/m.test(read(".gitignore")),
+  /^packages\/native\/src-tauri\/binaries\/$/m.test(read(".gitignore")) &&
+    /^packages\/native\/src-tauri\/target\/$/m.test(read(".gitignore")),
   true,
 );
 
@@ -1924,8 +2069,8 @@ check("the hardened runtime is on", mac["hardenedRuntime"], true);
 check("an entitlements file is named", typeof mac["entitlements"], "string");
 check("and it exists", existsSync(join(ROOT, TAURI_DIR, String(mac["entitlements"]))), true);
 /*
- * **Two Mach-O binaries, two signatures, two entitlement sets — and the split is
- * the assertion.**
+ * **Two bundles, two signatures, two entitlement sets — and the split is the
+ * assertion.**
  *
  * The app's set stays at one entitlement: this is the signature on the window
  * holding the fleet's credential. The bundled runtime's is five, because V8
@@ -1936,8 +2081,9 @@ check("and it exists", existsSync(join(ROOT, TAURI_DIR, String(mac["entitlements
  * Pinned as exact sets in both directions. A key added to the app's file is a
  * loosening of the wrong process — `disable-library-validation` there would mean
  * any dylib could be loaded into the window — and a key dropped from the
- * runtime's is a daemon that will not start once signing is switched on, which is
- * a failure nobody would see until the first signed build.
+ * runtime's is a daemon that will not start. That one is no longer a failure
+ * nobody sees until the first signed build: `build-daemon.mjs` signs the runtime
+ * helper with this file on every build, ad-hoc when there is no identity.
  */
 const keysOf = (rel: string): string[] =>
   [...read(rel).matchAll(/<key>([^<]+)<\/key>/g)].map((m) => m[1] ?? "").sort();
@@ -1965,6 +2111,45 @@ check(
   "and never the debug entitlement Node ships with",
   read(`${TAURI_DIR}/entitlements-node.plist`).includes("get-task-allow</key>"),
   false,
+);
+/*
+ * ⚠ **No comment in a plist here may hold a double hyphen, and `plutil` will not
+ * say so.** XML forbids one inside a comment. `plutil -lint` accepts it anyway;
+ * codesign's parser does not, and refuses the whole file:
+ * *"Failed to parse entitlements: AMFIUnserializeXML: syntax error near line 15"*.
+ * Measured on `entitlements-node.plist` the first time anything signed with it —
+ * its comment quoted the `codesign` command that measured its keys, flags and
+ * all, so the file that existed for the first signed build could not have signed
+ * one. `xmlCode` above already states the rule; nothing held the files to it.
+ *
+ * Swept over every plist in the crate and in the helper's directory rather than
+ * asserted of the four known ones, so a fifth arriving is held to it too, and the
+ * predicate is driven both ways first: an empty offenders list is the passing
+ * answer, so a pattern that stopped matching would read as a clean tree.
+ */
+const commentHasDoubleHyphen = (xml: string): boolean =>
+  [...xml.matchAll(/<!--([\s\S]*?)-->/g)].some((m) => /--|-$/.test(m[1] ?? ""));
+check(
+  "the double-hyphen predicate bites where one is and nowhere else",
+  [
+    commentHasDoubleHyphen("<!-- codesign -d --xml -->\n<plist/>"),
+    commentHasDoubleHyphen("<!-- ends in a hyphen--->"),
+    commentHasDoubleHyphen("<!-- a single-hyphen word and an em dash — -->"),
+    commentHasDoubleHyphen("<key>a--b</key>"),
+  ],
+  [true, true, false, false],
+);
+const plists = [
+  ...readdirSync(join(ROOT, TAURI_DIR)).filter((name) => name.endsWith(".plist")),
+  ...readdirSync(join(ROOT, TAURI_DIR, "runtime"))
+    .filter((name) => name.endsWith(".plist"))
+    .map((name) => `runtime/${name}`),
+].sort();
+report("the plists were found to sweep", plists.length >= 4, `${String(plists.length)}: ${plists.join(", ")}`);
+check(
+  "and no comment in one carries a double hyphen, which codesign refuses as malformed XML",
+  plists.filter((rel) => commentHasDoubleHyphen(read(`${TAURI_DIR}/${rel}`))),
+  [],
 );
 /*
  * ⚠ **The macOS floor is 13.0 because the *opt-in* background service needs it.**
@@ -3009,6 +3194,44 @@ check(
   "a release minifies and is not debuggable",
   [/isMinifyEnabled = true/.test(releaseBuild), /isDebuggable/.test(releaseBuild), /isJniDebuggable/.test(releaseBuild)],
   [true, false, false],
+);
+/*
+ * ⚠ **And what a release is signed with — which that file's banner said was
+ * asserted here, and was not.** `build.gradle.kts` lists the edits an `init`
+ * re-run takes out and says this driver pins each against its code; measured
+ * when the fourth was added, a grep for `signingConfig` in this file returned
+ * nothing. So the edit deciding whether a release is signed at all rested on the
+ * banner alone, which is the shape `ic_launcher` had before this driver read it.
+ *
+ * ⚠ **The fourth is `enableV1Signing = true`, and losing it has no symptom short
+ * of somebody's phone.** Left unset, AGP signs with the JAR scheme only below
+ * `minSdk` 24, so the 0.10.1 APK carried v2 alone. It verified, installed on a
+ * Pixel, and installed over `adb install` on a OnePlus 13 — whose own installer
+ * then refused the same file as invalid. That an OEM installer, parsing the APK
+ * before the platform does, wants a JAR signature is the leading hypothesis
+ * rather than a measurement; whichever it is, an APK without the pair still
+ * builds, signs and verifies. `enableV2Signing` is pinned beside it because the
+ * pair is the decision, and AGP's default is not one.
+ *
+ * Read out of `create("release")` rather than out of the file, so the pair
+ * written into some other signing config — a debug one added later — cannot
+ * stand in for this one. And the build type's `signingConfig` line is asserted
+ * in the same breath because it is what makes the pair load-bearing rather than
+ * decoration — `isMinifyEnabled` is the same precondition for the keep rule —
+ * and without it a release is not signed at all: AGP writes
+ * `app-universal-release-unsigned.apk`, which `ci-release.sh` refuses on the
+ * release path rather than on a push.
+ */
+const releaseSigning = between(gradleCode, `create("release") {`, "buildTypes {");
+check("the release signing config was found to read", releaseSigning.length > 0, true);
+check(
+  "a release is signed by that config, and the config signs v1 beside v2",
+  [
+    /signingConfig = signingConfigs\.getByName\("release"\)/.test(releaseBuild),
+    /^\s*enableV1Signing = true\s*$/m.test(releaseSigning),
+    /^\s*enableV2Signing = true\s*$/m.test(releaseSigning),
+  ],
+  [true, true, true],
 );
 
 /* ── Android TLS: three halves of one fact ────────────────────────────────── */

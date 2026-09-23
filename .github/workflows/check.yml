@@ -424,11 +424,10 @@ jobs:
       # And the daemon payload, for the sharper version of the same reason.
       #
       # ⚠ **This is not a build step, it is a prerequisite of `cargo` itself.**
-      # `bundle.resources` and `bundle.externalBin` are copied from inside
-      # `build.rs`, not by the bundler — so with the staging directory absent
-      # every one of the three cargo steps below fails with
-      # `ResourcePathNotFound`, including `fmt`, which has no business caring
-      # about a 200 MB payload. It is a step of its own rather than a
+      # `bundle.resources` is copied from inside `build.rs`, not by the bundler,
+      # and the same `build.rs` refuses a macOS build with no runtime helper
+      # staged — so with the staging directory absent the cargo steps below
+      # fail before compiling anything. It is a step of its own rather than a
       # `beforeBuildCommand` for exactly that: `beforeBuildCommand` runs for
       # `tauri build` alone and would leave clippy and test broken.
       #
@@ -442,11 +441,11 @@ jobs:
       # refusal `ci-release.sh app` makes about a leftover one.
       #
       # ⚠ **The triple is an argument and is not optional on a cross leg.**
-      # `build-daemon.mjs` defaults to the host, and `tauri-build` resolves
-      # `binaries/node-<target-triple>` — so `macos-x64` staged without it fails
-      # inside the build script with *"resource path
-      # `binaries/node-x86_64-apple-darwin` doesn't exist"*, which names neither
-      # this step nor the leg. `ci-release.sh app` passes it the same way.
+      # `build-daemon.mjs` defaults to the host, and the runtime helper it
+      # stages has no triple in its name — so `macos-x64` staged without it
+      # would put an arm64 `node` into an Intel app. `build.rs` reads the staged
+      # binary's CPU type and refuses that build, naming the command that
+      # restages it. `ci-release.sh app` passes the triple the same way.
       - run: node packages/native/scripts/build-daemon.mjs ${{ matrix.triple }}
         if: matrix.payload == 'yes'
 

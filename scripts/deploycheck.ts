@@ -5240,8 +5240,51 @@ process.stdout.write("\nwhat a release does, driven without a registry\n");
     RELEASE_ANDROID_KEY_ALIAS: "a",
     RELEASE_ANDROID_KEY_PASSWORD: "k",
   };
-  /** An `apksigner` that verifies anything, and one that verifies nothing. */
-  const apksignerOk = stub('echo "apksigner $*"');
+  /**
+   * An `apksigner` for each APK the verb can meet, and one that verifies nothing.
+   *
+   * ⚠ **Modelled on apksig's own rule rather than on what the script asks, and
+   * the obvious gate is why.** Reading `v1 scheme (JAR signing): true` out of
+   * `verify --verbose` at the APK's own floor refuses every correct release
+   * against the real tool: `ApkVerifier` consults a JAR signature only when the
+   * lowest API level it checks is below 24 or when there is no v2-or-newer
+   * block, and this app's manifest says 24. A stub printing `true` whenever it is
+   * run passes that gate exactly as it passes the right one. So each of these
+   * reads `--min-sdk-version` the way the real one does and falls back to the
+   * manifest's 24, prints its scheme lines only under `--verbose`, and below 24
+   * refuses a missing JAR signature with apksig's own error — which makes the
+   * green signed case below the assertion that the script asks below 24, and
+   * asks verbosely, as well as the one that it passes.
+   */
+  const apksignerFor = (apk: { jar: boolean; v2: boolean }): string =>
+    stub(
+      [
+        'echo "apksigner $*"',
+        "floor=24; verbose=0; prev=",
+        'for arg in "$@"; do',
+        '  if [ "$prev" = --min-sdk-version ]; then floor=$arg; fi',
+        '  if [ "$arg" = --verbose ]; then verbose=1; fi',
+        "  prev=$arg",
+        "done",
+        "v1=false",
+        'if [ "$floor" -lt 24 ]; then',
+        apk.jar
+          ? "  v1=true"
+          : '  echo "DOES NOT VERIFY" >&2; echo "ERROR: Missing META-INF/MANIFEST.MF" >&2; exit 1',
+        "fi",
+        '[ "$verbose" = 1 ] || exit 0',
+        'echo "Verifies"',
+        'echo "Verified using v1 scheme (JAR signing): $v1"',
+        `echo "Verified using v2 scheme (APK Signature Scheme v2): ${String(apk.v2)}"`,
+        'echo "Verified using v3 scheme (APK Signature Scheme v3): false"',
+      ].join("\n"),
+    );
+  /** What `build.gradle.kts` asks for now: the JAR signature beside v2. */
+  const apksignerOk = apksignerFor({ jar: true, v2: true });
+  /** What 0.10.1 shipped: v2 alone, which verifies at the manifest's floor. */
+  const apksignerV2Only = apksignerFor({ jar: false, v2: true });
+  /** The JAR signature with no v2 beside it, so the loop's second pass is driven too. */
+  const apksignerNoV2 = apksignerFor({ jar: true, v2: false });
   const apksignerBad = stub('echo "apksigner $*" >&2; exit 1');
   /**
    * A `tauri` that writes the APK **and reports the keystore while it still
@@ -5273,6 +5316,20 @@ process.stdout.write("\nwhat a release does, driven without a registry\n");
     APKSIGNER: apksignerOk,
   });
   check("and a signed build names its asset", /app: android \S+-android\.apk \d+ bytes/.test(signed.out), true);
+  /*
+   * The second `apksigner` run is printed on success, so a release log says which
+   * schemes verified and from what floor — the first thing to read the day an
+   * installer refuses an APK again.
+   */
+  check(
+    "and its log says both schemes verified, asked from below API 24",
+    [
+      signed.out.includes("--min-sdk-version 23"),
+      signed.out.includes("Verified using v1 scheme (JAR signing): true"),
+      signed.out.includes("Verified using v2 scheme (APK Signature Scheme v2): true"),
+    ],
+    [true, true, true],
+  );
 
   const keystorePath = /keystore-path (\S+)/.exec(signed.out)?.[1] ?? "";
   check("the keystore is written with no bits for anybody but this user", /keystore-mode (\S+)/.exec(signed.out)?.[1] ?? null, "-rw-------");
@@ -5329,6 +5386,62 @@ process.stdout.write("\nwhat a release does, driven without a registry\n");
   });
   check("an APK at the signed name whose signature does not verify is refused", badSig.status, 2);
   check("and the refusal says so rather than blaming the name", badSig.err.includes("not validly signed"), true);
+
+  /*
+   * ⚠ **0.10.1's own APK, which the check above passes.** Signed with v2 alone
+   * it verifies at the manifest's floor — it installed on a Pixel, and over
+   * `adb install` on the OnePlus whose own installer then refused it — so the
+   * refusal has to come from the second run, name the scheme, and not call a
+   * signed file unsigned. apksigner's own output rides the refusal, because
+   * `Missing META-INF/MANIFEST.MF` is the line that says what is missing from the
+   * file. ⚠ That is the text and not apksig's name for it: the issue is
+   * `JAR_SIG_NO_MANIFEST`, and apksigner prints only its message — read off
+   * build-tools 36.0.0 against the 0.10.1 asset — so a stub quoting the name
+   * would have this assert a line no real refusal carries.
+   */
+  const v2Only = app("android", {
+    ...androidSecrets,
+    TAURI: tauriAndroid("app-universal-release.apk"),
+    APKSIGNER: apksignerV2Only,
+  });
+  check("an APK signed with v2 alone is refused, which 0.10.1's was not", v2Only.status, 2);
+  check(
+    "and the refusal names the JAR scheme, carries apksigner's reason, and does not call it unsigned",
+    [
+      v2Only.err.includes("does not verify using the v1 scheme (JAR signing)"),
+      v2Only.err.includes("Missing META-INF/MANIFEST.MF"),
+      v2Only.err.includes("not validly signed"),
+    ],
+    [true, true, false],
+  );
+  check("and no asset is named for it", /app: android \S+-android\.apk/.test(v2Only.out), false);
+  const noV2 = app("android", {
+    ...androidSecrets,
+    TAURI: tauriAndroid("app-universal-release.apk"),
+    APKSIGNER: apksignerNoV2,
+  });
+  check(
+    "an APK with the JAR signature and no v2 is refused too, and the refusal names v2",
+    [noV2.status, noV2.err.includes("does not verify using the v2 scheme (APK Signature Scheme v2)")],
+    [2, true],
+  );
+  /*
+   * ⚠ **And the control without which the signed case says nothing about the
+   * floor.** Asked from the manifest's own 24, the stub for a correct APK has to
+   * answer `false` for v1, because that is what the real tool answers; a model
+   * that said `true` there would pass a script that never asks below 24, which
+   * is the gate this section exists to keep out.
+   */
+  const askedFrom = (args: readonly string[]): string =>
+    spawnSync(apksignerOk, ["verify", "--verbose", ...args, "app.apk"], { encoding: "utf8" }).stdout ?? "";
+  check(
+    "the model answers v1 false at the manifest's floor and true below it, as apksig does",
+    [
+      askedFrom([]).includes("Verified using v1 scheme (JAR signing): false"),
+      askedFrom(["--min-sdk-version", "23"]).includes("Verified using v1 scheme (JAR signing): true"),
+    ],
+    [true, true],
+  );
 
   const noSigner = app("android", {
     ...androidSecrets,

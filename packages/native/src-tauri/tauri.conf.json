@@ -34,7 +34,6 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
-    "externalBin": ["binaries/node"],
     "resources": {
       "target/daemon/": "daemon"
     },
@@ -55,6 +54,9 @@
     "createUpdaterArtifacts": false,
     "macOS": {
       "infoPlist": "Info.plist",
+      "files": {
+        "Helpers/Reemoat Runtime.app": "target/Helpers/Reemoat Runtime.app"
+      },
       "minimumSystemVersion": "13.0",
       "entitlements": "entitlements.plist",
       "hardenedRuntime": true,

@@ -61,12 +61,11 @@ use std::time::Duration;
 ///
 /// **One code path for the bundle and for `tauri dev`**, which is worth stating
 /// because it looks like it should need two. `tauri-build` copies
-/// `bundle.resources` and `bundle.externalBin` into `target/<profile>/` during
-/// `build.rs`, and Tauri's own `resource_dir()` answers that directory in a
-/// development build and `Contents/Resources` in a bundle. The runtime is beside
-/// the executable in both — `target/<profile>/node` next to `target/<profile>/…`,
-/// and `Contents/MacOS/node` next to the app binary — so `current_exe()`'s parent
-/// finds it either way. Verified on this checkout rather than assumed.
+/// `bundle.resources` into `target/<profile>/` during `build.rs`, and Tauri's own
+/// `resource_dir()` answers that directory in a development build and
+/// `Contents/Resources` in a bundle. The runtime is found from the executable by
+/// {@link runtime_beside}, and on macOS by one relative path in both layouts —
+/// see there for why the staging directory was chosen to make that true.
 pub struct Payload {
     /// The daemon's own tree: `src/`, `scripts/`, `deploy/`, `node_modules/`.
     pub root: PathBuf,
@@ -91,9 +90,59 @@ pub struct Payload {
 /// is not fine in an application people install.
 const PAYLOAD_OVERRIDE: &str = "REEMOAT_DAEMON_PAYLOAD";
 
+/// The helper app the runtime lives in on macOS.
+///
+/// Written down in `build-daemon.mjs`, `build.rs` and `tauri.conf.json`'s
+/// `bundle.macOS.files` as well; `nativecheck` compares all four.
+///
+/// ⚠ **macOS only, like its one reader.** Only the macOS arm of
+/// {@link runtime_beside} names it, so on every other target it is dead code, and
+/// the `native-android` job's `clippy --target aarch64-linux-android -- -D warnings`
+/// refuses the crate over it — which a clippy run on a Mac cannot show.
+#[cfg(target_os = "macos")]
+pub const RUNTIME_HELPER: &str = "Reemoat Runtime.app";
+
+/// The Node binary the daemon runs under, found from this process's executable.
+///
+/// ⚠ **On macOS it is not beside the executable, and that is the fix for the Dock.**
+/// It is `Contents/Helpers/Reemoat Runtime.app/Contents/MacOS/node`, a bundle of
+/// its own whose `Info.plist` carries `LSUIElement`. libuv registers a process with
+/// LaunchServices when `process.title` is set — npm sets one for every MCP server
+/// an agent starts through `npx` — and a binary in `Contents/MacOS` was registered
+/// as a Foreground application of *this* bundle, which drew a blank "exec" tile in
+/// the Dock for each of them. `build-daemon.mjs` carries the measurements.
+///
+/// **One relative path for the bundle and a development build.** The executable is
+/// `Contents/MacOS/<app>` in one and `target/<profile>/<app>` in the other, and the
+/// helper is staged at `target/Helpers` so that `<exe>/../../Helpers` lands on
+/// `Contents/Helpers` and on `target/Helpers` alike. `build.rs` copies it beside a
+/// profile directory that is not under `src-tauri/target`.
+///
+/// Elsewhere it is beside the executable, which is where `tauri-build` puts an
+/// `externalBin`. No overlay ships a runtime today, so `locate` refuses on the
+/// payload before this matters; it is the layout such a platform would have.
+#[cfg(target_os = "macos")]
+pub fn runtime_beside(exe: &Path) -> Option<PathBuf> {
+    Some(
+        exe.parent()?
+            .parent()?
+            .join("Helpers")
+            .join(RUNTIME_HELPER)
+            .join("Contents")
+            .join("MacOS")
+            .join("node"),
+    )
+}
+
+/// See the macOS arm above: beside the executable, where an `externalBin` lands.
+#[cfg(not(target_os = "macos"))]
+pub fn runtime_beside(exe: &Path) -> Option<PathBuf> {
+    Some(exe.parent()?.join("node"))
+}
+
 impl Payload {
     pub fn locate(resource_dir: &Path, exe: &Path) -> Option<Payload> {
-        let node = exe.parent()?.join("node");
+        let node = runtime_beside(exe)?;
         /*
          * The checkout wins when one is named, and only in a development build.
          * The *runtime* is still the bundled one: what is being swapped is the
@@ -1904,12 +1953,14 @@ mod tests {
         std::fs::create_dir_all(checkout.join("scripts")).unwrap();
         std::fs::write(checkout.join("scripts").join("daemon.ts"), "").unwrap();
         // A bundled payload beside a fake runtime, so `locate` can succeed either way.
+        // The runtime goes wherever `runtime_beside` says for this platform, so the
+        // test follows the layout rather than restating it.
         std::fs::create_dir_all(bundle.join("daemon").join("scripts")).unwrap();
         std::fs::write(bundle.join("daemon").join("scripts").join("daemon.ts"), "").unwrap();
-        let exedir = dir.join("bin");
-        std::fs::create_dir_all(&exedir).unwrap();
-        std::fs::write(exedir.join("node"), "").unwrap();
-        let exe = exedir.join("app");
+        let exe = dir.join("bin").join("app");
+        let runtime = runtime_beside(&exe).expect("an executable path has a runtime path");
+        std::fs::create_dir_all(runtime.parent().unwrap()).unwrap();
+        std::fs::write(&runtime, "").unwrap();
 
         // SAFETY: single-threaded within this test, and the variable is removed
         // before it returns. `cargo test` runs tests in parallel, so the name is
@@ -1932,7 +1983,7 @@ mod tests {
         }
         // ⚠ The runtime is the bundled one in both cases: what the override swaps
         // is the code, never the Node it runs under.
-        assert_eq!(found.node, exedir.join("node"));
+        assert_eq!(found.node, runtime);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1943,9 +1994,37 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("reemoat-payload-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("daemon").join("scripts")).unwrap();
         std::fs::write(dir.join("daemon").join("scripts").join("daemon.ts"), "").unwrap();
-        // The runtime is looked for beside the executable, which here is absent.
+        // The runtime is looked for where `runtime_beside` says, which here is absent.
         assert!(Payload::locate(&dir, &dir.join("missing").join("app")).is_none());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// ⚠ **One relative path reaches the runtime in a bundle and in a development
+    /// build**, and this is the assertion that the staging directory still lines up.
+    /// `build-daemon.mjs` stages the helper at `target/Helpers` because `target/`
+    /// stands where `Contents/` stands; if either end moves, the bundle keeps working
+    /// and `tauri dev` quietly answers "unsupported", which reads as a missing stage.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_runtime_helper_is_one_path_from_the_bundle_and_from_a_development_build() {
+        let bundle = runtime_beside(Path::new(
+            "/Applications/Reemoat.app/Contents/MacOS/reemoat-native",
+        ));
+        assert_eq!(
+            bundle,
+            Some(PathBuf::from(
+                "/Applications/Reemoat.app/Contents/Helpers/Reemoat Runtime.app/Contents/MacOS/node"
+            ))
+        );
+        let dev = runtime_beside(Path::new(
+            "/src/packages/native/src-tauri/target/debug/reemoat-native",
+        ));
+        assert_eq!(
+            dev,
+            Some(PathBuf::from(
+                "/src/packages/native/src-tauri/target/Helpers/Reemoat Runtime.app/Contents/MacOS/node"
+            ))
+        );
     }
 
     #[test]

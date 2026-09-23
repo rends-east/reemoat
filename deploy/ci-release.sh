@@ -23,9 +23,12 @@
 #                   above because it is a program this script runs, not a value
 #                   it reads.
 #   APKSIGNER     — the Android signature check. A seam for `GH`'s reason rather
-#                   than `DOCKER`'s: both of its answers matter, so the driver
-#                   stubs a verifier that passes and one that fails, and neither
-#                   needs an Android SDK on the machine running the driver.
+#                   than `DOCKER`'s: its answers matter, and so does what it
+#                   prints about which schemes verified — so the driver stubs a
+#                   verifier for each kind of APK (both schemes, v2 alone, the
+#                   JAR signature alone) and one that verifies nothing, and none
+#                   of them needs an Android SDK on the machine running the
+#                   driver.
 #
 # **Five verbs, and every one of them re-runs every gate.**
 #
@@ -142,8 +145,9 @@ NODE=${NODE:-node}
 # The Android signature verifier.
 #
 # ⚠ **`apksigner` is the only thing in this script that can tell a signed APK
-# from an unsigned one**, and it ships inside the Android SDK's build-tools
-# rather than on PATH, at a version-numbered path nobody should write down here.
+# from an unsigned one**, or say which schemes signed it, and it ships inside the
+# Android SDK's build-tools rather than on PATH, at a version-numbered path
+# nobody should write down here.
 # Left unset it is resolved out of the SDK the build already needed; the `app`
 # verb refuses rather than skipping the check when it cannot be found, because a
 # verification that silently does not run is worse than none — it reads as green.
@@ -1095,6 +1099,53 @@ case "$verb" in
   so the signature itself is what failed. An APK published like this installs on
   nothing, and the name it would carry is the one people fetch from
   releases/latest/download."
+
+      # ── and signed with v1 as well as v2, which Android does not need ─────
+      #
+      # ⚠ **The JAR signature is for an installer that is not Android's.** AGP
+      # leaves it out by itself at `minSdk` 24, and 0.10.1 shipped that way: it
+      # passed the check above, installed on a Pixel and over `adb install` on a
+      # OnePlus 13, and that OnePlus's own installer refused it as invalid. That
+      # an OEM installer parsing the APK before the platform does wants a JAR
+      # signature is the leading hypothesis rather than a measurement;
+      # `app/build.gradle.kts` carries the rest beside `enableV1Signing`.
+      #
+      # ⚠ **`--min-sdk-version 23` is what makes the v1 line mean anything.**
+      # `apksigner` consults a JAR signature only below API 24 or when there is
+      # no v2-or-newer block — Android 7's own rule, in apksig's `ApkVerifier` —
+      # and by default it checks from the manifest's `minSdk`, which is 24. So at
+      # the default it prints `v1 scheme (JAR signing): false` about an APK
+      # carrying a perfectly good one, and a gate reading that line would refuse
+      # every correct release. At 23 the JAR signature is verified and a missing
+      # one is an error rather than a skip — apksig's `JAR_SIG_NO_MANIFEST`,
+      # which apksigner prints as `ERROR: Missing META-INF/MANIFEST.MF`, never
+      # by that name. Not lower: a lower floor also holds the signature to
+      # algorithms older platforms lack, which is a question about devices this
+      # app does not install on.
+      #
+      # A second run rather than a flag on the first, so each refusal is about one
+      # thing: that one is a signature that does not verify, this one a scheme the
+      # build left out. The lines are what is read, never the exit status: a
+      # verifier answering 0 without having checked a scheme cannot pass for one
+      # that did, and one answering 1 fails closed because its line is missing.
+      # They are printed on success too, because which schemes verified is the
+      # first thing to read the day an installer refuses an APK again.
+      android_schemes=$("$APKSIGNER" verify --verbose --min-sdk-version 23 "$android_apk" 2>&1) || true
+      for android_scheme in "v1 scheme (JAR signing)" "v2 scheme (APK Signature Scheme v2)"; do
+        case "$android_schemes" in
+          *"Verified using $android_scheme: true"*) ;;
+          *) fail "refusing $RELEASE_TAG: $android_apk does not verify using the $android_scheme.
+
+  The signature itself verified above, so this is a scheme the build left out
+  rather than one that is broken. A release is signed with v1 and v2 both —
+  enableV1Signing and enableV2Signing in gen/android/app/build.gradle.kts —
+  because 0.10.1, signed with v2 alone, was refused by a OnePlus's own installer
+  while Android itself accepted it. apksigner, asked from API 23, said:
+
+$android_schemes" ;;
+        esac
+      done
+      printf '%s\n' "$android_schemes"
     else
       (cd "$R/packages/native" && "$TAURI" build --target "$app_target_triple")
     fi

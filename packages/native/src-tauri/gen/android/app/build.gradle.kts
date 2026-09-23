@@ -1,14 +1,17 @@
 /*
  * ⚠ **Hand-edited, and `tauri android init` overwrites this file.**
  *
- * Three things below are in no template and are this repository's: the
+ * Four things below are in no template and are this repository's: the
  * `signingConfigs` block with the conditional `signingConfig` in `release`, the
+ * `enableV1Signing`/`enableV2Signing` pair inside that signing config, the
  * `repositories { maven … }` block that asks cargo where the
  * `rustls-platform-verifier` `.aar` is, and the dependency on it. Compared
  * against the `build.gradle.kts` embedded in `@tauri-apps/cli` on 2026-09-19:
  * it carries none of them. An `init` re-run therefore produces a release APK
  * that is unsigned and whose every TLS connection fails at run time — and it
- * compiles, links and ships.
+ * compiles, links and ships. Losing the pair alone is quieter still: the APK is
+ * signed, verifies, and carries v2 and nothing else, which is AGP's default at
+ * this `minSdk` and the shape of the 0.10.1 APK a OnePlus installer refused.
  *
  * ⚠ **`init` is not optional on a new machine.**
  * `gen/android/tauri.settings.gradle` holds that computer's cargo registry
@@ -16,7 +19,7 @@
  * *settings evaluation*: a clone fails there before any project is configured.
  * `.claude/rules/native-packaging.md` carries the two-command recipe that
  * survives an `init`, and `nativecheck` asserts each edge above against this
- * file's **code** — this banner names all three, so read raw it would satisfy
+ * file's **code** — this banner names all four, so read raw it would satisfy
  * them by itself.
  */
 import java.util.Properties
@@ -60,6 +63,48 @@ android {
                 storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
                 keyAlias = System.getenv("ANDROID_KEY_ALIAS")
                 keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+                /*
+                 * ⚠ **v1 beside v2, which AGP does not do by itself at this
+                 * `minSdk`.** Left unset, AGP signs with the JAR scheme only when
+                 * `minSdk` is below 24, so the 0.10.1 APK carried an APK
+                 * Signature Scheme v2 block and no JAR signature at all: no
+                 * `MANIFEST.MF`, no `.SF`, no `.RSA` in `META-INF`. Measured on
+                 * that release's asset, the signing block held v2, AGP's
+                 * dependency metadata and verity padding, and nothing else.
+                 *
+                 * Android does not need the v1 half. From 7.0 it verifies v2 and
+                 * never reads a JAR signature beside one, and that APK installed
+                 * on a Pixel on Android 16 and over `adb install` on a OnePlus 13.
+                 * What refused it was the OnePlus's own installer — OxygenOS,
+                 * Android 16, "package appears to be invalid", with no earlier
+                 * copy of the app installed to conflict with. `adb install`
+                 * hands the file to the package manager directly; a downloaded
+                 * APK that is tapped goes through the OEM's installer app first,
+                 * which parses it on its own. **That this parse wants a JAR
+                 * signature is a hypothesis, not a measurement** — and a weak
+                 * one: those words are what Android's own installer shows when
+                 * the platform refuses a package, and the platform never reads
+                 * v1 beside v2. The next release installing would not confirm
+                 * it, since the download and the build change with it; the
+                 * published APK signed twice with one key, with and without v1,
+                 * and tapped on that phone, would.
+                 *
+                 * `enableV2Signing` is AGP's default already and is written down
+                 * so the pair is one decision rather than half of one leaning on
+                 * a default. v3 is left off deliberately: Android 9 and later
+                 * verify v3 in place of v2 wherever both are present, so turning
+                 * it on here would change what every current phone checks —
+                 * the Pixel that already worked included — and a OnePlus that
+                 * then accepted the APK would not say which half fixed it. v4 is
+                 * not in the APK at all, being a separate `.idsig` file for
+                 * `adb install --incremental`.
+                 *
+                 * `nativecheck` asserts both lines against this file's code, and
+                 * `deploy/ci-release.sh` refuses a release whose APK does not
+                 * verify under both schemes.
+                 */
+                enableV1Signing = true
+                enableV2Signing = true
             }
         }
     }
