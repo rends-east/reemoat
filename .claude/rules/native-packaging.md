@@ -28,6 +28,10 @@ paths:
   - packages/native/src-tauri/icons/*
   - packages/web/public/favicon.svg
   - packages/native/src-tauri/tauri.conf.json
+  # The runtime helper's Info.plist and the two entitlements files that sign the
+  # helper and the app around it. The section on the helper is about all three.
+  - packages/native/src-tauri/runtime/*
+  - packages/native/src-tauri/entitlements*.plist
 ---
 
 # Packaging the native app
@@ -59,7 +63,11 @@ full profile; Windows, Linux, Android and iOS are clients.
 Tauri merges those over the base — `linux`, `windows`, `macos`, `android`, `ios` —
 through `json_patch::merge`, which is **RFC 7386**: an array replaces, and a
 `null` deletes the key. So a client profile is `externalBin: null` and
-`resources: null`, and the payload is gone.
+`resources: null`, and the payload is gone. The runtime was never there on those
+platforms: it is `bundle.macOS.files`, which only the macOS bundler reads, and the
+base names no `externalBin` at all since the runtime became a helper (below).
+`externalBin: null` stays in each overlay anyway — `ci-release.sh`'s `app_profile`
+reads it as the client marker, and it is the guard if the base ever names one again.
 
 ⚠ **Measured, 2026-09-19, because the alternative was a cargo feature.** With
 `target/daemon` and `binaries/` both moved aside, `cargo check` fails inside
@@ -128,6 +136,57 @@ runtime is a staging bug; it says so and exits 127. `nativecheck` asserts the
 absence of the old line as well as the presence of the new one, and compares
 against the file's **code** rather than its text, because the docblock explaining
 this quotes the line it replaced.
+
+## The runtime is a helper app, and the Dock is why
+
+**On macOS the runtime is `Contents/Helpers/Reemoat Runtime.app`, a bundle of its
+own whose `Info.plist` carries `LSUIElement`** — `src-tauri/runtime/Info.plist`,
+identifier `com.reemoat.app.runtime`. It used to be `Contents/MacOS/node`, an
+`externalBin`. libuv registers a process with LaunchServices when `process.title`
+is set, npm sets one for every MCP server an agent starts through `npx`, and a
+binary in `Contents/MacOS` belongs to Reemoat.app — so each became a Foreground
+application of `com.reemoat.app` and drew a blank "exec" tile in the Dock.
+Measured with `lsappinfo` on 0.10.1: `Foreground` from `Contents/MacOS`,
+`UIElement` from the helper, same bytes; `docs/NATIVE.md` has the table and the
+one-line check.
+
+**One copy, one relative path.** `pnpm native:stage` puts the helper at
+`src-tauri/target/Helpers`, because `target/` stands where `Contents/` stands: the
+payload is `daemon` directly under `Contents/Resources` and under
+`target/<profile>`, so the shim's `../../../../Helpers/…` from `.bin` and
+`daemon.rs`'s `<exe>/../../Helpers/…` land on the helper in a bundle and in
+`tauri dev` alike. `bundle.macOS.files` copies it into the bundle and
+`externalBin` is gone, so nothing lands in `Contents/MacOS` but the app.
+
+⚠ **`build.rs` makes the check the file name used to make.** `binaries/node-<triple>`
+failed a build staged for the other architecture on a missing file; a fixed path
+copies whatever is there, so `build.rs` reads the staged binary's Mach-O CPU type
+and refuses a mismatch, or a missing helper, on any macOS target. It also copies
+the helper beside a profile directory that is not `src-tauri/target` (`--target`,
+`CARGO_TARGET_DIR`), which is what `tauri-build` did for an `externalBin`.
+
+⚠ **Signed by staging, inside out, because the bundler will not.** tauri-bundler
+2.11 signs the app, its frameworks and its `externalBin` entries — all with the
+*app's* entitlements — and copies `bundle.macOS.files` unsigned before sealing.
+An unsigned helper then fails `codesign --verify --deep --strict` on the whole
+app (*"In subcomponent: …/Helpers/Reemoat Runtime.app"*), measured. So
+`build-daemon.mjs` signs it with `entitlements-node.plist` under the hardened
+runtime — `APPLE_SIGNING_IDENTITY` with a timestamp, else ad-hoc — and refuses
+`APPLE_CERTIFICATE` alone, which the bundler imports only during `tauri build`.
+That is the nested pass `entitlements-node.plist` was written for, and it now runs
+on every build.
+
+⚠ **Which found a file that could not have signed anything.** Its comment quoted
+the measuring `codesign` command, flags and all; XML forbids a double hyphen in a
+comment, codesign refused the file (*"AMFIUnserializeXML: syntax error"*) and
+`plutil -lint` passed it. `nativecheck` sweeps every plist here for the rule.
+
+**Rejected:** `LSUIElement` on the app (Reemoat's own Dock icon and menu bar go
+too); the runtime in `Contents/Resources` (not nested code, not reliably signed);
+the payload's `.bin` off the front of the daemon's `PATH` (`deploy/agents.sh` finds
+the node beside npm); and changing somebody else's MCP server. `nativecheck` pins
+the layout, the four copies of the helper's name, the four plist keys that decide
+how LaunchServices files the process, the signing step and `build.rs`'s CPU table.
 
 ## The two mobile platforms are in different states
 

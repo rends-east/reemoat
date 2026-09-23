@@ -2,20 +2,24 @@
  * Stage the daemon — runtime, dependencies and source — for embedding in the app.
  *
  * `node scripts/build-daemon.mjs`, from this package. It writes two things and
- * nothing else:
+ * nothing else — the runtime, and the payload:
  *
- *   src-tauri/binaries/node-<target-triple>   the runtime, for `bundle.externalBin`
- *   src-tauri/target/daemon/                  the payload, for `bundle.resources`
+ *   src-tauri/target/Helpers/Reemoat Runtime.app   the runtime on macOS, as a signed
+ *                                                  helper app, for `bundle.macOS.files`
+ *   src-tauri/binaries/node-<target-triple>        the runtime for any other triple,
+ *                                                  which no overlay ships today
+ *   src-tauri/target/daemon/                       the payload, for `bundle.resources`
  *
  * **This is its own step rather than a `beforeBuildCommand`, and that is the one
  * structural thing to know about it.** `build-frontend.mjs` can be a
- * `beforeBuildCommand` because `frontendDist` is read by the *bundler*. Resources
- * and external binaries are not: `tauri-build` copies both from inside `build.rs`
- * (`copy_resources` / `copy_binaries`), so they are read by **cargo**, and a
- * missing staging directory fails `cargo clippy`, `cargo test` and
- * `tauri build --no-bundle` — all three of which the `native` CI job runs — with
- * `ResourcePathNotFound` long before anything is bundled. So this has to run ahead
- * of every cargo invocation, which is what `pnpm native:stage` is for.
+ * `beforeBuildCommand` because `frontendDist` is read by the *bundler*. The payload
+ * and the runtime are not: `tauri-build` copies `bundle.resources` from inside
+ * `build.rs` (`copy_resources`), and this crate's own `build.rs` refuses a macOS
+ * build whose runtime helper is missing or staged for another architecture — so
+ * both are read by **cargo**, and a missing staging directory fails `cargo clippy`,
+ * `cargo test` and `tauri build --no-bundle` — all three of which the `native` CI
+ * job runs — long before anything is bundled. So this has to run ahead of every
+ * cargo invocation, which is what `pnpm native:stage` is for.
  *
  * ## Why npm builds the tree when this repository is a pnpm repository
  *
@@ -128,9 +132,11 @@ const NODE_DIST = "https://nodejs.org/dist";
 /**
  * Which build to fetch, per Rust target triple.
  *
- * `bundle.externalBin` names a path *prefix* and resolves
- * `<prefix>-<target-triple>`, so the file on disk carries the triple and the
- * binary inside the bundle does not.
+ * On macOS the runtime is staged into one helper whatever the triple —
+ * `bundle.macOS.files` names a fixed path — so the triple is no longer in the
+ * file's name, and `build.rs` is what refuses a helper staged for the other
+ * architecture by reading the Mach-O header of the binary itself. Any other
+ * triple keeps the `<name>-<target-triple>` file an `externalBin` resolves.
  *
  * ⚠ **This project is not macOS-only, and this table is where that stops being a
  * comment and starts being work.** `docs/NATIVE.md` lists macOS, Windows and Linux
@@ -212,6 +218,25 @@ const tauriRoot = join(nativeRoot, "src-tauri");
 const cacheDir = join(tauriRoot, ".node-cache");
 const stageDir = join(tauriRoot, "target", "daemon");
 const binariesDir = join(tauriRoot, "binaries");
+/**
+ * The helper app the runtime lives in on macOS, and where it is staged.
+ *
+ * ⚠ **`target/Helpers`, because `target/` stands where `Contents/` stands.** The
+ * payload is `Contents/Resources/daemon` in a bundle and `target/<profile>/daemon`
+ * in a development build — two levels below each — so one relative path reaches
+ * the runtime from the payload in both, and one reaches it from the executable:
+ * `<exe>/../../Helpers/…` is `Contents/Helpers` beside `Contents/MacOS`, and
+ * `target/Helpers` beside `target/<profile>`. A development build with another
+ * target directory gets its copy from `build.rs`, the way `tauri-build` copies
+ * an `externalBin` into the profile directory.
+ *
+ * The name is written down in three more places — `bundle.macOS.files` in
+ * `tauri.conf.json`, `daemon.rs` and `build.rs` — and `nativecheck` compares all
+ * four, because a helper staged under one name and looked for under another is a
+ * bundle that builds, signs and then starts no daemon.
+ */
+const RUNTIME_HELPER = "Reemoat Runtime.app";
+const helpersDir = join(tauriRoot, "target", "Helpers");
 
 const triple = process.argv[2] ?? defaultTriple();
 const target = TARGETS[triple];
@@ -485,10 +510,10 @@ function copySource(runtime) {
 /**
  * The `node` the payload runs, and the shims that find it.
  *
- * A copy inside `node_modules/.bin` rather than a link to the one in
- * `Contents/MacOS`: the shims resolve it as `$basedir/node`, which is what makes
- * the payload independent of PATH, and a relative link out of `Resources` into
- * `MacOS` would be a symlink — the one thing the bundler cannot copy.
+ * A shim inside `node_modules/.bin` rather than a link to the real runtime: the
+ * other shims resolve it as `$basedir/node`, which is what makes the payload
+ * independent of PATH, and a relative link out of `Resources` into `Helpers`
+ * would be a symlink — the one thing the bundler cannot copy.
  */
 function placeRuntime(runtime) {
   const node = join(runtime, "bin", "node");
@@ -501,7 +526,7 @@ function placeRuntime(runtime) {
    * to PATH, and `deploy/agents.sh` resolves the runtime as
    * `$(dirname -- "$(command -v npm)")/node` — the node *beside* npm. The obvious
    * way to satisfy both is to copy the binary there, and that is what this did:
-   * **122 MB, byte-identical to the `externalBin` copy, shipped twice**, taking the
+   * **122 MB, byte-identical to the bundled runtime, shipped twice**, taking the
    * projected bundle from 244 MiB to 360 MiB.
    *
    * A symlink is what this wants and is exactly what cannot be used — the bundler
@@ -509,12 +534,22 @@ function placeRuntime(runtime) {
    * this whole script is shaped around. So: a shim, which is a regular file, and
    * which finds the one real copy.
    *
-   * It probes **two** relative paths because the two layouts differ in depth, and
-   * hard-coding either would work in development and fail in the bundle or the
-   * reverse — the worst pair of outcomes to choose between:
+   * It probes **two** relative paths, and the first serves the bundle and a
+   * development build alike, because {@link helpersDir} is staged where it is for
+   * exactly that:
    *
-   *   bundle  Contents/Resources/daemon/node_modules/.bin → ../../../../MacOS/node
-   *   dev     target/<profile>/daemon/node_modules/.bin   → ../../../node
+   *   bundle  Contents/Resources/daemon/node_modules/.bin → ../../../../Helpers/Reemoat Runtime.app/…/node
+   *   dev     target/<profile>/daemon/node_modules/.bin   → the same four levels up, to target/Helpers
+   *   other   an `externalBin` beside the executable      → ../../../node
+   *
+   * The second is where `tauri-build` puts an `externalBin` in a development
+   * build, and it is what the layout was on every platform before the runtime
+   * moved into the helper. No overlay ships a runtime today, so nothing reaches
+   * it; it stays so that a platform which does is not broken by this one's move.
+   *
+   * ⚠ **The first path has a space in it**, which is why every candidate is quoted
+   * in the list and at the `exec`. A bare word would split at `Reemoat` and exec
+   * nothing, and the refusal below would then blame the staging.
    *
    * ⚠ **There is no third guess, and the line that used to be one was a
    * self-exec.** It read `exec node "$@"`, and this comment claimed *"PATH is then
@@ -535,9 +570,9 @@ function placeRuntime(runtime) {
     join(binDir, "node"),
     `#!/bin/sh\n` +
       `# Generated by packages/native/scripts/build-daemon.mjs.\n` +
-      `# The runtime itself is the externalBin copy; this only finds it.\n` +
+      `# The runtime itself is the one in the ${RUNTIME_HELPER} helper; this only finds it.\n` +
       `basedir=$(dirname "$0")\n` +
-      `for candidate in "$basedir/../../../../MacOS/node" "$basedir/../../../node"; do\n` +
+      `for candidate in "$basedir/../../../../Helpers/${RUNTIME_HELPER}/Contents/MacOS/node" "$basedir/../../../node"; do\n` +
       `  [ -x "$candidate" ] && exec "$candidate" "$@"\n` +
       `done\n` +
       `echo "reemoat: the bundled Node runtime was not found beside this payload" >&2\n` +
@@ -545,11 +580,107 @@ function placeRuntime(runtime) {
   );
   chmodSync(join(binDir, "node"), 0o755);
 
-  mkdirSync(binariesDir, { recursive: true });
-  const external = join(binariesDir, `node-${triple}`);
-  cpSync(node, external);
-  chmodSync(external, 0o755);
+  if (triple.endsWith("-apple-darwin")) {
+    stageHelper(node);
+  } else {
+    mkdirSync(binariesDir, { recursive: true });
+    const external = join(binariesDir, `node-${triple}`);
+    cpSync(node, external);
+    chmodSync(external, 0o755);
+  }
   step(`runtime placed once (${(statSync(node).size / 1e6).toFixed(0)} MB), reached by a shim in the payload`);
+}
+
+/**
+ * The runtime on macOS: an application bundle of its own, nested in the app and
+ * signed before the app around it is.
+ *
+ * ⚠ **A bundle because of the Dock, and the mechanism is LaunchServices, not
+ * Node.** libuv registers a process with LaunchServices when `process.title` is
+ * set, and npm sets one — `npm exec chrome-devtools-mcp@latest` — for every MCP
+ * server an agent starts through `npx`. The main bundle of a binary is found from
+ * its path, so for `Reemoat.app/Contents/MacOS/node` it was Reemoat.app, which
+ * carries no `LSUIElement`: every such process became a Foreground application of
+ * `com.reemoat.app`, and with no icon of its own the Dock drew a blank "exec"
+ * tile for it. Measured with `lsappinfo` on 0.10.1, same bytes each time:
+ *
+ *   Reemoat.app/Contents/MacOS/node, process.title set       type="Foreground"
+ *   the same, no process.title                               not registered
+ *   Homebrew's node, process.title set                       type="BackgroundOnly"
+ *   Contents/Helpers/Reemoat Runtime.app/…/node, title set   type="UIElement"
+ *
+ * So the runtime gets a bundle whose `Info.plist` says `LSUIElement`, and the
+ * app's own `Info.plist` is left alone — `LSUIElement` there would take Reemoat's
+ * own Dock icon away. `src-tauri/runtime/Info.plist` is the committed half and
+ * this assembles the rest around it.
+ *
+ * ⚠ **Signed here because the bundler will not, and it has to be before the
+ * bundler seals the app.** tauri-bundler 2.11 signs the app, its frameworks and
+ * its `externalBin` entries — all with the *app's* entitlements file — and copies
+ * `bundle.macOS.files` verbatim, before sealing. So a helper that arrives
+ * unsigned is sealed over as it is, and `codesign --verify --deep --strict`
+ * refuses the app: *"In subcomponent: …/Helpers/Reemoat Runtime.app"*, measured.
+ * Signed here, inside out, with the runtime's own entitlements — which is also
+ * the nested pass `entitlements-node.plist` has been waiting for since it was
+ * written, and it runs on every build rather than only on a signed one.
+ */
+function stageHelper(node) {
+  const helper = join(helpersDir, RUNTIME_HELPER);
+  const contents = join(helper, "Contents");
+  // From nothing, every time: a helper left by a previous run carries a
+  // signature over bytes this run is about to replace.
+  rmSync(helper, { recursive: true, force: true });
+  mkdirSync(join(contents, "MacOS"), { recursive: true });
+  cpSync(join(tauriRoot, "runtime", "Info.plist"), join(contents, "Info.plist"));
+  cpSync(node, join(contents, "MacOS", "node"));
+  chmodSync(join(contents, "MacOS", "node"), 0o755);
+  signHelper(helper);
+}
+
+/**
+ * Sign the helper as a bundle — its `Info.plist` bound, its executable under the
+ * hardened runtime with `entitlements-node.plist` — and verify it.
+ *
+ * **The identity is the bundler's own variable**, `APPLE_SIGNING_IDENTITY`, so a
+ * build carries one identity from the inside out; with none set, both halves are
+ * ad-hoc. `--timestamp` goes with a real identity because notarization refuses a
+ * Developer ID signature without a secure timestamp, and never with `-`, which
+ * cannot carry one.
+ *
+ * ⚠ **`APPLE_CERTIFICATE` alone is refused.** With that variable the bundler
+ * imports the certificate into a keychain of its own *during* `tauri build`,
+ * which does not exist yet when this runs — so the app would be signed with the
+ * Developer ID and the runtime inside it ad-hoc, and notarization would reject
+ * the pair after the whole build had run. Import the certificate into a keychain
+ * on the search list first and name it in `APPLE_SIGNING_IDENTITY`.
+ */
+function signHelper(helper) {
+  if (process.platform !== "darwin") {
+    fail(`${triple} is staged as a signed helper app, and only macOS has codesign. Stage it on a Mac.`);
+  }
+  const identity = process.env.APPLE_SIGNING_IDENTITY || "-";
+  if (identity === "-" && process.env.APPLE_CERTIFICATE) {
+    fail(
+      "APPLE_CERTIFICATE is set and APPLE_SIGNING_IDENTITY is not.\n" +
+        "  The bundler imports that certificate into its own keychain during tauri build, after\n" +
+        "  this step has run, so the runtime would be signed ad-hoc inside a Developer ID app and\n" +
+        "  notarization would refuse it. Import the certificate into a keychain on the search list\n" +
+        "  and export APPLE_SIGNING_IDENTITY with its name.",
+    );
+  }
+  run("codesign", [
+    "--force",
+    "--sign",
+    identity,
+    "--options",
+    "runtime",
+    "--entitlements",
+    join(tauriRoot, "entitlements-node.plist"),
+    identity === "-" ? "--timestamp=none" : "--timestamp",
+    helper,
+  ]);
+  run("codesign", ["--verify", "--strict", helper]);
+  step(`runtime helper signed ${identity === "-" ? "ad-hoc" : `as ${identity}`} with entitlements-node.plist`);
 }
 
 /**

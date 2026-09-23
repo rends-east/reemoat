@@ -41,6 +41,14 @@ it — so a citation here would be the one kind nothing checks.
   signature, and tapped on that phone, does. A release now also refuses to
   publish an APK missing either signature.
 
+- **Starting a session in the macOS app put blank "exec" icons in the Dock.**
+  Every MCP server an agent started through `npx` appeared there as an application
+  of its own — a blank tile labelled "node" — because macOS counted the Node
+  runtime inside the app as part of Reemoat itself. The runtime now lives in a
+  small helper inside the app that macOS keeps out of the Dock, so MCP servers run
+  exactly as before and the Dock shows Reemoat alone. The app is no larger: it
+  still carries one copy of the runtime.
+
 ## [0.10.1] - 2026-09-22
 
 ### Added

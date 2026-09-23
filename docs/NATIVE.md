@@ -121,9 +121,49 @@ afterwards — the same hazard `pnpm web:build` has (Q5.15).
 
 ### The daemon inside it, and the loop for changing it
 
-The app carries a daemon — a Node runtime in `Contents/MacOS/node` and a snapshot of
-`src/`, `scripts/` and `deploy/` in `Contents/Resources/daemon/`, staged by
+The app carries a daemon — a Node runtime in
+`Contents/Helpers/Reemoat Runtime.app/Contents/MacOS/node` and a snapshot of `src/`,
+`scripts/` and `deploy/` in `Contents/Resources/daemon/`, staged by
 `pnpm native:stage`.
+
+⚠ **The runtime is a helper app of its own, and the Dock is why.** It used to be
+`Contents/MacOS/node`. libuv registers a process with LaunchServices the moment
+`process.title` is set, npm sets one for every MCP server an agent starts through
+`npx` (`npm exec chrome-devtools-mcp@latest`), and a binary in `Contents/MacOS`
+belongs to Reemoat.app as far as LaunchServices is concerned — so each of those
+became a Foreground application of `com.reemoat.app` with a blank "exec" icon in
+the Dock. The helper's `Info.plist` (`src-tauri/runtime/Info.plist`) carries
+`LSUIElement` and its own identifier, `com.reemoat.app.runtime`. Measured with
+`lsappinfo` on 0.10.1, the same binary each time:
+
+| Runtime | `process.title` set | LaunchServices says |
+|---|---|---|
+| `Reemoat.app/Contents/MacOS/node` | yes | `type="Foreground"`, `bundleID="com.reemoat.app"` — a Dock icon |
+| `Reemoat.app/Contents/MacOS/node` | no | not registered |
+| Homebrew's `node` | yes | `type="BackgroundOnly"` |
+| `Contents/Helpers/Reemoat Runtime.app/Contents/MacOS/node` | yes | `type="UIElement"`, `bundleID="com.reemoat.app.runtime"` — no Dock icon |
+
+To check a build by hand:
+
+```bash
+"Reemoat.app/Contents/Helpers/Reemoat Runtime.app/Contents/MacOS/node" \
+  -e "process.title='probe';setTimeout(()=>{},5000)" & sleep 1.5
+lsappinfo list | grep -A8 '"probe"'    # type="UIElement", never "Foreground"
+```
+
+It is still **one** copy of the binary. The payload's `node_modules/.bin/node` is a
+shim that finds it four directories up — `Contents/` in a bundle, `target/` in a
+development build, where `pnpm native:stage` puts the helper at `target/Helpers`
+for exactly that — and `daemon.rs` finds it at `<executable>/../../Helpers` in both.
+`build.rs` refuses a build whose staged helper is missing or for the other
+architecture, and copies it beside a profile directory that is not
+`src-tauri/target`.
+
+Rejected, each for a reason worth keeping: `LSUIElement` on the app itself (it
+takes Reemoat's own Dock icon and menu bar away), the runtime in
+`Contents/Resources` (not nested code, so not reliably signed), taking the
+payload's `.bin` off the front of the daemon's `PATH` (`deploy/agents.sh` finds
+the runtime as the node beside npm), and changing somebody else's MCP server.
 
 ⚠ **That snapshot is not your working tree, and it is not your working tree in
 `tauri dev` either.** `bundle.resources` is copied by `build.rs` into
@@ -259,7 +299,14 @@ Three consequences, each stated rather than worked around:
    `flags=0x20002(adhoc,linker-signed)` and **no entitlements and no hardened
    runtime**. Both are applied when a real identity signs, not before — so a
    development build is not evidence that `entitlements.plist` is right, and the
-   first signed build is where that gets tested.
+   first signed build is where that gets tested. **The runtime helper is the
+   exception**: `pnpm native:stage` signs it ad-hoc under the hardened runtime with
+   `entitlements-node.plist` on every build, so a build that starts its daemon *is*
+   evidence for that file. And because nothing seals the app itself,
+   `codesign --verify --deep --strict` refuses an unsigned build with *"code has no
+   resources but signature indicates they must be present"* — 0.10.1's did too.
+   `APPLE_SIGNING_IDENTITY=- pnpm native:build` has the bundler seal it ad-hoc,
+   through the same code path a certificate takes, and that build verifies.
 
 **And three things a `.dmg` needs that a `.app` does not.** `bundle.targets` is
 `["app"]` alone, because Tauri's `bundle_dmg.sh` drives **Finder over AppleScript**
@@ -282,7 +329,7 @@ be somebody's identity in a public repository.
 
 | | What | Driven by |
 |---|---|---|
-| Apple code signature | a **Developer ID Application** certificate, with the hardened runtime | `APPLE_SIGNING_IDENTITY`, or `APPLE_CERTIFICATE` + `APPLE_CERTIFICATE_PASSWORD` |
+| Apple code signature | a **Developer ID Application** certificate, with the hardened runtime | `APPLE_SIGNING_IDENTITY`, naming a certificate already in a keychain on the search list — `APPLE_CERTIFICATE` alone is refused, see below |
 | Notarization | Apple's service; Tauri submits and staples during `tauri build` when the variables are present | `APPLE_ID` + `APPLE_PASSWORD` (an app-specific password) + `APPLE_TEAM_ID`, **or** `APPLE_API_KEY` / `APPLE_API_ISSUER` / `APPLE_API_KEY_PATH` |
 | Update signature | a **separate** minisign keypair from `tauri signer generate`, nothing to do with Apple | `TAURI_SIGNING_PRIVATE_KEY` |
 
@@ -297,6 +344,20 @@ build**. The steps, in order:
    staples.
 3. `xcrun stapler validate` on the `.app`, and `spctl -a -vvv -t install` on the
    `.dmg`, to see what a downloader will see.
+
+⚠ **The runtime helper is signed by `pnpm native:stage`, not by the bundler, and
+that decides how the identity may be supplied.** tauri-bundler 2.11 signs the app,
+its frameworks and its `externalBin` entries — every one with the *app's*
+entitlements file — and copies `bundle.macOS.files` without signing anything in it.
+So `build-daemon.mjs` signs `Reemoat Runtime.app` first, inside out: the hardened
+runtime, `entitlements-node.plist`, and `APPLE_SIGNING_IDENTITY` with a secure
+timestamp (ad-hoc when it is unset); the bundler then seals the app around the
+signed helper. The identity therefore has to be findable **before** `tauri build`
+starts. `APPLE_CERTIFICATE` is imported by the bundler into a keychain of its own
+during the build, after staging has run, so staging refuses it on its own rather
+than put an ad-hoc runtime inside a Developer ID app for notarization to reject.
+Import the certificate first (`security import`, or a CI action that does) and
+export its name as `APPLE_SIGNING_IDENTITY`.
 
 ⚠ **If signed updates are ever wanted, generate the keypair before the first public
 build.** A build shipped with no `pubkey` can never be updated in place by a later
@@ -458,8 +519,9 @@ Recorded here rather than discovered, in the column this repository keeps them i
   build is still a thing somebody can ask for, and this is what it would cost.
   Read off `tauri-utils`: a `.deb` or AppImage puts resources at
   `/usr/lib/<productName>/` while the executable is at `/usr/bin/<productName>`.
-  `Payload::locate` takes `node` from `exe.parent()?.join("node")`, which there is
-  `/usr/bin/node` — the distribution's, a different version with a different
+  Off macOS, `Payload::locate` takes `node` from `runtime_beside`, which answers
+  `exe.parent()?.join("node")` — the macOS helper is not a Linux layout — so on a
+  `.deb` it is `/usr/bin/node`: the distribution's, a different version with a different
   module set, and the daemon would run under it with nothing saying so. That half
   is unfixed, deliberately: fixing it blind on a macOS checkout is how a guess
   becomes a measurement.

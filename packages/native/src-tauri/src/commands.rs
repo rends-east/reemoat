@@ -552,7 +552,8 @@ fn resource_dir(app: &AppHandle) -> std::path::PathBuf {
         .unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
-/// This process's own executable, whose directory holds `bundle.externalBin`.
+/// This process's own executable, from which `daemon::runtime_beside` finds the
+/// runtime — on macOS the helper app in `Contents/Helpers`, not a file beside it.
 fn exe_path() -> std::path::PathBuf {
     std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("."))
 }

@@ -14,14 +14,16 @@
   wanted, and not one day before. `docs/NATIVE.md` carries what that would take.
 
   ⚠ **There is a second entitlements file beside this one and it is not a
-  duplicate.** `entitlements-node.plist` belongs to `Contents/MacOS/node`, the
-  bundled runtime the daemon runs under, which needs five hardened-runtime
-  exceptions that V8 cannot start without. They are deliberately *not* merged in
-  here: this is the signature on the window holding the fleet's credential, and
+  duplicate.** `entitlements-node.plist` belongs to
+  `Contents/Helpers/Reemoat Runtime.app`, the helper holding the Node runtime the
+  daemon runs under, which needs five hardened-runtime exceptions that V8 cannot
+  start without. They are deliberately *not* merged in here: this is the
+  signature on the window holding the fleet's credential, and
   `disable-library-validation` on it would mean any dylib could be loaded into
-  that process. Two Mach-O binaries, two signatures, two sets — which is how the
-  hardened runtime is meant to be used, and the reason that file exists rather
-  than this one growing.
+  that process. Two bundles, two signatures, two sets — which is how the hardened
+  runtime is meant to be used, and the reason that file exists rather than this
+  one growing. `build-daemon.mjs` signs the helper with it; the bundler signs this
+  app with this one, and seals the signed helper inside.
 -->
 <plist version="1.0">
   <dict>

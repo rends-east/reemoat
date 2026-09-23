@@ -5,19 +5,26 @@
   ⚠ **This file is not the app's.** `entitlements.plist` beside it holds one
   entitlement and is meant to stay that way; these five would be a real loosening
   of the window that holds the fleet's credential. They belong to
-  `Contents/MacOS/node`, which is a separate Mach-O with a separate signature and
-  therefore a separate set.
+  `Contents/Helpers/Reemoat Runtime.app`, the helper app the runtime lives in,
+  which is a separate bundle with a separate signature and therefore a separate
+  set.
 
   **Every key here was measured rather than chosen.** The official Node build from
   nodejs.org already ships signed with the hardened runtime, and this is the set it
-  carries — read off `node-v24.21.0-darwin-arm64` with:
+  carries — read off `node-v24.21.0-darwin-arm64` by asking `codesign -d` for the
+  entitlements of `bin/node` as XML, which answered `allow-jit`,
+  `allow-unsigned-executable-memory`, `disable-executable-page-protection`,
+  `disable-library-validation`, `allow-dyld-environment-variables` and
+  `get-task-allow`. So this is not a guess about what V8 needs; it is what the
+  people who build V8 ask for.
 
-      codesign -d --entitlements - --xml bin/node
-
-  which answered `allow-jit`, `allow-unsigned-executable-memory`,
-  `disable-executable-page-protection`, `disable-library-validation`,
-  `allow-dyld-environment-variables` and `get-task-allow`. So this is not a guess
-  about what V8 needs; it is what the people who build V8 ask for.
+  ⚠ **No double hyphen appears anywhere in this comment, and that is not style.**
+  XML forbids one inside a comment, and codesign's own parser refuses the whole
+  file over it: `Failed to parse entitlements: AMFIUnserializeXML: syntax error`.
+  `plutil -lint` accepts the same file, which is how the command line quoted here
+  verbatim went unnoticed for as long as nothing signed with this file: it could
+  not have signed anything. `nativecheck` asserts the rule over every plist beside
+  it.
 
   ⚠ **`com.apple.security.get-task-allow` is deliberately absent**, and it is the
   one key in that measurement that must never be copied. It lets another process
@@ -47,14 +54,15 @@
     allow-dyld-environment-variables
                                      Node reads DYLD_* for its own diagnostics.
 
-  **None of this is exercised yet.** `bundle.macOS.signingIdentity` is null, so
-  the bundler skips signing entirely and a development build is `adhoc,
-  linker-signed` with no entitlements at all — `docs/NATIVE.md` records the
-  measurement and says a development build is not evidence. What this file is for
-  is the first signed build, where `Contents/MacOS/node` has to be signed with
-  this set *before* the app around it is sealed. Tauri's `entitlements` key names
-  one file for the app, so that nested pass is a step of its own rather than
-  something the config expresses.
+  **Exercised on every build now, which it was not before.** Tauri's
+  `entitlements` key names one file, for the app, and the bundler signs nothing in
+  `bundle.macOS.files` — so the nested pass this file exists for is a step of its
+  own: `build-daemon.mjs` signs the helper with it, under the hardened runtime,
+  before the bundler seals the app around it. With `APPLE_SIGNING_IDENTITY` set
+  that is the Developer ID signature notarization reads; with none it is ad-hoc,
+  and the runtime still starts under the hardened runtime with exactly these five.
+  So a development build is evidence for this file, where `docs/NATIVE.md` is right
+  that it is still not evidence for the app's.
 -->
 <plist version="1.0">
   <dict>
