@@ -482,6 +482,55 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     [true, true, true, true],
   );
   /*
+   * ⭐ **And the way to the card, which is the only way left** (Q3.640). New
+   * session installs nothing and signs nothing in any more: a strip with nothing to
+   * start says why and offers Agent settings, which lands on this list. So a row
+   * that is reporting a fault has to lead to the harness's own card, or the walk
+   * from "nothing can start" ends one screen short of the remedy.
+   *
+   * Four halves, each one a way to lose it quietly: conditional on the fact the row
+   * already reports rather than on its kind; a push to the leaf rather than a
+   * button that runs something in place; inside the one menu rather than beside it,
+   * since a row that gains a control moves every control beside it; and the old
+   * silent Install gone, so the card is the one surface that starts a run.
+   * `\s+` between tokens rather than single spaces, so a formatter reflowing the
+   * JSX cannot turn a live assertion into a false one. The third operand is a
+   * preset on a harness that refused while routed — the fault New session's
+   * *not ready* sends somebody here about, which the row used to carry no Set up
+   * for.
+   */
+  check(
+    "a row whose agent cannot start opens that agent's card, from inside the menu",
+    [
+      /behind\s+!==\s+null\s+&&\s+\(badge\?\.tone\s+===\s+"strong"\s+\|\|\s+!behind\.available\s+\|\|\s+presetRefused\)\s+&&\s+\(\s*<RowAction\s+label=\{`Set up \$\{harnessName\(behind\)\}`\}/.test(
+        pane,
+      ),
+      /navigate\(\s*agentSetupPath\(\s*machineId,\s+behind\.id\s*\)\s*\)/.test(pane),
+      pane.indexOf("<Menu") > 0 &&
+        pane.indexOf("agentSetupPath(machineId, behind.id)") > pane.indexOf("<Menu"),
+      /onInstall/.test(pane),
+      /\.startInstall\(/.test(pane),
+    ],
+    [true, true, true, false, false],
+  );
+  /*
+   * And the card is this screen's own leaf, mounted untitled — the harness's name
+   * heads it, since the pane already says "Setup" — and keyed on machine and
+   * harness, so a live login run cannot leak from one harness's card into
+   * another's. Imported from the panel that draws it everywhere else, which is
+   * what keeps it one card rather than a copy.
+   */
+  check(
+    "and the card is a leaf of this screen, mounted untitled",
+    [
+      /<AgentDetail\s+key=\{`\$\{machineId\}:\$\{harness\}`\}\s+machineId=\{machineId\}\s+agentId=\{harness\}\s*\/>/.test(
+        pane,
+      ),
+      /import\s+\{\s*AgentDetail\s*\}\s+from\s+"\.\/AgentsPanel"/.test(pane),
+    ],
+    [true, true],
+  );
+  /*
    * ⚠ **And the card that *states* the refusal carries one too**, because the list
    * above cannot reach every harness that can be in this state. `AgentDetail` is
    * where `stanceLine` draws the sentence, and a sentence naming a remedy with no
@@ -813,6 +862,76 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     "an empty machine is said only where the read succeeded",
     /rows\.length === 0 && failure === null && supported/.test(pane),
     true,
+  );
+  /*
+   * ⚠ **And an empty *list* is not always an empty machine.** This list leaves out
+   * every harness `startsBare` is false for — opencode, and any a plugin added —
+   * so a machine listing only those has agents and draws no rows, and "reports no
+   * agents" over it contradicts the New session sentence that sent somebody here.
+   * Two sentences, told apart by the listing rather than by the rows.
+   */
+  check(
+    "a list with no rows says whether the machine has no agents or only ones that need a model",
+    /listing\.agents\.length === 0\s*\?\s*"This machine reports no agents\."\s*:\s*"Every agent on this machine needs a model\. Add an agent to pick one\."/.test(
+      pane,
+    ),
+    true,
+  );
+  /*
+   * ⚠ **A preset row names its harness's fault, where it used to name its
+   * system.** A fault displaces the vendor on a harness row, and a preset on a
+   * missing harness — or one that refused while routed, which `startableHere`
+   * refuses and New session's *not ready* counts — is the same fault one row
+   * removed. It is also what explains the Set up in that row's menu, which would
+   * otherwise offer to set up a harness the row never mentions. Both tests are
+   * the New session tile's own (`missing`, `refused`), and the words are the
+   * tile's, so the two screens describe one preset alike;
+   * `webcheck.strip-chosen-tile.ts` pins the tile's half. Ordered, because a
+   * preset that is fine has to fall through to its system and a missing one may
+   * not read as refused.
+   */
+  {
+    const missingAt = pane.search(/const presetMissing = preset !== null && \(behind === null \|\| !behind\.available\);/);
+    const refusedAt = pane.search(
+      /const presetRefused =\s*preset !== null && behind !== null && behind\.available && behind\.lastStartRefusal\?\.routed === true;/,
+    );
+    const underAt = pane.indexOf("const under = since !== null");
+    const under = underAt < 0 ? "" : pane.slice(underAt, pane.indexOf(";", underAt));
+    const missingArm = under.search(/presetMissing\s*\?\s*`\$\{harnessName\(behind \?\? \{ id: preset\.harness \}\)\} not installed`/);
+    const refusedArm = under.search(/presetRefused\s*\?\s*`\$\{harnessName\(behind \?\? \{ id: preset\.harness \}\)\} would not start`/);
+    const systemArm = under.indexOf("customAgentSubline(preset, listing.systems)");
+    check(
+      "a preset row says its harness is not installed or would not start, ahead of its system",
+      [
+        missingAt >= 0,
+        refusedAt >= 0,
+        under.length > 0,
+        missingArm >= 0 && missingArm < refusedArm,
+        refusedArm >= 0 && refusedArm < systemArm,
+      ],
+      [true, true, true, true, true],
+    );
+  }
+  /*
+   * ⚠ **And the poll loop an adopted run starts stops with the list.** It
+   * re-arms with a bare `setTimeout`, and this list unmounts on every Set up now
+   * — the leaf replaces it — so each ◀ back during a run started one more loop
+   * while the last went on polling for a component that was gone. Three
+   * places a loop can be standing when that happens: a tick already queued, an
+   * answer already out, and a failure already out. The flag is set on the way
+   * in as well, or StrictMode's second mount could watch nothing.
+   */
+  const watchAt = pane.indexOf("const watch = (");
+  const watchBody = watchAt < 0 ? "" : pane.slice(watchAt, pane.indexOf("poll(cursor);", watchAt));
+  check(
+    "the install poll stops when the list is gone, at every step it can be on",
+    [
+      /const alive = useRef\(true\);/.test(pane),
+      /useEffect\(\(\) => \{\s*alive\.current = true;\s*return \(\) => \{\s*alive\.current = false;\s*\};\s*\}, \[\]\);/.test(pane),
+      watchBody.length > 0,
+      (watchBody.match(/if \(!alive\.current\) return;/g) ?? []).length,
+    ],
+    [true, true, true, 3],
   );
   /*
    * ⚠ **The rows animate only while a drag is live.** Clearing the transform and

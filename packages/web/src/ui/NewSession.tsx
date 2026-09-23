@@ -1,16 +1,13 @@
 import {
   ChevronRight,
   CornerLeftUp,
-  Download,
   FileArchive,
   Folder,
   FolderPlus,
   GitBranch,
-  LogIn,
   Settings2,
 } from "lucide-react";
 import { Suspense, lazy, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
-import { agentDoor, doorLabel, type AgentDoor } from "./agentInstall";
 import { ApiError, errorText } from "../http";
 import { forgetPick, heldPick, keepPick, takePick, takeRemoval } from "../agentPick";
 import { refOf, sessionId, type MachineId } from "../ids";
@@ -19,14 +16,13 @@ import { displayCwd, pathCrumbs } from "../paths";
 import { nativeBoot, pickFolderNative } from "../native";
 import { agentStripPath, settingsPath } from "../settings";
 import { navigate, newPath, sessionPath, type Route } from "../router";
-import { store, type AppState } from "../store";
+import { machinesAsDrawn, store, type AppState, type DrawnMachine } from "../store";
 import type { AgentAvailability, AgentStripEntry, CustomAgent, DirEntry, Me, SystemInfo } from "../wire";
 import { customAgentSubline, harnessSubline, offersStripTile, startableHere } from "../agents";
-import { defaultRow, orderStrip, stripKey } from "../agentStrip";
+import { defaultRow, orderStrip, stripKey, type StripRow } from "../agentStrip";
 import { AgentGlyph } from "./AgentIcons";
 import { ImportCode } from "./ImportCode";
-import { harnessName, startsBare } from "./agentCard";
-import { AgentDetail } from "./settings/AgentsPanel";
+import { harnessName } from "./agentCard";
 import {
   Button,
   Dot,
@@ -95,21 +91,22 @@ function MachinePicker({
   value,
   onChange,
 }: {
-  machines: readonly MachineState[];
+  /** In the rail's order and under the rail's names — see `machinesAsDrawn`. */
+  machines: readonly DrawnMachine[];
   value: MachineId | null;
   onChange: (id: MachineId) => void;
 }): ReactNode {
-  const current = machines.find((machine) => machine.id === value);
-  const reason = current === undefined ? null : unusableReason(current);
+  const current = machines.find((one) => one.machine.id === value);
+  const reason = current === undefined ? null : unusableReason(current.machine);
 
   return (
     <div className="space-y-1">
       <Dropdown
-        items={machines.map((machine) => {
+        items={machines.map(({ machine, name }) => {
           const why = unusableReason(machine);
           return {
             value: machine.id,
-            label: machine.name,
+            label: name,
             description: why,
             disabled: why !== null,
             adornment: <Dot tone={why === null ? "on" : "off"} />,
@@ -375,7 +372,15 @@ function NewSession({
    * unavailable and one that accepts a machine, an agent, a directory and a typed
    * prompt before answering 403.
    */
-  const reachable = state.machines.filter((machine) => canStartOn(machine));
+  /*
+   * ⚠ **In the rail's order and under the rail's names**, through
+   * `machinesAsDrawn` rather than `state.machines`. That list is the control
+   * plane's order, so with the rail leading with `local` the picker opened
+   * under it named the host and `reachable[0]` — the default when the route
+   * names no machine — could be any other machine. One answer for all three.
+   */
+  const drawn = machinesAsDrawn(state);
+  const reachable = drawn.map((one) => one.machine).filter((machine) => canStartOn(machine));
   const [machine, setMachine] = useState<MachineId | null>(fromRoute);
   /*
    * The choices live in `StartSheet`, one level up, and the reason is a *route*.
@@ -488,7 +493,14 @@ function NewSession({
   }, [machine, cwd, fromRoute, fromRouteCwd]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  /** Bumped by the inline sign-in, so the tiles re-read `GET /agent-auth`. */
+  /**
+   * Bumped by the retries under the strip — Check again and Try again — so every
+   * read the row is drawn from is sent again.
+   *
+   * ⚠ **It was the inline sign-in's, and that door is gone** (Q3.640). A sign-in
+   * or an install now happens on the machine's Agents screen, and coming back
+   * from there remounts this component, which re-reads the listing by itself.
+   */
   const [agentsEpoch, setAgentsEpoch] = useState(0);
 
   const selected = machine ?? reachable[0]?.id ?? null;
@@ -540,22 +552,27 @@ function NewSession({
    * the hidden one arriving through the other door. {@link defaultRow} weighs both,
    * and the *marked* default on the Agents screen is that same call — one rule, so
    * the badge over there cannot name a row this line would skip.
+   *
+   * ⚠ **The merge is its own binding, because two answers are read off it.** The
+   * default is one; the empty state below is the other, and the two must be about
+   * the same rows — a sentence saying nothing can start, computed over a
+   * different list from the one that found nothing to default to, is a screen
+   * that can contradict its own `Start` button.
    */
-  const defaulted =
+  const stripRows =
     customAgents === null
       ? null
-      : defaultRow(
-          orderStrip(
-            [
-              ...(agents ?? [])
-                .filter(shownHere)
-                .map((one) => ({ kind: "harness" as const, id: one.id })),
-              ...customAgents.map((one) => ({ kind: "custom" as const, id: one.id })),
-            ],
-            stored,
-          ),
-          (row) => startableHere(row, agents, customAgents),
+      : orderStrip(
+          [
+            ...(agents ?? [])
+              .filter(shownHere)
+              .map((one) => ({ kind: "harness" as const, id: one.id })),
+            ...customAgents.map((one) => ({ kind: "custom" as const, id: one.id })),
+          ],
+          stored,
         );
+  const defaulted =
+    stripRows === null ? null : defaultRow(stripRows, (row) => startableHere(row, agents, customAgents));
   /**
    * The tile this screen draws as chosen, and the id `Start` will post.
    *
@@ -587,6 +604,30 @@ function NewSession({
       customAgents,
       hiddenHere,
     );
+  /**
+   * Which kind of empty the strip is, or `null` when it is not one — see
+   * {@link stripEmpty}.
+   *
+   * ⚠ **Decided once, here, and handed to both places that speak about it**: the
+   * sentence under the strip and the footer beside `Start`. Each deciding for
+   * itself is how the first draft of this had the footer say "no agent to start"
+   * under a read that had *failed* — `GET /agents` failing lands `[]` and a
+   * reason, which is not an empty machine, and only this call is told about the
+   * reason.
+   *
+   * `null` until both listings have answered, since "nothing can start" is a claim
+   * about two reads and neither may be guessed at.
+   */
+  const empty =
+    agents === null || stripRows === null
+      ? null
+      : stripEmpty({
+          agents,
+          presets: customAgents,
+          rows: stripRows,
+          canConfigure,
+          failed: agentsFailure !== null || presetsFailure !== null,
+        });
   /*
    * What the pop-up that just closed did, adopted once.
    *
@@ -677,9 +718,10 @@ function NewSession({
      * with the chosen folder sitting on screen and named in the footer. Three
      * ordinary routes reached it: the rail's folder `+` (`/new/:machineId/:cwd`,
      * where child effects run before parent effects, so the wipe landed second),
-     * the "re-check" button after an inline sign-in (`agentsEpoch`), and any
-     * change of machine. The picker resets itself now, by being remounted — see
-     * its `key` below.
+     * the "re-check" button after an inline sign-in (`agentsEpoch`, which the
+     * retries under the strip still bump now that sign-in has left this screen),
+     * and any change of machine. The picker resets itself now, by being
+     * remounted — see its `key` below.
      */
     void daemon
       .agents()
@@ -845,15 +887,18 @@ function NewSession({
        * `SHEET_BODY` used to be the scroller of last resort and now clips; this
        * column is `min-h-0 flex-1` of a box that never scrolls, so anything the
        * fixed rows cannot fit would be cut off at the bar rather than reachable,
-       * unless this box moves. The inline sign-in reaches it in one tap: a
-       * device-code transcript adds a couple of hundred pixels to a `shrink-0`
-       * block on a 667px screen. The folder list keeps its `min-h-32` floor, so
-       * this only moves once there is genuinely nowhere left to shrink to.
+       * unless this box moves. The inline sign-in reached it in one tap, with a
+       * device-code transcript in a `shrink-0` block; that card lives on the
+       * Agents screen now (Q3.640), and what is left here that grows is the strip's
+       * own rows — the empty sentence with its button, and the two failure rows
+       * with theirs, which can all be on a 667px screen at once. The folder list
+       * keeps its `min-h-32` floor, so this only moves once there is genuinely
+       * nowhere left to shrink to.
        */}
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5">
         <div className="shrink-0">
           <MachineLine
-            machines={state.machines}
+            machines={drawn}
             reachable={reachable}
             value={selected}
             fromRoute={fromRoute}
@@ -902,6 +947,7 @@ function NewSession({
               canConfigure={canConfigure}
               failure={agentsFailure}
               presetsFailure={presetsFailure}
+              empty={empty}
               value={picked}
               onChange={choose}
               /*
@@ -916,6 +962,15 @@ function NewSession({
                *
                * `navigate` and not `replace`: the settings screen is somewhere you
                * go *from* here, and the phone's Back button has to come back.
+               *
+               * ⚠ **Two controls press it, and they are one crossing.** The gear at
+               * the end of the row, and **Agent settings** under a row with nothing
+               * to start — the door that replaced the inline install and sign-in
+               * (Q3.640). One handler, so the empty state inherits the whole of
+               * what makes this walk affordable rather than a second copy of it:
+               * the address made whole, the push, and the pick in `agentPick.ts`.
+               * From the list, a row's **Set up** opens that harness's card, and
+               * two ◀ come back here.
                */
               onConfigure={() => {
                 if (selected === null) return;
@@ -967,8 +1022,9 @@ function NewSession({
               /*
                * **The folder is chosen with this computer's own panel where the
                * daemon *is* this computer.** `localMachineId` comes from the
-               * announce file the local daemon wrote, and `state.localMachineId`'s
-               * own docblock argues at length why it rather than
+               * machine this app created here and the announce file the local
+               * daemon wrote, and `state.localMachineId`'s own docblock argues at
+               * length why it rather than
                * `route.kind === "local"`: the route is a preference `setLocalOff`
                * can switch off, so a picker keyed on it would put the tree back the
                * moment somebody chose the relay on the machine they are sitting at.
@@ -976,9 +1032,11 @@ function NewSession({
                * not reach `route.kind` anyway — `MachineConnection` is pinned to
                * four modules and no `ui/` file is among them.)
                *
-               * ⚠ **Not part of `key`.** `localMachineId` lands one `runResume`
-               * after the first render, and `picksFolder` one `hostReady`, so this
-               * can go false → true under a mounted picker; a remount would throw
+               * ⚠ **Not part of `key`.** `localMachineId` can land after the first
+               * render — at a `runResume`, for a daemon that came up after the app
+               * on a computer this app did not set up, or naming another machine —
+               * and `picksFolder` one `hostReady`, so this can go false → true under
+               * a mounted picker; a remount would throw
                * away a folder somebody had already walked to, which is the defect
                * `initial`'s own docblock is about. Flipping is harmless: `path`
                * survives and the tree is simply replaced by a line naming the same
@@ -1014,6 +1072,24 @@ function NewSession({
           answers itself and this one needs a tap. It waits for the listing, or it
           would ask for an agent over a row that is still loading.
 
+          ⚠ **Three answers for that arm, and only one of them asks.** "choose an
+          agent" asks for a tap, which is only honest where there is a tile to
+          tap; on a machine with nothing to start it asked for the impossible, so
+          that state says "no agent to start" and the sentence under the strip says
+          why. That one is `empty`'s to say and not a test of its own — see where
+          it is decided — because a read that *failed* also leaves nothing chosen,
+          and there this line must not claim the machine is empty.
+
+          ⚠ **Nor may it ask, so a failed agent read leaves it empty.** With
+          `GET /agents` refused there is no harness tile at all, and every preset
+          tile is disabled because there is no listing to weigh its harness
+          against — so "choose an agent" asked for a tap nothing could make,
+          which is the failure the paragraph above removed. The Try again row
+          under the strip speaks for that state — an empty string rather than a
+          dropped arm, as the folder arm's is and for its reason. Only the
+          *agents* read: a failed preset read leaves the harness tiles, and
+          asking is honest there.
+
           ⚠ **And the refusal is one of the arms now, where it used to be the last
           paragraph of the scroller — which is a place nobody was looking.** That
           column ends in a `flex-1` directory picker with a `min-h-32` floor, so
@@ -1043,7 +1119,7 @@ function NewSession({
           ) : busy ? (
             "this can take up to 45 seconds"
           ) : agents !== null && picked === null ? (
-            "choose an agent"
+            agentsFailure !== null ? "" : empty !== null ? "no agent to start" : "choose an agent"
           ) : cwd !== null ? (
             /*
              * Nothing, once a folder is chosen. It read `in ~/thing`, which is the
@@ -1084,14 +1160,14 @@ export type Picked = { kind: "harness"; id: string } | { kind: "custom"; id: str
 
 /**
  * Whether the strip draws a tile for a harness, which is two rules rather than
- * one: {@link startsBare} asks whether the harness is a whole answer by itself,
- * and {@link offersTile} asks whether it is in a state anything could be started
- * from. Neither implies the other — opencode is perfectly signed in and still has
- * no tile, and claude is a whole answer and still has none while it is signed out.
+ * one: `startsBare` asks whether the harness is a whole answer by itself, and
+ * `offersTile` asks whether it is in a state anything could be started from.
+ * Neither implies the other — opencode is perfectly signed in and still has no
+ * tile, and claude is a whole answer and still has none while it is signed out.
  *
  * Read through one function rather than at the four places that need it, because
- * the row, the default, a restored pick and the sign-in fallback all have to mean
- * the same thing by *offered*. Every time two of them have disagreed the result
+ * the row, the default, a restored pick and the empty state all have to mean the
+ * same thing by *offered*. Every time two of them have disagreed the result
  * was on screen: a tile drawn `aria-pressed` and `disabled` at once, or a `Start`
  * live over a row with nothing selected in it.
  *
@@ -1111,36 +1187,18 @@ export type Picked = { kind: "harness"; id: string } | { kind: "custom"; id: str
  */
 const shownHere = offersStripTile;
 
-/**
- * Whether this screen has a sign-in to offer for an agent.
- *
- * The daemon's own reason (`no_flow`) rather than a boolean re-derived here, which
- * is how the strip's old status line came to disagree with the settings card about
- * the same agent on the same machine.
- *
- * Named because two places have to agree exactly: the block that draws the wizard,
- * and the fallback that decides which agent it is about. A fallback naming an agent
- * the block then declines to draw for is a screen with an empty row, no door and
- * nothing saying why — which is the state hiding signed-out tiles would otherwise
- * have created on a machine where nothing is signed in.
- */
 /*
- * ⚠ **This is `agentDoor` now, in `ui/agentInstall.ts`, and the move is a repair
- * rather than a tidy.** The predicate that stood here answered `true` for
- * `!available` — so a machine without a harness drew **"Sign in to Grok"**, which
- * opened a card whose control slot computes `login.supported && agent.available`
- * and therefore rendered nothing at all. What was left on screen was the daemon's
- * hint: *"grok not found on this daemon's PATH…"*. A door onto one true sentence
- * and no control, which is exactly the state the block below says it was written
- * to prevent — the fix had landed on the `no_flow` arm alone, which covers
- * opencode and nothing else.
- *
- * Kept as a named re-export so both readers below still call one binding, which
- * is the property the old function was extracted for.
+ * ⚠ **There is no door on this screen any more, and its absence is the
+ * decision** (Q3.640). A machine with nothing to start used to unfold a *Sign in
+ * to X* or *Install X* disclosure here, with the harness's whole card inside it —
+ * `agentDoor` and `doorLabel` in `ui/agentInstall.ts` chose which, and a local
+ * binding of the first stood where this note is. It was an in-place expansion on
+ * the one screen where what is below the strip is what somebody came to choose,
+ * and it guessed *which* agent to set up for them. Setting an agent up is the
+ * machine's Agents screen's job now: `STRIP_EMPTY` below says why nothing can
+ * start and offers **Agent settings**, and a row there offers **Set up**, which
+ * opens the same card as a leaf of that screen.
  */
-function doorFor(candidate: AgentAvailability): AgentDoor {
-  return agentDoor(candidate);
-}
 
 /**
  * The same choice back, or `null` where this machine's listing does not offer it.
@@ -1209,6 +1267,97 @@ export function offeredHere(
   return startableHere(pick, agents, customAgents) ? pick : null;
 }
 
+/** Which kind of empty a strip with nothing to start is. See {@link stripEmpty}. */
+export type StripEmpty = "hidden" | "not_set_up" | "not_ready" | "none_listed" | "too_old";
+
+/**
+ * What the strip says when nothing on it can start, and the one control under the
+ * sentence.
+ *
+ * ⚠ **Data rather than JSX, so the copy is a value a driver can read.** These
+ * sentences were string literals inside a ternary, told apart by `webcheck` by
+ * their quotes and by nothing else, and each new arm needed a new pinned literal
+ * in the same change. As a table every arm is swept at once — for jargon, for
+ * length, and for the two verbs this screen no longer offers.
+ *
+ * ⚠ **No sentence says install or sign in, and neither does any control** (Q3.640).
+ * Both acts live on the machine's Agents screen, where a row's **Set up** opens
+ * that harness's own card. Three arms therefore end in **Agent settings**, the
+ * gear's own handler. `none_listed` ends in **Check again** — "Check again" and
+ * not "Try again": nothing failed, the daemon answered and what it answered was
+ * nothing, and what makes pressing it worth anything happens on the host. And
+ * `too_old` ends in nothing: an old daemon has no Agents screen to send anyone
+ * to, and a button whose every press lands on "update your machine" is a
+ * control that is not true in the state it is drawn in.
+ */
+export const STRIP_EMPTY: Readonly<
+  Record<StripEmpty, { line: string; action: "settings" | "check_again" | null }>
+> = {
+  hidden: { line: "Every agent that can start here is hidden.", action: "settings" },
+  not_set_up: { line: "No agent is set up on this machine yet.", action: "settings" },
+  not_ready: { line: "No agent on this machine is ready to start.", action: "settings" },
+  none_listed: { line: "This machine reports no agents.", action: "check_again" },
+  too_old: {
+    line: "This machine needs an update before agents can be set up here.",
+    action: null,
+  },
+};
+
+/**
+ * Which kind of empty the strip is, or `null` when something on it can start —
+ * or when this screen may not say.
+ *
+ * ⚠ **`null` for a read that failed or has not landed, which is the rule this
+ * whole screen keeps: a failed read is not an empty machine.** The Try again row
+ * speaks for a failure, and a sentence about an empty machine beside it would be
+ * two answers to one question with only one of them true.
+ *
+ * ⚠ **`startableHere` is the predicate, and it is the one `defaulted` asks** over
+ * the same rows, so "nothing can start" here and "nothing to default to" there
+ * cannot disagree. `rows` is `NewSession`'s own merge, harnesses already filtered
+ * by `shownHere` — a signed-out harness has no row at all, which is why it is
+ * weighed below through `agents` rather than through `rows`.
+ *
+ * The order is the argument:
+ *
+ * - **A startable drawn row ends it.** Everything below is about a row with
+ *   nothing to press.
+ * - **Nothing listed at all** before anything else, because it is the one state
+ *   no other arm can describe: there is no agent to be hidden, unready or unset.
+ * - **Hidden before the faults, and only a hidden row that could *start*.** It is
+ *   the one cause true of a machine with nothing wrong with it. "Every agent is
+ *   hidden" was the old test, and it was false both ways: a hidden signed-in
+ *   harness beside a visible preset on a missing harness drew *not ready*,
+ *   blaming a machine that was ready; and a hidden preset on a missing harness
+ *   drew *hidden*, promising a remedy that fixes nothing.
+ * - **Too old before the two faults**, because both of their sentences end in a
+ *   button and an old daemon has nowhere for it to go.
+ * - **Set up against ready last**: nothing installed and nothing assembled is the
+ *   ordinary first run rather than a fault, and "not ready" would describe it as
+ *   one. Anything else — signed out, refused, only a router like opencode, a
+ *   preset on a harness that is gone or that refused while routed — is *not
+ *   ready*, and the Agents screen says which, on each row: a harness row in its
+ *   badge, a preset row in its subline, each with **Set up** behind it.
+ */
+export function stripEmpty(input: {
+  agents: readonly AgentAvailability[];
+  presets: readonly CustomAgent[] | null;
+  rows: readonly StripRow[];
+  canConfigure: boolean;
+  failed: boolean;
+}): StripEmpty | null {
+  if (input.presets === null || input.failed) return null;
+  const presets = input.presets;
+  const can = (row: StripRow): boolean => startableHere(row, input.agents, presets);
+  if (input.rows.some((row) => !row.hidden && can(row))) return null;
+  if (input.agents.length === 0 && presets.length === 0) return "none_listed";
+  if (input.rows.some((row) => row.hidden && can(row))) return "hidden";
+  if (!input.canConfigure) return "too_old";
+  return presets.length === 0 && !input.agents.some((one) => one.available)
+    ? "not_set_up"
+    : "not_ready";
+}
+
 /**
  * Every agent this machine can start **from a tile**, as a strip you drag
  * sideways. Not quite the same set as "every agent this machine can start": a
@@ -1275,11 +1424,10 @@ export function offeredHere(
  * ⚠ **Nothing here early-returns over the row any more, and the trailing control
  * is why.** "This machine reports no agents" used to be returned *above* the
  * strip, so a transient failure of the cheap `GET /agents` took the entry point to
- * the whole assembled-agent feature off the screen — and the inline sign-in with
- * it — while the daemon was perfectly willing. The sentence is a row inside the
- * strip now: the gear is drawn on exactly the condition it is about
- * (`canConfigure && machineId !== null`) and nothing upstream of it can decide
- * whether it exists.
+ * the whole assembled-agent feature off the screen while the daemon was perfectly
+ * willing. The sentence is a row inside the strip now: the gear is drawn on
+ * exactly the condition it is about (`canConfigure && machineId !== null`) and
+ * nothing upstream of it can decide whether it exists.
  */
 function AgentStrip({
   agents,
@@ -1289,6 +1437,7 @@ function AgentStrip({
   canConfigure,
   failure,
   presetsFailure,
+  empty,
   value,
   onChange,
   onConfigure,
@@ -1322,6 +1471,16 @@ function AgentStrip({
   /** The same for the assembled agents, which is a separate read and a separate row. */
   presetsFailure: string | null;
   /**
+   * Which kind of empty this row is, or `null` — decided by `NewSession`, never
+   * here.
+   *
+   * ⚠ **A prop rather than a value computed off this component's own lists**,
+   * because the footer beside `Start` speaks about the same state and has to
+   * agree with the sentence drawn here. Two computations would be two answers,
+   * and the first draft's footer was the one that forgot a failed read.
+   */
+  empty: StripEmpty | null;
+  /**
    * The chosen tile, or `null` when this machine offers nothing that was chosen.
    *
    * ⚠ **Nullable rather than always naming something**, because the alternative is
@@ -1340,15 +1499,15 @@ function AgentStrip({
    * assembled agents, the systems table and the stored order. They are one
    * effect in `NewSession` and therefore one door.
    *
-   * ⚠ **It was the inline sign-in's alone, and the retries below press the same
-   * thing.** Nothing else on this screen re-sends a read: that effect depends on
-   * the daemon client, which `store.daemonFor` keeps stable for the machine's
-   * whole life, so a refusal stands for the life of the mount unless somebody
-   * asks again through here.
+   * ⚠ **The retries below are its only callers** — Check again under an empty
+   * listing and Try again under a failed read. It was the inline sign-in's first,
+   * and that left with the door (Q3.640). Nothing else on this screen re-sends a
+   * read: that effect depends on the daemon client, which `store.daemonFor` keeps
+   * stable for the machine's whole life, so a refusal stands for the life of the
+   * mount unless somebody asks again through here.
    */
   onChanged: () => void;
 }): ReactNode {
-  const [signingIn, setSigningIn] = useState<string | null>(null);
   /*
    * ⚠ **The chosen tile is scrolled to, and assembling one is why.** The strip
    * overflows at **three** tiles on a 390px phone, and a new agent lands at the end
@@ -1506,45 +1665,12 @@ function AgentStrip({
   useEffect(() => {
     chosen.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [key]);
-  /*
-   * The sign-in block below is about a *harness*, so it is drawn only when one is
-   * chosen. An assembled agent that cannot start says so at `POST /sessions` by
-   * name — "no key saved for Moonshot" — and the remedy for that is a system's
-   * key rather than a CLI's login, which is a different screen.
-   *
-   * ⚠ **The second arm keeps the sign-in door on a machine that can start
-   * nothing, and it is not a selection.** This resolution used to fall back to
-   * `agents[0]` and the tiles drew themselves against *it*, so a machine with every
-   * harness uninstalled put its first tile on screen `aria-pressed` and `disabled`
-   * at once. The tiles ask `value` now and nothing there is pressed — but that
-   * machine's only way forward is this block, since there is no tile to tap to
-   * reach a sign-in. So the door hangs off the first row with nothing claiming to
-   * be chosen. Narrowed to exactly that state: with something startable on the
-   * machine, a `null` selection means a *preset* went away, and offering a CLI
-   * login for that answers the wrong question.
-   *
-   * ⚠ **Both halves of it moved when signed-out tiles stopped being drawn**, and
-   * they had to move together. The condition is now "no tile at all" rather than
-   * "nothing installed" — a machine whose only harness is installed and signed out
-   * draws an empty row, which the old test called *startable* — and the fallback
-   * picks the first agent this screen has a sign-in **for** rather than the first
-   * one listed, so the door cannot land on an agent `signInOffered` then refuses to
-   * draw the wizard for. `agents[0]` survives as the tail of that chain and is now
-   * only reachable when nothing can be signed in at all, where the block below
-   * draws nothing and the row's `+` is the answer.
-   */
-  const harness =
-    value?.kind === "harness"
-      ? (agents.find((candidate) => candidate.id === value.id) ?? null)
-      : value === null && !agents.some(shownHere)
-        ? (agents.find((one) => doorFor(one) !== null) ?? agents[0] ?? null)
-        : null;
   const presets = customAgents ?? [];
   /*
    * The harnesses this row actually draws — see `shownHere`. Resolved once,
-   * because the row is drawn from it and the "nothing here" line below is decided
-   * by it, and those two disagreeing is a screen that says a machine is empty over
-   * a row of tiles.
+   * because the row is drawn from it and `NewSession`'s merge — which decides the
+   * "nothing here" line — filters by the same binding, and those two disagreeing
+   * is a screen that says a machine is empty over a row of tiles.
    */
   const shown = agents.filter(shownHere);
   /**
@@ -1571,20 +1697,12 @@ function AgentStrip({
    * What is left after the hidden entries, which is what is drawn.
    *
    * ⚠ **Kept apart from `rows`, because "nothing is offered" and "everything is
-   * hidden" are two sentences below and telling them apart needs both counts.**
-   * One list would make a machine with four hidden agents say it reports none,
-   * pointing somebody at a sign-in screen for a problem one tap away in the other
-   * direction.
+   * hidden" are two sentences and telling them apart needs both.** One list would
+   * make a machine with four hidden agents say it reports none. Which sentence is
+   * said is `empty`'s, decided one level up over `NewSession`'s own copy of this
+   * merge; this list is only what the tiles are drawn from.
    */
   const drawn = rows.filter((row) => !row.hidden);
-  /*
-   * ⚠ **Said only once the second read has settled.** With `customAgents`
-   * flattened to `[]` while it was still out, a fast `GET /agents` answering
-   * nothing put "This machine reports no agents" on screen over a listing that
-   * was on its way — and it is drawn *below* the row rather than instead of it,
-   * so the `+` survives whatever either read did.
-   */
-  const nothingAtAll = shown.length === 0 && presets.length === 0 && customAgents !== null;
 
   /*
    * The tile. One shape for both kinds, because they are one choice — and the
@@ -1784,9 +1902,11 @@ function AgentStrip({
                     // Applying it everywhere but the JSX key would leave out the one
                     // place React actually reads.
                     key: stripKey("harness", candidate.id),
-                    /* Against `value` and never against the resolved `harness`, which
-                       carries the sign-in door's fallback and would draw a tile as
-                       chosen on a machine where nothing can be. */
+                    /* Against `value` and nothing else. A resolved harness that
+                       carried the sign-in door's fallback once stood beside it, and
+                       a tile drawn against that was chosen on a machine where
+                       nothing could be; the door and its fallback are gone
+                       (Q3.640), and this stays the one thing a tile asks. */
                     picked: value?.kind === "harness" && candidate.id === value.id,
                     /* ⚠ **Structurally false, and kept.** `shownHere` filters out an
                        uninstalled harness before the row is built, so nothing here can
@@ -1843,18 +1963,32 @@ function AgentStrip({
                  * `disabled: !candidate.available`; this is that same fact, reached
                  * through the preset's own `harness`. `offeredHere` folds it in too,
                  * so a stale pick clears rather than being posted.
+                 *
+                 * ⚠ **And a harness that refused while routed is the same fact
+                 * through the other door, which this tile drew pressable.**
+                 * `startableHere` refuses such a preset, so a tap here was dropped
+                 * by `offeredHere` in silence — under *No agent on this machine is
+                 * ready to start*, when this was the one row that machine had.
+                 * `routed === true` only, which is `startableHere`'s own line: a
+                 * bare refusal says nothing about a start on the system's key.
+                 * The machine's Agents row asks the same (`presetRefused` there),
+                 * so both screens name the fault in the same words.
                  */
                 const runs = agents.find((candidate) => candidate.id === one.harness) ?? null;
                 const missing = runs === null || !runs.available;
+                const refused = !missing && runs?.lastStartRefusal?.routed === true;
                 // The harness's own name, from the listing where there is one — a
                 // preset whose harness came from a plugin has a namespaced id, and
                 // `harnessName` is where the label lives.
                 const ranBy = harnessName(runs ?? { id: one.harness });
                 const where = customAgentSubline(one, systems);
+                // Why this tile cannot be pressed, or `null` where it can — one
+                // value for the subline and the label, so the two cannot disagree.
+                const why = missing ? "not installed" : refused ? "would not start" : null;
                 return tile({
                   key: stripKey("custom", one.id),
                   picked: value?.kind === "custom" && one.id === value.id,
-                  disabled: missing,
+                  disabled: why !== null,
                   onClick: () => onChange({ kind: "custom", id: one.id }),
                   glyph: <AgentGlyph agent={one.harness} size={18} />,
                   title: one.name,
@@ -1862,7 +1996,7 @@ function AgentStrip({
                   // tiles' status line follows: a tile that cannot be pressed says why
                   // on the one line it has, rather than describing a pairing nothing
                   // can run.
-                  subline: missing ? `${ranBy} not installed` : where,
+                  subline: why === null ? where : `${ranBy} ${why}`,
                   /*
                    * ⚠ **All three facts, because one of them is a glyph and
                    * `AgentGlyph` draws its svg `aria-hidden`.** Read out, this tile
@@ -1871,9 +2005,9 @@ function AgentStrip({
                    * visible name comes first, so voice control's "click <name>"
                    * still lands on it.
                    */
-                  label: missing
-                    ? `${one.name}, ${ranBy} not installed`
-                    : `${one.name}, ${ranBy}, ${where}`,
+                  label: why === null
+                    ? `${one.name}, ${ranBy}, ${where}`
+                    : `${one.name}, ${ranBy} ${why}`,
                   /*
                    * ⚠ **The tooltip is kept, and it is the name and nothing else.**
                    * `AgentBuilder`'s `Supports` docblock measured what `title` is
@@ -1972,113 +2106,48 @@ function AgentStrip({
           is not a machine with nothing on it, and the reason was otherwise only
           on the screen behind this one. */}
       {/*
-       * ⚠ **Three sentences, because an empty row now has three causes.** It used
-       * to have one: the daemon listed nothing. Since a harness that is not signed
-       * in has no tile, a machine can list three agents and draw none of them —
-       * and "this machine reports no agents" over a machine that reported three is
-       * the kind of false line that sends somebody to the wrong screen. The third
-       * arrived with the strip: everything this machine offers can be *hidden*,
-       * which is a row somebody chose and the one cause with a one-tap remedy. It
-       * is asked **first**, because it is the only one of the three that is true
-       * of a machine with nothing wrong with it, and the sentence names the gear
-       * rather than a screen — the control is at the end of the row directly
-       * above.
+       * ⚠ **One sentence and one control, and neither installs or signs in
+       * anything** (Q3.640). This was two `Empty`s and a disclosure under them —
+       * *Install X* or *Sign in to X*, unfolding that harness's whole card in
+       * place — and the owner's rule is that a screen does not grow a form inside
+       * itself. It also had to guess *which* agent to set up, and `agents[0]` is
+       * the guess this row has been caught making before. The sentence says which
+       * kind of empty this is, from `STRIP_EMPTY`, and the control goes where the
+       * rows are that say why each one cannot start.
        *
-       * What is *not* said in the second — a machine that listed agents and can
-       * draw none of them — is which agent or why: the sign-in door below is drawn
-       * in exactly that state and says both, and repeating it here would be two
-       * answers to one question.
+       * ⚠ **Agent settings is the gear's own handler, not a second door.**
+       * `onConfigure` makes the address whole, pushes the machine's Agents list,
+       * and the pick survives in `agentPick.ts` — so the walk back is the gear's
+       * walk back. `plain`, so `Start` stays the one filled control on the screen,
+       * and labelled as the gear is (`aria-label="Agent settings"`): one function,
+       * one name.
        *
-       * ⚠ **The first has no such door, which is why it is the one that ended up
-       * carrying a control.** That door hangs off a harness
-       * (`agents.find(signInOffered) ?? agents[0]`), and the whole of what "reports
-       * no agents" says is that there were none to resolve it from — so it is
-       * `null`, the block below draws nothing, and for as long as that sentence
-       * stood alone it was a screen stating a fact with nowhere to go from it.
+       * The Try again rows below speak for a failed read, which is why `empty` is
+       * `null` there rather than a sentence about an empty machine. And no
+       * `failed` on this `Empty`: every arm it draws is a settled answer, and
+       * dressing one as an event would send somebody hunting for a fault this
+       * screen has no evidence of.
        */}
-      {drawn.length === 0 && rows.length > 0 && (
-        <Empty>Every agent on this machine is hidden. The gear above is where to bring one back.</Empty>
-      )}
-      {nothingAtAll && failure === null && (
+      {empty !== null && (
         <Empty
-          /*
-           * ⚠ **The door belongs to the empty-listing arm only.** The other one is
-           * drawn in exactly the state the sign-in block below is drawn in, and that
-           * block names the agent and says why — so a control here would be the
-           * two-answers-to-one-question the paragraph above already refuses.
-           *
-           * **"Check again" and not "Try again": nothing failed.** The daemon
-           * answered, and what it answered was nothing — this is a re-ask, and the
-           * thing that makes it worth pressing happens on the host rather than
-           * here. No `failed`, for the same reason: an empty listing is a settled
-           * answer, and dressing it as an event would send somebody hunting for a
-           * fault this screen has no evidence of.
-           */
-          action={agents.length === 0 ? <Button onClick={onChanged}>Check again</Button> : undefined}
+          action={
+            STRIP_EMPTY[empty].action === "settings" ? (
+              <Button onClick={onConfigure}>
+                <Icon as={Settings2} size={14} />
+                Agent settings
+              </Button>
+            ) : STRIP_EMPTY[empty].action === "check_again" ? (
+              <Button onClick={onChanged}>Check again</Button>
+            ) : undefined
+          }
         >
-          {/* ⚠ **Both sentences stay string literals rather than becoming JSX
-              text**, for the reason the fade above writes `aria-hidden="true"` in
-              full: `webcheck` tells these two states apart by the quoted strings
-              and by nothing else — neither is a value any function on this screen
-              returns — so a rewrite that drops the quotes takes the assertion with
-              it and says nothing while doing so. */}
-          {agents.length === 0 ? (
-            <>
-              {"This machine reports no agents."} That list is the host's, and every
-              harness on it is a CLI installed there — so this is a machine to go
-              and look at rather than a screen to fix.
-            </>
-          ) : harness !== null && doorFor(harness) === "install" ? (
-            /*
-             * ⚠ **A third arm, and `webcheck` tells these states apart by the
-             * quoted strings and by nothing else** — so a third one needs a third
-             * pinned literal in the same change. It exists because nothing puts a
-             * harness on a machine by itself any more: a freshly enrolled machine
-             * has no agents at all, and *"not ready to start"* describes that as a
-             * fault when it is the ordinary first-run state with a button under it.
-             */
-            "No agent is installed on this machine yet."
-          ) : harness !== null && doorFor(harness) !== null ? (
-            "No agent on this machine is ready to start."
-          ) : (
-            /*
-             * ⚠ **The same state, with the door taken away — and the sentence has
-             * to carry it.** The arm above is bare because the sign-in block below
-             * is drawn in exactly that state and names the agent and the remedy.
-             * That block hangs off `signInOffered`, which answers `false` for every
-             * harness with no wizard — and those are precisely the harnesses that
-             * can be hidden by `start_refused`, since a harness that refused and
-             * *has* a wizard is `signed_out`-shaped and reaches the arm above. So
-             * on a machine whose only harness a plugin added, this used to be one
-             * sentence with nothing under it and nowhere to go.
-             *
-             * The gear, for the hidden arm's reason: it is at the end of the row
-             * directly above, and the list behind it keeps the row this screen has
-             * stopped drawing, with the badge saying what happened and the control
-             * that asks again.
-             */
-            <>
-              {"No agent on this machine is ready to start."}{" "}
-              {/*
-               * ⚠ **And the gear is only worth naming for what it will actually
-               * show.** That screen lists harnesses `startsBare` answers true for
-               * and nothing else — opencode, and any a plugin added without
-               * one a plugin added, have no row there at all — so on a machine holding
-               * only those, "lists them all" pointed at a screen that would draw
-               * *This machine reports no agents*: two screens answering one
-               * question, one of them wrong. The bar at its foot is drawn either
-               * way, which is what the second arm names instead.
-               */}
-              {agents.some(startsBare)
-                ? "The gear above lists them all, with what each one said."
-                : "The gear above is where to add one."}
-            </>
-          )}
+          {STRIP_EMPTY[empty].line}
         </Empty>
       )}
       {/*
-        * ⚠ **Unconditional, where it used to ride inside `nothingAtAll`.** That
-        * predicate also requires `presets.length === 0`, so on any machine holding
+        * ⚠ **Unconditional, where it used to ride inside a predicate that also
+        * required `presets.length === 0`** — the old empty-state test, which
+        * `stripEmpty` has since replaced — so on any machine holding
         * one assembled agent a failed `GET /agents` said nothing at all: the strip
         * simply lost its harness tiles. "A failed read is not an empty machine" is
         * the rule, and the sibling row below has always been drawn this way — the
@@ -2118,12 +2187,12 @@ function AgentStrip({
       {/*
        * ⚠ **There is no Edit control here any more, and its absence is the
        * decision rather than a deletion.** It was one control about the chosen
-       * tile, hanging under the strip — the shape the sign-in block below still
-       * has — and the argument for it was that a kebab *on* a 112px tile inside a
-       * strip you drag sideways puts a target on another target's face. That
-       * argument is unchanged and this is not a reversal of it: editing moved to a
-       * row on the Agents screen, where the tile it is about is a full-width row
-       * with room for a kebab and nothing to mis-tap.
+       * tile, hanging under the strip — the shape the sign-in block that stood
+       * below it also had — and the argument for it was that a kebab *on* a
+       * 112px tile inside a strip you drag sideways puts a target on another
+       * target's face. That argument is unchanged and this is not a reversal of
+       * it: editing moved to a row on the Agents screen, where the tile it is
+       * about is a full-width row with room for a kebab and nothing to mis-tap.
        *
        * What it cost was a line under the picker that appeared and disappeared as
        * you tapped along the row, moving the folder picker and the footer with it
@@ -2132,66 +2201,16 @@ function AgentStrip({
        */}
 
       {/*
-       * **Signing in happens here, not somewhere else.**
-       *
-       * This used to `navigate(settingsPath(...))`. From inside a pop-up that is a
-       * pop-up replacing a pop-up, and it discards the folder already chosen — the
-       * dialog appears to have wandered off. So the same `AgentDetail` the settings
-       * sheet renders opens *inline* instead: one flow, one door, the folder
-       * untouched, and the `sessionStorage` reattach works identically because it
-       * is keyed on machine and agent rather than on where it is mounted.
-       *
-       * The old `navigate` is removed rather than kept as a fallback. Two doors
-       * into one flow is how one of them rots.
+       * ⚠ **And there is no sign-in or install block here any more**, which is
+       * the other half of the sentence above. It opened `AgentDetail` inline,
+       * under a disclosure, on the argument that walking to settings discarded the
+       * folder — true once, and answered since by the folder riding the address
+       * and the pick riding `agentPick.ts`, so the walk costs nothing it used to.
+       * The card is a leaf of the machine's Agents screen now,
+       * `…/agents/:harness`, reached through a row's **Set up**; the wizard's
+       * `sessionStorage` reattach is keyed on machine and agent, so a login run
+       * survives the move exactly as it survived an unmount here.
        */}
-      {/* ⚠ **And never for an agent with nothing to sign in to** — see
-          `signInOffered`, which is where that test lives now. It was written out
-          here and the fallback above tested something subtly different, which is
-          exactly the pair that had to stop drifting: the two states this block
-          draws are reachable for opencode in one way only (not installed), and the
-          panel that opened for it held one true sentence and no controls, under a
-          button offering a sign-in that does not exist. */}
-      {harness !== null && doorFor(harness) !== null && machineId !== null && (
-        <div>
-          <button
-            type="button"
-            onClick={() => setSigningIn(signingIn === harness.id ? null : harness.id)}
-            aria-expanded={signingIn === harness.id}
-            className="tap press -my-2 inline-flex min-h-11 items-center gap-1 rounded-sm px-2 text-xs text-muted hover:bg-raised hover:text-fg"
-          >
-            {/* ⚠ **The glyph follows the door, and so does the label.** A button
-                saying "Sign in" over a harness that is not on the machine is the
-                reported defect: it opened a card that could draw no control,
-                leaving the daemon's own "not found on this daemon's PATH" as the
-                whole of what was on screen. */}
-            <Icon as={doorFor(harness) === "install" ? Download : LogIn} size={12} />
-            {doorLabel(doorFor(harness) ?? "sign_in", harnessName(harness), signingIn === harness.id)}
-          </button>
-          {/* `bg-raised/50` — the quiet grade, the one a tool card uses. This is
-              a container for the wizard rather than a value to read. */}
-          {signingIn === harness.id && (
-            <div className="mt-2 rounded-lg border border-edge bg-raised/50 p-3">
-              {/*
-               * Keyed on machine and agent so wizard state cannot leak across a
-               * switch, exactly as `MachineSystemsSection` keys it.
-               *
-               * ⚠ The sheet's ✕, its scrim and Escape must never be wired to
-               * this — only the wizard's own Cancel may call `cancelLogin`.
-               * Closing a dialog looks like it should cancel what it was doing,
-               * and here that would kill a live device-code flow with the code
-               * already on somebody's clipboard. Unmounting is safe: the run id
-               * is in `sessionStorage` and reopening replays the transcript.
-               */}
-              <AgentDetail
-                key={`${machineId}:${harness.id}`}
-                machineId={machineId}
-                agentId={harness.id}
-                onChanged={onChanged}
-              />
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 }
@@ -2218,7 +2237,7 @@ function MachineLine({
   me,
   onChange,
 }: {
-  machines: MachineState[];
+  machines: readonly DrawnMachine[];
   reachable: MachineState[];
   value: MachineId | null;
   fromRoute: MachineId | null;
@@ -2232,7 +2251,7 @@ function MachineLine({
 }): ReactNode {
   const settled = fromRoute !== null || reachable.length === 1;
   const [open, setOpen] = useState(!settled);
-  const current = machines.find((candidate) => candidate.id === value) ?? null;
+  const current = machines.find((candidate) => candidate.machine.id === value) ?? null;
 
   if (machines.length === 0) {
     return (
@@ -2255,7 +2274,7 @@ function MachineLine({
   if (!open && current !== null) {
     return (
       <div className="flex min-h-8 items-center gap-2 text-sm">
-        <Dot tone={current.reach === "online" ? "on" : "off"} />
+        <Dot tone={current.machine.reach === "online" ? "on" : "off"} />
         <span className="min-w-0 truncate">
           on <span className="font-medium">{current.name}</span>
         </span>

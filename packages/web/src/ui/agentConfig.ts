@@ -791,8 +791,22 @@ export function splitOptions(
  * runs first — so a chip reading "Default" is fixed by naming the value rather
  * than by mining a sentence for a noun.
  *
+ * ⚠ **A separator is not enough on its own, and a live chip said so.** Measured
+ * 2026-09-22 against claude 2.1.280, a conversation resumed on a model id an alias
+ * has since moved past publishes its tail row as
+ *
+ *   value "claude-opus-5[1m]"  name "Opus 5 (1M context)"  desc "Newer version available · select Opus for Opus 5.5"
+ *
+ * — the template is in the binary since at least 2.1.277; what 2.1.280 changed is
+ * that `opus` now means Opus 5.5, so a session on the explicit id qualifies. The
+ * head before the `·` is a notice, not a model, and the chip read "Newer version
+ * availa…". So off the `default` placeholder the head is believed only where its
+ * first word is the row name's own ({@link familyWord}): `Sonnet` over `Sonnet 5 ·
+ * …`, `Opus (1M context)` over `Opus 5.5 with 1M context · …`.
+ *
  * Falls back to the name whenever there is no description, which is what kimi and
- * claude's effort control both give — so nothing here can invent a value.
+ * claude's effort control both give, or the head does not name the model the row
+ * does — so nothing here can invent a value.
  */
 export function chipValue(option: AgentConfigOption, prose?: ConfigProse): string {
   /*
@@ -838,6 +852,26 @@ export function chipValue(option: AgentConfigOption, prose?: ConfigProse): strin
   // splitting on " with " would rescue "a description that runs on…" into
   // "a description" — a plausible-looking string that is not a model name.
   if (head.length === 0 || head.length > 40) return name;
+  /*
+   * ⚠ **The separator is necessary and not sufficient.** claude 2.1.280 describes
+   * a row resumed on a model an alias has moved past as `Newer version available ·
+   * select Opus for Opus 5.5` — separated, 23 characters of head, and not a model.
+   * So a head is believed only where its first word is the row name's.
+   *
+   * `default` is the one row exempt, because it is the one whose name names no
+   * model at all — which is the whole reason this function mines descriptions.
+   * Keyed on the literal value, as {@link choiceOverride} keys it.
+   *
+   * The fallback is the row's own name without a trailing parenthetical:
+   * `Opus 5 (1M context)` → `Opus 5`, which is the `with 1M context` rule below
+   * applied to a name, and what this same model's chip read on `opus[1m]` before
+   * the alias moved. The whole name stays in the menu row, and the CLI's notice
+   * stays in both the menu row and the chip's `title`, where the notice is the
+   * remedy — pick Opus.
+   */
+  if (String(option.value) !== "default" && familyWord(head) !== familyWord(name)) {
+    return name.replace(/\s*\([^()]*\)\s*$/, "") || name;
+  }
   // "Opus 5 with 1M context" → "Opus 5". The context length is a property of the
   // *choice*, already spelled out in the menu row and in the description under it;
   // on a chip it is three extra words competing with the one that matters. Split
@@ -845,6 +879,22 @@ export function chipValue(option: AgentConfigOption, prose?: ConfigProse): strin
   // "Haiku 4.5" — which carry none — are untouched.
   const model = head.split(/\s+with\s+/i)[0]?.trim() ?? head;
   return model.length === 0 ? name : model;
+}
+
+/**
+ * The first word of a model's name, for {@link chipValue}'s test of whether a
+ * description's head names the model its row does.
+ *
+ * Split on whitespace, `(` and `[`, so `Opus (1M context)` and `Opus 5.5 with 1M
+ * context` are both `opus` — and so is `opus[1m]`, which is what `name` is when
+ * the value has no choice to name it and the prose is all there is.
+ *
+ * `toLowerCase` and not the locale form, for {@link capitalised}'s reason: these
+ * are words an agent published, and the reader's locale must not decide whether
+ * two of them match.
+ */
+function familyWord(text: string): string {
+  return (text.trim().split(/[\s(\[]+/)[0] ?? "").toLowerCase();
 }
 
 /** What this client knows about one choice that the agent did not say. */

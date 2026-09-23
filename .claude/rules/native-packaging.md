@@ -76,8 +76,11 @@ with the same early return it gives a missing bridge (`packages/web/src/store.ts
 `state === null || state.status === "unsupported"`). The degraded path was written for a developer who forgot
 `pnpm native:stage` and it is the same path.
 
-⚠ **And `host_local_daemon` is not part of it.** It reads `~/.reemoat/daemon.json`
-— what `src/announce.ts` wrote — and has never depended on the payload. So a
+⚠ **And `host_local_daemon` is not part of it.** It reads the current server's
+`daemon.json` and then `~/.reemoat/daemon.json` — what `src/announce.ts` wrote —
+and has never depended on the payload. The second read is this promise: a client
+build starts no daemon for a second server, so `~/.reemoat` is the one it finds
+(Q7.148). So a
 client build on Linux still reaches a daemon installed by `install.sh`, over
 loopback, exactly as before. What a client build gives up is *starting* one, not
 *finding* one.

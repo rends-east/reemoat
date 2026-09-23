@@ -460,8 +460,9 @@ const { models } = await ctx.model.list({ agent: "claude" });
 models exist is a fact about the agent's CLI on that disk, published over ACP, and
 it changes when somebody updates it. So `list` **starts the agent** to find out —
 no prompt is sent and no quota is spent, but it is a subprocess and a handshake.
-It is cached for ten minutes and it costs one of your six requests a minute. Call
-it when you draw a picker, not on every hook.
+It is cached for up to ten minutes — read again on the first request after the
+agent's CLI is updated — and it costs one of your six requests a minute. Call it
+when you draw a picker, not on every hook.
 
 An agent that offers no choice of model answers with an **empty list**, and that
 is an answer rather than an error — kimi is one. Draw "this agent does not offer

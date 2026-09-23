@@ -220,6 +220,24 @@ export interface NativeBoot {
    * build from this repository.
    */
   defaultServer: string | null;
+  /**
+   * The machine this app created for {@link NativeBoot.server}, if it created
+   * one — the claim {@link DaemonState.claimed} also carries, read here with no
+   * daemon and no probe.
+   *
+   * ⚠ **The seed for `AppState.localMachineId`, and identity is the whole of
+   * what it is for.** The app stops its own daemon at quit and the daemon removes
+   * its announce file on that clean stop, so {@link localDaemon} answers `null`
+   * on every cold launch until the store has drawn the list and started the
+   * daemon again — which renamed and moved this computer's tile a moment after
+   * the first paint. The claim survives the quit; it is what this computer *is*
+   * on that server, not whether anything is listening (Q7.139).
+   *
+   * `null` in a browser, before this app has set a computer up for that server,
+   * and for a daemon it adopted rather than created — the live read is then the
+   * only answer, exactly as before.
+   */
+  claimed: string | null;
 }
 
 let boot: NativeBoot | null = null;
@@ -531,11 +549,20 @@ async function canHostDaemonHere(): Promise<boolean> {
 /**
  * A daemon running on *this computer*, as the host process found it.
  *
- * The daemon writes `~/.reemoat/daemon.json` from its own listening callback
- * (`src/announce.ts`); the host reads it and answers this, or `null`. Everything
- * that could go wrong there — no file, an unknown version, a non-loopback host, a
- * `shared_secret` daemon — is the same `null`, because the caller has exactly one
- * question and it is not *why not*.
+ * The daemon writes `daemon.json` into its state root from its own listening
+ * callback (`src/announce.ts`); the host reads the current server's —
+ * `~/.reemoat/servers/<server>/` for a daemon it runs for a second server — and
+ * then `~/.reemoat`'s, and answers the first live one, or `null` (Q7.148).
+ * Everything that could go wrong there — no file, an unknown version, a
+ * non-loopback host, a `shared_secret` daemon — is the same `null`, because the
+ * caller has exactly one question and it is not *why not*.
+ *
+ * So the machine this answers can belong to another fleet — an `install.sh` daemon
+ * in `~/.reemoat` for the server that file names — and every caller compares its
+ * id with a machine it already holds: `localAnnouncedFor` with the machine it is
+ * routing to, the `this device` badge and the home screen's `local` with the rows
+ * in the list, and the setup flow with its connections. Another fleet's id
+ * matches none of them — so it is never called `local` and never put first.
  *
  * ⚠ **`base` is finished, and nothing here builds one.** Loopback is enforced in
  * the host, where the page cannot reach it, for the reason `host_cp` keeps the
@@ -601,7 +628,9 @@ export interface DaemonState {
    */
   claimed: string | null;
   /**
-   * What `~/.reemoat/daemon.env` already says: one of {@link DAEMON_CONFIG}.
+   * What this server's env file on this computer already says: one of
+   * {@link DAEMON_CONFIG}. `~/.reemoat/daemon.env` when that file names this
+   * server, a folder of its own under `~/.reemoat/servers` otherwise (Q7.148).
    *
    * ⚠ **Asked before a machine is created, and the whole reason a machine used to
    * be created for a computer that already had one.** Without it the only visible
@@ -624,6 +653,23 @@ export interface DaemonState {
    * this app did not start it.
    */
   exitCode: number | null;
+  /**
+   * Whether the daemon behind {@link DaemonState.machineId} says it enrolled with
+   * a control plane other than this server's.
+   *
+   * ⚠ **Why a status is not enough on its own.** `~/.reemoat` is the root of every
+   * daemon started without `REEMOAT_HOME` and its announcement is
+   * last-writer-wins, so the daemon the host finds in the root it gives a server
+   * can be a `pnpm daemon` from a checkout, enrolled to another fleet entirely.
+   * Its machine is in no list this account holds, and reading that as *a daemon
+   * for this server that you cannot see* put a false sentence and a remedy that
+   * cannot work on the screen. The host compares the origins, because the origin
+   * is something only the host knows. **A flag, never `absent`**: the status
+   * stays what the file and the probe say, since this server's own daemon may be
+   * up under that file and adopting "nothing" would start a second one over its
+   * database. `false` for a daemon older than the field.
+   */
+  stranger: boolean;
 }
 
 /**
@@ -655,11 +701,11 @@ export const DAEMON_EXIT = {
  * otherwise fall through every arm in the store and do nothing at all.
  */
 export const DAEMON_CONFIG = {
-  /** No env file on this computer. */
+  /** No env file on this computer for this server. */
   none: "none",
-  /** One that names the server this app is signed in to. */
+  /** This server's env file, and it names the server this app is signed in to. */
   here: "here",
-  /** One that names another server, or nothing this can read. */
+  /** This server's env file names another server, or nothing this can read. */
   elsewhere: "elsewhere",
 } as const;
 
@@ -743,7 +789,7 @@ export async function startLocalDaemon(enrollCode: string, machineId: string): P
   if (!(await canHostDaemonHere())) throw new Error("this device cannot run a Reemoat daemon");
   /*
    * ⚠ **Both empty is adoption, and is a real call rather than a mistake.**
-   * The host then starts what `~/.reemoat/daemon.env` already configures and
+   * The host then starts what this server's env file already configures and
    * creates nothing — which is what a machine set up by `deploy/install.sh`, or by
    * this app before a restart, needs. Passing a code instead makes it provisioning,
    * and the host rewrites the file.
@@ -752,11 +798,12 @@ export async function startLocalDaemon(enrollCode: string, machineId: string): P
 }
 
 /**
- * Stop the daemon this app started, and only that one.
+ * Stop the daemon this app started for the server it is on, and only that one.
  *
  * Nothing happens to a daemon the shell installer set up: the host holds a handle
  * to the child it spawned and stopping is identity-checked against it, because a
- * pid is reused and `~/.reemoat` is shared with whatever else set one up.
+ * pid is reused and `~/.reemoat` is shared with whatever else set one up. Nor to
+ * another server's: each has its own, and they stop together when the app quits.
  */
 export async function stopLocalDaemon(): Promise<void> {
   // Nothing to stop, and silence is the honest answer: stopping a daemon that

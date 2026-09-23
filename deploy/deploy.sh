@@ -785,8 +785,10 @@ for svc in $TARGETS; do
       #
       # Cheap when
       # everything is current, since a refresh that finds nothing newer is a no-op;
-      # and a refresh with no restart is seen by nothing in the daemon, so its
-      # version report lags the binary by up to ten minutes. Never fatal, for the
+      # and a refresh with no restart is seen at the daemon's next use of that CLI,
+      # because LocalRuntime.agentCli weighs the file behind the path it holds on
+      # every hit (Q6.112). Only a copy newly placed earlier on PATH, or a payload
+      # moved under a shim, waits for the ten-minute ceiling. Never fatal, for the
       # reason the script itself gives. Not fenced against the daemon's own run —
       # the overlap needs a deploy within five minutes of a restart or on the day's
       # tick, and the npm arm stages per run, so what could overlap is two vendor

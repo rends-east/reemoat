@@ -109,7 +109,7 @@ member of the family `cp-accounts.md` describes and the sharpest case for it: th
 documents ship in this bundle and name **one party**, so a deployment claims them
 rather than inherits them. Off — the default — means no `/terms` page, no consent
 box, and no requirement on the register route. `instance.ts` reads it strictly:
-only literal `true` is a claim, where `catalogue` and `offer` beside it take any
+only literal `true` is a claim, where `catalogue` and `appDownload` beside it take any
 absolute URL, because those lose a feature when they read wrong and this one puts
 a named party's contract in front of somebody.
 

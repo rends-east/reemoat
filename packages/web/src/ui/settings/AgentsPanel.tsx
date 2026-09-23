@@ -77,7 +77,7 @@ function useAgentAuth(machineId: MachineId): {
    *
    * A flag scoped to the effect is enough there because that hook's only trigger
    * *is* the effect: its `refresh` bumps an epoch and the effect runs again.
-   * This one is called imperatively — on mount, from `changed()` after every
+   * This one is called imperatively — on mount, from `AgentDetail` after every
    * sign-in, and from every "Check again" tap — so two reads can be in flight
    * inside a single effect run, and one flag cannot tell them apart.
    *
@@ -191,7 +191,6 @@ export function AgentDetail({
   agentId,
   title,
   keyEnv,
-  onChanged,
 }: {
   machineId: MachineId;
   agentId: AgentId;
@@ -201,9 +200,11 @@ export function AgentDetail({
    *
    * The systems screen passes the *system's* name — "Anthropic" over a card that
    * drives `claude auth login` — because that is what somebody has an account
-   * with. Omitted, it is the harness, which is what `NewSession`'s inline
-   * sign-in wants: there the tile above it says `Claude`, and a card underneath
-   * headed `Anthropic` would read as a different subject.
+   * with. Omitted, it is the harness, which is what the two harness leaves want:
+   * the Agents list's **Set up**, opened from a row that says `Claude Code`, and
+   * the Sign-ins list's row for a harness no provider speaks for. A card headed
+   * `Anthropic` under either would read as a different subject from the row
+   * somebody tapped.
    */
   title?: string;
   /**
@@ -216,26 +217,20 @@ export function AgentDetail({
    * about that one variable and says nothing else: no stance sentence, no caveat,
    * no divider, no "either one will do" — those are all facts about the *harness*,
    * and the reader is here about an account. `null` keeps the whole card, which is
-   * what the agents screen and `NewSession`'s inline door both want.
+   * what both harness leaves want — the Agents list's **Set up** and the Sign-ins
+   * list's harness row.
    */
   keyEnv?: string | null;
-  /**
-   * Something here changed what another screen already read.
-   *
-   * `NewSession` mounts this inline and drives its agent tiles from a *different*
-   * route (`GET /agents`), so a sign-in finished in here left those tiles stale.
-   * It used to bump its own epoch from a duplicate "re-check" button sitting
-   * under this component; that button is gone, so the signal travels properly
-   * instead. Fired only from acts a person took — never on mount, which would
-   * spend a request on every open. Q3.431.
+  /*
+   * ⚠ **There is no `onChanged` here any more, and its one caller is why.** It
+   * existed for `NewSession`, which mounted this card inline and drew its tiles
+   * from a different route (`GET /agents`), so a sign-in finished in here had to
+   * tell the strip to re-read. That door is gone (Q3.640): every screen that
+   * mounts this card now is a leaf, and leaving it remounts whatever reads the
+   * listing. Q3.431 is where the signal came from.
    */
-  onChanged?: () => void;
 }): ReactNode {
   const { listing, error, loading, refresh } = useAgentAuth(machineId);
-  const changed = (): void => {
-    refresh();
-    onChanged?.();
-  };
 
   if (loading && listing === null) {
     return (
@@ -326,10 +321,10 @@ export function AgentDetail({
         os={listing.os}
         checking={loading}
         checkFailed={error !== null}
-        onChanged={changed}
+        onChanged={refresh}
       />
 
-      <RecheckButton onClick={changed} busy={loading} />
+      <RecheckButton onClick={refresh} busy={loading} />
     </div>
   );
 }
@@ -410,9 +405,11 @@ function SignIn({
    * `installable` per row — the daemon's own docblock says a row that says yes
    * to one and no to the other is a button that answers `503` — but this card
    * reads `GET /agent-auth`, which spreads the runtime's `installable` **with
-   * no such fold**. So on a machine running `REEMOAT_AGENT_UPDATES=off` the
-   * strip screen draws no Install and this one drew a button whose `POST`
-   * answers `503 install_unsupported`.
+   * no such fold**. So on a machine running `REEMOAT_AGENT_UPDATES=off` this
+   * card drew a button whose `POST` answers `503 install_unsupported`. And the
+   * machine's Agents list draws no Install at all since Q3.640 — this card is the
+   * one surface that starts a run — so this flag is the only suppression on the
+   * one Install this app still draws.
    *
    * ⚠ **A flag that only ever rises, never a tri-state.** `false` is "nothing
    * heard", which is what an older daemon's `404` and a dropped request both
@@ -422,11 +419,13 @@ function SignIn({
   /*
    * ⚠ **What the daemon is already running, adopted rather than guessed at.**
    * There is one install run daemon-wide and the seed above is per tab and per
-   * agent, so it was silent about three real states: a run started from the
-   * machine's agent list one screen over, a reload in a private window, and a
-   * key left behind by a run the daemon has since swept — that last one opening
-   * the pane onto a dead id. One read answers all three, and its negative arm is
-   * the one that clears a stale key before anything polls it.
+   * agent, so it was silent about three real states: a run started on this card
+   * in another tab or on another device (through either list that opens it, the
+   * Agents list's **Set up** or the Sign-ins list's harness row), a reload in a
+   * private window, and a key left behind by a run the daemon has since swept —
+   * that last one opening the pane onto a dead id. One read answers all three,
+   * and its negative arm is the one that clears a stale key before anything
+   * polls it.
    *
    * **Unconditional, and that is one small `GET` per card opened.** It could be
    * narrowed to the states that draw an Install — but a live run outranks every
@@ -1904,10 +1903,10 @@ function InstallPane({
     /*
      * ⚠ **The daemon is asked what it is already running before anything is
      * started.** There is one install run daemon-wide and the stored id is per
-     * tab and per agent, so three real cases reached this pane with nothing to
-     * reattach to: a reload where storage is unavailable, a run started from the
-     * machine's agent list one screen over, and a run this tab never learned the
-     * id of. Each of them pressed Install and got `409 install_busy` about a run
+     * tab and per agent, so two real cases reached this pane with nothing to
+     * reattach to: a reload where storage is unavailable, and a run this tab never
+     * learned the id of — one started on this card in another tab or on another
+     * device. Each of them pressed Install and got `409 install_busy` about a run
      * it could have been watching instead. `GET /agent-install` names it, and the
      * id it answers with is the id `DELETE` takes — so Stop works on an adopted
      * run exactly as on one this pane started.

@@ -669,47 +669,39 @@ if (pluginCatalogueUrl !== null && !isBrowserReachable(pluginCatalogueUrl)) {
   );
 }
 
-/**
- * Where somebody with no machine is pointed, or nothing.
+/*
+ * Settings that used to mean something, warned about rather than swallowed —
+ * `scripts/daemon.ts`'s rule for its own retired variables, applied here.
  *
- * ⚠ **Env only, deliberately, and it is not in `SETTING_KEYS` for a different
- * reason than `pluginCatalogueUrl` above.** That one is kept out because a
- * database-owned value could name an origin the CSP built at construction
- * refuses. This one is kept out because it is **not a product setting**: it
- * points at one particular shop, run by whoever runs this deployment, and
- * `SETTING_KEYS` is drawn on the Server settings screen of every instance — so a
- * row there would put a commercial switch, with somebody's business behind it,
- * in front of every admin of every fork. The operator of a deployment sets this
- * in the environment they already own; nobody else is offered it, and on an
- * instance that never sets it the add-a-machine screens are exactly what they
- * were before it existed.
+ * `REEMOAT_CP_MACHINES_OFFER_URL` drew a "Rent a machine" link beside the
+ * installer and is deleted (Q1.650). An env file still carrying it is harmless —
+ * its value is passed to nothing — but it shipped in a release and was
+ * documented as a setting, so a deployment this repository cannot see may carry
+ * it on purpose, and it is a line claiming a feature that is gone in the file an
+ * operator reads to learn what this instance does. Said once, never fatal.
  *
- * Absent is the ordinary state and the default.
- *
- * ⚠ **Validated the way the catalogue is** — this value is rendered into an
- * `href` on the origin that holds the browser's credential, and `new URL`
- * accepts `javascript:` and `data:` without complaint, so the scheme is checked
- * rather than inferred from the parse succeeding. Warned rather than fatal: an
- * instance with a bad offer URL is an instance that offers nothing, which is
- * also the default.
+ * Read through `process.env[key]` rather than by name, so `deploycheck` can
+ * assert that no literal read of the variable is left while this list still
+ * names it.
  */
-const machineOfferUrl = (process.env["REEMOAT_CP_MACHINES_OFFER_URL"] ?? "").trim() || null;
-if (machineOfferUrl !== null && !isBrowserReachable(machineOfferUrl)) {
+const RETIRED_ENV: Readonly<Record<string, string>> = {
+  REEMOAT_CP_MACHINES_OFFER_URL: 'The "Rent a machine" link it drew is deleted.',
+};
+for (const [key, what] of Object.entries(RETIRED_ENV)) {
+  if ((process.env[key] ?? "").trim().length === 0) continue;
   console.warn(
-    `REEMOAT_CP_MACHINES_OFFER_URL must be an absolute http:// or https:// URL, got "${machineOfferUrl}".\n` +
-      "  It becomes a link this app's own screens draw, so it needs a scheme a browser will follow.\n" +
-      "  Ignoring it: this instance will point nobody anywhere, which is the default.",
+    `warning: ${key} is set and no longer does anything.\n` +
+      `  ${what} Remove the line from this control plane's env file.`,
   );
 }
 
 /**
  * Where this instance publishes a build of the Reemoat app, or nothing.
  *
- * Environment-only, unset by default, validated the way the two values above
- * are — `machineOfferUrl`'s shape and every one of its arguments. It is rendered
- * into an `href` on the gate, so the scheme is checked rather than inferred from
- * `new URL` parsing, and a bad value is warned about rather than fatal: an
- * instance that names no build is the ordinary state.
+ * Environment-only, unset by default, validated the way the catalogue above is.
+ * It is rendered into an `href` on the gate, so the scheme is checked rather
+ * than inferred from `new URL` parsing, and a bad value is warned about rather
+ * than fatal: an instance that names no build is the ordinary state.
  *
  * ⚠ **Unset is the honest answer for this repository today**, not a gap somebody
  * forgot to fill. Nothing here publishes a signed build: `tauri.conf.json` has
@@ -720,11 +712,11 @@ if (machineOfferUrl !== null && !isBrowserReachable(machineOfferUrl)) {
  * says "this server does not publish a build" and points at building from
  * source, which is true.
  *
- * ⚠ **Not a `SETTING_KEYS` row**, for `REEMOAT_CP_MACHINES_OFFER_URL`'s reason
- * rather than the catalogue's: there is no CSP to disagree with — a download is
- * a navigation, not a `fetch` — but it points at one particular build published
- * by whoever runs this deployment, and `SETTING_KEYS` is drawn on the Server
- * settings screen of *every* instance including every fork.
+ * ⚠ **Not a `SETTING_KEYS` row, and not for the catalogue's reason**: there is
+ * no CSP to disagree with — a download is a navigation, not a `fetch` — but it
+ * names one particular build published by whoever runs this deployment, and
+ * `SETTING_KEYS` is drawn on the Server settings screen of *every* instance
+ * including every fork.
  */
 const appDownloadUrl = (process.env["REEMOAT_CP_APP_DOWNLOAD_URL"] ?? "").trim() || null;
 if (appDownloadUrl !== null && !isBrowserReachable(appDownloadUrl)) {
@@ -739,10 +731,10 @@ if (appDownloadUrl !== null && !isBrowserReachable(appDownloadUrl)) {
 /*
  * Whether this deployment publishes the built-in legal documents as its own.
  *
- * Filed here beside the offer URL because it is the same family and kept out of
- * `SETTING_KEYS` for the same reason: those documents name one particular party,
- * and a row on the Server settings screen of every fork would offer somebody
- * else's contract as a switch. Off unless this says otherwise — an instance has
+ * Filed here beside the download URL because it is the same family and kept out
+ * of `SETTING_KEYS` for the same reason: those documents name one particular
+ * party, and a row on the Server settings screen of every fork would offer
+ * somebody else's contract as a switch. Off unless this says otherwise — an instance has
  * to *claim* the documents, never inherit them.
  *
  * Any non-empty value other than `0`, `off`, `false` or `no` turns it on: this is
@@ -766,10 +758,9 @@ const app = createControlPlaneApp({
   // it: `originOf` there answers `null` for anything unparseable, so a warned
   // value and an absent one reach exactly the same policy.
   pluginCatalogueUrl: pluginCatalogueUrl !== null && isBrowserReachable(pluginCatalogueUrl) ? pluginCatalogueUrl : null,
+  gateRoot,
   // The same shape and the same reason: one predicate decides, and a warned
   // value reaches the app as the absent one rather than as itself.
-  gateRoot,
-  machineOfferUrl: machineOfferUrl !== null && isBrowserReachable(machineOfferUrl) ? machineOfferUrl : null,
   appDownloadUrl: appDownloadUrl !== null && isBrowserReachable(appDownloadUrl) ? appDownloadUrl : null,
   legalDocuments,
 });

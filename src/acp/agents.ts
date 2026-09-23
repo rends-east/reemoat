@@ -879,12 +879,14 @@ export const MANAGED_CLI_DIRS: readonly string[] = [
   join(homedir(), ".opencode", "bin"),
   /*
    * ⚠ **`~/.grok/bin` is deliberately *not* here, and it is the one directory grok
-   * actually keeps its binary in.** Measured 2026-09-21: `@xai-official/grok` is a
-   * launcher shim, and what it decompresses into `$GROK_HOME/bin` (`~/.grok/bin`
-   * by default) is the 145 MB native `grok-<version>`, with a `grok` symlink
-   * beside it. `deploy/agents.sh` installs the **shim** into the toolchain
-   * directory below, so that is where a copy this daemon can refresh lives, and
-   * the shim finds its own payload.
+   * actually keeps its binary in.** Measured 2026-09-21: `@xai-official/grok`'s
+   * node launcher decompresses the 145 MB native `grok-<version>` into
+   * `$GROK_HOME/bin` (`~/.grok/bin` by default), with a `grok` symlink beside it.
+   * Under npm its postinstall also points the package's bin entry at an extracted
+   * copy of that native binary (measured 2026-09-23), so what `deploy/agents.sh`
+   * installs into the toolchain directory below is a build this daemon can
+   * refresh and run directly; only a launcher left in place by another package
+   * manager goes on to find its payload in `~/.grok/bin`.
    *
    * Naming the payload's directory too would break the invariant `deploycheck`
    * holds this list to — *every directory the daemon searches is one this script

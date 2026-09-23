@@ -1654,6 +1654,26 @@ do_uninstall() {
       tty_say "and these working copies, which may hold uncommitted work:"
       tty_say "$_copies"
     fi
+    # ⚠ **And the desktop app's daemons for other servers**, which live inside
+    # $REEMOAT_HOME and so go with it: one folder per server under `servers/`,
+    # each its own database, sessions and working copies (Q7.148). Named rather
+    # than taken silently, for the reason the worktrees above are — somebody
+    # purging the install.sh daemon may not know the app put a second one here.
+    #
+    # ⚠ **And said to be possibly live, because `_stopped` cannot see them.**
+    # Every daemon under `servers/` is a child of the desktop app, never of the
+    # service `svc_uninstall` stopped, so the refusal above — the one outcome
+    # nothing can undo, a delete under a running agent — does not reach them. A
+    # sentence rather than a second refusal: probing each folder's announced port
+    # would be this script reading the app's layout, and the question below still
+    # has to be answered.
+    _servers=$(ls -1 "$REEMOAT_HOME/servers" 2>/dev/null | sed 's/^/  /')
+    if [ -n "$_servers" ]; then
+      tty_say ""
+      tty_say "and the desktop app's daemons for these other servers, each with its own sessions and working copies:"
+      tty_say "$_servers"
+      tty_say "Quit Reemoat first: it may be running these right now."
+    fi
     tty_say ""
     tty_confirm "delete $REEMOAT_HOME and $CHECKOUT?" || die "nothing was deleted."
     rm -rf "$REEMOAT_HOME" "$CHECKOUT"
@@ -1664,6 +1684,13 @@ do_uninstall() {
     note "$_env"
     note "${REEMOAT_DB:-$REEMOAT_HOME/reemoat.db}   sessions and their history"
     note "$REEMOAT_HOME/worktrees                   working copies, possibly with uncommitted work"
+    # `if`, never `[ … ] && note`: that list is false whenever the folder is
+    # absent, and the day it becomes a function's last command under `set -e` it
+    # ends the run with nothing said — the hazard `prune_builds` in `agents.sh`
+    # records, measured.
+    if [ -d "$REEMOAT_HOME/servers" ]; then
+      note "$REEMOAT_HOME/servers                     the desktop app's daemons for other servers"
+    fi
     note "$CHECKOUT"
     say ""
     note "to delete them too: re-run with --uninstall --purge"

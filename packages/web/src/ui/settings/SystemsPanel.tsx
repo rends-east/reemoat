@@ -378,8 +378,8 @@ export function SystemDetail({
         /*
          * The harness's own card, under the system's name.
          *
-         * ⚠ **The same component the New session sheet mounts inline**, keyed the
-         * same way — one flow, one door. Two implementations of a device-code
+         * ⚠ **The same component the Agents list's Set up leaf mounts**, keyed
+         * the same way — one flow, one door. Two implementations of a device-code
          * login is how one of them rots, and this one would be the copy that
          * never gets the next fix.
          */

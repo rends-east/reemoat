@@ -32,7 +32,8 @@
 //! `app.dialog()` or a `blocking_` call must carry the argument form:
 //!
 //! - `host_daemon_state` and `host_local_daemon` — a loopback `/health` probe
-//!   worth three `PROBE_TIMEOUT`s in the bad case.
+//!   worth three `PROBE_TIMEOUT`s in the bad case; `host_local_daemon` can make
+//!   two, this server's announcement and then `~/.reemoat`'s.
 //! - `host_device_dh` — an OS keyring round trip **twice per Noise handshake**,
 //!   which is the hot-path clause rather than the waiting one.
 //! - `host_save_file` — a platform panel, and then up to `MAX_DOWNLOAD_BYTES`.
@@ -44,13 +45,14 @@
 //!   device cache flush. ⚠ The second is that same call on a **directory**
 //!   descriptor, which is measured only as far as being reached and answering
 //!   success; `config::sync_dir` carries the numbers, and the platform where it
-//!   does nothing at all. The first also erases a keyring entry and the last does
-//!   a keyring erase, a keyring write and a read-back to verify it.
+//!   does nothing at all. The last also does a keyring erase, a keyring write and
+//!   a read-back to verify it.
 //! - `host_daemon_start` — an env file written the same durable way, and then a
 //!   child process spawned.
-//! - `host_daemon_stop` — a SIGTERM and then a **bounded wait** on the child, up
-//!   to `STOP_DEADLINE`. Waiting is the point rather than politeness (`daemon.rs`
-//!   has the argument), which is exactly why it may not be waited for here.
+//! - `host_daemon_stop` — a SIGTERM and then a **bounded wait** on the current
+//!   server's child, up to `STOP_DEADLINE`. Waiting is the point rather than
+//!   politeness (`daemon.rs` has the argument), which is exactly why it may not be
+//!   waited for here.
 //!
 //! `host_cp` is an `async fn` and the macro gives it the same treatment without
 //! being asked.
@@ -72,7 +74,8 @@
 //! Nothing the compiler does will tell you it went missing; the symptom is a
 //! beachball on somebody else's machine.
 
-use std::sync::Mutex;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
@@ -92,13 +95,42 @@ pub struct Host {
     pub client: reqwest::Client,
     pub config_dir: std::path::PathBuf,
     pub durable: bool,
-    /// The daemon this app started, if it started one. See `daemon.rs`.
-    pub supervisor: Mutex<daemon::Supervisor>,
+    /// The daemons this app started, one per server, keyed by origin. See
+    /// `daemon.rs`.
+    ///
+    /// ⚠ **A lock per server inside the lock on the map, and the second layer is not
+    /// decoration.** `host_daemon_stop` holds its supervisor for up to
+    /// `STOP_DEADLINE` — twenty-six seconds — and under one lock over the whole map
+    /// that would stall `host_daemon_state` and `host_daemon_log` for *every*
+    /// server, including the one the app is on. The map lock is held only long
+    /// enough to find or make an entry; the wait happens on that server's own.
+    ///
+    /// Filled lazily, by the first command that asks about a server, and never
+    /// emptied: an entry for a server nobody started a daemon for is an empty
+    /// supervisor, which answers `absent` exactly as no entry would. Q7.148.
+    pub supervisors: Mutex<BTreeMap<String, Arc<Mutex<daemon::Supervisor>>>>,
 }
 
 impl Host {
     fn origin(&self) -> Option<String> {
         self.server.lock().ok().and_then(|held| held.clone())
+    }
+
+    /// This server's supervisor, made on first use.
+    fn supervisor_for(&self, origin: &str) -> Result<Arc<Mutex<daemon::Supervisor>>, String> {
+        let mut held = self
+            .supervisors
+            .lock()
+            .map_err(|_| "the supervisor is poisoned".to_string())?;
+        Ok(Arc::clone(held.entry(origin.to_string()).or_default()))
+    }
+
+    /// This server's supervisor, if anything has ever asked for one.
+    fn supervisor_if(&self, origin: &str) -> Option<Arc<Mutex<daemon::Supervisor>>> {
+        self.supervisors
+            .lock()
+            .ok()
+            .and_then(|held| held.get(origin).map(Arc::clone))
     }
 }
 
@@ -117,10 +149,10 @@ impl Host {
 ///
 /// - `unsupported` — no payload in this build. Nothing to offer; the relay is the
 ///   only route, as it was before any of this.
-/// - `foreign` — a daemon is announced that this app did not start. Adopted, never
-///   raced: `claimDaemonLock` would refuse a second process against one database,
-///   and creating a second control-plane machine for one computer would burn a
-///   quota slot permanently.
+/// - `foreign` — a daemon is announced in this server's root that this app did not
+///   start. Adopted, never raced: `claimDaemonLock` would refuse a second process
+///   against one database, and creating a second control-plane machine for one
+///   computer would burn a quota slot permanently.
 /// - `running` — this app started it and it has announced itself.
 /// - `starting` — this app started it and it has not announced itself yet.
 /// - `exited` — it was started and is gone. `detail` carries the tail of what it
@@ -150,26 +182,43 @@ pub fn host_daemon_state(app: AppHandle, host: State<'_, Host>) -> daemon::Daemo
     if daemon::Payload::locate(&resource_dir(&app), &exe_path()).is_none() {
         return unknown("unsupported");
     }
+    /*
+     * ⚠ **Everything below is about the server the app is on, and the root it
+     * gets.** This read `~/.reemoat` whoever it belonged to, so a computer whose
+     * launchd daemon served the dev stand answered `elsewhere` to production and
+     * could not be set up there at all — and a live daemon for *another* server in
+     * that folder read as `foreign`, which the store took to mean "somebody has
+     * this covered" and said nothing. With no server there is nothing to ask about.
+     */
+    let Some(origin) = host.origin() else {
+        return unknown("absent");
+    };
+    let root = daemon::state_root(&home, &origin);
 
-    let announced = local::read(&home);
+    let announced = local::read_announced(&root.dir);
     /*
      * What this app already spent a machine on, for *this* server. Read here rather
      * than left to the page, because the page would have to be told the origin to
      * ask the question and the origin is deliberately something only the host
      * knows — the same rule `host_cp` keeps.
      */
-    let origin = host.origin();
-    let claimed = origin
-        .as_deref()
-        .and_then(|origin| daemon::read_claim(&host.config_dir, origin));
+    let claimed = daemon::read_claim(&host.config_dir, &origin);
     /*
      * ⚠ **Answered on every state read, because the caller's *first* decision
      * depends on it.** A store that cannot see an existing env file creates a
      * machine for a computer that already had one — a quota slot spent on a
      * machine nobody asked for, and one only a person who notices it can return. `daemon::config_state` carries the measurement.
      */
-    let config = daemon::config_state(&home, origin.as_deref()).to_string();
-    let Ok(mut supervisor) = host.supervisor.lock() else {
+    let config = daemon::config_state(&root.dir, Some(&origin)).to_string();
+    let Ok(handle) = host.supervisor_for(&origin) else {
+        return daemon::DaemonState {
+            status: "absent".to_string(),
+            claimed,
+            config,
+            ..Default::default()
+        };
+    };
+    let Ok(mut supervisor) = handle.lock() else {
         return daemon::DaemonState {
             status: "absent".to_string(),
             claimed,
@@ -186,8 +235,9 @@ pub fn host_daemon_state(app: AppHandle, host: State<'_, Host>) -> daemon::Daemo
      * treats as "somebody else has this covered" — and then nothing starts a daemon
      * ever again, on a computer whose daemon dies with the app by design.
      * ⚠ **And it is `/health` rather than a bare connect, because the port is not
-     * the daemon.** `REEMOAT_PORT` is a fixed value in the env file, so a stale
-     * announce names an ordinary port that anything may hold afterwards. The
+     * the daemon.** `REEMOAT_PORT` is fixed in the legacy root's env file and the
+     * kernel's choice on a root of its own, so either way a stale announce names
+     * an ordinary port that anything may hold afterwards. The
      * answer carries the same `instanceId` the file does, so this proves the
      * daemon rather than the socket.
      * Not asked when this app owns the child: the handle is better evidence than a
@@ -197,21 +247,34 @@ pub fn host_daemon_state(app: AppHandle, host: State<'_, Host>) -> daemon::Daemo
      * one that has to be proved — so the fix is the `(async)` on this command:
      * the round trip is off the *main thread* now rather than off the poll.
      */
-    let announced =
-        announced.filter(|found| ours || daemon::is_alive(&found.base, &found.instance_id));
+    let announced = announced
+        .filter(|found| ours || daemon::is_alive(&found.daemon.base, &found.daemon.instance_id));
+    /*
+     * ⚠ **"This server's root" is not "this server's daemon" on the legacy root.**
+     * `~/.reemoat` is every daemon's root that was started without `REEMOAT_HOME`,
+     * and the file there is last-writer-wins — so a `pnpm daemon` from a checkout,
+     * enrolled to another control plane, answers `/health` as itself and reads as
+     * `foreign` with a machine id no list here holds. The announcement says which
+     * control plane it enrolled with, and a different one is a flag rather than
+     * another status: `DaemonState.stranger` has why it may not be `absent`.
+     */
+    let stranger = announced
+        .as_ref()
+        .is_some_and(|found| found.for_another_server(&origin));
 
     let mut state = match (announced, ours) {
         (Some(found), true) => daemon::DaemonState {
             status: "running".to_string(),
-            machine_id: Some(found.machine_id),
+            machine_id: Some(found.daemon.machine_id),
             claimed,
             ..Default::default()
         },
-        // Announced by somebody else's daemon — the shell installer's, or one left
-        // from a previous run of this app that outlived it.
+        // Announced by somebody else's daemon — the shell installer's, one left
+        // from a previous run of this app that outlived it, or, on the legacy
+        // root, another fleet's.
         (Some(found), false) => daemon::DaemonState {
             status: "foreign".to_string(),
-            machine_id: Some(found.machine_id),
+            machine_id: Some(found.daemon.machine_id),
             claimed,
             ..Default::default()
         },
@@ -241,6 +304,7 @@ pub fn host_daemon_state(app: AppHandle, host: State<'_, Host>) -> daemon::Daemo
         }
     };
     state.config = config;
+    state.stranger = stranger;
     state
 }
 
@@ -265,6 +329,13 @@ pub fn host_daemon_state(app: AppHandle, host: State<'_, Host>) -> daemon::Daemo
 /// - **A file naming another server** — refused outright, both above. Overwriting
 ///   it would point somebody's working daemon at a fleet they did not choose.
 ///
+/// **"The file" is this server's, in the root `daemon::state_root` gives it**:
+/// `~/.reemoat/daemon.env` for the server that file names, and
+/// `~/.reemoat/servers/<server>/daemon.env` for every other. So the third case no
+/// longer means *another server's launchd daemon lives here* — that one keeps its
+/// folder and this server gets its own — and is reached only by a file in this
+/// server's own folder that was edited by hand or cannot be read. Q7.148.
+///
 /// ⚠ **`(async)`, because everything this does waits.** `write_private` below is
 /// durable now — the bytes and then the directory entry, two `sync_all`s, the
 /// first of them a full device cache flush on macOS and the second the same call
@@ -287,9 +358,18 @@ pub fn host_daemon_start(
     let payload = daemon::Payload::locate(&resource_dir(&app), &exe_path())
         .ok_or_else(|| "this build carries no daemon".to_string())?;
 
-    let env_file = daemon::env_path(&home);
-    let origin = host.origin();
-    if daemon::config_state(&home, origin.as_deref()) == daemon::CONFIG_ELSEWHERE {
+    /*
+     * ⚠ **Required up front now, rather than only on the provisioning arm.** Which
+     * root this server's daemon lives in is a function of the origin, so with none
+     * there is no file to adopt either — and adopting whatever `~/.reemoat` held,
+     * for a server nobody had chosen, is the one-slot assumption this replaced.
+     */
+    let origin = host
+        .origin()
+        .ok_or_else(|| "no server has been chosen yet".to_string())?;
+    let root = daemon::state_root(&home, &origin);
+    let env_file = root.env_file();
+    if daemon::config_state(&root.dir, Some(&origin)) == daemon::CONFIG_ELSEWHERE {
         return Err(format!(
             "{} on this computer is set up for a different Reemoat server, so this one was left alone.",
             env_file.display()
@@ -311,9 +391,7 @@ pub fn host_daemon_start(
      * and idempotent, which is what makes ordering it first free.
      */
     if !machine_id.is_empty() {
-        if let Some(origin) = origin.as_deref() {
-            daemon::write_claim(&host.config_dir, origin, &machine_id)?;
-        }
+        daemon::write_claim(&host.config_dir, &origin, &machine_id)?;
     }
 
     /*
@@ -322,8 +400,16 @@ pub fn host_daemon_start(
      * app's child for a single-use code, the database lock and the port — and
      * whichever loses, the code is spent. Only the rewrite: adoption below is
      * exactly the right thing to do with a machine somebody else set up.
+     *
+     * **And only on the legacy root**, because that is the only file a unit can
+     * source: `deploy/` renders one per account, pointed at `~/.reemoat/daemon.env`.
+     * A server with a folder of its own under `servers/` is one no service knows
+     * about, and refusing it over somebody else's plist would lock every second
+     * server out of a computer that happens to have one. A leftover unit beside an
+     * *empty* `~/.reemoat` is `state_root`'s to refuse, and it sends that server to
+     * a folder of its own rather than handing the unit a file to race for.
      */
-    if !enroll_code.is_empty() && env_file.exists() {
+    if root.legacy && !enroll_code.is_empty() && env_file.exists() {
         if let Some(unit) = daemon::managed_unit(&home) {
             return Err(daemon::managed_unit_detail(&unit));
         }
@@ -343,14 +429,13 @@ pub fn host_daemon_start(
          * already holds makes `CONFIG_HERE` true by construction rather than by
          * agreement between two services.
          */
-        let control_plane = origin
-            .clone()
-            .ok_or_else(|| "no server has been chosen yet".to_string())?;
-        let dir = env_file
-            .parent()
-            .ok_or_else(|| "bad env path".to_string())?;
-        std::fs::create_dir_all(dir)
-            .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+        let control_plane = origin.clone();
+        /*
+         * Every level of the root at `0700`, not only the last: a writable
+         * `servers/` is a folder another account could name for a server before
+         * this app does. `ensure_root` has the argument.
+         */
+        daemon::ensure_root(&home, &root)?;
         /*
          * ⚠ **A rewrite, not a replacement, when there is already a file.** The one
          * measured here carried a private CA path its owner had added by hand —
@@ -372,10 +457,22 @@ pub fn host_daemon_start(
     let text = std::fs::read_to_string(&env_file)
         .map_err(|e| format!("could not read {}: {e}", env_file.display()))?;
     let env = daemon::parse_env(&text);
-    host.supervisor
+    /*
+     * ⚠ **The root, the server and the port go on the spawn and never into the
+     * file** — `daemon::Spawn` has why, and why the legacy root keeps its port.
+     * This server's own supervisor, so a daemon already running for the server the
+     * app was on a minute ago is neither the one "already running" here nor
+     * touched by starting this one.
+     */
+    let spawn = daemon::Spawn {
+        root: root.dir.clone(),
+        control_plane: origin.clone(),
+        ephemeral_port: !root.legacy,
+    };
+    host.supervisor_for(&origin)?
         .lock()
         .map_err(|_| "the supervisor is poisoned".to_string())?
-        .start(&payload, &home, &env)?;
+        .start(&payload, &home, &env, &spawn)?;
     Ok(daemon::DaemonState {
         status: "starting".to_string(),
         claimed: if machine_id.is_empty() {
@@ -390,7 +487,10 @@ pub fn host_daemon_start(
     })
 }
 
-/// Stop the daemon this app started, and only that one.
+/// Stop the daemon this app started for the server it is on, and only that one.
+///
+/// Another server's daemon is not this command's: it keeps running until the app
+/// quits, where `daemon::stop_all` takes every one of them together.
 ///
 /// ⚠ **`(async)`, and this is the longest wait in the file by an order of
 /// magnitude.** `Supervisor::stop` signals and then **waits** — bounded by
@@ -403,7 +503,12 @@ pub fn host_daemon_start(
 /// Stop.
 #[tauri::command(async)]
 pub fn host_daemon_stop(host: State<'_, Host>) -> Result<(), String> {
-    host.supervisor
+    // No server, or none this app ever asked about: nothing of ours to stop, and
+    // stopping nothing has already succeeded.
+    let Some(handle) = host.origin().and_then(|origin| host.supervisor_if(&origin)) else {
+        return Ok(());
+    };
+    handle
         .lock()
         .map_err(|_| "the supervisor is poisoned".to_string())?
         .stop();
@@ -425,13 +530,19 @@ pub fn host_daemon_stop(host: State<'_, Host>) -> Result<(), String> {
 /// — no daemon started here, a daemon somebody else's installer started, a daemon
 /// that has printed nothing yet — is an empty list, and the screen says which of
 /// those it is from the state it already has.
+///
+/// **The server the app is on**, like every daemon command here: another server's
+/// ring is kept, and shown again when that server is.
 #[tauri::command]
 pub fn host_daemon_log(host: State<'_, Host>) -> Vec<String> {
-    match host.supervisor.lock() {
-        Ok(supervisor) => supervisor.log_lines(),
-        // See `log_lines`: a poisoned lock costs the evidence, never the app.
-        Err(_) => Vec::new(),
-    }
+    let Some(handle) = host.origin().and_then(|origin| host.supervisor_if(&origin)) else {
+        return Vec::new();
+    };
+    // See `log_lines`: a poisoned lock costs the evidence, never the app.
+    let Ok(supervisor) = handle.lock() else {
+        return Vec::new();
+    };
+    supervisor.log_lines()
 }
 
 /// `0600` inside a `0700` directory, on the platforms that have modes.
@@ -714,6 +825,21 @@ pub struct Boot {
     /// `nativecheck` asserts the way it asserts `signingIdentity: null`.
     #[serde(rename = "defaultServer")]
     pub default_server: Option<String>,
+    /// The machine this app created for that server, if it created one — the
+    /// same `daemon::read_claim` that `host_daemon_state` answers `claimed` from.
+    ///
+    /// **What the page seeds `localMachineId` with, and it needs no daemon.**
+    /// Which machine this computer is, is identity, not reachability (Q7.139), and
+    /// the one read that answered it could not answer on a cold launch: the app
+    /// stops its own daemon at quit, `src/announce.ts` removes the announce file
+    /// on that clean stop, and the page starts the daemon again only after it has
+    /// drawn the machine list — so `host_local_daemon` said `None` on every
+    /// launch and the rail renamed and reordered itself a moment later. The claim
+    /// survives the quit. One small file read and no `/health` probe, which is
+    /// why it rides this call rather than `host_daemon_state`'s.
+    ///
+    /// No `rename`: one lowercase word serializes as itself.
+    pub claimed: Option<String>,
 }
 
 #[tauri::command]
@@ -731,6 +857,12 @@ pub fn host_boot(app: AppHandle, host: State<'_, Host>) -> Boot {
     let device_key = server
         .as_deref()
         .and_then(|origin| device::ensure_key(&host.config_dir, origin).ok());
+    // And the claim, for that same origin: a machine id from one fleet names
+    // nothing — or somebody else's machine — on another. A file read and never a
+    // probe, because it is identity the page wants here, not a daemon to talk to.
+    let claimed = server
+        .as_deref()
+        .and_then(|origin| daemon::read_claim(&host.config_dir, origin));
     Boot {
         server,
         credential,
@@ -744,6 +876,7 @@ pub fn host_boot(app: AppHandle, host: State<'_, Host>) -> Boot {
         device_public_key: device_key.as_ref().map(|k| k.public_key.clone()),
         device_key_at_rest: device_key.as_ref().map(|k| k.at_rest.clone()),
         default_server: config::default_server(),
+        claimed,
     }
 }
 
@@ -824,14 +957,24 @@ pub fn host_device_key_reset(host: State<'_, Host>) -> Result<DeviceKey, String>
 /// if the listener is not the daemon: a 300-second bearer, spendable **through the
 /// relay from anywhere**. The file being unplantable by another uid closes only
 /// half of it — `src/announce.ts` cannot remove its file on a SIGKILL, a crash or a
-/// power cut, `REEMOAT_PORT` is a fixed 7887 by decision, and anything may hold an
-/// ordinary port afterwards. `host_daemon_state` already applies exactly this
+/// power cut, `REEMOAT_PORT` is a fixed 7887 on the legacy root by decision and the
+/// kernel's choice everywhere else, and anything may hold an ordinary port
+/// afterwards. `host_daemon_state` already applies exactly this
 /// filter, with a ⚠ saying exactly this; it was the *status* path that had the
 /// proof and the token-bearing path that did not.
 ///
-/// It costs one `/health` round trip against `PROBE_TIMEOUT`, and `localRoute.ts`
-/// asks this once per route resolution — a wake or a fifteen-second retry, never
-/// the four-second poll. ⚠ **It also does not memoise, on purpose**, so a fleet of
+/// **Two files, in order: this server's root, then `~/.reemoat`**
+/// (`daemon::announce_roots`). The first is the daemon this app runs for the server
+/// it is on. The second is what keeps a client build reaching a daemon
+/// `deploy/install.sh` set up — `native-packaging.md`'s promise that a build with
+/// no payload still *finds* one — and a daemon for this server started by hand
+/// with its env file somewhere else, which the store adopts rather than buying a
+/// second machine for. A legacy daemon for another fleet is harmless here: the
+/// page checks the machine id against the one it wants and declines.
+///
+/// It costs one `/health` round trip against `PROBE_TIMEOUT` per file found, and
+/// `localRoute.ts` asks this once per route resolution — a wake or a
+/// fifteen-second retry, never the four-second poll. ⚠ **It also does not memoise, on purpose**, so a fleet of
 /// N machines resolving after a wake is N of these one after another, each worth a
 /// connect, a write and a read against that timeout: three quarters of a second
 /// apiece against a port that is stale and filtered rather than refused.
@@ -842,27 +985,45 @@ pub fn host_device_key_reset(host: State<'_, Host>) -> Result<DeviceKey, String>
 /// on the wrong side of the code it describes. It is the attribute now, so the
 /// probe is paid on the async runtime and the webview goes on painting through it.
 #[tauri::command(async)]
-pub fn host_local_daemon(app: AppHandle) -> Option<LocalDaemon> {
+pub fn host_local_daemon(app: AppHandle, host: State<'_, Host>) -> Option<LocalDaemon> {
     let home = app.path().home_dir().ok()?;
-    local::read(&home).filter(|found| daemon::is_alive(&found.base, &found.instance_id))
+    daemon::announce_roots(&home, host.origin().as_deref())
+        .iter()
+        .filter_map(|root| local::read(root))
+        .find(|found| daemon::is_alive(&found.base, &found.instance_id))
 }
 
-/// Adopt a server, and give up the previous one's sign-in in the same act.
+/// Adopt a server, and **keep** the previous one's sign-in.
 ///
-/// The erase is not tidiness. A credential this app is no longer going to present
-/// is one it has no reason to keep, and doing it here — rather than on some later
-/// sign-out that may never happen — is what makes "no credential is retained for a
-/// server you are not using" true of the act rather than of an intention.
+/// ⚠ **It used to erase `credential#<previous>` here, and that is reversed
+/// (Q7.148).** The argument was "no credential is retained for a server you are
+/// not using". It bought less than it sounded: a switch deliberately ends no
+/// session on the old server, so the erase removed only this computer's copy of a
+/// session that stayed live there, and charged a full sign-in on every return. With
+/// one app running a daemon per server, switching between two fleets is the
+/// ordinary case rather than a one-way move, and that charge fell on every switch.
 ///
-/// ⚠ **`(async)`, because both halves of that act wait on a store.** The write is
-/// a durable `server.json` — the bytes and the directory entry, the first of
-/// which is a full device cache flush on macOS and the second of which
-/// `config::sync_dir` states the measured limits of — and the erase is a
-/// `securityd` IPC round trip. Neither was ever free; the durability fix is what
-/// made the first of them expensive enough to stop pretending otherwise.
+/// Nothing this relies on moved: the keyring account *is* the origin, so a kept
+/// credential still cannot be read for any other server — `host_boot` reads the
+/// entry for the origin it is booting on and no other. Giving one up is signing out while on it
+/// (`host_credential_clear`), which erases the current origin's entry and no
+/// other.
+///
+/// ⚠ **`(async)`, because the act waits on a store.** The write is a durable
+/// `server.json` — the bytes and the directory entry, the first of which is a
+/// full device cache flush on macOS and the second of which `config::sync_dir`
+/// states the measured limits of. It was never free; the durability fix is what
+/// made it expensive enough to stop pretending otherwise.
 ///
 /// Nothing here reaches the event loop — `State` and a `Mutex`, no `AppHandle` —
 /// so there is no reentrancy the attribute could turn into a deadlock.
+///
+/// ⚠ **And no daemon is touched, deliberately.** The previous server's daemon, if
+/// this app started one, keeps running — its turns go on, its approvals stay
+/// pending and a phone on that fleet still reaches this computer — and it stops
+/// with the others at `RunEvent::Exit` (Q7.148). Stopping it here would make every
+/// switch cost what a restart costs, which is the whole of why each server has a
+/// daemon of its own. `nativecheck` pins the absence in this body.
 #[tauri::command(async)]
 pub fn host_set_server(url: String, host: State<'_, Host>) -> Result<String, String> {
     let origin = config::normalize_origin(&url)?;
@@ -871,9 +1032,6 @@ pub fn host_set_server(url: String, host: State<'_, Host>) -> Result<String, Str
         return Ok(origin);
     }
     config::write_server(&host.config_dir, &origin)?;
-    if let Some(previous) = previous {
-        let _ = credential::erase(&previous);
-    }
     if let Ok(mut held) = host.server.lock() {
         *held = Some(origin.clone());
     }
@@ -902,8 +1060,8 @@ pub fn host_credential_clear(host: State<'_, Host>) -> Result<(), String> {
 /// elsewhere would at best register a stranger's-looking device and at worst be a
 /// value from a fleet this person does not administer.
 ///
-/// Unlike the credential, this is **not** erased when the server changes. See
-/// `config.rs`: the row on the old server still exists, so forgetting the id
+/// Like the credential since Q7.148, this is **not** erased when the server
+/// changes. See `config.rs`: the row on the old server still exists, so forgetting the id
 /// leaves an installation nobody can recognise in their own list and spends a
 /// second slot the next time they point back.
 ///

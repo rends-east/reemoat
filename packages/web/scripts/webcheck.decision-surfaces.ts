@@ -306,7 +306,7 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
     if (!REACHES_44.test(classes)) shortStart.push(classes.slice(0, 60));
   }
   /*
-   * ⚠ **Nine, and it was eight, and before that nine.** The `Edit <preset>`
+   * ⚠ **Eight, and it was nine, then eight, and before that nine.** The `Edit <preset>`
    * control under the picker went when editing an assembled agent became a row on
    * the machine's Agents screen — a full-width row rather than a 112px tile in a
    * strip you drag sideways — and the `+` beside it became the gear, the same
@@ -319,12 +319,21 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
    * is how the two become one thing in a reader's head. So it owes its 44px the
    * hard way, in its own class string, which is exactly what the line below reads.
    *
+   * What takes it to **eight** again is the install and sign-in disclosure under
+   * the strip. Its button was a hand-written `tap` class string and is gone
+   * (Q3.640): its act moved to the Agents list, where a row's **Set up** opens the
+   * harness's card as a leaf. The control that stands in its place here, **Agent
+   * settings**, is a `bits` `Button`, whose class string lives in `bits.tsx` and is
+   * not a `className` attribute in this file, so it is not counted.
+   *
    * A count going *down* is only good news if the act moved rather than
    * disappeared, which is the trap `PluginsPanel`'s kebab assertion was written
    * against one section down. What answers it here is the pair below: this file
-   * builds no path into the builder, and `MachineAgentsSection` builds both.
+   * builds no path into the builder, and `MachineAgentsSection` builds both — and
+   * for the disclosure, `webcheck.strip-order-and-hidden.ts`, which requires the
+   * row's Set up and the card it opens.
    */
-  check("the new-session sweep actually found the screen's controls", aimed, 9);
+  check("the new-session sweep actually found the screen's controls", aimed, 8);
   check("and every one of them clears 44px", shortStart, []);
 
   /*

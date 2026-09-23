@@ -535,9 +535,16 @@ function screenOf(route: Route): string {
       // The strip flag is part of the identity, not screen state: it is a
       // different screen from the machine it hangs under, so arriving on it has
       // to move focus the way every other depth in this sheet does.
+      //
+      // ⚠ **So is the harness a leaf names**, and without it two leaves shared a
+      // screen with their parent. `signin` carries both the Agents list's card
+      // (`…/agents/:harness`) and the Sign-ins list's harness row
+      // (`…/signin/:agent`), and neither was in this string — so the card had the
+      // list's identity, and the Sign-ins leaf the machine screen's, and arriving
+      // on either left focus where the previous screen had put it. Q3.640.
       return `settings/${route.section ?? ""}/${route.machineId ?? ""}/${route.system ?? ""}/${
         route.agents ? "agents" : ""
-      }`;
+      }/${route.signin ?? ""}`;
     // One screen, whichever machine and folder it happens to be pointed at.
     case "new":
       return "new";

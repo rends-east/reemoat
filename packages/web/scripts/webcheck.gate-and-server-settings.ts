@@ -280,10 +280,10 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
    * operator's documents decides what the sign-up form *asks for*, never whether
    * somebody may sign in or recover an account.
    */
-  const off = { registration: "off", email: false, source: null, catalogue: null, offer: null, appDownload: null, legal: false } as const;
-  const offMail = { registration: "off", email: true, source: null, catalogue: null, offer: null, appDownload: null, legal: false } as const;
-  const openLocal = { registration: "open", email: false, source: null, catalogue: null, offer: null, appDownload: null, legal: false } as const;
-  const openMail = { registration: "open", email: true, source: null, catalogue: null, offer: null, appDownload: null, legal: false } as const;
+  const off = { registration: "off", email: false, source: null, catalogue: null, appDownload: null, legal: false } as const;
+  const offMail = { registration: "off", email: true, source: null, catalogue: null, appDownload: null, legal: false } as const;
+  const openLocal = { registration: "open", email: false, source: null, catalogue: null, appDownload: null, legal: false } as const;
+  const openMail = { registration: "open", email: true, source: null, catalogue: null, appDownload: null, legal: false } as const;
 
   /* ---- the wire body actually becomes one of those ---- */
 
@@ -325,21 +325,20 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
   const wireSource = { url: SOURCE_URL, version: VERSION };
 
   /*
-   * ⚠ **`catalogue` and `machineOfferUrl` are free variables, and they have to be
-   * supplied here for the same reason the §13 constants are.** The handler closes
-   * over both — each is read once at construction in `main.ts` and never from the
-   * database — so a `new Function` that did not pass them throws a
-   * `ReferenceError` at call time rather than asserting anything, which is what
-   * this span is *for*: a field added to that payload is a field this driver
-   * either spans or breaks on, never one it silently ignores. Values rather than
-   * thunks, unlike `registrationMode` and `mailConfigured`, because the handler
-   * reads them rather than calling them.
+   * ⚠ **`pluginCatalogueUrl`, `appDownloadUrl` and `legalDocuments` are free
+   * variables, and they have to be supplied here for the same reason the §13
+   * constants are.** The handler closes over all three — each is read once at
+   * construction in `main.ts` and never from the database — so a `new Function`
+   * that did not pass them throws a `ReferenceError` at call time rather than
+   * asserting anything, which is what this span is *for*: a field added to that
+   * payload is a field this driver either spans or breaks on, never one it
+   * silently ignores. Values rather than thunks, unlike `registrationMode` and
+   * `mailConfigured`, because the handler reads them rather than calling them.
    */
   const instanceWireBody = (
     mode: { enabled: boolean; requiresEmail: boolean },
     configured: boolean,
     catalogue: string | null = null,
-    offer: string | null = null,
     legal = false,
   ): unknown => {
     const source = appSource.split("\n");
@@ -358,8 +357,7 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
       "SOURCE_URL",
       "VERSION",
       "pluginCatalogueUrl",
-      "machineOfferUrl",
-      // Injected for `machineOfferUrl`'s reason: it is a free variable of that
+      // Injected for the catalogue's reason: it is a free variable of that
       // handler, so a driver that did not name it would fail with a
       // `ReferenceError` rather than an assertion — which is the loud failure
       // this construction is built to produce.
@@ -375,7 +373,6 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
       SOURCE_URL,
       VERSION,
       catalogue,
-      offer,
       // Always `null` here. What the fixtures are about is the registration and
       // mail matrix; the download address has one parser and it is driven
       // directly in `webcheck.devices.ts`.
@@ -430,36 +427,26 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
   );
 
   /*
-   * ⚠ **The offer, across the same span, in both states and in the two shapes a
-   * wrong one takes.** It is rendered into an `href` a person taps, so the two
-   * failures are not symmetrical with the catalogue's: a scheme-less value is a
-   * **relative** path, and the SPA fallback answers it with `index.html` — the
-   * offer would open a second copy of this app in a new tab, which is the §13
-   * link's own measured failure arriving on a link somebody was told would sell
-   * them a machine. And `new URL` parses `javascript:` without throwing, on the
-   * one origin that holds the browser's credential.
+   * ⚠ **The machine offer is deleted, and the span proves it left the wire**
+   * (Q1.650). The handler is run, not read: a `machines` key coming back, or
+   * `machineOfferUrl` reappearing as a free variable this `new Function` does not
+   * supply, goes red here. And the other skew: a control plane nobody has
+   * redeployed still sends the field, and this client must drop it rather than
+   * refuse the config. Compared whole, so a parser that kept even an
+   * `offer: null` for it goes red too.
    */
   check(
-    "the machine offer survives the wire",
-    parseInstanceConfig(instanceWireBody({ enabled: true, requiresEmail: true }, true, null, "https://get.example"))
-      ?.offer,
-    "https://get.example",
+    "the instance document names no machine offer",
+    Object.keys(instanceWireBody({ enabled: true, requiresEmail: true }, true) as object).includes("machines"),
+    false,
   );
   check(
-    "and an instance that offers nothing says so rather than leaving it undefined",
-    parseInstanceConfig(instanceWireBody({ enabled: true, requiresEmail: true }, true))?.offer,
-    null,
-  );
-  check(
-    "a scheme-less offer is refused rather than resolved against this origin",
-    parseInstanceConfig(instanceWireBody({ enabled: true, requiresEmail: true }, true, null, "get.example"))?.offer,
-    null,
-  );
-  check(
-    "and a javascript: one is refused rather than parsed",
-    parseInstanceConfig(instanceWireBody({ enabled: true, requiresEmail: true }, true, null, "javascript:alert(1)"))
-      ?.offer,
-    null,
+    "and a control plane from before the deletion is read with its offer dropped",
+    parseInstanceConfig({
+      ...(instanceWireBody({ enabled: true, requiresEmail: true }, true) as object),
+      machines: { offer: "https://get.example" },
+    }),
+    { ...openMail, source: wireSource },
   );
 
   check(
@@ -830,11 +817,13 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
   /**
    * ⚠ **Two orderings, asserted as indices, because both fail silently.**
    *
-   * The first: the page gives up its credential **before** `setNativeServer`
+   * The first: the page lets go of its credential **before** `setNativeServer`
    * moves the host's base. Below it, the four-second poll or a `cpFetch` in
    * flight hands the old fleet's session token to a host somebody just typed in —
    * the request succeeds, nothing on screen changes, and the only trace is a
-   * token in a stranger's log.
+   * token in a stranger's log. It lets go with `detachSession`, which keeps the
+   * stored copy: the server being left stays signed in (Q7.148), so a
+   * `clearSession` here would be a sign-out charged on every switch.
    *
    * The second: the no-op exit sits **above** that clear. Putting it after —
    * where `host_set_server`'s own early return makes it look natural — means
@@ -845,11 +834,28 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/\/\/[^\n]*/g, "");
   const noop = chooseServer.indexOf("typed === current");
-  const clears = chooseServer.indexOf("cp.clearSession()");
+  const clears = chooseServer.indexOf("cp.detachSession()");
   const adopts = chooseServer.indexOf("setNativeServer(typed)");
   check("the server screen still does all three", [noop >= 0, clears >= 0, adopts >= 0], [true, true, true]);
   check("saving an unchanged address gives nothing up", noop < clears, true);
   check("and the credential goes before the host's origin moves", clears < adopts, true);
+  check("and only the page's copy goes: the server being left stays signed in", /clearSession\(/.test(chooseServer), false);
+  /*
+   * ⚠ **A refused switch hands the copy back.** Every way `host_set_server` fails
+   * returns before it moves the base, so the page is still on the server this
+   * bearer belongs to; without the restore a full disk left it holding nothing,
+   * with no sign-out to say so. Asserted as an order inside the catch, because a
+   * restore anywhere else would re-arm the bearer after the base had moved.
+   */
+  const refused = chooseServer.slice(adopts, chooseServer.indexOf("window.location.assign", adopts));
+  check(
+    "a refused switch gives the page its credential back, inside the catch",
+    /catch \(cause: unknown\) \{\s*if \(held !== null\) cp\.adoptHydratedCredential\(held\.value\);/.test(refused),
+    true,
+  );
+  check("and says it stays signed in only where the keyring keeps it", /\{durable && \(/.test(chooseServer), true);
+  const accountSection = readFileSync(new URL("../src/ui/settings/AccountSection.tsx", import.meta.url), "utf8");
+  check("and Settings no longer says a switch signs this computer out", /signs this computer out/.test(accountSection), false);
   /*
    * The field opens on the current value, and Cancel exists only where there is
    * one — which is what keeps the first-run state uncancellable, and is why
@@ -876,12 +882,12 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
    *
    * *"That address is ours"* is nonsense on a build that compiled no default in —
    * which is every build from this repository, where the field opens empty. And
-   * *"forgets this computer's sign-in"* describes something that does not exist
-   * when the screen is reached by the back control on the sign-in form, where
-   * there is no session at all. Each is now gated on the fact it claims.
+   * *"stays signed in to"* describes something that does not exist when the
+   * screen is reached by the back control on the sign-in form, where there is no
+   * session at all. Each is now gated on the fact it claims.
    */
   check("the explainer knows whether there is an address above it", /suggested === null \?/.test(chooseServer), true);
-  check("and the sign-in it says will be lost is one that exists", /editing && signedIn &&/.test(chooseServer), true);
+  check("and the sign-in it says is kept is one that exists", /editing && signedIn &&/.test(chooseServer), true);
   /*
    * One field, first screen — and deliberately not when editing, where the sheet
    * has already placed focus and taking it is the defect `Sheet`'s own effect
@@ -889,7 +895,8 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
    */
   check("the first screen focuses the one thing it asks for", /autoFocus=\{!editing\}/.test(chooseServer), true);
   check("cancel is offered only where there is a server to go back to", /editing && \(/.test(chooseServer), true);
-  check("it says what changing servers costs", /forgets this computer/.test(chooseServer), true);
+  check("it says what changing servers keeps", /stays signed in to/.test(chooseServer), true);
+  check("and no longer that it forgets a sign-in", /forgets this computer/.test(chooseServer), false);
   check("and the probe carries no credential", /probeServer\([^)]*authorization/i.test(chooseServer), false);
 
   /*

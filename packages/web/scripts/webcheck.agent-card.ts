@@ -414,8 +414,6 @@ process.stdout.write("\nwhat one agent's card says\n");
    * predicate *is* the shared one, by name.
    */
   const newSessionRaw = readFileSync(new URL("../src/ui/NewSession.tsx", import.meta.url), "utf8");
-  const agentInstallRaw = readFileSync(new URL("../src/ui/agentInstall.ts", import.meta.url), "utf8");
-  const { agentDoor } = await import("../src/ui/agentInstall.js");
   const agentsRaw = readFileSync(new URL("../src/agents.ts", import.meta.url), "utf8");
   check(
     "the New session tiles hold no vocabulary of their own",
@@ -464,48 +462,37 @@ process.stdout.write("\nwhat one agent's card says\n");
     );
   }
   /*
-   * ⚠ **And the sign-in door on that screen is shut for an agent that has none.**
-   * Read off `blocked` rather than off the stance, and the difference is not
-   * cosmetic: `agentStance` tests `!available` *first*, so a not-installed
-   * opencode is `not_installed` and never `no_login` — which is the one state that
-   * reaches this button at all. Gating on the stance would have been a no-op that
-   * looked like a fix.
+   * ⚠ **And that screen offers no install and no sign-in at all** (Q3.640). It had
+   * a door: a machine with nothing to start unfolded *Install X* or *Sign in to X*
+   * under the strip, with the harness's whole card inside it — an in-place form on
+   * the one screen where what is below the strip is what somebody came to choose,
+   * and a guess at *which* agent to set up. Both acts live on the machine's Agents
+   * screen now, behind a row's **Set up**, and New session names that screen.
    *
-   * ⚠ **It is one named function now, and both halves are pinned.** The test was
-   * written out at the button and something subtly different decided *which* agent
-   * the button was about — which stopped being survivable the moment a signed-out
-   * harness lost its tile, because the fallback naming the agent and the gate
-   * drawing the wizard are then the only way onto that screen's sign-in at all. A
-   * fallback that names an agent the gate declines to draw for is an empty row, no
-   * door, and nothing saying why.
+   * Asserted as absences over comment-stripped source, because the defect this
+   * holds off is a door creeping back in under a new name: the card itself, the
+   * two helpers that chose and labelled the door (deleted from `agentInstall.ts`,
+   * which the second driver pins), the two glyphs it wore, any of the calls that
+   * start a run or read a credential, and either verb in anything a reader sees.
+   * `"not installed"` on a disabled preset tile survives the last pattern — it is
+   * a status, not a control, and nothing precedes `Install` there.
    */
-  /*
-   * ⚠ **`agentDoor` now, and the move is what fixed a door onto nothing.** The
-   * predicate this replaces tested `!available` and therefore answered `true` for
-   * a harness that is not on the machine — so the button read **"Sign in to
-   * Grok"**, opened a card whose control slot computes `login.supported &&
-   * agent.available`, and drew no control at all. The comment above the block
-   * described that exact failure and said it was fixed; the fix had landed on the
-   * `no_flow` arm alone, which covers opencode and nothing else.
-   *
-   * Both halves still read **one binding**, which is the property the extraction
-   * was for. `doorFor` is the local name; `agentDoor` is where the rule lives.
-   */
-  check(
-    "and it offers no sign-in to an agent that has none",
-    [
-      /candidate\.login\?\.blocked === "no_flow"/.test(stripComments(agentInstallRaw)),
-      newSessionRaw.includes("{harness !== null && doorFor(harness) !== null && machineId !== null && ("),
-      newSessionRaw.includes("(agents.find((one) => doorFor(one) !== null) ?? agents[0] ?? null)"),
-      // `available` before `blocked`, which is `agentStance`'s own ordering and
-      // the whole of the repair. Driven as a value beside the placement.
-      agentDoor({ available: false, login: { blocked: "no_flow" }, installable: true }),
-      // And an older daemon, which sends no `installable`: no button rather than
-      // one that answers a bare 404.
-      agentDoor({ available: false }),
-    ],
-    [true, true, true, "install", null],
-  );
+  {
+    const ns = stripComments(newSessionRaw);
+    check(
+      "New session offers no install and no sign-in, and mounts no card that does",
+      [
+        /\bAgentDetail\b/.test(ns),
+        /from "\.\/settings\/AgentsPanel"/.test(ns),
+        /\b(agentDoor|doorLabel|AgentDoor)\b/.test(ns),
+        /\b(Download|LogIn)\b/.test(ns),
+        /\b(startInstall|startLogin|liveInstall|agentAuth)\(/.test(ns),
+        /sign[ -]?in/i.test(ns),
+        /["'`>]\s*Install\b/.test(ns),
+      ],
+      [false, false, false, false, false, false, false],
+    );
+  }
 
   /*
    * The two axes are **not** one boolean. `available` is the adapter;

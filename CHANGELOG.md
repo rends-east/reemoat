@@ -25,6 +25,90 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+### Removed
+
+- **The "Rent a machine" link.** An instance whose control plane set
+  `REEMOAT_CP_MACHINES_OFFER_URL` drew it under the one-line installer — on the
+  home screen of an empty fleet and in Settings → Machines. It is gone from the app
+  and from `GET /v1/instance`, and the variable no longer does anything: a control
+  plane that still finds it in its environment says so once at startup, and the
+  line can be deleted. Adding a machine is unchanged — the one-line installer is
+  still on all three screens, and so is the sentence shown in its place when the
+  machine limit is reached. An app from an earlier release stops drawing the link
+  as soon as its control plane is updated.
+
+### Changed
+
+- **New session no longer installs or signs in to an agent.** When nothing on a
+  machine can start, the screen says why in one sentence and offers one button,
+  **Agent settings**, which opens that machine's Agents list. Coming back returns
+  to New session with the folder and the chosen agent as they were.
+- **The Agents list can finish the job.** A row that is not installed, not signed
+  in or would not start now has **Set up <agent>** in its menu. It opens that
+  agent's own screen: install with the installer's output, then sign in. The
+  list's own Install, which ran with no output, is gone.
+- **Switching servers no longer signs you out of the one you left.** The app kept
+  one sign-in and gave it up on every server change, so moving between two fleets
+  meant signing in again each way. Each server now keeps its own on this computer,
+  and switching back asks nothing. Signing out still signs out of the server you
+  are on, and only that one.
+
+### Fixed
+
+- **The computer the app runs on is called "local" and comes first in the machine
+  list.** The machine strip, the desktop rail and New session named it by its
+  host name ("MacBook-Pro…") and sorted it among the others by name. On this
+  computer they now say "local" and list it first — from the moment the app
+  opens, before its daemon has started, and without changing back while the
+  daemon restarts — and New session picks it by default whenever it is reachable.
+  Everywhere else — your phone,
+  another computer, anybody you share it with — it keeps its real name, and
+  Settings → Machines still shows the real name with "this device" beside it, so it
+  can be renamed there as before. Another machine that is itself named "local",
+  such as one an earlier version of the app set up, is shown with its id added
+  ("local-2405b5ea…") so only this computer reads "local". If you have dragged it
+  somewhere in the list, it stays where you put it; if you had rearranged the
+  machines before this release, it stays where it was until you move it.
+- **The app can set a computer up for more than one server.** Signed in to a
+  second server it used to refuse ("This computer could not be set up"), because
+  the daemon settings in `~/.reemoat` named the first. Each server now gets its own
+  daemon, database, sessions and working copies — `~/.reemoat` stays with the
+  server its `daemon.env` names, and every other lives under
+  `~/.reemoat/servers/<server>/` on a port the system picks — started the first
+  time the app opens that server and stopped when the app quits, all together.
+  Switching servers interrupts nothing: the other server's daemon, its running
+  turns and pending approvals, and a phone's way to this computer through it stay
+  up while the app runs. A second server starts empty — no plugins, system keys,
+  custom agents or pasted keys of its own — while the agent CLIs' sign-ins are
+  shared. `REEMOAT_AGENT_UPDATES`, `REEMOAT_AGENT_SOURCE` and
+  `REEMOAT_AGENT_CHANNEL` in `~/.reemoat/daemon.env` do not yet reach the daemons
+  for other servers.
+- **A daemon running here for this server that the app did not start is no longer
+  met with silence.** One whose machine is in your list is adopted as before; one
+  your account cannot see is named in the setup notice.
+- **The app no longer creates a second machine for a daemon already running on
+  this computer** with its settings file somewhere else (`REEMOAT_ENV_FILE`,
+  `pnpm daemon` from a checkout); it adopts it.
+- **A daemon's clean stop no longer deletes another daemon's announcement.** Every
+  daemon removed `daemon.json` on its way out, whoever had written it; now only the
+  one that wrote it does.
+- `install.sh --uninstall --purge` names the desktop app's daemons for other
+  servers before deleting them, and `--uninstall` lists them among the data it
+  keeps.
+- **The model chip read "Newer version availa…" after Claude Code moved its
+  `opus` alias.** Claude Code 2.1.280 describes a conversation resumed on a model
+  an alias has since moved past with a notice instead of the model's name, and the
+  chip showed the start of that notice. It now shows the model the row names,
+  "Opus 5". The notice stays in the menu under that row, where it tells you to pick
+  Opus for Opus 5.5.
+- **A Claude Code update the daemon did not install was picked up only ten minutes
+  later.** When something other than the daemon updated the CLI (its own updater,
+  another daemon, or `deploy/deploy.sh`), the new-agent screen kept naming the
+  previous build, and listing its models, for up to ten minutes. The daemon now
+  checks which file it would run each time it uses it, so the new build's version
+  and models appear the next time you open the new-agent screen. A session that is
+  asleep still shows its old list until it wakes.
+
 ## [0.10.1] - 2026-09-22
 
 ### Added

@@ -1094,8 +1094,10 @@ async function connect(id: string, channels: never = fetchChannel) {
  * ⚠ **The 2026-09-15 reversal's other half.** The machine this app sets up is
  * labelled after the computer now, like every other machine, because that label
  * is read by a phone and by every other client of the account. What is left
- * saying "you are sitting at this one" is a badge, and the badge needs a fact
- * that is true per client: the announce file, which is what `localDaemon` reads.
+ * saying "you are sitting at this one" is drawn per client — a `this device` badge
+ * in Settings → Machines, and the name `local`, first, on the home screen — and
+ * both need a fact that is true per client: the announce file, which is what
+ * `localDaemon` reads.
  *
  * Driven above for the value (`localAnnouncedFor` against a stubbed
  * `host_local_daemon`); asserted off disk here for the two wirings a value test
@@ -1127,6 +1129,72 @@ async function connect(id: string, channels: never = fetchChannel) {
    */
   const resume = /private async runResume\([\s\S]*?\n    this\.patch\(\{ resuming: true \}\);[\s\S]{0,400}/.exec(store)?.[0] ?? "";
   check("and the resume funnel is what asks again", /await this\.refreshLocalMachine\(\);/.test(resume), true);
+  /*
+   * ⚠ **And once before the first paint of the rail**, beside the two listings
+   * `bootstrap` already awaits. The home screen calls this machine `local` and
+   * puts it first, so a read that landed only in `runResume` — after
+   * `phase: "ready"` had drawn the list — renamed and moved it once on every
+   * launch where the daemon was already up.
+   */
+  const boot = /async bootstrap\(\)[\s\S]*?this\.patch\(\{ phase: "ready", me/.exec(store)?.[0] ?? "";
+  check("bootstrap was found to read", boot.length > 0, true);
+  check(
+    "and it asks which computer this is inside the same wait as the listing",
+    /await Promise\.all\(\[[\s\S]*?cp\.machines\(\)[\s\S]*?this\.refreshLocalMachine\(\),\s*\]\);/.test(boot),
+    true,
+  );
+  /*
+   * ⚠ **And before that wait, the seed — because on a cold launch that read has
+   * nothing to find.** The app stops its own daemon at quit, the daemon removes
+   * its announce file on the clean stop, and `setUpThisComputer` starts it again
+   * only after `phase: "ready"`. So the read above answered `null` on every launch
+   * of the app-run daemon, and the rail renamed and reordered itself a moment
+   * after the first paint. The claim the host keeps for this server is on disk
+   * and needs nothing listening; the section below drives what the two methods
+   * do with it.
+   */
+  const seedAt = boot.indexOf("this.seedLocalMachine(boot.claimed);");
+  check("bootstrap seeds it from the boot payload's claim", seedAt > 0, true);
+  check("before the live read is asked", seedAt < boot.indexOf("await Promise.all(["), true);
+  check("and the live read is weighed rather than assigned", /this\.weighLocalMachine\(\);/.test(refresher), true);
+  check(
+    "against what is known and the machines held",
+    /weighLocalMachine\(answer: MachineId \| null = this\.announcedMachine\)[\s\S]{0,160}localMachineAfter\(known, answer, /.test(store),
+    true,
+  );
+  /*
+   * ⚠ **And weighed again once each listing lands.** *"A machine of ours"* is a
+   * question about the list, and both reads are made before it is current —
+   * `bootstrap`'s beside the listing, `runResume`'s ahead of the re-list — so a
+   * machine this app has only just created, the daemon that has just come up, is
+   * ours only after them. Without the second weighing a claim for a machine since
+   * switched off outranks it until the next wake.
+   */
+  check(
+    "bootstrap weighs it again before the first paint",
+    /this\.weighLocalMachine\(\);\s*this\.patch\(\{ phase: "ready", me/.test(store),
+    true,
+  );
+  check(
+    "and a resume, after its re-list",
+    (store.match(/this\.dropMachine\(id\);\s*\}\s*this\.weighLocalMachine\(\);/g) ?? []).length,
+    1,
+  );
+  /*
+   * ⚠ **And the machine just created is this computer at once, on both paths that
+   * create one.** It is in the list from the `machinesChanged` before it, so it is
+   * weighed like a live answer there; left to `settleDaemon`, the new tile was
+   * drawn under the host name, in name order, until its child announced itself.
+   */
+  check(
+    "a machine created for this computer is weighed as it the moment the listing holds it",
+    (
+      store.match(
+        /await this\.machinesChanged\("machine-added"\);\s*this\.weighLocalMachine\(machineId\(created\.machine\.id\)\);\s*await this\.settleDaemon\(created\.machine\.id/g,
+      ) ?? []
+    ).length,
+    2,
+  );
 
   /*
    * **The second reader of that fact, and it wants it for the same reason the
@@ -1170,4 +1238,80 @@ async function connect(id: string, channels: never = fetchChannel) {
    * `webcheck.machine-limit-and-probe.ts` already exists for.
    */
   check("the listing effect stands down where the panel stands up", /path === null \|\| osDialog\) return;/.test(start), true);
+}
+
+/* ------------------------------------------------------------------ *
+ * Seeded, then sticky — the store's own two methods, driven
+ *
+ * `localMachineAfter` is asserted by value one driver over; what that cannot see
+ * is that the store calls it, with *which* `known`, and against *which* list. So
+ * this drives `seedLocalMachine` and `refreshLocalMachine` on the real store,
+ * through the stubbed `host_local_daemon`, in the order a cold launch takes them:
+ * the claim first, then a live read that finds nothing, then the reads a wake and
+ * a restart can produce.
+ *
+ * ⚠ **Two stand-in connections, and nothing yields while they are there.** The
+ * live read asks `connections.has`, and a patch publishes each entry's `state()`
+ * — so a stand-in answers that and nothing else. Every await below is a resolved
+ * promise or the stub's own `async`, so no poll tick can reach an entry that is
+ * not a `MachineConnection` before they are deleted, and the last patch publishes
+ * the list without them.
+ * ------------------------------------------------------------------ */
+process.stdout.write("\nwhich computer this is, seeded and then sticky\n");
+{
+  const { store } = await import("../src/store.js");
+  const internals = store as unknown as {
+    seedLocalMachine(claimed: string | null): void;
+    refreshLocalMachine(): Promise<void>;
+    weighLocalMachine(): void;
+    patch(fields: { localMachineId: string | null }): void;
+    connections: Map<string, unknown>;
+  };
+  const local = (): string | null => store.getSnapshot().localMachineId;
+  const live = (id: string) => ({ machineId: id, base: LOCAL, instanceId: "i_sticky" });
+
+  installShell();
+  internals.patch({ localMachineId: null });
+  const standIn = (id: string) => ({ state: () => ({ id, name: id }) });
+  internals.connections.set("m_claim", standIn("m_claim"));
+  internals.connections.set("m_moved", standIn("m_moved"));
+  announced = null;
+
+  internals.seedLocalMachine("m_claim");
+  check("the claim is which computer this is before any daemon has answered", local(), "m_claim");
+  await internals.refreshLocalMachine();
+  check("and a live read that finds nothing — every cold launch — leaves it", local(), "m_claim");
+  announced = live("m_stranger");
+  await internals.refreshLocalMachine();
+  check("a daemon for another fleet answering first does not move it", local(), "m_claim");
+  announced = live("m_moved");
+  await internals.refreshLocalMachine();
+  check("a different machine of ours, live, replaces it", local(), "m_moved");
+  announced = null;
+  await internals.refreshLocalMachine();
+  check("and a /health that misses its probe does not clear that either", local(), "m_moved");
+  internals.seedLocalMachine("m_claim");
+  check("while a seed never replaces what a live read said", local(), "m_moved");
+  internals.patch({ localMachineId: null });
+  internals.seedLocalMachine(null);
+  check("and no claim seeds nothing", local(), null);
+
+  /*
+   * The machine this app has just created: its daemon answers before the re-list
+   * that makes it ours. Not at the read, then — and at the weighing after it.
+   */
+  internals.seedLocalMachine("m_claim");
+  announced = live("m_fresh");
+  await internals.refreshLocalMachine();
+  check("a machine not in the list yet does not replace one that is", local(), "m_claim");
+  internals.connections.set("m_fresh", standIn("m_fresh"));
+  internals.weighLocalMachine();
+  check("and does once the listing that holds it has landed", local(), "m_fresh");
+
+  internals.connections.delete("m_claim");
+  internals.connections.delete("m_moved");
+  internals.connections.delete("m_fresh");
+  internals.patch({ localMachineId: null });
+  announced = null;
+  removeShell();
 }

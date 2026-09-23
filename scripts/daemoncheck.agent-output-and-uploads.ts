@@ -19,7 +19,8 @@ import {
   type UploadRow,
 } from "../src/uploads.js";
 import { probeContained, probeRequestable, safeRelPath } from "../src/changes.js";
-import { atOrUnder } from "../src/paths.js";
+import { atOrUnder, resolveStateRoot } from "../src/paths.js";
+import { resolveWorktreeRoot } from "../src/worktree.js";
 import { tmp } from "./tmp.js";
 import { check } from "./daemoncheck.env.js";
 import { memoryUploadIndex, users, uAbcd, now, tokenFor, app, stubAgentConfig } from "./daemoncheck.fixtures.js";
@@ -791,6 +792,59 @@ process.stdout.write("\nwhere uploads live\n");
   const worktrees = join(homedir(), ".reemoat", "worktrees");
   check("the two roots do not nest", atOrUnder(uploadsRoot, worktrees), false);
   check("in either direction", atOrUnder(worktrees, uploadsRoot), false);
+}
+
+/*
+ * The state root every default above is derived from.
+ *
+ * `REEMOAT_HOME` is what the desktop app sets for each server it runs a daemon
+ * for — `~/.reemoat` for the one `~/.reemoat/daemon.env` names and
+ * `~/.reemoat/servers/<server>/` for every other (Q7.148) — so one computer on two
+ * servers is two databases, two worktree trees and two upload trees rather than
+ * one identity re-enrolled back and forth. Unset has to keep meaning exactly what
+ * it always did, because every daemon started any other way reads it that way.
+ */
+process.stdout.write("\nthe root those defaults sit under\n");
+{
+  check("unset is ~/.reemoat, as it always was", resolveStateRoot(undefined), join(homedir(), ".reemoat"));
+  check("and blank is unset", resolveStateRoot("  "), join(homedir(), ".reemoat"));
+  check("a tilde expands", resolveStateRoot("~/r"), join(homedir(), "r"));
+  const refusal = (spec: string): string => {
+    try {
+      resolveStateRoot(spec);
+      return "(accepted)";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  };
+  check("a relative path is refused", refusal("rel").startsWith("REEMOAT_HOME must be an absolute path"), true);
+  /*
+   * ⚠ **The home directory itself is refused**, because the defaults under it are
+   * `uploads`, `worktrees` and `plugins` with no leading dot — rooted at `~` they
+   * would be ordinary folders the directory picker offers as a `cwd`, which is the
+   * one thing the dot-prefixed default exists to prevent. Every spelling of it.
+   */
+  for (const [spelling, spec] of [
+    ["~", "~"],
+    ["~/", "~/"],
+    ["as an absolute path", homedir()],
+    ["with a trailing separator", `${homedir()}/`],
+    ["with a trailing /.", `${homedir()}/.`],
+  ] as const) {
+    check(`the home directory itself is refused, spelt ${spelling}`, refusal(spec).startsWith("REEMOAT_HOME may not be"), true);
+  }
+
+  check("uploads follow the root", resolveUploadRoot(undefined, "/srv/r"), "/srv/r/uploads");
+  check("and so do worktrees", resolveWorktreeRoot(undefined, "/srv/r"), "/srv/r/worktrees");
+  check("while an explicit root still wins over it", resolveUploadRoot("/elsewhere/up", "/srv/r"), "/elsewhere/up");
+  check("for both of them", resolveWorktreeRoot("/elsewhere/wt", "/srv/r"), "/elsewhere/wt");
+  /*
+   * And under a root of its own the two remover trees are still siblings, which
+   * is what `REMOVER_TREES` in `scripts/daemon.ts` refuses to start without.
+   */
+  const up = resolveUploadRoot(undefined, "/srv/r");
+  const wt = resolveWorktreeRoot(undefined, "/srv/r");
+  check("under a custom root the two still do not nest", [atOrUnder(up, wt), atOrUnder(wt, up)], [false, false]);
 }
 
 /* ------------------------------------------------------------------ *

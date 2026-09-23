@@ -386,6 +386,19 @@ process.stdout.write("\nthe credential, in the shell\n");
   check("signing out clears the memory copy", cp.currentCredential(), null);
   check("and asks the store to forget it", calls.map((c) => c.command), ["host_credential_clear"]);
   check("still touching no browser storage", [...storage.keys()], []);
+  /*
+   * ⚠ **The other half, and the one a server change takes (Q7.148).** Switching
+   * servers keeps the one being left signed in, so the page lets go of its copy
+   * — which is what stops the old fleet's bearer riding a request to the new host
+   * — and asks the store for nothing. A `detachSession` that reached the keyring
+   * would put the sign-out back into every switch, silently.
+   */
+  cp.setSession("rs_leaving");
+  calls.length = 0;
+  cp.detachSession();
+  check("a server change lets go of the memory copy", cp.currentCredential(), null);
+  check("and asks the store for nothing, so that server stays signed in", calls.length, 0);
+  check("and touches no browser storage either", [...storage.keys()], []);
   leaveShell();
 }
 

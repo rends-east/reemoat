@@ -359,6 +359,102 @@ process.stdout.write("\nthe machine limit\n");
     check('only a refusal falls through to buying one', /!== "dead"/.test(setUp), true);
 
     /*
+     * ⭐ **A daemon per server, and what the setup flow owes each answer now.**
+     * Q7.148: the host used to read `~/.reemoat` whoever it belonged to, so on a Mac
+     * whose launchd daemon served the dev stand, signing in to production answered
+     * `elsewhere` — *"This computer could not be set up"* — and a live daemon for
+     * another server in that folder read as `foreign`, which returned without a
+     * word. The host reads this server's own root now, and three things follow here.
+     *
+     * `foreign` means a daemon in *this* server's root that this app did not start
+     * — this server's own unless the host flags it a `stranger`, below. One
+     * whose machine is in this account's list is adopted silently; one that is not
+     * is a sentence, because silence is a computer that never becomes a machine
+     * with nothing saying why — and only once the machine list is in hand, since
+     * `bootstrap`'s catch leaves no connections and would make somebody's own
+     * daemon read as one they cannot see.
+     */
+    check(
+      "a foreign daemon this account can see is adopted without a word",
+      /status === "foreign"[\s\S]{0,300}this\.connections\.has\(/.test(setUp),
+      true,
+    );
+    check("and one it cannot see is a sentence rather than silence", /status === "foreign"[\s\S]{0,500}FOREIGN_DAEMON_DETAIL/.test(setUp), true);
+    check(
+      "and the sentence waits for the machine list",
+      /status === "running"\) \{\s*if \(state\.stranger\) return;\s*if \(this\.snapshot\.phase !== "ready"\) return;/.test(setUp),
+      true,
+    );
+    /*
+     * ⭐ **And a stranger is silence, before anything else is asked.** The legacy
+     * root is every daemon's that was started without `REEMOAT_HOME`, and its
+     * announcement is last-writer-wins — so the daemon the host finds there can be
+     * a `pnpm daemon` from a checkout enrolled with another control plane, whose
+     * machine is in no list this account has. The first version of this arm told
+     * that person *"a daemon for this server is running … as a machine this account
+     * cannot see"*, with a remedy about this server's accounts: two false things.
+     * The host says `stranger` beside the status rather than `absent` in its place,
+     * so the silence is a return and never an adoption.
+     */
+    check(
+      "a stranger's daemon is silence, whatever the list says",
+      /state\.status === "foreign" \|\| state\.status === "running"\) \{\s*if \(state\.stranger\) return;/.test(setUp),
+      true,
+    );
+    /*
+     * ⭐ **And `running` owes the answer `foreign` does.** A sign-out reloads the
+     * page and leaves the host and its children up, so the next account on this
+     * server finds the child the last one enrolled: a machine it cannot see, which
+     * used to fall through to the running-or-starting return without a word. Only
+     * in the first read — the settle loop's `running` stays the happy path it is,
+     * because a control plane that blinked between the spawn and the poll would
+     * otherwise draw a failure over a daemon that came up fine.
+     */
+    check(
+      "a running daemon this account cannot see gets the same sentence",
+      /state\.status === "foreign" \|\| state\.status === "running"\)[\s\S]{0,500}FOREIGN_DAEMON_DETAIL/.test(setUp),
+      true,
+    );
+    check(
+      "and foreign is answered before the running-or-starting return",
+      [setUp.indexOf('state.status === "foreign"') > 0, setUp.indexOf('state.status === "foreign"') < setUp.indexOf('state.status !== "absent"')],
+      [true, true],
+    );
+    /*
+     * ⭐ **And a daemon for this server that the host's root does not hold is still
+     * adopted before anything is bought or re-minted.** A daemon on the legacy
+     * database whose env file lives elsewhere — `REEMOAT_ENV_FILE`, `pnpm daemon`
+     * from a checkout, a `daemon.env` moved aside while it ran — answers `absent`
+     * for this server's root. Without the check the flow buys a second machine, or
+     * re-mints the claimed one into a fresh database and rotates the tunnel key out
+     * from under the daemon serving it. Asserted as an ordering, for the same reason
+     * the adoption-before-re-mint check above is.
+     */
+    check(
+      "a live daemon this account already reaches is adopted before re-minting or buying",
+      /DAEMON_CONFIG\.here[\s\S]*await localDaemon\(\)[\s\S]*this\.connections\.has\([\s\S]*remintFor\(/.test(setUp),
+      true,
+    );
+    /*
+     * And the remedy the old sentence gave is gone from every sentence: moving
+     * `~/.reemoat/daemon.env` aside strands the *other* server's database — the one
+     * that file belongs to — rather than setting anything up here.
+     */
+    check("and no sentence tells anybody to move ~/.reemoat/daemon.env", /move ~\/\.reemoat\/daemon\.env aside/.test(store), false);
+    check("while a file in this server's own folder still has one", /~\/\.reemoat\/servers aside/.test(store), true);
+    /*
+     * The server picker says what a switch does not cost any more: the previous
+     * server's daemon keeps running until the app quits — and says it only where a
+     * daemon could be running here at all.
+     */
+    {
+      const chooseServer = strip(readFileSync(new URL("../src/ui/ChooseServer.tsx", import.meta.url), "utf8"));
+      check("changing servers says the old server's daemon keeps running", /keeps running until you quit Reemoat/.test(chooseServer), true);
+      check("and only where this shell can host one", /\{hostsDaemon &&\s*" If Reemoat runs a daemon/.test(chooseServer), true);
+      check("which is the declared capability", /const hostsDaemon = nativeBoot\(\)\?\.canHostDaemon === true;/.test(chooseServer), true);
+    }
+
+    /*
      * ⭐ **And the whole flow runs once.** `bootstrap()` has three callers — the
      * entry point, `retry()` and the forced password change — so two runs racing
      * would each read `absent` and each buy a machine.
@@ -454,6 +550,40 @@ process.stdout.write("\nthe machine limit\n");
      */
     check("a foreign daemon does not clear the notice", /status === "foreign"/.test(settle), true);
     check("and only a daemon this app started does", /status === "running"[\s\S]{0,120}setup: null/.test(settle), true);
+    check(
+      "and the settle loop's running arm asks nothing about the list",
+      /status === "running"\) \{\s*this\.patch\(\{ setup: null \}\);\s*await this\.machinesChanged\("machine-added"\);\s*return;\s*\}/.test(settle),
+      true,
+    );
+    /*
+     * ⭐ **And a child that died beside a stranger is still a failure — told
+     * without "for this server".** Inside a settle the child this app started is
+     * gone whoever else is announced, so silence would be the invisible failure
+     * this loop exists to end; but `ANOTHER_DAEMON_DETAIL` says the other daemon is
+     * this server's and a machine to use instead, and another fleet's is neither.
+     */
+    check("a stranger in the settle loop gets its own sentence", /state\.stranger \? STRANGER_DAEMON_DETAIL : ANOTHER_DAEMON_DETAIL/.test(settle), true);
+    {
+      const raw = readFileSync(new URL("../src/store.ts", import.meta.url), "utf8");
+      const strangerSaid = /const STRANGER_DAEMON_DETAIL =\s*`\$\{DAEMON_STOPPED_DETAIL\} ` \+\s*"([^"]+)";/.exec(raw)?.[1] ?? "";
+      check("which was found to read", strangerSaid.length > 0, true);
+      check("and never calls the other daemon this server's", /for this server/.test(strangerSaid), false);
+      check("and says whose it is", /for a different server/.test(strangerSaid), true);
+      /*
+       * And Settings → Logs, whose `foreign` sentence names "the daemon for this
+       * server": picked by the same flag, from the same poll, or that screen says
+       * the false thing the setup notice no longer does.
+       */
+      const logs = strip(readFileSync(new URL("../src/ui/settings/LogsSection.tsx", import.meta.url), "utf8"));
+      check("the logs screen reads the flag off the poll", /setStranger\(state\?\.stranger === true\)/.test(logs), true);
+      const foreignSaid = /case "foreign":\s*return stranger\s*\?\s*"([^"]+)"\s*:\s*"([^"]+)";/.exec(logs);
+      check("and picks its foreign sentence by it", foreignSaid !== null, true);
+      check(
+        "a stranger's is about a different server, and the other names this one",
+        [/found here is for a different server/.test(foreignSaid?.[1] ?? ""), /The daemon for this server/.test(foreignSaid?.[2] ?? "")],
+        [true, true],
+      );
+    }
     /*
      * ⭐ **And "that machine is gone" is a *named* refusal.** With the test the
      * other way round, a 401 on an expired session or any unrecognised 5xx bought a
@@ -517,8 +647,10 @@ process.stdout.write("\nthe machine limit\n");
      *
      * So this pins **both halves of the reversal**, because either alone can be
      * quietly undone: the base is the host name, and no literal `"local"` is left
-     * in the function. The `local`-ness moved to a badge drawn off the announce
-     * file, asserted in `webcheck.local-route.ts` where the announce stub lives.
+     * in the function. The `local`-ness moved to the client, drawn off the announce
+     * file: a `this device` badge in Settings → Machines, asserted in
+     * `webcheck.local-route.ts` where the announce stub lives, and the name `local`
+     * first on the home screen, driven in `webcheck.command-menu-and-browser.ts`.
      */
     const storeSrc = stripComments(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"));
     const creating = /private async createForThisComputer\([\s\S]*?\n  \}/.exec(storeSrc)?.[0] ?? "";
@@ -554,9 +686,9 @@ process.stdout.write("\nthe machine limit\n");
    * driver-fails-on-an-improvement shape this repository names elsewhere.
    *
    * And the claim was already false when it was written: `ui/AppShell.tsx` draws
-   * `installCommand(controlPlaneOrigin())` plus `<MachineOffer/>` in one arm
-   * against `machineQuotaNotice(state.me)` in the other — the door-or-the-sentence
-   * pair these three per-file checks exist for — and was on no list.
+   * `installCommand(controlPlaneOrigin())` in one arm against
+   * `machineQuotaNotice(state.me)` in the other — the door-or-the-sentence pair
+   * these three per-file checks exist for — and was on no list.
    *
    * Differencing two derivations is what goes red on a skip: the set of UI files
    * that mention the predicate, against the set somebody wrote down. A count
@@ -611,8 +743,8 @@ process.stdout.write("\nthe machine limit\n");
     check("reporting it unconditionally instead", /onPick\(path\);/.test(src), true);
     /*
      * ⚠ **And the report's dependencies are `path` alone**, which is the half that
-     * became load-bearing when the picker grew a second arm. `osDialog` arrives one
-     * `runResume` after the first render, so a dependency list holding it would
+     * became load-bearing when the picker grew a second arm. `osDialog` can arrive
+     * at a `runResume` after the first render, so a dependency list holding it would
      * re-fire the report at that moment — a second writer on a different clock,
      * which is this whole block's subject arriving through a new door.
      */

@@ -259,6 +259,22 @@ process.stdout.write("\nwhat a navigation moves\n");
     const stale = { name: "settings", ...parseSettingsRoute(["machines", "m", "plugins", "board"]) } as never;
     check("a stale plugin address is the machine's depth", navMove(oneMachine, stale), null);
     check("and walking to it from Machines is one push, like the machine itself", navMove(machines, stale), "section-push");
+    /*
+     * ⚠ **The Agents list has a leaf again, and it is the one fifth depth in this
+     * sheet** (Q3.640): one harness's card, pushed from a row's Set up and popped
+     * back to the list. Through the parser, for the reason the stale address above
+     * is: the leaf rides `signin` beside `agents`, and a hand-written literal that
+     * left either out would agree with a shape the parser never produces. At 4 it
+     * would be the list's own depth, and `navMove` would slide nothing either way.
+     */
+    const list = { name: "settings", ...parseSettingsRoute(["machines", "m", "agents"]) } as never;
+    const card = { name: "settings", ...parseSettingsRoute(["machines", "m", "agents", "claude"]) } as never;
+    check("the Agents list is a fourth depth and its card a fifth", [depthOf(list), depthOf(card)], [4, 5]);
+    check(
+      "so Set up slides in, and its chevron slides back",
+      [navMove(list, card), navMove(card, list)],
+      ["section-push", "section-pop"],
+    );
   }
 
   /*

@@ -45,6 +45,8 @@ export const {
   fillWindow,
   gapPlan,
   loadStop,
+  localMachineAfter,
+  machinesAsDrawn,
   nextCut,
   reattachSince,
   sessionGroups,
@@ -71,9 +73,8 @@ export const {
   visibleRows,
   waitingFloor,
 } = await import("../src/ui/groups.js");
-export const { MAX_MACHINE_ORDER, dropSlot, nextOrder, orderMachines, setMachineOrder } = await import(
-  "../src/machineOrder.js"
-);
+export const { LOCAL_DISPLAY_NAME, MAX_MACHINE_ORDER, dropSlot, machineDisplayName, nextOrder, orderMachines, setMachineOrder } =
+  await import("../src/machineOrder.js");
 export const { expandConfig, prune, reduceConfig } = await import("../src/configMemory.js");
 export const { RANK_STEP, canReorder, compareRows, effectiveRank, orderSessions, rankBetween, resolveDrop } = await import(
   "../src/sessionOrder.js"

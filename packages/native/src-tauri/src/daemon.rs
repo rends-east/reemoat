@@ -30,13 +30,23 @@
 //!
 //! ## What it will not do
 //!
-//! **It never starts a daemon that is already there.** `~/.reemoat/reemoat.db`
-//! holds one identity and `claimDaemonLock` refuses a second process against it, so
-//! a machine installed by `deploy/bootstrap.sh` is *adopted* — read through
-//! `local.rs` like any other — and never raced. The same rule is what stops a
-//! second control-plane machine being created for one computer, which would burn a
-//! quota slot until a person notices and revokes it — the count is
+//! **It never starts a daemon that is already there.** Each state root's
+//! `reemoat.db` holds one identity and `claimDaemonLock` refuses a second process
+//! against it, so a machine installed by `deploy/bootstrap.sh` is *adopted* — read
+//! through `local.rs` like any other — and never raced. The same rule is what stops
+//! a second control-plane machine being created for one computer, which would burn
+//! a quota slot until a person notices and revokes it — the count is
 //! `machine_owners` rows, and a revoke is what releases one.
+//!
+//! **One database is one machine on one server, so there is a root per server.**
+//! `state_root` keeps `~/.reemoat` for the server its `daemon.env` names — the one
+//! `deploy/install.sh` and launchd know about, untouched — and gives every other
+//! server this app is pointed at `~/.reemoat/servers/<server>/`, with a
+//! `Supervisor` of its own that is started the first time that server is opened
+//! and stopped with the rest when the app quits. Re-enrolling one database back and
+//! forth was the alternative, and it is refused in Q7.148: the identity is a single
+//! row, and a daemon that checks `aud` and never the subject would serve every
+//! session in it to whoever holds a grant on the new server.
 //!
 //! **And it never kills a daemon it did not start.** `Instance` records the pid and
 //! the start time of the child this app launched; a daemon whose file says
@@ -109,11 +119,188 @@ impl Payload {
     }
 }
 
+/* ── which directory a server's daemon lives in ──────────────────────────── */
+
+/// `~/.reemoat` — the root `deploy/install.sh`, launchd and every hand-started
+/// daemon use, and the one a server keeps when its `daemon.env` is there.
+pub fn legacy_root(home: &Path) -> PathBuf {
+    home.join(".reemoat")
+}
+
+/// The directory under the legacy root that holds one folder per other server.
+const SERVERS_DIR: &str = "servers";
+
+/// A server's folder name under `~/.reemoat/servers`.
+///
+/// `https://app.reemoat.com` → `https_app.reemoat.com`, and
+/// `http://127.0.0.1:7890` → `http_127.0.0.1_7890`: every `_` doubled first, then
+/// the scheme's `://` and the port's `:` each written as one `_`.
+///
+/// ⚠ **Injective, and the doubling is what makes it so.** Underscore is legal in a
+/// host, so without it `http://a.b:8080` and `http://a.b_8080` would share a folder
+/// — which `config_state` would catch as `elsewhere`, a permanent refusal whose
+/// remedy (move the folder aside) strands the *other* server's database. With it
+/// the second is `http_a.b__8080`. The scheme is kept, because `http://` and
+/// `https://` are different trust boundaries and must not share a database.
+///
+/// The input is always a canonical origin — `host.origin()`, which
+/// `normalize_origin` produced on the way in and `read_server` re-normalizes on
+/// the way out — so it carries no path, no `/` after the scheme and no `\`. The
+/// last arm writes those as `_` anyway, so the answer is one path component by
+/// construction rather than by the caller's good behaviour.
+pub fn server_slug(origin: &str) -> String {
+    origin
+        .replace('_', "__")
+        .replacen("://", "_", 1)
+        .chars()
+        .map(|c| match c {
+            ':' | '/' | '\\' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect()
+}
+
+/// Where one server's daemon keeps its database, its worktrees and its env file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateRoot {
+    pub dir: PathBuf,
+    /// `~/.reemoat` itself — the root a service unit can source, the one whose
+    /// port stays 7887, and the only one `managed_unit` is asked about.
+    pub legacy: bool,
+}
+
+impl StateRoot {
+    pub fn env_file(&self) -> PathBuf {
+        env_path(&self.dir)
+    }
+}
+
+/// Whether a root holds nothing a daemon left, or might have.
+///
+/// ⚠ **"Could not tell" is not "empty"**, for `config_state`'s reason: the one
+/// thing that must not happen is somebody else's state being treated as an empty
+/// slot. So an existence check that errors counts as present. `daemon.json` is
+/// on the list beside the env file and the database because it is the one trace a
+/// live daemon with both of those elsewhere (`REEMOAT_ENV_FILE`, `REEMOAT_DB`)
+/// still leaves here — and giving that root to a new server would put two daemons
+/// on one announcement and one port.
+fn holds_no_daemon(root: &Path) -> bool {
+    ["daemon.env", "reemoat.db", "daemon.json"]
+        .iter()
+        .all(|name| matches!(root.join(name).try_exists(), Ok(false)))
+}
+
+/// Which root a server's daemon gets. First match wins.
+///
+/// 1. **`~/.reemoat`, when its `daemon.env` names this server.** The launchd or
+///    `install.sh` daemon keeps working exactly as it did, and this app adopts it.
+/// 2. **`~/.reemoat/servers/<server>`, when that folder already has an env file.**
+///    Once a server has a folder it keeps it, whatever happens to the legacy root
+///    afterwards.
+/// 3. **`~/.reemoat`, on a computer with nothing there** — no env file, no
+///    database, no announcement — **and no service unit left behind.** This keeps
+///    "`install.sh` can take over what the app set up" true for the first server.
+///    ⚠ The unit half is not decoration: `host_daemon_start`'s refusal needs an env
+///    file to exist, so a leftover plist beside an empty `~/.reemoat` used to be
+///    handed the file this app then wrote, and launchd raced its child for the code.
+/// 4. **`~/.reemoat/servers/<server>`** for everything else.
+///
+/// ⚠ **Asked on every state read rather than remembered**, because every answer is
+/// a fact about the disk that can change under a running app — `install.sh`
+/// writing the legacy file, somebody moving a folder aside — and a remembered root
+/// would go on reading a folder that is no longer this server's. Q7.148.
+pub fn state_root(home: &Path, origin: &str) -> StateRoot {
+    let legacy = legacy_root(home);
+    if config_state(&legacy, Some(origin)) == CONFIG_HERE {
+        return StateRoot {
+            dir: legacy,
+            legacy: true,
+        };
+    }
+    let own = legacy.join(SERVERS_DIR).join(server_slug(origin));
+    if !matches!(env_path(&own).try_exists(), Ok(false)) {
+        return StateRoot {
+            dir: own,
+            legacy: false,
+        };
+    }
+    if holds_no_daemon(&legacy) && managed_unit(home).is_none() {
+        return StateRoot {
+            dir: legacy,
+            legacy: true,
+        };
+    }
+    StateRoot {
+        dir: own,
+        legacy: false,
+    }
+}
+
+/// Where to look for a daemon's announcement, in order.
+///
+/// **This server's root first, then `~/.reemoat`.** The first is the daemon this
+/// app would run for the server it is on; the second keeps reaching a daemon
+/// `deploy/install.sh` set up, or one started by hand with no `REEMOAT_HOME`,
+/// which is what a client build with no payload depends on (`native-packaging.md`).
+/// A machine id in the legacy file that belongs to another fleet costs nothing:
+/// the page checks it against the machine it wants and declines a mismatch.
+pub fn announce_roots(home: &Path, origin: Option<&str>) -> Vec<PathBuf> {
+    let legacy = legacy_root(home);
+    let Some(origin) = origin else {
+        return vec![legacy];
+    };
+    let own = state_root(home, origin).dir;
+    if own == legacy {
+        vec![legacy]
+    } else {
+        vec![own, legacy]
+    }
+}
+
+/// Create a root, and narrow every level of it to `0700`.
+///
+/// ⚠ **Every level, not only the last.** A writable `servers/` would let another
+/// account plant a folder named for a server before this app creates it — an env
+/// file naming a control plane of its choosing and an announcement naming a port
+/// it holds, which is the harvested machine token `local.rs`'s whole file argument
+/// exists to prevent. `DirBuilder::mode` so a directory is never wider than `0700`
+/// for the length of a `chmod`, and the `chmod` afterwards for one that already
+/// existed wider — `src/announce.ts` makes the same pair of moves for the same
+/// reason. Best effort on the `chmod`, for `write_private`'s: a filesystem with no
+/// modes is not a reason to refuse.
+pub fn ensure_root(home: &Path, root: &StateRoot) -> Result<(), String> {
+    let legacy = legacy_root(home);
+    let mut chain = vec![legacy.clone()];
+    if !root.legacy {
+        chain.push(legacy.join(SERVERS_DIR));
+        chain.push(root.dir.clone());
+    }
+    for dir in &chain {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(format!("could not create {}: {e}", dir.display())),
+            }
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /* ── the environment a daemon is started with ────────────────────────────── */
 
-/// `~/.reemoat/daemon.env`.
-pub fn env_path(home: &Path) -> PathBuf {
-    home.join(".reemoat").join("daemon.env")
+/// `<root>/daemon.env`, for a state root from `state_root`.
+pub fn env_path(root: &Path) -> PathBuf {
+    root.join("daemon.env")
 }
 
 /// The env file's whole content, for a machine this app is enrolling.
@@ -123,6 +310,14 @@ pub fn env_path(home: &Path) -> PathBuf {
 /// becoming a fork. A machine set up by the app can afterwards be taken over by
 /// the shell installer, and one set up by the installer is adopted by the app,
 /// because neither can tell which wrote the file.
+///
+/// ⚠ **That takeover is a property of `~/.reemoat/daemon.env` alone.** A file under
+/// `~/.reemoat/servers/<server>/` has the same three keys in the same format, and
+/// `install.sh` still has no way to run a second daemon beside the first — its
+/// unit label and its log path are one per account — so a server that is not the
+/// legacy root's is reachable while this app runs and not after (Q7.148). Its
+/// `REEMOAT_CONTROL_PLANE` line is a record for `config_state` rather than the value
+/// the daemon enrolls with: the spawn passes the host's own origin over it.
 ///
 /// ⚠ **The enrollment code is written to a `0600` file and never to argv.**
 /// `deploy/bootstrap.sh` passes it on stdin for this reason: argv is readable by
@@ -194,10 +389,11 @@ const PROBE_LIMIT: u64 = 8 * 1024;
 /// deleting a file nobody tells you about.
 ///
 /// ⚠ **And a bare connect is not enough, which is the second half of the same
-/// bug.** `REEMOAT_PORT` is a fixed value in the env file, so after an unclean
-/// exit the port named by a stale announce is an ordinary port that anything may
-/// now hold — another dev server, a second hand-installed daemon on a different
-/// database, a proxy. A connect proves somebody is listening; it does not prove it
+/// bug.** `REEMOAT_PORT` is either fixed in the env file — 7887, on the legacy
+/// root — or `0` and so a new port every start, on a root of its own; either way,
+/// after an unclean exit the port named by a stale announce is an ordinary port
+/// that anything may now hold — another dev server, a second daemon on a
+/// different database, a proxy. A connect proves somebody is listening; it does not prove it
 /// is the daemon this file describes, and answering `foreign` to a stranger is the
 /// same permanent deadlock, just rarer.
 ///
@@ -265,6 +461,40 @@ pub fn is_alive(base: &str, instance_id: &str) -> bool {
 
 /// The key that decides which fleet a daemon belongs to.
 const CONTROL_PLANE_KEY: &str = "REEMOAT_CONTROL_PLANE";
+
+/// The daemon's state root, which `resolveStateRoot` in `src/paths.ts` reads.
+///
+/// Not `HOME_KEY`, beside a `.env("HOME", home)` that means something else
+/// entirely: `HOME` stays the user's real home, so the agents a daemon spawns
+/// find their own sign-ins in `~/.claude` and `~/.codex` whichever server it is.
+const STATE_ROOT_KEY: &str = "REEMOAT_HOME";
+
+/// The daemon's listening port.
+const PORT_KEY: &str = "REEMOAT_PORT";
+
+/// What a spawn is told on top of the env file, and never writes into it.
+///
+/// ⚠ **Variables rather than configuration, deliberately.** Written into the file,
+/// the root and the port would be two more keys this app owns — `OWNED_KEYS` grows,
+/// and with it what a refreshed code may rewrite in a file `install.sh` wrote —
+/// and a second daemon's address would become a setting somebody could copy into
+/// the one file a service sources. Passed at spawn, after the file, they win over
+/// it for the child this app starts and are nothing to any other reader.
+pub struct Spawn {
+    /// `REEMOAT_HOME` — `state_root`'s answer for this server.
+    pub root: PathBuf,
+    /// `REEMOAT_CONTROL_PLANE` — the host's own origin, which the file's copy is a
+    /// record of.
+    pub control_plane: String,
+    /// `REEMOAT_PORT=0`, so the kernel picks and the announcement carries it.
+    ///
+    /// ⚠ **Only for a root of its own, never the legacy one.** `~/.reemoat`'s
+    /// daemon stays on 7887, the value `install.sh` wrote or the default, because
+    /// `pnpm client` and `deploy/lib.sh`'s `/health` probe address it there (Q1.22)
+    /// — and overriding a `REEMOAT_PORT=7887` line would break the rule a few lines
+    /// down that the file wins. Only the per-server roots can collide on a port.
+    pub ephemeral_port: bool,
+}
 
 /// The three keys this app owns. Everything else in the file is somebody else's.
 ///
@@ -408,8 +638,15 @@ pub const CONFIG_ELSEWHERE: &str = "elsewhere";
 /// ⚠ **A file naming nothing this can parse reads as `elsewhere`, never `none`.**
 /// The one thing that must not happen is a file somebody else wrote being treated
 /// as an empty slot, and "I could not read it" is not evidence that it is empty.
-pub fn config_state(home: &Path, origin: Option<&str>) -> &'static str {
-    let path = env_path(home);
+///
+/// **`root` is a state root, and which one decides what `elsewhere` can mean.**
+/// `state_root` hands the legacy root to a server only when this answers `here`
+/// for it, or when there is nothing there at all — so on the root a server is
+/// actually given, `elsewhere` is a file in that server's *own* folder that was
+/// edited by hand or cannot be read. A folder-name collision would be the third
+/// way, and `server_slug` is injective so that it is not one.
+pub fn config_state(root: &Path, origin: Option<&str>) -> &'static str {
+    let path = env_path(root);
     if !path.exists() {
         return CONFIG_NONE;
     }
@@ -918,6 +1155,11 @@ const STOP_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 /// shared with whatever `deploy/install.sh` may have set up, and a pid is reused
 /// by the kernel — so "stop the daemon" must mean "stop *this* child", never "kill
 /// whatever is at the pid in that file". The handle is the identity.
+///
+/// **One per server, not one per app.** `Host` keeps a map from origin to one of
+/// these, filled the first time a server is opened, so changing servers leaves the
+/// previous one's child running and its ring intact; `RunEvent::Exit` stops every
+/// one of them under a single deadline (`stop_all`). Q7.148.
 pub struct Supervisor {
     child: Option<std::process::Child>,
     log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
@@ -948,11 +1190,24 @@ pub struct DaemonState {
     /// `Supervisor::owns_running`.
     #[serde(rename = "exitCode")]
     pub exit_code: Option<i32>,
-    /// `none` · `here` · `elsewhere` — what `~/.reemoat/daemon.env` already says.
+    /// `none` · `here` · `elsewhere` — what this server's env file already says:
+    /// `daemon.env` in the root `state_root` gives it.
     ///
     /// ⚠ **Asked before a machine is created, never after.** See `config_state`,
     /// which carries the measurement behind that ordering.
     pub config: String,
+    /// Whether the announcement behind `machineId` names a control plane other
+    /// than this server's — `local::Announced::for_another_server`.
+    ///
+    /// ⚠ **A flag on the status rather than a status of its own, and never
+    /// `absent`.** `~/.reemoat` is shared by every daemon started without
+    /// `REEMOAT_HOME`, so a stranger's file there says nothing about whether this
+    /// server's own daemon is up — the launchd one may well be, announced over. An
+    /// `absent` would send the setup flow's adoption arm to start a second daemon
+    /// on a database that unit holds. So the status stays what the file and the
+    /// probe say, and this tells the page that the machine beside it is somebody
+    /// else's fleet's: nothing to adopt and nothing to say "for this server" about.
+    pub stranger: bool,
 }
 
 impl Default for DaemonState {
@@ -966,6 +1221,7 @@ impl Default for DaemonState {
             claimed: None,
             config: CONFIG_NONE.to_string(),
             exit_code: None,
+            stranger: false,
         }
     }
 }
@@ -1066,11 +1322,22 @@ impl Supervisor {
     /// a handle to is a wrapper, the daemon is a grandchild, and stopping the app
     /// would leave the real daemon reparented with nothing reaping it. `--import`
     /// runs the daemon in the process we spawned, so the handle is the daemon.
+    ///
+    /// **Three layers, and each wins over the one before.** A clean environment with
+    /// who this process is (`USER`, `LOGNAME`); then the env file, so a line there
+    /// beats anything this process guessed; then `spawn` — the state root, the
+    /// server and, for a root of its own, the port — which beats the file, because
+    /// those three are what make this child *this server's* daemon and the file is
+    /// only a record of them (`Spawn` has why they are never written into it).
+    ///
+    /// The early return below is per server by construction: there is one of these
+    /// per origin, so "already running" can only mean that server's child.
     pub fn start(
         &mut self,
         payload: &Payload,
         home: &Path,
         env: &BTreeMap<String, String>,
+        spawn: &Spawn,
     ) -> Result<(), String> {
         if self.owns_running() {
             return Ok(());
@@ -1134,6 +1401,20 @@ impl Supervisor {
         }
         for (key, value) in env {
             command.env(key, value);
+        }
+        /*
+         * ⚠ **After the file, so these win over it — and they are the whole of what
+         * makes one child this server's daemon rather than another's.** The root
+         * decides which database, worktrees and announcement it has; the origin is
+         * the host's own, for `host_daemon_start`'s reason that a URL from anywhere
+         * else is a different spelling waiting to become `elsewhere`; and the port is
+         * the kernel's on a root of its own, since two daemons on 7887 is one of them
+         * dying on `EADDRINUSE`. The legacy root keeps whatever port its file says.
+         */
+        command.env(STATE_ROOT_KEY, &spawn.root);
+        command.env(CONTROL_PLANE_KEY, &spawn.control_plane);
+        if spawn.ephemeral_port {
+            command.env(PORT_KEY, "0");
         }
         // Inherited only when the user set it, because the daemon has no opinion
         // about a locale and a missing one makes git's output ASCII-mangled.
@@ -1245,8 +1526,23 @@ impl Supervisor {
     /// `SIGTERM` rather than a kill: `scripts/daemon.ts` has a real graceful stop
     /// — a 20s budget to close sessions, a hard exit at 25 — and skipping it means
     /// every live turn is interrupted and every pending approval dropped.
+    ///
+    /// {@link signal} and then {@link reap_by} one `STOP_DEADLINE` out. Split in
+    /// two so that {@link stop_all} can signal every server's daemon before it waits
+    /// on any: stopping them one after another would hand a quit up to one whole
+    /// deadline *per server*.
     pub fn stop(&mut self) {
-        let Some(mut child) = self.child.take() else {
+        self.signal();
+        self.reap_by(std::time::Instant::now() + STOP_DEADLINE);
+    }
+
+    /// Ask the child to stop, and keep the handle so it can still be reaped.
+    ///
+    /// ⚠ **The handle stays in `self.child` on purpose.** It is what keeps the pid
+    /// unreaped, and therefore unrecyclable, until {@link reap_by} waits on it — so
+    /// the signal cannot land on a process the kernel handed the number to since.
+    pub fn signal(&mut self) {
+        let Some(child) = self.child.as_mut() else {
             return;
         };
         #[cfg(unix)]
@@ -1255,7 +1551,7 @@ impl Supervisor {
             // the shutdown the daemon implements.
             let pid = child.id() as i32;
             // Safe: `pid` is this process's own live child, taken from the handle
-            // above, and `wait` below reaps it. The signal cannot reach a recycled
+            // above, and `reap_by` reaps it. The signal cannot reach a recycled
             // pid because the handle keeps it unreaped until then.
             unsafe {
                 libc::kill(pid, libc::SIGTERM);
@@ -1275,6 +1571,16 @@ impl Supervisor {
         {
             let _ = child.kill();
         }
+    }
+
+    /// Wait for the child until `deadline`, then kill it and reap it.
+    ///
+    /// A deadline rather than a duration, so that {@link stop_all} can hand every
+    /// daemon the *same* instant and a quit waits once rather than once per server.
+    pub fn reap_by(&mut self, deadline: std::time::Instant) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
         /*
          * ⚠ **Bounded, because this runs on the way out of the main loop.** An
          * unbounded `wait` hands the daemon's shutdown budget to the quit gesture:
@@ -1289,7 +1595,6 @@ impl Supervisor {
          * and the setup flow reads that as a daemon that will not start. Waiting is
          * what makes "the app is gone" mean "the daemon is gone".
          */
-        let deadline = std::time::Instant::now() + STOP_DEADLINE;
         loop {
             match child.try_wait() {
                 Ok(Some(_)) => return,
@@ -1312,6 +1617,34 @@ impl Supervisor {
 impl Default for Supervisor {
     fn default() -> Self {
         Supervisor::new()
+    }
+}
+
+/// Stop every daemon this app started, together, under one deadline.
+///
+/// ⚠ **Signal all, then wait once — never `stop()` each in turn.** With a daemon
+/// per server, stopping them one after another would make a quit worth up to one
+/// `STOP_DEADLINE` *per server*: three servers with a busy session each is well over
+/// a minute of a dock icon that will not go away. Every child gets its `SIGTERM` in
+/// the same breath, runs its own 20-second close in parallel with the others, and
+/// the one deadline bounds the lot. `cargo test` drives it with children that
+/// ignore the signal, which is the only shape that can tell the two apart.
+pub fn stop_all<'a>(supervisors: impl IntoIterator<Item = &'a mut Supervisor>) {
+    stop_all_by(supervisors, std::time::Instant::now() + STOP_DEADLINE);
+}
+
+/// {@link stop_all} with the deadline named, so a test can wait one second rather
+/// than twenty-six.
+fn stop_all_by<'a>(
+    supervisors: impl IntoIterator<Item = &'a mut Supervisor>,
+    deadline: std::time::Instant,
+) {
+    let mut all: Vec<&'a mut Supervisor> = supervisors.into_iter().collect();
+    for supervisor in all.iter_mut() {
+        supervisor.signal();
+    }
+    for supervisor in all.iter_mut() {
+        supervisor.reap_by(deadline);
     }
 }
 
@@ -1692,8 +2025,8 @@ mod tests {
 
     #[test]
     fn a_computer_with_no_env_file_is_an_empty_slot() {
-        let home = scratch("cfg-none");
-        assert_eq!(config_state(&home, Some("https://cp.example")), CONFIG_NONE);
+        let root = legacy_root(&scratch("cfg-none"));
+        assert_eq!(config_state(&root, Some("https://cp.example")), CONFIG_NONE);
     }
 
     #[test]
@@ -1705,19 +2038,19 @@ mod tests {
          * not the spelling compared, the app refuses a file it wrote itself — for
          * ever, since nothing rewrites a file it believes belongs to somebody else.
          */
-        let home = scratch("cfg-roundtrip");
+        let root = legacy_root(&scratch("cfg-roundtrip"));
         for origin in [
             "https://cp.example",
             "http://127.0.0.1:7890",
             "https://cp.example:8443",
         ] {
-            std::fs::write(env_path(&home), env_contents(origin, "ec_abc")).unwrap();
-            assert_eq!(config_state(&home, Some(origin)), CONFIG_HERE, "{origin}");
+            std::fs::write(env_path(&root), env_contents(origin, "ec_abc")).unwrap();
+            assert_eq!(config_state(&root, Some(origin)), CONFIG_HERE, "{origin}");
             // And the same after a code refresh, which takes the other write path.
-            let existing = std::fs::read_to_string(env_path(&home)).unwrap();
-            std::fs::write(env_path(&home), env_rewritten(&existing, origin, "ec_next")).unwrap();
+            let existing = std::fs::read_to_string(env_path(&root)).unwrap();
+            std::fs::write(env_path(&root), env_rewritten(&existing, origin, "ec_next")).unwrap();
             assert_eq!(
-                config_state(&home, Some(origin)),
+                config_state(&root, Some(origin)),
                 CONFIG_HERE,
                 "{origin} rewritten"
             );
@@ -1785,27 +2118,27 @@ mod tests {
 
     #[test]
     fn a_file_naming_this_server_is_adopted_rather_than_provisioned() {
-        let home = scratch("cfg-here");
+        let root = legacy_root(&scratch("cfg-here"));
         std::fs::write(
-            env_path(&home),
+            env_path(&root),
             "REEMOAT_CONTROL_PLANE='https://cp.example'\n",
         )
         .unwrap();
         // Quoted, because `lib.sh`'s `sq` writes it that way — and the spelling is
         // compared after `normalize_origin`, so a trailing slash or a default port
         // is the same server rather than a different one.
-        assert_eq!(config_state(&home, Some("https://cp.example")), CONFIG_HERE);
+        assert_eq!(config_state(&root, Some("https://cp.example")), CONFIG_HERE);
         std::fs::write(
-            env_path(&home),
+            env_path(&root),
             "REEMOAT_CONTROL_PLANE=https://cp.example:443/\n",
         )
         .unwrap();
-        assert_eq!(config_state(&home, Some("https://cp.example")), CONFIG_HERE);
+        assert_eq!(config_state(&root, Some("https://cp.example")), CONFIG_HERE);
     }
 
     #[test]
     fn a_file_naming_another_server_is_never_treated_as_an_empty_slot() {
-        let home = scratch("cfg-else");
+        let root = legacy_root(&scratch("cfg-else"));
         for text in [
             "REEMOAT_CONTROL_PLANE=https://other.example\n",
             // Unreadable is *also* `elsewhere`: no control plane at all, and a value
@@ -1814,20 +2147,20 @@ mod tests {
             "REEMOAT_AUTH=signed\n",
             "REEMOAT_CONTROL_PLANE=:::\n",
         ] {
-            std::fs::write(env_path(&home), text).unwrap();
+            std::fs::write(env_path(&root), text).unwrap();
             assert_eq!(
-                config_state(&home, Some("https://cp.example")),
+                config_state(&root, Some("https://cp.example")),
                 CONFIG_ELSEWHERE,
                 "{text}"
             );
         }
         // And with no server chosen yet, every file is somebody else's.
         std::fs::write(
-            env_path(&home),
+            env_path(&root),
             "REEMOAT_CONTROL_PLANE=https://cp.example\n",
         )
         .unwrap();
-        assert_eq!(config_state(&home, None), CONFIG_ELSEWHERE);
+        assert_eq!(config_state(&root, None), CONFIG_ELSEWHERE);
     }
 
     #[test]
@@ -1921,5 +2254,359 @@ mod tests {
             parsed.get("REEMOAT_HOST").map(String::as_str),
             Some("127.0.0.1")
         );
+    }
+
+    /* ── a root per server ───────────────────────────────────────────────── */
+
+    const DEV: &str = "https://app.reemoat.test";
+    const PROD: &str = "https://app.reemoat.com";
+
+    fn server_root(home: &Path, origin: &str) -> PathBuf {
+        legacy_root(home).join("servers").join(server_slug(origin))
+    }
+
+    /// The shape this whole change was measured on: the launchd daemon's file names
+    /// the dev stand, and the app is signed in to production.
+    #[test]
+    fn the_legacy_root_is_kept_for_the_server_its_file_names() {
+        let home = scratch("root-legacy");
+        std::fs::write(
+            env_path(&legacy_root(&home)),
+            format!("REEMOAT_CONTROL_PLANE='{DEV}'\nREEMOAT_PORT=7887\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            state_root(&home, DEV),
+            StateRoot {
+                dir: legacy_root(&home),
+                legacy: true
+            },
+            "the server launchd's daemon belongs to keeps it, untouched"
+        );
+        let prod = state_root(&home, PROD);
+        assert_eq!(prod.dir, server_root(&home, PROD));
+        assert!(!prod.legacy, "and it is the only one that does");
+        // Which is exactly what used to be refused: prod read the dev file as its
+        // own slot, answered `elsewhere`, and the computer could not be set up.
+        assert_eq!(
+            config_state(&prod.dir, Some(PROD)),
+            CONFIG_NONE,
+            "the other server's slot is empty rather than somebody else's"
+        );
+    }
+
+    #[test]
+    fn every_other_server_gets_a_root_of_its_own() {
+        let home = scratch("root-others");
+        std::fs::write(
+            env_path(&legacy_root(&home)),
+            format!("REEMOAT_CONTROL_PLANE={DEV}\n"),
+        )
+        .unwrap();
+        let a = state_root(&home, PROD);
+        let b = state_root(&home, "http://127.0.0.1:7890");
+        assert_ne!(a.dir, b.dir, "two servers, two databases");
+        assert_eq!(a.env_file(), server_root(&home, PROD).join("daemon.env"));
+        for root in [&a, &b] {
+            assert!(!root.legacy);
+            assert!(root.dir.starts_with(legacy_root(&home).join("servers")));
+        }
+    }
+
+    #[test]
+    fn a_computer_with_nothing_on_it_gives_the_first_server_the_legacy_root() {
+        let home = scratch("root-fresh");
+        // An empty `~/.reemoat`, and none at all, are the same computer.
+        assert!(state_root(&home, PROD).legacy);
+        std::fs::remove_dir_all(legacy_root(&home)).unwrap();
+        assert!(state_root(&home, PROD).legacy);
+        // The toolchain is per user, not a daemon's state, and does not make the
+        // slot taken.
+        std::fs::create_dir_all(legacy_root(&home).join("toolchain").join("bin")).unwrap();
+        assert!(state_root(&home, PROD).legacy);
+    }
+
+    /// ⚠ **"No env file" is not "nothing here".** A daemon run with its env file
+    /// elsewhere — `REEMOAT_ENV_FILE`, a checkout's `.env` — still keeps its database
+    /// in `~/.reemoat`, and handing that root to a new server would enroll the
+    /// database a live daemon is using as a different machine.
+    #[test]
+    fn a_legacy_database_with_no_file_is_not_an_empty_slot() {
+        for trace in ["reemoat.db", "daemon.json"] {
+            let home = scratch(&format!("root-trace-{}", trace.replace('.', "-")));
+            std::fs::write(legacy_root(&home).join(trace), "").unwrap();
+            let root = state_root(&home, PROD);
+            assert!(!root.legacy, "{trace} alone keeps the legacy root taken");
+            assert_eq!(root.dir, server_root(&home, PROD));
+        }
+    }
+
+    #[test]
+    fn a_server_that_has_a_root_keeps_it() {
+        let home = scratch("root-keeps");
+        let own = server_root(&home, PROD);
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(env_path(&own), format!("REEMOAT_CONTROL_PLANE={PROD}\n")).unwrap();
+        // The legacy root is empty now — somebody purged it — and rule 3 would
+        // otherwise hand it over and strand this server's database in its folder.
+        assert_eq!(
+            state_root(&home, PROD),
+            StateRoot {
+                dir: own,
+                legacy: false
+            }
+        );
+    }
+
+    /// ⚠ **The unit half of the empty-slot rule.** `host_daemon_start` refuses to
+    /// rewrite a file a service owns, but only once the file exists — so a leftover
+    /// plist beside an *empty*
+    /// `~/.reemoat` would be handed the env file this app then writes, and launchd
+    /// would respawn against it within ten seconds and race the child for the code.
+    #[test]
+    fn a_leftover_unit_sends_a_fresh_server_to_its_own_root() {
+        let home = scratch("root-unit");
+        let agents = home.join("Library").join("LaunchAgents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(agents.join("com.reemoat.daemon.plist"), "").unwrap();
+        let root = state_root(&home, PROD);
+        assert!(!root.legacy);
+        assert_eq!(root.dir, server_root(&home, PROD));
+    }
+
+    #[test]
+    fn the_slug_keeps_the_scheme_and_the_port() {
+        assert_eq!(server_slug(PROD), "https_app.reemoat.com");
+        assert_eq!(server_slug("http://127.0.0.1:7890"), "http_127.0.0.1_7890");
+        // Two trust boundaries, two databases.
+        assert_ne!(
+            server_slug("http://cp.example"),
+            server_slug("https://cp.example")
+        );
+        assert_ne!(
+            server_slug("http://cp.example:7890"),
+            server_slug("http://cp.example:7891")
+        );
+        /*
+         * ⚠ **An underscore in the host may not stand in for a port.** Both
+         * of these became `http_a.b_8080` before the doubling, and the second
+         * server's permanent `elsewhere` would have told somebody to move the
+         * first server's database aside.
+         */
+        assert_ne!(
+            server_slug("http://a.b:8080"),
+            server_slug("http://a.b_8080")
+        );
+        assert_eq!(server_slug("http://a.b_8080"), "http_a.b__8080");
+        // And every canonical origin is one ordinary path component.
+        for origin in [
+            PROD,
+            "http://127.0.0.1:7890",
+            "http://[::1]:7890",
+            "https://a_b.example",
+        ] {
+            let origin = crate::config::normalize_origin(origin).unwrap();
+            let slug = server_slug(&origin);
+            let mut parts = Path::new(&slug).components();
+            assert!(
+                matches!(parts.next(), Some(std::path::Component::Normal(_)))
+                    && parts.next().is_none(),
+                "{origin} → {slug} is not one component"
+            );
+        }
+        let ipv6 = crate::config::normalize_origin("http://[::1]:7890").unwrap();
+        assert_ne!(
+            server_slug(&ipv6),
+            server_slug(&crate::config::normalize_origin("http://127.0.0.1:7890").unwrap())
+        );
+    }
+
+    #[test]
+    fn the_host_reads_this_servers_announcement_before_the_legacy_one() {
+        let home = scratch("root-announce");
+        std::fs::write(
+            env_path(&legacy_root(&home)),
+            format!("REEMOAT_CONTROL_PLANE={DEV}\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            announce_roots(&home, Some(PROD)),
+            vec![server_root(&home, PROD), legacy_root(&home)],
+            "a server of its own first, and the install.sh daemon after it"
+        );
+        assert_eq!(
+            announce_roots(&home, Some(DEV)),
+            vec![legacy_root(&home)],
+            "the legacy root's own server is read once, not twice"
+        );
+        assert_eq!(announce_roots(&home, None), vec![legacy_root(&home)]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_root_narrows_every_level_to_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = scratch("root-modes");
+        let legacy = legacy_root(&home);
+        // An upgrade: both ancestors already exist, and wide.
+        std::fs::create_dir_all(legacy.join("servers")).unwrap();
+        for dir in [&legacy, &legacy.join("servers")] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let root = StateRoot {
+            dir: server_root(&home, PROD),
+            legacy: false,
+        };
+        ensure_root(&home, &root).unwrap();
+        for dir in [legacy.clone(), legacy.join("servers"), root.dir.clone()] {
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{} is {mode:o}", dir.display());
+        }
+        // Twice is not an error.
+        ensure_root(&home, &root).unwrap();
+    }
+
+    /// A child that ignores `SIGTERM`, which is what a daemon deep in its 20-second
+    /// close looks like to this process.
+    #[cfg(unix)]
+    fn stubborn() -> Supervisor {
+        let child = Command::new("sh")
+            .args(["-c", "trap '' TERM; exec sleep 30"])
+            .spawn()
+            .unwrap();
+        Supervisor {
+            child: Some(child),
+            ..Supervisor::new()
+        }
+    }
+
+    /// ⚠ **The only shape that can tell "one deadline" from "one each".** A
+    /// child that dies on `SIGTERM` is gone in milliseconds either way, so a test
+    /// built from `sleep 30` alone passes for the sequential version too. These
+    /// ignore the signal, so a quit that stopped them one after another would take
+    /// a deadline apiece — two seconds here — and one that signals all and waits
+    /// once takes one.
+    #[cfg(unix)]
+    #[test]
+    fn a_quit_stops_every_daemon_under_one_deadline() {
+        let mut first = stubborn();
+        let mut second = stubborn();
+        // Let `sh` install the trap before anything signals it.
+        std::thread::sleep(Duration::from_millis(200));
+        let began = std::time::Instant::now();
+        stop_all_by(
+            [&mut first, &mut second],
+            began + Duration::from_millis(1000),
+        );
+        let took = began.elapsed();
+        assert!(
+            first.child.is_none() && second.child.is_none(),
+            "both reaped"
+        );
+        assert!(
+            took < Duration::from_millis(1900),
+            "one deadline for both, not one each: {took:?}"
+        );
+        assert!(
+            took >= Duration::from_millis(900),
+            "and the deadline was waited out rather than skipped: {took:?}"
+        );
+    }
+
+    /// And the other half: a daemon that does stop is not held to the deadline.
+    #[cfg(unix)]
+    #[test]
+    fn a_daemon_that_stops_is_not_waited_for_past_its_exit() {
+        let mut quick = Supervisor {
+            child: Some(Command::new("sleep").arg("30").spawn().unwrap()),
+            ..Supervisor::new()
+        };
+        let began = std::time::Instant::now();
+        stop_all([&mut quick]);
+        assert!(quick.child.is_none());
+        assert!(began.elapsed() < Duration::from_secs(5));
+    }
+
+    /// The three spawn-time variables, read back out of a child's own environment.
+    ///
+    /// A stand-in `node` that prints its environment, so the assertion is about
+    /// what a process actually received rather than about the builder's calls.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_of_its_own_gets_the_kernels_port_and_the_legacy_root_keeps_its_own() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = scratch("spawn-env");
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let node = bin.join("node");
+        std::fs::write(&node, "#!/bin/sh\nenv\n").unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let payload = Payload {
+            root: home.clone(),
+            node,
+        };
+        // The file says what `install.sh` writes, including a stale server.
+        let file: BTreeMap<String, String> = [
+            ("REEMOAT_PORT", "7887"),
+            ("REEMOAT_CONTROL_PLANE", "https://stale.example/"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+
+        let seen = |ephemeral_port: bool, root: PathBuf| -> Vec<String> {
+            let mut supervisor = Supervisor::new();
+            supervisor
+                .start(
+                    &payload,
+                    &home,
+                    &file,
+                    &Spawn {
+                        root,
+                        control_plane: PROD.to_string(),
+                        ephemeral_port,
+                    },
+                )
+                .unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while std::time::Instant::now() < deadline
+                && !supervisor
+                    .log_lines()
+                    .iter()
+                    .any(|l| l.starts_with("REEMOAT_HOME="))
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // The ring is filled by reader threads; give them the rest of `env`.
+            std::thread::sleep(Duration::from_millis(100));
+            supervisor.stop();
+            supervisor.log_lines()
+        };
+
+        let own = server_root(&home, PROD);
+        let lines = seen(true, own.clone());
+        let has = |line: &str| lines.iter().any(|l| l == line);
+        assert!(has(&format!("REEMOAT_HOME={}", own.display())), "{lines:?}");
+        assert!(
+            has(&format!("REEMOAT_CONTROL_PLANE={PROD}")),
+            "the host's origin wins over the file's"
+        );
+        assert!(
+            has("REEMOAT_PORT=0"),
+            "a root of its own is on the kernel's port"
+        );
+        assert!(!has("REEMOAT_PORT=7887"));
+
+        let lines = seen(false, legacy_root(&home));
+        let has = |line: &str| lines.iter().any(|l| l == line);
+        assert!(has(&format!(
+            "REEMOAT_HOME={}",
+            legacy_root(&home).display()
+        )));
+        assert!(
+            has("REEMOAT_PORT=7887"),
+            "the legacy root keeps the file's port, for pnpm client and lib.sh"
+        );
+        assert!(!has("REEMOAT_PORT=0"));
     }
 }

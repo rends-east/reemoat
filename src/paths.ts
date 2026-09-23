@@ -1,6 +1,6 @@
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, sep } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 
 /**
  * A leading `~` as this daemon's own home directory.
@@ -25,6 +25,49 @@ export function expandHome(value: string): string {
   if (value === "~") return homedir();
   if (value.startsWith(`~${sep}`) || value.startsWith("~/")) return join(homedir(), value.slice(2));
   return value;
+}
+
+/**
+ * The directory every default path this daemon derives lives under.
+ *
+ * `REEMOAT_HOME`, `~/.reemoat` when it is unset. The database, the worktrees, the
+ * uploads, the plugins, the ask directory and the local announcement
+ * (`daemon.json`) all default to a name inside it, and an explicit `REEMOAT_DB` or
+ * `REEMOAT_*_ROOT` still wins over the default it would have given.
+ *
+ * ⚠ **One database is one machine on one server, so one computer on two servers
+ * is two of these.** The `identity` row is a single row, and re-enrolling
+ * overwrites it; and the daemon checks a token's `aud` and never its subject, so
+ * everything one database holds is served to whoever holds a grant on the machine
+ * it currently is. The desktop app therefore gives each server it runs a daemon
+ * for a root of its own — `~/.reemoat` for the server `~/.reemoat/daemon.env`
+ * names, `~/.reemoat/servers/<server>/` for every other — and passes it here at
+ * spawn rather than writing it into a file. Q7.148.
+ *
+ * **It is not where the agent CLIs live.** `~/.reemoat/toolchain` is per *user*,
+ * one copy shared by every daemon this account runs (`MANAGED_CLI_DIRS`), and it
+ * does not move with this.
+ *
+ * ⚠ **The home directory itself is refused**, because the defaults below it are
+ * `uploads`, `worktrees` and `plugins` with no leading dot: rooted at `~` they
+ * would land as ordinary folders in the directory picker, which is the one place
+ * the dot-prefixed default exists to keep them out of. A relative path is refused
+ * for `resolveDbPath`'s reason — state that depends on which terminal launched the
+ * daemon. Purely syntactic, like {@link expandHome}: nothing here touches the disk.
+ */
+export function resolveStateRoot(spec: string | undefined): string {
+  const raw = (spec ?? "").trim();
+  if (raw.length === 0) return join(homedir(), ".reemoat");
+  const expanded = expandHome(raw);
+  if (!isAbsolute(expanded)) {
+    throw new Error(`REEMOAT_HOME must be an absolute path, got "${raw}"`);
+  }
+  // `resolve` rather than a string compare, so a trailing separator or a `.`
+  // segment is the same directory rather than a way round the refusal.
+  if (resolve(expanded) === resolve(homedir())) {
+    throw new Error(`REEMOAT_HOME may not be your home directory itself, got "${raw}"`);
+  }
+  return expanded;
 }
 
 /**

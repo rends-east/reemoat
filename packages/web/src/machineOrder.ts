@@ -1,14 +1,26 @@
 /**
- * What order the machines are in, and who decides.
+ * What order the machines are in, who decides — and what the list calls the one
+ * this app is running beside.
  *
  * **Their reader decides, and only by saying so.** The list is ordered by name
- * until somebody drags one, and by name for every machine nobody has dragged.
+ * until somebody drags one, and by name for every machine nobody has dragged —
+ * except the computer this client is running on, which leads until somebody drags
+ * it somewhere else ({@link orderMachines}' first clause).
  * That is a narrowing of the rule in `web-shell.md`, not a reversal of it, and the
  * distinction is the rule's own stated reason: *reachability* and *activity*
  * flicker on the four-second poll, so a list ordered by either reshuffles under a
  * travelling thumb. A **stored** order cannot — it moves when somebody moves it
  * and at no other moment — which is exactly why one is allowed here where a
- * derived one is still banned outright.
+ * derived one is still banned outright. **Which computer this is** does not flicker
+ * either: it is seeded at launch from the machine this app created for the
+ * server, replaced only when the announce file names a different machine of the
+ * account's, and never cleared by a read that finds nothing — so it moves when
+ * this computer's daemon becomes another machine, never when a daemon restarts
+ * or a network does (`store.ts`'s `localMachineAfter`).
+ *
+ * **And the one name this module decides**, {@link machineDisplayName}, sits here
+ * because it is the same fact as that first clause asked a second question: the
+ * machine this client runs beside leads the list, and is called `local` in it.
  *
  * **Module state seeded from `localStorage`**, the idiom `rail.ts` argues and
  * `groups.ts` uses: this is a preference about the app rather than about a screen,
@@ -66,49 +78,118 @@ export const MAX_MACHINE_ORDER = 200;
 /**
  * The stored order, merged over what the fleet actually holds.
  *
- * Three clauses, two of them {@link import("./agentStrip").orderStrip}'s and the
- * third a deliberate absence:
+ * Four clauses — two of them {@link import("./agentStrip").orderStrip}'s, one this
+ * list's own, and the last a deliberate absence:
  *
- *   1. **Stored ids first, in stored order**, keeping only those `natural` still
+ *   1. **`first` — the machine this client runs beside — leads, unless the stored
+ *      order names it.** The owner's words: the local daemon is `local` *and first
+ *      in the list*. A position somebody expressed still wins: an id that is in
+ *      `stored` stays exactly where it was put, so this clause fills the default
+ *      and never overrides a drag. It is placed *before* the stored ids, not
+ *      appended with the strangers in clause 3 — appended, it would be first only
+ *      on a fleet nobody had ever dragged. `null` (a browser, a shell with no
+ *      daemon) and an id `natural` does not hold (another fleet's daemon) both
+ *      leave the other three clauses exactly as they were.
+ *   2. **Stored ids next, in stored order**, keeping only those `natural` still
  *      holds. An id that resolves to nothing is dropped *at draw time* and keeps
  *      its slot in storage, so a machine comes back where it was if the grant
  *      does.
- *   2. **Then everything the store has never heard of, in natural order, at the
+ *   3. **Then everything the store has never heard of, in natural order, at the
  *      end.** `natural` arrives already sorted by name, so this clause *is* the
  *      name sort rather than a replacement for it. A machine enrolled this morning
  *      has no position anybody expressed, and inventing one inside the stored list
  *      would be this function having an opinion nobody gave it.
- *   3. **There is no `hidden` clause and there must never be one.** `natural`
+ *   4. **There is no `hidden` clause and there must never be one.** `natural`
  *      decides membership outright. `web-shell.md`: *"A machine with no sessions
  *      still gets a tab"* — an order that could drop a granted machine would
  *      reverse that through the other door, and the tab is the only route to
  *      starting a session on a machine you have just added.
  *
- * ⚠ **`natural` decides membership; `stored` decides only order.** Reading them
- * as symmetric is the mistake `agentStrip.ts` records having to name, and the
- * duplicate guard is the other half of it: this list comes out of storage somebody
- * can hand-edit, and one id drawn twice is two tabs that select each other.
+ * ⚠ **`natural` decides membership; `stored` and `first` decide only order.**
+ * Reading them as symmetric is the mistake `agentStrip.ts` records having to name,
+ * and the duplicate guard is the other half of it: this list comes out of storage
+ * somebody can hand-edit, and one id drawn twice is two tabs that select each
+ * other.
+ *
+ * ⚠ **A drag is what stores `first`, and nothing else does.** `setMachineOrder`
+ * writes the whole drawn list, so the first drag of *any* machine stores this one
+ * at the place it was drawn — first, if nobody had moved it — and from then on
+ * clause 2 is what holds it there. The consequence is stated rather than smoothed:
+ * a reader who had dragged anything before this clause existed already has this
+ * machine stored wherever it was drawn then, and it stays there until they move it.
  */
 export function orderMachines<T extends { id: MachineId }>(
   natural: readonly T[],
   stored: readonly string[],
+  first: MachineId | null = null,
 ): T[] {
   const live = new Map(natural.map((one) => [one.id as string, one]));
   const rows: T[] = [];
   const placed = new Set<string>();
-  for (const id of stored) {
-    if (placed.has(id)) continue;
+  const take = (id: string): void => {
+    if (placed.has(id)) return;
     const one = live.get(id);
-    if (one === undefined) continue;
+    if (one === undefined) return;
     placed.add(id);
     rows.push(one);
-  }
-  for (const one of natural) {
-    if (placed.has(one.id as string)) continue;
-    placed.add(one.id as string);
-    rows.push(one);
-  }
+  };
+  if (first !== null && !stored.includes(first)) take(first);
+  for (const id of stored) take(id);
+  for (const one of natural) take(one.id as string);
   return rows;
+}
+
+/** The word {@link machineDisplayName} draws for the machine this client runs beside. */
+export const LOCAL_DISPLAY_NAME = "local";
+
+/**
+ * What this client calls a machine wherever it names one as a label: `local` for
+ * the computer it is running on, the stored label for every other — except a
+ * label that is itself `local`.
+ *
+ * ⚠ **Drawn, never stored, and that is Q7.139 in both of its halves.** The label
+ * on the control plane is the ordinary host name, because that row is read by a
+ * phone, a second computer and anybody holding a grant, and to every one of them
+ * `local` names a computer somewhere else. Which row you are *sitting at* is true
+ * of one client only, so it is answered here, per client, from
+ * `AppState.localMachineId` — the announce file, never `route.kind`. Nothing that
+ * writes a label may call this: a rename seeded from it would store `local` on
+ * the row every other client reads, which is the decision Q7.139 reversed.
+ *
+ * **One function, so the rule is asserted once.** Every surface that names a
+ * machine as a label — the strip, the rail, the New session picker, the
+ * `machine · path` line on a row and on a session's header — reads it through here
+ * or through `MachineGroup.name`, which `sessionGroups` fills from here. Settings →
+ * Machines is the deliberate exception: it is where the label is *managed*, so it
+ * shows the real one and marks the row `this device` instead.
+ *
+ * ⚠ **A sentence keeps the stored label.** "could not authenticate on local"
+ * reads as a word missing, and a sentence is what gets pasted to somebody at
+ * another client — for whom `local` is their own computer.
+ *
+ * ⚠ **On this client the word means this computer and nothing else, so another
+ * machine labelled `local` is drawn as `local-<hex>`.** Such labels exist: Q7.139
+ * migrated nothing, so a machine the app set up while `local` was the stored
+ * label still carries it — a Mac's old one sits in the list beside the one it
+ * runs now — and `nameVisibleTo` lets any other be renamed to it, because the
+ * label this computer's own machine carries is its host name. Drawn plainly, two tiles read
+ * `local` under the same monogram, and the control plane's uniqueness rule cannot
+ * see a name that exists only in this function. The suffix is `qualifiedName`'s
+ * shape — label, `-`, the id without `m_` — because for a machine created as
+ * `local` and never renamed it is exactly `machines.name`, the one name the
+ * control plane holds unique, and what `cpctl admin machines` prints. As a *drawn*
+ * string it is not unique by construction: another machine could be labelled
+ * `local-2405b5ea…` by hand and draw the same text, which is a person choosing
+ * the collision rather than two machines falling into it.
+ * Case-folded, as `ambiguousNames` folds: `Local` beside `local` is the same
+ * collision to somebody reading a tab. **Whatever `local` is**, including `null` —
+ * so this tile's name never depends on whether this computer has been identified
+ * yet, and a browser, with no computer to call `local`, never draws the word.
+ */
+export function machineDisplayName(machine: { id: MachineId; name: string }, local: MachineId | null): string {
+  if (local !== null && machine.id === local) return LOCAL_DISPLAY_NAME;
+  if (machine.name.toLowerCase() === LOCAL_DISPLAY_NAME) return `${machine.name}-${machine.id.replace(/^m_/, "")}`;
+  return machine.name;
 }
 
 /**
@@ -231,9 +312,10 @@ function read(): string[] {
     return parsed.filter((id): id is string => typeof id === "string").slice(0, MAX_MACHINE_ORDER);
   } catch {
     // Private mode, a quota, or somebody's hand-edited value. ⚠ **The failure mode
-    // of storage here is the behaviour this app had before there was an order at
-    // all**: an empty list falls straight through clause 2 to pure name order. That
-    // is what makes this `catch` honest rather than a swallow.
+    // of storage here is the order a reader who never dragged gets anyway**: an
+    // empty list falls through `orderMachines`' clause 1 to this computer's machine
+    // and then through clause 3 to pure name order. That is what makes this `catch`
+    // honest rather than a swallow.
     return [];
   }
 }
@@ -251,8 +333,9 @@ export function machineOrder(): readonly string[] {
  * The version, and it is in `sessionGroups`' memo guard rather than only here.
  *
  * That memo is keyed on the identity of `state.sessions` and `state.machines`, and
- * a reorder replaces neither — so this number is the third input, and the only one
- * of the three that moves without the poll.
+ * a reorder replaces neither — so this number is the third input. It is one of two
+ * that move without the poll; the other is `state.localMachineId`, which decides
+ * clause 1 of {@link orderMachines} and is in the same guard for the same reason.
  */
 export function machineOrderVersion(): number {
   return version;

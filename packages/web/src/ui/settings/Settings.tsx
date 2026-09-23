@@ -294,9 +294,14 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
                parse to the same `machineId`; the segment after it is what tells
                them apart. There is no plugin leaf here any more — a plugin's
                settings are on the plugin's page under `/plugins`, and the list on
-               the machine screen links to it. */
+               the machine screen links to it.
+
+               The strip has a leaf of its own, one harness's card, and it rides
+               `signin` beside `agents` — so the same section draws both, and
+               the list's guards (machine gone, asking, unreachable) stand in
+               front of the card too. Q3.640. */
             route.agents ? (
-              <MachineAgentsSection state={state} machineId={route.machineId} />
+              <MachineAgentsSection state={state} machineId={route.machineId} harness={route.signin} />
             ) : route.system === null && route.signin === null ? (
               <MachineSection state={state} machineId={route.machineId} />
             ) : (

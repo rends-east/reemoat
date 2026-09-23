@@ -142,12 +142,15 @@ export function startsBare(agent: { id: string }): boolean {
  * further on: opencode has nothing to sign in to, so it can never be signed in,
  * and it reaches this screen as an assembled agent rather than as a tile anyway.
  *
- * ⚠ **This hides a door, and the caller owes one back.** With every signed-out
- * harness out of the row, the sign-in wizard under the strip is no longer reached
- * by tapping the tile that says why — so `NewSession` hangs it off "this machine
- * offers no tile at all" instead, and the settings card is the other way in. That
- * is a real trade and it is the one that was asked for: a row of agents you can
- * start, rather than a row of agents with a status report under each.
+ * ⚠ **This hides a door, and what the caller owes back is a way to it rather
+ * than a copy of it.** With every signed-out harness out of the row, the sign-in
+ * wizard is no longer reached by tapping the tile that says why. `NewSession`
+ * hung it off "this machine offers no tile at all", inline under the strip, and
+ * that disclosure is gone (Q3.640): the row with nothing to start says why and
+ * offers **Agent settings**, where the harness's own row offers **Set up** and
+ * the card opens as a leaf. That is a real trade and it is the one that was asked
+ * for: a row of agents you can start, rather than a row of agents with a status
+ * report under each.
  *
  * A predicate over the stance rather than over the listing, so `webcheck` sweeps
  * it across all six states and a seventh arrives as a decision rather than as a

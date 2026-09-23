@@ -70,8 +70,9 @@ export interface SettingsRoute {
    * two were indistinguishable while each harness spoke only to its own vendor;
    * they came apart the moment one could be pointed at another system, and a
    * screen still called "Agents" would be asking which CLI you have an account
-   * with. `…/agents/:agent` still parses, to the machine, which is this
-   * function's standing "fall up to the nearest real screen".
+   * with. `…/agents/:agent`, the address this field once had, parses again —
+   * to the Agents list's own leaf, one harness's card (see
+   * {@link SettingsRoute.agents}), and never to a system.
    *
    * ⚠ **There is no `plugin` beside it any more, and its absence is the
    * decision.** A plugin used to have a leaf here — `…/plugins/:pluginId` — which
@@ -91,8 +92,8 @@ export interface SettingsRoute {
    * The machine's **agent strip** — which agents its New session screen offers,
    * and in what order. Never without a machine, never together with a system.
    *
-   * ⚠ **A boolean, where its two siblings are ids, because there is nothing
-   * under it.** A system is a leaf you pick one of from a list drawn on the
+   * ⚠ **A boolean, where its two siblings are ids, because the list is one
+   * screen.** A system is a leaf you pick one of from a list drawn on the
    * machine's screen; this is a single screen holding one list, so the only
    * thing the address has to say is whether you are on it.
    *
@@ -101,9 +102,15 @@ export interface SettingsRoute {
    * `…/systems/:system` when a harness and the account it signs in to came
    * apart — and since then it has parsed to the machine as "fall up to the
    * nearest real screen". It names the machine's agent *list* now, which is what
-   * a person reading the address would guess, and a leftover fourth segment from
-   * the old shape is dropped rather than redirected: the screen it lands on is
-   * one tap from what that address used to open.
+   * a person reading the address would guess.
+   *
+   * ⚠ **And there is something under it again: one harness's card,
+   * `…/agents/:harness`**, carried in {@link SettingsRoute.signin} beside this
+   * flag rather than in a field of its own. It is the card New session used to
+   * unfold inline under a *Sign in* or *Install* disclosure, moved here when that
+   * screen stopped offering either (Q3.640) — so an old one-agent address opens
+   * that agent's card again, where for a while it dropped its tail and landed on
+   * the list. The list's row **Set up** is what pushes it.
    */
   agents: boolean;
   /**
@@ -117,11 +124,22 @@ export interface SettingsRoute {
    * blocks. `…/systems/:system` therefore keeps its meaning and every address
    * that ever worked goes on working; this is where the second kind lives.
    *
-   * ⚠ **Only a harness *no provider speaks for* is ever addressed here.** Every
-   * built-in is named by a system's `loginVia` — Anthropic signs in through
-   * claude, OpenRouter through opencode — and that system's own leaf is where its
-   * card is drawn. Two leaves for one credential is the "two copies and two
-   * answers to *signed in?*" this whole section was built to remove.
+   * ⚠ **Two producers now, and `agents` is what tells them apart.** Under
+   * `…/signin/` it holds only a harness *no provider speaks for*: every built-in
+   * is named by a system's `loginVia` — Anthropic signs in through claude,
+   * OpenRouter through opencode — and that system's own leaf is where its card
+   * is drawn in the Sign-ins list. Two rows for one credential there is the "two
+   * copies and two answers to *signed in?*" this whole section was built to
+   * remove (Q3.540).
+   *
+   * Under `…/agents/` it holds **any** harness the Agents list names, with
+   * `agents` true: that list's **Set up** opens the harness's own card as a leaf.
+   * ⚠ **That is a card that moved rather than one that multiplied.** It was
+   * drawn inline on New session until Q3.640, beside the same Anthropic leaf, and
+   * it is the same `AgentDetail` reading the same `GET /agent-auth` — so the two
+   * addresses cannot disagree about whether claude is signed in, and the Sign-ins
+   * list stays the list of credentials. What this leaf is for is the state that
+   * list does not show: a harness that is not installed yet.
    */
   signin: string | null;
   /**
@@ -337,11 +355,13 @@ export function parseSettingsSection(segment: string | undefined): SettingsSecti
  *   - a machine id under any section but `machines` is ignored;
  *   - `…/systems/<not a system>` drops it and shows the chooser, because an
  *     unknown id is a stale link and the chooser is where you pick again;
- *   - anything between the machine and `systems` that is not the literal
- *     `systems` drops to the machine's own screen — `…/agents/:agent`, the
- *     address this replaced, is exactly that case and is deliberately **not**
- *     redirected, for the reason `/settings/agents` is not: a redirect would
- *     have to guess, and the screen it falls to is one tap from the answer.
+ *   - anything between the machine and `systems` that is not one of the
+ *     literals this function knows — `systems`, `agents`, `signin` — drops to
+ *     the machine's own screen, and is deliberately **not** redirected, for the
+ *     reason `/settings/agents` is not: a redirect would have to guess, and the
+ *     screen it falls to is one tap from the answer. (`…/agents/:agent`, the
+ *     address `systems` replaced, is not that case any more: it is the Agents
+ *     list's own leaf again.)
  *
  * ⚠ **The system id is *not* validated against a list here, and that is a change
  * from the agent segment it replaces.** An agent was one of three compiled into
@@ -372,22 +392,40 @@ export function parseSettingsRoute(
   }
   const machine = machineId(decode(segments[1]));
   /*
-   * ⚠ **Before the `systems` arm, and it takes whatever follows it with it.**
-   * `…/agents/claude` is the address the old one-agent screen had, and it now
-   * lands on the machine's agent list — the nearest real screen, one tap from
-   * what it used to open — rather than on the machine, which is where it landed
-   * while `agents` named nothing. Dropping the tail rather than parsing it is the
-   * same posture the rest of this function keeps: there is no leaf here, so a
-   * segment claiming to be one is a stale link.
+   * ⚠ **Before the `systems` arm, and the segment after it is that harness's
+   * card.** `…/agents/claude` is the address the old one-agent screen had; for a
+   * while it dropped its tail and landed on the list, and now it opens claude's
+   * card again as the list's leaf (Q3.640) — which is what that address always
+   * meant. Parsed into `signin` with `agents` true, so the route's shape does not
+   * change and the two producers of `signin` are told apart by the flag.
+   *
+   * Bounded by {@link MAX_HARNESS_ID_CHARS} rather than the system bound, because
+   * a harness a plugin adds is `<pluginId>:<localId>`: 65 characters at the
+   * longest, one past 64, and a `Set up` that pushed an address this function
+   * then dropped would be a tap that visibly did nothing. A segment past the
+   * bound falls to the list, never to the machine.
    */
   if (segments[2] === "agents") {
-    return { section, machineId: machine, system: null, signin: null, agents: true, leaf: null };
+    const named = segments[3] === undefined ? "" : decode(segments[3]);
+    return {
+      section,
+      machineId: machine,
+      system: null,
+      signin: named.length > 0 && named.length <= MAX_HARNESS_ID_CHARS ? named : null,
+      agents: true,
+      leaf: null,
+    };
   }
   /*
    * The harness leaf, beside `systems/:system` rather than inside it — see
-   * `SettingsRoute.signin`. Bounded by the same number and dropped the same way: a
-   * segment longer than any real id is a stale link, and this parser never decides
-   * *which* ids exist.
+   * `SettingsRoute.signin`. Dropped the same way: a segment longer than any real
+   * id is a stale link, and this parser never decides *which* ids exist.
+   *
+   * ⚠ **Bounded by the harness number, and it was the system one.** The harness
+   * this leaf names is by definition one no provider speaks for — which is the
+   * contributed kind, `<pluginId>:<localId>`, 65 characters at the longest — so
+   * at 64 the longest such row opened the list it was tapped from. Found while
+   * adding the Agents leaf beside it (Q3.640), which had the same arithmetic.
    */
   if (segments[2] === "signin") {
     const named = segments[3] === undefined ? "" : decode(segments[3]);
@@ -395,7 +433,7 @@ export function parseSettingsRoute(
       section,
       machineId: machine,
       system: null,
-      signin: named.length > 0 && named.length <= MAX_SYSTEM_ID_CHARS ? named : null,
+      signin: named.length > 0 && named.length <= MAX_HARNESS_ID_CHARS ? named : null,
       agents: false,
       leaf: null,
     };
@@ -463,6 +501,21 @@ export function settingsLeafPath(leaf: SettingsLeaf): string {
 const MAX_SYSTEM_ID_CHARS = 64;
 
 /**
+ * The longest a harness id in a URL may be before the segment is ignored — under
+ * `…/agents/` and under `…/signin/` alike.
+ *
+ * ⚠ **96, not {@link MAX_SYSTEM_ID_CHARS}, and 64 is one short.** A harness a
+ * plugin adds is `<pluginId>:<localId>` with each half bounded at 32, so the
+ * longest legal id is 65 — and both leaves are pushed by a row, **Set up** on the
+ * Agents list and a harness row on the Sign-ins list, so an id this bound dropped
+ * would land the push back on the list it came from. 96 is the daemon's
+ * `MAX_STRIP_REF_CHARS`, which paid for the same arithmetic on the one write the
+ * Agents screen makes; it is not derived from the manifest's bound, which is
+ * somebody else's subject. A system id keeps its own: systems are one short word.
+ */
+const MAX_HARNESS_ID_CHARS = 96;
+
+/**
  * The path for a settings screen.
  *
  * Positional and widening rather than an options object, so the three call
@@ -509,6 +562,25 @@ export function agentStripPath(machine: MachineId): string {
 }
 
 /**
+ * One harness's own card, as a leaf of the machine's Agents list.
+ *
+ * ⚠ **Its own function for {@link agentStripPath}'s reason** — `settingsPath`'s
+ * signature is positional and widening, and a harness under the strip is not a
+ * widening of `system`. Machine required, since the card reads one daemon.
+ *
+ * ⚠ **Under `…/agents`, never beside it**, because the ◀ is read off the URL:
+ * `settingsUp` answers the list for this address, so the card walks back to the
+ * row that opened it, and the list's own ◀ goes on reading `origin` — which is
+ * what brings two taps of ◀ back to New session when that is where the walk
+ * started. `…/signin/` is the Sign-ins list's leaf and walks to the machine
+ * screen instead; pointing **Set up** there would strand somebody one screen from
+ * where they came in. Q3.640.
+ */
+export function agentSetupPath(machine: MachineId, agent: string): string {
+  return `${agentStripPath(machine)}/${encodeURIComponent(agent)}`;
+}
+
+/**
  * One harness's own sign-in, for a harness no provider speaks for.
  *
  * ⚠ **Its own function for `agentStripPath`'s reason** — `settingsPath`'s
@@ -537,7 +609,7 @@ export function harnessSigninPath(machine: MachineId, agent: string): string {
  * parent is a row the nav draws, which is the same shape of answer `Header`'s
  * `close` prop encodes as `lg:hidden`.
  *
- * The agent depths are `false`: `…/agents` and `…/agents/:agent` are *inside*
+ * The agent depths are `false`: `…/agents` and `…/agents/:harness` are *inside*
  * Machines, and the nav has no row for either, so the chevron is the only way back
  * at every width.
  *
@@ -554,6 +626,11 @@ export function settingsUp(
    * gear is a *crossing* between two pop-ups, so the parent in the URL — the
    * machine — is not where anybody came from, and a ◀ walking there strands them
    * in settings with the sheet they were filling in gone. That was reported.
+   *
+   * ⚠ **The list, and not its leaf.** `…/agents/:harness` is pushed from the
+   * list, so its parent in the URL *is* where somebody came from and it never
+   * reads this; `originFor` keeps the origin on that push, so the list still
+   * holds it on the way back and answers New session one ◀ later.
    *
    * It is deliberately not general. Applied at every depth it would break walking
    * *up* inside this sheet: `originFor` keeps an origin across a move within one
@@ -576,6 +653,7 @@ export function settingsUp(
   }
   if (
     route.agents &&
+    typeof route.signin !== "string" &&
     origin !== null &&
     origin.split("/").filter((part) => part.length > 0)[0] === "new"
   ) {
@@ -588,17 +666,18 @@ export function settingsUp(
     //
     /*
      * The strip is the same shape and the same answer: it is reached from a row on
-     * the machine's screen, and it walks back to that machine at every width.
+     * the machine's screen, and it walks back to that machine at every width —
+     * unless it was opened from New session's gear, which is the `origin` arm
+     * above and the one crossing this sheet answers.
      *
-     * ⚠ **The gear on New session is a *crossing*, and nothing in this sheet
-     * answers it — that is the standing rule rather than a gap.** This function is
-     * derived from the URL, which is what makes its answer stable, and `Header.tsx`
-     * argues at length against the alternative. So arriving here from the gear, the
-     * ◀ walks to the machine and the phone's Back button is what returns to New
-     * session — the same deal every crossing into this sheet has always had. The
-     * builder is the one screen that reads `origin` for its ◀, because there the
-     * label and the destination are one control naming where it goes.
+     * ⚠ **The strip's leaf walks to the strip, by URL alone.** `…/agents/:harness`
+     * is pushed from a row on the list, so the list is where somebody came from
+     * and the chevron says "Back to Agents". Tested before the three leaves below,
+     * which all go to the machine — this one is a leaf of a leaf.
      */
+    if (route.agents && typeof route.signin === "string") {
+      return { path: agentStripPath(route.machineId), withinNav: false };
+    }
     /*
      * ⚠ **All three leaves under a machine, and `signin` was the one that got
      * missed.** It has a shape, a parse, a path builder and a title arm, and
@@ -676,9 +755,15 @@ export function settingsPaneTitle(route: SettingsRoute): string | null {
    * would be the chrome saying what the body already says.
    *
    * Above the machine arm, since a strip route carries a machine too.
+   *
+   * ⚠ **Its leaf is "Setup", a noun like every sibling's title** — "Sign-in",
+   * "New key", "Agents" — and not the menu item's verb that opens it, "Set up
+   * Claude Code". The harness is named by the card's own title one rank below, for
+   * the reason the system arm gives: this function holds a route and the only
+   * string in reach is an id.
    */
   if (route.section === "machines" && route.machineId !== null && route.agents) {
-    return "Agents";
+    return typeof route.signin === "string" ? "Setup" : "Agents";
   }
   /*
    * **The system's own depth, and above the machine arm for the strip's reason:

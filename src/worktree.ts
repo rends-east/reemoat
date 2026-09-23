@@ -2,10 +2,9 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, realpathSync, rmSync } from "node:fs";
 
 import { probeExists, probeRealpath } from "./stall.js";
-import { homedir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 import type { PlainReason, SessionWorkspace } from "./events.js";
-import { containedIn, containedInResolved, expandHome } from "./paths.js";
+import { containedIn, containedInResolved, expandHome, resolveStateRoot } from "./paths.js";
 import {
   GitError,
   GIT_MAX_LIST_BYTES,
@@ -187,10 +186,22 @@ export interface CreateWorkspaceResult {
  * `git clean -xfd`; beside one, we would be writing into a directory we do not
  * own and may not be able to write to. The default is dot-prefixed, so
  * `GET /fs/list` already hides it from the directory picker.
+ *
+ * Dot-prefixed because it is `worktrees` inside the state root, which is
+ * `~/.reemoat` unless `REEMOAT_HOME` names another — one per server, when the
+ * desktop app runs the daemon (`resolveStateRoot`, Q7.148), and dot-prefixed
+ * whenever the app chose it. ⚠ **An undotted `REEMOAT_HOME` set by hand is not
+ * hidden**: refusing `~` itself is all `resolveStateRoot` does, so the picker
+ * offers that root's `worktrees` like any folder — the operator's choice, as an
+ * undotted `REEMOAT_WORKTREE_ROOT` always was. `root` defaults to the
+ * unset answer, so the registry's own fallback and every driver get the path they
+ * always did. `resolveUploadRoot` takes the same second argument for the same
+ * reason, and the two stay siblings under one root, which is what keeps
+ * `REMOVER_TREES` from nesting.
  */
-export function resolveWorktreeRoot(spec: string | undefined): string {
+export function resolveWorktreeRoot(spec: string | undefined, root: string = resolveStateRoot(undefined)): string {
   const raw = (spec ?? "").trim();
-  if (raw.length === 0) return join(homedir(), ".reemoat", "worktrees");
+  if (raw.length === 0) return join(root, "worktrees");
   const expanded = expandHome(raw);
   if (!isAbsolute(expanded)) {
     throw new WorktreeError(

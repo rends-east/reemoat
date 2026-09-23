@@ -408,8 +408,9 @@ export function currentView(groups: SessionGroups): ListView {
  * grant revoked and restored puts you back on your tab rather than on whatever
  * happened to be first while it was gone.
  *
- * The fallback is first **in the reader's own order** — which is by name until
- * somebody has dragged a machine — and never by activity. Activity flickers on the
+ * The fallback is first **in the reader's own order** — which is by name, this
+ * computer's own machine first, until somebody has dragged one — and never by
+ * activity. Activity flickers on the
  * four-second poll, and a default tab that moves while you are looking at it is
  * the same failure as a list that reorders under a travelling thumb. A stored
  * order does not flicker, which is the whole of why one is allowed and the other
@@ -437,8 +438,11 @@ export interface MachineTab {
 /**
  * The tab bar, in `store.ts`'s order and no other.
  *
- * No sorting happens here, deliberately: `sessionGroups` already orders by name
- * and that is asserted one file over. Sorting again — by activity, by
+ * No sorting happens here, deliberately: `sessionGroups` already orders — by name,
+ * this computer's first, until a drag — and that is asserted one file over. Nor
+ * any naming: `name` is `MachineGroup.name`, which is already
+ * `machineDisplayName`'s answer, so the rule that calls this computer `local` is
+ * spelled once. Sorting again — by activity, by
  * reachability, by anything — would put the ordering in two places and make the
  * bar reshuffle under a thumb.
  *

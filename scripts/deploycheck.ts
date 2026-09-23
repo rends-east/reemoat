@@ -861,6 +861,18 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   check("and the credential directory is named as not being one of them", /CODEX_HOME/.test(daemonExample), true);
 
   /*
+   * ⚠ **The state root is documented, and as something to leave unset in a file a
+   * service reads.** `REEMOAT_HOME` is what the desktop app passes each daemon it
+   * starts, one root per server (Q7.148). Uncommented in `~/.reemoat/daemon.env`,
+   * it would move the launchd daemon's announcement somewhere the app never
+   * looks, so the app would stop seeing it and start a competing child on
+   * `~/.reemoat` with a spent code — so the example says so beside the name.
+   */
+  check("the state root is documented", /^#\s*REEMOAT_HOME=/m.test(daemonExample), true);
+  const homeBlock = daemonExample.split(/\n\s*\n/).find((para) => /^#\s*REEMOAT_HOME=/m.test(para)) ?? "";
+  check("and as one to leave unset in a file a service sources", /leave it unset/i.test(homeBlock), true);
+
+  /*
    * ⚠ **Every runtime setting, swept against the control plane's own example.**
    *
    * `SETTING_KEYS` already has its environment mapping asserted in a loop by
@@ -2641,19 +2653,19 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   check("the control-plane wizard writes it", new RegExp(`set_env ${KEY} `).test(installer), true);
 
   /*
-   * ⚠ **The two environment-only values, which the sweep above cannot reach.**
-   * `SETTING_KEYS` is swept against this file in one loop, and neither of these
-   * is a member — the catalogue because a database-owned value could name an
-   * origin the CSP refuses, the offer because it points at one particular shop
-   * and that array is drawn on every instance's Server settings screen. Being
-   * outside the sweep is exactly why they are named here: an env-only variable
-   * that nothing documents is one an operator has no way to discover.
+   * ⚠ **The environment-only values, which the sweep above cannot reach.**
+   * `SETTING_KEYS` is swept against this file in one loop, and none of these is a
+   * member — the catalogue because a database-owned value could name an origin
+   * the CSP refuses, the download because it names one deployment's build and that
+   * array is drawn on every instance's Server settings screen, and the two
+   * switches for the reasons given at each below. Being outside the sweep is
+   * exactly why they are named here: an env-only variable that nothing documents
+   * is one an operator has no way to discover.
    */
   for (const envOnly of [
     "REEMOAT_CP_PLUGIN_CATALOGUE_URL",
-    "REEMOAT_CP_MACHINES_OFFER_URL",
     /*
-     * The offer's twin, and it earns the list for the same reason plus one of its
+     * The catalogue's twin in shape, and it earns the list for a reason of its
      * own: it names one particular build published by whoever runs *this*
      * deployment, and there is no compiled-in default because this repository
      * publishes no signed build at all. Unset is the truthful state, so an
@@ -2742,6 +2754,29 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
      * the explanation. What must not come back is a process reading it.
      */
     check("and nothing reads a variable naming a web bundle", /process\.env\["REEMOAT_CP_WEB"\]/.test(mainTs), false);
+    /*
+     * ⚠ **`REEMOAT_CP_MACHINES_OFFER_URL` is deleted, and asserted from both ends**
+     * (Q1.650). Its value may not be read by name — a deleted variable still read
+     * is a feature an env file can switch back on without a diff — but a file
+     * still carrying it is warned about, `scripts/daemon.ts`'s rule, so the list
+     * the warning reads must name it. And the example may not document it as a
+     * setting any more: a commented assignment is what an operator copies.
+     */
+    check(
+      "and the machine offer is not read by name any more; only the retirement list names it",
+      /process\.env\["REEMOAT_CP_MACHINES_OFFER_URL"\]/.test(mainTs),
+      false,
+    );
+    check(
+      "but an env file still setting it is warned about",
+      /const RETIRED_ENV[^=]*=\s*\{[^}]*\bREEMOAT_CP_MACHINES_OFFER_URL:/.test(mainTs),
+      true,
+    );
+    check(
+      "and the example no longer documents it as a setting",
+      /^#\s*REEMOAT_CP_MACHINES_OFFER_URL=/m.test(cpExample),
+      false,
+    );
   }
 
   /*
@@ -7043,7 +7078,7 @@ process.stdout.write("\nthe one-line installer\n");
       checkout: string;
       db: string;
     }
-    const fixture = (name: string, opts: { lib: boolean; worktree: boolean; env?: boolean }): Fixture => {
+    const fixture = (name: string, opts: { lib: boolean; worktree: boolean; env?: boolean; servers?: boolean }): Fixture => {
       const h = join(sandbox, `uninstall-${name}`);
       rmSync(h, { recursive: true, force: true });
       mkdirSync(join(h, ".reemoat", "toolchain", "bin"), { recursive: true });
@@ -7060,6 +7095,12 @@ process.stdout.write("\nthe one-line installer\n");
         writeFileSync(join(h, "co", "deploy", "lib.sh"), "svc_uninstall() { return 0; }\n");
       }
       if (opts.worktree) mkdirSync(join(h, ".reemoat", "worktrees", "branch-a"), { recursive: true });
+      // A second server's daemon, as the desktop app lays one out (Q7.148): a
+      // folder of its own under `servers/`, holding its own database.
+      if (opts.servers === true) {
+        mkdirSync(join(h, ".reemoat", "servers", "https_other.example"), { recursive: true });
+        writeFileSync(join(h, ".reemoat", "servers", "https_other.example", "reemoat.db"), "");
+      }
       return {
         home: h,
         toolchain: join(h, ".reemoat", "toolchain"),
@@ -7151,6 +7192,44 @@ process.stdout.write("\nthe one-line installer\n");
       const g = fixture("purge-tree-yes", { lib: true, worktree: true });
       const yes = uninstall(g, "--purge", "--yes");
       check("while --yes takes them with everything else", [yes.status, existsSync(join(g.home, ".reemoat", "worktrees", "branch-a"))], [0, false]);
+    }
+    /*
+     * ⚠ **The desktop app's daemons for other servers live inside the same
+     * directory, and a purge takes them too — so it names them first.** Each is a
+     * database and working copies of its own (Q7.148), and somebody purging the
+     * `install.sh` daemon may not know the app put a second one there. Named
+     * before the question, taken only with the answer, and named as kept when
+     * there is no `--purge` at all.
+     */
+    {
+      const f = fixture("purge-servers", { lib: true, worktree: false, servers: true });
+      const other = join(f.home, ".reemoat", "servers", "https_other.example");
+      const run = uninstall(f, "--purge");
+      check("--purge names the desktop app's other servers", run.err.includes("https_other.example"), true);
+      /*
+       * ⚠ **And says they may be live.** `_stopped` is about the service alone, and
+       * every daemon under `servers/` is the desktop app's child — so the refusal
+       * that keeps a purge off a running daemon's worktrees cannot see these, and
+       * the sentence is all that stands between the question and a delete under a
+       * running agent.
+       */
+      check("and says to quit the app that may be running them", run.err.includes("Quit Reemoat first: it may be running these right now."), true);
+      check("and takes none of them without an answer", [run.status !== 0, existsSync(other)], [true, true]);
+      const g = fixture("purge-servers-yes", { lib: true, worktree: false, servers: true });
+      const yes = uninstall(g, "--purge", "--yes");
+      check("while --yes takes them with the rest", [yes.status, existsSync(join(g.home, ".reemoat", "servers"))], [0, false]);
+      const h = fixture("keep-servers", { lib: true, worktree: false, servers: true });
+      const kept = uninstall(h);
+      check(
+        "and a plain --uninstall keeps them and says where they are",
+        [kept.status, existsSync(join(h.home, ".reemoat", "servers", "https_other.example")), kept.out.includes(".reemoat/servers")],
+        [0, true, true],
+      );
+      // The control: with no second server there is nothing to name, and no line.
+      const i = fixture("keep-no-servers", { lib: true, worktree: false });
+      check("with nothing named when there are none", uninstall(i).out.includes(".reemoat/servers"), false);
+      const j = fixture("purge-no-servers", { lib: true, worktree: false });
+      check("and a purge with none says nothing about the app", uninstall(j, "--purge").err.includes("Quit Reemoat first"), false);
     }
   }
 }

@@ -76,7 +76,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1014 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1019 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -304,9 +304,13 @@ pnpm native:build                    # → a macOS .app with packages/web inside
                                      #   rustup; `docs/NATIVE.md` has the rest
 ```
 
-State lives in one SQLite file (`REEMOAT_DB`, default `~/.reemoat/reemoat.db`)
-and each session gets its own git worktree under `~/.reemoat/worktrees/…`. A
-daemon restart leaves every session it did not stop on purpose `interrupted` and
+State lives in one SQLite file per daemon (`REEMOAT_DB`, default
+`$REEMOAT_HOME/reemoat.db`; `REEMOAT_HOME` is `~/.reemoat` unless set) and each
+session gets its own git worktree under that root's `worktrees/`. One database is
+one machine on one server, so the desktop app runs one daemon per server it has
+opened — `~/.reemoat` for the server its `daemon.env` names,
+`~/.reemoat/servers/<server>/` for every other — and stops them all when it quits
+(Q7.148). A daemon restart leaves every session it did not stop on purpose `interrupted` and
 puts an agent back on each by itself — see `.claude/rules/daemon-sessions.md`.
 
 **Traffic to a remote daemon is end-to-end encrypted and there is no other
@@ -489,7 +493,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `native-packaging.md` | `packages/native/src-tauri/tauri.*.conf.json`, `packages/native/scripts/`, `deploy/ci-release.sh` | Which platforms carry a daemon inside them and which carry a client · the one JSON file a profile is, and the measurement that made it one rather than a cargo feature · what an overlay may say, and why the list is that short · why the staging script refuses a Windows triple by name |
 | `web-typography.md` | `packages/web/src/index.css`, `ui/bits.tsx`, `paths.ts`, `ui/settings/` | Which strings are monospace and which are prose · the one surface where a path is a name instead · the scale, and the single arbitrary size that is allowed to exist · one caps idiom, three constants, and why the choice between them is a colour · what the landing page shares and what nothing can check |
 | `docked-panels.md` | `packages/web/src/ui/paneWidth.ts`, `rail.ts`, `taskWidth.ts`, `PaneHandle.tsx`, `leaving.ts`, `TaskPanel.tsx` | How wide a draggable pane is, and which custom property the panel actually spends · who owns the separator's keyboard path · how a layer leaves |
-| `machine-gestures.md` | `packages/web/src/machineOrder.ts`, `ui/machineDrag.ts`, `machineSwipe.ts`, `MachineColumn.tsx`, `SessionBrowser.tsx` | What orders the machines until a reader drags one · why the reorder is a hook and not a component · where the merge is applied and which memo is load-bearing · swiping between machines, on the list and not on the strip · the tabs' own numbers |
+| `machine-gestures.md` | `packages/web/src/machineOrder.ts`, `ui/machineDrag.ts`, `machineSwipe.ts`, `MachineColumn.tsx`, `SessionBrowser.tsx` | What orders the machines until a reader drags one, and why this computer's leads · what this computer's own is called, and on which screens · why the reorder is a hook and not a component · where the merge is applied and which memo is load-bearing · swiping between machines, on the list and not on the strip · the tabs' own numbers |
 | `native-panels.md` | `packages/web/src/ui/NewSession.tsx`, `download.ts`, `packages/web/src/native.ts`, `packages/native/src-tauri/src/commands.rs`, `packages/web/scripts/webcheck.native-bridge.ts`, `local-route.ts` | Why a cancel is neither a failure nor an answer · `(async)` as a rule and now a mechanism · why the folder panel is the one thing here that is per *machine* · what this loosens and what it does not · the browser arm, which is not a gap |
 | `plugins.md` | `src/plugins/`, `plugins/`, `packages/web/src/wire.ts` | What a plugin may add and where it may appear · the two axes of authorization, and which applies inside a hook · what an update keeps and what a failed one puts back · why `src/` now holds three `fetch` calls |
 | `plugin-contributions.md` | `src/plugins/contributions.ts`, `manifest.ts`, `src/acp/`, `src/runtime/local.ts`, `packages/web/src/ui/agentCard.ts` | A plugin that adds an *agent* or a *provider* · which id is checked for membership and which only for shape, and what each costs to get wrong · where a base URL may point now · what a machine's ceiling is and why it is a refusal |

@@ -503,9 +503,9 @@ process.stdout.write("\nthe three documents, and the box that points at them\n")
   // Older control planes predate the field entirely; that is the same state.
   check("and one that never heard of the field is not either", legalOf(undefined), false);
   /*
-   * Strictly `true`, unlike `catalogue` and `offer` beside it, which take any
-   * absolute URL. Those two lose a feature when they read wrong; this one decides
-   * whether a named party's contract is put in front of somebody.
+   * Strictly `true`, unlike `catalogue` and `appDownload` beside it, which take
+   * any absolute URL. Those two lose a feature when they read wrong; this one
+   * decides whether a named party's contract is put in front of somebody.
    */
   for (const truthy of ["true", 1, "yes", {}]) {
     check(`a truthy ${typeof truthy} is not a claim`, legalOf(truthy), false);

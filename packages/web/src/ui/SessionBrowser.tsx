@@ -21,6 +21,7 @@ import { useMachineSwipe } from "./machineSwipe";
 import { navigate, newPath, sessionPath } from "../router";
 import { settingsPath } from "../settings";
 import { elapsedSince, sessionGroups, sessionLists, type AppState, type SessionRow, type SetupState } from "../store";
+import { machineDisplayName } from "../machineOrder";
 import { humanRequests, needsHuman, resumeStalled } from "../wire";
 import {
   Button,
@@ -63,7 +64,6 @@ import {
 } from "./groups";
 import { useRowDrag, type RowDrag } from "./rowDrag";
 import { CommandLine } from "./CommandLine";
-import { MachineOffer } from "./MachineOffer";
 import { RenameField, SessionMenu } from "./SessionMenu";
 
 /**
@@ -391,12 +391,6 @@ export function SessionBrowser({
                     <div className="text-left">
                       <CommandLine command={installCommand(controlPlaneOrigin())} />
                     </div>
-                    {/* ⚠ **Inside `lg:hidden`, with the command.** At `lg` the pane
-                        draws both instead, and an offer hoisted out of this div
-                        would render twice — once in a 280px rail and once beside
-                        it. The same reason the command is in here. No wrapper: the
-                        component fills its box and centres its own contents. */}
-                    <MachineOffer config={state.config} me={state.me} />
                   </div>
                 </>
               ) : (
@@ -772,10 +766,12 @@ function TabUnderline(): ReactNode {
 /**
  * The machines, as folder tabs.
  *
- * Order is `groups.groups`' order and nothing else — by name, decided in
- * `store.ts` and asserted there. Never by activity or reachability: both flicker
- * on the four-second poll, and a bar that reorders under a travelling thumb is the
- * one thing this list cannot do.
+ * Order is `groups.groups`' order and nothing else — by name, this computer's own
+ * machine first, until a reader drags; decided in `store.ts` and asserted there.
+ * Never by activity or reachability: both flicker on the four-second poll, and a
+ * bar that reorders under a travelling thumb is the one thing this list cannot do.
+ * The name on a tab is `MachineGroup.name`, so this computer's reads `local`
+ * (`machineDisplayName`) — and nothing here spells that rule a second time.
  *
  * The count on a tab is `blockedCount`, and it is necessary but **not sufficient**
  * — the bar scrolls, so a tab can be off screen. `waitingFloor` is what actually
@@ -1985,7 +1981,9 @@ function SessionLine({
              */
             <div className="mt-0.5 truncate text-2xs text-muted">
               {row.snapshot.agent}
-              {showMachine && ` · ${row.machineName}`}
+              {/* The rail's name for the machine, so under All a row on this
+                  computer says `local` like the tab it came from. */}
+              {showMachine && ` · ${machineDisplayName({ id: row.ref.machineId, name: row.machineName }, state.localMachineId)}`}
               {/* The path left this row when the folder took it. What comes back
                   is only the part the folder does not already say. */}
               {subpath !== null && ` · ${subpath}`}

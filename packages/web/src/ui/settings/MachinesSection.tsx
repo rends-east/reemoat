@@ -24,7 +24,6 @@ import {
   reachText,
 } from "../bits";
 import { CommandLine } from "../CommandLine";
-import { MachineOffer } from "../MachineOffer";
 
 /**
  * Your machines, and adding one.
@@ -188,12 +187,6 @@ export function MachinesSection({ state }: { state: AppState }): ReactNode {
             <div className="mt-2">
               <CommandLine command={installCommand(controlPlaneOrigin())} />
             </div>
-            {/* Under the command, never above it: the free way to add a machine
-                is the answer, and this is the alternative for somebody who has
-                no machine to point it at. Inside this arm for the reason
-                `MachineOffer`'s own docblock gives — the other arm is where the
-                fleet is full, and a machine bought there cannot enroll. */}
-            <MachineOffer config={state.config} me={state.me} />
           </>
         ) : (
           <p className="mt-2 text-xs text-muted">{machineQuotaNotice(state.me)}</p>
@@ -214,13 +207,17 @@ function MachineRow({
   /**
    * This row is the computer the app is running on.
    *
-   * ⚠ **The whole of what is left of "local" after 2026-09-15.** The machine's
-   * label is the ordinary host name, because that row is read by a phone and by
-   * every other client of the account; which row you are *sitting at* is true of
-   * one client only, so it is drawn here and stored nowhere. `AppState.localMachineId`
-   * is the read, and it comes from the daemon's announce file rather than from the
-   * route — a routing preference can be switched off, and the badge must not go
-   * with it.
+   * ⚠ **Settings' half of "local" after 2026-09-15.** The machine's label is
+   * the ordinary host name, because that row is read by a phone and by every
+   * other client of the account; which row you are *sitting at* is true of one
+   * client only, so it is drawn and stored nowhere. The home screen draws it as
+   * the name `local`, first in the list (`machineDisplayName`, `orderMachines`);
+   * this screen is where the real label is *managed* — renamed, compared, told
+   * apart from a colliding one — so it keeps that label and says `this device`
+   * beside it instead. `AppState.localMachineId` is the read for both, and it
+   * comes from the machine this app created here and the daemon's announce file
+   * rather than from the route — a routing preference can be switched off, and
+   * neither half may go with it.
    *
    * ⚠ **Not the same claim as the `This device` *heading* one screen along.**
    * That heading (`MachineSection.tsx`) is on every machine's page and is about

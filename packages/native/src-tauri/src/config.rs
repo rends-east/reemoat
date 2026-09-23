@@ -227,10 +227,9 @@ struct Stored {
     server: Option<String>,
     /// The device this app is registered as, per server.
     ///
-    /// **A map rather than one current value**, and that is the one place this
-    /// file's shape departs from `credential.rs`'s. `host_set_server` erases the
-    /// previous origin's *credential* because a credential this app will not
-    /// present is one it has no reason to hold. The same act on a device id would
+    /// **A map rather than one current value.** `host_set_server` used to erase
+    /// the previous origin's *credential* and keeps it since Q7.148; it never
+    /// touched a device id, and must not start, because on an id the erase would
     /// be destructive rather than tidy: the row on that server is not deleted by
     /// anything here, so forgetting the id leaves an installation the person can
     /// no longer recognise in their own list and spends a second slot the next
@@ -278,7 +277,7 @@ pub fn server_file(dir: &Path) -> PathBuf {
 /// software and forks run their own control planes, so a value compiled in here
 /// would be one deployment's address in everybody's binary — the argument
 /// `cp-accounts.md` already makes for `REEMOAT_CP_PLUGIN_CATALOGUE_URL` and
-/// `REEMOAT_CP_MACHINES_OFFER_URL`, which have no compiled-in default for exactly
+/// `REEMOAT_CP_APP_DOWNLOAD_URL`, which have no compiled-in default for exactly
 /// this reason. `nativecheck` asserts no file here sets it.
 ///
 /// **Environment at compile time rather than at run time**, which is the one
@@ -1225,8 +1224,8 @@ mod tests {
         // different acts and a partial write is the one that loses the other.
         assert_eq!(read_server(&dir).as_deref(), Some("https://a.example"));
 
-        // Changing servers keeps both, which is where this deliberately differs
-        // from the credential: the row on the old server still exists.
+        // Changing servers keeps both: the row on the old server still exists, so
+        // forgetting its id would spend a second slot on the way back.
         write_server(&dir, "https://b.example").unwrap();
         assert_eq!(
             read_device(&dir, "https://a.example").as_deref(),

@@ -1475,6 +1475,42 @@ process.stdout.write("\nthe routes that spawn a process\n");
         chipValue(expandConfig(small).options[0] as never),
         chipValue(wide.options[0] as never),
       );
+      /*
+       * ⚠ **A memory written before the notice rule still holds the notice**, and
+       * is read back through the same `chipValue`. claude 2.1.280 describes a
+       * session resumed on `claude-opus-5[1m]` as `Newer version available · …`,
+       * and that sentence is already in somebody's `localStorage` as the selected
+       * choice's description — so the rule has to hold on the reduced copy, not only
+       * on a live list. Local rather than shared: the driver files keep their own
+       * fixtures.
+       */
+      const resumed280Config = {
+        modes: null,
+        options: [
+          {
+            id: "model",
+            name: "Model",
+            description: null,
+            category: "model",
+            kind: "select" as const,
+            value: "claude-opus-5[1m]",
+            choices: [
+              { value: "opus", name: "Opus", description: "Opus 5.5 · Best for everyday, complex tasks", group: null },
+              {
+                value: "claude-opus-5[1m]",
+                name: "Opus 5 (1M context)",
+                description: "Newer version available · select Opus for Opus 5.5",
+                group: null,
+              },
+            ],
+          },
+        ],
+      };
+      check(
+        "a memory written before this rule still draws the row's name",
+        chipValue(expandConfig(reduceConfig(resumed280Config as never)).options[0] as never),
+        "Opus 5",
+      );
       check(
         "modes keep the current one and drop the rest",
         [small.modes?.current, small.modes?.available.length],

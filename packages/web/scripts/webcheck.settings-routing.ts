@@ -17,7 +17,9 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   const {
     DEFAULT_SECTION,
     SECTION_SPECS,
+    agentSetupPath,
     agentStripPath,
+    harnessSigninPath,
     parseSettingsRoute,
     parseSettingsSection,
     settingsPath,
@@ -28,7 +30,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     settingsLeafPath,
     settingsUpLabel,
   } = await import("../src/settings.js");
-  const { sheetTitle, sheetUpLabel, upFrom } = await import("../src/nav.js");
+  const { originFor, sheetTitle, sheetUpLabel, upFrom } = await import("../src/nav.js");
 
   check("no segment is the index", parseSettingsSection(undefined), null);
   check("a known one is itself", parseSettingsSection("machines"), "machines");
@@ -123,16 +125,18 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, leaf: null },
   );
   /*
-   * ⚠ **`…/agents` names a screen again, and the tail of the old address goes
-   * with it.** It meant *one agent's sign-in* until a harness and the account it
-   * signs in to came apart, and then it meant nothing and fell to the machine.
-   * It now names the machine's agent **list** — the strip — which is what a
-   * person reading the address would guess, and `…/agents/claude` lands there
-   * rather than on the machine: that is still "fall up to the nearest real
-   * screen", and the screen it falls to is one tap from what that address used to
-   * open. A redirect is still refused, for the reason it always was — this
-   * function is pure, and a redirect would have to guess which system a harness
-   * stood for.
+   * ⚠ **`…/agents` names a screen again, and the segment after it is that
+   * harness's card.** It meant *one agent's sign-in* until a harness and the
+   * account it signs in to came apart, and then it meant nothing and fell to the
+   * machine. It names the machine's agent **list** now — the strip — which is
+   * what a person reading the address would guess. For a while `…/agents/claude`
+   * dropped its tail and landed on the list; it opens claude's card again now, as
+   * the list's own leaf (Q3.640), because New session stopped installing and
+   * signing in and the list's **Set up** is where that went. The route's shape
+   * does not change — the harness rides `signin`, told apart from the Sign-ins
+   * list's leaf by `agents` — so no literal in this file had to move for it. A
+   * redirect is still refused, for the reason it always was — this function is
+   * pure, and a redirect would have to guess which system a harness stood for.
    */
   check(
     "the machine's agent strip parses",
@@ -140,10 +144,59 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     { section: "machines", machineId: "m_1", system: null, signin: null, agents: true, leaf: null },
   );
   check(
-    "and the old one-agent address falls to it, tail dropped",
+    "and the old one-agent address opens that agent's card again",
     parseSettingsRoute(["machines", "m_1", "agents", "claude"]),
-    { section: "machines", machineId: "m_1", system: null, signin: null, agents: true, leaf: null },
+    { section: "machines", machineId: "m_1", system: null, signin: "claude", agents: true, leaf: null },
   );
+  check(
+    "which is the address Set up emits, under the list rather than beside it",
+    agentSetupPath("m_1" as never, "claude"),
+    "/settings/machines/m_1/agents/claude",
+  );
+  /*
+   * ⚠ **A harness a plugin added round-trips, and the bound is why this is not
+   * trivially true.** Its id is `<pluginId>:<localId>` — a colon, which
+   * `encodeURIComponent` escapes — and 65 characters at the longest, one past the
+   * 64 a system id is held to. At 64 the parse dropped that id, and a Set up on
+   * its row pushed an address that landed back on the list it was tapped from:
+   * a control that visibly did nothing. `MAX_HARNESS_ID_CHARS` is 96, the
+   * daemon's own strip bound; an essay still falls to the list.
+   */
+  {
+    const longest = `${"p".repeat(32)}:${"l".repeat(32)}`;
+    check(
+      "and a harness a plugin added round-trips, at the longest id one may have",
+      [
+        parseSettingsRoute(seg(agentSetupPath("m_1" as never, "byo:gemini")), decodeURIComponent),
+        parseSettingsRoute(seg(agentSetupPath("m_1" as never, longest)), decodeURIComponent).signin,
+        longest.length,
+      ],
+      [
+        { section: "machines", machineId: "m_1", system: null, signin: "byo:gemini", agents: true, leaf: null },
+        longest,
+        65,
+      ],
+    );
+    check(
+      "while a segment longer than any id falls to the list",
+      parseSettingsRoute(["machines", "m_1", "agents", "x".repeat(500)]),
+      { section: "machines", machineId: "m_1", system: null, signin: null, agents: true, leaf: null },
+    );
+    /*
+     * ⚠ **And the Sign-ins list's harness leaf is held to the same number**, since
+     * the harness it names is by definition one no provider speaks for — the
+     * contributed kind, which is where a 65-character id comes from. It was held to
+     * the system bound, so the longest such row opened the list it was tapped on.
+     */
+    check(
+      "and so does the Sign-ins list's harness leaf, at the same length",
+      [
+        parseSettingsRoute(seg(harnessSigninPath("m_1" as never, longest)), decodeURIComponent).signin,
+        parseSettingsRoute(["machines", "m_1", "signin", "x".repeat(500)]).signin,
+      ],
+      [longest, null],
+    );
+  }
   check(
     "which is the address the builder emits",
     agentStripPath("m_1" as never),
@@ -166,8 +219,9 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     [
       parseSettingsRoute(["machines", "m_1", "agents"]).system,
       parseSettingsRoute(["machines", "m_1", "systems", "moonshot"]).agents,
+      parseSettingsRoute(["machines", "m_1", "agents", "claude"]).system,
     ],
-    [null, false],
+    [null, false, null],
   );
   check(
     "a machine id under another section is ignored",
@@ -262,6 +316,34 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     settingsUp({ section: "machines", machineId: "m_1" as never, system: null, signin: "acme:gemini", agents: false, leaf: null }),
     { path: "/settings/machines/m_1", withinNav: false },
   );
+  /*
+   * ⚠ **The strip's leaf goes up to the strip, by URL alone, wherever the sheet
+   * was opened from.** It is pushed from a row on the list, so the list is its
+   * parent in fact as well as in the address — and it must not read `origin`,
+   * which the list holds for its own ◀: answering New session from the card would
+   * skip the list somebody tapped Set up on. Driven with the origin present, which
+   * is the state that would expose it.
+   */
+  {
+    const setup = {
+      section: "machines" as const,
+      machineId: "m_1" as never,
+      system: null,
+      signin: "claude",
+      agents: true,
+      leaf: null,
+    };
+    const fromNew = "/new/m_1/%2FUsers%2Fme%2Fsrc";
+    check(
+      "the Set up leaf goes up to the list, wherever the sheet was opened from",
+      [settingsUp(setup), settingsUp(setup, fromNew), settingsUpLabel(setup, fromNew)],
+      [
+        { path: "/settings/machines/m_1/agents", withinNav: false },
+        { path: "/settings/machines/m_1/agents", withinNav: false },
+        "Agents",
+      ],
+    );
+  }
   check(
     "and it is titled by what it is rather than by which machine",
     settingsPaneTitle({ section: "machines", machineId: "m_1" as never, system: null, signin: null, agents: true, leaf: null }),
@@ -330,6 +412,36 @@ process.stdout.write("\nwhich settings screen a URL names\n");
       path: "/settings/machines/m_1",
       withinNav: false,
     });
+    /*
+     * ⭐ **The whole walk, which is what "two ◀ come back to New session" has to
+     * mean** (Q3.640). Agent settings under an empty strip crosses into this sheet;
+     * a row's Set up pushes the card; ◀ replaces it with the list; ◀ again leaves
+     * for New session. Nothing new carries it: `originFor` records the crossing
+     * once and keeps it across both moves inside the sheet, and `settingsUp` reads
+     * it only at the list. Driven as the sequence the router performs, each
+     * origin computed from the one before, so a step that dropped it — or a leaf
+     * that read it early — fails here rather than on a phone.
+     */
+    const list = "/settings/machines/m_1/agents";
+    const leaf = "/settings/machines/m_1/agents/claude";
+    const at = (path: string) => parseSettingsRoute(seg(path), decodeURIComponent);
+    const o1 = originFor(fromNew, list, null);
+    const o2 = originFor(list, leaf, o1);
+    const up1 = settingsUp(at(leaf), o2);
+    const o3 = originFor(leaf, up1?.path ?? "", o2);
+    const up2 = settingsUp(at(list), o3);
+    check(
+      "New session → Agents → Set up → ◀ → ◀ lands back on New session",
+      [o1, o2, up1, up2, settingsUpLabel(at(leaf), o2), settingsUpLabel(at(list), o3)],
+      [
+        fromNew,
+        fromNew,
+        { path: list, withinNav: false },
+        { path: fromNew, withinNav: false },
+        "Agents",
+        "New session",
+      ],
+    );
   }
 
   const plain = { id: "u_1", name: "ada", isAdmin: false };
@@ -819,10 +931,17 @@ process.stdout.write("\nwhich settings screen a URL names\n");
    * machine is named by the row you came through and by the chevron pointing back
    * at it.
    */
+  /*
+   * ⚠ **And its leaf is "Setup", a noun like every sibling title** — "Sign-in",
+   * "New key" — rather than the menu item's verb that opens it. It was "Agents"
+   * at both addresses while the second one dropped its tail; it is a screen of its
+   * own now (Q3.640), and a title shared with its parent is the non-injectivity
+   * this block records costing the chrome both of its facts.
+   */
   check(
-    "and the strip is titled by what it is, at both of its addresses",
+    "the strip is titled Agents and its leaf Setup",
     [pane(["machines", "m_1", "agents"]), pane(["machines", "m_1", "agents", "claude"])],
-    ["Agents", "Agents"],
+    ["Agents", "Setup"],
   );
   /*
    * ⭐ And it is a **constant**: nothing in the pop-up's chrome is a function of
@@ -1196,8 +1315,9 @@ process.stdout.write("\nwhich settings screen a URL names\n");
       settingsUpLabel(parseSettingsRoute(["account"])),
       settingsUpLabel(parseSettingsRoute(["machines", "m_1"])),
       settingsUpLabel(parseSettingsRoute(["machines", "m_1", "systems", "anthropic"])),
+      settingsUpLabel(parseSettingsRoute(["machines", "m_1", "agents", "claude"])),
     ],
-    ["Settings", "Machines", "Machine settings"],
+    ["Settings", "Machines", "Machine settings", "Agents"],
   );
   check("and says nothing at the index", settingsUpLabel(parseSettingsRoute([])), null);
   /*

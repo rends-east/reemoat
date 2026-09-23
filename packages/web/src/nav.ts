@@ -75,11 +75,12 @@ export function depthOf(route: Route): number {
      * screen and therefore one depth, which is what makes every navigation within
      * it `null`.
      *
-     * ⚠ **One list has a leaf and the other no longer does.** An agent is a
-     * fourth depth; a plugin's settings left this sheet for the plugin's own page
-     * under `/plugins`, so `…/plugins/:pluginId` parses to depth 3 — the machine
-     * — rather than to a screen. That is the same answer the URL now gives, and
-     * the two have to agree or the animation plays against a screen nobody is on.
+     * ⚠ **One list has a leaf and the other no longer does.** The agent list
+     * is a fourth depth and one harness's card under it a fifth (Q3.640); a
+     * plugin's settings left this sheet for the plugin's own page under
+     * `/plugins`, so `…/plugins/:pluginId` parses to depth 3 — the machine —
+     * rather than to a screen. That is the same answer the URL now gives, and the
+     * two have to agree or the animation plays against a screen nobody is on.
      */
     case "new":
       return 1;
@@ -113,8 +114,15 @@ export function depthOf(route: Route): number {
        * between two pop-ups rather than a push: the two stacks' depths are never
        * compared, so `navMove` answers on the sheet stack and `origin` is what
        * points the ◀ back at `/new`. Nothing here has to know about that door.
+       *
+       * ⚠ **And the strip's leaf is one deeper again**, the only fifth depth in
+       * this sheet: one harness's card, pushed from a row on the list and popped
+       * back to it. Answering 4 for it would make `navMove` see `here === there`
+       * and slide nothing in either direction — the defect the `signin` arm below
+       * records having once had. `typeof`, for `settingsUp`'s reason: the drivers
+       * build partial routes by hand.
        */
-      if (route.agents) return 4;
+      if (route.agents) return typeof route.signin === "string" ? 5 : 4;
       if (route.system !== null) return 4;
       // The third leaf under a machine, and it shares their depth for their reason.
       // Missing, it read as depth 3 — the machine screen it is pushed *from* — so

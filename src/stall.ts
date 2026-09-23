@@ -26,7 +26,10 @@ import { mountFor, readMounts, type MountEntry } from "./mounts.js";
  * That last one is the reason this module exists at all: for a `plain` session
  * `workspace.root` **is** the `cwd` the caller chose, so `existsSync` on it was
  * the same event-loop death the picker had already been rewritten to avoid,
- * sitting behind `GET /sessions/:id/changes`.
+ * sitting behind `GET /sessions/:id/changes`. And `runtime/local.ts`, which asks
+ * through {@link probeBuild} which file an agent's CLI path names on every use of
+ * a held choice — a path under a home directory, which is a network mount on
+ * plenty of machines, asked from the paths a spawn and a relay dial take.
  *
  * Nothing here is a boundary. Being wrong about a filesystem degrades an answer;
  * it never permits or refuses anything.
@@ -414,6 +417,65 @@ export async function probeRealpath(path: string, options: ProbeOptions = {}): P
       (): PathResolution => ({ kind: "missing" }),
     ),
   );
+  return answer.answered ? answer.value : null;
+}
+
+/** Which file a path names, or that it names none. */
+export type BuildProbe = { kind: "file"; key: string } | { kind: "missing" };
+
+/**
+ * Which *file* a path names right now — {@link probeRealpath} plus a `stat` of the
+ * target, bounded, with the same third answer.
+ *
+ * ⚠ **Asked because a CLI moves under a running daemon without telling it**, and
+ * it moves in two shapes that need the two halves of the key:
+ *
+ *   - **The native installers swap by rename.** `~/.local/bin/claude` is a symlink
+ *     to `~/.local/share/claude/versions/<version>`, and an update repoints it —
+ *     the path a choice holds never changes, and the file behind it does. The
+ *     resolved path is what catches this one.
+ *   - **An npm install replaces the file where it stands.** Under `--source npm` a
+ *     launcher's real path is the same across versions, so what differs is the
+ *     inode, the size and the `ctimeMs`. `ctime` and not `mtime`, because an
+ *     installer may keep the packed file times — size and `mtime` can then be
+ *     identical across two builds — while `ctime` cannot be set from userland.
+ *
+ * ⚠ **It sees the file the path names, never what that file loads.** A launcher
+ * that resolves its payload at run time is invisible here: grok's node launcher
+ * (`bin/grok-bootstrap.js`, left as the bin entry when a package manager other
+ * than npm installs it) execs `$GROK_HOME/bin/grok`, so a payload moved beneath it
+ * falls back to whatever ceiling the caller keeps. Under npm, grok's postinstall
+ * points the bin entry at an extracted native binary, and an update renames a new
+ * file over it, which this probe does see.
+ *
+ * ⚠ **Keyed on the link's mount, not the target's.** The memory is filed under
+ * the path as the caller named it, and `stat(real)` may land on another
+ * filesystem. The deadline covers both calls, so the probe is still bounded; what
+ * is lost is only that a stalled *target* is remembered under the link's key
+ * rather than its own.
+ *
+ * `missing` for a path that resolves to nothing — the caller compares keys, and a
+ * build that vanished is a change like any other. `null` for "could not tell",
+ * which is never a new build: a mount that stopped answering has not replaced
+ * anything.
+ */
+export async function probeBuild(path: string, options: ProbeOptions = {}): Promise<BuildProbe | null> {
+  const ctx = await probeContext(options);
+  // Normalized before keying, for `probeExists`'s reason: an override is an
+  // environment variable somebody typed, and two spellings of one file must not be
+  // two entries in the memory.
+  const answer = await attempt(stallKeyFor(resolve(path), ctx.mounts), ctx, async (): Promise<BuildProbe> => {
+    try {
+      const real = await realpath(path);
+      const info = await stat(real);
+      return { kind: "file", key: `${real}\0${info.dev}:${info.ino}:${info.size}:${info.ctimeMs}` };
+    } catch {
+      // ENOENT, ENOTDIR, EACCES, ELOOP — a link to nothing, or a file gone between
+      // the two calls. All of them mean there is no file here to name, which is an
+      // answer the caller compares like any other rather than a failure to report.
+      return { kind: "missing" };
+    }
+  });
   return answer.answered ? answer.value : null;
 }
 

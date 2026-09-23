@@ -18,6 +18,7 @@ mod device;
 mod local;
 mod proxy;
 
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use tauri::Manager;
@@ -123,7 +124,7 @@ pub fn run() {
                 client: proxy::client(),
                 config_dir: dir,
                 durable: credential::probe(),
-                supervisor: Mutex::new(daemon::Supervisor::new()),
+                supervisors: Mutex::new(BTreeMap::new()),
             });
 
             /*
@@ -172,7 +173,7 @@ pub fn run() {
              * in `tauri-runtime-wry`, destroying the last window emits
              * `ExitRequested` and, with nothing calling `prevent_exit()`, sets
              * `ControlFlow::Exit` — on every platform, macOS included. So ⌘W
-             * quits this app and takes its daemon with it, which is what
+             * quits this app and takes its daemons with it, which is what
              * Windows and Linux users expect and what a Mac user does not.
              *
              * The code is right either way and the event is still the one to
@@ -181,11 +182,24 @@ pub fn run() {
              * What changes is that the macOS convention — stay running, come back
              * from the dock — is a **deliberate non-goal** beside "no menu bar, no
              * tray" rather than something this comment claimed was already true.
+             *
+             * ⚠ **Every daemon it started, signalled together and waited on once.**
+             * There is one per server this app has opened (Q7.148), and a server
+             * change leaves the previous one running — so this is the only place
+             * they stop, and stopping them in turn would make a quit worth one
+             * `STOP_DEADLINE` per server. `daemon::stop_all` signals all, then
+             * reaps all against one deadline. A server whose supervisor is poisoned
+             * is skipped rather than blocking the rest; its child is orphaned, which
+             * is the failure this block exists to prevent, for that one only.
              */
             if matches!(event, tauri::RunEvent::Exit) {
                 if let Some(host) = handle.try_state::<commands::Host>() {
-                    if let Ok(mut supervisor) = host.supervisor.lock() {
-                        supervisor.stop();
+                    if let Ok(supervisors) = host.supervisors.lock() {
+                        let mut held: Vec<_> = supervisors
+                            .values()
+                            .filter_map(|one| one.lock().ok())
+                            .collect();
+                        daemon::stop_all(held.iter_mut().map(|guard| &mut **guard));
                     }
                 }
             }

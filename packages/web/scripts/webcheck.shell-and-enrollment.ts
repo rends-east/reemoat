@@ -578,9 +578,13 @@ process.stdout.write("\nnothing names a colour that no longer exists\n");
    * What keeps that from being a licence is measured at the tokens themselves — the
    * fill is tinted and the text is not — and enforced below, where their presence is
    * now asserted exactly as the others' absence is.
+   *
+   * `offer` and `offer-ink` joined when the machine offer was deleted (Q1.650); the
+   * ink's other reader, the `(stopped)` chip, moved to `caution` — a rename that
+   * missed `tasks.ts` is this gate's failure exactly.
    */
-  const RETIRED = ["accent", "accent-ink", "warn", "ok"];
-  const LIVE = ["add", "add-ink", "del", "del-ink", "offer", "offer-ink"];
+  const RETIRED = ["accent", "accent-ink", "warn", "ok", "offer", "offer-ink"];
+  const LIVE = ["add", "add-ink", "del", "del-ink", "caution"];
   const root = new URL("../src/", import.meta.url);
   const files: string[] = [];
   const walk = (dir: URL): void => {
@@ -650,30 +654,22 @@ process.stdout.write("\nnothing names a colour that no longer exists\n");
   check("the one exception survives", /--color-danger:\s*#7e362b/.test(css), true);
 
   /*
-   * ⚠ **`offer` is the only hue on a *control*, and one is the whole of what
-   * bounds it.** The palette's argument is that hue tints content — a diff is
-   * many tinted lines by construction, so "one per view" cannot be said there —
-   * while a colour that identifies a control is held to `danger`'s rule instead:
-   * never more than one in a view. A second `bg-offer` would be the edit that
-   * turns a named exception into a decoration scheme, and nothing typed can see
-   * it, so it is counted here.
-   *
-   * The label sweep is the other half, and it is the one the token's docblock
-   * rests on: the fill is tinted and the text is not. `text-offer-ink` on the
-   * *label* would put legibility on the hue and make the greyscale claim false,
-   * so the ink is allowed on the glyph and the border and nowhere else.
+   * ⚠ **`caution` is one word on one chip, and that is the whole of what bounds
+   * it.** The token's docblock says so — the `(stopped)` chip and nothing else,
+   * text only, never a fill or a border — and nothing typed can see a second
+   * site, so every utility that spends it is listed here with where it is. It
+   * replaces the count that bounded the offer's tint to one control (Q1.650):
+   * the ink outlived the control it was named for, and a colour with a stated
+   * limit and no check behind it is a limit nobody holds.
    */
-  const tinted = files.filter((file) => /\bbg-offer\b/.test(stripped(readFileSync(file, "utf8"))));
-  check(
-    "exactly one control carries the offer tint",
-    tinted.map((file) => file.slice(file.lastIndexOf("/") + 1)),
-    ["MachineOffer.tsx"],
+  const spendsCaution = files.flatMap((file) =>
+    (
+      stripped(readFileSync(file, "utf8")).match(
+        /\b(?:text|bg|border|ring|from|to|fill|stroke|decoration|outline|shadow|divide|accent)-caution\b/g,
+      ) ?? []
+    ).map((cls) => `${file.slice(file.indexOf("/packages/web/src/") + "/packages/web/src/".length)}: ${cls}`),
   );
-  check(
-    "and the tinted label is `text-fg`, so nothing reads by hue",
-    /text-sm font-medium text-fg/.test(stripped(readFileSync(new URL("../src/ui/MachineOffer.tsx", import.meta.url), "utf8"))),
-    true,
-  );
+  check("caution is one word on one chip, and never a fill", spendsCaution, ["tasks.ts: text-caution"]);
 
   /*
    * ⭐ **One control in this client changes the mouse, by name**, and the check is
@@ -1210,33 +1206,52 @@ process.stdout.write("\nthe three lines a daemon is started with\n");
    * the obvious place to copy this to; it is a field label on a 390px phone
    * beside a door that already leads to the screen that has the command, and
    * `.claude/rules/web-composer.md`'s rule is that a control never leaves the
-   * strip. Asserted rather than left to a comment, because "put it in all three"
-   * is what a reader of the other two would reasonably do.
+   * strip. Asserted rather than left to a comment, because "put it in all four"
+   * is what a reader of the other three would reasonably do — the rail's empty
+   * state below `lg`, `NothingSelected` beside it at `lg`, and Settings → Machines.
    */
   {
     const reads = (path: string): string =>
       stripComments(readFileSync(new URL(`../src/ui/${path}`, import.meta.url), "utf8"));
     const browser = reads("SessionBrowser.tsx");
     const machines = reads("settings/MachinesSection.tsx");
+    const shell = reads("AppShell.tsx");
     const newSession = reads("NewSession.tsx");
     check(
-      "the two screens with room for it call the one renderer",
-      [/installCommand\(/.test(browser), /installCommand\(/.test(machines)],
-      [true, true],
+      "the three screens with room for it call the one renderer",
+      [/installCommand\(/.test(browser), /installCommand\(/.test(machines), /installCommand\(/.test(shell)],
+      [true, true, true],
     );
     // Never a hand-typed second copy: `docscheck` pins the READMEs against the
-    // same function, and a literal here would be a third thing to keep in step.
+    // same function, and a literal here would be one more thing to keep in step.
     check(
-      "and neither writes the command out by hand",
-      [/curl -fsSL/.test(browser), /curl -fsSL/.test(machines)],
-      [false, false],
+      "and none writes the command out by hand",
+      [/curl -fsSL/.test(browser), /curl -fsSL/.test(machines), /curl -fsSL/.test(shell)],
+      [false, false, false],
     );
     check("the new-session strip does not draw it", /installCommand/.test(newSession), false);
     /*
      * And the door-or-the-sentence property is untouched: the command sits inside
-     * the `mayAddMachine` arm on both, so the state that says there is no way to
-     * add a machine still shows no way to add one.
+     * the `mayAddMachine` arm on all three, so the state that says there is no way
+     * to add a machine still shows no way to add one.
      */
+    /*
+     * ⚠ **`NothingSelected` is held structurally, and for a while it was held by
+     * nothing.** The only assertion that reached its door arm was the machine
+     * offer's ordering check, which required `installCommand(` before the offer
+     * before `machineQuotaNotice(` — and it went with the offer (Q1.650). So at
+     * `lg` the command could move out of the ternary and sit beside "you cannot
+     * add machines" with every driver green. A character window is the wrong
+     * tool here: the notice call is a few hundred characters after the door's
+     * `? (`, close enough that any window long enough to find the command also
+     * reaches into the notice arm. So it is four positions in order — the door,
+     * the command, the ternary's `) : (`, the notice — which a command before the
+     * ternary fails as surely as one after it.
+     */
+    const doorAt = shell.indexOf("mayAddMachine(state.me) ? (");
+    const commandAt = shell.indexOf("installCommand(");
+    const otherArmAt = doorAt < 0 ? -1 : shell.indexOf(") : (", doorAt);
+    const noticeAt = shell.indexOf("machineQuotaNotice(");
     check(
       "the command is inside the door arm, not beside the notice",
       [
@@ -1245,117 +1260,28 @@ process.stdout.write("\nthe three lines a daemon is started with\n");
         // under the same heading (decision 3B) — so the window is a few tags of
         // wrapper, never long enough to reach across into the notice arm.
         /canAdd \? \([\s\S]{0,200}<CommandLine command=\{installCommand\(/.test(machines),
+        doorAt >= 0 && doorAt < commandAt && commandAt < otherArmAt && otherArmAt < noticeAt,
       ],
-      [true, true],
+      [true, true, true],
     );
 
     /* ---------------------------------------------------------------- *
-     * And the offer beside it
+     * And nothing beside it
      *
-     * **The paid way to get a machine, drawn only where the free way is.** Same
-     * partition as the command and the same reason, one degree stronger for the
-     * strip: a link off the origin, sitting between somebody and starting work,
-     * is the worst instance of a control leaving it.
+     * **The command is the whole of what these screens draw for adding a
+     * machine.** A "Rent a machine" link sat under it on all three until it was
+     * deleted rather than left switched off (Q1.650). Asserted as an absence over
+     * the whole client, comments stripped so the record of why may stay, by the
+     * names it had — which are the names `docs/DECISIONS.md` still cites, so
+     * `docscheck` resolves them here. Removing this list turns `docscheck` red,
+     * which is the point: the history keeps its names only while something still
+     * asserts they are gone.
      * ---------------------------------------------------------------- */
-    const { machineOfferHref } = await import("../src/offer.js");
-    const shell = reads("AppShell.tsx");
-    const who = (email: string | null): { email: string | null } => ({ email });
-
-    /*
-     * The base is operator-supplied and the address is a person's, so both are
-     * hostile here. Every row was run before it was written down.
-     *
-     * The `#top` row is the one the obvious implementation gets wrong:
-     * `` `${base}?email=…` `` puts the whole query *inside the fragment*, so the
-     * far side receives none of it and the link still opens and still looks
-     * right. And `%2B` is not cosmetic — Hono, on the other side, turns a bare
-     * `+` into a space before percent-decoding, into a field it renders readonly.
-     */
-    const rows: [string | null, string | null, string | null][] = [
-      ["https://get.reemoat.com", "a@b.com", "https://get.reemoat.com/?email=a%40b.com"],
-      ["https://get.reemoat.com/", "a@b.com", "https://get.reemoat.com/?email=a%40b.com"],
-      ["https://get.reemoat.com/buy?ref=x", "a@b.com", "https://get.reemoat.com/buy?ref=x&email=a%40b.com"],
-      ["https://get.reemoat.com/?email=old@x.com", "a@b.com", "https://get.reemoat.com/?email=a%40b.com"],
-      ["https://get.reemoat.com#top", "a@b.com", "https://get.reemoat.com/?email=a%40b.com#top"],
-      ["https://get.reemoat.com", "a+b@c.com", "https://get.reemoat.com/?email=a%2Bb%40c.com"],
-      ["https://get.reemoat.com", "a@b.com&plan=free", "https://get.reemoat.com/?email=a%40b.com%26plan%3Dfree"],
-      ["https://get.reemoat.com", "a@b.com#frag", "https://get.reemoat.com/?email=a%40b.com%23frag"],
-      // No address is still an offer: an instance with no SMTP has accounts that
-      // never had one, and they are exactly who this is for.
-      ["https://get.reemoat.com", null, "https://get.reemoat.com/"],
-      // A scheme this must never put in an `href`, on the one origin that holds
-      // the browser's credential. `new URL` parses both without throwing.
-      ["javascript:alert(1)", "a@b.com", null],
-      ["data:text/html,x", "a@b.com", null],
-      // Not a URL at all — a scheme-less value would be a relative href, which
-      // the SPA fallback answers with this app's own index.html.
-      ["get.reemoat.com", "a@b.com", null],
-      ["//evil.example", "a@b.com", null],
-      // Nothing offered is nothing drawn, whatever the account.
-      [null, "a@b.com", null],
-      [null, null, null],
-    ];
-    for (const [base, email, want] of rows) {
-      check(
-        `an offer at ${JSON.stringify(base)} for ${JSON.stringify(email)}`,
-        machineOfferHref(base, who(email) as never),
-        want,
-      );
-    }
+    const GONE = ["MachineOffer", "machineOffer", "machineOfferHref"];
     check(
-      "an account with no email field at all is the same as one with none",
-      machineOfferHref("https://get.reemoat.com", {} as never),
-      "https://get.reemoat.com/",
-    );
-
-    /*
-     * ⚠ **The offer is environment-only, and nothing in `SETTING_KEYS` may name
-     * it.** It points at one particular shop run by whoever runs the deployment,
-     * and that array is drawn on the Server settings screen of *every* instance —
-     * a row there would put a commercial switch in front of every admin of every
-     * fork. `main.ts` reads the variable and hands it to the app, the way the
-     * plugin catalogue is handled. Asserted from both sides, because "add it to
-     * SETTING_KEYS so an admin can change it" is the natural next edit and the
-     * one this refuses.
-     */
-    const cpSettings = readFileSync(new URL("../../control-plane/src/settings.ts", import.meta.url), "utf8");
-    const cpMain = readFileSync(new URL("../../control-plane/src/main.ts", import.meta.url), "utf8");
-    check("the offer is not a runtime setting", /offer/i.test(cpSettings), false);
-    check("and the environment is where it is read", /REEMOAT_CP_MACHINES_OFFER_URL/.test(cpMain), true);
-
-    const drawnOnce = (text: string): boolean => (text.match(/<MachineOffer/g) ?? []).length === 1;
-    check(
-      "exactly the three screens with room for it draw the offer",
-      [drawnOnce(machines), drawnOnce(browser), drawnOnce(shell)],
-      [true, true, true],
-    );
-    check("the composer strip does not draw the offer either", /MachineOffer/.test(newSession), false);
-    /*
-     * ⚠ **The assertion that matters, and it is pinned from both sides.** A
-     * purchase drawn beside "this account cannot add machines" sells a host this
-     * control plane will refuse at the dial — the machine comes back here to
-     * enroll and that needs a free slot. So: after the command (which keeps the
-     * two windows above meaning what they say), and before the notice's own call
-     * (which is the other arm).
-     */
-    const afterTheCommand = (text: string): boolean => text.indexOf("installCommand(") < text.indexOf("<MachineOffer");
-    const beforeTheNotice = (text: string): boolean => {
-      const offer = text.indexOf("<MachineOffer");
-      // The *call*, never the import: `machineQuotaNotice` is named at the top of
-      // each of these files as well.
-      const notice = text.indexOf("machineQuotaNotice(");
-      return offer >= 0 && notice > offer;
-    };
-    check(
-      "the offer is inside the door arm, under the command and never beside the notice",
-      [machines, browser, shell].map((text) => afterTheCommand(text) && beforeTheNotice(text)),
-      [true, true, true],
-    );
-    // Off by default is a property of the one renderer, not of three call sites.
-    check(
-      "and the renderer draws nothing when the instance offers nothing",
-      /if \(href === null\) return null;/.test(reads("MachineOffer.tsx")),
-      true,
+      "nothing in the client draws or builds a machine offer",
+      srcFiles().filter((file) => GONE.some((name) => stripComments(srcFile(file)).includes(name))),
+      [],
     );
   }
 

@@ -5,6 +5,7 @@ import { snapshot, workspaceAt } from "./webcheck.ws.js";
 import { storage } from "./webcheck.env.js";
 import type { MachineId } from "../src/ids.js";
 import {
+  LOCAL_DISPLAY_NAME,
   MAX_MACHINE_ORDER,
   RANK_STEP,
   dropSlot,
@@ -20,6 +21,9 @@ import {
   folderPathOf,
   foldersOf,
   groupsVersion,
+  localMachineAfter,
+  machineDisplayName,
+  machinesAsDrawn,
   machineTabs,
   nextOrder,
   orderMachines,
@@ -708,6 +712,33 @@ process.stdout.write("\nthe composer's command menu\n");
   );
 
   /*
+   * ⚠ **The chip's notice rule stops at the chip.** claude 2.1.280 describes a
+   * session resumed on a model an alias has moved past as `Newer version available
+   * · select Opus for Opus 5.5`; the chip draws the row's name instead, and this
+   * row is where the sentence belongs — under the name, saying what to pick. So the
+   * menu draws both exactly as the agent sent them.
+   */
+  const resumedModel = option("model", "model", {
+    value: "claude-opus-5[1m]",
+    choices: [
+      { value: "opus", name: "Opus", description: "Opus 5.5 · Best for everyday, complex tasks", group: null },
+      {
+        value: "claude-opus-5[1m]",
+        name: "Opus 5 (1M context)",
+        description: "Newer version available · select Opus for Opus 5.5",
+        group: null,
+      },
+    ],
+  });
+  check(
+    "the menu draws the CLI's own notice under the row's own name",
+    configChoices(resumedModel as never)
+      .filter((row) => row.value === "claude-opus-5[1m]")
+      .map((row) => ({ label: row.label, description: row.description })),
+    [{ label: "Opus 5 (1M context)", description: "Newer version available · select Opus for Opus 5.5" }],
+  );
+
+  /*
    * The prose fallback, which is the arm that matters in a live session and the
    * arm nothing reached.
    *
@@ -1202,14 +1233,23 @@ process.stdout.write("\nwhat is actually on screen\n");
      * process, so an order left behind here reorders somebody else's assertion
      * three sections away — where it would be read as a defect in whatever that
      * section is about.
+     *
+     * ⚠ **And `setMachineOrder([])` is not a reset; it was the spelling here, and it
+     * did nothing.** `nextOrder` keeps a slot for every id it has ever stored — the
+     * revoke-and-restore promise — so an empty drawn list writes back exactly what
+     * was there, the idempotence guard returns early, and `["m_b", "m_a"]` stayed
+     * in memory for every section below. Deleting the storage key does not reach
+     * module state either. Nothing can take an id back out, by design, so the
+     * reset is to put these two back in the order the name sort would draw them.
+     * Found by the `local` section below, which read the leftover as its own.
      */
-    setMachineOrder([]);
+    setMachineOrder(["m_a", "m_b"]);
     storage.delete("reemoat.machineOrder");
   }
 
   /*
    * The merge itself, driven directly. `natural` arrives from `store.ts` already
-   * sorted by name, so clause 2 *is* the name sort rather than a replacement for
+   * sorted by name, so clause 3 *is* the name sort rather than a replacement for
    * it — which is what a machine nobody has dragged relies on.
    */
   {
@@ -1250,6 +1290,215 @@ process.stdout.write("\nwhat is actually on screen\n");
       [0, 1, 2, 0],
     );
     check("and a pointer that has not moved reports the slot it started in", dropSlot([50, 150, 250], 1, 150), 1);
+  }
+
+  /*
+   * ⭐ **The machine this app runs beside: `local`, and first.** The owner's report
+   * was the rail reading `M · MacBoo…` for its own computer, in name order — the
+   * 2026-09-15 reversal had moved `local` off the stored label and onto a badge in
+   * Settings → Machines, and nothing on the home screen read
+   * `AppState.localMachineId` at all. Both halves are one fact asked twice, and
+   * each is asserted here once: the name through `machineDisplayName`, the place
+   * through `orderMachines`' `first`.
+   */
+  {
+    const m = (id: string, name: string) => ({ id: id as MachineId, name });
+    check("this computer's machine is called local", machineDisplayName(m("m_b", "MacBook-Pro"), "m_b" as MachineId), "local");
+    check("and the word is the one constant", LOCAL_DISPLAY_NAME, "local");
+    check("every other machine keeps its own name", machineDisplayName(m("m_a", "alpha"), "m_b" as MachineId), "alpha");
+    check("and with no local daemon every machine does", machineDisplayName(m("m_b", "MacBook-Pro"), null), "MacBook-Pro");
+
+    /*
+     * ⚠ **One word, one computer.** Q7.139 migrated nothing, so a machine the app
+     * set up while `local` was the stored label is still called that — the owner's
+     * Mac carries `m_2405b5ea56616a65` labelled `local` beside the machine it runs
+     * now — and any other can be renamed to it. Drawn plainly, two tiles read
+     * `local` under one monogram. So another machine's `local` is drawn in
+     * `qualifiedName`'s shape, which for that machine is exactly its
+     * `machines.name`. Case-folded, and whether or not this computer is known.
+     */
+    check(
+      "another machine labelled local is drawn by its qualified name",
+      machineDisplayName(m("m_2405b5ea56616a65", "local"), "m_b" as MachineId),
+      "local-2405b5ea56616a65",
+    );
+    check("in any case", machineDisplayName(m("m_2405b5ea56616a65", "Local"), "m_b" as MachineId), "Local-2405b5ea56616a65");
+    check(
+      "and before this computer is known, too — so its name never waits on that",
+      machineDisplayName(m("m_2405b5ea56616a65", "local"), null),
+      "local-2405b5ea56616a65",
+    );
+    check("while this computer keeps the word even if its own label is local", machineDisplayName(m("m_b", "local"), "m_b" as MachineId), "local");
+    check(
+      "and a label that only contains the word is left alone",
+      [machineDisplayName(m("m_x", "local-dev"), "m_b" as MachineId), machineDisplayName(m("m_y", "mylocal"), "m_b" as MachineId)],
+      ["local-dev", "mylocal"],
+    );
+
+    /*
+     * ⚠ **Which computer this is, merged rather than assigned** — `localMachineAfter`.
+     * `host_local_daemon` answers only a daemon that passes `/health` inside its
+     * probe, so an assigned answer put the host name and the name order back on
+     * every wake where the daemon was restarting. And it answers across two roots,
+     * so on a computer carrying a daemon for another fleet that one answers
+     * whenever this server's is down — every cold launch, since the app stops its
+     * own at quit — and must not move `local` off this computer's row.
+     */
+    {
+      const ours = new Set<string>(["m_seed", "m_live"]);
+      const held = (id: MachineId) => ours.has(id);
+      const after = (known: string | null, answer: string | null) =>
+        localMachineAfter(known as MachineId | null, answer as MachineId | null, held);
+      check("a read that finds nothing does not clear a known id", after("m_seed", null), "m_seed");
+      check("and nothing known and nothing found is still nothing", after(null, null), null);
+      check("a different machine of ours replaces it", after("m_seed", "m_live"), "m_live");
+      check("the same answer changes nothing", after("m_live", "m_live"), "m_live");
+      check("a machine this account does not hold never displaces one", after("m_seed", "m_stranger"), "m_seed");
+      check("but with nothing known it is taken, and matches no row", after(null, "m_stranger"), "m_stranger");
+      check("and one of ours then replaces the stranger", after("m_stranger", "m_live"), "m_live");
+    }
+
+    const natural = [{ id: "m_a" }, { id: "m_b" }, { id: "m_c" }] as never as { id: MachineId }[];
+    const ids = (rows: readonly { id: string }[]) => rows.map((r) => r.id);
+    const local = "m_c" as MachineId;
+    check("nobody has placed it, so it leads", ids(orderMachines(natural, [], local)), ["m_c", "m_a", "m_b"]);
+    check(
+      "ahead of the stored ids, not appended behind them",
+      ids(orderMachines(natural, ["m_b"], local)),
+      ["m_c", "m_b", "m_a"],
+    );
+    check("a position somebody stored for it wins", ids(orderMachines(natural, ["m_b", "m_c", "m_a"], local)), ["m_b", "m_c", "m_a"]);
+    check("even when that position is last", ids(orderMachines(natural, ["m_a", "m_b", "m_c"], local)), ["m_a", "m_b", "m_c"]);
+    check("a local id the fleet does not hold changes nothing", ids(orderMachines(natural, ["m_b"], "m_other" as MachineId)), ["m_b", "m_a", "m_c"]);
+    check("and neither does no local daemon at all", ids(orderMachines(natural, ["m_b"], null)), ["m_b", "m_a", "m_c"]);
+    check(
+      "it is never drawn twice, whatever storage holds",
+      ids(orderMachines(natural, ["m_c", "m_c", "m_gone"], local)),
+      ["m_c", "m_a", "m_b"],
+    );
+    check("and membership is still the fleet's", orderMachines(natural, [], local).length, natural.length);
+
+    /*
+     * ⚠ **The memo, driven, for the reason the reorder's is.** `localMachineId`
+     * is patched on its own — at a `runResume`, for a daemon that came up after
+     * the app — and replaces neither `sessions` nor `machines`, so a guard without
+     * it keeps the rail on the host name, in name order, until the poll hands over
+     * a new array. Same `sessions`, same `machines`, and only the local id differs.
+     *
+     * Machine ids of its own, which no section has ever stored: an id in the
+     * stored order is exactly what clause 1 must defer to, so borrowing `m_a` and
+     * `m_b` would test the leftover rather than the rule. And a name that sorts
+     * *last*, so leading is the clause's doing and not the alphabet's.
+     */
+    const fleet = [machineOf("m_mac", "MacBook-Pro"), machineOf("m_zed", "zed")];
+    const away = { sessions: [], machines: fleet, localMachineId: null } as never;
+    const here = { sessions: (away as { sessions: [] }).sessions, machines: fleet, localMachineId: "m_zed" } as never;
+    const before = sessionGroups(away);
+    check("with no local daemon the rail is the name sort", before.groups.map((g) => [g.id, g.name]), [["m_mac", "MacBook-Pro"], ["m_zed", "zed"]]);
+    const after = sessionGroups(here);
+    check("which computer this is invalidates the fleet memo", after === before, false);
+    check("and the rail leads with it", after.groups.map((g) => g.id), ["m_zed", "m_mac"]);
+    check("under the name local", after.groups.map((g) => g.name), ["local", "MacBook-Pro"]);
+    check(
+      "which is the name on its tab, on both axes",
+      machineTabs(after, currentView(after)).map((t) => t.name),
+      ["local", "MacBook-Pro"],
+    );
+    check("and the fallback tab is this computer's", selectedMachineIn(after), "m_zed");
+    check("while the record keeps the real label", fleet.map((one) => one.name), ["MacBook-Pro", "zed"]);
+    check(
+      "New session lists the rail's machines, in its order and under its names",
+      machinesAsDrawn(here).map((one) => [one.machine.id, one.name]),
+      [["m_zed", "local"], ["m_mac", "MacBook-Pro"]],
+    );
+    check("and a second read with nothing changed is the cached one", sessionGroups(here), after);
+    /*
+     * The collision, through the real function: this computer and a machine
+     * labelled `local` in one fleet draw one `local` between them.
+     */
+    const twin = [...fleet, machineOf("m_2405b5ea56616a65", "local")];
+    const both = sessionGroups({ sessions: [], machines: twin, localMachineId: "m_zed" } as never);
+    check(
+      "a fleet holding a machine labelled local still draws the word once",
+      both.groups.map((g) => g.name),
+      ["local", "local-2405b5ea56616a65", "MacBook-Pro"],
+    );
+    check("losing it puts the name and the name order back", sessionGroups(away).groups.map((g) => [g.id, g.name]), [["m_mac", "MacBook-Pro"], ["m_zed", "zed"]]);
+
+    /*
+     * A drag stores the whole drawn list, so the first one pins this machine at
+     * the place it was drawn — and after that clause 2 holds it wherever it is put.
+     * These two ids are this section's alone, so what is left behind reorders
+     * nobody else's fixture.
+     */
+    setMachineOrder(["m_mac", "m_zed"]);
+    check("dragged down, it stays down", sessionGroups(here).groups.map((g) => g.id), ["m_mac", "m_zed"]);
+    check("and is still called local there", sessionGroups(here).groups.map((g) => g.name), ["MacBook-Pro", "local"]);
+    storage.delete("reemoat.machineOrder");
+
+    /*
+     * Off disk, for the call sites a value test cannot reach. Two positives —
+     * the two labels that are not `MachineGroup.name` go through the one function
+     * — and the negative that matters: Settings → Machines is where the label is
+     * managed, so it must never draw the display name, or a rename would open on
+     * `local`.
+     */
+    const read = (file: string) => stripComments(readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8"));
+    check(
+      "a row under All names its machine through the one rule",
+      /showMachine && ` · \$\{machineDisplayName\(\{ id: row\.ref\.machineId, name: row\.machineName \}, state\.localMachineId\)\}`/.test(read("ui/SessionBrowser.tsx")),
+      true,
+    );
+    check(
+      "and so does a session's own header",
+      /machineName=\{machineDisplayName\(\{ id: sessionRef\.machineId, name: row\.machineName \}, state\.localMachineId\)\}/.test(read("ui/SessionView.tsx")),
+      true,
+    );
+    check("the store names a group through it", /name: machineDisplayName\(machine, state\.localMachineId\)/.test(read("store.ts")), true);
+    const start = read("ui/NewSession.tsx");
+    check("and New session reads the rail's list rather than the control plane's", /const drawn = machinesAsDrawn\(state\);/.test(start), true);
+    /*
+     * ⚠ **And its default is that list's first reachable machine.** The picker is
+     * drawn from `drawn`, so pinning only `drawn` leaves `reachable` free to go back
+     * to `state.machines` — the control plane's order — with the tiles still right
+     * and the default some other machine than the one the rail leads with.
+     */
+    check(
+      "whose reachable machines are the drawn ones, in the drawn order",
+      /const reachable = drawn\.map\(\(one\) => one\.machine\)\.filter\(/.test(start),
+      true,
+    );
+    check("and the default is the first of them", /const selected = machine \?\? reachable\[0\]\?\.id \?\? null;/.test(start), true);
+    check("with no second list of machines to disagree with it", /state\.machines/.test(start), false);
+    /*
+     * ⚠ **Every file under Settings, not one.** The label is renamed in
+     * `MachineSection.tsx` (`RenameMachine`), one file along from the list this
+     * used to read — so a rename field seeded from the display name would store
+     * `local` on the row every client reads while this stayed green.
+     */
+    const settings = srcFiles().filter((file) => file.startsWith("ui/settings/"));
+    check(
+      "the sweep over Settings reaches the list and the rename field",
+      ["ui/settings/MachinesSection.tsx", "ui/settings/MachineSection.tsx"].every((file) => settings.includes(file)),
+      true,
+    );
+    check(
+      "and no file under it draws the display name, so Settings keeps the real label",
+      settings.filter((file) => /machineDisplayName|machinesAsDrawn|LOCAL_DISPLAY_NAME|sessionGroups|machineTabs|MachineGroup|DrawnMachine/.test(stripComments(srcFile(file)))),
+      [],
+    );
+    /*
+     * ⚠ **And no screen spells the word itself.** A component writing
+     * `id === state.localMachineId ? "local" : name` would draw the same thing
+     * today and be the copy that disagrees tomorrow — the census is over every
+     * file under `ui/` and the store, where each such copy would have to live.
+     */
+    check("the word is spelled once, in machineOrder.ts", (read("machineOrder.ts").match(/"local"/g) ?? []).length, 1);
+    check(
+      "and nowhere a screen or the store could draw it from",
+      srcFiles().filter((file) => (file.startsWith("ui/") || file === "store.ts") && /"local"/.test(stripComments(srcFile(file)))),
+      [],
+    );
   }
 
   /*

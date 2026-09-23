@@ -206,11 +206,12 @@ function FactRow({
 /**
  * The control plane this installation talks to, and the way to change it.
  *
- * **Immediately above Sign out, because they are the same kind of act.** Changing
- * servers *is* signing out, plus a redirection: `host_set_server` erases
- * `credential#<previous>` in the same act that adopts the next one, and
- * `ChooseServer` clears this page's copy one line before that. Filed anywhere
- * else it would read as a preference.
+ * **Immediately above Sign out, and no longer the same kind of act.** Changing
+ * servers used to *be* signing out, plus a redirection: `host_set_server` erased
+ * `credential#<previous>` in the same act. It keeps it now (Q7.148), so each
+ * server stays signed in on this computer and switching back asks nothing; the
+ * row stays beside Sign out because both answer "which fleet is this window on",
+ * and Sign out is still the one that gives a sign-in up.
  *
  * **The second of the screen's two entrances**, the first being the control on
  * the sign-in screen. Before both, `setNativeServer` had exactly one call site —
@@ -242,7 +243,7 @@ function ServerRow(): ReactNode {
       <h2 className={SETTINGS_HEADING}>Server address</h2>
       <FactRow
         value={<span className="truncate font-mono">{server}</span>}
-        subline="Changing it signs this computer out."
+        subline="Each server keeps its own sign-in on this computer."
         action={
           <Button size="sm" onClick={() => store.pickServer()}>
             Change

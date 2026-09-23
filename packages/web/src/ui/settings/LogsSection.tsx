@@ -58,6 +58,8 @@ export function LogsSection(): ReactNode {
   const native = inNativeShell();
   const [lines, setLines] = useState<readonly string[]>([]);
   const [status, setStatus] = useState<string | null>(null);
+  /** `DaemonState.stranger`: the daemon behind `status` enrolled with another control plane. */
+  const [stranger, setStranger] = useState(false);
   /** Whether the first answer has landed. `true` in a browser: there is nothing to wait for. */
   const [read, setRead] = useState(!native);
   const paneRef = useRef<HTMLPreElement | null>(null);
@@ -77,6 +79,7 @@ export function LogsSection(): ReactNode {
       if (cancelled) return;
       setLines(said);
       setStatus(state?.status ?? null);
+      setStranger(state?.stranger === true);
       setRead(true);
     };
     void ask();
@@ -128,7 +131,7 @@ export function LogsSection(): ReactNode {
           ) : !read ? (
             <Spinner />
           ) : lines.length === 0 ? (
-            <Empty failed={status === "exited"}>{nothingHere(status)}</Empty>
+            <Empty failed={status === "exited"}>{nothingHere(status, stranger)}</Empty>
           ) : (
             <>
               {/*
@@ -190,19 +193,37 @@ const FOOTNOTE = "A ring in memory, not a file — it starts empty at every laun
  *
  * `foreign` is the one worth the extra clause: a daemon installed by
  * `deploy/install.sh` is running perfectly and this screen is still empty, which
- * reads as a broken screen unless it says otherwise. Its output is where its own
- * service manager put it, and naming a path here would be this app guessing at
- * another installer's layout.
+ * reads as a broken screen unless it says otherwise. Its output is where whatever
+ * started it put it, and naming a path here would be this app guessing at another
+ * installer's layout.
+ *
+ * ⚠ **Every one of these is about the server the app is on.** There is a daemon
+ * per server now (Q7.148), and the ring shown is that server's child's — so a
+ * sentence saying "the daemon on this computer" would be false beside another
+ * server's daemon running perfectly, and `foreign` no longer means *installed
+ * outside Reemoat*: a copy of Reemoat that is not this one, or a daemon started by
+ * hand, is the same answer.
+ *
+ * ⚠ **Except a `stranger`, which is not this server's at all.** `~/.reemoat` is the
+ * root of every daemon started without `REEMOAT_HOME`, so the one announced there
+ * can be enrolled with another control plane, and "the daemon for this server"
+ * would then be a false sentence about another fleet's. What is true is the empty
+ * ring — nothing was started here for this server — and whose daemon was found.
+ * Not "the one running here": this server's own daemon may be up as well, its
+ * announcement written over by the stranger's, so the sentence may not imply
+ * there is none.
  */
-function nothingHere(status: string | null): string {
+function nothingHere(status: string | null, stranger: boolean): string {
   switch (status) {
     case "running":
       return "The daemon is running and has printed nothing since it started.";
     case "foreign":
-      return "The daemon on this computer was installed outside Reemoat, so Reemoat holds none of its output. Its own service manager has it.";
+      return stranger
+        ? "Reemoat has not started a daemon for this server on this computer, so it holds no output to show. The daemon it found here is for a different server, and whatever started that one has its output."
+        : "The daemon for this server on this computer was not started by this copy of Reemoat, so Reemoat holds none of its output. Whatever started it has it.";
     case "exited":
       return "The daemon stopped without printing anything.";
     default:
-      return "Reemoat has not started a daemon on this computer yet.";
+      return "Reemoat has not started a daemon for this server on this computer yet.";
   }
 }

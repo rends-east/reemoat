@@ -118,6 +118,17 @@ export function ChooseServer(): ReactNode {
    * compares by identity.
    */
   const signedIn = cp.currentCredential() !== null;
+  /*
+   * Whether this shell can run a daemon here at all, which is the one condition on
+   * the third sentence below: on a phone there is nothing to keep running, and a
+   * sentence about it would be a promise about nothing. `canHostDaemon` is the
+   * declared capability, never a guess from `platform`.
+   *
+   * ⚠ `=== true`, the reverse of `canHostDaemonHere`'s `!== false`, for the
+   * reverse reason: there silence would cost the local route, here it costs one
+   * sentence, and a sentence is a claim that should be left out when unsure.
+   */
+  const hostsDaemon = nativeBoot()?.canHostDaemon === true;
   const [address, setAddress] = useState(current ?? suggested ?? "");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -133,10 +144,11 @@ export function ChooseServer(): ReactNode {
      *
      * `host_set_server` returns early on an origin equal to the one it holds, so
      * the obvious place for this check is after it. That is wrong here, and it
-     * was written that way first: by then `clearSession()` has already run, so
-     * saving the address you are already on would sign you out. The host's early
-     * return protects the file and the keyring; it cannot protect a decision this
-     * page took two lines earlier.
+     * was written that way first: by then the page has already let go of its
+     * credential, and when that was `clearSession()` saving the address you are
+     * already on signed you out. `detachSession()` keeps the stored copy now, so
+     * the cost below the check is a reload rather than a sign-in — and a reload
+     * over nothing is still the wrong answer to pressing Continue on no change.
      *
      * **Exact equality against the canonical value, and deliberately nothing
      * cleverer.** `current` came from the host already normalized, and the field
@@ -177,18 +189,28 @@ export function ChooseServer(): ReactNode {
        * screen was only ever drawn at `server === null` there was no credential
        * and no window; as a settings screen there is both.
        *
-       * `clearSession()` is local, instant and cannot fail, and it erases
-       * `credential#<old origin>` through the same call `host_set_server` was
-       * about to make one line later. What it costs is that a `setNativeServer`
-       * failing on a full disk leaves somebody signed out of a server they are
-       * still pointed at — one sign-in. What the other order costs is a
-       * credential disclosure to a host nobody has verified. Priced, and stated
-       * here because the safe-looking order is the wrong one.
+       * `detachSession()` is local, instant and cannot fail, and it drops this
+       * page's copy only: `credential#<old origin>` stays in the keyring, so the
+       * server being left is still signed in when somebody switches back
+       * (Q7.148). What the other order costs is a credential disclosure to a host
+       * nobody has verified. Priced, and stated here because the safe-looking
+       * order is the wrong one.
+       *
+       * ⚠ **A refusal hands the copy back.** Every way `host_set_server` fails —
+       * an address it will not normalize, a `server.json` it could not write —
+       * returns before it moves the base, so the page is still pointed at the
+       * server this bearer belongs to. Without this a full disk left the page
+       * with no credential and no sign-out: every `cpFetch` refusing locally,
+       * machines drifting to no token, and only a quit to recover. Re-adopted
+       * through the hydration door, because what it restores is exactly what the
+       * keyring still holds for this origin.
        */
-      if (cp.currentCredential() !== null) cp.clearSession();
+      const held = cp.currentCredential();
+      if (held !== null) cp.detachSession();
       try {
         await setNativeServer(typed);
       } catch (cause: unknown) {
+        if (held !== null) cp.adoptHydratedCredential(held.value);
         setError(cause instanceof Error ? cause.message : "could not save that address");
         setBusy(false);
         return;
@@ -197,11 +219,11 @@ export function ChooseServer(): ReactNode {
        * **The reload is unconditional from here**, including where the host
        * answers the origin it already held. That happens only when somebody typed
        * a different *spelling* of the server they are on — the exact-equality exit
-       * at the top caught the literal case — and by this line the credential is
-       * gone. Cancelling would put them back on a screen behind a session that no
-       * longer exists; reloading lands them on the sign-in form for the server
-       * they are in fact still pointed at, which is honest and is what the rest of
-       * this function already produces.
+       * at the top caught the literal case — and by this line the page holds no
+       * credential. Cancelling would put them back on a screen behind a session
+       * this page has let go of; reloading reads the stored one back for the
+       * server they are in fact still pointed at, which is what the rest of this
+       * function already produces for any server that was signed in before.
        */
       /*
        * ⚠ **A reload rather than an in-memory unwind**, and `signOut` takes the same
@@ -270,22 +292,43 @@ export function ChooseServer(): ReactNode {
 
           {/*
             ⚠ **What changing servers costs, said before rather than discovered
-            after.** `host_set_server` erases `credential#<previous>` in the same
-            act that adopts the new one, and `submit` clears this page's copy one
-            line earlier — so pointing somewhere else is signing out of here.
+            after — and the first sentence used to be a cost.** `host_set_server`
+            erased `credential#<previous>` in the same act, so pointing somewhere
+            else was signing out of here. It keeps it now (Q7.148): `submit` drops
+            this page's copy and nothing else, and switching back asks nothing.
 
-            The second sentence is the half that stops the first from reading as
-            a threat, and it is exactly true: **nothing here ends the session on
-            the old server.** No `DELETE /v1/me/sessions/current` is sent, and
-            deliberately not — it is a network call to a server somebody is
-            leaving, which is often the reason they are leaving, and it must not
-            stand in front of a server change. The row stays in that server's
-            Settings → Devices, where its owner can retire it.
+            It stays exactly true for the reason the old second sentence was:
+            **nothing here ends the session on the old server.** No `DELETE
+            /v1/me/sessions/current` is sent, and deliberately not — it is a
+            network call to a server somebody is leaving, which is often the
+            reason they are leaving, and it must not stand in front of a server
+            change. Leaving it for good is signing out while on it.
+
+            ⚠ **The third is what a switch does *not* cost, which it used to.**
+            Each server has a daemon of its own on this computer now (Q7.148), and
+            `host_set_server` touches none of them: the one for the server being
+            left goes on running — its turns, its pending approvals, a phone's way
+            in — until Reemoat quits. Conditional on purpose, because whether this
+            copy started one for that server is not something this screen knows.
           */}
-          {editing && signedIn && (
+          {/*
+            ⚠ **"Stays signed in" is said only where it is true.** On a computer
+            whose credential store does not keep what it is given (`durable`
+            false), switching back *does* ask again, and the sentence under the
+            buttons already says so; drawing both would be two answers to one
+            question with only one of them right.
+          */}
+          {editing && signedIn && (durable || hostsDaemon) && (
             <p className="mt-3 text-sm text-muted">
-              Signing in to a different server forgets this computer&apos;s sign-in for{" "}
-              <span className="font-mono text-fg">{current}</span>. Your account there is untouched.
+              {durable && (
+                <>
+                  This computer stays signed in to{" "}
+                  <span className="font-mono text-fg">{current}</span>, so switching back does not
+                  ask again.
+                </>
+              )}
+              {hostsDaemon &&
+                " If Reemoat runs a daemon on this computer for that server, it keeps running until you quit Reemoat."}
             </p>
           )}
 

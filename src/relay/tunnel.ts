@@ -156,10 +156,13 @@ export interface TunnelOptions {
  *
  * The answer is normally a cache hit — `LocalRuntime.agentCli` holds a choice for
  * ten minutes — and the miss costs up to four `--version` spawns, each bounded at
- * `LOGIN_PROBE_TIMEOUT_MS` and run together. Three seconds is longer than any of
- * them takes on a healthy machine and far shorter than the reachability a
- * daemon would forfeit waiting for a hung binary: past it the dial proceeds with
- * no header and the next dial carries what the probe has resolved by then.
+ * `LOGIN_PROBE_TIMEOUT_MS` and run together. A hit is not free any more: it costs
+ * one bounded `realpath` and `stat` of the file the choice names, and a build that
+ * moved since costs its `--version` inside this same budget. Three seconds is
+ * longer than any of them takes on a healthy machine and far shorter than the
+ * reachability a daemon would forfeit waiting for a hung binary: past it the dial
+ * proceeds with no header and the next dial carries what the probe has resolved by
+ * then.
  */
 export const ANNOUNCE_TIMEOUT_MS = 3_000;
 

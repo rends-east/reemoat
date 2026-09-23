@@ -14,6 +14,7 @@ import {
 } from "../src/archive.js";
 import { forgetStalled, isStalled, listDirs, makeDir, PathError, probeExists, resolveCwd } from "../src/browse.js";
 import { isRemoteType, mountFor, parseBsdMounts, parseLinuxMounts, readMounts } from "../src/mounts.js";
+import { probeBuild } from "../src/stall.js";
 import { atOrUnder, atOrUnderResolved, containedIn, containedInResolved } from "../src/paths.js";
 import { WebSocketServer } from "ws";
 import { RelayTunnel, announcedAgentClis } from "../src/relay/tunnel.js";
@@ -779,6 +780,27 @@ process.stdout.write("\na workspace on a filesystem that stopped answering\n");
   forgetStalled();
   const changesLive = await get("/sessions/s_one/changes", "u_alice");
   check("once it answers again, so does the route", changesLive.status, 200);
+
+  /*
+   * `probeBuild` answers the same three ways, and its caller keys on the
+   * difference: `LocalRuntime`'s `cliBuild` re-chooses a CLI on `missing` — a build
+   * that vanished is a change — and keeps the held choice on `null`, which is never
+   * one. So a `missing` that became `null` would hold a deleted build, and the
+   * reverse would re-choose over a mount that merely stopped answering — and the
+   * runtime's own driver reaches `null` only through a stand-in. A dangling link is
+   * `missing` rather than a file, because what runs is the target and there is none.
+   */
+  const builds = join(sandbox, "build-probe");
+  mkdirSync(builds, { recursive: true });
+  const cli = join(builds, "cli");
+  writeFileSync(cli, "#!/bin/sh\nexit 0\n");
+  const dangling = join(builds, "dangling");
+  symlinkSync(join(builds, "no-such-target"), dangling);
+  check("a file that answers is named as one", (await probeBuild(cli))?.kind, "file");
+  check("one that is genuinely absent is missing", (await probeBuild(join(builds, "no-such-cli")))?.kind, "missing");
+  check("and so is a link to nothing", (await probeBuild(dangling))?.kind, "missing");
+  check("while a deadline that has passed is neither", await probeBuild(cli, { probeTimeoutMs: 0 }), null);
+  forgetStalled();
 }
 
 /* ------------------------------------------------------------------ *

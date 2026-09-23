@@ -109,7 +109,10 @@ server for free. **A custom scheme does not: there is one webview origin for eve
 server somebody might point this app at.** So the keyring account *is* the origin —
 `credential#<origin>` — which means a credential cannot be read for a server it was
 not issued by, structurally rather than because a code path remembered to clear it.
-`host_set_server` erases the previous origin's entry in the same act.
+`host_set_server` keeps the previous origin's entry, so switching back asks nothing
+(Q7.148); signing out erases the current one. ⚠ What that widens: a script in this
+window could move the origin and re-read `host_boot`, reaching every kept server's
+credential rather than one — recorded in Q7.148 with its close.
 
 `#` as the delimiter, chosen rather than defaulted: a URL origin cannot contain
 one, so no escaping is needed, and a later `credential#<origin>#<account>` is an
@@ -196,22 +199,21 @@ exactly one call site and `clearSession` leaves the server alone — so a server
 once chosen **could not be changed from inside the app at all**, and the only
 remedy was deleting the shell's config by hand.
 
-⚠ **`cp.clearSession()` runs before `setNativeServer`, and the safe-looking order
+⚠ **`cp.detachSession()` runs before `setNativeServer`, and the safe-looking order
 is the wrong one.** `host_set_server` moves the base **in the host process**, so
 from the instant it returns every `host_cp` call goes to the *new* origin while
 the page still holds the old fleet's bearer — and the four-second poll,
 `refreshConfig` or any `cpFetch` in flight would hand server A's session token to
 a host somebody has just typed in. While the screen was only ever drawn at
 `server === null` there was no credential and no window; as a settings screen
-there is both. `clearSession()` is local, instant, cannot fail, and erases
-`credential#<old origin>` through the same call `host_set_server` was about to
-make. What it costs is one sign-in if the write then fails on a full disk; what
-the other order costs is a credential disclosure. `webcheck` asserts the two
+there is both. `detachSession()` is local, instant, cannot fail, and drops the
+page's copy only — never `clearSession()`, which would sign out of the server
+being left. What the other order costs is a credential disclosure. `webcheck` asserts the two
 indices, because every other assertion stays green either way.
 
 **Adopting an origin equal to the one already held reloads nothing.**
 `host_set_server` returns early on a match — no file written, no credential
-erased — so re-typing the address you are on would otherwise be a sign-out charged
+erased — so re-typing the address you are on would otherwise be a reload charged
 for a spelling. Only reachable from the editing entrance, which is why it did not
 have to exist before.
 
@@ -221,14 +223,14 @@ whole of what keeps the first-run state uncancellable. It is also why
 form with no server, so the guard is structural rather than a second predicate
 answering a question `App.tsx` already answers.
 
-**What changing servers costs is said on the screen, in two sentences, and both
-halves are load-bearing.** The first is true because the credential for the old
-origin is erased in the same act. The second — *"Your account there is
-untouched"* — is true because **nothing here ends the session on the old
+**What changing servers costs is said on the screen, and each sentence is
+load-bearing.** The first — *"stays signed in"* — is true because nothing erases
+`credential#<old origin>` and **nothing here ends the session on the old
 server**: no `DELETE /v1/me/sessions/current` is sent, deliberately, it being a
 network call to a server somebody is leaving, which is often *why* they are
-leaving. The row stays in that server's Settings → Devices, and saying so is
-honest where claiming a revocation would not be.
+leaving. The row stays in that server's Settings → Devices. A second, where a
+daemon can run: the old server's keeps running until quit, because
+`host_set_server` stops none.
 
 A `Route` arm would have been wrong twice. `parseGateScreen` is shared with the
 router, so the web build would parse and draw `/server` — a screen that can do
@@ -408,6 +410,12 @@ ring for Settings → Logs. That is a **second** reader of that ring on purpose:
 permission for any of them would be a door the webview could walk through on a page
 that renders agent output. `nativecheck` pins the permission list empty as an exact
 set and names those prefixes out of it.
+
+**The daemon commands answer about the server the app is on.** `state_root` keeps
+`~/.reemoat` for the server its `daemon.env` names, `~/.reemoat/servers/<server>/`
+for every other; the root, the origin and, off the legacy root, `REEMOAT_PORT=0` go
+on the spawn, never into the file, so `OWNED_KEYS` stays three. A `Supervisor` per
+origin, all stopped at `RunEvent::Exit`. Q7.148.
 
 Three censuses hold the command list, in three directions, and each catches a
 different failure: declared against registered (`nativecheck` — a dead function),

@@ -19,13 +19,13 @@ import { AgentLoginRuns } from "../src/agentauth.js";
 import { AgentInstallRuns } from "../src/agentinstall.js";
 import { AgentScriptGate } from "../src/agentscript.js";
 import { AgentUpdates, agentChannelFrom, agentSourceFrom } from "../src/agentupdate.js";
-import { removeAnnounce, writeAnnounce, ANNOUNCE_VERSION } from "../src/announce.js";
+import { announcedControlPlane, removeAnnounce, writeAnnounce, ANNOUNCE_VERSION } from "../src/announce.js";
 import { IdleParking } from "../src/idlepark.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import { resolveRoots } from "../src/browse.js";
 import { codeFingerprint, enroll, EnrollError } from "../src/enroll.js";
 import { boundedInt } from "../src/http.js";
-import { atOrUnder, expandHome } from "../src/paths.js";
+import { atOrUnder, expandHome, resolveStateRoot } from "../src/paths.js";
 import {
   IDLE_PARK_MS,
   MAX_LIVE_SESSIONS,
@@ -114,7 +114,11 @@ function threadpoolNote(): string {
  * The port stays known and stays 7887 by default, because `pnpm client`,
  * `pnpm harness` and `deploy/lib.sh`'s `/health` probe all reach it from *this*
  * machine, where loopback is the point rather than the obstacle. `REEMOAT_PORT=0`
- * is still supported for a daemon that is only ever served by the relay.
+ * is still supported for a daemon that is only ever served by the relay — and it
+ * is what the desktop app passes every daemon it runs for a server *other* than
+ * the one `~/.reemoat/daemon.env` names, because a second daemon on 7887 would
+ * lose the bind and the announcement carries whatever port the kernel chose. The
+ * one on `~/.reemoat` keeps 7887, for the three callers above (Q7.148).
  */
 const DEFAULT_HOST = "127.0.0.1";
 const SHUTDOWN_HARD_LIMIT_MS = 25_000;
@@ -138,7 +142,25 @@ const EXIT_CONTROL_PLANE_UNREACHABLE = 4;
  * waiting helps — somebody has to grant a permission. See `localNetworkBlocked`.
  */
 const EXIT_LOCAL_NETWORK_BLOCKED = 5;
-const DEFAULT_DB = join(homedir(), ".reemoat", "reemoat.db");
+
+/**
+ * The directory every default below is derived from: `REEMOAT_HOME`, else
+ * `~/.reemoat`.
+ *
+ * The database, the worktrees, the uploads, the plugins, the ask directory and the
+ * announcement all sit inside it unless their own variable says otherwise — so a
+ * second daemon on this account is one variable rather than six. The desktop app
+ * sets it for every daemon it starts, one root per server (Q7.148); a daemon
+ * started any other way gets `~/.reemoat` and nothing about it moved.
+ */
+let stateHome: string;
+try {
+  stateHome = resolveStateRoot(process.env["REEMOAT_HOME"]);
+} catch (error) {
+  console.error(describe(error));
+  process.exit(2);
+}
+const DEFAULT_DB = join(stateHome, "reemoat.db");
 const DAY_MS = 86_400_000;
 
 /**
@@ -332,14 +354,21 @@ interface AuthSetup {
   machineId: string | null;
   /** Both halves of a usable relay, or `null`. */
   relay: { relayUrl: string; tunnelKey: string } | null;
+  /**
+   * The control plane the stored identity enrolled with, for the announcement
+   * alone — `null` under the shared secret, and for an identity that recorded
+   * none. Not `REEMOAT_CONTROL_PLANE`: that is read on the enrollment path only,
+   * and a daemon whose file was edited since still belongs to the fleet it joined.
+   */
+  controlPlane: string | null;
 }
 
-const { verifier, machineId, relay: enrolledRelay } = await buildVerifier();
+const { verifier, machineId, relay: enrolledRelay, controlPlane: enrolledControlPlane } = await buildVerifier();
 
 let workspacePolicy;
 try {
   workspacePolicy = {
-    worktreeRoot: resolveWorktreeRoot(process.env["REEMOAT_WORKTREE_ROOT"]),
+    worktreeRoot: resolveWorktreeRoot(process.env["REEMOAT_WORKTREE_ROOT"], stateHome),
     branchPrefix: (process.env["REEMOAT_BRANCH_PREFIX"] ?? DEFAULT_BRANCH_PREFIX).trim() || DEFAULT_BRANCH_PREFIX,
     defaultMode: worktreeMode(process.env["REEMOAT_WORKTREE"]),
   };
@@ -350,13 +379,13 @@ try {
 
 let uploadRoot: string;
 try {
-  uploadRoot = resolveUploadRoot(process.env["REEMOAT_UPLOAD_ROOT"]);
+  uploadRoot = resolveUploadRoot(process.env["REEMOAT_UPLOAD_ROOT"], stateHome);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));
   process.exit(2);
 }
 
-const pluginRoot = expandHome(process.env["REEMOAT_PLUGIN_ROOT"] ?? join(homedir(), ".reemoat", "plugins"));
+const pluginRoot = expandHome(process.env["REEMOAT_PLUGIN_ROOT"] ?? join(stateHome, "plugins"));
 
 /*
  * **Three** remover trees now, and no two of them may nest.
@@ -513,7 +542,7 @@ const agentLogins = new AgentLoginRuns({
  * copy would give a plugin holding only the `model` scope an agent reading a tree
  * that scope says nothing about.
  */
-const askRoot = expandHome(process.env["REEMOAT_ASK_ROOT"] ?? join(homedir(), ".reemoat", "ask"));
+const askRoot = expandHome(process.env["REEMOAT_ASK_ROOT"] ?? join(stateHome, "ask"));
 mkdirSync(askRoot, { recursive: true, mode: 0o700 });
 const agentAsks = new AgentAskRuns({ runtime, cwd: askRoot });
 
@@ -715,29 +744,40 @@ const AGENT_UPDATES_OFF: ReadonlySet<string> = new Set(["off", "0", "false", "no
  * Q4.113.
  */
 /**
- * Everything that has to forget what it knew about a harness whose binary moved.
+ * Everything that has to forget what it knew about a harness whose binary moved,
+ * when this daemon is the one that moved it.
  *
  * ⚠ **One function and two callers, because the list is an *order* rather than a
  * set and a second copy would drift out of it.** The daily refresh and an install
  * somebody pressed both change which build is on disk, and the block below was
  * written out inside `onUpdated` when `onUpdated` was the only caller.
  *
+ * ⚠ **No longer the only route by which a moved binary is noticed.** A build that
+ * moved without this daemon — the CLI's own updater, another daemon on the same
+ * home directory, a `deploy.sh` refresh — is caught at its next use by the file
+ * check `LocalRuntime.agentCli` and `AgentAskRuns.capabilities` make on every hit
+ * (Q6.112). This stays because it is immediate, and because it reaches what that
+ * check cannot: `findOnPath`'s memo, and the sessions waiting on `resumeInterrupted`.
+ *
  * `agent` narrows it where the caller knows: an install is about one harness, a
  * refresh may have moved any of them.
  */
 const afterAgentsChanged = (agent?: string): void => {
-  // Or the daemon's *report* goes on naming the build it resolved before this ran,
-  // for the length of that cache: the spawn already runs the new one, because the
-  // held path is the symlink the script repointed — see `LocalRuntime.agentCli`.
-  // This is also what clears `findOnPath`'s 30s miss, which is why every verdict
-  // about "is it there now" has to come after it rather than before.
+  // Or the daemon's *report* names the build it resolved before this ran until the
+  // next use weighs the held path's file and finds it moved: the spawn already runs
+  // the new one, because the held path is the symlink the script repointed — see
+  // `LocalRuntime.agentCli`. This is also what clears `findOnPath`'s 30s miss,
+  // which is why every verdict about "is it there now" has to come after it rather
+  // than before.
   runtime.forgetAvailability();
   /*
    * And the capability cache, which `forgetAvailability` cannot reach: it holds
    * the model list *and* the build that published it for `MODELS_TTL_MS`, so a
    * picker opened just before the run would name the old build over the old list
    * for ten minutes after the binary moved — the exact pairing `cli` rides that
-   * route to keep honest.
+   * route to keep honest. A hit now weighs that `cli` against `agentCli` (Q6.112),
+   * which catches the move by itself wherever the version moved with it; this is
+   * the immediate half, and the one that also holds where it did not.
    */
   agentAsks.forget(agent);
   /*
@@ -1010,14 +1050,18 @@ function announceLocally(local: { host: string; port: number }): void {
     return;
   }
   try {
-    writeAnnounce({
-      v: ANNOUNCE_VERSION,
-      machineId,
-      host: local.host,
-      port: local.port,
-      instanceId,
-      authMode,
-    });
+    writeAnnounce(
+      {
+        v: ANNOUNCE_VERSION,
+        machineId,
+        host: local.host,
+        port: local.port,
+        instanceId,
+        authMode,
+        controlPlane: enrolledControlPlane,
+      },
+      stateHome,
+    );
     console.log(`local: announced at ${local.host}:${local.port} for apps on this computer`);
   } catch (error) {
     console.error(`local: could not announce this daemon (${describe(error)}); clients will use the relay`);
@@ -1312,10 +1356,12 @@ async function shutdown(signal: string): Promise<void> {
   hard.unref();
 
   // First, and before the tunnel: a stopped daemon that is still advertising a
-  // loopback address costs the next local probe a refused connection. Cheap,
-  // synchronous, and `force: true` so a daemon that never announced is a no-op.
+  // loopback address costs the next local probe a refused connection. Cheap and
+  // synchronous; a daemon that never announced is a no-op, and so is a file some
+  // other daemon on this root wrote since — the removal is keyed on this
+  // process's own `instanceId`, so a stop can no longer take the winner's file.
   try {
-    removeAnnounce();
+    removeAnnounce(instanceId, stateHome);
   } catch {
     // A crash leaves it behind anyway, so nothing may depend on this running —
     // see `removeAnnounce`. Not worth a line of output during a shutdown.
@@ -1413,7 +1459,7 @@ async function buildVerifier(): Promise<AuthSetup> {
     }
     // No control plane in this mode, so no relay either: there is nobody to have
     // issued a tunnel credential and nowhere to present one.
-    return { verifier: shared, machineId: null, relay: null };
+    return { verifier: shared, machineId: null, relay: null, controlPlane: null };
   }
 
   const controlPlane = (process.env["REEMOAT_CONTROL_PLANE"] ?? "").trim();
@@ -1560,9 +1606,19 @@ async function buildVerifier(): Promise<AuthSetup> {
       console.error("REEMOAT_AUTH=both requires REEMOAT_TOKEN to be set as well.");
       process.exit(2);
     }
-    return { verifier: new CompositeVerifier(signed, shared), machineId: identity.machineId, relay };
+    return {
+      verifier: new CompositeVerifier(signed, shared),
+      machineId: identity.machineId,
+      relay,
+      controlPlane: announcedControlPlane(identity.controlPlane),
+    };
   }
-  return { verifier: signed, machineId: identity.machineId, relay };
+  return {
+    verifier: signed,
+    machineId: identity.machineId,
+    relay,
+    controlPlane: announcedControlPlane(identity.controlPlane),
+  };
 }
 
 function describe(error: unknown): string {

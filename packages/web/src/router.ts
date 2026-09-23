@@ -100,9 +100,10 @@ export type Route =
    * which matters because a phone routinely discards this page mid-flow — the
    * reason `AgentCard` already keeps a `sessionStorage` reattach key.
    *
-   * Two segments deeper under `machines`, since agent settings moved inside a
-   * machine: `/settings/machines/:machineId/agents/:agentId`. Every rule about
-   * those is in `settings.ts` rather than here, so this stays four lines and
+   * Up to three segments deeper under `machines`, since agent settings moved
+   * inside a machine: `…/:machineId/systems/:systemId`, `…/:machineId/signin/:agent`,
+   * and the Agents list with its one leaf, `…/:machineId/agents[/:harness]`. Every
+   * rule about those is in `settings.ts` rather than here, so this stays four lines and
    * `webcheck` — which cannot import this file at all, because the module body
    * touches `window.location` — can assert all of them.
    */

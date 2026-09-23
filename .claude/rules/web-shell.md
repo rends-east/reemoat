@@ -162,8 +162,8 @@ have to enter. These are the rules a change here must not break:
 - **Anything that filters the list belongs beside the filter**, in `groups.ts`
   module state. A component `useState` makes `j`/`k` step onto rows the rail is not
   drawing. Q3.15.
-- **Ordered by name until a reader drags a tab (`machine-gestures.md`), and never
-  by reachability or activity.** Both of those flicker on the four-second poll, and
+- **By name, `local` first, until a reader drags (`machine-gestures.md`), and never
+  by reachability or activity.** Both flicker on the four-second poll, and
   a list reordering under a travelling thumb is the one thing this cannot do —
   which is why a *stored* order is allowed where a derived one is not. **Rows inside them are their reader's**:
   `sessions.rank`, a position clock defaulting to `createdAt`, descending. A drag
@@ -274,10 +274,10 @@ have to enter. These are the rules a change here must not break:
 anything, and `resolveMachineRef` picks the owned one. A machine that is not
 yours carries a **`shared` badge**, never a subline; one badge per row, ranked
 **state · `this device` · `shared`**. `this device` is the machine the app runs
-on, read from the announce file through `AppState.localMachineId`, never from
+on, read off the claim and the announce file via `AppState.localMachineId`, never
 `route.kind === "local"` — a preference `setLocalOff` can switch off. The *label*
-is the ordinary host name: "local" is drawn per client, never stored on a row
-every client reads. Q3.543, Q7.139. It also carries **`enrolledBy`**
+is the host name: "local" is drawn per client, never stored on a row every
+client reads. Q3.543, Q7.139. It also carries **`enrolledBy`**
 on a subline of its own — never a badge, never a clause on the truncating
 `standing` line — since nothing else discloses a substitution no route may
 refuse; `enrolledByText` is that one string, `null` where there is nothing to
@@ -407,7 +407,7 @@ primitive adds `tap` itself and carries its own entry.
 | `packages/web/src/ui/SessionBrowser.tsx` | The list column: one header row (menu · search · filter · bell, the `<h1>` `sr-only`), the waiting floor, the machine tabs **below `lg` only**, Pinned above the selected machine's folders, orphans, and a footer that is one button. Mounted twice — the `lg` aside and the `lg:hidden` screen — the breakpoint answered only in those two class strings. A pinned row is drawn **once**, in Pinned, with its own path |
 | `packages/web/src/nav.ts` | What a navigation moves (`depthOf`, `isSheet`, `navMove` — five values, two stacks never compared) and where "up" goes (`upFrom`, what a ◀ goes to). Its own module because `router.ts` reads `window.location` in its module body |
 | `packages/web/src/ui/SessionMenu.tsx` | What you can do to a session — rename, pin, stop, resume — plus `Background tasks` in the header's copy, the panel's second door. `RenameField` |
-| `packages/web/src/ui/settings/` | `SettingsNav` is the 224px column beside the section at `sm`, and the whole sheet body below it. One file per section — Account, **API keys**, Machines, **Logs**, then under an "Admin" heading Server, **Email**, Users, in that order; the last three `adminOnly` (Q3.543). **No neutral state at `sm`+**: the pane draws `DEFAULT_SECTION`, the rail highlights the same constant. `/settings` still parses to `section: null` (below `sm` it *is* the list), so the default feeds what is *drawn*, never `settingsUp`, and is never `adminOnly`. `ServerSection` holds registration, the domains, the machine limit and the provisioning key; `EmailSection` the SMTP form, the test send and delivery trouble, and no delivery log (Q3.225). **`LogsSection` is the one screen that lists program output**, and it exists because the setup notice stopped doing so (Q7.140): the supervisor's ring for the daemon *this app started on this computer*, and a sentence everywhere else — a browser, a `foreign` daemon, any other machine. Both change what `GET /v1/instance` reports, so each calls `store.refreshConfig()` beside its `setAnswer`. A list being read draws one `SkeletonRow` (Q3.548, Q3.544). **No row opens a form in place**: password, email and a new key are leaf screens (`SettingsLeaf`, Q3.549); keys are a `KeyTable`. Systems is **not** a section: `MachineSystemsSection` and `SystemsPanel` hang off a machine, two URL depths down |
+| `packages/web/src/ui/settings/` | `SettingsNav` is the 224px column beside the section at `sm`, and the whole sheet body below it. One file per section — Account, **API keys**, Machines, **Logs**, then under an "Admin" heading Server, **Email**, Users, in that order; the last three `adminOnly` (Q3.543). **No neutral state at `sm`+**: the pane draws `DEFAULT_SECTION`, the rail highlights the same constant. `/settings` still parses to `section: null` (below `sm` it *is* the list), so the default feeds what is *drawn*, never `settingsUp`, and is never `adminOnly`. `ServerSection` holds registration, the domains, the machine limit and the provisioning key; `EmailSection` the SMTP form, the test send and delivery trouble, and no delivery log (Q3.225). **`LogsSection` is the one screen that lists program output**, and it exists because the setup notice stopped doing so (Q7.140): the ring of the daemon *this app started for this server*, and a sentence everywhere else — a browser, a `foreign` daemon, any other machine. Both change what `GET /v1/instance` reports, so each calls `store.refreshConfig()` beside its `setAnswer`. A list being read draws one `SkeletonRow` (Q3.548, Q3.544). **No row opens a form in place**: password, email and a new key are leaf screens (`SettingsLeaf`, Q3.549); keys are a `KeyTable`. Systems is **not** a section: `MachineSystemsSection` and `SystemsPanel` hang off a machine, two URL depths down |
 | `packages/web/scripts/webcheck.ts` | Offline driver for the browser client. Stubs `window`, uses a real loopback socket. **Every pure function it imports is one this repo promises to keep assertable** |
 
 ## Bounds

@@ -512,6 +512,22 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
       ],
       [true, 3],
     );
+    /*
+     * ⚠ **And every tone is a colour the palette actually declares.** The check
+     * above is satisfied by three *different* names, which is exactly what the
+     * first version of this table had — `text-success` and `text-warning` were
+     * different strings, emitted no CSS, and drew `(done)` and `(stopped)` in the
+     * row's ambient colour (Q3.603). A token renamed under this table (`offer-ink`
+     * became `caution`, Q1.650) is the same failure from the other side.
+     */
+    const palette = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
+    check(
+      "and every tone names a token the palette declares",
+      Object.values(TASK_CHIPS)
+        .map(([, tone]) => tone.replace(/^text-/, ""))
+        .filter((name) => !new RegExp(`^\\s*--color-${name}:`, "m").test(palette)),
+      [],
+    );
 
     /*
      * The sections, in Claude Code's own order, and the rule that a kind with no

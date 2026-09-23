@@ -1,13 +1,12 @@
 import { randomBytes } from "node:crypto";
 import { lstatSync } from "node:fs";
 import { chmod, mkdir, open, readdir, readFile, rm } from "node:fs/promises";
-import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type * as acp from "@agentclientprotocol/sdk";
 
-import { containedIn, expandHome } from "./paths.js";
+import { containedIn, expandHome, resolveStateRoot } from "./paths.js";
 import { describeError } from "./http.js";
 
 /**
@@ -394,10 +393,22 @@ export function contentDispositionFor(name: string): string {
  * same way. Dot-prefixed by default for the same reason too: `GET /fs/list`
  * hides it, so the directory picker does not offer somebody their own staging
  * area as a `cwd`.
+ *
+ * The default is `uploads` inside the state root — `~/.reemoat` unless
+ * `REEMOAT_HOME` names another, which is how the desktop app gives each server's
+ * daemon its own (`resolveStateRoot`, Q7.148). That root is dot-prefixed whenever
+ * the desktop app chose it — `~/.reemoat`, `~/.reemoat/servers/<server>` — and
+ * `resolveStateRoot` refuses `~` itself, the one value that would put this beside
+ * somebody's own folders. ⚠ **What it does not stop is an undotted
+ * `REEMOAT_HOME` set by hand**, and the picker will offer that root's children as
+ * a `cwd`: the operator's choice, exactly as an undotted `REEMOAT_UPLOAD_ROOT`
+ * always was. `root` defaults to the unset answer, so a caller with no daemon
+ * around it — a driver, the registry's own fallback — gets exactly the path it
+ * always did.
  */
-export function resolveUploadRoot(spec: string | undefined): string {
+export function resolveUploadRoot(spec: string | undefined, root: string = resolveStateRoot(undefined)): string {
   const raw = (spec ?? "").trim();
-  if (raw.length === 0) return join(homedir(), ".reemoat", "uploads");
+  if (raw.length === 0) return join(root, "uploads");
   const expanded = expandHome(raw);
   if (!isAbsolute(expanded)) {
     throw new Error(`REEMOAT_UPLOAD_ROOT must be an absolute path, got "${raw}"`);

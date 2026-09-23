@@ -478,5 +478,7 @@ same globs as this file. It is a file of its own because this one reached
 - **`node:sqlite` needs `--experimental-sqlite` on Node 22**, which is why `engines` is
   `>=24`.
 - **Two daemons on one database file** is refused by the single-row `daemon` table,
-  checked before restore — otherwise each would reap the other's agents.
+  checked before restore — otherwise each would reap the other's agents. Two on one
+  *account* are ordinary: one per state root (`REEMOAT_HOME`), which is how the
+  desktop app runs one per server — Q7.148.
 - **The daemon crashes with a raw `EADDRINUSE` stack** if the port is taken. Not fixed.

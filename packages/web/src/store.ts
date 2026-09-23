@@ -24,7 +24,7 @@ import {
 import { isTruncationMarker } from "./permission";
 import { hostPlatform, localNetworkDetail } from "./platform";
 import { mayAddMachine } from "./quota";
-import { machineOrder, machineOrderVersion, orderMachines } from "./machineOrder";
+import { machineDisplayName, machineOrder, machineOrderVersion, orderMachines } from "./machineOrder";
 import { mergeOptimistic } from "./sessionOrder";
 import { provideSignInAuth } from "./signInAuth";
 import { SessionStream, type StreamSink, type StreamStatus } from "./stream";
@@ -1113,15 +1113,47 @@ const SETUP_SLOW_POLL_MS = 5_000;
  */
 const SETUP_GIVE_UP_MS = 5 * 60_000;
 
-/** Said when the env file here belongs to a fleet this app is not signed in to. */
+/**
+ * Said when this server's own env file on this computer names another server, or
+ * cannot be read.
+ *
+ * ⚠ **Not "the settings on this computer" any more, and the old sentence was the
+ * bug.** It was written when `~/.reemoat` was the only slot, so a Mac whose
+ * launchd daemon served one server told somebody signing in to a second one to
+ * move `~/.reemoat/daemon.env` aside — which strands the first server's database
+ * rather than setting anything up. Every server has a folder of its own now
+ * (Q7.148), so the only file this can be about is one in *this* server's folder
+ * that somebody edited by hand, and moving that folder aside is the remedy that
+ * costs nobody else anything.
+ */
 const FOREIGN_ENV_DETAIL =
-  "The daemon settings already on this computer name a different Reemoat server, or could not be read, " +
-  "so they were left alone. Sign in to that server instead, or move ~/.reemoat/daemon.env aside to set " +
-  "this computer up here.";
+  "The daemon settings Reemoat keeps on this computer for this server name a different server, or could not be read, " +
+  "so they were left alone. Moving this server's folder in ~/.reemoat/servers aside lets Reemoat set this computer up here again.";
 
-/** Said when another daemon holds this computer and ours could not start. */
+/**
+ * Said when a daemon for this server is running here as a machine this account cannot see.
+ *
+ * ⚠ **This used to be silence**, and silence here is a computer that never becomes
+ * a machine with nothing saying why. Two statuses reach it. `foreign`: a daemon
+ * this app did not start is up in this server's root — `deploy/install.sh`'s, or
+ * one a second account on this server enrolled. `running`: this app's own child,
+ * enrolled by the account signed in before this one — a sign-out reloads the page
+ * and leaves the host and its children up. When the machine is in this account's
+ * list, adopting it without a word is right; when it is not, this account cannot
+ * reach it and must not start a second daemon over its database either.
+ *
+ * ⚠ **Never for a `stranger`** — a daemon that says it enrolled with another
+ * control plane. The legacy root is shared by every daemon started without
+ * `REEMOAT_HOME`, so the one announced there can be another fleet's, and "for this
+ * server" plus a remedy about this server's accounts would both be false.
+ */
+const FOREIGN_DAEMON_DETAIL =
+  "A Reemoat daemon for this server is already running on this computer, as a machine this account cannot see, " +
+  "so Reemoat left it alone. Sign in with the account that set it up, or ask its owner to share it with you.";
+
+/** Said when another daemon holds this server's root on this computer and ours could not start. */
 const ANOTHER_DAEMON_DETAIL =
-  "Another Reemoat daemon is already running on this computer, so the one Reemoat started could not. " +
+  "Another Reemoat daemon for this server is already running on this computer, so the one Reemoat started could not. " +
   "It is reachable, but it belongs to a different machine — stop it, or use that machine instead.";
 
 /** Said when the daemon is neither up nor gone after {@link SETUP_SETTLE_MS}. */
@@ -1143,6 +1175,21 @@ const LOGS_POINTER = "Settings → Logs has what it printed.";
 
 /** Said when a daemon this app started came up and then stopped. */
 const DAEMON_STOPPED_DETAIL = `The daemon Reemoat started on this computer stopped. ${LOGS_POINTER}`;
+
+/**
+ * {@link ANOTHER_DAEMON_DETAIL}, when the daemon holding the root is a `stranger` —
+ * one that says it enrolled with a different control plane.
+ *
+ * Its own sentence rather than a neutral rewording of that one, because both of
+ * that one's claims are false here: another fleet's machine is not one this
+ * account can use instead, and nothing says it is what stopped ours. The legacy
+ * root keeps its port, so it may be, and that is as far as the evidence goes — so
+ * this says what is known, points at the log, which has the reason, and offers
+ * the other daemon only as a *may*.
+ */
+const STRANGER_DAEMON_DETAIL =
+  `${DAEMON_STOPPED_DETAIL} ` +
+  "A Reemoat daemon for a different server is running here too, and stopping it may let this one start.";
 
 /**
  * Said when it is neither up nor gone after {@link SETUP_GIVE_UP_MS}.
@@ -1195,6 +1242,48 @@ export function machineLabelFor(hostName: string | null): string {
     .replace(/[-._]+$/, "")
     .slice(0, 64);
   return shaped.length > 0 ? shaped : "computer";
+}
+
+/**
+ * Which machine this computer is, once the announce file has answered again.
+ *
+ * `known` is what the store holds — the claim it was seeded with, or an earlier
+ * answer — `answer` is what `localDaemon()` just said, and `held` whether this
+ * account has a machine by that id. Three rules, each a way the rail used to
+ * rename and reorder itself with nobody touching it:
+ *
+ *   1. **Nothing found keeps what is known.** `host_local_daemon` answers only a
+ *      daemon that passes `/health` inside its probe, so a daemon restarting, or
+ *      busy for a quarter of a second at a wake, read as *no daemon here* — and
+ *      `local` went back to the host name, in name order, until the next wake.
+ *      Which computer this is does not change because a socket was slow; that is
+ *      Q7.139's own line that identity and reachability are two questions.
+ *   2. **A different id replaces it — where this account holds that machine.**
+ *      The live read is the authority when it names one of ours: it is the daemon
+ *      running here now, and a claim can lag it.
+ *   3. **An id this account does not hold never displaces one it might.** The
+ *      host answers the first live daemon across *two* roots, this server's and
+ *      then `~/.reemoat`, and the second can be a daemon for another fleet — so
+ *      on a computer carrying one, whenever this server's own daemon is down
+ *      (every cold launch, since the app stops it at quit) the answer is a machine
+ *      no row here has. Taken, it would move `local` off this computer's row onto
+ *      none. With nothing known it is taken anyway: it matches no row, which is
+ *      exactly what `null` draws.
+ *
+ * ⚠ **So nothing ever clears it, and that needs no clause of its own.** A stale
+ * id — a machine revoked, or another fleet's — matches no row, so it draws what
+ * `null` would. An id names a machine rather than an account, so a sign-in on
+ * the same page after an expiry inherits an answer that is still true; and a
+ * server change reloads the page, which is the only way a different fleet begins.
+ */
+export function localMachineAfter(
+  known: MachineId | null,
+  answer: MachineId | null,
+  held: (id: MachineId) => boolean,
+): MachineId | null {
+  if (answer === null || answer === known) return known;
+  if (known === null || held(answer)) return answer;
+  return known;
 }
 
 /**
@@ -1262,6 +1351,24 @@ export interface AppState {
    * answered here, per client, from the announce file the daemon on this computer
    * wrote. {@link AppStore.createForThisComputer} carries the reversal that made
    * this field necessary.
+   *
+   * **Six readers, one rule each.** Settings → Machines marks the row `this
+   * device`; `sessionGroups` calls it `local` (`machineDisplayName`) and puts it
+   * first until somebody drags it (`orderMachines`); a row under All and a
+   * session's header name it through `machineDisplayName` too; New session draws
+   * this computer's own folder panel for it. `sessionGroups` keys its memo on this
+   * field, since it is patched on its own and replaces neither `sessions` nor
+   * `machines`.
+   *
+   * ⚠ **Seeded, then sticky — because every one of those readers draws a *name*
+   * and a *place*, and both used to move by themselves.** Seeded at launch from
+   * {@link NativeBoot.claimed}, the machine this app created for this server,
+   * which needs no daemon: the app's own is stopped at quit, so the announce file
+   * is gone on every cold launch. Then replaced by what the announce file says
+   * ({@link localMachineAfter}), and never cleared by a read that finds nothing —
+   * a `/health` that misses its probe is a daemon restarting, not a computer that
+   * stopped being this one. Only a different id replaces it. A stale id costs
+   * nothing: one this account does not hold matches no row.
    *
    * ⚠ **The announce file rather than `route.kind === "local"`.** The route is a
    * preference `setLocalOff` can switch off, so a badge keyed on it would vanish
@@ -1646,6 +1753,15 @@ class AppStore implements StreamSink {
     if (boot !== null) {
       cp.adoptHydratedCredential(boot.credential);
       this.patch({ host: boot });
+      /*
+       * **Which computer this is, from the boot payload, before anything asks a
+       * daemon.** The live read below cannot answer on a cold launch — the app
+       * stopped its own daemon at quit and starts it again only after the list is
+       * drawn — so without this the first paint drew this computer under its host
+       * name, in name order, and renamed and moved it once `setUpThisComputer`
+       * had it running. The claim is on disk and needs nothing to be listening.
+       */
+      this.seedLocalMachine(boot.claimed);
     }
 
     if (cp.currentCredential() === null) {
@@ -1678,6 +1794,20 @@ class AppStore implements StreamSink {
           if (ApiError.isApiError(error) && error.code === "password_change_required") return [];
           throw error;
         }),
+        /*
+         * **Which computer this is, live, before the first paint of the rail** —
+         * beside the two round trips rather than after them, so it costs no time.
+         * The seed above covers a daemon this app created; this covers one it did
+         * not — an `install.sh` or launchd daemon already up, which carries no
+         * claim — and, read only in `runResume`, that one landed *after*
+         * `phase: "ready"` had drawn it under its host name, in name order. It
+         * never rejects, and a miss leaves the seed where it is
+         * ({@link localMachineAfter}). `runResume` asks again, for a daemon that
+         * starts after the app. What it answers is weighed again once the
+         * listing beside it has landed (`weighLocalMachine`, below), since on a
+         * cold launch "a machine of ours" has no list to mean until then.
+         */
+        this.refreshLocalMachine(),
       ]);
       for (const record of machines) {
         const id = machineId(record.id);
@@ -1695,6 +1825,8 @@ class AppStore implements StreamSink {
       for (const [id, connection] of this.connections) {
         if (!this.daemons.has(id)) this.daemons.set(id, new DaemonClient(connection));
       }
+      // The live answer again, now that "a machine of ours" has a list to mean.
+      this.weighLocalMachine();
       this.patch({ phase: "ready", me, cpError: null, authError: null });
     } catch (error) {
       /*
@@ -1841,12 +1973,52 @@ class AppStore implements StreamSink {
       // exactly as it was before any of this existed.
       if (state === null || state.status === "unsupported") return;
       /*
-       * ⚠ **`foreign` is a reason to stop, not a reason to try harder.** A daemon
-       * has announced itself here that this app did not start — the shell
-       * installer's, most likely. Starting a second would be refused by
-       * `claimDaemonLock` against one database, and creating a second machine for
-       * one computer would spend a quota slot on a machine nobody asked for.
+       * ⚠ **`foreign` is a reason to stop, not a reason to try harder — and it is
+       * no longer a reason to say nothing.** A daemon has announced itself in *this
+       * server's* root that this app did not start — the shell installer's, most
+       * likely. Starting a second would be refused by `claimDaemonLock` against one
+       * database, and creating a second machine for one computer would spend a
+       * quota slot on a machine nobody asked for.
+       *
+       * The host used to read `~/.reemoat` whoever it belonged to, so a daemon for
+       * a *different* server read as this one's `foreign` and the setup returned
+       * here without a word. It reads this server's root now (Q7.148), and there
+       * are three answers. A machine in this account's list is adopted silently —
+       * the store already holds a connection to it. One that is not is a daemon
+       * this account cannot reach, and that is a sentence rather than silence.
+       *
+       * ⚠ **And a `stranger` is silence, because this server's root is not always
+       * this server's daemon.** The legacy root is every daemon's that was started
+       * without `REEMOAT_HOME`, and its announcement is last-writer-wins, so the
+       * daemon there can be a `pnpm daemon` from a checkout enrolled with another
+       * control plane. The host compares the control plane the daemon announced
+       * with this server's; one that differs is another fleet's machine, about
+       * which "for this server" and a remedy about this server's accounts would
+       * both be false. Silence, not adoption: the host still says `foreign` rather
+       * than `absent`, so nothing below starts a second daemon over a database
+       * this server's own unit may be holding.
+       *
+       * ⚠ **`running` owes the same answer.** A sign-out reloads the page and
+       * leaves the host and its children up, so the next account on this server
+       * finds the child the last one enrolled — a machine it cannot see, which
+       * returned below without a word. Only here, in the first read: the settle
+       * loop's `running` is the happy path, where a control plane that blinked
+       * between the spawn and the poll would draw a failure over a daemon that
+       * came up fine.
+       *
+       * ⚠ **Only once the machine list is in hand.** `bootstrap`'s catch leaves no
+       * connections when the control plane could not be reached, and this runs
+       * anyway, so without the guard somebody's *own* daemon would be described as
+       * a machine they cannot see. The guard reads the snapshot rather than the
+       * error field, which this method may never touch.
        */
+      if (state.status === "foreign" || state.status === "running") {
+        if (state.stranger) return;
+        if (this.snapshot.phase !== "ready") return;
+        if (state.machineId !== null && this.connections.has(machineId(state.machineId))) return;
+        this.patch({ setup: { step: "failed", said: FOREIGN_DAEMON_DETAIL } });
+        return;
+      }
       if (state.status !== "absent" && state.status !== "exited") return;
 
       /*
@@ -1854,6 +2026,12 @@ class AppStore implements StreamSink {
        * host refuses to write over it too; this arm exists so the refusal is a
        * sentence on the screen rather than a thrown string, and so no machine is
        * bought for a computer this app is not going to be able to start.
+       *
+       * ⚠ **Rare now, where it used to be the ordinary case.** The file is this
+       * server's own — `~/.reemoat/daemon.env` only when it names this server, a
+       * folder under `~/.reemoat/servers` otherwise — so another server's daemon
+       * on this computer no longer reaches this arm at all. What does is a file in
+       * this server's folder edited by hand, or one that cannot be read.
        */
       if (state.config === DAEMON_CONFIG.elsewhere) {
         this.patch({ setup: { step: "failed", said: FOREIGN_ENV_DETAIL } });
@@ -1887,6 +2065,25 @@ class AppStore implements StreamSink {
       }
 
       /*
+       * ⚠ **A daemon already running for this server, in a root this app did not
+       * give it — adopted, and nothing bought or re-minted.** The host looks in
+       * this server's root, and that misses a daemon on the legacy database whose
+       * env file lives somewhere else: `REEMOAT_ENV_FILE` under
+       * `deploy/run-daemon.sh`, a checkout's `.env` exported by hand before
+       * `pnpm daemon` — which reads no env file of its own — or a `daemon.env`
+       * moved aside while its daemon ran.
+       * Each answers `absent` above, and without this the flow would buy a second
+       * machine for this computer — or, holding a claim, re-mint and re-enroll the
+       * same machine into a fresh database, rotating the tunnel key out from under
+       * the daemon that is serving it. `localDaemon()` reads this server's
+       * announcement and then `~/.reemoat`'s, and a machine this account already
+       * has a connection to is the proof; another fleet's machine id is not in the
+       * list and falls through. Q7.148.
+       */
+      const here = await localDaemon();
+      if (here !== null && this.connections.has(machineId(here.machineId))) return;
+
+      /*
        * Nothing configured here, but a machine was already bought for this server
        * — the app was quit between `POST /v1/machines` and the daemon redeeming
        * its code. Re-mint against it rather than buying a second.
@@ -1917,6 +2114,15 @@ class AppStore implements StreamSink {
        * many of them you may have, and that is read off `me`.
        */
       await this.machinesChanged("machine-added");
+      /*
+       * ⚠ **The machine just created is this computer, and it is said now rather
+       * than when its daemon first answers.** It is in `connections` from the
+       * listing above, so it is weighed like a live answer — replacing a claim for
+       * a machine since revoked, or an unknown. Left to `settleDaemon`, the new tile
+       * was drawn under the host name, in name order, until the child announced
+       * itself — and a drag in that window stored it at its name position.
+       */
+      this.weighLocalMachine(machineId(created.machine.id));
       await this.settleDaemon(created.machine.id);
     } catch (error) {
       this.patch({ setup: { step: "failed", said: describe(error) } });
@@ -1969,9 +2175,16 @@ class AppStore implements StreamSink {
        * so the same failure arrives on Linux through a user unit — and
        * `managed_unit_detail` already answers it with `systemctl --user disable
        * --now`. The sentence below names neither, deliberately.
+       *
+       * ⚠ **A `stranger` gets a sentence of its own, not silence.** Unlike the
+       * first read in `setUpThisComputer`, this one is watching a child this app
+       * started, and that child is gone — which is a failure whoever else is
+       * announced. What changes is the daemon it can blame: another fleet's is not
+       * "for this server" and not a machine to use instead.
        */
       if (state.status === "foreign") {
-        this.patch({ setup: { step: "failed", said: ANOTHER_DAEMON_DETAIL } });
+        const said = state.stranger ? STRANGER_DAEMON_DETAIL : ANOTHER_DAEMON_DETAIL;
+        this.patch({ setup: { step: "failed", said } });
         return;
       }
       if (state.status === "exited") {
@@ -2074,6 +2287,8 @@ class AppStore implements StreamSink {
     this.patch({ setup: { step: "starting", said: null } });
     await startLocalDaemon(created.enrollment.code, created.machine.id);
     await this.machinesChanged("machine-added");
+    // This computer, from now: see `setUpThisComputer`'s create arm.
+    this.weighLocalMachine(machineId(created.machine.id));
     await this.settleDaemon(created.machine.id, true);
     return true;
   }
@@ -2156,10 +2371,12 @@ class AppStore implements StreamSink {
      * client may not be stored on a row every client reads. `localRoute.ts` states
      * that rule for *reachability*; this is the same rule for *naming*.
      *
-     * So the label is what this computer is called, and **"this device" is drawn
-     * rather than stored** — off the announce file, on the machine the app is
-     * actually running on, through {@link AppState.localMachineId}. It costs one
-     * badge and it cannot be wrong on anybody else's screen.
+     * So the label is what this computer is called, and **"local" is drawn rather
+     * than stored** — off the claim and then the announce file, on the machine the app is actually
+     * running on, through {@link AppState.localMachineId}: as `local` on the home
+     * screen (`machineDisplayName`) and as a `this device` badge in Settings →
+     * Machines, where the real label is managed. Neither can be wrong on anybody
+     * else's screen.
      */
     const base = machineLabelFor(boot.hostName);
     try {
@@ -2310,24 +2527,67 @@ class AppStore implements StreamSink {
   }
 
   /**
+   * The first answer to which machine this computer is, and it needs no daemon.
+   *
+   * {@link NativeBoot.claimed}: the machine this app created for this server.
+   * **It fills an unknown and never replaces a known id** — the seed is what disk
+   * remembers, and anything already held came from a later read. `null` (a
+   * browser, a computer this app has not set up, a daemon it adopted rather than
+   * created) leaves the live read as the only answer, exactly as before.
+   */
+  private seedLocalMachine(claimed: string | null): void {
+    if (!claimed || this.snapshot.localMachineId !== null) return;
+    this.patch({ localMachineId: machineId(claimed) });
+  }
+
+  /**
    * Re-read which machine this computer is, from the daemon's own announce file.
    *
    * ⚠ **A memo, where {@link localBaseFor} deliberately refuses one — and what
    * the answer is *for* is the whole difference.** Routing must find a daemon
    * that started after the app, on a laptop where both come up at login, so it
-   * re-reads per route resolution. A badge may be one wake late: what it costs to
-   * be stale is a row that does not say "this device" until the next resume, and
-   * what a per-render IPC read would cost is a file read per paint of a list.
+   * re-reads per route resolution. A name may be one wake late: what it costs to
+   * be stale is a rail that calls this computer by its host name, in name order,
+   * and a row that does not say "this device", until the next resume — and what a
+   * per-render IPC read would cost is a file read per paint of a list.
    *
-   * Called from {@link AppStore.runResume}, which is the one funnel every wake,
-   * every machine mutation and the bootstrap promotion already pass through.
-   * Best-effort and silent: `localDaemon` swallows its own refusals and answers
-   * `null`, which is the correct value for "there is no daemon here" as well.
+   * ⚠ **What it answers is merged, never assigned** — {@link localMachineAfter}
+   * through {@link AppStore.weighLocalMachine}: nothing found keeps what is known,
+   * and only a different machine of ours replaces it. Assigned, a `/health` that
+   * missed its probe put the host name and the name order back on a rail nobody
+   * had touched.
+   *
+   * Called twice: inside `bootstrap`'s listing wait, for a daemon already up, and
+   * first thing in {@link AppStore.runResume}, the funnel every wake, every
+   * machine mutation and the bootstrap promotion pass through. Best-effort and
+   * silent: `localDaemon` swallows its own refusals and answers `null`.
    */
   private async refreshLocalMachine(): Promise<void> {
     const found = await localDaemon();
-    const id = found === null ? null : machineId(found.machineId);
-    if (id !== this.snapshot.localMachineId) this.patch({ localMachineId: id });
+    this.announcedMachine = found === null ? null : machineId(found.machineId);
+    this.weighLocalMachine();
+  }
+
+  /**
+   * What the announce file said at the last read, before it was weighed.
+   *
+   * Kept because *"a machine of ours"* is a question about a list, and both reads
+   * are made before that list is current: `bootstrap`'s beside the listing that
+   * fills it, `runResume`'s ahead of the re-list. A machine this app has just
+   * created is in neither — so without a second weighing, a claim for a machine
+   * since switched off would outrank the daemon that replaced it until the next
+   * wake. `null` after a read that found nothing, which weighs as nothing.
+   */
+  private announcedMachine: MachineId | null = null;
+
+  /**
+   * Merge the last live answer into {@link AppState.localMachineId}, against the
+   * machines held now. After each read, and again after each listing lands.
+   */
+  private weighLocalMachine(answer: MachineId | null = this.announcedMachine): void {
+    const known = this.snapshot.localMachineId;
+    const id = localMachineAfter(known, answer, (one) => this.connections.has(one));
+    if (id !== known) this.patch({ localMachineId: id });
   }
 
   /**
@@ -2557,6 +2817,9 @@ class AppStore implements StreamSink {
           for (const id of [...this.connections.keys()]) {
             if (!machines.some((m) => m.id === id)) this.dropMachine(id);
           }
+          // The read above was weighed against the list before this one: a machine
+          // created since — the daemon that just came up — is only ours from here.
+          this.weighLocalMachine();
           /*
            * And leave the loading screen, which nothing else here could.
            *
@@ -3981,6 +4244,12 @@ export function sessionLists(state: AppState): SessionLists {
 /** One machine's own sessions, in the order its section draws them. */
 export interface MachineGroup {
   id: MachineId;
+  /**
+   * What the home screen calls this machine — {@link machineDisplayName}, so
+   * `local` on the one this client runs beside and the stored label on every
+   * other. **A display name, never a label**: nothing that writes to the control
+   * plane may read it, and `MachineState.name` is still the real one.
+   */
   name: string;
   reach: MachineState["reach"];
   offlineReason: MachineState["offlineReason"];
@@ -4073,6 +4342,15 @@ let groupsForMachines: MachineState[] | null = null;
  * your head than relying on `groupsCache !== null` to cover the first call.
  */
 let groupsForOrder = -1;
+/**
+ * Which machine the cache was built believing is this computer.
+ *
+ * The fourth input, and it moves off the poll too: {@link AppState.localMachineId}
+ * is patched on its own — seeded from the boot payload's claim, then replaced
+ * when the announce file names a different machine of ours — so it replaces
+ * neither `sessions` nor `machines`.
+ */
+let groupsForLocal: MachineId | null = null;
 let groupsCache: SessionGroups | null = null;
 
 /**
@@ -4094,25 +4372,33 @@ let groupsCache: SessionGroups | null = null;
  * carries machine state too. `emitTranscripts` replaces neither, so a streamed
  * event still costs nothing — the same property `sessionLists` defends.
  *
- * **Groups are ordered by name until a reader drags one, and never by
- * reachability.** `reach` flickers, and a list that reorders itself while a thumb
- * is already travelling toward a row is the one failure this app cannot have — a
- * *stored* order is allowed for exactly that reason, since it moves when somebody
- * moves it and at no other moment. `machineOrder.ts` is the merge and
- * `machine-gestures.md` is the rule; a derived order is still banned outright.
+ * **Groups are ordered by name until a reader drags one — this computer's own
+ * machine first — and never by reachability.** `reach` flickers, and a list that
+ * reorders itself while a thumb is already travelling toward a row is the one
+ * failure this app cannot have — a *stored* order is allowed for exactly that
+ * reason, since it moves when somebody moves it and at no other moment, and so is
+ * which computer this is, which moves when its daemon does. `machineOrder.ts` is
+ * the merge and `machine-gestures.md` is the rule; an order derived from anything
+ * the poll moves is still banned outright.
  *
  * ⚠ **Which is why the order's version is in the guard above.** The memo is keyed
  * on the identity of `sessions` and `machines`, and a reorder replaces neither —
  * so without it a drop repaints nothing until the four-second poll happens to hand
  * over a new `machines` array, which reads as a drag that does nothing for four
- * seconds and then jumps. It is the third input and the only one that moves off
- * the poll.
+ * seconds and then jumps. It is the third input.
+ *
+ * ⚠ **And `localMachineId` is the fourth, for the same reason.** It decides a
+ * group's `name` (`local`) and its place (first until somebody drags it), and it
+ * is patched on its own — at launch from the claim, and at a `runResume` when a
+ * daemon names another machine of ours — so without it in the guard the rail went
+ * on drawing the old answer until the poll happened to replace `machines`.
  */
 export function sessionGroups(state: AppState): SessionGroups {
   if (
     groupsForSessions === state.sessions &&
     groupsForMachines === state.machines &&
     groupsForOrder === machineOrderVersion() &&
+    groupsForLocal === state.localMachineId &&
     groupsCache !== null
   ) {
     return groupsCache;
@@ -4127,7 +4413,7 @@ export function sessionGroups(state: AppState): SessionGroups {
   for (const machine of state.machines) {
     byId.set(machine.id, {
       id: machine.id,
-      name: machine.name,
+      name: machineDisplayName(machine, state.localMachineId),
       reach: machine.reach,
       offlineReason: machine.offlineReason,
       route: machine.route,
@@ -4217,15 +4503,48 @@ export function sessionGroups(state: AppState): SessionGroups {
   /*
    * The name sort **stays**, and is `orderMachines`' `natural`: it is the position
    * of every machine nobody has dragged, and deleting it would leave such a
-   * machine with no order at all rather than with a stored one.
+   * machine with no order at all rather than with a stored one. `first` is this
+   * computer's machine, which leads until a drag stores it somewhere — so where
+   * `local` would have sorted among the names is never drawn.
    */
-  const groups = orderMachines([...byId.values()].sort((a, b) => a.name.localeCompare(b.name)), machineOrder());
+  const groups = orderMachines(
+    [...byId.values()].sort((a, b) => a.name.localeCompare(b.name)),
+    machineOrder(),
+    state.localMachineId,
+  );
 
   groupsCache = { pinned, groups, orphans };
   groupsForSessions = state.sessions;
   groupsForMachines = state.machines;
   groupsForOrder = machineOrderVersion();
+  groupsForLocal = state.localMachineId;
   return groupsCache;
+}
+
+/** A machine as the home screen draws it: the record, and what the rail calls it. */
+export interface DrawnMachine {
+  machine: MachineState;
+  /** {@link MachineGroup.name} — `local` for this computer's own. Never a label to write back. */
+  name: string;
+}
+
+/**
+ * The fleet in the rail's order and under the rail's names, for a screen that
+ * needs the `MachineState` itself rather than its group.
+ *
+ * New session is the reader. It listed `state.machines` — the control plane's
+ * order — and took the first reachable one as its default, so the rail could
+ * lead with `local` while the picker opened under it named the host and defaulted
+ * to some other machine. Read through {@link sessionGroups}, the picker, its
+ * default and the strip are one answer, and the rule behind all three stays in
+ * `machineOrder.ts` rather than being re-derived at a second call site.
+ */
+export function machinesAsDrawn(state: AppState): DrawnMachine[] {
+  const byId = new Map(state.machines.map((machine) => [machine.id, machine] as const));
+  return sessionGroups(state).groups.flatMap((group) => {
+    const machine = byId.get(group.id);
+    return machine === undefined ? [] : [{ machine, name: group.name }];
+  });
 }
 
 /**

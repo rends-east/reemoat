@@ -19,13 +19,14 @@ import { daemonRead } from "../../machine";
 import { MACHINE_GONE } from "../../plugins";
 import { shortPath } from "../../paths";
 import { agentEditPath, agentFromHarnessPath, agentPath, navigate } from "../../router";
-import { settingsPath } from "../../settings";
+import { agentSetupPath, settingsPath } from "../../settings";
 import { store, type AppState } from "../../store";
 import type { AgentId, AgentAvailability, AgentStripEntry, CustomAgent, SystemInfo } from "../../wire";
 import { agentBadge, agentStance, harnessName, startsBare } from "../agentCard";
 import { installElapsed, installFailure } from "../agentInstall";
 import { AgentGlyph } from "../AgentIcons";
 import { Badge, Button, Empty, Icon, IconButton, Menu, NotReachable, RowAction, Spinner, TwoStep } from "../bits";
+import { AgentDetail } from "./AgentsPanel";
 
 /**
  * Which agents this machine's New session strip offers, and in what order.
@@ -51,6 +52,17 @@ import { Badge, Button, Empty, Icon, IconButton, Menu, NotReachable, RowAction, 
  * exclusion and it is not a status — opencode is a router and has no tile in any
  * state, so a row you could order that can never appear is a lie rather than a
  * warning.
+ *
+ * ⚠ **And it is where "nothing can start" is finished, which it could not do.**
+ * New session stopped installing and signing in (Q3.640): a strip with nothing to
+ * start says why and offers **Agent settings**, which lands here. So a row whose
+ * badge says *not installed*, *not signed in* or *would not start* — or, on a
+ * preset, whose subline says it of the harness underneath — offers **Set
+ * up** in its menu, and that opens the harness's own card — install with the
+ * installer's output, then sign in — as this screen's leaf, `…/agents/:harness`.
+ * This list's own Install, which ran with no output behind a row that could say
+ * one word about it, went in the same change: the card is the one surface that
+ * starts a run, and this list only adopts one.
  */
 
 /** Everything the screen reads, so "still loading" is one flag rather than four. */
@@ -135,9 +147,15 @@ function nearestScroller(from: HTMLElement): HTMLElement | null {
 export function MachineAgentsSection({
   state,
   machineId,
+  harness,
 }: {
   state: AppState;
   machineId: MachineId;
+  /**
+   * The harness whose card is open, from `…/agents/:harness`, or `null` for the
+   * list. See `SettingsRoute.signin`, which carries it.
+   */
+  harness: string | null;
 }): ReactNode {
   const machine = state.machines.find((one) => one.id === machineId) ?? null;
 
@@ -217,6 +235,32 @@ export function MachineAgentsSection({
     );
   }
 
+  /*
+   * ⚠ **The leaf: one harness's card, which is New session's old inline card
+   * moved rather than copied** (Q3.640). That screen unfolded it under a *Sign in*
+   * or *Install* disclosure, and the owner's rule for this app's settings is that
+   * a form is a leaf route and never something a screen grows in place — so it is
+   * an address of its own, pushed by a row's **Set up**, and its ◀ is this list.
+   *
+   * Below the three guards on purpose: a machine that is gone, still being asked
+   * about or unreachable says so here before a card can claim anything about it.
+   * No hooks sit above this line, so the early return costs `StripEditor` nothing.
+   *
+   * Keyed on machine and harness, which is `MachineSystemsSection`'s key for its
+   * reason: a live `LoginWizard` run is state inside the card, and moving between
+   * two harnesses must not carry one into the other. Unmounting is safe — the run
+   * id is in `sessionStorage` and coming back replays the transcript — so ◀ in the
+   * middle of a device-code flow loses nothing.
+   *
+   * **Untitled**, so the card is headed by the harness's own name: somebody came
+   * here from a row reading `Claude Code`, and the pane already says `Setup`.
+   * `AgentDetail` reads only `GET /agent-auth`, so this works on a daemon too old
+   * for the strip routes — though New session never sends anyone here from one.
+   */
+  if (harness !== null) {
+    return <AgentDetail key={`${machineId}:${harness}`} machineId={machineId} agentId={harness} />;
+  }
+
   return (
     <div>
       {/*
@@ -275,21 +319,24 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
    */
   const [writeFailure, setWriteFailure] = useState<string | null>(null);
   /**
-   * Harnesses being installed right now, each with the moment it was pressed.
+   * Harnesses being installed right now, each with the moment the run started.
    *
    * A `Map` rather than a single id: the daemon refuses a second concurrent run
-   * with `409`, so at most one is ever live — but the *screen* must be able to
-   * report a press that has not been answered yet without inventing a state, and
-   * a map is what makes the row's subline a lookup rather than a comparison.
+   * with `409`, so at most one is ever live — and a map is what makes the row's
+   * subline a lookup rather than a comparison.
    *
-   * ⚠ **The value is the press, not the latest poll**, or the clock restarts on
+   * ⚠ **Every entry is adopted now, and none is pressed here.** This list had an
+   * Install of its own, with no output behind it, and it went when the card
+   * became this screen's leaf (Q3.640) — so what fills this is a run somebody
+   * started on the card, found again by the `liveInstall` read below after a ◀.
+   *
+   * ⚠ **The value is the start, not the latest poll**, or the clock restarts on
    * every tick. `MachineInstalls`' measured rule.
    *
-   * ⚠ **And for a run this screen *adopted* it is the daemon's own `startedAt`**,
-   * which is the field `InstallPane` has always drawn its clock from. A browser
-   * `Date.now()` there would restart a five-minute-old install at zero seconds,
-   * which is the same defect as the rule above arriving through the other door;
-   * the two clocks disagree by NTP drift and the press disagreed by minutes.
+   * ⚠ **And it is the daemon's own `startedAt`**, which is the field
+   * `InstallPane` has always drawn its clock from. A browser `Date.now()` there
+   * would restart a five-minute-old install at zero seconds; the two clocks
+   * disagree by NTP drift, and a press stamped here disagreed by minutes.
    */
   const [installing, setInstalling] = useState<ReadonlyMap<string, number>>(new Map());
   /**
@@ -605,7 +652,7 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
       .catch((cause: unknown) => setWriteFailure(errorText(cause)));
   };
 
-  /** One row out of the running set, however the run ended. Three callers. */
+  /** One row out of the running set, however the run ended. Two callers, both in `watch`. */
   const forget = (id: string): void => {
     setInstalling((was) => {
       const next = new Map(was);
@@ -617,14 +664,42 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
   /**
    * Run ids this screen is already polling.
    *
-   * ⚠ **Because two things can arrive at the same run.** The adoption read below
-   * lands a moment after mount, and a press made inside that window is answered
-   * by a `POST` whose run the read may also name — two poll loops on one run,
-   * two `setAttempt` bumps and, on a failure, the sentence written twice. An id
-   * is `in_<hex>` from the daemon and never reused, so nothing is ever removed
-   * from this and it dies with the screen.
+   * ⚠ **Because two things could arrive at the same run, and one of them has
+   * gone.** The adoption read below lands a moment after mount, and a press on
+   * this list's own Install inside that window was answered by a `POST` whose run
+   * the read might also name — two poll loops on one run, two `setAttempt` bumps
+   * and, on a failure, the sentence written twice. That Install is gone
+   * (Q3.640), and the set stays as the guard for whatever next starts a run from
+   * here: it costs one lookup, and the failure it prevents prints a sentence
+   * twice with nothing to say why. An id is `in_<hex>` from the daemon and never
+   * reused, so nothing is ever removed from this and it dies with the screen.
+   *
+   * ⚠ **And the loops it guards die with it, which the set alone never made
+   * true.** It is per mount, and this list unmounts on every **Set up** — the leaf
+   * replaces it — so each ◀ back during a run mounted a fresh set, adopted the
+   * same run again and started a second loop while the first went on polling for
+   * a component that no longer existed: one more `readInstall` a second through
+   * the tunnel per crossing, the cost {@link INSTALL_POLL_MS} exists to avoid.
+   * {@link alive} is what stops each one at its next step.
    */
   const followed = useRef<Set<string>>(new Set());
+  /**
+   * Whether this list is still mounted, for the poll loops `watch` starts.
+   *
+   * A loop re-arms itself with a bare `setTimeout`, so nothing about the adoption
+   * effect's `cancelled` flag reaches it — that flag guards the one `liveInstall`
+   * read and not the loop the read starts. Set **on the way in** as well as
+   * cleared on the way out, which is `AgentBuilder`'s `alive` for its StrictMode
+   * reason: a flag only ever cleared would leave the second development mount
+   * unable to watch anything at all.
+   */
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
 
   /**
    * Watch one run to its end, from wherever it was found.
@@ -636,8 +711,8 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
    * a row that draws `Installing… · 42s`. `InstallRunView.cursor` is documented
    * on both sides as "Total output produced so far. Poll with this as the next
    * `since`", the card honours it, and this is the same contract read the same
-   * way: the first `since` is the one the `POST` (or the live-run read) answered
-   * with, so the bytes this screen never draws are never sent at all.
+   * way: the first `since` is the one the live-run read answered with, so the
+   * bytes this screen never draws are never sent at all.
    *
    * ⚠ **Which is also why `gap` is not read here.** Threading makes the flag
    * *rarer* rather than newly possible: `readFrom` answers `since < dropped`, so
@@ -652,9 +727,15 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
     if (followed.current.has(installId)) return;
     followed.current.add(installId);
     const poll = (since: number): void => {
+      // Asked at every step a loop can be standing on when the list goes: before
+      // a request (a tick that was already queued), and on each answer (one that
+      // was already out). Nothing is written to a component that is gone, and
+      // nothing is re-armed for it.
+      if (!alive.current) return;
       void daemon
         .readInstall(installId, since)
         .then((chunk) => {
+          if (!alive.current) return;
           if (!chunk.done) {
             setTimeout(() => poll(chunk.cursor), INSTALL_POLL_MS);
             return;
@@ -668,6 +749,7 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
           setAttempt((one) => one + 1);
         })
         .catch((cause: unknown) => {
+          if (!alive.current) return;
           forget(id);
           setWriteFailure(errorText(cause));
         });
@@ -680,8 +762,13 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
    * There is one install run daemon-wide and this screen kept its running set in
    * component state alone — so walking off this list and back, or arriving after
    * somebody pressed Install on the harness's own card, drew a row with no
-   * subline and a menu offering an Install that answers `409 install_busy`.
+   * subline and a menu offering an Install that answered `409 install_busy`.
    * `GET /agent-install` is the only thing that can say otherwise.
+   *
+   * ⚠ **It is the whole of this list's part in an install now.** The menu offers
+   * no Install any more — the card is the one surface that starts a run
+   * (Q3.640) — so adoption is what draws `Installing… · 42s` under the row after
+   * a ◀ from a card mid-install, and what re-reads the listing when it ends.
    *
    * ⚠ **`[machineId]` and nothing else**, deliberately unlike the listing read
    * above: `attempt` is bumped when a run *finishes*, and adopting on that would
@@ -715,38 +802,6 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
     // updaters. Listing them would re-ask the daemon on every keystroke.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [machineId]);
-
-  /**
-   * Start an install, and say only what this screen can say about it.
-   *
-   * ⚠ **No transcript here, and that is the trade rather than an omission.** This
-   * is a list somebody drags to reorder, not a terminal: the row's subline says a
-   * run is going and the shared status line under the list says if it failed. The
-   * installer's own bytes are on the harness's card, which is where somebody who
-   * needs them goes. Growing the row to carry them is the one thing this list may
-   * not do — a row that gains a control moves every row beside it, and a drag
-   * measures one row at `pointerdown` and applies that number to all of them.
-   *
-   * ⚠ **`403` is the ordinary answer for a shared grant**, since installing is
-   * `machine:admin`: putting new programs on somebody's machine is an act on the
-   * machine. `errorText` carries the route's own sentence for it.
-   */
-  const install = (id: string): void => {
-    const daemon = store.daemonFor(machineId);
-    if (daemon === undefined) {
-      setWriteFailure("That machine is not reachable right now.");
-      return;
-    }
-    setWriteFailure(null);
-    setInstalling((was) => new Map(was).set(id, Date.now()));
-    void daemon
-      .startInstall(id)
-      .then((view) => watch(daemon, id, view.installId, view.cursor))
-      .catch((cause: unknown) => {
-        forget(id);
-        setWriteFailure(`Couldn't start the install — ${errorText(cause)}.`);
-      });
-  };
 
   const remove = (id: string): void => {
     const daemon = store.daemonFor(machineId);
@@ -904,7 +959,18 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
        * answers to one question and only one of them true.
        */}
       {rows.length === 0 && failure === null && supported ? (
-        <Empty>This machine reports no agents.</Empty>
+        /*
+         * ⚠ **Two sentences, because this list excludes a whole kind of
+         * harness.** A machine listing only harnesses `startsBare` is false for —
+         * opencode, or any a plugin added — has agents and draws no rows, and
+         * "reports no agents" over it would contradict the New session sentence
+         * that sent somebody here. What they need is the bar below.
+         */
+        <Empty>
+          {listing.agents.length === 0
+            ? "This machine reports no agents."
+            : "Every agent on this machine needs a model. Add an agent to pick one."}
+        </Empty>
       ) : rows.length === 0 ? null : (
         <ul className="mt-1 border-y border-edge">
           {rows.map((row, index) => (
@@ -932,7 +998,6 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
               }
               onAnnounce={setMoved}
               onRecheck={(agent) => recheck(agent)}
-              onInstall={(agent) => install(agent)}
               installing={installing}
               now={now}
               onRemove={() => remove(row.id)}
@@ -1132,7 +1197,6 @@ function StripRowView({
   onToggle,
   onAnnounce,
   onRecheck,
-  onInstall,
   installing,
   now,
   onRemove,
@@ -1192,8 +1256,7 @@ function StripRowView({
    * are two different things and the record is kept against the harness.
    */
   onRecheck: (agent: string) => void;
-  onInstall: (agent: string) => void;
-  /** Harnesses with a run in flight, each keyed to the moment it was pressed. */
+  /** Harnesses with a run in flight, each keyed to the moment it started. */
   installing: ReadonlyMap<string, number>;
   /** The shared clock's latest reading. `0` before the first tick. */
   now: number;
@@ -1373,6 +1436,28 @@ function StripRowView({
    */
   const since = installing.get(row.id) ?? null;
   const elapsed = since === null ? null : installElapsed(since, now);
+  /*
+   * ⚠ **A preset whose harness is missing says so, where it used to name its
+   * system.** "A fault displaces the vendor" is the rule for a harness row, and a
+   * preset on an absent harness is the same fault one row removed — it is also
+   * what explains the **Set up** in that row's menu, which would otherwise offer
+   * to set up a harness the row never mentions. The test is the New session
+   * tile's own (`missing` there), so the two screens describe one preset alike.
+   *
+   * ⚠ **And so does a harness that refused while routed, which is the fault the
+   * row was silent about.** `startableHere` refuses that preset — a refusal
+   * measured after `providers/set` is evidence about every way of starting the
+   * harness — so New session answered *No agent on this machine is ready to
+   * start* and sent somebody here, to a row reading `OpenRouter · <model>` like a
+   * healthy one, with no Set up behind it. `routed === true` and nothing wider,
+   * for the reason `startableHere` gives: a refusal measured bare is the
+   * signed-out Claude Code that OpenRouter still runs. The New session tile asks
+   * the same (`refused` there), so the tile, `offeredHere`, the empty sentence and
+   * this row all say one thing about one preset.
+   */
+  const presetMissing = preset !== null && (behind === null || !behind.available);
+  const presetRefused =
+    preset !== null && behind !== null && behind.available && behind.lastStartRefusal?.routed === true;
   const under = since !== null
     ? `Installing…${elapsed === null ? "" : ` · ${elapsed}`}`
     : harness
@@ -1381,7 +1466,11 @@ function StripRowView({
         : harnessSubline(row.id, listing.systems, info?.contributedBy)
       : preset === null
         ? ""
-        : customAgentSubline(preset, listing.systems);
+        : presetMissing
+          ? `${harnessName(behind ?? { id: preset.harness })} not installed`
+          : presetRefused
+            ? `${harnessName(behind ?? { id: preset.harness })} would not start`
+            : customAgentSubline(preset, listing.systems);
 
   /**
    * Put the row where the pointer is, and work out which slot it is over.
@@ -1888,15 +1977,52 @@ function StripRowView({
                * may decide on; what it draws for either is the same item.
                */}
               {/*
-               * ⚠ **Only where there is something to drop, and that is the one
-               * conditional row in this menu.** The screen's standing rule is that
-               * a row's *kind* may decide a lookup or a destination and never a
-               * presentation — this is not keyed on kind. It is keyed on a fact
-               * the row is already reporting one line up, in the badge that
-               * displaced the vendor: this harness would not start. Offered on
-               * every row it would be a control that does nothing on all but one
-               * of them, which is what "Edit" was before it meant *start from
-               * this*.
+               * ⚠ **Set up, where the row is reporting a fault — and it is the only
+               * way from this list to the harness's card.** New session sends a
+               * machine with nothing to start here (Q3.640), so a row saying *not
+               * installed*, *not signed in* or *would not start* has to lead
+               * somewhere that fixes it: the card, as this screen's leaf, with the
+               * installer's own output and the sign-in wizard. `Edit` does not —
+               * it opens the builder.
+               *
+               * ⚠ **Keyed on a fact the row already reports, never on its kind**,
+               * which is this screen's standing rule: a `strong` badge — the three
+               * faults above — or a harness under a preset that is not there or
+               * that refused while routed, which the preset's subline now says
+               * (`presetMissing`, `presetRefused`). A preset whose harness the
+               * machine does not list at all has nothing to set up and no item.
+               * On a harness this machine cannot install, the card still says
+               * what to do — install it on the machine itself — and carries
+               * **Check again** for after; that is a sentence with a control, not
+               * the empty card `agent-install.md` warns about.
+               *
+               * ⚠ **Inside the kebab, never a button on the row**: a row that
+               * gains a control moves every control beside it, and on a list you
+               * drag that is the one thing that must not happen. And it needs no
+               * strip route, so `frozen` leaves it alone as it leaves Edit.
+               *
+               * A push, not a replace: the card is deeper, and its ◀ comes back
+               * to this list.
+               */}
+              {behind !== null && (badge?.tone === "strong" || !behind.available || presetRefused) && (
+                <RowAction
+                  label={`Set up ${harnessName(behind)}`}
+                  onClick={() => {
+                    close();
+                    navigate(agentSetupPath(machineId, behind.id));
+                  }}
+                />
+              )}
+              {/*
+               * ⚠ **Only where there is something to drop, and it is one of the
+               * two conditional rows in this menu** — Set up above is the other.
+               * The screen's standing rule is that a row's *kind* may decide a
+               * lookup or a destination and never a presentation — this is not
+               * keyed on kind. It is keyed on a fact the row is already reporting
+               * one line up, in the badge that displaced the vendor: this harness
+               * would not start. Offered on every row it would be a control that
+               * does nothing on all but one of them, which is what "Edit" was
+               * before it meant *start from this*.
                *
                * ⚠ **And it is what the strip owes.** `offersStripTile` has taken
                * this harness's tile away, so this list is the only place it
@@ -1904,31 +2030,6 @@ function StripRowView({
                * off-screen entirely: run its own program once on the machine. This
                * is the only control in the app that says "I did that, look again".
                */}
-              {/*
-               * ⚠ **Inside the kebab, never a button on the row**, for the reason
-               * the whole menu exists: `web-shell.md`'s rule that everything else
-               * a settings row can do sits behind one square, and
-               * `agent-strip.md`'s stronger one that a row which loses or gains a
-               * control moves every control beside it — on a list you drag, that
-               * is the one thing that must not happen.
-               *
-               * ⚠ **And this screen is the only place it can be offered.**
-               * `offersStripTile` keeps a `not_installed` harness off the New
-               * session row entirely, so without this the remedy for the state
-               * this list is *reporting* would be off-screen. The card behind
-               * `Edit` has the full flow with the installer's own output; this is
-               * the one press from the list that is already saying it is missing.
-               */}
-              {behind?.installable === true && behind.available === false && (
-                <RowAction
-                  label={since === null ? `Install ${harnessName(behind)}` : "Installing…"}
-                  disabled={since !== null}
-                  onClick={() => {
-                    close();
-                    onInstall(behind.id);
-                  }}
-                />
-              )}
               {behind?.lastStartRefusal != null && (
                 <RowAction
                   label="Check again"

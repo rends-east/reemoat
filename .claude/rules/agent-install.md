@@ -126,21 +126,23 @@ importing the parser to drive the emitter. It exists because `attempt` and
 header line and then minutes of silence, so a progress indicator had nothing to
 move.
 
-⚠ **The strip's door follows the same repair as the card's slot.** `agentDoor`
-replaces `signInOffered` and tests `available` **before** `blocked`, which is
-`agentStance`'s own ordering. The old predicate answered `true` for `!available`,
-so a machine without a harness drew *"Sign in to X"* onto a card whose control
-slot computes `login.supported && agent.available` — and rendered nothing, leaving
-the daemon's *"not found on this daemon's PATH"* as the whole of what was on
-screen. The comment above that block described this failure and said it was fixed;
-the fix had landed on the `no_flow` arm alone, which covers opencode and nothing
-else.
+⚠ **New session has no door, and the card is the only surface that starts a
+run.** `agentDoor` and `doorLabel` chose and labelled a disclosure under an empty
+strip — *Install X* or *Sign in to X*, the whole card unfolded in place — and both
+are deleted (Q3.640): that screen says why nothing can start and offers **Agent
+settings**, and a row there offers **Set up**, which opens the card as a leaf. The
+repair `agentDoor` carried survives where it belongs — `primaryControl` tests
+`available` before the credential axis, so a missing harness is never offered
+*"Sign in to X"* onto a slot that computes `login.supported && agent.available`
+and renders nothing. The Agents list's own Install, which ran with no output, went
+in the same change; the list only **adopts** a run through `liveInstall`, which is
+what keeps `Installing… · 42s` under a row after a ◀ from a card mid-install.
 
 ⚠ **And the card owes a sentence the strip cannot say.** `offersTile` keeps both
 `not_installed` *and* `signed_out` off the New session row, so a freshly installed
 harness still has no tile — somebody installs, sees nothing, and concludes it
 failed. `installResultLine`'s `installed` arm names the sign-in for exactly that
-reason.
+reason, and the Sign-in button it names is on the same card.
 
 ## Layout
 
@@ -149,4 +151,4 @@ reason.
 | `src/agentinstall.ts` | One install run: the script, its transcript, `readStep`, and the verdict taken by asking the machine rather than reading a status |
 | `src/agentscript.ts` | Who may run `deploy/agents.sh` between the two things in this process that do. First come, first served; what differs is the cost of losing |
 | `src/transcript.ts` | `readFrom`, shared by both runs — exported precisely because an asserted *copy* is drift nothing can see, which has already happened here once |
-| `packages/web/src/ui/agentInstall.ts` | The client's two rules: which control the card's one slot draws (`primaryControl`), and which door the strip owes (`agentDoor`) |
+| `packages/web/src/ui/agentInstall.ts` | Which control the card's one slot draws (`primaryControl`), and the sentences a run ends on. The strip owes no door any more (Q3.640) |

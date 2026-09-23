@@ -130,7 +130,7 @@
  *
  * **One palette, and it is monochrome apart from four named exceptions.** Light,
  * warm, paper-coloured, with the whole app drawn in values of a single
- * near-black. The exceptions are `danger`, the diff's `add`/`del`, and `offer`;
+ * near-black. The exceptions are `danger`, the diff's `add`/`del`, and `caution`;
  * each is argued at its own declaration below, and the count is the point — a
  * hue here is a thing somebody decided, not a thing somebody reached for. There is no dark block any more and
  * `prefers-color-scheme: dark` is deliberately ignored: everything that used to be
@@ -273,10 +273,14 @@
    * the others' absence — the same property from the other side, because the
    * failure it exists to catch is a utility with no token behind it, whichever
    * direction the two drifted apart in.
+   *
+   * `--color-offer` and `--color-offer-ink` joined them when the machine offer was
+   * deleted (Q1.650); the ink's one other reader moved to `caution`.
    */
 
   /*
-   * The diff's two colours, and the only ones in the app besides `danger`.
+   * The diff's two colours, and the only ones in the app besides `danger` and
+   * `caution`.
    *
    * `danger`'s rules are `text`/`border` on an outlined control, never a fill, and
    * never more than one in a view. None of them is being bent, because none of them
@@ -312,44 +316,21 @@
   --color-del-ink: #77332a;
 
   /*
-   * The third hue, and the first one on a **control** rather than on content.
+   * One word's colour: the `(stopped)` chip in the task panel, and nothing else.
    *
-   * ⚠ **The paragraph above bounds hue to content and says so in as many words;
-   * this is the exception to it, and it is the owner's call of 2026-09-06 rather
-   * than a case the argument covers.** Writing that down instead of quietly
-   * widening the rule is the point: the next reader should find one named
-   * exception, not a paragraph that has stopped being true.
+   * It was the ink half of a tinted "Rent a machine" control, which is deleted
+   * (Q1.650); the fill went with it and `webcheck` counts both old names as
+   * retired. The ink stayed because `tasks.ts` had already spent it on *needs
+   * attention*, beside `add-ink` for *finished well* and `danger` for *failed*.
+   * Renamed rather than kept, so the palette does not name a feature it no
+   * longer has. Not `warn` come back: that was a state colour spent across the
+   * list and retired for fill, ring and weight; this is one word on one chip,
+   * which `webcheck` asserts by sweeping for the utility.
    *
-   * What keeps it from being a licence is the constraint the diff tints are held
-   * to, applied unchanged: **the fill is tinted and the text is not.** The label
-   * is `text-fg` — 14.74 on this, against `add`'s 14.68 — so nothing about
-   * legibility rests on the hue, and the control says what it is without it: the
-   * word `Or` on the rule above it, a border, an external-link glyph, and a verb
-   * for a label. In greyscale it reads exactly the same.
-   *
-   * **Bounded to one control in the app**, which `webcheck` asserts by sweeping
-   * for the utility. One is what a fill this size can be: `danger`'s "never more
-   * than one in a view" is the same sentence about a different colour, and the
-   * reason both need saying is that a second tinted control turns a palette into
-   * a decoration scheme.
-   *
-   * Measured against the palette's own grades, on the same warm axis as
-   * everything else here and deliberately quiet — 1.179 from `surface`, between
-   * `add` (1.184) and a tool card (1.10). Warm sand rather than a green or a red,
-   * because those two are spoken for one paragraph up and a buyer's button that
-   * reads as an added diff line is a worse joke than a grey one.
-   *
-   * ⚠ **Measured from `ink` as well, and that is a constraint the diff tints do
-   * not carry.** They are drawn on `surface` only and their own docblock records
-   * that on `raised` they vanish (1.034, 1.010). This one is drawn on `ink` in
-   * the rail *and* on `surface` in the pane and the settings sheet, so it has to
-   * survive both: 1.110 from `ink`, which is a tool card's step and reads.
-   *
-   * `-ink` is the glyph and the border alone, never the label: 7.17 on the tint,
-   * beside `add-ink`'s 7.06 and `del-ink`'s 7.57.
+   * `danger`'s rules and narrower: text only, never a fill or a border. 8.45 on
+   * `surface`, 7.96 on `ink`, 6.91 on `raised`.
    */
-  --color-offer: #f2ecdd;
-  --color-offer-ink: #5f4a1e;
+  --color-caution: #5f4a1e;
 
   /* A scale, replacing the `text-[11px]` / `text-[10px]` arbitrary values that
      were scattered through every component with no relationship between them.

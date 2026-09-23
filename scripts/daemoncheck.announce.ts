@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writ
 import { join } from "node:path";
 import { check, report } from "./daemoncheck.env.js";
 import { tmp } from "./tmp.js";
-import { ANNOUNCE_VERSION, announcePath, removeAnnounce, writeAnnounce } from "../src/announce.js";
+import { ANNOUNCE_VERSION, announcedControlPlane, announcePath, removeAnnounce, writeAnnounce } from "../src/announce.js";
 
 /* ------------------------------------------------------------------ *
  * What a daemon says about itself to the computer it is running on
@@ -17,11 +17,17 @@ import { ANNOUNCE_VERSION, announcePath, removeAnnounce, writeAnnounce } from ".
  *
  * `packages/native/src-tauri/src/local.rs` is the only reader; `nativecheck`
  * compares the two shapes off disk, since neither language can see the other.
+ *
+ * Every call names the **state root** rather than a home — `~/.reemoat` for a
+ * daemon started any ordinary way, `~/.reemoat/servers/<server>/` for one the
+ * desktop app runs for a second server (Q7.148) — so the fixture is a home with a
+ * `.reemoat` inside it, which is the shape both of those are.
  * ------------------------------------------------------------------ */
 
 process.stdout.write("\nannouncing a daemon to its own computer\n");
 
 const home = tmp("daemoncheck-announce-");
+const root = join(home, ".reemoat");
 
 const announce = {
   v: ANNOUNCE_VERSION,
@@ -30,12 +36,13 @@ const announce = {
   port: 7887,
   instanceId: "i_x",
   authMode: "signed" as const,
+  controlPlane: "https://cp.example",
 };
 
 {
-  writeAnnounce(announce, home);
-  const path = announcePath(home);
-  check("it lands where a client looks for it", path, join(home, ".reemoat", "daemon.json"));
+  writeAnnounce(announce, root);
+  const path = announcePath(root);
+  check("it lands where a client looks for it", path, join(root, "daemon.json"));
   check("and round-trips as itself", JSON.parse(readFileSync(path, "utf8")) as unknown, announce);
 
   /*
@@ -46,7 +53,38 @@ const announce = {
    * the database beside it.
    */
   check("the file is readable by nobody else", statSync(path).mode & 0o777, 0o600);
-  check("nor is the directory holding it", statSync(join(home, ".reemoat")).mode & 0o777, 0o700);
+  check("nor is the directory holding it", statSync(root).mode & 0o777, 0o700);
+}
+
+{
+  /*
+   * ⚠ **Whose daemon this is, written down beside where it is.** `~/.reemoat` is
+   * shared by every daemon started without `REEMOAT_HOME`, so the machine id alone
+   * could not tell the desktop app that the daemon announced there was enrolled
+   * with another control plane — and it told somebody a daemon *for this server*
+   * was running as a machine they could not see. The host compares this field with
+   * the server it is on; `nativecheck` holds the two shapes together and the
+   * comparison in place.
+   */
+  check(
+    "the file names the control plane the daemon enrolled with",
+    (JSON.parse(readFileSync(announcePath(root), "utf8")) as { controlPlane?: unknown }).controlPlane,
+    "https://cp.example",
+  );
+  writeAnnounce({ ...announce, controlPlane: null }, root);
+  check(
+    "and an unknown one is written as null rather than left out",
+    Object.hasOwn(JSON.parse(readFileSync(announcePath(root), "utf8")) as object, "controlPlane"),
+    true,
+  );
+  writeAnnounce(announce, root);
+  /*
+   * The identity's column holds a string and never `NULL`, so a blank one is the
+   * only "not known" it can say. Trimmed and nothing else — the reader normalizes,
+   * and a second normalizer here would be a second opinion about what an origin is.
+   */
+  check("a blank enrolled address is announced as unknown", announcedControlPlane("  "), null);
+  check("and a real one as it was typed, trimmed", announcedControlPlane(" https://cp.example/ "), "https://cp.example/");
 }
 
 {
@@ -60,7 +98,7 @@ const announce = {
   const older = tmp("daemoncheck-announce-old-");
   mkdirSync(join(older, ".reemoat"), { recursive: true });
   chmodSync(join(older, ".reemoat"), 0o755);
-  writeAnnounce(announce, older);
+  writeAnnounce(announce, join(older, ".reemoat"));
   check("an existing wide directory is narrowed rather than left", statSync(join(older, ".reemoat")).mode & 0o777, 0o700);
   rmSync(older, { recursive: true, force: true });
 }
@@ -72,22 +110,44 @@ const announce = {
    * failure, which degrades to the relay — but a temporary file left behind is a
    * file somebody finds in `~/.reemoat` and wonders about.
    */
-  writeAnnounce({ ...announce, port: 7899 }, home);
-  check("a second write replaces the first", (JSON.parse(readFileSync(announcePath(home), "utf8")) as { port: number }).port, 7899);
-  const leftovers = readdirSafe(join(home, ".reemoat")).filter((name) => name !== "daemon.json");
+  writeAnnounce({ ...announce, port: 7899 }, root);
+  check("a second write replaces the first", (JSON.parse(readFileSync(announcePath(root), "utf8")) as { port: number }).port, 7899);
+  const leftovers = readdirSafe(root).filter((name) => name !== "daemon.json");
   check("and leaves no temporary file behind", leftovers, []);
 }
 
 {
-  removeAnnounce(home);
-  report("a clean shutdown stops advertising", !existsSafe(announcePath(home)), announcePath(home));
+  /*
+   * ⚠ **Another daemon's stop may not take this one's file.** Two daemons sharing
+   * a root are last-writer-wins by design, and the removal used to unlink whatever
+   * was at the path — so the daemon that *lost* the race deleted the winner's
+   * announcement on its own clean stop, and the desktop app lost the local route
+   * to a daemon that was still running. `i_x` wrote the file; `i_other` is the
+   * loser shutting down.
+   */
+  removeAnnounce("i_other", root);
+  check("a daemon removes only its own announcement", existsSafe(announcePath(root)), true);
+  check("and the file it left is still the winner's", (JSON.parse(readFileSync(announcePath(root), "utf8")) as { instanceId: string }).instanceId, "i_x");
+
+  removeAnnounce("i_x", root);
+  report("a clean shutdown stops advertising", !existsSafe(announcePath(root)), announcePath(root));
   /*
    * Twice, because a daemon that never announced — `shared_secret`, or one that
    * could not write — still runs this on the way out, and a shutdown path that
    * threw there would turn a tidy-up into a failed stop.
    */
-  removeAnnounce(home);
+  removeAnnounce("i_x", root);
   report("and doing it twice is not an error", true, "no throw on a second remove");
+
+  /*
+   * And a file that does not parse is left alone: this daemon publishes by
+   * rename, so it never leaves half a file, and a malformed one is therefore not
+   * one it wrote.
+   */
+  writeFileSync(announcePath(root), "{ not json");
+  removeAnnounce("i_x", root);
+  check("a file this daemon cannot read as its own is left in place", existsSafe(announcePath(root)), true);
+  rmSync(announcePath(root), { force: true });
 }
 
 {
@@ -99,12 +159,12 @@ const announce = {
   writeFileSync(blocked, "");
   let threw = false;
   try {
-    writeAnnounce(announce, blocked);
+    writeAnnounce(announce, join(blocked, ".reemoat"));
   } catch {
     threw = true;
   }
   report("an unwritable home throws rather than half-announcing", threw, "caller reports and continues");
-  check("and nothing was created", existsSafe(announcePath(blocked)), false);
+  check("and nothing was created", existsSafe(announcePath(join(blocked, ".reemoat"))), false);
 }
 
 rmSync(home, { recursive: true, force: true });

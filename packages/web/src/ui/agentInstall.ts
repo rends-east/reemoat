@@ -158,7 +158,9 @@ export function primaryControl(input: {
      * ⚠ **Above the credential axis, and this is the whole repair.** `canSignIn`
      * is `login.supported && agent.available`, so it is already `false` for a
      * harness that is not there — which is why the card drew *nothing at all* and
-     * `NewSession`'s door opened onto one true sentence and no control.
+     * the door `NewSession` had then opened onto one true sentence and no control.
+     * That door is gone (Q3.640); this card is what the Agents list's **Set up**
+     * opens, and a missing harness is the commonest state it is opened in.
      */
     case "not_installed":
       return input.installable ? "install" : "none";
@@ -182,45 +184,15 @@ export function primaryControl(input: {
   }
 }
 
-/**
- * Which door the strip owes a machine whose row it has hidden, or `null`.
- *
- * ⚠ **This replaces `signInOffered`, and the bug it fixes is the reported one.**
- * That predicate answered `true` for `!available` — so a machine without Grok drew
- * **"Sign in to Grok"**, which opened a card whose control slot computed
- * `login.supported && agent.available` and rendered nothing. What was left on
- * screen was the daemon's hint: *"grok not found on this daemon's PATH…"*. A door
- * onto one true sentence and no control.
- *
- * ⚠ **`available` is tested before `blocked`, which is `agentStance`'s ordering
- * and not a rearrangement.** The comment above that block already described this
- * failure and said it was fixed — the fix had landed on the `no_flow` arm alone,
- * which covers opencode and nothing else, so every harness that *has* a login
- * flow still walked into it.
- *
- * ⚠ **One binding, read by both the fallback's resolution and the block's gate**,
- * which is the property `signInOffered` was extracted for: a fallback naming an
- * agent the gate then declines to draw for is an empty row, no door, and nothing
- * saying why.
+/*
+ * ⚠ **`agentDoor` and `doorLabel` stood here, and both are deleted rather than
+ * left unused** (Q3.640). They decided which disclosure New session unfolded on a
+ * machine with nothing to start — *Install X* or *Sign in to X* — and what its
+ * button said. New session draws no door now: it names the machine's Agents list,
+ * a row there offers **Set up**, and the card that opens decides its one control
+ * through `primaryControl` above, which already tested `available` before the
+ * credential axis for the reason `agentDoor` was written.
  */
-export type AgentDoor = "install" | "sign_in" | null;
-
-export function agentDoor(candidate: {
-  available: boolean;
-  loggedIn?: boolean | null;
-  login?: { blocked?: string | null };
-  installable?: boolean;
-}): AgentDoor {
-  if (!candidate.available) return candidate.installable === true ? "install" : null;
-  if (candidate.login?.blocked === "no_flow") return null;
-  return candidate.loggedIn === false ? "sign_in" : null;
-}
-
-/** What the fallback button says. Here so the strings are inside `webcheck`'s sweep. */
-export function doorLabel(door: Exclude<AgentDoor, null>, name: string, open: boolean): string {
-  if (door === "install") return open ? "Hide install" : `Install ${name}`;
-  return open ? "Hide sign-in" : `Sign in to ${name}`;
-}
 
 /**
  * What the machine said about the harness after a run, once it has been re-read.

@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { check } from "./webcheck.env.js";
+import { JARGON_WORDS } from "./webcheck.agent-card.js";
 import { stripComments } from "./webcheck.source.js";
+import type { AgentAvailability, AgentStripEntry, CustomAgent } from "../src/wire.js";
 
 process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
 {
@@ -19,7 +21,7 @@ process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
    * does not, a preset deleted in the builder, and a preset deleted on another
    * device where no hand-off exists to be told about it.
    */
-  const { offeredHere } = await import("../src/ui/NewSession.js");
+  const { offeredHere, stripEmpty, STRIP_EMPTY } = await import("../src/ui/NewSession.js");
   const { startsBare } = await import("../src/ui/agentCard.js");
   const { AGENT_IDS } = await import("../src/wire.js");
   const harness = (id: string, available: boolean): unknown => ({ id, available, version: null, path: null });
@@ -600,45 +602,220 @@ process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
       [true, true, true, true],
     );
   }
-  /*
-   * ⚠ **And an empty row says which kind of empty it is.** It had one sentence,
-   * because it had one cause: the daemon listed nothing. A machine can now list
-   * three agents and draw none of them, and "this machine reports no agents" over a
-   * machine that reported three is the false line that sends somebody to the wrong
-   * screen. What is deliberately *not* here is which agent or why — the sign-in
-   * door below is drawn in exactly this state and says both.
-   */
-  check(
-    "an empty row distinguishes a machine with no agents from one with none ready",
-    [
-      strip.includes('"This machine reports no agents."'),
-      strip.includes('"No agent on this machine is ready to start."'),
-      strip.includes("const nothingAtAll = shown.length === 0"),
-    ],
-    [true, true, true],
-  );
-  /*
-   * ⚠ **The second sentence now has two endings, and the assertion above cannot
-   * tell them apart.** It matches a literal that appears twice, so it went from
-   * distinguishing the arms to being satisfied by either — the failure this file
-   * warns about generally and had here specifically.
+  /* ---------------------------------------------------------------- *
+   * ⭐ An empty row says which kind of empty it is — and never installs or signs
+   * in anything
    *
-   * The second ending exists because the first overclaimed: the gear opens a
-   * screen that lists harnesses `startsBare` answers true for and nothing else, so
-   * on a machine holding only opencode, or only a contributed harness without
-   * one a plugin added, "the gear above lists them all" pointed at a screen that would
-   * draw *This machine reports no agents* — two screens answering one question,
-   * one of them wrong. What is true in that state is the bar at its foot, which is
-   * always drawn.
+   * It had one sentence, because it had one cause: the daemon listed nothing. A
+   * machine can list three agents and draw none of them, and "this machine
+   * reports no agents" over a machine that reported three is the false line that
+   * sends somebody to the wrong screen. Those sentences were literals inside a
+   * ternary, told apart here by their quotes and by nothing else; they are
+   * `STRIP_EMPTY` now, and `stripEmpty` is driven as a value over every arm.
+   *
+   * ⚠ **And under the sentence there is no door** (Q3.640). It unfolded *Install
+   * X* or *Sign in to X* with the harness's whole card inside it; what is there
+   * now is **Agent settings**, the gear's own handler, and the Agents list's row
+   * offers **Set up**. `webcheck.agent-card.ts` holds the absences over the file.
+   *
+   * The rows are built the way `NewSession` builds them — harnesses through
+   * `offersStripTile`, then every preset, merged by `orderStrip` — because a row
+   * this screen never builds (a signed-out harness, say) handed to the function is
+   * a fixture asserting a state nothing can reach.
+   * ---------------------------------------------------------------- */
+  {
+    const { offersStripTile } = await import("../src/agents.js");
+    const { orderStrip } = await import("../src/agentStrip.js");
+    const listed = (id: string, over: Partial<AgentAvailability> = {}): AgentAvailability =>
+      ({ id, available: true, loggedIn: true, version: null, path: null, ...over }) as AgentAvailability;
+    const assembled = (id: string, harness: string): CustomAgent =>
+      ({ id, name: id, harness, system: "moonshot", model: "m", createdAt: 0 }) as unknown as CustomAgent;
+    const emptyFor = (
+      agents: AgentAvailability[],
+      presets: CustomAgent[] | null,
+      stored: AgentStripEntry[] = [],
+      over: { canConfigure?: boolean; failed?: boolean } = {},
+    ): string | null =>
+      stripEmpty({
+        agents,
+        presets,
+        rows: orderStrip(
+          [
+            ...agents.filter(offersStripTile).map((one) => ({ kind: "harness" as const, id: one.id })),
+            ...(presets ?? []).map((one) => ({ kind: "custom" as const, id: one.id })),
+          ],
+          stored,
+        ),
+        canConfigure: over.canConfigure ?? true,
+        failed: over.failed ?? false,
+      });
+    const refused = { at: 0, routed: false, message: "no" };
+    check(
+      "every kind of empty is told apart, and each is the state it names",
+      [
+        // Nothing installed and nothing assembled: the ordinary first run.
+        emptyFor([listed("claude", { available: false, installable: true }), listed("codex", { available: false })], []),
+        // Installed and signed out: no row at all, weighed through `agents`.
+        emptyFor([listed("claude", { loggedIn: false })], []),
+        // Installed and refused to start, with nothing to probe.
+        emptyFor([listed("codex", { loggedIn: null, lastStartRefusal: refused })], []),
+        // Only a router, which is never a tile.
+        emptyFor([listed("opencode", { loggedIn: null, login: { blocked: "no_flow" } as never })], []),
+        // A preset on a harness that is gone, beside one installed and signed out.
+        emptyFor(
+          [listed("claude", { available: false }), listed("codex", { loggedIn: false })],
+          [assembled("ca_1", "claude")],
+        ),
+        // Everything that could start is hidden.
+        emptyFor([listed("claude")], [], [{ kind: "harness", ref: "claude", hidden: true }]),
+        // The machine lists nothing.
+        emptyFor([], []),
+        // A daemon too old for the Agents screen, with agents that cannot start.
+        emptyFor([listed("claude", { available: false })], [], [], { canConfigure: false }),
+      ],
+      ["not_set_up", "not_ready", "not_ready", "not_ready", "not_ready", "hidden", "none_listed", "too_old"],
+    );
+    /*
+     * ⚠ **The two states the old hidden test got wrong, both ways.** It asked
+     * "is every row hidden", which is a count, where the question is whether a
+     * row that could *start* is hidden. A: a signed-in harness hidden beside a
+     * visible preset on a missing harness — the old test said *not ready* about a
+     * machine that is ready. B: the only row is a hidden preset on a missing
+     * harness — the old test said *hidden*, promising a remedy that fixes nothing.
+     */
+    check(
+      "hidden means a hidden row that could start, and nothing else",
+      [
+        emptyFor(
+          [listed("claude"), listed("codex", { available: false })],
+          [assembled("ca_1", "codex")],
+          [{ kind: "harness", ref: "claude", hidden: true }],
+        ),
+        emptyFor(
+          [listed("codex", { available: false })],
+          [assembled("ca_1", "codex")],
+          [{ kind: "custom", ref: "ca_1", hidden: true }],
+        ),
+      ],
+      ["hidden", "not_ready"],
+    );
+    /*
+     * ⚠ **A preset on a harness that refused while routed is *not ready*, and
+     * one refused bare still starts** — `startableHere`'s `routed` split, carried
+     * through to the sentence and to the pick. Driven on opencode because that is
+     * the shape the defect had: `startsBare` gives that harness no tile of its
+     * own, so the preset is the machine's only row, the sentence says nothing can
+     * start, and the tile it sat beside was drawn pressable over a tap
+     * `offeredHere` dropped in silence. The tile's half is the placement below.
+     */
+    const onRouter = (routed: boolean): AgentAvailability =>
+      listed("opencode", {
+        loggedIn: null,
+        login: { blocked: "no_flow" } as never,
+        lastStartRefusal: { at: 0, routed, message: "no" },
+      });
+    check(
+      "a preset whose harness refused while routed cannot start, and one refused bare still can",
+      [
+        emptyFor([onRouter(true)], [assembled("ca_1", "opencode")]),
+        offeredHere({ kind: "custom", id: "ca_1" }, [onRouter(true)], [assembled("ca_1", "opencode")]),
+        emptyFor([onRouter(false)], [assembled("ca_1", "opencode")]),
+        offeredHere({ kind: "custom", id: "ca_1" }, [onRouter(false)], [assembled("ca_1", "opencode")]),
+      ],
+      ["not_ready", null, null, { kind: "custom", id: "ca_1" }],
+    );
+    /*
+     * ⚠ **And its tile says so rather than drawing pressable.** The same
+     * `routed === true` test, so the tile, `offeredHere` and the sentence above
+     * cannot disagree about one preset — and the reason is one value feeding
+     * both the visible line and the label, in the words the machine's Agents row
+     * uses for the same preset (`webcheck.strip-order-and-hidden.ts` pins that
+     * half).
+     */
+    check(
+      "and its tile is disabled for it, with the reason in the line and the label",
+      [
+        /const refused = !missing && runs\?\.lastStartRefusal\?\.routed === true;/.test(strip),
+        /const why = missing \? "not installed" : refused \? "would not start" : null;/.test(strip),
+        /disabled: why !== null,/.test(strip),
+        /subline: why === null \? where : `\$\{ranBy\} \$\{why\}`,/.test(strip),
+        /label: why === null\s*\?\s*`\$\{one\.name\}, \$\{ranBy\}, \$\{where\}`\s*:\s*`\$\{one\.name\}, \$\{ranBy\} \$\{why\}`,/.test(strip),
+        /disabled: missing,/.test(strip),
+      ],
+      [true, true, true, true, true, false],
+    );
+    /*
+     * ⚠ **`null` is three answers, and two of them are refusals to speak.** A
+     * listing still out, and a read that failed — where the Try again row is the
+     * answer and a sentence about an empty machine beside it would be two answers
+     * to one question. The third is the ordinary one: something can start. And an
+     * old daemon that lists nothing still says so and offers Check again, which
+     * works there; the order is what decides that.
+     */
+    check(
+      "and it says nothing while a read is out, after one failed, or when something can start",
+      [
+        emptyFor([listed("claude", { available: false })], null),
+        emptyFor([listed("claude", { available: false })], [], [], { failed: true }),
+        emptyFor([listed("claude")], []),
+        emptyFor([listed("kimi", { loggedIn: null })], []),
+        emptyFor([], [], [], { canConfigure: false }),
+      ],
+      [null, null, null, null, "none_listed"],
+    );
+    check(
+      "three arms end in Agent settings, one in Check again, and an old daemon in nothing",
+      Object.entries(STRIP_EMPTY).map(([key, one]) => [key, one.action]),
+      [
+        ["hidden", "settings"],
+        ["not_set_up", "settings"],
+        ["not_ready", "settings"],
+        ["none_listed", "check_again"],
+        ["too_old", null],
+      ],
+    );
+    const lines = Object.values(STRIP_EMPTY).map((one) => one.line);
+    check(
+      "no empty sentence is written for a developer, names install or sign-in, or runs past a screen line",
+      [
+        lines.filter((line) => JARGON_WORDS.test(line)),
+        lines.filter((line) => /install|sign[ -]?in|log[ -]?in/i.test(line)),
+        lines.filter((line) => line.trim().split(/\s+/).length > 14),
+      ],
+      [[], [], []],
+    );
+  }
+  /*
+   * ⚠ **Decided once, in `NewSession`, and read by the strip as a prop.** The
+   * footer beside `Start` speaks about the same state, and a draft that let each
+   * compute it for itself had the footer say "no agent to start" under a read
+   * that had failed.
+   * So the call is outside the strip's body, over the merge `defaulted` is taken
+   * from, told about both failures — and the strip holds one `Empty`, draws the
+   * table's line, and offers the gear's handler or the retry, never a disclosure.
    */
   check(
-    "and the gear is only named for what it will actually show",
+    "the empty state is decided once, over the default's own rows, and the strip only draws it",
     [
-      strip.includes("agents.some(startsBare)"),
-      strip.includes('"The gear above lists them all, with what each one said."'),
-      strip.includes('"The gear above is where to add one."'),
+      /const empty =[\s\S]{0,120}stripEmpty\(/.test(newSessionSrc),
+      /rows:\s*stripRows,/.test(newSessionSrc),
+      /defaultRow\(stripRows,/.test(newSessionSrc),
+      /failed:\s*agentsFailure !== null \|\| presetsFailure !== null/.test(newSessionSrc),
+      /empty=\{empty\}/.test(newSessionSrc),
+      /stripEmpty\(/.test(strip),
     ],
-    [true, true, true],
+    [true, true, true, true, true, false],
+  );
+  check(
+    "and under the row it is one sentence and one control, with nothing that unfolds",
+    [
+      /STRIP_EMPTY\[empty\]\.line/.test(strip),
+      /<Button\s+onClick=\{onConfigure\}>\s*<Icon\s+as=\{Settings2\}\s+size=\{14\}\s*\/>\s*Agent settings\s*<\/Button>/.test(strip),
+      /<Button\s+onClick=\{onChanged\}>\s*Check again\s*<\/Button>/.test(strip),
+      (strip.match(/<Empty\b/g) ?? []).length,
+      /aria-expanded/.test(strip),
+    ],
+    [true, true, true, 1, false],
   );
   /*
    * ⚠ **Four answers to one question, and this pins the fourth.** `.no-scrollbar`
@@ -908,7 +1085,7 @@ process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
    *
    * And it was state set inside `GET /agents`'s own `.then`, which is why it
    * needed `picksRef` — THE CLOSURE CAPTURE this section was built around. The
-   * effect's deps are the daemon client and the sign-in epoch, and
+   * effect's deps are the daemon client and the retry epoch, and
    * `store.daemonFor` answers the same object for a machine's whole life, so
    * nothing re-ran it when a tile was tapped and the `.then` created a round trip
    * ago still held the props of the render that made it. Derived, there is no
@@ -922,7 +1099,8 @@ process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
   check(
     "the default is derived from the drawn row rather than recorded from a listing",
     [
-      /const defaulted =\s*customAgents === null/.test(newSessionSrc),
+      /const stripRows =\s*customAgents === null/.test(newSessionSrc) &&
+        /const defaulted =\s*stripRows === null/.test(newSessionSrc),
       newSessionSrc.includes("setDefaulted"),
       /picksRef\.current/.test(settled),
     ],
@@ -935,15 +1113,22 @@ process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
    * behaviour because the behaviour is `orderStrip`'s and is swept in full one
    * section over; what this pins is that this screen asks it rather than
    * re-deriving an order of its own.
+   *
+   * ⚠ **Sliced from `stripRows`, where the merge is its own binding now.** The
+   * empty state is read off the same rows, so the merge was lifted out of the
+   * default's expression rather than written twice; the slice runs to `picked`
+   * either way, and holds the merge and the call over it.
    */
+  const deriving = newSessionSrc.slice(newSessionSrc.indexOf("const stripRows ="), newSessionSrc.indexOf("const picked ="));
   check(
     "and it is the first row that row will draw",
     [
-      /orderStrip\(/.test(newSessionSrc.slice(newSessionSrc.indexOf("const defaulted ="), newSessionSrc.indexOf("const picked ="))),
-      /defaultRow\(/.test(newSessionSrc.slice(newSessionSrc.indexOf("const defaulted ="), newSessionSrc.indexOf("const picked ="))),
-      /\.find\(\(row\) => !row\.hidden\)/.test(newSessionSrc.slice(newSessionSrc.indexOf("const defaulted ="), newSessionSrc.indexOf("const picked ="))),
+      deriving.length > 0,
+      /orderStrip\(/.test(deriving),
+      /defaultRow\(/.test(deriving),
+      /\.find\(\(row\) => !row\.hidden\)/.test(deriving),
     ],
-    [true, true, false],
+    [true, true, true, false],
   );
   /*
    * ⚠ **And "first" is stricter than "first not hidden", which is what that
@@ -1055,17 +1240,28 @@ process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
   );
   // Asked only once the listing has settled, or it asks for an agent over a row
   // that is still loading — and asked *before* the folder, because the folder
-  // answers itself and this one needs a tap.
-  check("and the footer asks for one, once the listing has answered", /agents !== null && picked === null \? \(\s*"choose an agent"/.test(footer), true);
+  // answers itself and this one needs a tap. And it asks only where there is a
+  // tile to tap: on a machine with nothing to start it says so instead, read off
+  // `empty` — the one call told about a failed read, so a failure never claims
+  // the machine is empty. Nor does a failed agent read *ask*: with `GET /agents`
+  // refused there is no harness tile and every preset tile is disabled, so the
+  // line is empty and the Try again row under the strip speaks for it.
+  check(
+    "the footer asks for one while the listing settles, says there is none once it has, and neither after the agent read failed",
+    /agents !== null && picked === null \? \(\s*agentsFailure !== null \? "" : empty !== null \? "no agent to start" : "choose an agent"/.test(footer),
+    true,
+  );
   /*
-   * ⚠ **Nothing draws a tile as chosen from the *resolved* harness.** That
-   * resolution carries the sign-in door's fallback — on a machine with every
-   * harness uninstalled it is the only way to a login, since every tile in the row
-   * is disabled and none can be tapped — and drawing against it is what put a
-   * first tile on screen `aria-pressed` and `disabled` at once.
+   * ⚠ **Nothing draws a tile as chosen from anything but `value`.** A resolved
+   * harness once stood beside it carrying the sign-in door's fallback — on a
+   * machine with every harness uninstalled it was the only way to a login, since
+   * every tile in the row is disabled and none can be tapped — and drawing
+   * against it is what put a first tile on screen `aria-pressed` and `disabled`
+   * at once. The door and its fallback are gone (Q3.640); the regexes stay, since
+   * what they pin is that a tile asks `value` and nothing else.
    */
   check(
-    "the tiles ask what was chosen, never what the sign-in door resolved to",
+    "the tiles ask what was chosen, and nothing resolved on their behalf",
     [
       /picked: value\?\.kind === "harness" && candidate\.id === value\.id/.test(strip),
       /picked: value\?\.kind === "custom" && one\.id === value\.id/.test(strip),

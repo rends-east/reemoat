@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -2467,6 +2467,142 @@ process.stdout.write("\nwhich build of a CLI runs\n");
   check("and forgetAvailability makes the next call ask again", spawns.length, 2);
 
   /*
+   * ⚠ **A build that moved without this daemon is chosen again at its next use.**
+   * Measured 2026-09-22: `~/.local/bin/claude` was repointed from
+   * `versions/2.1.278` to `versions/2.1.280` by something other than this daemon,
+   * nothing called `forgetAvailability`, and for up to `AGENT_CLI_TTL_MS` the
+   * report went on naming 2.1.278 while every spawn ran 2.1.280. A held choice now
+   * remembers which *file* its path named and weighs it on every hit (Q6.112).
+   *
+   * Driven with a real symlink swapped the way the native installer swaps it — a
+   * new link renamed over the old one — and with `answers` keyed on the **link**
+   * path, so the only thing that tells the two builds apart is the file behind it.
+   * `forgetAvailability` is not called between the calls, because it would make
+   * every check here pass whether or not the runtime looked at the file.
+   */
+  const builds = join(sandbox, "cli-builds");
+  const linkBin = join(sandbox, "cli-link-bin");
+  mkdirSync(builds, { recursive: true });
+  mkdirSync(linkBin, { recursive: true });
+  for (const version of ["2.1.278", "2.1.280"]) {
+    writeFileSync(join(builds, version), `#!/bin/sh\necho ${version}\n`);
+    chmodSync(join(builds, version), 0o755);
+  }
+  const link = join(linkBin, "claude");
+  symlinkSync(join(builds, "2.1.278"), link);
+  process.env["PATH"] = `${linkBin}:${bin}:${prior.path ?? ""}`;
+  fresh();
+  answers.set(link, "2.1.278 (Claude Code)");
+  await runtime.agentCli("kimi");
+  await runtime.agentCli("claude");
+  const unmoved = await runtime.agentCli("claude");
+  check(
+    "a build that has not moved is not asked again",
+    [unmoved?.version, spawns.filter((one) => one === link).length],
+    ["2.1.278", 1],
+  );
+
+  symlinkSync(join(builds, "2.1.280"), `${link}.next`);
+  renameSync(`${link}.next`, link);
+  answers.set(link, "2.1.280 (Claude Code)");
+  const repointed = await runtime.agentCli("claude");
+  check(
+    "one that moved under the held choice is chosen again at its next use, with no forgetAvailability",
+    [repointed?.path, repointed?.version, spawns.filter((one) => one === link).length],
+    [link, "2.1.280", 2],
+  );
+  await runtime.agentCli("claude");
+  check("and the new build is held in its turn", spawns.filter((one) => one === link).length, 2);
+  await runtime.agentCli("kimi");
+  check("and only the harness whose file moved is asked again", spawns.filter((one) => one === stubKimi).length, 1);
+
+  /*
+   * The other shape: an npm install replaces the file where it stands, so the real
+   * path is the same across builds and only the inode, size and change time say it
+   * moved. A new file renamed over the target, which is how such a write lands.
+   */
+  writeFileSync(join(builds, "2.1.281.tmp"), "#!/bin/sh\necho 2.1.281 replaced where it stands\n");
+  chmodSync(join(builds, "2.1.281.tmp"), 0o755);
+  renameSync(join(builds, "2.1.281.tmp"), join(builds, "2.1.280"));
+  answers.set(link, "2.1.281 (Claude Code)");
+  const replaced = await runtime.agentCli("claude");
+  check(
+    "and so is a file replaced where it stands, which is how an npm update lands",
+    [replaced?.version, spawns.filter((one) => one === link).length],
+    ["2.1.281", 3],
+  );
+
+  /*
+   * And a build that vanished is a change too, which is the half `cliBuild` exists
+   * for: `probeBuild` answers `missing` for a link to nothing, and spelled as `null`
+   * it would read as "could not tell" and the held choice would outlive the
+   * deleted file for the rest of `AGENT_CLI_TTL_MS`. The link stays on PATH and in
+   * `findOnPath`'s memo, so the re-choice lands on it again — the count is what
+   * says it was asked.
+   */
+  unlinkSync(join(builds, "2.1.280"));
+  await runtime.agentCli("claude");
+  check("and so is one whose file has vanished", spawns.filter((one) => one === link).length, 4);
+  process.env["PATH"] = `${bin}:${prior.path ?? ""}`;
+  forgetPathHits();
+
+  /*
+   * ⚠ **"Could not tell" is not a new build.** A home directory on a mount that has
+   * stopped answering makes the probe answer `null`, and re-choosing on that would
+   * spawn `--version` of a file on the same mount on every use. So `null` keeps the
+   * held choice, and an answer naming a different file afterwards still re-chooses.
+   * The probe is stood in by `identify`, because `LocalRuntime` passes no deadline
+   * through to `probeBuild`, so "could not tell" reaches it from a driver through
+   * that seam alone; `probeBuild`'s own `null` is pinned in
+   * `daemoncheck.import-and-mounts.ts`, forced with `probeTimeoutMs: 0`.
+   */
+  let seen: string | null = "a";
+  const blindSpawns: string[] = [];
+  const blind = new LocalRuntime({
+    exec: async (command) => {
+      blindSpawns.push(command);
+      return "9.9.9 (Claude Code)";
+    },
+    identify: async () => seen,
+    secrets: () => ({}),
+  });
+  await blind.agentCli("claude");
+  seen = null;
+  await blind.agentCli("claude");
+  check("a file that does not answer is not a new build, so the held choice stands", blindSpawns.length, 1);
+  seen = "b";
+  await blind.agentCli("claude");
+  check("and one that answers as a different file is chosen again", blindSpawns.length, 2);
+
+  /*
+   * ⚠ **The hit awaits the probe now, so `forgetAvailability` can land inside it**,
+   * and a caller that read its entry before the clear must not hand it back after:
+   * that is the pre-update answer, after the update — what clearing `cliInFlight`
+   * there exists to prevent for a decision in flight. The negative control is the
+   * spawn: unfenced, the probe answers the same file and nothing is asked.
+   */
+  let straddleGate: Promise<string> | null = null;
+  const straddleSpawns: string[] = [];
+  const straddle = new LocalRuntime({
+    exec: async (command) => {
+      straddleSpawns.push(command);
+      return "9.9.9 (Claude Code)";
+    },
+    identify: () => straddleGate ?? Promise.resolve("same"),
+    secrets: () => ({}),
+  });
+  await straddle.agentCli("claude");
+  const hold = deferred();
+  straddleGate = hold.promise.then(() => "same");
+  const straddled = straddle.agentCli("claude");
+  await new Promise((r) => setTimeout(r, 0));
+  straddle.forgetAvailability();
+  straddleGate = null;
+  hold.resolve();
+  await straddled;
+  check("a hit that straddles forgetAvailability is not handed back after it", straddleSpawns.length, 2);
+
+  /*
    * ⚠ **A miss is never held, and it is the runtime's own cache being pinned here,
    * not `findOnPath`'s.** `cliChosen` used to hold `null` for `AGENT_CLI_TTL_MS` —
    * ten minutes — over a walk whose own miss memo is thirty seconds, so a CLI
@@ -2525,6 +2661,12 @@ process.stdout.write("\nwhich build of a CLI runs\n");
    * cost one `--version`, and an answer that started before `forgetAvailability`
    * is not written back over the clear: the race `probeGeneration` fences for the
    * login probe, fenced the same way here.
+   *
+   * Both runtimes stand `identify` in, because a choice now reads which file it is
+   * before `--version`: the real probe reads the mount table on its first call and
+   * then `realpath`s, and those land after the `setTimeout(0)` these cases wait on
+   * — so "cost one `--version`" would count zero, measuring where a filesystem
+   * callback happened to fall rather than the collapse.
    */
   const gate = deferred();
   const slowSpawns: string[] = [];
@@ -2534,6 +2676,7 @@ process.stdout.write("\nwhich build of a CLI runs\n");
       await gate.promise;
       return "9.9.9 (Claude Code)";
     },
+    identify: async () => "stub",
     secrets: () => ({}),
   });
   forgetPathHits();
@@ -2552,6 +2695,7 @@ process.stdout.write("\nwhich build of a CLI runs\n");
       await lateGate.promise;
       return "9.9.9 (Claude Code)";
     },
+    identify: async () => "stub",
     secrets: () => ({}),
   });
   forgetPathHits();

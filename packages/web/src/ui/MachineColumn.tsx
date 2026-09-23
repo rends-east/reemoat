@@ -69,9 +69,12 @@ import {
  * selected entry, repeatedly. It is a scroll position rather than a viewport
  * measurement, which is the distinction `AppShell`'s rule turns on.
  *
- * **Order is `machineTabs`', which is `store.ts`'s, which is by name.** No sort
- * here, ever: reachability and activity both flicker on the poll, and a list
- * reordering under a travelling thumb is the one thing this app does not do.
+ * **Order is `machineTabs`', which is `store.ts`'s**: by name, this computer's
+ * own machine first, until a reader drags. No sort here, ever: reachability and
+ * activity both flicker on the poll, and a list reordering under a travelling
+ * thumb is the one thing this app does not do. **Nor a name**: `tab.name` is
+ * `MachineGroup.name`, so this computer's entry reads `local` — its label, its
+ * `title` and the monogram's letter — through `machineDisplayName` in the store.
  * Reachability is drawn nowhere — an entry says its name and its waiting count, the
  * two things the pill says today — so this column reverses no part of that trade.
  */

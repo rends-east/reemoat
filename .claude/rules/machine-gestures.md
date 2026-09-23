@@ -10,17 +10,24 @@ paths:
 # The machines: their order, and the two gestures that move between them
 
 `web-shell.md` owns the rail. This is the narrower subject it points at: what
-order the machine folders are in, who decides, and the two touch gestures that
-share one screen with each other and with the chat rows' own drag.
+order the machine folders are in, who decides, what this computer's own is called,
+and the two touch gestures that share one screen with each other and with the chat
+rows' own drag.
 
-## Ordered by name until a reader drags one
+## Ordered by name, this computer first, until a reader drags one
 
 **A stored order is allowed where a derived one is not, and the distinction is the
 old rule's own stated reason.** `reach` and activity flicker on the four-second
 poll, so a list ordered by either reshuffles under a travelling thumb. An order
 somebody set cannot: it moves when they move it and at no other moment. So
 ordering by reachability or activity stays banned outright, and
-`reemoat.machineOrder` is merged over the name sort.
+`reemoat.machineOrder` is merged over the name sort. **Which computer this client
+runs on** is the one derived input admitted, for the same reason: it is seeded at
+launch from the machine this app created for the server (`NativeBoot.claimed`,
+which needs no daemon), replaced by a later read — at launch, on a wake, or the
+machine just created — only when it names a *different* machine of the account's, and never cleared by a read that finds
+nothing (`localMachineAfter`) — so a restarting daemon or a missed `/health` moves
+nothing, and nothing reads it off the poll.
 
 **Per device, in `localStorage`** — the `reemoat.railWidth` / `reemoat.machineTab`
 idiom, and the owner's call: the control plane has nowhere to put a per-user order
@@ -29,19 +36,30 @@ over: the order you set on a desktop is not the order on your phone.
 
 **`machineOrder.ts` holds the merge and no DOM**, so `webcheck` can import it, and
 it sits beside `store.ts` rather than under `ui/` because `store.ts` reads it and
-may not import from `ui/`. Three clauses, two of them `orderStrip`'s:
+may not import from `ui/`. Four clauses, two of them `orderStrip`'s:
 
-1. **Stored ids first, in stored order**, keeping only what the fleet still holds.
-2. **Then everything unknown, in natural order, at the end** — and `natural`
+1. **`first` — `AppState.localMachineId` — leads, unless `stored` names it.** Ahead
+   of the stored ids rather than among the strangers, or it would lead only on a
+   fleet nobody ever dragged. A stored position always wins, so this fills the
+   default and never overrides a drag. `null`, or an id the fleet does not hold
+   (another fleet's daemon), changes nothing.
+2. **Stored ids next, in stored order**, keeping only what the fleet still holds.
+3. **Then everything unknown, in natural order, at the end** — and `natural`
    arrives already sorted by name, so that clause *is* the name sort rather than a
    replacement for it.
-3. **No `hidden` clause, ever.** `natural` decides membership outright, or *"a
+4. **No `hidden` clause, ever.** `natural` decides membership outright, or *"a
    machine with no sessions still gets a tab"* is reversed through the other door —
    and that tab is the only route to starting a session on a machine just added.
 
-⚠ **`natural` decides membership; `stored` decides only order.** Plus a duplicate
-guard, because this list comes out of storage a person can hand-edit and one id
-drawn twice is two tabs that select each other.
+⚠ **`natural` decides membership; `stored` and `first` decide only order.** Plus
+a duplicate guard, because this list comes out of storage a person can hand-edit
+and one id drawn twice is two tabs that select each other.
+
+⚠ **A drag is what stores `first`.** `setMachineOrder` writes the whole drawn
+list, so the first drag of *any* machine pins this one where it was drawn, and
+clause 2 holds it from then on. A reader who had dragged before clause 1 existed
+has it stored already, wherever it was drawn then — it stays there until they move
+it. Q7.139.
 
 ⚠ **`nextOrder` keeps a slot for a machine the fleet has lost**, and this is the
 one place it diverges from the agent strip, which drops such an entry on the next
@@ -57,6 +75,34 @@ added by hand, a handful per account, over months — so a whole-list rewrite pe
 reorder costs nothing and removes every way the arithmetic can be wrong. There is
 also no server to hold a rank, and this list is bounded where sessions are not.
 
+## This computer is called `local`, on this computer only
+
+**`machineDisplayName`, in `machineOrder.ts`, is the one rule**: `local`
+(`LOCAL_DISPLAY_NAME`) for `localMachineId`, the stored label for everything else.
+Drawn, never stored — the control-plane label is the host name, because a phone and
+every grantee read that row and to them `local` is somewhere else (Q7.139).
+`sessionGroups` fills `MachineGroup.name` from it, so the strip, the rail (label,
+`title`, the monogram's letter) and the drag's announcement inherit it with no call
+of their own; New session reads `machinesAsDrawn` for the rail's order, names and
+default; the two `machine · path` lines (a row under All, `WorkspaceLine`) call it
+directly.
+
+⚠ **`local` means this computer and nothing else, on this client.** A machine
+whose own label is `local` — Q7.139 migrated nothing, so a Mac can carry its
+old one beside the one it runs now, and `nameVisibleTo` lets any other be renamed
+to it — is drawn `local-<hex>`, `qualifiedName`'s shape and, for a machine never
+renamed, exactly its `machines.name`. Case-folded, and whether or not this
+computer is known yet, so that tile's name never waits on the identification.
+
+⚠ **Two places keep the real label, deliberately.** **Settings → Machines** is
+where a label is managed — renamed, compared, told apart from a collision — so it
+shows the host name and badges the row `this device`; `webcheck` pins **every
+file under `ui/settings/`** free of the function, since the rename field is in
+`MachineSection.tsx`, one file along from the list. **A sentence** — a resume failure, a reachability line — keeps it
+too: "on local" reads as a word missing, and a sentence is what gets pasted to
+somebody at another client. `webcheck` also sweeps `ui/` and `store.ts` for the
+literal, so no screen spells the word itself.
+
 ## The merge is applied in the store, and the memo is the load-bearing half
 
 `sessionGroups` wraps its name sort in `orderMachines`, so **both axes inherit one
@@ -68,8 +114,20 @@ a reorder replaces neither.** Without `machineOrderVersion()` in that guard a dr
 repaints nothing until the poll happens to hand over a new `machines` array — a
 drag that does nothing for four seconds and then jumps. **Every assertion written
 off the source text stays green with the guard reverted**, so that pair is driven
-against the real function instead. It is the third input and the only one that
-moves off the poll.
+against the real function instead. It is the third input.
+
+⚠ **`localMachineId` is the fourth, for the same reason**: it is patched on its own
+and replaces neither array, so without it the rail kept the host name, in name
+order, until a poll. It is driven the same way, on ids no other section has
+stored — `setMachineOrder([])` is not a reset (`nextOrder` keeps every slot), so
+borrowed ids would test the leftover. **`bootstrap` seeds it from the claim**,
+then reads it live inside the listing's own `Promise.all`, both before
+`phase: "ready"`: the app stops its own daemon at quit, so on a cold launch the
+live read finds nothing, and read only in `runResume` the tile was renamed and
+moved once on every launch. ⚠ **Each live answer is weighed again once a listing
+lands** (`weighLocalMachine`): *a machine of ours* is a question about the list,
+and both reads are made before it is current — so the daemon of a machine just
+created would otherwise lose to a claim for one since switched off.
 
 `groups.ts` carries one line, `subscribeMachineOrder(bump)`: both readers already
 subscribe to `groupsVersion`, and a second `useSyncExternalStore` in each would be

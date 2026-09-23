@@ -1818,8 +1818,7 @@ function renderEvent(node: EventNode, files: FileAccess | null): ReactNode {
      * *is* that message, and the `UserBubble` here is the row the reader sent —
      * the same component, in the same place, as if the cut had spared it.
      *
-     * The rule stays quiet: a hairline each side of a `text-2xs text-faint` word,
-     * which `ui/MachineOffer.tsx` cites by name as this file's own idiom.
+     * The rule stays quiet: a hairline each side of a `text-2xs text-faint` word.
      */
     case "context_cleared":
       return (

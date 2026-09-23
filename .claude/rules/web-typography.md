@@ -236,11 +236,10 @@ constants, two of them byte-identical local `const label` declarations in two fi
 that never imported from each other. Nothing had ever swept for the idiom, so the
 second wave was invisible until somebody counted. Q5.115.
 
-**Six** sites spend the idiom outside the constants **on purpose**, and every one
+**Five** sites spend the idiom outside the constants **on purpose**, and every one
 of them says so at the code: `SessionBrowser`'s waiting-elsewhere band (`text-fg`,
 louder than its rows), `MachineSection`'s `RETIRE_HEADING` (`text-danger`),
-`MachineOffer`'s `or` (no `font-semibold` — the word between two doors is not a
-heading), `AgentBuilder`'s `HIDDEN_PROVIDER_HEADING` (`text-faint`, written out
+`AgentBuilder`'s `HIDDEN_PROVIDER_HEADING` (`text-faint`, written out
 rather than `` `${SETTINGS_HEADING} text-faint` `` and saying why), `MenuDrawer`'s `DRAWER_HEADING` (`text-faint` at that panel's own `px-3`, because
 `MENU_HEADING` carries `px-2.5` and put the word 2px inboard of the rows it heads),
 and `TaskPanel`'s `FINISHED_HEADING` (`text-faint`, spent by **both** arms of the

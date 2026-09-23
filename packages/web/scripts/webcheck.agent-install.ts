@@ -7,14 +7,14 @@ import { srcFile, srcFiles, stripComments } from "./webcheck.source.js";
  * Installing a harness, because somebody asked for it
  *
  * The daemon side is `daemoncheck.agent-install.ts`; the script's own end of the
- * step grammar is `deploycheck`. What is here is the client's two rules: which
- * control a card draws, and which door the strip owes a machine.
+ * step grammar is `deploycheck`. What is here is the client's rule for which
+ * control a card draws, and the placements that keep the card the one surface a
+ * run is started from. The strip owed a machine a door once — `agentDoor` — and
+ * owes it none now (Q3.640); what is left of that is an absence, below.
  * ------------------------------------------------------------------ */
 process.stdout.write("\ninstalling a harness, from this side\n");
 {
   const {
-    agentDoor,
-    doorLabel,
     installElapsed,
     installFailure,
     installResult,
@@ -227,44 +227,24 @@ process.stdout.write("\ninstalling a harness, from this side\n");
   );
 
   /* ---------------------------------------------------------------- *
-   * `agentDoor`: the reported bug, from both ends
+   * `agentDoor`, and why it is gone
    * ---------------------------------------------------------------- */
   /*
-   * ⚠ **`available` before `blocked`, which is `agentStance`'s ordering.** The
-   * predicate this replaces tested `blocked` first, so a harness that is not on
-   * the machine and *has* a wizard drew "Sign in to X" — onto a card whose
-   * control slot computes `login.supported && agent.available` and therefore
-   * rendered nothing. The whole of what was left on screen was the daemon's hint.
+   * ⚠ **It chose which disclosure New session unfolded — Install or Sign in — and
+   * that screen unfolds none now** (Q3.640). The reported bug it fixed was real
+   * and its repair survives where it belongs: `primaryControl` tests `available`
+   * before the credential axis, pinned above, and that is the card the Agents
+   * list's Set up opens. Asserted as an absence on the module that held both
+   * helpers, so neither can come back as a door with no screen to be drawn on.
    */
-  check(
-    "a harness that is not on the machine gets the install door, whatever its sign-in says",
-    [
-      agentDoor({ available: false, installable: true }),
-      agentDoor({ available: false, installable: true, login: { blocked: "no_flow" } }),
-      agentDoor({ available: false, installable: true, loggedIn: false }),
-    ],
-    ["install", "install", "install"],
-  );
-  /*
-   * ⚠ **And the regression, which is the state that shipped**: a harness that is
-   * absent on a daemon that cannot install it gets **no door**, rather than one
-   * onto a card with one true sentence and no control.
-   */
-  check(
-    "while one this machine cannot install gets no door at all",
-    [agentDoor({ available: false }), agentDoor({ available: false, installable: false, loggedIn: false })],
-    [null, null],
-  );
-  check(
-    "an installed harness still answers the credential question",
-    [
-      agentDoor({ available: true, loggedIn: false }),
-      agentDoor({ available: true, loggedIn: true }),
-      agentDoor({ available: true, loggedIn: null }),
-      agentDoor({ available: true, loggedIn: false, login: { blocked: "no_flow" } }),
-    ],
-    ["sign_in", null, null, null],
-  );
+  {
+    const mod: Record<string, unknown> = await import("../src/ui/agentInstall.js");
+    check(
+      "the strip's door is gone from the module that held it",
+      ["agentDoor", "doorLabel"].filter((name) => name in mod),
+      [],
+    );
+  }
 
   /* ---------------------------------------------------------------- *
    * The transcript reducer and the clock
@@ -448,7 +428,7 @@ process.stdout.write("\ninstalling a harness, from this side\n");
     (rel) => rel !== "daemon.ts" && /liveInstall\(/.test(stripComments(srcFile(rel))),
   );
   check(
-    "both Install surfaces ask the machine what it is already running",
+    "both screens that draw a run ask the machine what it is already running",
     callers.sort(),
     ["ui/settings/AgentsPanel.tsx", "ui/settings/MachineAgentsSection.tsx"],
   );
@@ -465,8 +445,6 @@ process.stdout.write("\ninstalling a harness, from this side\n");
     const line = installResultLine(result, "Claude Code");
     if (line !== null) sentences.push(line);
   }
-  for (const door of ["install", "sign_in"] as const)
-    for (const open of [true, false]) sentences.push(doorLabel(door, "Claude Code", open));
   for (const phase of ["download", "install", "link"] as const) {
     const line = installStep(phase);
     if (line !== null) sentences.push(line);
@@ -544,9 +522,10 @@ process.stdout.write("\ninstalling a harness, from this side\n");
    * call sites in this one component write it**, so the id a pane is polling is
    * not always the id stored. Three *sites*, not three surfaces: the sweep 120
    * lines up has it right — `MachineAgentsSection` keeps its run in component
-   * state and names no key at all (zero `storage` occurrences in the file), so
-   * the strip screen can start a run this key never learns about, which is the
-   * hazard rather than a fourth writer. A pane seeded from a stale key — Hide while a run was going, then the
+   * state and names no key at all (zero `storage` occurrences in the file). It
+   * used to be able to start a run this key never learned about, which was the
+   * hazard rather than a fourth writer; it starts none now and only adopts one
+   * (Q3.640), so every run is started by the card that writes this key. A pane seeded from a stale key — Hide while a run was going, then the
    * daemon's ten-minute sweep — polls an id that `404`s, and by then the card's
    * live-run adoption may have written down a *newer* run's id; a clear by
    * (machine, agent) at that moment deletes the live run's only reattachment
@@ -585,20 +564,28 @@ process.stdout.write("\ninstalling a harness, from this side\n");
   );
 
   /*
-   * ⚠ **Inside the kebab, and the row's two fixed widths are unchanged.** A row
-   * that grows a control moves every row beside it, and a drag measures one row
-   * at `pointerdown` and applies that number to all of them — which is why
-   * `agent-strip.md` makes this a correctness claim rather than a preference.
+   * ⚠ **The list starts no run, and its way to the card is inside the kebab.**
+   * It had an Install of its own that ran with no output behind a row that could
+   * say one word about it; that went when the card became this screen's leaf
+   * (Q3.640), so the card is the one surface that starts a run and this list only
+   * adopts one. What replaced it is a navigation, and it is inside the menu for
+   * the reason the Install was: a row that grows a control moves every row beside
+   * it, and a drag measures one row at `pointerdown` and applies that number to
+   * all of them — which is why `agent-strip.md` makes this a correctness claim
+   * rather than a preference.
    */
   const section = stripComments(
     readFileSync(new URL("../src/ui/settings/MachineAgentsSection.tsx", import.meta.url), "utf8"),
   );
   const menuAt = section.indexOf("<Menu");
-  const installAt = section.indexOf("onInstall(behind.id)");
   check(
-    "the install action is inside the row's one menu",
-    [menuAt >= 0, installAt > menuAt],
-    [true, true],
+    "the list starts no run of its own, and its way to the card is inside the row's one menu",
+    [
+      menuAt >= 0,
+      section.indexOf("agentSetupPath(machineId, behind.id)") > menuAt,
+      /\.startInstall\(/.test(section),
+    ],
+    [true, true, false],
   );
   check(
     "and the row's reserved widths did not move",
@@ -628,6 +615,9 @@ process.stdout.write("\ninstalling a harness, from this side\n");
    * And the strip's tiles did not get it: `offersTile` keeps `not_installed` off
    * the New session row, and an Install control inside a 112px tile in a strip
    * you drag sideways is the `Edit`-on-a-tile control that row already deleted.
+   * Nor does anything under them any more: the disclosure that unfolded the card
+   * there is gone (Q3.640), so the second half of this pair used to read `true`
+   * for the door and reads `false` for the card now.
    */
   const newSession = stripComments(
     readFileSync(new URL("../src/ui/NewSession.tsx", import.meta.url), "utf8"),
@@ -646,8 +636,8 @@ process.stdout.write("\ninstalling a harness, from this side\n");
   const stripBody = stripAt < 0 ? "" : newSession.slice(stripAt, newSession.indexOf("\nfunction ", stripAt + 1));
   report("the strip's own body was isolated", stripBody.length > 0, `${String(stripBody.length)} chars`);
   check(
-    "the tiles carry no install control, and the door reads one binding",
-    [/installable/.test(stripBody), newSession.includes("doorLabel(")],
-    [false, true],
+    "the tiles carry no install control, and nothing under them opens one",
+    [/installable/.test(stripBody), /doorLabel\(|AgentDetail/.test(newSession)],
+    [false, false],
   );
 }

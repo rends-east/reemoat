@@ -152,15 +152,16 @@ export function taskTokens(total: number): string {
  * with `text-success` and `text-warning`, which are not tokens here and emit no
  * CSS at all** — Tailwind v4 writes no rule for a utility whose variable does not
  * exist, so `(done)` and `(stopped)` were drawn in the row's ambient colour and
- * were indistinguishable from `(running)`. `add-ink` and `offer-ink` are the two
- * this app actually has for *finished well* and *needs attention*.
+ * were indistinguishable from `(running)`. `add-ink` and `caution` are the two
+ * this app actually has for *finished well* and *needs attention*, and `webcheck`
+ * now asserts every tone here is a declared token.
  */
 export const TASK_CHIPS: Readonly<Record<AsyncTaskState, readonly [string, string]>> = {
   running: ["(running)", "text-faint"],
   paused: ["(paused)", "text-faint"],
   completed: ["(done)", "text-add-ink"],
   failed: ["(error)", "text-danger"],
-  stopped: ["(stopped)", "text-offer-ink"],
+  stopped: ["(stopped)", "text-caution"],
 };
 
 /**

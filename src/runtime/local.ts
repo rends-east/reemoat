@@ -21,6 +21,7 @@ import {
 } from "../acp/agents.js";
 import { BUILTIN_CATALOGUE, type MachineCatalogue, type SystemId } from "../acp/systems.js";
 import { hostGit, type GitExec } from "../git.js";
+import { probeBuild } from "../stall.js";
 import type {
   AgentAvailability,
   AgentCliChoice,
@@ -163,6 +164,12 @@ const LOGIN_PROBE_TTL_MS = 3_000;
  * is cleared: a self-updating CLI moves under a running daemon, and an answer held
  * for the life of the process would pin the model list to whatever was installed
  * at boot.
+ *
+ * ⚠ **No longer the delay after an update, only the ceiling behind it.** A held
+ * choice is weighed against the file behind its path on every use (Q6.112), so a
+ * build that moved is re-chosen the next time anything asks, whoever moved it.
+ * What the ten minutes still bound is a change that check cannot see: a probe that
+ * answered "could not tell", or a payload moved beneath a shim that did not.
  */
 const AGENT_CLI_TTL_MS = 10 * 60_000;
 
@@ -491,6 +498,20 @@ export interface LocalRuntimeOptions {
     stream: "stdout" | "stderr",
   ) => Promise<string | null>;
   /**
+   * Which file a CLI path names, as a key compared for equality, or `null` for
+   * "could not tell" — for the drivers only.
+   *
+   * `exec`'s kind of seam, and for the part of its reason that is timing: the real
+   * answer is {@link cliBuild}, a bounded `realpath` and `stat` through `stall.ts`,
+   * whose first call reads the mount table — so a driver pinning what happens
+   * *between* two askers would be asserting where a filesystem callback happened to
+   * land. And this class passes no deadline through to `probeBuild`, so "could not
+   * tell" is unreachable from a driver except through this seam — `probeBuild`'s
+   * own three answers are pinned directly, with `probeTimeoutMs: 0` forcing the
+   * third. Nothing in `scripts/daemon.ts` sets it.
+   */
+  identify?: (path: string) => Promise<string | null>;
+  /**
    * What this machine offers beyond what this repository ships.
    *
    * ⚠ **Injected rather than imported, and it is the same seam `secrets` is.**
@@ -516,18 +537,23 @@ export class LocalRuntime implements SessionRuntime {
     env: NodeJS.ProcessEnv,
     stream: "stdout" | "stderr",
   ) => Promise<string | null>;
+  private readonly identify: (path: string) => Promise<string | null>;
   private readonly machine: MachineCatalogue;
 
   /** Memoised: `script` does not appear and disappear during a daemon's life. */
   private scriptResolved: string | null | undefined;
   /**
-   * Which build each harness resolved to, and when it was decided.
+   * Which build each harness resolved to, when it was decided, and which file it
+   * was — so a swap nobody reported is seen at the next use rather than at the
+   * clock's.
    *
    * On a clock rather than for the process, because the file it names is the one
    * thing under this daemon that moves without a restart — `deploy/agents.sh`
-   * repoints it daily. See {@link agentCli}.
+   * repoints it daily, and the CLI's own updater or another daemon on the same home
+   * directory whenever they like. `build` is {@link identify}'s key, `null` where
+   * that could not tell. See {@link agentCli}.
    */
-  private readonly cliChosen = new Map<AgentId, { at: number; value: AgentCliChoice }>();
+  private readonly cliChosen = new Map<AgentId, { at: number; value: AgentCliChoice; build: string | null }>();
 
   /**
    * One decision in flight per harness, for `loginInFlight`'s reason: a restart
@@ -578,6 +604,7 @@ export class LocalRuntime implements SessionRuntime {
     this.systemSecretOf = options.systemSecret ?? (() => null);
     this.onWarning = options.onWarning ?? (() => {});
     this.exec = options.exec ?? ((command, args, env, stream) => runProbe(command, args, env, stream));
+    this.identify = options.identify ?? cliBuild;
     this.machine = options.machine ?? BUILTIN_CATALOGUE;
   }
 
@@ -792,8 +819,10 @@ export class LocalRuntime implements SessionRuntime {
     /*
      * ⚠ **The CLI choice too.** The daily agent update is one of this method's
      * callers, and it is the event that moves the file a choice names: a memo held
-     * past this point is the build the updater has just replaced, run for another
-     * ten minutes while the fresh one sits on disk.
+     * past this point is the build the updater has just replaced. `agentCli` would
+     * now find that out at the next use by itself (Q6.112), but only for a file
+     * whose path it already holds — a copy that has just *appeared* earlier on PATH
+     * is found by the walk below, and only once its memo is gone.
      */
     this.cliChosen.clear();
     // And a decision still in flight, which the generation fence keeps out of the
@@ -1157,11 +1186,18 @@ export class LocalRuntime implements SessionRuntime {
    * would pin the answer to whatever was installed at boot and quietly defeat this.
    * Ten minutes rather than the login probe's three seconds — see the constant for
    * why the two facts move at different speeds; and the updater calls
-   * `forgetAvailability` besides, so the day's build is picked up at once. A
-   * refresh `deploy.sh` makes without restarting the daemon is seen by nothing
-   * here, so for up to ten minutes after one the *report* names the previous
-   * build while the spawn already runs the new one — the file a held path names
-   * was swapped by rename, and the path did not move.
+   * `forgetAvailability` besides, so the day's build is picked up at once.
+   *
+   * ⚠ **A build moved by anything else is seen at its next use, and it used not
+   * to be seen at all.** The file a held path names is swapped by rename — the path
+   * does not move — so a refresh `deploy.sh` made, another daemon's updater on the
+   * same home directory, or the CLI updating itself left the spawn running the new
+   * build while the *report* named the old one, and the model list under it stayed
+   * the old one's, for up to ten minutes (Q6.112). So a held choice remembers which
+   * file it was, {@link identify} is asked again on every hit, and a different
+   * answer re-chooses this harness alone. The price is one bounded `realpath` and
+   * `stat` per use, through `stall.ts`, so a stalled home directory costs one
+   * deadline and then nothing.
    *
    * **Every caller that consumes the *path* is async and goes through here; the two
    * that are synchronous ask only whether a binary exists at all** — `loginSupport`
@@ -1171,7 +1207,33 @@ export class LocalRuntime implements SessionRuntime {
    */
   async agentCli(agent: AgentId): Promise<AgentCliChoice | null> {
     const held = this.cliChosen.get(agent);
-    if (held !== undefined && Date.now() - held.at < AGENT_CLI_TTL_MS) return held.value;
+    if (held !== undefined && Date.now() - held.at < AGENT_CLI_TTL_MS) {
+      /*
+       * ⚠ **Fenced, because this hit is no longer synchronous.** A caller that read
+       * `held` and is waiting on the probe must not hand it back if
+       * `forgetAvailability()` ran meanwhile — that is the pre-update answer, after
+       * the update, which is exactly what clearing `cliInFlight` there prevents for
+       * a decision in flight. Captured before the await, compared after it.
+       *
+       * `null` keeps the held choice: a mount that stopped answering has not
+       * replaced anything, and treating it as a new build would spawn `--version` of
+       * a file on that mount on every use.
+       */
+      const generation = this.probeGeneration;
+      const now = await this.identify(held.value.path);
+      if (generation === this.probeGeneration && (now === null || now === held.build)) return held.value;
+      /*
+       * **This harness's entry goes, and nothing else.** Not `forgetAvailability()`,
+       * which bumps `probeGeneration` — discarding every harness's login probe in
+       * flight and the PATH walk's memo — from inside a read path, over a fact about
+       * one file. Only if it is still the entry this caller weighed: another caller
+       * may already have seen the same move and chosen again, and that choice is
+       * the answer.
+       */
+      if (this.cliChosen.get(agent) === held) this.cliChosen.delete(agent);
+      const current = this.cliChosen.get(agent);
+      if (current !== undefined) return current.value;
+    }
     const running = this.cliInFlight.get(agent);
     if (running !== undefined) return running;
 
@@ -1180,11 +1242,13 @@ export class LocalRuntime implements SessionRuntime {
      * `forgetAvailability()` bumps it — a plugin change, a credential arriving, the
      * daily agent update — and a decision that started before the bump must not
      * write itself back afterwards, or the build the updater has just replaced is
-     * held for another ten minutes.
+     * held for another ten minutes. The file check on a hit narrows that and does
+     * not close it: it weighs the *path* a choice holds, so a copy the update put
+     * earlier on PATH is invisible to it, and only this fence keeps it out.
      */
     const generation = this.probeGeneration;
     const run = this.chooseCli(agent)
-      .then((value) => {
+      .then((chosen) => {
         /*
          * ⚠ **A miss is never held.** `findOnPath` forgets one after thirty seconds
          * for exactly this reason, and this cache sat over it with ten minutes — so
@@ -1194,8 +1258,10 @@ export class LocalRuntime implements SessionRuntime {
          * a miss is what the next install disproves, and it costs nothing to ask
          * again, since a `null` here spawned no `--version`.
          */
-        if (value !== null && generation === this.probeGeneration) this.cliChosen.set(agent, { at: Date.now(), value });
-        return value;
+        if (chosen !== null && generation === this.probeGeneration) {
+          this.cliChosen.set(agent, { at: Date.now(), value: chosen.value, build: chosen.build });
+        }
+        return chosen?.value ?? null;
       })
       .finally(() => {
         if (this.cliInFlight.get(agent) === run) this.cliInFlight.delete(agent);
@@ -1204,8 +1270,18 @@ export class LocalRuntime implements SessionRuntime {
     return run;
   }
 
-  /** {@link agentCli} without the cache. */
-  private async chooseCli(agent: AgentId): Promise<AgentCliChoice | null> {
+  /**
+   * {@link agentCli} without the cache — and which file answered, for the cache to
+   * weigh a later use against.
+   *
+   * ⚠ **The file is read before `--version`, never after.** A swap landing between
+   * the two then pairs the *new* version with the *old* file's key, and the next
+   * use sees the key move and asks once more; the other order would pair the old
+   * version with the new file's key, which every later use agrees with, and the
+   * report would name the wrong build for the whole of {@link AGENT_CLI_TTL_MS}.
+   * One extra `--version` is the price of the race going the safe way.
+   */
+  private async chooseCli(agent: AgentId): Promise<{ value: AgentCliChoice; build: string | null } | null> {
     const login = this.builtinLogin(agent);
     if (login === null) return null;
 
@@ -1213,7 +1289,8 @@ export class LocalRuntime implements SessionRuntime {
     if (overrideName !== null) {
       const override = (process.env[overrideName] ?? "").trim();
       if (override.length > 0) {
-        return { path: override, version: await this.cliVersion(override), source: "override" };
+        const build = await this.identify(override);
+        return { value: { path: override, version: await this.cliVersion(override), source: "override" }, build };
       }
     }
 
@@ -1222,7 +1299,8 @@ export class LocalRuntime implements SessionRuntime {
     // absence seen from the reporting side.
     const onPath = findOnPath(login.command);
     if (onPath === null) return null;
-    return { path: onPath, version: await this.cliVersion(onPath), source: "path" };
+    const build = await this.identify(onPath);
+    return { value: { path: onPath, version: await this.cliVersion(onPath), source: "path" }, build };
   }
 
   /**
@@ -1527,6 +1605,22 @@ function runProbe(
       },
     );
   });
+}
+
+/**
+ * The real {@link LocalRuntimeOptions.identify}: which file a CLI path names, as
+ * one string compared for equality.
+ *
+ * A free function for {@link runProbe}'s reason — the option stands in for it.
+ * `probeBuild` answers three ways and the cache holds one key, so `missing` is
+ * spelled as a key of its own rather than as `null`: a CLI that vanished is a
+ * change like any other and must be re-chosen, while `null` is "could not tell"
+ * and must never be. The NUL keeps it from ever equalling a real path's key.
+ */
+async function cliBuild(path: string): Promise<string | null> {
+  const probe = await probeBuild(path);
+  if (probe === null) return null;
+  return probe.kind === "file" ? probe.key : "\0missing";
 }
 
 /**

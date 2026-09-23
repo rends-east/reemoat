@@ -289,6 +289,31 @@ export function clearSession(): void {
 }
 
 /**
+ * Stop presenting the credential this page holds, and **leave the stored one
+ * where it is** — the half of `clearSession` a server change needs and nothing
+ * more.
+ *
+ * ⚠ **This exists for one caller, `ChooseServer`, and it is the page's half of a
+ * switch's safety.** `host_set_server` moves the base in the host process, so from
+ * the instant it returns every `host_cp` call goes to the *new* origin; a bearer
+ * still held here would ride the next four-second poll or `cpFetch` to a host
+ * somebody has just typed in. Nulling it first means none of those is *sent* with
+ * one — a request already dispatched carries its header regardless, and what keeps
+ * that one on the old server is that the host reads its base when it runs.
+ * `state.host` still holds the boot's copy until the reload, and nothing between
+ * here and that reload adopts it.
+ *
+ * What it no longer does is erase `credential#<origin>`: the server being left
+ * stays signed in on this computer, so switching back asks nothing (Q7.148). The
+ * keyring entry is keyed on its own origin and the page reloads on the new one,
+ * so a kept credential is still never read for any other server. Signing out is
+ * still `clearSession`, and still erases the current server's entry alone.
+ */
+export function detachSession(): void {
+  credential = null;
+}
+
+/**
  * Which installation this client is registered as, or `null`.
  *
  * In the shell this comes from `NativeBoot` — the shell's own configuration file,

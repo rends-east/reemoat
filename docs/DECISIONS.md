@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 142 | `###` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 143 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 89 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 386 | `####` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 388 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 65 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 114 | `####` |
-| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 71 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 147 | `###` |
-| | | **1014** | |
+| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 72 | `###` |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 148 | `###` |
+| | | **1019** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1014 rather than the 514
+dividers. So the count is over **both** depths, and it says 1019 rather than the 517
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -393,7 +393,9 @@ change what the daemon bound to or what an already-memoised client did.
 ### Q1.22 — Does `REEMOAT_PORT` still matter if nothing outside dials it?
 
 **Decision.** `REEMOAT_PORT` stays known and stays 7887. `REEMOAT_PORT=0` still
-works for a daemon only ever served by the relay.
+works for a daemon only ever served by the relay — and is what the desktop app
+gives every daemon it runs for a server other than the one `~/.reemoat/daemon.env`
+names, the `~/.reemoat` daemon keeping 7887 (Q7.148).
 
 **Why.** The things that address the port are on the same machine: `pnpm client`
 under the shared secret, and the deploy script's `/health` probe. With `0`, the
@@ -3381,6 +3383,9 @@ leaving the strip. Signing the address so the far side could trust it: it
 protects a form default — the order is built from the POST body either way — at
 the cost of a shared secret spanning two repositories with no rotation story.
 
+**Status.** Superseded — Q1.650: the offer is deleted, by the owner's decision of
+2026-09-23. Nothing above was wrong; it is kept whole as the way back.
+
 ### Q1.633 — May an admin hand somebody a grant on a machine they do not own?
 
 **Decision.** No, and the routes that did it are deleted rather than guarded.
@@ -3697,7 +3702,9 @@ is the owner's call rather than a derivation.
 **Why the rule points the other way.** Of `REEMOAT_CP_MACHINES_OFFER_URL` that
 rule says it *"points at one particular shop run by whoever runs the deployment"*
 and that neither it nor the catalogue URL has a compiled-in default, *"because
-this is AGPL software and forks run their own control planes."* Terms are that
+this is AGPL software and forks run their own control planes."* [⚠ the offer is
+deleted — Q1.650; `cp-accounts.md` now makes the same argument of
+`REEMOAT_CP_APP_DOWNLOAD_URL`, and it applies here unchanged.] Terms are that
 argument sharpened: they name a legal person with liability behind them, and they
 are drawn on the sign-up screen of **every** instance rather than on an admin
 screen. A fork that forgets to replace them is telling its users they have a
@@ -3730,7 +3737,8 @@ because *not yet known* may not be drawn either way.
 
 **The way back for the party itself is written down so nobody re-derives it.** Move the party to an
 environment variable named REEMOAT\_CP\_LEGAL\_OPERATOR, published on
-`GET /v1/instance` beside `machines.offer`, read in `instance.ts` with the guard
+`GET /v1/instance` beside `legal.documents` [it said `machines.offer`, deleted by
+Q1.650], read in `instance.ts` with the guard
 `isAbsoluteHttpUrl`'s sibling, and fall back to *"whoever runs this control
 plane"* — `gateNotice`'s own sentence, so two screens cannot disagree about who
 somebody is being asked to deal with. Its price is a field on that route, which
@@ -3791,7 +3799,9 @@ the lookup key** — `credential#<origin>`. So a credential cannot be *read* for
 server it was not issued by: structurally, rather than because some code path
 remembered to clear it on a change. `host_set_server` also erases the previous
 origin's entry in the same act, so nothing is retained for a server this app is no
-longer going to present to.
+longer going to present to. [⚠ reversed by Q7.148: it keeps it now, so a server
+switched away from stays signed in; the lookup key above is unchanged and is what
+the reversal rests on.]
 
 `#` as the delimiter because a URL origin cannot contain one, which makes the rule
 unambiguous with no escaping and makes a later `credential#<origin>#<account>` an
@@ -4231,6 +4241,57 @@ answers `null` outside the shell, so a browser was already refused and already s
 so. What this removes is dead weight and a false promise, not a hole.
 
 **Status.** Current. Q7.37 is the phase this follows from.
+
+### Q1.650 — Deleting the machine offer
+
+**Question.** Q1.632 drew a "Rent a machine" link under the one-line installer, off
+unless `REEMOAT_CP_MACHINES_OFFER_URL` named a shop — and the dev stand's env file
+named one, so it sat on the home screen of every empty fleet there. Switch it off,
+or take it out?
+
+**Decision. Deleted — the owner's call of 2026-09-23.** Unsetting the variable is
+the state Q1.632 was built to fall back to, and it is not enough on its own: it is a
+line in the dev stand's env file, and possibly prod's, which this repository cannot
+see, and it leaves a renderer, a URL builder, a config field, a wire field and a
+tint in the tree — about thirty driver checks — for a feature nobody runs.
+
+**What went:** the `MachineOffer` renderer (`ui/MachineOffer.tsx`) and
+`machineOfferHref` (`offer.ts`), both files; its three call sites in
+`MachinesSection`, `SessionBrowser` and `NothingSelected`; `machineOffer` and
+`InstanceConfig`'s `offer` field; `machines.offer` on `GET /v1/instance` and the
+option that carried it into `createControlPlaneApp`; the variable's read in
+`main.ts` and its block in `.env.example`; and `--color-offer`. Its ink, which the
+`(stopped)` task chip had already borrowed (Q3.603), stays under a name of its own,
+`caution` — a palette naming a feature it no longer has is a docblock that has
+stopped being true. `webcheck` counts both old names as retired and bounds the new
+one to that one chip.
+
+**What stayed.** `installCommand` and `machineQuotaNotice`, untouched: the command
+is still the only way a machine is added from this app, and the door-or-the-sentence
+pair is still what an empty fleet draws. The landing page's pricing and the checkout
+it links to are another deploy. The Terms' *Paid plans* section is a contract rather
+than a screen and is not edited here.
+
+**Skew, in both directions.** An app built before this reads the missing field as
+an instance that offers nothing — Q1.632's own fail-closed arm — so redeploying the
+control plane takes the link off every installed build, the only lever that reaches
+them. An app built after it ignores a `machines.offer` a control plane not yet
+redeployed still sends; `webcheck` feeds it one. Neither side has to ship first.
+
+**The variable is warned about rather than swallowed.** `RETIRED_ENV` in `main.ts`
+says once at startup that it is set and no longer does anything —
+`scripts/daemon.ts`'s rule for its own retired settings (`deadContainerVars`),
+applied to the control plane for the first time. `REEMOAT_CP_WEB` went without one
+(Q1.649); this one is known to be set on the dev stand, and it shipped in 0.8.0 as
+a documented setting, so a deployment this repository cannot see may carry it on
+purpose. Its value is passed to nothing; `deploycheck` asserts the list names it and
+that nothing reads it by name.
+
+**The way back is Q1.632, kept whole.** Its placement argument — inside the
+`mayAddMachine` arm, below `installCommand` — and its `URLSearchParams` measurement
+do not depend on the feature existing, and this commit's parent holds every file.
+
+**Status.** Reversed an earlier decision — Q1.632.
 
 
 ## Session lifecycle, questions and attachments
@@ -9408,8 +9469,9 @@ Low/High/Max, and on `K2.7 Coding` it offers the single value `On`.
 #### Q3.66 — Why did the model chip read "Default", and how is the real name recovered?
 
 **Decision.** The snapshot keeps the **selected** choice's description — 1 of N,
-clipped to 120 chars — and `chipValue` shows the head of it, minus qualifiers.
-Narrowed to `category === "model"`.
+clipped to 120 chars — and `chipValue` shows the head of it, minus qualifiers
+[on the `default` placeholder; on any other row only where the head names the row's
+own model, Q3.641]. Narrowed to `category === "model"`.
 
 **Why.** The model is resolvable and was being thrown away: its `default` choice
 is named `Default (recommended)` and only its **description** says which model
@@ -10112,6 +10174,12 @@ installed", which called a machine whose only harness is installed and signed ou
 predicate is now one function called in both places: the fallback naming an agent
 the wizard's own gate then declines to draw for is an empty row, no door, and
 nothing saying why. `webcheck` pins both call sites as source text.
+
+⚠ **Reversed by Q3.640: the door is gone, and what the screen owes back is a way to
+it rather than a copy of it.** New session draws no sign-in and no install; an empty
+strip says which kind of empty it is and offers Agent settings, and a row there
+offers Set up, which opens the card as a leaf of the machine's Agents list. The
+paragraph above is kept as what was decided at the time.
 
 **And an empty row says which kind of empty it is.** It had one sentence because it
 had one cause — the daemon listed nothing. A machine can now list three agents and
@@ -12586,7 +12654,8 @@ length guard does not tell a sentence from a name.
 **Measured.** codex's 37-character "Latest frontier agentic coding model." passed a
 length guard and put itself on the chip while `GPT-5.6-Sol` sat one field away.
 
-**Status.** Current
+**Status.** Current — narrowed by Q3.641: the separator is necessary and no longer
+sufficient, since claude 2.1.280 separates a notice from its blurb the same way.
 
 #### Q3.411 — Do `labelFor` and `choiceOverride` answer the same question?
 
@@ -17615,6 +17684,11 @@ and `…/agents/claude` lands there with the tail dropped — still "fall up to 
 nearest real screen", and the screen it falls to is one tap from what that address
 used to open.
 
+⚠ **The tail is not dropped any more (Q3.640).** `…/agents/claude` opens claude's
+card as the list's own leaf, pushed by a row's Set up, and walks back to the list by
+URL. The list's ◀ below still reads `origin`, which is what brings a walk that began
+on New session back there after two taps.
+
 **The Agents screen's own ◀ reads `origin` too, and only there.** It walked to the
 machine — the parent in the URL — which is right when you arrived from the machine's
 own row and wrong when you arrived from the gear: it strands somebody in settings
@@ -18079,7 +18153,12 @@ for, that screen lists no rows at all, so "lists them all" would have been two
 screens answering one question with one of them wrong. The second ending names the
 bar at its foot, which is drawn either way.
 
-**Status.** Done.
+⚠ **Superseded by Q3.640, and neither ending survives.** The sentences are
+`STRIP_EMPTY` now, and every arm with somewhere to send you ends in an Agent settings
+button rather than naming the gear in prose. The row's **Set up**, opening the card,
+is a fourth door beside the three this entry lists.
+
+**Status.** Done; the empty arm superseded by Q3.640
 
 #### Q3.539 — May a plugin add an *agent*?
 
@@ -21412,7 +21491,8 @@ which are not tokens in this palette — Tailwind v4 emits no rule for a utility
 variable does not exist (Q3.204's own measurement), so `(done)` and `(stopped)` were
 drawn in the row's ambient colour and were indistinguishable from `(running)`. The
 retired-colour sweep does not catch them: its pattern ends `warn\b`, and `\b` fails
-against the `i` of `warning`. They are `add-ink` and `offer-ink` now.
+against the `i` of `warning`. They are `add-ink` and `offer-ink` now. [⚠ `offer-ink`
+is `caution` since Q1.650, which deleted the control it was named for; same value.]
 
 **Status.** Current
 
@@ -23347,6 +23427,232 @@ than trusted, because it is the property that decides whether this plugin may be
 pointed at markdown at all. It is also a **render** fix rather than a send fix —
 every message already in the log gains its breaks back on the next paint.
 
+#### Q3.640 — New session never installs or signs in; it sends you to the machine's Agents list
+
+**Reported, by the owner.** New session unfolded an *Install <X>* or *Sign in to
+<X>* disclosure, with that harness's whole card inside it, whenever no agent on the
+machine could start. What was asked for: no install and no sign-in on that screen at
+all, and a button to the machine's agent settings instead.
+
+**Question.** Redirecting was the easy half and a dead end on its own. The Agents
+screen that button would open could not sign anybody in, and its Install ran with no
+output — a menu item, then one word under a row. Sent there as it stood, somebody
+with nothing to start would land one screen short of the remedy.
+
+**Decision. New session keeps no door, and the Agents list finishes the job.** An
+empty strip draws one sentence and at most one control, from `STRIP_EMPTY`, chosen by
+`stripEmpty` — both in `NewSession.tsx`, both driven as values:
+
+| Case | Sentence | Control |
+|---|---|---|
+| a row that could start is hidden | *Every agent that can start here is hidden.* | Agent settings |
+| nothing installed, nothing assembled | *No agent is set up on this machine yet.* | Agent settings |
+| signed out, refused, only a router like opencode, a preset on a missing harness or on one refused while routed | *No agent on this machine is ready to start.* | Agent settings |
+| the machine lists nothing | *This machine reports no agents.* | Check again |
+| a daemon too old for the strip routes | *This machine needs an update before agents can be set up here.* | none |
+| a read failed or is still out | nothing — the Try again row speaks | — |
+
+**Agent settings** is `onConfigure`, the gear's own handler — the same crossing, so
+the address made whole, the push and the pick in `agentPick.ts` all come with it
+rather than a second copy. `plain`, so `Start` stays the one filled control; named
+as the gear is labelled. No sentence says install or sign in, and `webcheck` sweeps
+the table for that and for the jargon floor and the fourteen-word line.
+
+**The empty state is decided once, and the footer is why.** The first draft computed
+it inside the strip and gave the footer its own test — *once both reads have
+settled, nothing chosen means nothing startable* — which is false exactly when a read
+fails: `GET /agents` failing lands `[]` and a reason, so the footer would have said
+*no agent to start* directly under *could not be read*. `stripEmpty` is called in
+`NewSession` over `stripRows`, the merge `defaultRow` is taken from, told about both
+failures; the strip reads it as a prop, and the footer says *no agent to start* only
+where it is non-null. Nor does the footer ask for a tap after `GET /agents` failed:
+there is no harness tile and every preset tile is disabled, so *choose an agent* was
+the impossible request again, and that line is empty while the Try again row speaks.
+
+**Hidden means a hidden row that could start.** "Every row is hidden" was the old
+test and it was wrong both ways, each a state the new table would otherwise have
+shipped: a signed-in harness hidden beside a visible preset on a missing harness
+read *not ready* about a machine that was ready, and a hidden preset on a missing
+harness read *hidden*, promising a remedy that fixes nothing. It is asked after
+*nothing listed* and before every fault, because it is the one cause true of a
+machine with nothing wrong with it.
+
+**The destination had to finish the job.** A row whose badge says *not installed*,
+*not signed in* or *would not start* — or a preset whose harness is not there or
+refused while routed, which its subline now says (*not installed*, *would not start*)
+instead of naming its system — offers **Set up <harness>** in its menu. That pushes
+`agentSetupPath`, `/settings/machines/:m/agents/:harness`, and
+`MachineAgentsSection` draws `AgentDetail` there, untitled, below its three guards:
+the same card New session used to unfold, with the installer's output and the
+sign-in wizard. The pane is titled **Setup**, a noun like its siblings. The list's
+own Install is **deleted**, so the card is the one surface that starts a run; the
+list only adopts one through `liveInstall`, which is what keeps `Installing… · 42s`
+under a row after a ◀ from a card mid-install. The poll it adopts stops when the list
+unmounts, which it now does on every Set up: a loop that outlived it was one more
+`readInstall` a second through the tunnel for each ◀ back during a run.
+
+⚠ **The routed arm was missing from the first draft, and it was the sharpest case.**
+`startableHere` refuses a preset whose harness refused while routed, so on a machine
+whose only row was an OpenRouter preset on opencode, New session said nothing could
+start and sent somebody to a row reading like a healthy one, with no Set up behind
+it — and beside that sentence the tile was drawn pressable over a tap `offeredHere`
+dropped. The row (`presetRefused`) and the tile (`refused`) both ask
+`routed === true` now, in the same words, so the tile, the pick, the sentence and
+the row say one thing; a refusal measured bare still leaves the preset startable.
+
+⚠ **A card that moved rather than one that multiplied.** Q3.540 records two leaves
+for one credential as the shape the Sign-ins list was built to remove, and
+`…/agents/claude` now draws claude's card beside the Anthropic leaf. It is the same
+`AgentDetail` over the same `GET /agent-auth`, so the two cannot disagree about
+*signed in?*, and the Sign-ins list stays the list of credentials; what this leaf
+adds is the state that list never shows — a harness not installed yet. It left New
+session in the same change, so the count of places it is drawn did not move.
+
+⚠ **The route's shape did not change, and the bound did.** The harness rides the
+existing `signin` field with `agents` true, so no route literal in the drivers had
+to move. It is bounded by `MAX_HARNESS_ID_CHARS`, 96 — the daemon's own
+`MAX_STRIP_REF_CHARS` — rather than the 64 a system id is held to: a harness a
+plugin adds is two 32-character halves and a colon, and at 64 a Set up on that row
+pushed an address the parser dropped, landing back on the list it was tapped from.
+The Sign-ins list's harness leaf, `…/signin/:agent`, moved to the same number in the
+same change: the harness it names is by definition one no provider speaks for, which
+is the contributed kind, so it had the same latent defect.
+
+**The walk back is derived, with no new mechanism.** The leaf's ◀ is the list, by
+URL: `settingsUp` answers `…/agents` for it and never reads `origin`. The list
+still holds the origin across that push — `originFor` keeps it within one pop-up —
+so its own ◀ answers New session, which remounts and restores the folder from the
+address and the pick from `agentPick.ts`: Q3.531's two survivals, which are also
+why Q7.118's reason for pulling the sign-in inline no longer holds. `depthOf` gives
+the leaf a fifth depth so Set up slides, and `screenOf` folds in `signin` so focus
+moves — which also closes a latent defect: the Sign-ins list's own harness leaf
+shared the machine screen's identity.
+
+**What this reverses.** Q4.126's *What it costs* sentence, which named the install
+under the strip; Q3.526's *this hides a door, and the screen owes one back*; Q3.538's
+empty arm naming the gear, with its two endings; Q3.531's `…/agents/claude` landing
+on the list with the tail dropped; and the inline mount of `AgentDetail` that
+Q3.431 counted as its second render site. `agentDoor` and `doorLabel` are deleted
+from `agentInstall.ts` and named in its tombstone; the repair they carried lives on
+in `primaryControl`, which tests `available` before the credential axis.
+
+**Rejected.**
+
+- **Relabelling the door.** Whatever it says, it is a form growing inside a screen,
+  which the owner's settings rule refuses.
+- **A button straight to one harness's card.** Which one is the `agents[0]` guess
+  this row has been caught making before; the list shows every row's reason.
+- **The Sign-ins leaves, `…/signin/:agent` and `…/systems/:system`.** Their ◀ goes
+  to the machine screen, which is the stranding Q3.531 recorded for a crossing.
+- **A `history.state` flag for the way back.** `settingsUp` is derived from the URL,
+  and that is what makes every chevron in the sheet stable.
+- **Making the row itself a tap target for Set up.** A row here is a handle and a
+  menu, and a row that gains a control moves every control beside it.
+- **Gating Set up on `installable`.** On a harness this machine cannot install, the
+  card still says what to do — install it on the machine itself — and carries Check
+  again for after; that is a sentence with a control rather than an empty card.
+
+**Known residue.** A daemon too old for the strip routes loses the only in-app way
+it had to set an agent up: a sentence and no button, because its Agents screen is a
+dead end. On a shared grant the card's Install answers `403` with the route's own
+sentence, since installing is `machine:admin`; signing in still works. A preset
+whose harness is gone draws the raw id for a contributed harness, as the New
+session tile already did — and says *not installed* when that harness belongs to a
+plugin that is installed and switched off, since `availability()` leaves a disabled
+plugin's harness out of the listing entirely and neither screen can tell the two
+apart; the remedy is the Plugins page, which neither row names, and Set up is
+rightly withheld because the card would have nothing to act on. The card keeps its
+own two in-place disclosures, now inside a leaf — not yet put to the owner against
+the no-in-place-expansion rule. And
+*choose an agent* still shows for the beat between the two reads landing.
+
+**Asserted, and not yet measured.** `webcheck` drives `stripEmpty` over every arm
+and both of the states the old hidden test got wrong, pins the footer and the one
+`Empty` with no `aria-expanded` under the strip, holds New session free of the card,
+both helpers, both glyphs and both verbs, and pins Set up inside the row's menu, the
+preset row's two sublines ahead of its system, the routed-refused preset as *not
+ready* with its tile disabled, the list's two empty sentences, its poll loop stopping
+on unmount, the leaf's parse and its bound, `Setup`, depth five, and the whole
+New session → Agents → Set up → ◀ → ◀ walk as a sequence of `originFor` and
+`settingsUp` answers. The walk in WKWebView — a fresh machine at 390×667 and 1280,
+Install and sign-in on the card, the two ◀ — is still to be made, and is what this
+paragraph owes next.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.641 — A model chip read "Newer version availa…": when is a description's head a model name?
+
+**Question.** Reported with a screenshot: after Claude Code had moved under the
+daemon, a conversation that woke on its old model drew its model chip as "Newer
+version availa…".
+
+**Measured, 2026-09-22, against claude 2.1.280, off stored `agent_config` events.**
+A fresh session's list:
+
+| value | name | description |
+|---|---|---|
+| `default` | Default (recommended) | Sonnet |
+| `sonnet` | Sonnet | Sonnet 5 · Efficient for routine tasks |
+| `claude-fable-5-1[1m]` | Fable | Fable 5.1 · Most capable for your hardest and longest-running tasks |
+| `opus` | Opus | Opus 5.5 · Best for everyday, complex tasks |
+| `haiku` | Haiku | Haiku 4.5 · Fastest for quick answers |
+| `opus[1m]` | Opus (1M context) | Opus 5.5 with 1M context · Best for everyday, complex tasks |
+
+A session resumed on `claude-opus-5[1m]` publishes the first five unchanged and, in
+place of `opus[1m]` — which is absent from its list — a row valued
+`claude-opus-5[1m]`, named "Opus 5 (1M context)" and described "Newer version
+available · select Opus for Opus 5.5". ⚠ **The row is not new in 2.1.280.** Its
+template is in the 2.1.277 and 2.1.278 binaries as well; what 2.1.280 changed is
+that the `opus` alias now means Opus 5.5, so a session on the explicit id an alias
+has moved past is the one that qualifies. `chipValue` took the head before the `·`
+as the model's name, because a separator was the whole of its test (Q3.410), and
+the head was 23 characters of notice.
+
+**Decision.** Off the `default` placeholder, a description's head is believed only
+where its first word is the row name's own — `familyWord`, which splits on
+whitespace, `(` and `[` and folds case, so `Sonnet` over `Sonnet 5 · …` and `Opus
+(1M context)` over `Opus 5.5 with 1M context · …` both pass, and so does a raw
+`opus[1m]` over prose when the value has no choice to name it. Otherwise the chip
+draws the row's own name without a trailing parenthetical: `Opus 5 (1M context)` →
+`Opus 5`. `default` is exempt because it is the one row whose name names no model,
+which is the reason the function mines descriptions at all; keyed on the literal
+value, as `choiceOverride` keys it.
+
+**Why this test.** Every fixture in `webcheck` passes it unchanged, and so does
+every row of both measured lists but the one it exists for. Run over the last 3000
+stored `agent_config` events, the only two mismatches are that row and `default`,
+which is exempt; grok, kimi and opencode publish no description with a separator at
+all.
+
+**Why the parenthetical goes.** `CHIP_MAX` holds about eighteen characters at
+`text-2xs` and "Opus 5 (1M context)" is nineteen, so the name whole would read
+"Opus 5 (1M cont…". Before the alias moved, the same model on `opus[1m]` read `Opus
+5`, because the `with 1M context` qualifier is already dropped from a head — the
+context length is a property of the choice, spelled out in the menu row. This is
+that rule applied to a name, in the fallback arm only.
+
+**Rejected.**
+- **Mining only the placeholder.** Every picked row would lose its version — `Opus`
+  where the answer is `Opus 5.5` — and the version is exactly what an update moves.
+- **Requiring a digit in the head.** "Newer version 2 available" would pass.
+- **A table of phrases that are not models.** That is this client matching the CLI's
+  English, which moves with every release.
+- **Matching on any shared word.** It admits strictly more heads than the first word
+  does and no measured row needs it.
+
+**Unchanged.** The menu row draws the CLI's sentence exactly as sent, under the
+row's whole name, and the chip's `title` draws the sentence alone — `Model: Newer
+version available · …`, never the name — so the context length the chip drops is
+in the menu row and not one hover away. In both the sentence is the remedy, and
+`webcheck` pins that the rule stops at the chip on the menu row; nothing pins the
+title. A session parked with the pre-update list keeps that list
+until it wakes, and `restoreConfig` is untouched: both are the owner's scope,
+decided 2026-09-23. A memory in `localStorage` that already holds the notice is read
+back through the same function and draws the name.
+
+**Status.** Current. Narrows Q3.410: the separator is necessary and no longer
+sufficient.
+
 ## Deployment, packaging and code layout
 
 ### Q4.1 — Is this one deployment or two, and why can the two services not be checked out separately?
@@ -24968,7 +25274,9 @@ the four come from is a choice made once per machine.
   PATH, which is the daemon's only for the daily run; and a refresh with no restart
   is seen by nothing in the daemon, so `AgentCapabilities.cli` names the previous
   build for up to ten minutes while the spawn already runs the new one — the file
-  a held path names was swapped by rename. Before, because `pnpm install` brings none of the CLIs any more: a
+  a held path names was swapped by rename. [⚠ no longer true — Q6.112: a held
+  choice is weighed against the file behind its path on every use, so the report
+  catches up at the daemon's next use of that CLI.] Before, because `pnpm install` brings none of the CLIs any more: a
   machine upgraded from 0.5.0, which vendored claude, codex and opencode under
   `node_modules`, would come back up with none of the three for the five minutes
   until the daemon's own first run, and `autoResume` would refuse every interrupted session
@@ -25374,7 +25682,8 @@ product. What does that page link to?
 
 **Decision. `REEMOAT_CP_APP_DOWNLOAD_URL`, env-only, unset by default**, published
 on `GET /v1/instance` as `app.download` — `REEMOAT_CP_MACHINES_OFFER_URL`'s shape
-and every one of its arguments. An address rather than a flag, because a client
+and every one of its arguments [⚠ that variable is deleted — Q1.650; this one now
+carries those arguments on its own]. An address rather than a flag, because a client
 that renders a link cannot be told "there is one" and left to invent where it goes.
 
 **⚠ Unset is the truthful state and the one this repository ships in.** Nothing
@@ -25872,6 +26181,11 @@ contention is answered so the script's own `exit 0` is never what a person sees.
 presses Install, and `NewSession` owes that state its own sentence — *"No agent is
 installed on this machine yet."* — because *"not ready to start"* describes the
 ordinary first-run state as a fault.
+
+⚠ **The sentence and the press both moved with Q3.640.** New session installs
+nothing now: that state reads *"No agent is set up on this machine yet."* and offers
+Agent settings, and the press is on the harness's card, opened by its row's Set up on
+the machine's Agents list. The reason for a sentence of its own is unchanged.
 
 ## Invariants — rules that were defects first
 
@@ -28049,7 +28363,8 @@ field's name is read off a form somebody is filling in from a phone.
 does not "fix" them: `SessionBrowser`'s waiting-elsewhere band (`text-fg` — louder
 than the rows under it, on purpose), `MachineSection`'s `RETIRE_HEADING`
 (`text-danger`), and `MachineOffer`'s `or` (no `font-semibold`, because it is the
-word between two doors rather than a heading). ⚠ `RETIRE_HEADING` is spelled out
+word between two doors rather than a heading) [⚠ deleted with the offer — Q1.650;
+`webcheck.typography.ts`'s census is the current list]. ⚠ `RETIRE_HEADING` is spelled out
 rather than composed for a real reason: `` `${SETTINGS_HEADING} text-danger` `` is a
 **silent no-op**, two colours of one family resolved by Tailwind's alphabetical
 emission rather than by the line — the same trap Q3 records for `items-center`
@@ -28077,7 +28392,10 @@ credential and no window; as a settings screen there is both.
 
 **The rule.** `cp.clearSession()` runs **before** `setNativeServer`, never after.
 It is local, instant, cannot fail, and erases `credential#<old origin>` through
-the same call `host_set_server` was about to make one line later.
+the same call `host_set_server` was about to make one line later. [⚠ amended by
+Q7.148: it is `detachSession` now, the in-memory half, and neither side erases the
+old origin's entry — a switch keeps that server signed in. The order is unchanged
+and is still the rule; a refused switch re-adopts the copy it let go of.]
 
 **Priced, because the safe-looking order is the wrong one.** Clearing first costs
 one sign-in in the case where `setNativeServer` then fails on a full disk:
@@ -28983,7 +29301,9 @@ which the shipped `tsconfig.json` deliberately forbids.
 
 **Behaviour.** The single-row `daemon` table, checked before restore.
 
-**Consequence.** Without it each daemon would reap the other's agents.
+**Consequence.** Without it each daemon would reap the other's agents. So it is one
+daemon per database — and the desktop app runs one per server, each on a state root
+of its own, rather than two against one file (Q7.148).
 
 ### Q6.50 — What happens if the daemon's port is already taken?
 
@@ -29475,7 +29795,8 @@ being recorded.
 
 **What an agent can now do.** Same uid, no sandbox: a file at `~/.local/bin/claude`
 whose `--version` prints a higher number becomes the build every session and login
-runs, within ten minutes. Before this it could edit the vendored binary in
+runs, within ten minutes [at the next use now, where it replaces the file behind a
+path already held — Q6.112]. Before this it could edit the vendored binary in
 `node_modules` to the same effect, so this is a second door to a room that was
 open; `CLAUDE.md` names it under **What is not confined**, and the pin flag or a
 named `CLAUDE_CODE_EXECUTABLE` closed it — with the flag gone (Q4.114) the
@@ -29501,7 +29822,9 @@ of `override` or `path`; and `findOnPath` searching `MANAGED_CLI_DIRS` **after**
 PATH. `daemoncheck` drives what stands with stubs on PATH and an injected
 `--version`, the in-flight collapse, the fence, and `spawnPlan`; `webcheck` the
 refusals of the picker line; `relaycheck` nothing — none of this crosses the relay.
-What keeps the PATH copy moving is Q4.113.
+What keeps the PATH copy moving is Q4.113. Amended by Q6.112: the ten-minute cache
+is a ceiling now rather than the mechanism — a held choice is weighed against the
+file behind its path on every use.
 
 ### Q6.107 — `_session/steering`: what the four agents actually do with a message sent mid-turn
 
@@ -29801,6 +30124,104 @@ from, so the two halves of that screen cannot disagree. `notice` became a list
 rather than a string: OpenRouter's failure is a fetch *this browser* made and this
 one is a spawn *the daemon* could not make, and joining them would claim one cause
 for two.
+
+### Q6.112 — A CLI build this daemon did not install is noticed at its next use
+
+**Question.** A new claude session ran Opus 5.5 the moment it was started, while the
+New session screen went on naming the previous Claude Code build, and listing that
+build's models, for up to ten minutes. Why the two answers, and why the delay?
+
+**Measured, 2026-09-22.** `~/.local/bin/claude` pointed at
+`~/.local/share/claude/versions/2.1.280`, the link's own mtime 21:56. It was moved by
+something other than this machine's production daemon, whose `daemon.log` still
+recorded its last refresh as 2.1.278; **which process moved it is not recorded**.
+Three other daemons started from a checkout were listening on 7987, 7992 and 7993,
+each running its own agent updater against the same home directory. A spawn after
+the move ran 2.1.280 at once, because the held path is the symlink and the file
+behind it is what executes. But `AGENT_CLI_TTL_MS` went on holding `2.1.278` as the
+reported build and `MODELS_TTL_MS` the list that build had published, and the only
+thing that clears either early is `afterAgentsChanged` — which runs only when *this*
+daemon moved the file.
+
+**Decision.** Pull, not push: each cache records which file answered, and compares
+on every hit.
+
+- `probeBuild`, in `stall.ts`: a bounded `realpath` then a `stat` of the target,
+  keyed `real + dev:ino:size:ctimeMs`. The resolved path catches the native
+  installers, which swap by rename; the inode, size and change time catch an npm
+  install replacing the file where it stands, where the real path is the same across
+  builds. `ctime` rather than `mtime`, because an installer may keep the packed file
+  times and `ctime` cannot be set from userland. `null` is "could not tell".
+- `LocalRuntime.agentCli`: `cliChosen` holds the key beside the choice (`cliBuild`
+  is the default `identify`, spelling `missing` as a key of its own), and every hit
+  asks again. `null` keeps the held choice — a stalled mount has not replaced
+  anything. A different key drops **this harness's** entry and re-chooses; not
+  `forgetAvailability()`, which would bump `probeGeneration` from inside a read path
+  and discard every harness's login probe and the PATH memo over a fact about one
+  file. `chooseCli` reads the file **before** `--version`, so a swap between the two
+  costs one extra `--version` at the next use rather than an old version held against
+  a new file for the whole TTL.
+- `AgentAskRuns.capabilities`: a held list is believed while `sameCli` says the
+  report it was published under is the report `agentCli` gives now — path, version
+  and source compared field by field, since a runtime may answer a fresh object on
+  every call.
+- **Both hit paths are fenced**, because both used to be synchronous and neither is
+  now, so a hit that straddles `forgetAvailability()` or `forget()` cannot hand back
+  the answer from before it. `agentCli` captures `probeGeneration` before the await
+  and compares it after, which is exact there because `forgetAvailability()` clears
+  every harness. `capabilities` compares the entry itself — still the one it read —
+  rather than `capsGeneration`, which a `forget()` for *any* harness bumps: fenced on
+  the counter, an install finishing on codex made every straddling claude hit throw a
+  valid list away and spend a handshake under `MAX_CONCURRENT_ASKS` fetching it
+  again. A caller whose signal has already aborted gets the held list without the
+  check, which may be a `--version`.
+- The two TTLs stay, as the ceilings behind the check rather than the mechanism.
+
+**Composes with.** `afterAgentsChanged` is unchanged in code: still immediate for
+this daemon's own updates and installs, and still the only thing that clears
+`findOnPath`'s memo and re-runs `resumeInterrupted`, neither of which a file check
+reaches.
+
+**Rejected.**
+- **`fs.watch` on the CLI's directory.** A watch on a directory this daemon did not
+  create is the stall `files-paths-git.md` forbids, in another shape.
+- **A timer.** Polling, for a fact nobody is looking at until something asks.
+- **Reading `cli` before `claim` in `readCapabilities`.** It would make the race
+  inside a spawn correct itself on the next hit, but it puts a CLI read ahead of a slot
+  wait of up to `SLOT_WAIT_MS`, and in front of the two `daemoncheck` cases that
+  measure that wait, whose runtimes carry no `agentCli`. So the window stays and is
+  written at the read: a build swapped inside the second or so of `Session.start` can
+  label the old list with the new build until `MODELS_TTL_MS` runs out.
+- **Clearing `startRefused` on a moved build.** Left, exactly as `afterAgentsChanged`
+  leaves it: a refusal still ages on `START_REFUSAL_TTL_MS`, and the first successful
+  start clears it.
+
+**Limits.**
+- The probe sees the file the path names and never what that file loads, so a
+  launcher that resolves its payload at run time hides a payload update beneath it,
+  which falls back to the ten minutes. grok's node launcher is one — left as the bin
+  entry when a package manager other than npm installs it, it execs
+  `$GROK_HOME/bin/grok` — and under npm it is not: grok's postinstall points the bin
+  entry at an extracted native binary and an update renames a new file over it,
+  which the probe sees. Measured 2026-09-23: `/opt/homebrew/bin/grok` resolved to
+  that native binary, byte-identical to `~/.grok/bin/grok-1.0.40` on its own inode.
+- `sameCli` compares the *reported* build, so a CLI whose `--version` answers nothing
+  keeps its previous list for up to `MODELS_TTL_MS` across a change.
+- A copy newly placed *earlier* on PATH is still found only once `findOnPath`'s memo
+  is cleared — the check weighs the path a choice already holds.
+- The stall memory is filed under the link's mount rather than the target's; the
+  deadline covers both calls, so the probe is still bounded.
+- A live or parked session keeps the list its own process published, and an open
+  builder keeps the list it fetched on mount — the first by the owner's decision, with
+  `restoreConfig` (Q3.641).
+
+**Cost.** One bounded `realpath` and `stat` per use — a spawn, the login probe, a
+capability read, a relay dial inside `ANNOUNCE_TIMEOUT_MS` — and nothing synchronous.
+On a stalled home directory it is one deadline, then remembered by `stall.ts`, and the
+held choice stands.
+
+**Status.** Current. Amends Q6.106: the ten-minute cache is a ceiling now rather than
+the mechanism.
 
 ## Open questions and deliberate non-goals
 
@@ -33861,6 +34282,11 @@ own docblock records why the *sign-in* flow was pulled inline — from inside a
 pop-up, navigating is "a pop-up replacing a pop-up", and it discards the folder
 already chosen. The builder has the same exposure.
 
+⚠ **The sign-in flow followed the builder out (Q3.640).** Its reason for being inline
+stopped holding for the reason this entry gives — the folder rides the address and
+the pick rides `agentPick.ts` — and the card is a leaf of the machine's Agents list
+now, reached from New session through Agent settings.
+
 **What changes the answer is that the folder can be made not to live in component
 state.** `/new/:machineId/:cwd` already had a segment for it — it was seeded from
 there and never written back. `NewSession` now replace-navigates on every folder
@@ -34788,7 +35214,9 @@ Sandbox is off. Windows (WebView2, Chromium's Private Network Access) and Linux
 (WebKitGTK) are open, and `docs/NATIVE.md` carries them. A platform that refuses
 costs nothing visible: `proveLocal` fails and the relay answers.
 
-**Status.** Reversed an earlier decision. Q7.135 is superseded.
+**Status.** Reversed an earlier decision. Q7.135 is superseded. Where the
+announcement lives — one per state root rather than one under `homedir()` — and
+which daemon may remove it is Q7.148.
 
 ### Q7.138 — Why the payload shipped a coding-agent CLI it deliberately does not ship
 
@@ -34900,8 +35328,94 @@ write nobody asked for, can itself `409` on `nameVisibleTo` leaving half a
 migration, and is cosmetic for a grantee anyway — `machines.name` was minted as
 `qualifiedName(label, id)` at creation and is permanently unchangeable.
 
+**Amended 2026-09-23: the home screen says `local`, and puts it first — the badge
+alone had kept half of the owner's words.** *"The local machine is called local
+only where the app is running"* was implemented as a `this device` badge in
+Settings → Machines, the one screen where the label is *managed*. The home screen —
+the machine strip, the desktop rail, the New session picker — never read
+`localMachineId`, so on the computer the app runs on the rail drew `M · MacBoo…`,
+in name order, and the owner asked why the local daemon was "not local and not
+first in the list". A badge answers *which row is this computer* for somebody who
+goes looking; the words were about what that machine is **called**, and the list
+you work from is where it is called anything.
+
+- **One rule for the name.** `machineDisplayName` in `machineOrder.ts`: `local` for
+  `localMachineId`, the stored label for every other machine. `sessionGroups` fills
+  `MachineGroup.name` from it, so the strip, the rail (label, tooltip, monogram) and
+  the drag's announcement follow with no call of their own; New session reads
+  `machinesAsDrawn`, which is the rail's order, names and therefore its default; the
+  two `machine · path` lines, on a row under All and on a session's header, call it
+  directly. **Settings → Machines keeps the real label** and the badge, since that is
+  where a label is renamed and told apart from a collision; **a sentence keeps it
+  too**, because one is what gets pasted to somebody at another client.
+- **One clause for the place.** `orderMachines` takes `first`: this computer's
+  machine leads *unless the stored order names it*, ahead of the stored ids rather
+  than among the machines nobody placed. A position somebody chose always wins, and
+  a drag is what stores one — `setMachineOrder` writes the whole drawn list, so the
+  first drag of any machine pins this one where it was drawn. A reader who had
+  dragged before this clause existed has it stored wherever it was drawn then, and
+  it stays there until they move it.
+- **The memo keys on it**, for `machineOrderVersion`'s reason — it is patched on its
+  own and replaces neither array — and `bootstrap` reads it inside the listing's own
+  `Promise.all`, so a daemon already up is `local` and first on the first paint
+  rather than renamed and moved a moment later.
+- **Seeded, then sticky — the review of that amendment found the name and the place
+  still moving by themselves.** The read above answered only on a launch where the
+  daemon was *already* up, and on this app's own computer it never is: the app stops
+  its daemon at quit, `src/announce.ts` removes the announce file on that clean stop,
+  and `setUpThisComputer` starts it again only after `phase: "ready"`. So every cold
+  launch drew the host name in name order and then renamed and jumped. And
+  `host_local_daemon` answers only a daemon that passes `/health` inside its probe, so
+  any wake where the daemon was restarting put the host name back until the next one.
+  Both were this entry's own rule read the wrong way round — *identity and
+  reachability are two questions* — so:
+  - **The seed is the claim**, the machine this app created for this server, which
+    the host already keeps per origin for the quota's sake and which survives the
+    quit. It rides the boot payload (`claimed`, one small file read, no probe) rather
+    than a new command or `host_daemon_state`'s poll, and `seedLocalMachine` fills an
+    unknown with it and never replaces a known id. A daemon the app adopted rather
+    than created carries no claim; the live read is its only answer, as before. The
+    announce file read *without* the probe was the other candidate and buys nothing
+    here: on the cold launch this exists for, the clean stop has already removed it.
+  - **The live read merges rather than assigns** (`localMachineAfter`): a read that
+    finds nothing keeps what is known, and a different machine of ours replaces it —
+    the live daemon is the authority when it names one. **An id this account does not
+    hold never displaces one**, which the brief had not asked for and the host forced:
+    it answers the first live daemon across this server's root and then
+    `~/.reemoat`, and a computer carrying a daemon for another fleet in the second
+    would otherwise have `local` moved off its own row on every cold launch. *Ours*
+    is a question about the list, and both reads are made before it is current, so
+    each answer is weighed again once a listing lands (`weighLocalMachine`) —
+    without that, the daemon of a machine just created lost to a claim for one
+    since switched off until the next wake.
+  - **Nothing clears it, and nothing needs to.** A stale id — a revoked machine,
+    another fleet's — matches no row, so it draws exactly what `null` does; a server
+    change reloads the page. The drag consequence above narrows with it: a drag made
+    while the id was unknown stored this machine at its name position, and that
+    window is now only a computer this app did not set up, before its daemon answers:
+    a machine the app has just created is weighed as this computer the moment the
+    listing holds it, rather than when its child first announces itself.
+- **Two tiles may not both say `local`.** *Not migrated*, above, means a machine the
+  app set up while `local` was the stored label still carries it — the owner's Mac
+  lists one beside the machine it runs now — and `nameVisibleTo` lets any other be
+  renamed to it, since this computer's own label is its host name. The control
+  plane's uniqueness rule cannot see a name that exists only on a client, so
+  `machineDisplayName` draws another machine's `local` (case-folded) as label, `-`,
+  and its id without `m_` — `qualifiedName`'s shape, which for a machine created as
+  `local` and never renamed is exactly the `machines.name` `cpctl admin machines`
+  prints. Whether or not this computer is known yet, so that tile's name never waits
+  on the identification, and in a browser the word is never drawn at all.
+
+Still drawn, never stored: nothing that writes a label reads it — `webcheck` sweeps
+every file under Settings, where the rename field is — and another fleet's daemon
+matches no row, so it is never called `local` and never put first.
+
 **Status.** Reverses the decision of 2026-09-15 recorded in `store.ts` and pinned in
-`webcheck.machine-limit-and-probe.ts`, on the owner's word the same day.
+`webcheck.machine-limit-and-probe.ts`, on the owner's word the same day. Amended
+2026-09-23, on the owner's report, to reach the home screen; driven in
+`webcheck.command-menu-and-browser.ts` (the name, the place, the merge, the
+collision, New session's default) and `webcheck.local-route.ts` (the seed and the
+merge through the real store); the host half of the seed is `nativecheck`'s.
 
 ### Q7.140 — Where a failed setup's output goes
 
@@ -35100,8 +35614,10 @@ Tauri plugin and no second arrival path to secure. `paseo` registers a `paseo:`
 scheme for *agent* deep links, which is a different feature from account recovery.
 
 **Unmeasured.** Nobody has switched servers on a real machine and watched
-`credential#<old origin>` disappear from the OS keyring. The Rust key *shape* is
-unit-tested and the erase is asserted at the call site, but writing and reading a
+`credential#<old origin>` disappear from the OS keyring. [⚠ Q7.148 reversed the
+erase: a switch keeps that entry now, and `nativecheck` asserts its absence at the
+call site. The hand check is `docs/NATIVE.md`'s step 16, rewritten to match.] The
+Rust key *shape* is unit-tested and the erase was asserted at the call site, but writing and reading a
 real entry needs an unlocked login keychain, which a non-interactive shell does
 not have — the same limit every other keychain item in `credential.rs` has.
 `docs/NATIVE.md`'s hand checklist is where it happens.
@@ -35375,3 +35891,254 @@ harness.
 eventually carries must be read off `docs.x.ai/developers/models` on the day it is
 written — the `moonshot` row shipped three ids that had been retired four months
 earlier and nothing noticed.
+
+### Q7.148 — One app, several servers, one computer: a state root and a daemon per server
+
+**Question.** Signed in to production on the Mac this is developed on, the app said
+*"This computer could not be set up"*. `~/.reemoat/daemon.env` there belongs to the
+launchd daemon and names the dev stand, and the app treated `~/.reemoat` as the one
+daemon slot a computer has: the file named another server, so `config_state`
+answered `elsewhere` and the setup stopped. The owner's follow-up was the real
+question: *why not just restart the one daemon when the server changes — and what
+does it cost with three instances?*
+
+**Decision. Each server gets a state root of its own and a daemon of its own,
+started the first time the app opens that server and stopped when the app quits.**
+
+- **Which root** is `state_root` in `daemon.rs`, first match wins: `~/.reemoat` when
+  its `daemon.env` names this server (the launchd / `install.sh` daemon works exactly
+  as before and is adopted); else `~/.reemoat/servers/<server>/` when that folder
+  already has an env file (a server keeps its folder); else `~/.reemoat` when there
+  is nothing in it — no env file, no database, no announcement — **and** no service
+  unit left behind (the first server on a fresh computer, so `install.sh` can still
+  take over what the app set up); else `~/.reemoat/servers/<server>/`.
+- **The folder name** doubles every `_` and then writes the scheme's `://` and the
+  port's `:` as one `_` each — `https_app.reemoat.com`, `http_127.0.0.1_7890`. The
+  doubling makes it injective: `http://a.b:8080` and `http://a.b_8080` would
+  otherwise share a folder, and the second server's permanent `elsewhere` would tell
+  somebody to move the first one's database aside. The scheme is kept, because
+  `http://` and `https://` are different trust boundaries. Every level is created
+  `0700` with `DirBuilder` and narrowed again for one that already existed wider: a
+  writable `servers/` is a folder another account could name for a server first.
+- **The root, the server and the port are variables on the spawn, never
+  configuration.** `Supervisor::start` sets `REEMOAT_HOME` (`STATE_ROOT_KEY`), the
+  host's own origin as `REEMOAT_CONTROL_PLANE`, and `REEMOAT_PORT=0` for a root of
+  its own — after the env file, so they win over it. The legacy root keeps the
+  file's port, 7887, because `pnpm client` and `deploy/lib.sh`'s `/health` probe
+  address it there (Q1.22), and forcing `0` there would break the rule that the file
+  wins. Nothing is written into the file, so `OWNED_KEYS` stays exactly three. A
+  per-server file is `env_contents` as before; its `REEMOAT_CONTROL_PLANE` line is a
+  record for `config_state`, and its certificate and proxy lines come from this
+  app's own environment when it is written — never copied from another root, which
+  would add one fleet's private CA to another's trust.
+- **The daemon derives every default from that root.** `resolveStateRoot` in
+  `src/paths.ts` reads `REEMOAT_HOME` — `~/.reemoat` unset, an absolute path only,
+  and never the home directory itself, whose defaults would be undotted folders the
+  picker offers — and the database, worktrees, uploads, plugins, the ask directory
+  and `daemon.json` all sit inside it unless their own variable says otherwise. The
+  agent toolchain (`MANAGED_CLI_DIRS`) does not move: it is per user.
+- **The host keeps a supervisor per origin**, behind a lock of its own inside the
+  lock on the map, because `host_daemon_stop` holds one for up to `STOP_DEADLINE` and
+  a single lock would stall every server's state poll for that long. Every daemon
+  command answers about the current server's root. `host_set_server` touches no
+  daemon, and `nativecheck` pins that absence in its body. `RunEvent::Exit` signals
+  every child and then reaps them all against one deadline, so a quit costs one
+  `STOP_DEADLINE` rather than one per server; `cargo test` drives it with children
+  that ignore `SIGTERM`, the only shape that can tell the two apart.
+- **`host_local_daemon` reads the current server's announcement, then
+  `~/.reemoat`'s.** The second is what keeps a client build finding an `install.sh`
+  daemon (`native-packaging.md`), and a legacy machine id from another fleet is
+  declined by every caller, all of which compare it with a machine they hold.
+- **`managed_unit` is asked only about the legacy root**, the one file a unit can
+  source; a leftover unit beside an *empty* `~/.reemoat` is caught in `state_root`
+  and sends that server to a folder of its own rather than handing the unit a file
+  to race for.
+
+**Fixed with it, each a defect the one-slot assumption was hiding.**
+`removeAnnounce` unlinked whatever was at the path, so of two daemons sharing a
+root the one that lost the last-writer race deleted the winner's announcement on its
+own clean stop; it now takes the daemon's own `instanceId` and removes only a file
+carrying it (a read and an unlink, so a microsecond window remains between daemons
+sharing a root). A live daemon for *another* server read as this one's `foreign`,
+and `setUpThisComputer` returned at its status gate without a word; `foreign` now
+means this server's root, a machine already in this account's list is adopted
+silently, and one that is not is `FOREIGN_DAEMON_DETAIL` — once the machine list is
+in hand, since `bootstrap`'s catch leaves no connections and would otherwise make
+somebody's own daemon read as one they cannot see. `running` gets the same answer in
+that first read, for the child a previous account on this server enrolled, which a
+sign-out leaves up. ⚠ **This server's root is still not always this server's
+daemon.** `~/.reemoat` is the root of every daemon started without `REEMOAT_HOME`
+and its file is last-writer-wins, so a `pnpm daemon` from a checkout, enrolled with
+another control plane, can be the one announced there — and the first version of
+this told that person a daemon *for this server* was running as a machine they could
+not see, with a remedy about this server's accounts. So `LocalAnnounce` carries
+`controlPlane`, the stored identity's, which `Stored` reads with a serde default;
+`host_daemon_state` compares it with the server through `normalize_origin` and sets
+`DaemonState.stranger` on a mismatch — a flag beside the status, never `absent`,
+which would start a second daemon on a database the launchd unit holds. A stranger
+is silence in the first read, `STRANGER_DAEMON_DETAIL` rather than
+`ANOTHER_DAEMON_DETAIL` once a child this app started has died beside it, and its own
+sentence in Settings → Logs. An announcement with no control plane — a daemon older
+than the field — is taken at its root's word, as before. And a daemon for this server
+running on the legacy database with its env file elsewhere (`REEMOAT_ENV_FILE`,
+`pnpm daemon` from a checkout, a `daemon.env` moved aside while it ran — the step
+the old `FOREIGN_ENV_DETAIL` told people to take) answers `absent` for the server's
+own root; `setUpThisComputer` asks `localDaemon()` before it re-mints or buys, so
+that daemon is adopted rather than joined by a second machine, or re-enrolled into a
+fresh database with its tunnel key rotated out from under it.
+
+**Why not one daemon, restarted on a switch — the owner's question, answered.**
+
+- **A restart does not change which server a daemon belongs to.**
+  `REEMOAT_CONTROL_PLANE` is read on the enrollment path only (`buildVerifier`), and
+  enrollment runs only for a code whose fingerprint is new (`codeFp`); the relay URL
+  and the tunnel key come from the stored identity. A restart with a new address and
+  no new code stays on the old fleet, and every token from the new one is refused.
+- **Moving it means overwriting its identity.** `identity` is a single row
+  (`CHECK (id = 1)`, `SqliteIdentityStore` upserts id 1), and enrolling rewrites the
+  machine id, the issuer, the keys, the control plane and the tunnel credential — the
+  first fleet's machine and relay key are gone, and going back is a fresh
+  enrollment, a code minted by the owner, every time. `ensureMachineKey` also hands
+  both control planes the same X25519 key, which links this computer across fleets.
+- **Worse, the daemon checks a token's `aud` and never its subject.** Sessions carry
+  no fleet column, so after a switch everything that database holds — every session,
+  transcript and worktree, the pasted agent keys, the plugins, system keys and custom
+  agents — is served to whoever holds a grant on the machine it has just become, and
+  the boot pass brings the old fleet's interrupted sessions back on its own under the
+  new identity. So **every server needs its own state folder whatever else is
+  chosen.** ⚠ That folder is a boundary on what the app and the API *serve*, not a
+  wall: an agent runs as you, from either fleet, and can read every root's
+  `reemoat.db` itself (`CLAUDE.md`, *What is not confined*).
+- **Given separate folders, one process restarted on each switch still costs a
+  restart every time.** A `SIGTERM` and the full shutdown — a 20-second session
+  budget, `SHUTDOWN_HARD_LIMIT_MS`, up to `STOP_DEADLINE` of waiting in the host —
+  every live turn interrupted and not re-run, every pending approval dropped (Q2.12),
+  a boot pass on the way back, and the server just left dark for as long as the app
+  is on the other one, a phone's way to this computer included.
+- **One daemon per server costs about 140 MB of memory and one relay connection**
+  (measured below), and every one of them stops when the app quits. With three
+  servers that is at most three processes, and only for the servers actually opened
+  in that run of the app. A second server starts empty — no plugins, system keys,
+  custom agents or pasted keys of its own — while the agent CLIs' own sign-ins
+  (`~/.claude` and the rest) are shared, `HOME` being the real one.
+
+**Measured**, 2026-09-23 on this Mac, with `footprint` (physical memory, which is
+what a person's machine pays) rather than `ps` RSS. A fresh daemon started the way
+the app starts one — `node --import tsx scripts/daemon.ts`, its own
+`REEMOAT_HOME`, no sessions — answered `/health` 0.5 s after the spawn and held
+122 MB, plus 14 MB in the `esbuild` child `tsx` keeps: **136 MB**, unchanged after
+90 s idle, over which it spent 0.03 s of CPU. Its state root was 304 KB. The dev
+daemon, 23 hours up with sessions behind it, held 103 MB (peak 122 MB) plus the same
+`esbuild` child. ⚠ An earlier reading here said 12–71 MB: that was `ps` RSS on
+daemons idle for days, which macOS had compressed, and it understated by about half.
+For scale, one Claude Code agent on the same machine held 382 and 541 MB — a daemon
+is a fraction of the agents it runs, and those are per session, not per server.
+
+**Rejected.**
+
+- **Rewriting `daemon.env` on a switch.** One file holds one single-use code, so
+  every switch is a re-enrollment; on this Mac it is refused outright, the file
+  belonging to a launchd unit whose `KeepAlive` would race the rewrite for the code,
+  the lock and the port (`managed_unit`).
+- **One daemon at a time over per-server folders**, for the restart cost above.
+- **Scanning `servers/*` and starting every root at launch**, which would keep every
+  fleet reachable from a phone while the app runs but spend a process on servers
+  nobody opened. Only the servers opened in this run get one; the other shape is an
+  open question below rather than a default.
+- **`REEMOAT_HOME` and `REEMOAT_PORT` written into the file.** Two more owned keys,
+  a longer list of what a refreshed code may rewrite in a file `install.sh` wrote,
+  and a second daemon's address turned into a setting somebody can copy into the one
+  file a service sources — where the owner asked for a variable.
+- **`REEMOAT_PORT=0` on the legacy root too.** It would override `install.sh`'s
+  `REEMOAT_PORT=7887` and take `pnpm client` and `lib.sh`'s probe away from the one
+  daemon they can reach.
+- **Copying the certificate between roots**, which adds one fleet's CA to another's
+  trust.
+
+**Known limitations.**
+
+- **Toolchain policy does not follow.** A per-server env file is bare `env_contents`,
+  so `REEMOAT_AGENT_UPDATES`, `REEMOAT_AGENT_SOURCE` and `REEMOAT_AGENT_CHANNEL` set in
+  `~/.reemoat/daemon.env` do not reach the daemons the app runs for other servers:
+  they refresh a toolchain the owner switched off there and, left on the default
+  channel, flip claude's back to `latest` daily whenever that one file names
+  `stable`. The seam, if it
+  matters, is copying exactly those three into a *new* per-server file, validated by
+  `is_writable_value`.
+- **Refreshes multiply.** Every daemon runs `deploy/agents.sh --refresh-only`
+  `FIRST_RUN_DELAY_MS` (five minutes) after it starts and daily after that, so with
+  lazily started daemons two refreshes by *other* daemons can be minutes apart rather
+  than a day. The toolchain lock serialises them and the native installers swap by
+  rename, but `prune_builds` spares only the build it replaced and the one it
+  installed — so an npm-installed harness (kimi, or anything under `--source npm`)
+  that a live session in one daemon is running can lose its tree to a second daemon's
+  refresh the same afternoon. The fix that does not depend on how many daemons there
+  are is a time-based spare in `prune_builds`; not built.
+- **`install.sh` cannot run a second daemon** — its unit label and log path are one
+  per account — so only the legacy root's server is reachable after the app quits,
+  and `pnpm client` and `lib.sh`'s probe cannot find a per-server daemon on its
+  ephemeral port.
+- **Every server somebody signs in to gets this computer as a machine**, spending a
+  quota slot and starting a daemon, which is today's first-server behaviour extended.
+  Whether a second server should be opt-in is open.
+- **The dev and the release build share `com.reemoat.app`**: open together, each
+  adopts the other's child as `foreign`, and quitting the one that started it stops
+  a daemon the other is using. Pre-existing, now per server. So is a force quit,
+  which orphans every child at once — the next launch adopts each silently as
+  `foreign` where its machine is in the list.
+- **`REEMOAT_DAEMON_PAYLOAD` pointing at a checkout older than this** ignores
+  `REEMOAT_HOME`, so with the legacy daemon stopped it would enroll
+  `~/.reemoat/reemoat.db` with another server's code. `docs/NATIVE.md` says so.
+- **A purge with the app running** deletes databases live daemons are using, and
+  Windows still has no graceful stop, now once per daemon. Both pre-date this; what
+  is new is how ordinary the first is, with an `install.sh` service and the app's
+  daemons side by side, and `--purge` cannot refuse it the way it refuses a live
+  service — `_stopped` sees only the unit. So when it names a `servers/` folder it
+  also says *Quit Reemoat first: it may be running these right now*, a sentence
+  rather than a refusal; probing each folder's announced port would be the script
+  reading the app's layout.
+- **Adoption after an account switch is still silent on a relaunch.** The first read
+  answers a `running` child whose machine this account cannot see with
+  `FOREIGN_DAEMON_DETAIL`, but after a relaunch there is no child: the root's env file
+  names this server, so adoption starts the previous account's daemon and the settle
+  loop's `running` arm clears the notice without asking the list. It is left that
+  way because that arm is the happy path, and a control plane that blinked between
+  the spawn and the poll would draw a failure over a daemon that came up fine. A
+  later bootstrap in the same run — a Retry — finds the child and says it; the next
+  relaunch is silent again.
+
+**And a switch keeps the sign-in it leaves.** `host_set_server` erased
+`credential#<previous>` in the same act (Q1.640), on the argument that nothing
+should be retained for a server this app is not using. With a daemon per server,
+moving between two fleets is the ordinary case rather than a one-way move, and the
+erase priced every return at a full sign-in while buying little: a switch ends no
+session on the old server, deliberately, so it removed only this computer's copy of
+a session that stayed live there. It keeps it now. The page still lets go of its
+own copy before the host's base moves — `detachSession`, which is `clearSession`'s
+in-memory half, so the old fleet's bearer still cannot ride a request to the new
+host — and the keyring account is still the origin, so a kept credential is never
+read for another server. Signing out while on a server is what gives one up.
+`nativecheck` pins the absence of the erase in that body, and `webcheck` pins that
+the server screen never calls `clearSession`, that `detachSession` asks the store
+for nothing, and that a refused switch re-adopts the copy it let go of.
+
+⚠ **What keeping them widens, recorded rather than closed.** A script running in
+this window — `script-src 'self'` is what keeps one out — could call
+`host_set_server` and then `host_boot` again without a reload, and read *every*
+kept server's credential rather than only the current one's; before, the others did
+not exist. It already held the current server's credential and its DH oracle, so
+this is a widening from one fleet to N, not a new door. The close is a one-shot
+credential read per page load, armed by a page-load hook — which has to be measured
+in the real window first, because a hook that fires after the first `host_boot`
+would sign everybody out on every launch. And a sign-out whose `DELETE` settles
+between a switch and its reload erases the *new* server's entry, since the
+credential and device commands act on whichever origin is current when they run —
+a race older than this change, which a kept credential makes cost a sign-in rather
+than nothing.
+
+**Status.** Reversed an earlier decision: the one-slot announcement of Q7.137 —
+`daemon.json` under `homedir()`, removed by whoever stopped — is one per state root,
+removed only by the daemon that wrote it; and Q1.22's 7887 no longer holds for the
+daemons the desktop app runs for a server other than the one `~/.reemoat/daemon.env`
+names, which get `0`; and Q1.640's erase of the previous server's credential on a
+switch.

@@ -240,13 +240,6 @@ process.stdout.write("\nevery site of the caps idiom, and the ones that are outs
       why: "text-danger, written out rather than composed onto SETTINGS_HEADING",
     },
     {
-      file: "ui/MachineOffer.tsx",
-      hits: 1,
-      constant: false,
-      anchor: 'text-2xs tracking-wider text-faint uppercase">or<',
-      why: "the word between two doors: no font-semibold, because it is not a heading",
-    },
-    {
       file: "ui/AgentBuilder.tsx",
       hits: 1,
       constant: false,
@@ -322,7 +315,7 @@ process.stdout.write("\nevery site of the caps idiom, and the ones that are outs
     const before = at < 0 ? "" : raw.slice(0, at);
     const closes = before.lastIndexOf("*/");
     /*
-     * 80 characters: measured, the five gaps are 3, 3, 3, 38 and 39 — a docblock
+     * 80 characters: measured, the five gaps are 3, 3, 3, 3 and 39 — a docblock
      * ending on the line above a `const`, or a `{/* … *\/}` above the element. A
      * generous bound would pass on a comment about something else entirely.
      */

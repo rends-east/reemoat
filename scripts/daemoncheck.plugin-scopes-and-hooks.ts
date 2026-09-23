@@ -860,6 +860,17 @@ process.stdout.write("\nwhich model a one-shot ask runs on\n");
   const configured: { configId: string; value: unknown }[] = [];
   /** How many `session/new` calls this fake has answered. Feeds the cache case. */
   let opened = 0;
+  /**
+   * Which build the fake runtime says answered. Moved mid-section, on purpose: the
+   * capability cache is keyed on it, so moving it is how a CLI update is driven
+   * without a CLI.
+   */
+  let stubVersion = "0.0.0";
+  /**
+   * What `agentCli` waits on before it answers — settled everywhere but the
+   * cases that need a hit to straddle a `forget()`.
+   */
+  let cliGate: Promise<void> = Promise.resolve();
   /** What the agent claims its models are. Rewritten mid-section, on purpose. */
   let models = [
     { value: "opus", name: "Opus 5", description: "the big one" },
@@ -1023,9 +1034,12 @@ process.stdout.write("\nwhich model a one-shot ask runs on\n");
     // whatever `claude --version` is on the host — a subprocess this driver did not
     // start, differing by machine. A fixed choice keeps the read hermetic. `path`
     // is what a copy `deploy/agents.sh` installed reports; `vendored` was the
-    // third source and went with the vendored copies (Q4.114).
-    override agentCli(): Promise<any> {
-      return Promise.resolve({ path: "/stub/claude", version: "0.0.0", source: "path" });
+    // third source and went with the vendored copies (Q4.114). A fresh object on
+    // every call, as a real runtime may answer, so the cache has to compare the
+    // fields rather than the reference (`sameCli`).
+    override async agentCli(): Promise<any> {
+      await cliGate;
+      return { path: "/stub/claude", version: stubVersion, source: "path" };
     }
     override availability(): Promise<any> {
       return Promise.resolve([{ id: "claude", displayName: "claude", available: true, hint: null, loggedIn: true, lastStartRefusal: null }]);
@@ -1142,8 +1156,66 @@ process.stdout.write("\nwhich model a one-shot ask runs on\n");
    */
   models = [{ value: "opus", name: "Opus 5", description: "the big one" }];
   const stale = await runs.models("claude" as never);
+  // The build did not move, so this is a statement about the TTL rather than about
+  // a build: nothing told the cache anything, and it believes what it was told.
   check("the cache still believes the retired model exists", stale.map((one) => one.id), ["opus", "haiku"]);
   check("but using it is refused against what the agent says now", await codeOfAsk("haiku"), "model_unknown");
+
+  /*
+   * ⚠ **A new build is a new list, and the cache knows which build it holds.**
+   * When Claude Code moved under a running daemon, the picker went on listing the
+   * previous build's models under the previous build's version for the rest of
+   * `MODELS_TTL_MS` — the agent's answer had moved and nothing asked it. Now a hit
+   * weighs the `cli` its list was published by against what the runtime reports,
+   * and a different answer is a read. Q6.112.
+   */
+  models = [
+    { value: "opus", name: "Opus 5", description: "the big one" },
+    { value: "opus-next", name: "Opus 6", description: "the new one" },
+  ];
+  stubVersion = "0.0.1";
+  const beforeMove = opened;
+  const moved = await runs.models("claude" as never);
+  check(
+    "a CLI that moved under the cache is asked again, inside MODELS_TTL_MS",
+    [opened - beforeMove, moved.map((one) => one.id)],
+    [1, ["opus", "opus-next"]],
+  );
+  await runs.models("claude" as never);
+  check("and the new build's answer is held in its turn", opened - beforeMove, 1);
+
+  /*
+   * ⚠ **The hit awaits the runtime now, so `forget()` can land inside it.** A
+   * plugin install clears this map synchronously; a hit that read its entry before
+   * the clear and matched the build after it would hand back the answer from before
+   * the install. So the hit weighs the entry it read against the one the map holds
+   * after the await. The negative control is the count: without the fence the hit
+   * matches and nothing is opened.
+   *
+   * Driven three times, because the fence has two sides. `forget()` and
+   * `forget("claude")` both take this harness's entry away and must each cost a
+   * read. `forget("codex")` takes nothing of claude's, and must cost none — which is
+   * what a fence on the one `capsGeneration` counter every harness shares got
+   * wrong: an install finishing on codex threw a valid claude list away and spent a
+   * handshake fetching it again.
+   */
+  const straddle = async (forgetting: () => void): Promise<number> => {
+    let releaseCli = (): void => {};
+    cliGate = new Promise<void>((resolve) => {
+      releaseCli = resolve;
+    });
+    const beforeForget = opened;
+    const across = runs.models("claude" as never);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    forgetting();
+    cliGate = Promise.resolve();
+    releaseCli();
+    await across;
+    return opened - beforeForget;
+  };
+  check("a cached list read across a forget is not served after it", await straddle(() => runs.forget()), 1);
+  check("nor across a forget of this harness alone", await straddle(() => runs.forget("claude" as never)), 1);
+  check("while a forget of another harness leaves this one's list standing", await straddle(() => runs.forget("codex" as never)), 0);
 
   /* ---------------------------------------------------------------- *
    * How much an agent may answer with, and what happens one chunk past it.

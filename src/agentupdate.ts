@@ -83,9 +83,13 @@ export interface AgentUpdateOptions {
    * The script cannot say which: it exits 0 whatever each vendor answered, and a
    * refresh that found nothing newer is indistinguishable from one that swapped a
    * binary. So the caller drops its cached CLI choice either way — a `--version`
-   * per harness once a day is the whole cost, and the alternative is the daemon
-   * going on launching the build it resolved before, for the length of
-   * `LocalRuntime.agentCli`'s cache, while a fresh CLI sits unused on disk.
+   * per harness once a day is the whole cost. What lags without it is the
+   * *report* rather than the spawn, which runs the file the held path names: the
+   * version on screen went on naming the build resolved before, for the length of
+   * that cache. `LocalRuntime.agentCli` now catches a moved file at its next
+   * use by itself (Q6.112); the call stays because it is immediate, and because a
+   * copy that has just appeared earlier on PATH is something only a cleared PATH
+   * memo finds.
    *
    * The report is what the script said on either stream, bounded, so the caller
    * can put a run that changed nothing in the log as well: a daily run of three

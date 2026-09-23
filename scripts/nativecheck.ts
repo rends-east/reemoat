@@ -115,8 +115,8 @@ function capture(text: string, re: RegExp): string | null {
  * still printing `ok`.
  *
  * What that costs is the assertion, not the floor. Every positive line over such
- * a slice — "a device key is written through that one writer", "adopting a server
- * gives up the previous one's sign-in" — goes on matching, from **some other
+ * a slice — "a device key is written through that one writer", "the host keeps a
+ * supervisor per server" — goes on matching, from **some other
  * function's body**, and says `ok` about a claim nothing checked any more. That is
  * the failure this repository keeps finding: an assertion that cannot fail.
  *
@@ -597,6 +597,11 @@ process.stdout.write("\nthe announcement, from both sides of it\n");
  * silently stops being offered, on a fleet that goes on working through the relay,
  * with nothing in any log. Nobody would find it.
  *
+ * ⚠ **One file per state root now** — `~/.reemoat/daemon.json`, and
+ * `~/.reemoat/servers/<server>/daemon.json` for a daemon this app runs for a
+ * second server (Q7.148) — and one shape across all of them, which is what this
+ * compares.
+ *
  * The version is compared too. It is the field that decides whether a reader
  * *tries*, so two numbers drifting apart is the same failure arriving deliberately.
  */
@@ -626,6 +631,48 @@ process.stdout.write("\nthe announcement, from both sides of it\n");
     capture(ts, /export const ANNOUNCE_VERSION = (\d+);/),
     capture(rs, /const ANNOUNCE_VERSION: u32 = (\d+);/),
   );
+
+  /*
+   * ⚠ **Whose daemon it is, and a field nobody compares is a field nobody needs.**
+   * `~/.reemoat` is the root of every daemon started without `REEMOAT_HOME`, and
+   * its file is last-writer-wins — so the daemon announced in the root the app
+   * gives a server can be a `pnpm daemon` from a checkout enrolled with another
+   * control plane, and the setup notice told somebody it was a daemon *for this
+   * server* they could not see. The census above holds the key on both sides; what
+   * it cannot see is the three things that make the key worth writing:
+   *
+   *   - **read with a default**, or every file an older daemon wrote stops parsing
+   *     and every local route to it silently goes — on its own line, because the
+   *     census takes a `rename` only when it is the whole attribute;
+   *   - **compared, in the host, through the one normalizer**, since the origin is
+   *     something only the host knows and a second spelling rule would make one
+   *     server two;
+   *   - **after the liveness probe, and onto the state as a flag** — never an
+   *     `absent`, which would start a second daemon on a database the unit that
+   *     owns this server's root may be holding.
+   */
+  check("the daemon names the control plane it enrolled with", writtenKeys.includes("controlPlane"), true);
+  check(
+    "and the shell reads it with a default, so an older daemon's file still parses",
+    /#\[serde\(default\)\]\s*#\[serde\(rename = "controlPlane"\)\]\s*control_plane: Option<String>,/.test(stored ?? ""),
+    true,
+  );
+  const localCode = flat(rustCode(rs));
+  check(
+    "and compares it through the one normalizer",
+    /pub fn for_another_server\(&self, origin: &str\) -> bool \{ match self\.control_plane\.as_deref\(\) \{ None => false, Some\(raw\) => !crate::config::normalize_origin\(raw\)\.is_ok_and\(\|named\| named == origin\)/.test(localCode),
+    true,
+  );
+  const pageDaemon = capture(rs, /pub struct LocalDaemon \{([\s\S]*?)\n\}/);
+  check("while the page's own answer carries no control plane", rustJsonKeys(pageDaemon ?? ""), ["base", "instanceId", "machineId"]);
+  const stateBody = flat(rustCode(between(commandsRs, "pub fn host_daemon_state(", "pub fn host_daemon_start(")));
+  check("the state command was found to read", stateBody.length > 0, true);
+  check("and reads the announcement with its control plane", /local::read_announced\(&root\.dir\)/.test(stateBody), true);
+  const probed = stateBody.indexOf("daemon::is_alive(");
+  const compared = stateBody.indexOf("found.for_another_server(&origin)");
+  check("and compares it with this server, after the probe", [probed > 0, compared > probed], [true, true]);
+  check("onto the state as a flag", /state\.stranger = stranger;/.test(stateBody), true);
+  check("while the status is still decided by the file and the probe alone", /let mut state = match \(announced, ours\) \{/.test(stateBody), true);
 }
 
 /* ------------------------------------------------------------------ *
@@ -702,6 +749,25 @@ process.stdout.write("\nthe announcement, from both sides of it\n");
   // attribute is in the file, so a reader that saw nothing would pass above for
   // the wrong reason.
   check("the strip had something to remove", bootDecl.length > bootCode.length, true);
+
+  /*
+   * ⚠ **`claimed` is the one field here that is *identity*, and the census above
+   * cannot see either half of what makes it that.** It seeds the page's
+   * `localMachineId` on a cold launch, where the announce file is gone because the
+   * app stopped its own daemon at quit. So it must be read for the origin this
+   * payload boots on — a claim from another fleet names somebody else's machine —
+   * and it must prove nothing: a `/health` probe here would put the very miss the
+   * seed exists to survive back on the first paint, on the main thread.
+   */
+  const bootBody = flat(rustCode(between(commandsRs, "pub fn host_boot(", "pub fn host_device_dh(")));
+  check("the boot command was found to read", bootBody.length > 0, true);
+  check(
+    "it reads this app's claim for the server it boots on",
+    /let claimed = server\.as_deref\(\)\.and_then\(\|origin\| daemon::read_claim\(&host\.config_dir, origin\)\);/.test(bootBody),
+    true,
+  );
+  check("and hands it over as the field", /\bclaimed,\s*\}/.test(bootBody), true);
+  check("without proving a daemon to do it", /is_alive|read_announced|local::read|announce_roots/.test(bootBody), false);
 }
 
 /* ------------------------------------------------------------------ *
@@ -2259,11 +2325,14 @@ check("and only that one", /give_up_device_key/.test(storeSecret), false);
 /* ── what adopting a server gives up ─────────────────────────────────────── */
 
 /**
- * ⚠ **Two rules at one call site, answering oppositely, and neither had ever been
- * asserted.** `host_set_server` erases the previous origin's *credential* — a
- * credential this app will not present is one it has no reason to hold, and doing
- * it in the same act is what makes "no credential is retained for a server you
- * are not using" true of the act rather than of an intention.
+ * ⚠ **Two rules at one call site, and the first was reversed.** `host_set_server`
+ * used to erase the previous origin's *credential*, on the argument that "no
+ * credential is retained for a server you are not using". It keeps it now
+ * (Q7.148): a switch ends no session on the old server, so the erase removed only
+ * this computer's copy of a live session and charged a sign-in on every return —
+ * which, with a daemon per server, is every switch between two fleets. The
+ * keyring account is the origin, so a kept entry is still never read for another
+ * server; signing out while on a server is what gives one up.
  *
  * It erases the previous origin's *device id* nowhere, and must not learn to:
  * the row on that server still exists, so forgetting the id leaves an
@@ -2273,8 +2342,54 @@ check("and only that one", /give_up_device_key/.test(storeSecret), false);
 const setServer = flat(read(`${TAURI_DIR}/src/commands.rs`));
 const setServerBody = between(setServer, "pub fn host_set_server", "pub fn host_credential_set");
 check("the sweep can see host_set_server at all", setServerBody.length > 0, true);
-check("adopting a server gives up the previous one's sign-in", /credential::erase\(&previous\)/.test(setServerBody), true);
+check("adopting a server keeps the previous one's sign-in", /credential::erase/.test(setServerBody), false);
 check("and never the device recorded for it", /erase_device/.test(setServerBody), false);
+/*
+ * ⚠ **And never the previous server's daemon.** A supervisor per server is what
+ * lets a switch interrupt nothing — the other fleet's turns go on and its phones
+ * still reach this computer — and one stop call in here would make every switch
+ * cost a restart: every turn in flight interrupted, every pending approval dropped
+ * (Q7.148). The body is `between` its own signature and the next command's, so
+ * the docblock above it, which says all of this in words, is not what is read.
+ */
+check("and leaves the previous server's daemon running", /supervisor|stop_all|\.stop\(\)/.test(setServerBody), false);
+
+/* ── a daemon per server ──────────────────────────────────────────────────── */
+
+/**
+ * **One database is one machine on one server, so each server gets a root and a
+ * supervisor of its own** — Q7.148 carries why re-enrolling one database back and
+ * forth was refused. Two halves, and each is silent without the other: the host
+ * keeps a map from origin to supervisor, and every command that answers about
+ * "the daemon on this computer" asks which root the *current* server has rather
+ * than reading `~/.reemoat` whoever it belongs to — which is what refused
+ * production on a Mac whose launchd daemon served the dev stand.
+ */
+{
+  const commandsRs = read(`${TAURI_DIR}/src/commands.rs`);
+  check(
+    "the host keeps a supervisor per server, each behind a lock of its own",
+    /pub supervisors: Mutex<BTreeMap<String, Arc<Mutex<daemon::Supervisor>>>>/.test(commandsRs),
+    true,
+  );
+  check("and the one-slot field is gone", /pub supervisor: Mutex</.test(commandsRs), false);
+  const flatCommands = flat(commandsRs);
+  const bodies: [string, string, RegExp][] = [
+    ["host_daemon_state", "pub fn host_daemon_start", /daemon::state_root\(&home, &origin\)/],
+    ["host_daemon_start", "pub fn host_daemon_stop", /daemon::state_root\(&home, &origin\)/],
+    ["host_local_daemon", "pub fn host_set_server", /daemon::announce_roots\(&home, host\.origin\(\)\.as_deref\(\)\)/],
+  ];
+  check(
+    "and every command about the daemon here asks which root this server has",
+    bodies.filter(([name, next, pattern]) => !pattern.test(between(flatCommands, `pub fn ${name}`, next))),
+    [],
+  );
+  check(
+    "none of them reads a home as if it were a root",
+    /local::read\(&home\)|config_state\(&home/.test(flatCommands),
+    false,
+  );
+}
 
 /* ── what the host process assumes about the platform it is on ───────────── */
 
@@ -3024,7 +3139,7 @@ check("and it is the minSdk Gradle declares", ndkApiLevels[0], capture(gradleCod
  * ── what the env file already on a computer is allowed to say ──────────────
  *
  * ⚠ **Three answers, written down twice, and a fourth added to one side alone is
- * silent.** `daemon.rs` decides whether `~/.reemoat/daemon.env` names this server,
+ * silent.** `daemon.rs` decides whether this server's env file names it,
  * another one, or nothing; `store.ts` branches on the answer to decide between
  * adopting a daemon, refreshing its enrollment code, and buying a machine. A value
  * the page has never heard of falls through every arm and does *nothing* — which
@@ -3812,8 +3927,16 @@ check("and it asks the one route below the auth gate", /GET \/health/.test(probe
  * check passed whether or not the callback existed. That is the failure the
  * paragraph itself describes, arriving in the thing meant to catch it, and the
  * realistic regression walks straight through it: somebody "corrects" the hook to
- * `ExitRequested` or a window-close handler, keeps `supervisor.stop()`, and both
+ * `ExitRequested` or a window-close handler, keeps `daemon::stop_all(`, and both
  * assertions stay green while every quit orphans a daemon.
+ *
+ * **Every daemon it started, not one.** There is a supervisor per server now
+ * (Q7.148) and a server change leaves the previous one's child running, so the
+ * exit hook is the only place they stop — and `supervisor.stop()` on each in turn
+ * would make a quit worth one `STOP_DEADLINE` per server. So the second assertion
+ * names `stop_all`, and the third reads its body: every child signalled before any
+ * is waited on, against one deadline. `cargo test` drives the timing with children
+ * that ignore `SIGTERM`; what this can see is the order.
  *
  * `daemonSrc` above already strips for exactly this; `libRs` is stripped here
  * rather than at its `read` because other assertions in this file are *about* the
@@ -3821,7 +3944,17 @@ check("and it asks the one route below the auth gate", /GET \/health/.test(probe
  */
 const libCode = libRs.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 check("the shell handles its own exit", /matches!\(event, tauri::RunEvent::Exit\)/.test(flat(libCode)), true);
-check("and stops the daemon it started there", /supervisor\.stop\(\)/.test(libCode), true);
+check("and stops every daemon it started there", /daemon::stop_all\(/.test(libCode), true);
+{
+  const stopAllBy = /fn stop_all_by<[\s\S]*?\n\}/.exec(daemonRs)?.[0] ?? "";
+  check("the quit's stop was found to read", stopAllBy.length > 0, true);
+  check(
+    "signalled together, under one deadline",
+    /\.signal\(\);[\s\S]*?\}[\s\S]*?\.reap_by\(deadline\);/.test(stopAllBy) && !/\.stop\(\)/.test(stopAllBy),
+    true,
+  );
+  check("and stop_all is that, one deadline out", /pub fn stop_all<[\s\S]*?stop_all_by\(supervisors, std::time::Instant::now\(\) \+ STOP_DEADLINE\);/.test(flat(daemonRs)), true);
+}
 /*
  * Bounded, because it runs on the way out of the main loop: an unbounded wait
  * hands the daemon's 25-second shutdown budget to the quit gesture.
@@ -3838,6 +3971,24 @@ check("a hand-installed service is looked for", /fn managed_unit\(/.test(daemonR
 check(
   "and a rewrite is refused while one owns the file",
   /daemon::managed_unit\(&home\)/.test(read(`${TAURI_DIR}/src/commands.rs`)),
+  true,
+);
+/*
+ * ⚠ **And only for the one root a unit can source.** `deploy/` renders one unit per
+ * account, pointed at `~/.reemoat/daemon.env`; a server with a folder of its own
+ * under `servers/` is one no service knows about. Refusing it over somebody's plist
+ * would lock every second server out of a computer that has one — and the leftover
+ * unit beside an *empty* `~/.reemoat` is `state_root`'s to catch, which sends that
+ * server to a folder of its own rather than handing the unit a file to race for.
+ */
+check(
+  "and only for the one root a unit can source",
+  /root\.legacy && !enroll_code\.is_empty\(\) && env_file\.exists\(\)/.test(flat(read(`${TAURI_DIR}/src/commands.rs`))),
+  true,
+);
+check(
+  "and a fresh computer's legacy root is not handed over beside a leftover unit",
+  /holds_no_daemon\(&legacy\) && managed_unit\(home\)\.is_none\(\)/.test(flat(daemonRs)),
   true,
 );
 /*
@@ -3862,7 +4013,7 @@ check("and it moves the file rather than only unloading it", /mv \{/.test(remedy
 check("values written into the env file are validated", /fn is_writable_value\(/.test(daemonRs), true);
 check(
   "and the state command asks before answering foreign",
-  /announced\.filter\(\|found\| ours \|\| daemon::is_alive/.test(read(`${TAURI_DIR}/src/commands.rs`)),
+  /announced\.filter\(\|found\| ours \|\| daemon::is_alive/.test(flat(read(`${TAURI_DIR}/src/commands.rs`))),
   true,
 );
 check(
@@ -3987,6 +4138,36 @@ check(
   const named = start.indexOf('command.env("USER", &name);');
   const fromFile = start.indexOf("for (key, value) in env {");
   check("and the env file still wins over it", named > 0 && fromFile > named, true);
+  /*
+   * ⚠ **The root, the server and the port are decided at spawn, after the file —
+   * and never written into it.** Q7.148: the state root is what makes one child
+   * *this server's* daemon, so it has to beat anything a file says; the origin is
+   * the host's own for `host_daemon_start`'s reason that any other spelling is an
+   * `elsewhere` waiting to happen; and the port is the kernel's on a root of its
+   * own, because two daemons on 7887 is one of them dying on `EADDRINUSE`. Written
+   * into the file instead, they would be three more keys `OWNED_KEYS` has to own —
+   * which the assertion further up pins at exactly three.
+   */
+  const spawnAt = start.indexOf("command.env(STATE_ROOT_KEY, &spawn.root);");
+  check("the root, the server and the port are decided at spawn, after the env file", spawnAt > fromFile && fromFile > 0, true);
+  check("the server is the host's own origin", /command\.env\(CONTROL_PLANE_KEY, &spawn\.control_plane\);/.test(start), true);
+  /*
+   * ⚠ **The kernel's port only for a root of its own.** `~/.reemoat`'s daemon stays
+   * on 7887 — `pnpm client` and `deploy/lib.sh`'s `/health` probe address it there
+   * (Q1.22) — and forcing `0` on it would override a `REEMOAT_PORT=7887` line and
+   * break the rule, two assertions up, that the file wins.
+   */
+  check("the port is the kernel's, for a root of its own", /if spawn\.ephemeral_port \{\s*command\.env\(PORT_KEY, "0"\);/.test(start), true);
+  check(
+    "and only a root of its own gets it",
+    /ephemeral_port: !root\.legacy,/.test(read(`${TAURI_DIR}/src/commands.rs`)),
+    true,
+  );
+  check(
+    "the host sets the name the daemon reads",
+    [/const STATE_ROOT_KEY: &str = "REEMOAT_HOME";/.test(daemonRs), /process\.env\["REEMOAT_HOME"\]/.test(daemonTs)],
+    [true, true],
+  );
   /*
    * The authority, not the inherited value — `commands.rs` takes `HOME` from
    * `app.path().home_dir()` for the same reason, and a stale export from whoever

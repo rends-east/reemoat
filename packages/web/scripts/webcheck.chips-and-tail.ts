@@ -280,6 +280,103 @@ process.stdout.write("\nchip labels\n");
   check("a short sentence is still a sentence, not a model name", chipValue(codexModel), "GPT-5.6-Sol");
   // And the claude shape it exists for is untouched: separator present, head kept.
   check("while a description that does separate still names the model", chipValue(modelDefault), "Opus 5");
+
+  /*
+   * ⭐ **A separator does not make a head a model name**, and a live chip read
+   * "Newer version availa…" to prove it. The rows below are claude 2.1.280's,
+   * verbatim, measured 2026-09-22: a fresh session's list, and the list of one
+   * resumed on `claude-opus-5[1m]` after the `opus` alias had moved to Opus 5.5 —
+   * the tail row is replaced by one whose description is a notice, and `opus[1m]`
+   * is gone from it.
+   *
+   * The rule is that off the `default` placeholder the head's first word must be
+   * the name's. Every row is asserted rather than the one that failed, because the
+   * rule's cost would be the version on every *other* chip — `Opus` where the
+   * answer is `Opus 5.5`, which is the one thing an update changes.
+   */
+  const row = (value: string, name: string, description: string | null) => ({ value, name, description, group: null });
+  const fresh280 = [
+    row("default", "Default (recommended)", "Sonnet"),
+    row("sonnet", "Sonnet", "Sonnet 5 · Efficient for routine tasks"),
+    row("claude-fable-5-1[1m]", "Fable", "Fable 5.1 · Most capable for your hardest and longest-running tasks"),
+    row("opus", "Opus", "Opus 5.5 · Best for everyday, complex tasks"),
+    row("haiku", "Haiku", "Haiku 4.5 · Fastest for quick answers"),
+    row("opus[1m]", "Opus (1M context)", "Opus 5.5 with 1M context · Best for everyday, complex tasks"),
+  ];
+  const resumed280 = [
+    ...fresh280.slice(0, 5),
+    row("claude-opus-5[1m]", "Opus 5 (1M context)", "Newer version available · select Opus for Opus 5.5"),
+  ];
+  const chipOn = (choices: typeof fresh280, value: string) => chipValue(opt({ category: "model", value, choices }));
+  /*
+   * The fallback is the row's name without its trailing parenthetical — the
+   * `with 1M context` rule applied to a name, and what this model's chip read on
+   * `opus[1m]` before the alias moved. The whole name stays in the menu row.
+   */
+  check(
+    "a description whose head is a notice rather than a model is drawn by the row's name",
+    chipOn(resumed280, "claude-opus-5[1m]"),
+    "Opus 5",
+  );
+  check(
+    "every row of a fresh 2.1.280 list names its model",
+    fresh280.map((one) => chipOn(fresh280, one.value)),
+    ["Default (recommended)", "Sonnet 5", "Fable 5.1", "Opus 5.5", "Haiku 4.5", "Opus 5.5"],
+  );
+  check(
+    "and so does the resumed list, bar the one row that names none",
+    resumed280.map((one) => chipOn(resumed280, one.value)),
+    ["Default (recommended)", "Sonnet 5", "Fable 5.1", "Opus 5.5", "Haiku 4.5", "Opus 5"],
+  );
+  /*
+   * 2.1.280's placeholder is described "Sonnet", with no separator, so it keeps
+   * its name — Q3.410's half, unchanged. The daemon drops that row anyway:
+   * `dedupeAliasChoices` rewrites the value off it onto the model it resolves to.
+   */
+  check(
+    "the placeholder whose description has no separator keeps its name",
+    chipOn(fresh280, "default"),
+    "Default (recommended)",
+  );
+  /*
+   * **The prose arm takes the same test.** `snapshotConfig` keeps only the
+   * selected choice's description, so a chip is as often named from the
+   * transcript's `agent_config` as from the snapshot — and a rule that held on one
+   * arm only would be a chip that changed on a reload.
+   */
+  const proseOf = (value: string, description: string) =>
+    configProse([
+      {
+        seq: 1,
+        ts: 0,
+        event: {
+          type: "agent_config",
+          modes: null,
+          options: [{ id: "x", name: "X", description: null, category: "model", kind: "select", value, choices: [row(value, value, description)] }],
+        },
+      },
+    ] as never).get("x");
+  check(
+    "the rule holds on the transcript's prose as well as the snapshot's",
+    chipValue(
+      opt({ category: "model", value: "claude-opus-5[1m]", choices: [row("claude-opus-5[1m]", "Opus 5 (1M context)", null)] }),
+      proseOf("claude-opus-5[1m]", "Newer version available · select Opus for Opus 5.5"),
+    ),
+    "Opus 5",
+  );
+  /*
+   * ⚠ **A value with no choice to name it is named by the raw value**, and
+   * `opus[1m]` has to be `opus` to the test or the prose that used to rescue it
+   * stops doing so. `[` is a word boundary for exactly this.
+   */
+  check(
+    "and a value with no choice to name it still takes the prose's model",
+    chipValue(
+      opt({ category: "model", value: "opus[1m]", choices: [row("sonnet", "Sonnet", "Sonnet 5 · Efficient for routine tasks")] }),
+      proseOf("opus[1m]", "Opus 5 with 1M context · Best"),
+    ),
+    "Opus 5",
+  );
 }
 
 /* ------------------------------------------------------------------ *

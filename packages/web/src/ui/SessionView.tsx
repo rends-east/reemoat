@@ -18,6 +18,7 @@ import { displayCwd, downloadablePath, folderLabel, relativeTo } from "../paths"
 import { navigate } from "../router";
 import { settingsPath } from "../settings";
 import { elapsedSince, store, type AppState, type SessionRow } from "../store";
+import { machineDisplayName } from "../machineOrder";
 import {
   humanRequests,
   isBuiltinAgentId,
@@ -381,7 +382,7 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
         }
         subtitle={
           <WorkspaceLine
-            machineName={row.machineName}
+            machineName={machineDisplayName({ id: sessionRef.machineId, name: row.machineName }, state.localMachineId)}
             workspace={session.workspace}
             roots={state.rootsByMachine.get(sessionRef.machineId) ?? []}
           />

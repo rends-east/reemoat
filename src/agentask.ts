@@ -122,8 +122,10 @@ export const SLOT_WAIT_MS = 120_000;
  * The two failures are deliberately asymmetric. A model that has *gone* is caught
  * at use: {@link AgentAskRuns.ask} validates against the agent's live answer, not
  * against this cache, so a stale choice is refused by name rather than sent. A
- * model that is *new* is invisible until this expires, which costs nothing but
- * waiting.
+ * model that is *new* arrives with a new build, and a held list is believed only
+ * while `agentCli` still reports the build that published it (Q6.112) — so this
+ * constant is the ceiling for a list that moves with *no* new build, which costs
+ * nothing but waiting.
  */
 export const MODELS_TTL_MS = 10 * 60_000;
 
@@ -227,6 +229,21 @@ export interface AgentCapabilities {
    * different facts about different things.
    */
   cli: AgentCliChoice | null;
+}
+
+/**
+ * Whether two reports name the same build — the key a held capability read is
+ * valid for (see {@link AgentAskRuns.capabilities}).
+ *
+ * Field by field rather than by identity, because nothing promises the same
+ * object twice: a runtime may build its answer fresh on every call, and a cache
+ * that compared references would read every hit as a new build and spawn an
+ * agent per settings pane. `null` against `null` is the same answer — a harness
+ * with no binary to name had none last time either.
+ */
+export function sameCli(a: AgentCliChoice | null, b: AgentCliChoice | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.path === b.path && a.version === b.version && a.source === b.source;
 }
 
 /**
@@ -673,7 +690,37 @@ export class AgentAskRuns {
    */
   async capabilities(agent: AgentId, signal?: AbortSignal, queue = false): Promise<AgentCapabilities> {
     const held = this.models_.get(agent);
-    if (held !== undefined && Date.now() - held.at < MODELS_TTL_MS) return held.answer;
+    if (held !== undefined && Date.now() - held.at < MODELS_TTL_MS) {
+      /*
+       * ⚠ **Believed only while the build that published it is the build that
+       * would run.** `cli` rides beside the rows so the two cannot describe
+       * different spawns, and that makes it the key this cache is valid for: a
+       * changed report means changed rows. Claude Code updating itself used to
+       * leave this serving the previous build's list, under the previous build's
+       * version, for the rest of the ten minutes (Q6.112). `sameCli` rather than
+       * identity, because a runtime may answer a fresh object every time.
+       *
+       * A caller that has gone gets the list without the check: once `cliChosen`
+       * has aged out the check is a `--version`, and a caller that has gone must
+       * not leave a subprocess behind — the rule `stopIfGone` states below.
+       *
+       * ⚠ **Fenced on the entry itself**, compared after the await: `forget()`
+       * clears this map synchronously and `forget(agent)` deletes this harness's
+       * entry, so a hit that straddled either finds `held` gone and does not hand
+       * back the answer from before a plugin install. On the entry and not on
+       * {@link capsGeneration}, because that counter is bumped by a `forget()` for
+       * *any* harness — an install finishing on codex would make every straddling
+       * claude hit throw a valid list away and spend a handshake under
+       * {@link MAX_CONCURRENT_ASKS} fetching it again. No bump on a mismatch —
+       * while an entry is fresh no read for this harness is in flight, and one that
+       * starts after this reads the new build.
+       */
+      if (signal?.aborted === true) return held.answer;
+      const cli = await this.options.runtime.agentCli(agent);
+      const still = this.models_.get(agent) === held;
+      if (still && sameCli(held.answer.cli, cli)) return held.answer;
+      if (still) this.models_.delete(agent);
+    }
 
     /*
      * Joined rather than raced. The signal is deliberately *not* consulted before
@@ -784,6 +831,15 @@ export class AgentAskRuns {
        * Asked of the runtime rather than of the session, because it is a question
        * about which *file* was spawned and the session only knows it is talking to
        * something. Cheap and cached there; this read is already behind a spawn.
+       *
+       * ⚠ **After the spawn, so there is a window, and it is accepted.** A build
+       * swapped inside the second or so `Session.start` takes labels the old list
+       * with the new build, and the check on the hit path above then agrees with it
+       * until {@link MODELS_TTL_MS} runs out. Reading it before `claim` would make
+       * the same race correct itself on the next hit — at the price of a CLI read
+       * ahead of a slot wait of up to {@link SLOT_WAIT_MS}, and of the two
+       * `daemoncheck` cases that measure that wait, whose stand-in runtimes have no
+       * `agentCli` at all (Q6.112).
        */
       const answer: AgentCapabilities = {
         models,

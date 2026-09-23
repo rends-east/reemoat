@@ -25,10 +25,12 @@ nothing in `server.ts`, `session.ts` or `registry.ts` changed for it. Q1.25.
 The direct path is **deleted, not disabled**, and **loopback binding is the
 lever** — `REEMOAT_HOST` defaults to `127.0.0.1` and the `baseUrl` column is gone
 rather than left null. Q1.21. `REEMOAT_PORT` stays 7887 because what
-addresses it is on the same machine: `pnpm client` under the shared secret, the
-deploy script's `/health` probe, and — since Q7.137 — the desktop app on that
-machine. `REEMOAT_PORT=0` still works for a relay-only daemon, and is announced
-like any other. Q1.22.
+addresses it is on the same machine: `pnpm client` under the shared secret and the
+deploy script's `/health` probe. The desktop app reads the port out of the
+announcement rather than addressing one, so `REEMOAT_PORT=0` still works for a
+relay-only daemon, is announced like any other, and is what the app gives every
+daemon it runs for a server other than the one `~/.reemoat/daemon.env` names —
+the `~/.reemoat` daemon keeps 7887 for the two above. Q1.22, Q7.148.
 
 **There is one exception and it is not that feature coming back.** The desktop app
 reaches a daemon on the **same computer** over loopback. No address a server names
@@ -49,8 +51,11 @@ a way the old direct path went wrong:
   never needed. `/health` is asked afterwards, never before: it is unauthenticated,
   so a 200 from it is a stranger's 200.
 - **A daemon says where it is; nothing guesses.** `src/announce.ts` writes
-  `~/.reemoat/daemon.json` at 0600 in a 0700 directory. ⚠ **The file is the
-  security argument, not a convenience.** Probing a well-known port was built and
+  `daemon.json` at 0600 into its state root — `~/.reemoat`, or
+  `~/.reemoat/servers/<server>/` for a daemon the app runs for a second server,
+  every level 0700 — and a clean stop removes it only if its own `instanceId` is
+  in it. The host reads the current server's file, then `~/.reemoat`'s. Q7.148.
+  ⚠ **The file is the security argument, not a convenience.** Probing a well-known port was built and
   taken back out: the probe has to carry a machine token to prove anything, so it
   hands a 300-second bearer — spendable through the relay from anywhere — to
   whichever process won the race for that port. A file another uid cannot write

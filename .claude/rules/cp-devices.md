@@ -127,7 +127,8 @@ So: `config.rs`'s `Stored.devices`, a `BTreeMap` keyed on origin, beside `server
 A map rather than one current value because `host_set_server` **erases nothing
 here** — the row on the old server still exists, so forgetting the id leaves an
 installation nobody can recognise in their own list and spends a second slot on
-the way back. That asymmetry with the credential is said at `commands.rs`.
+the way back. The credential is kept across a change too since Q7.148, so the two
+no longer differ there; each is given up only by its own act.
 
 `credential.rs` is untouched: `CREDENTIAL` stays a set of one, `read`/`write` keep
 carrying a `String`, there is still no `list()`. **Q7.136 is reversed only in its

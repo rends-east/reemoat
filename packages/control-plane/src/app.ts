@@ -471,14 +471,15 @@ export interface ControlPlaneOptions {
    * because installing from a file never involved this at all.
    */
   pluginCatalogueUrl?: string | null;
-  machineOfferUrl?: string | null;
   /**
    * Where this instance publishes a build of the app, or `null`.
    *
-   * `machineOfferUrl`'s shape and its argument. Read in `main.ts`, validated
-   * there, and published on `GET /v1/instance` as an **address rather than a
-   * boolean** for `machines.offer`'s reason: a client that renders a link cannot
-   * be told "there is one" and left to invent where it goes.
+   * `pluginCatalogueUrl`'s shape. Read in `main.ts`, validated there, and
+   * published on `GET /v1/instance` as an **address rather than a boolean**: a
+   * client that renders a link cannot be told "there is one" and left to invent
+   * where it goes. Env-only for a reason of its own rather than the catalogue's
+   * CSP one: it names one deployment's build, and a `SETTING_KEYS` row is drawn
+   * on every instance's Server settings screen.
    */
   appDownloadUrl?: string | null;
   /**
@@ -497,7 +498,7 @@ export interface ControlPlaneOptions {
    * Whether this deployment publishes the built-in legal documents as its own.
    *
    * Environment-only and with no compiled-in default, for
-   * `machineOfferUrl`'s reason one degree sharper: those documents name one
+   * `appDownloadUrl`'s reason one degree sharper: those documents name one
    * particular party, and a deployment that has not adopted them would otherwise
    * be asking its users to agree to a contract with a stranger.
    */
@@ -574,7 +575,6 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   const relayUrl = options.relayUrl ?? null;
   const relayUrls = options.relayUrls ?? null;
   const pluginCatalogueUrl = options.pluginCatalogueUrl ?? null;
-  const machineOfferUrl = options.machineOfferUrl ?? null;
   const appDownloadUrl = options.appDownloadUrl ?? null;
   const legalDocuments = options.legalDocuments ?? false;
   const relay = options.relay ?? null;
@@ -1692,26 +1692,8 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     return c.json({
       registration: { enabled: mode.enabled, requiresEmail: mode.requiresEmail },
       mail: { configured: mailConfigured(db).configured },
-      /*
-       * Where somebody with no machine can get one, or `null`.
-       *
-       * `plugins.catalogue` below, in shape and in argument: **the address,
-       * never a boolean.** What differs is which header each has to satisfy, and
-       * it is worth stating here because the inconsistency otherwise looks like
-       * one somebody should fix — a catalogue is `fetch`ed and so needs
-       * `connect-src`, which is why it is environment-only and pinned to the CSP
-       * built once at construction; this is an `<a href>`, the policy above has
-       * no `navigate-to` and neither `form-action` nor `base-uri` constrains a
-       * link, so it can be an ordinary `SETTING_KEYS` row an admin owns without
-       * a redeploy.
-       *
-       * Above the credential line with the rest of this route, and correctly so:
-       * whether this instance points anywhere for a machine is a fact about the
-       * instance. The *address* is public; the person's email is not, and it is
-       * appended in the browser out of `GET /v1/me` — this route has no caller to
-       * know one for.
-       */
-      machines: { offer: machineOfferUrl },
+      // No `machines` key: the machine offer is deleted (Q1.650), and an app built
+      // before that reads the absence as an instance that offers nothing.
       app: { download: appDownloadUrl },
       legal: { documents: legalDocuments },
       /*

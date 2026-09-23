@@ -443,9 +443,9 @@ Q3.519, Q3.525.
 
 **A model chip shows the model's name unless the agent refuses to give one.**
 `chipValue` mines a description only where a separator says the head *is* the model
-(`Opus 5 · Best for…`), because the whole reason it exists is claude's `Default
-(recommended)`; without one the description is a sentence however short, and a
-length guard does not tell the two apart. Q3.410.
+(`Opus 5 · Best for…`), and off `default` only where the head's first word is the
+row name's (`familyWord`); a notice like `Newer version available · …` names none.
+Q3.410, Q3.641.
 
 ## Layout
 
@@ -462,8 +462,7 @@ length guard does not tell the two apart. Q3.410.
 | `packages/web/src/ui/CommandMenu.tsx` | The menu: the agent's commands and the controls it does *not* publish, one list, two stages. Never takes focus |
 | `packages/web/src/ui/AgentConfigBar.tsx` | The agent's own controls, as a cluster in the composer's control row: mode left, model/effort right, a nested control inside its host's menu, the rest behind `…`. Drawn from `category`, never an id |
 
-**`MachineOffer` does not appear in the strip either**, joining `installCommand`
-for a stronger version of the same reason: a link off this origin, between somebody
-and starting work, is the worst case of a control leaving the strip.
-`MachineLine`'s empty state keeps its door to Settings → Machines, where both live.
-`webcheck.shell-and-enrollment.ts` asserts both absences by name.
+**`installCommand` does not appear in the strip.** `MachineLine`'s empty state
+keeps its door to Settings → Machines, where the command lives — a shell line is not
+a field label on a 390px phone (`cp-machines.md`). `webcheck.shell-and-enrollment.ts`
+asserts the absence by name.

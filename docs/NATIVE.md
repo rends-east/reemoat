@@ -60,7 +60,7 @@ Five things a webview cannot do for itself:
 | the credential | in the operating system's credential store, keyed on the server's origin, never in `localStorage` |
 | a link | opened in the real browser, through `ui/links.ts`'s own three-scheme allowlist |
 | a download | written through the platform's save panel |
-| a daemon on this computer | read out of `~/.reemoat/daemon.json`, which a webview cannot open. The host answers a finished loopback origin and refuses any other |
+| a daemon on this computer | read out of the current server's `daemon.json` (`~/.reemoat/`, or `~/.reemoat/servers/<server>/` for a daemon the app runs for a second server) and then `~/.reemoat`'s, which a webview cannot open. The host answers a finished loopback origin and refuses any other |
 
 The fifth is what makes the app more than a window: a daemon on the same machine is
 reached over loopback rather than out to the relay and back. ⚠ **It changes what a
@@ -148,11 +148,24 @@ is `cfg!(debug_assertions)`-gated, for `lib.rs`'s navigation-guard reason — a
 variable naming a directory this process executes as you is fine on a developer's
 machine and is not fine in an application people install.
 
+⚠ **The override runs whatever that checkout says, including about where its state
+lives.** The app starts every daemon with `REEMOAT_HOME` naming the root it chose for
+the server — `~/.reemoat` for the one `~/.reemoat/daemon.env` names,
+`~/.reemoat/servers/<server>/` for every other (Q7.148). A checkout older than that
+change ignores the variable, so pointed at a second server with the launchd daemon
+stopped it would enroll `~/.reemoat/reemoat.db` — the first server's identity — with
+the second server's code. Keep the override on a checkout that reads `REEMOAT_HOME`.
+
 **And the third loop is the one that needs no app at all.** A daemon started the
 ordinary way — `pnpm daemon`, or the launchd unit — runs your working tree and
 announces itself, and the app *adopts* it (`host_daemon_state` answers `foreign` and
-starts nothing). That is the fastest loop for daemon work and it is what already
-happens on a machine with a daemon installed.
+starts nothing). One enrolled with a control plane other than the server the app is
+on is flagged `stranger` beside that status and passed over without a word — the
+announcement names the control plane, because `~/.reemoat` is every such daemon's
+root. That is the fastest loop for daemon work and it is what already
+happens on a machine with a daemon installed. It holds for a daemon whose env file
+is somewhere else, too: the store finds it through `~/.reemoat/daemon.json` and a
+machine id it already has, and buys nothing.
 
 ### Prerequisites
 
@@ -440,12 +453,58 @@ The parts that need a window, a fleet or an agent, and therefore no driver:
     replaces the whole sheet, opens on the current address and offers **Cancel**,
     which returns to the settings sheet still open at the same section. Submit the
     address unchanged: nothing reloads and nothing is signed out. Then change it
-    for real and confirm the app reloads
-    signed out, and that
+    for real and confirm the app reloads onto the second server (signed out there
+    the first time), and that
     `security find-generic-password -s com.reemoat.app -a 'credential#<the first origin>'`
-    answers *item could not be found* while the second server's entry is there.
+    still finds the first server's entry — a switch keeps it (Q7.148). Switch back:
+    the first server opens signed in. Sign out there: only its entry is gone.
 17. The app carries no sign-up form at all:
     `grep -c "Create an account" packages/web/dist/assets/*.js` answers `0`.
+
+**One computer, two servers** (Q7.148), with the launchd dev daemon running on
+`~/.reemoat` — both from `REEMOAT_DAEMON_PAYLOAD=$PWD pnpm native` and from a
+`pnpm native:build` bundle opened from Finder, which has no `NODE_EXTRA_CA_CERTS`:
+
+18. Sign in to the second server. The setup finishes, where it used to answer
+    *This computer could not be set up*.
+19. `ls -la ~/.reemoat/servers/<server>` shows `0700` at every level —
+    `~/.reemoat`, `servers/` and the folder — and `daemon.env`, `daemon.json` and
+    `reemoat.db` at `0600`.
+    `sqlite3 -readonly ~/.reemoat/servers/<server>/reemoat.db 'select machine_id,
+    control_plane from identity'` names the second server.
+20. The first server was not touched:
+    `sqlite3 -readonly ~/.reemoat/reemoat.db 'select machine_id, control_plane from
+    identity'` still names it, and `~/.reemoat/daemon.json` has the same mtime and
+    `instanceId` as before step 18.
+21. `lsof -nP -iTCP -sTCP:LISTEN | grep node`: the app's child on an ephemeral port,
+    launchd's daemon still on 7887. A child the app starts on `~/.reemoat` itself
+    keeps 7887 too.
+22. *this device* appears on the second server's machine, and Settings → Logs shows
+    that child's ring.
+23. Start a long turn on the second server, then switch the server back to the
+    first. The launchd machine is adopted with no notice, and
+    `ps -o pid,ppid,command -ax | grep scripts/daemon.ts` shows the second server's
+    child with the same pid. Switch back: the turn was not interrupted, and neither
+    switch asked for a sign-in — each server kept its own.
+24. Quit with ⌘Q, and separately with ⌘W: every child the app started is gone
+    within seconds, and launchd's daemon is still running.
+25. `kill -9` the app while both children run, relaunch, and check `ps`: the
+    orphans are adopted silently as `foreign`, and no third daemon starts.
+26. Stop the launchd daemon, move `~/.reemoat/daemon.env` elsewhere, and run
+    `REEMOAT_ENV_FILE=<the moved file> deploy/run-daemon.sh` — or `set -a;
+    . <the moved file>; set +a; pnpm daemon`, since `pnpm daemon` reads no env file
+    of its own — so it runs on `~/.reemoat`'s database with no env file there. The
+    app adopts it for its server and creates no machine.
+27. Sign in to the first server as a second account with no grant on the launchd
+    machine. The setup notice says *A Reemoat daemon for this server is already
+    running on this computer, as a machine this account cannot see* — checked in
+    WebKit, not Chromium.
+28. With the launchd daemon up, run `pnpm daemon` from a checkout with no
+    `REEMOAT_HOME`, its own `REEMOAT_DB` and `REEMOAT_PORT`, enrolled with a local
+    `pnpm cp`, and open the app on the launchd daemon's server. No setup notice
+    appears, `~/.reemoat/daemon.json` names the local control plane as
+    `controlPlane`, and Settings → Logs says the daemon it found here is for a
+    different server.
 
 ## Open measurements
 

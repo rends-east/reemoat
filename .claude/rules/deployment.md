@@ -20,6 +20,7 @@ curl -fsSL https://github.com/rends-east/reemoat/releases/latest/download/instal
   … | sh -s -- --enroll-code ec_…    #   with a code already minted, and no account credential
   … | sh -s -- --uninstall           #   stop it and take the unit away; names your data, deletes none
   … | sh -s -- --uninstall --purge   #   and delete it, after naming the database, checkout and worktrees it would take
+                                     #   — and the desktop app's other servers, under ~/.reemoat/servers (Q7.148)
 deploy/agents.sh --check             # what the agent CLIs would install or refresh, changing nothing
 deploy/agents.sh --only kimi         #   that harness alone. What `src/agentinstall.ts` passes when
                                      #   somebody presses Install; its value is checked, --skip's is not

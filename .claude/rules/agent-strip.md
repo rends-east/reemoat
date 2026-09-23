@@ -162,15 +162,14 @@ is the *refusal* axis reaching the preset arm; the **credential** axis still doe
 not, and `webcheck` asserts the pair together so neither can be collapsed into the
 other by somebody tidying.
 
-⚠ **The door this one owes is not the sign-in block.** `signInOffered` answers
-`false` for every harness with no wizard — which is exactly the population this
-state hides — so New session's *"No agent on this machine is ready to start."* was
-a sentence with nothing under it on a machine whose only harness came from a
-plugin. It names the gear in that case. What is behind the gear is the row, kept in
-place with `would not start` where the vendor line goes, a paste box, and **Check
-again**: the only control in this app whose subject is off-screen entirely, because
-the commonest remedy for such a harness is to run its own program once on the
-machine and nothing about that reaches the daemon. Q3.538.
+⚠ **What the hidden tile owes back is a way to the card, never a card.** New
+session draws no install and no sign-in at all (Q3.640): a machine with nothing to
+start says one `STRIP_EMPTY` sentence and offers **Agent settings**, which is the
+gear's `onConfigure`. Behind it is the row, kept in place with `would not start`
+where the vendor line goes, **Set up <harness>** in its menu opening the card with
+its paste box, and **Check again**: the only control in this app whose subject is
+off-screen entirely, because the commonest remedy for such a harness is to run its
+own program once on the machine and nothing about that reaches the daemon. Q3.538.
 
 ## Hidden is not a refusal
 
@@ -184,9 +183,15 @@ Three consequences, and the third is the one that is easy to miss:
 - **A harness is hidden; an assembled agent is removed.** There is nothing to delete
   about a harness — it is whatever the host has installed — so "remove" on one would
   be a control claiming to reach a disk it cannot.
-- **An empty row says which kind of empty.** "Every agent on this machine is hidden"
-  is asked **first**, because it is the only one of the three causes that is true of
-  a machine with nothing wrong with it, and it names the gear rather than a screen.
+- **An empty row says which kind of empty, and three of five end in Agent
+  settings.** `stripEmpty` asks *hidden* before every fault, because it is the only
+  cause true of a machine with nothing wrong with it — and asks it of a hidden row
+  that could **start**, since "every row is hidden" was false both ways: a hidden
+  signed-in harness beside a preset on a missing one read *not ready*, and a hidden
+  preset on a missing harness read *hidden*. `none_listed` offers Check again,
+  `too_old` offers nothing (there is no Agents screen to send anyone to), and a
+  failed or unsettled read answers `null` — the Try again row speaks for it. It is
+  decided once in `NewSession`, so the footer's "no agent to start" cannot disagree.
 - **`offeredHere` takes the hidden set.** Hiding is not an availability failure, so
   nothing downstream refuses it; a pick that survived that call would be `Start` live
   over a row with nothing drawn as chosen — the fourth member of the family that
@@ -213,19 +218,28 @@ inline — a pop-up replacing a pop-up, discarding a walked-to folder. The folde
 in the address now, and the chosen tile is in `agentPick.ts` as a **standing** map:
 `keepPick`/`heldPick`, **read** rather than taken, which is the opposite discipline
 from the two hand-offs beside it. Those carry an event that happened once; this
-carries a choice that stays true until somebody taps another.
+carries a choice that stays true until somebody taps another. The empty state's
+**Agent settings** is the same crossing — one handler, so it inherits all of this
+rather than a second copy of it.
 
-**`…/agents` names a screen again.** It meant one agent's sign-in until a harness
-and the account it signs in to came apart; `…/agents/claude` now lands on the list
-with the tail dropped, which is this parser's standing "fall up to the nearest real
-screen".
+**`…/agents` names a screen again, and `…/agents/:harness` is that harness's
+card.** It meant one agent's sign-in until a harness and the account it signs in to
+came apart; the tail was dropped for a while, and now it is the address's first
+meaning with the install half added — New session's old inline card as a leaf
+(Q3.640). Parsed into `signin` with `agents` true, so the route's shape is
+unchanged, and bounded by `MAX_HARNESS_ID_CHARS` (96) rather than the system bound,
+for the 65-character reason above: a Set up that pushed an id the parser dropped
+would land back on the list it was tapped from.
 
 **And its ◀ reads `origin`, at this one screen and for a New session origin only.**
 The gear is a crossing, so the parent in the URL is not where anybody came from.
 It cannot be general: `originFor` keeps an origin across a move *within* a pop-up,
 so applying it at every depth would make a settings sheet opened from New session
 answer `/new` for its sections too. Narrowed to the New session pop-up so
-`settingsUpLabel` has exactly one name to give.
+`settingsUpLabel` has exactly one name to give. **The leaf never reads it**: the
+card walks up to the list by URL, the list still holds the origin across that push
+(`originFor`), and so two ◀ end on New session — driven as a sequence in
+`webcheck`.
 
 **Two controls on a row — a handle and a menu — and what varies is *inside* the
 menu.** A row that loses a control moves every control beside it, and on a list you
@@ -233,7 +247,10 @@ drag that is the one thing that must not happen; a menu's panel is drawn on dema
 and displaces nothing. So the kebab is live on **every** row, on an old daemon
 too: `frozen` — a daemon that cannot store an order — disables the drag handle
 and the Add back / Remove item, the two acts that write the strip, and nothing
-else, since Edit and Check again need no strip route.
+else, since Edit, Set up and Check again need no strip route. **Set up** is keyed
+on a fact the row reports — a `strong` badge, or a preset's harness not there or
+refused while routed, which its subline says — and is the list's only way to the
+card; the silent Install it replaced is gone.
 The status line sits **under** the list and is 0-height until it has something
 to say, for the same layout reason: a write failure must never move the rows a
 finger is over (Q3.543's sibling decision, 13A).
