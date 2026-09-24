@@ -172,6 +172,7 @@ const FOREIGN = new Set([
   "translateY", // CSS
   // WebKit's own predicate, cited in Q3.638; nothing in this tree declares it.
   "isSelectionRoot",
+  "inlineCode", // mdast's own node type, quoted in Q3.639 for what a walk over `children` cannot enter
   "recvBuf", // `yamux-js` internals, in the entry about its broken flow control
   "resOnFinish", // likewise
   "sendWindowUpdate", // likewise
@@ -187,6 +188,16 @@ const FOREIGN = new Set([
   // The two adapters' internals, cited in Q6.107 for how each handles a second prompt.
   "turnQueue",
   "activePrompt",
+  // claude-agent-acp's, cited in Q2.232 and Q2.233 for where a cycle nobody prompted ends and what it cannot do.
+  "AUTONOMOUS_RESULT_ORIGINS",
+  "isAutonomousResult",
+  "pendingExitPlanContextReset",
+  "continuePlanInFreshContext",
+  // claude-agent-acp's, cited in Q2.234 for why a new agent never republishes a task list.
+  "teardownSession",
+  "backgroundTasksChanged",
+  "finishLifecycle",
+  "takeSnapshot", // WKWebView's own method, how Q3.645 read what WebKit painted
 ]);
 
 // Cited by DECISIONS.md and greps to nothing. Pinned by equality so the list can only shrink; triage is outstanding.

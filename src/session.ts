@@ -15,11 +15,26 @@ import {
   MAX_ASYNC_TASK_TEXT_CHARS,
   MAX_ASYNC_TASK_TYPE_CHARS,
   MAX_TRACKED_ASYNC_TASKS,
+  byLiveThenNewest,
   isTerminalAsyncTaskState,
   readAsyncTaskEdge,
   readBackgroundedMarker,
 } from "./acp/asynctasks.js";
 import { MAX_PARENT_ID_CHARS, toolCallLineage } from "./acp/subagents.js";
+import {
+  mcpElicitResponse,
+  mcpElicitation,
+  planPermission,
+  planResponse,
+  questionElicitation,
+  questionResponse,
+  type XaiMcpElicitRequest,
+  type XaiMcpElicitResponse,
+  type XaiPlanRequest,
+  type XaiPlanResponse,
+  type XaiQuestionRequest,
+  type XaiQuestionResponse,
+} from "./acp/xai.js";
 import { sessionMetaFor } from "./acp/agents.js";
 import type { AgentRouting } from "./acp/systems.js";
 import {
@@ -73,6 +88,16 @@ const STEER_TIMEOUT_MS = 10_000;
 
 /** `started_new_turn` is a failure: that turn has no session/prompt for pump to close. */
 export type SteerOutcome = "injected" | "started_new_turn" | "prompt_required" | "unsupported";
+
+// claude-agent-acp stamps the usage_update after every SDK result with the cycle's origin; the one end a cycle nobody prompted has (Q2.233).
+const CYCLE_ORIGIN_META = "_claude/origin";
+
+function marksCycleEnd(meta: unknown): boolean {
+  if (typeof meta !== "object" || meta === null) return false;
+  const origin = (meta as Record<string, unknown>)[CYCLE_ORIGIN_META];
+  return typeof origin === "object" && origin !== null;
+}
+
 const NEW_SESSION_TIMEOUT_MS = 15_000;
 // Bounds the launch RPC: unbounded, a wedged agent leaks its process, worktree and session slot.
 const LAUNCH_SESSION_TIMEOUT_MS = 60_000;
@@ -203,6 +228,12 @@ export class Session {
   private readonly asyncTaskListeners = new Set<(tasks: readonly BackgroundTask[]) => void>();
   private commandState: AgentCommands = { commands: [], dropped: 0 };
   private readonly commandListeners = new Set<(commands: AgentCommands) => void>();
+  // Latched by the first cycle end: an agent that never marks one is never tracked, so nothing can strand it reading as working (Q2.233).
+  private marksCycleEnds = false;
+  private unpromptedSinceValue: number | null = null;
+  private readonly unpromptedListeners = new Set<(since: number | null) => void>();
+  // grok's requests in flight, by the call id its interaction_resolved names (Q6.113).
+  private readonly xaiInFlight = new Map<string, AbortController>();
 
   private cwd = "";
 
@@ -245,6 +276,8 @@ export class Session {
     ).length;
     this.asyncTasks.clear();
     this.announceAsyncTasks();
+    // The old conversation's cycle end is unroutable now too.
+    this.setUnprompted(null);
 
     const wanted = this.config;
     this.config = {
@@ -309,12 +342,7 @@ export class Session {
   }
 
   get backgroundTasks(): readonly BackgroundTask[] {
-    return [...this.asyncTasks.values()].sort((a, b) => {
-      const liveA = isTerminalAsyncTaskState(a.state) ? 1 : 0;
-      const liveB = isTerminalAsyncTaskState(b.state) ? 1 : 0;
-      if (liveA !== liveB) return liveA - liveB;
-      return b.startedAt - a.startedAt;
-    });
+    return [...this.asyncTasks.values()].sort(byLiveThenNewest);
   }
 
   get reportsBackgroundTasks(): boolean {
@@ -324,6 +352,43 @@ export class Session {
   onBackgroundTasksChanged(listener: (tasks: readonly BackgroundTask[]) => void): () => void {
     this.asyncTaskListeners.add(listener);
     return () => this.asyncTaskListeners.delete(listener);
+  }
+
+  /** When the agent began working with no prompt of ours in flight, or null (Q2.233). */
+  get unpromptedSince(): number | null {
+    return this.unpromptedSinceValue;
+  }
+
+  onUnpromptedChanged(listener: (since: number | null) => void): () => void {
+    this.unpromptedListeners.add(listener);
+    return () => this.unpromptedListeners.delete(listener);
+  }
+
+  /** The daemon's own ending, for a cycle whose end never arrived; the agent is told nothing. */
+  endUnprompted(): void {
+    this.setUnprompted(null);
+  }
+
+  awaitUnpromptedEnd(timeoutMs: number = CANCEL_SETTLE_MS): Promise<boolean> {
+    return this.waitUntil(() => this.unpromptedSinceValue === null, timeoutMs);
+  }
+
+  // Set on arrival, in onUpdate's order, never from the idle drain: a drain behind the end marker would light it again.
+  private noteAgentWork(): void {
+    if (this.turnActive || !this.marksCycleEnds || this.unpromptedSinceValue !== null) return;
+    this.setUnprompted(Date.now());
+  }
+
+  private setUnprompted(next: number | null): void {
+    if (this.unpromptedSinceValue === next) return;
+    this.unpromptedSinceValue = next;
+    for (const listener of this.unpromptedListeners) {
+      try {
+        listener(next);
+      } catch {
+        // Same guard as updateConfig.
+      }
+    }
   }
 
   get agentCommands(): AgentCommands {
@@ -808,6 +873,8 @@ export class Session {
         (response) => {
           if (this.promptEpoch !== epoch) return;
           this.flushToolDraft();
+          // The agent runs its input in order, so every cycle begun before this prompt has ended by now.
+          this.setUnprompted(null);
           this.queue.push({
             type: "turn_end",
             stopReason: response.stopReason,
@@ -817,6 +884,7 @@ export class Session {
         (error: unknown) => {
           if (this.promptEpoch !== epoch) return;
           this.flushToolDraft();
+          this.setUnprompted(null);
           this.queue.push({
             type: "error",
             message: describeError(error),
@@ -987,7 +1055,75 @@ export class Session {
       onReadTextFile: (request) => this.onReadTextFile(request),
       onWriteTextFile: (request) => this.onWriteTextFile(request),
       onElicitation: (request, signal) => this.onElicitation(request, signal),
+      onXaiQuestion: (request, signal) => this.onXaiQuestion(request, signal),
+      onXaiPlan: (request, signal) => this.onXaiPlan(request, signal),
+      onXaiMcpElicit: (request, signal) => this.onXaiMcpElicit(request, signal),
+      onXaiInteractionResolved: (toolCallId) => this.xaiInFlight.get(toolCallId)?.abort(),
     };
+  }
+
+  /** grok's three requests go through the two doors every agent's do, so parking, the log and the card are theirs (Q2.235). */
+  private async onXaiQuestion(request: XaiQuestionRequest, signal: AbortSignal): Promise<XaiQuestionResponse> {
+    // The text is the answer's key, so a question the card would draw cut is refused rather than asked in part.
+    if (request.questions.some((one) => one.question.length > MAX_ELICITATION_MESSAGE_CHARS)) {
+      throw acp.RequestError.invalidParams(
+        {},
+        `this client draws a question of at most ${MAX_ELICITATION_MESSAGE_CHARS} characters`,
+      );
+    }
+    const answer = await this.withdrawable(request.toolCallId, signal, (live) =>
+      this.onElicitation(questionElicitation(request), live),
+    );
+    return questionResponse(answer, request.questions);
+  }
+
+  private async onXaiPlan(request: XaiPlanRequest, signal: AbortSignal): Promise<XaiPlanResponse> {
+    // grok's call carries no arguments, so the plan is written onto it: the snapshot's 8 KiB clamp would lose a long one.
+    this.flushToolDraft();
+    this.queue.push({
+      type: "tool_call_update",
+      toolCallId: boundToolCallId(request.toolCallId),
+      title: null,
+      status: null,
+      locations: [],
+      rawInput: { plan: request.plan },
+      content: null,
+      images: null,
+      parentToolCallId: null,
+      backgrounded: false,
+    });
+    const answer = await this.withdrawable(request.toolCallId, signal, (live) =>
+      this.onPermission(planPermission(request), live),
+    );
+    return planResponse(answer);
+  }
+
+  private async onXaiMcpElicit(request: XaiMcpElicitRequest, signal: AbortSignal): Promise<XaiMcpElicitResponse> {
+    const answer = await this.withdrawable(request.toolCallId, signal, (live) =>
+      this.onElicitation(mcpElicitation(request), live),
+    );
+    return mcpElicitResponse(answer);
+  }
+
+  /** The SDK's signal and grok's own settling as one, so the registry's agent_withdrew path hears either. */
+  private async withdrawable<T>(
+    toolCallId: string | null,
+    signal: AbortSignal,
+    ask: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    if (toolCallId === null) return ask(signal);
+    const controller = new AbortController();
+    const forward = (): void => controller.abort();
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener("abort", forward, { once: true });
+    // Set on arrival and not before: the interaction_resolved closing grok's own permission step for this call comes just ahead of it.
+    this.xaiInFlight.set(toolCallId, controller);
+    try {
+      return await ask(controller.signal);
+    } finally {
+      signal.removeEventListener("abort", forward);
+      if (this.xaiInFlight.get(toolCallId) === controller) this.xaiInFlight.delete(toolCallId);
+    }
   }
 
   private async onElicitation(
@@ -1011,6 +1147,7 @@ export class Session {
       throw error;
     }
 
+    this.noteAgentWork();
     return this.elicitations(
       {
         toolCallId: request.toolCallId ?? null,
@@ -1067,6 +1204,7 @@ export class Session {
       case "agent_message_chunk":
       case "agent_thought_chunk":
       case "user_message_chunk":
+        if (update.sessionUpdate !== "user_message_chunk") this.noteAgentWork();
         this.queue.push({
           type: "text",
           role: update.sessionUpdate === "user_message_chunk" ? "user" : "agent",
@@ -1079,6 +1217,9 @@ export class Session {
       case "tool_call": {
         // toolCallLineage reads the raw id for its self-parent test.
         const toolCallId = boundToolCallId(update.toolCallId);
+        const lineage = toolCallLineage(update);
+        // A subagent's steps are a delegation the foot already counts, not the agent's own cycle.
+        if (lineage.parentToolCallId === null) this.noteAgentWork();
         this.queue.push({
           type: "tool_call",
           toolCallId,
@@ -1087,7 +1228,7 @@ export class Session {
           status: update.status ?? "pending",
           locations: toLocations(update.locations),
           rawInput: update.rawInput ?? null,
-          ...toolCallLineage(update),
+          ...lineage,
         });
         this.emitDiffs(toolCallId, update.content);
         return;
@@ -1112,6 +1253,7 @@ export class Session {
           parentToolCallId: toolCallLineage(update).parentToolCallId,
           backgrounded: readBackgroundedMarker(update._meta),
         };
+        if (event.parentToolCallId === null) this.noteAgentWork();
         // Raw one-block guard: a rendered single string may hide a diff block, which must not be held.
         if (update.content?.length === 1 && this.holdsToolDraft(event)) return;
         this.flushToolDraft();
@@ -1127,6 +1269,7 @@ export class Session {
       }
 
       case "plan":
+        this.noteAgentWork();
         this.queue.push({ type: "plan", entries: update.entries });
         return;
 
@@ -1144,6 +1287,11 @@ export class Session {
 
       case "usage_update":
         this.updateUsage(update);
+        // Any origin: one cycle runs at a time, so whichever just ended, the agent is between cycles.
+        if (marksCycleEnd(update._meta)) {
+          this.marksCycleEnds = true;
+          this.setUnprompted(null);
+        }
         return;
 
       default:
@@ -1188,6 +1336,7 @@ export class Session {
       request.options.find((option) => option.kind === "allow_always") ??
       null;
 
+    this.noteAgentWork();
     if (this.permissions && choice) {
       return this.permissions(
         {
@@ -1278,10 +1427,14 @@ export class Session {
   }
 
   private waitForTurnToSettle(timeoutMs: number): Promise<boolean> {
+    return this.waitUntil(() => !this.turnActive, timeoutMs);
+  }
+
+  private waitUntil(done: () => boolean, timeoutMs: number): Promise<boolean> {
     return new Promise((resolve) => {
       const started = Date.now();
       const tick = () => {
-        if (!this.turnActive) {
+        if (done()) {
           resolve(true);
           return;
         }
@@ -1456,7 +1609,7 @@ function boundToolCallId(id: string): string {
 }
 
 function sessionMetaOf(options: SessionOptions): Record<string, unknown> | undefined {
-  return sessionMetaFor(options.agent, { ultracode: options.ultracode === true });
+  return sessionMetaFor(options.agent, { ultracode: options.ultracode === true, elicitation: options.elicitations != null });
 }
 
 // Native pairings only. Answers a sentence: start refuses on it, openResumed demotes (Q2.216).

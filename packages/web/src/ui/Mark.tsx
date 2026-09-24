@@ -33,12 +33,12 @@ export function Mark({ size = 20, className = "" }: { size?: number; className?:
 }
 
 /** `still` draws the mark at rest where what it is about has stopped or can no longer be vouched for. */
-export function WorkingMark({ still = false }: { still?: boolean } = {}): ReactNode {
+export function WorkingMark({ still = false, size = 11 }: { still?: boolean; size?: number } = {}): ReactNode {
   return (
     <svg
       viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
-      height={11}
-      width={10}
+      height={size}
+      width={Math.round((size * VIEW_WIDTH) / VIEW_HEIGHT)}
       fill="currentColor"
       aria-hidden="true"
       className="shrink-0"

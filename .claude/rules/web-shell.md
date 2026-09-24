@@ -40,10 +40,10 @@ alone. Consequences: `StatusDot` goes through `statusTone`, and `POST
 /sessions/:id/prompt` joins `slowRoute` unconditionally, because
 `request` sees only a method and a path.
 
-**A cancel is two more pure predicates in `wire.ts`.** `canCancelTurn` is
-`turn !== null && !isTerminal && status !== "stopping"` — deliberately **wider
-than `showsWorking` by exactly the blocked case**, because a session parked on a
-question is where somebody most wants out and the daemon takes the cancel there.
+**A cancel is two more pure predicates in `wire.ts`.** `canCancelTurn` is a turn,
+unprompted work or a parked request, `&& !isTerminal && status !== "stopping"` —
+**wider than `showsWorking` by exactly the blocked case**, where somebody most
+wants out and the daemon takes the cancel, turn or not (Q2.232).
 The `stopping` clause is the daemon's *second* refusal (`terminal ||
 stopRequested`) and `isTerminal` does not cover it: a session stopped mid-turn
 carries `{status: "stopping", turn: 5}` for seconds. `cancelInFlight`
@@ -68,7 +68,7 @@ bundle, two shells**: `packages/native` is a Tauri window around this same
 copy and no branch at a call site. `native-shell.md` is that area, and Q3.605 is
 why "no Electron" is narrowed rather than reversed.
 It is **adaptive**: below `lg` one screen at a time, list → detail; at `lg` and
-above the rail becomes permanent and is **two columns** — `MachineColumn`, 72px of
+above the rail becomes permanent and is **two columns** — `MachineColumn`, 80px of
 machines, then the session list. `AppShell` is the only place that knows, and it
 knows **in CSS** — no breakpoint state in JavaScript, so a resized window cannot
 render a rail that is not there. Both columns are inside one `<aside>` on one
@@ -92,10 +92,10 @@ have to enter. These are the rules a change here must not break:
   filter and the needle deliberately, and `webcheck` asserts it as a **superset
   property** over every filter × every tab × a set of queries. Q3.200.
   **`Sheet` draws no waiting count** (Q3.434, reversing Q3.201).
-- **`machineSubline` keeps `blocked` above `offline`**, and an unreachable machine
-  is announced **nowhere in the rail** — it and `MachineTab.reach` have no caller
-  outside `webcheck`. Settings → Machines and the New session picker are the only
-  places reachability shows. An open question, not a settled trade. Q3.202.
+- **`machineSubline` keeps `blocked` above `offline`**, and no row or banner says a
+  machine or the server is unreachable: `ConnectionPill` does, floating at the
+  list's bottom-left (`relay.md`, Q3.659). `MachineTab.reach` has no caller outside
+  `webcheck`. Q3.202.
 - **Nothing in a row mounts sideways into another control.** Three remedies:
   *delete it* when redundant; *reserve its slot* when it is the only copy (the
   pin, the two spinners); *move it off the row* when it is neither (the working
@@ -125,7 +125,7 @@ have to enter. These are the rules a change here must not break:
   nor any weight.
 - **`bg-fg` is the affirmative action inside a decision, and otherwise a *mark*
   under a stated size** — Send and the reversible approval; below that, only things
-  the size of a glyph: the tab underline, the bell dot, a blocked count, a selected
+  the size of a glyph: the bell dot, a blocked count, a selected
   machine's 28px chip. A pill-sized fill is still the loudest object on screen.
   `raised` means **state**: a tab you are on, a toggle on, a chosen menu row.
   Q3.209, Q3.624.
@@ -137,9 +137,9 @@ have to enter. These are the rules a change here must not break:
   Reverses Q3.211.
 - **The menu is a left drawer and the only thing in this app that is not a
   route.** `MenuDrawer`, portaled, `useDismissible("sheet")` — never `"menu"`,
-  which would leave `j`/`k` walking the list behind it. Two triggers, one panel,
-  state in `App`; the `usePathname()` effect is what makes Android's Back close
-  it, at the cost of Back doing two things.
+  which would leave `j`/`k` walking the list behind it. Two triggers and a pull
+  (Q3.657), one panel, state in `App`; the `usePathname()` effect makes Android's
+  Back close it, at the cost of Back doing two things.
   **No ✕, by the owner's call**, so VoiceOver on iOS reaches no exit — `webcheck`
   pins the absence. Q3.628.
 - **`border-r` on the rail: the rule is the ratio**, measured in Q3.210.

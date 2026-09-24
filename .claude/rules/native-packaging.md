@@ -312,17 +312,23 @@ background were both real repairs and neither touched the cause.
 **What a correct adaptive foreground is, since `tauri icon` does not produce
 one either.** Its `ic_launcher_foreground.png` is the whole badge, opaque edge to
 edge — so it hides the background layer entirely and the launcher masks a square.
-A foreground is the **mark alone on transparency**, inset to the adaptive safe
-zone: the centre 66dp of 108 is all that survives every launcher mask, so the art
-sits at 58% of the frame. The background layer carries `#1c1a16`, which is the
-badge colour `packages/web/public/favicon.svg` already knocks the mark out of.
+A foreground is the **mark alone on transparency**. The background layer carries
+`#1c1a16`, the badge colour `packages/web/public/favicon.svg` already knocks the
+mark out of, and `<monochrome>` reuses the foreground for Android 13's themed icons.
 
-Both trees are written: `gen/android` because that is what builds, and
-`src-tauri/icons/android` so the next person diffing them does not find them
-disagreeing. **A future `tauri android init` overwrites the first**, which is one
-more reason `gen/android` is committed rather than generated.
+⚠ **Inside the safe zone is not the right size.** The mark sat at 58% of the 108dp
+frame, its corners on the 66dp safe circle — **87% of the 72dp a launcher shows**,
+against 70.6% of the Dock's tile, so it all but touched its circle (Q4.128).
+`icons.mjs` now treats the 72dp viewport as the badge, which makes the share the
+Dock's by construction: 51dp tall, reaching 26dp of the 33dp safe radius.
 
-## The macOS inset, and why it is one platform's
+Both trees are written by it, byte for byte: `gen/android` because that is what
+builds — `tauri android build` copies nothing into `res/`, measured by the 0.11.0
+APK carrying the committed bytes — and `src-tauri/icons/android` so a diff never
+finds them disagreeing. **A future `tauri android init` overwrites the first**;
+`pnpm --dir packages/native icon` puts it back.
+
+## The macOS inset, and which surfaces carry it
 
 ⚠ **The badge was 100% of its canvas on every macOS raster in this tree**, opaque
 corner to corner, and that is why the tile read about a quarter larger in linear
@@ -345,8 +351,8 @@ section rather than a footnote to it:
 | Surface | Geometry | Why |
 |---|---|---|
 | `icons/icon.icns`, `icon.png`, the sized PNGs, `icon.ico` | **inset** to 824/1024 | macOS masks and expects the margin |
-| `icons/android/`, `gen/android/` foreground | the mark alone at 58% | a different mask, a different safe zone — and hand-authored, above |
-| `icons/android/`, `gen/android/` legacy rasters | full bleed | correct, and a `tauri icon` run is what breaks them |
+| `icons/android/`, `gen/android/` foreground | the mark alone, the 72dp viewport as the badge | the launcher's mask is the tile; the Dock's share of it, above |
+| `icons/android/`, `gen/android/` legacy rasters | the Dock's tile; `_round` as a circle | API 24–25 draws them unmasked, as the Dock does |
 | `icons/ios/*`, `packages/web/public/apple-touch-icon.png` | full bleed | iOS masks its own; this inset would double. That PNG is colour type 2 and has no alpha to inset *with* |
 | `packages/web/public/favicon.svg` | full bleed | a tab strip does not mask, so a margin there is a smaller mark for nothing. It stays the **source** |
 | `Square*Logo.png`, `StoreLogo.png` | unchanged, and **unmeasured** | a Windows tile sits on a coloured plate and wants a third geometry. No CI leg, no asset, no measurement — a stated gap rather than a guess |
@@ -356,16 +362,17 @@ is what replaced it.** The reason is the section above: that command overwrites
 `ic_launcher_foreground.png` with the whole badge and rewrites both launcher XMLs
 back to `@mipmap/…` and `#fff`, so every run has to be followed by a hand-restore
 of three files — which is the same shape as the `git checkout -- gen/android` that
-already gets forgotten. The generator writes **only** the macOS and Windows files
-and nothing under either Android tree, which `nativecheck` asserts from the other
-side by reading the script.
+already gets forgotten. The generator writes the macOS, Windows and Android
+rasters and **no XML** — the launcher XMLs stay hand-authored — which `nativecheck`
+asserts from the other side by reading the script.
 
 It also replaced a script that could not run: `package.json` said `tauri icon
 icon.png` and `packages/native/icon.png` **has never existed**. Nothing noticed,
 because nothing looked at icons at all.
 
-**Two numbers in that file are Apple's and the rest is read off `favicon.svg`.**
-`MARGIN` is `100 / 1024` and `RADIUS` is `185.4 / 824`; the mark's six numbers are
+**Three numbers in that file are the platforms' and the rest is read off
+`favicon.svg`.** `MARGIN` is `100 / 1024`, `RADIUS` is `185.4 / 824` and
+`ADAPTIVE_MARGIN` is Android's `(108 - 72) / 2 / 108`; the mark's six numbers are
 parsed out of the SVG rather than retyped, so the app icon is a stated *transform*
 of the favicon rather than a fourth copy of the drawing. `rx` is the one thing
 that does not scale — the favicon's corner is 25% of its side and Apple's is 22.5%
@@ -380,9 +387,10 @@ now carries a PNG decoder (all five filter types, so it still bites on a raster
 somebody replaces by hand) and pins: every path in `bundle.icon` exists; the
 `.icns` member list is the eight PNG types a macOS 13 floor reads, with no legacy
 RGB+mask members; `ic10` is 824×824 at (100,100) and is the same bytes as
-`icon.png`; every generated raster is inset to the same grid; Android's foreground
-is the mark and its legacy rasters are full bleed, across both trees and all five
-densities; the mark agrees between `favicon.svg` and `Mark.tsx`; the favicon and
+`icon.png`; every generated raster is inset to the same grid; the mark is the
+favicon's `scale` of the visible shape in the Dock, in the adaptive foreground's
+72dp and in both legacy rasters, inside the safe circle, and the two Android trees
+are the same bytes; the mark agrees between `favicon.svg` and `Mark.tsx`; the favicon and
 `apple-touch-icon.png` are still full bleed; and **every file a script in
 `packages/native/package.json` names exists**, which is the line that would have
 caught `tauri icon icon.png` years ago.

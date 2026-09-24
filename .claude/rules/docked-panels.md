@@ -8,9 +8,13 @@ paths:
   - packages/web/src/ui/TaskPanel.tsx
   - packages/web/src/ui/MenuDrawer.tsx
   - packages/web/src/ui/AppShell.tsx
+  - packages/web/src/ui/sheetDrag.ts
+  - packages/web/src/ui/sheetMotion.ts
+  - packages/web/src/ui/Sheet.tsx
+  - packages/web/src/ui/AgentConfigBar.tsx
 ---
 
-# A second surface beside the conversation: how wide it is, and how it leaves
+# A second surface beside the conversation: how wide it is, how it leaves, and how it is dragged away
 
 Two subjects, and they are one file because they landed on one element. `TaskPanel`
 is the background panel — a bottom sheet on a phone, a card docked to the right of
@@ -142,7 +146,8 @@ read out of both call sites.
   the licence `machineSwipe`'s `offsetParent` read is granted. Without it the first
   drag of the panel at `xl` begins from the `md` default and jumps 96px under the
   pointer.
-- ⚠ **`col-resize`, and it is the app's only cursor.** It went out with every other
+- ⚠ **`col-resize`, and it is one of the app's two cursors** (the other is the
+  text caret on the header's session name, Q3.665). It went out with every other
   one when the ban landed and came back by the owner's call: the ban is about a
   *pointer* shape claiming ordinary text is pressable, and an arrow pair over the
   division between two panes is the opposite — it is the only thing saying an 8px
@@ -227,21 +232,16 @@ What the caller owes, each with the defect behind it:
    resolved by Tailwind's emission order rather than by the class string.
 
 **The backstop is the longer of a surface's exits**, not the one it plays most —
-260ms for the sheet against 140 for the card. `webcheck` reads both tokens out of
-the stylesheet and asserts the constant against the longer, because neither file can
-see the other's number.
+260ms for the sheet against 140 for the card.
 
-**Each surface declares its own constant beside its own class strings.**
-`DRAWER_EXIT_MS`, `SHEET_EXIT_MS` and `TASK_PANEL_EXIT_MS` are three numbers, each
-asserted against its own token. One shared constant would be a single number
-standing for durations that are not the same.
+**One clock and one curve, since the durations are now the same.** Every sheet,
+drawer and scrim arrives and leaves on `--sheet-ms` and `--sheet-ease`, which
+`sheetMotion.ts` spells as `SHEET_MS` and `SHEET_EASE` for the backstops and the
+settle; `webcheck` asserts the pair. The three per-surface constants went with the
+three durations they stood for (Q3.650).
 
-⚠ **`AgentConfigBar`'s picker is deliberately not a caller.** It keeps its panel
-mounted past dismissal for the same reason — neither layer is a route, so neither
-has a view-transition snapshot to leave behind — but its `open` is its own
-`useState`, flipped from inside the exit timer, so `shown === open` throughout and
-its render reads `{open && !leaving && (`, which `webcheck` pins as a literal. A
-different shape wearing the same word.
+**`AgentConfigBar`'s picker is a caller now.** It kept a timer and an `open` flipped
+from inside it; the anchored panel draws on `open` and the sheet on `shown`.
 
 ⚠ **`pb-safe` is spelled as its own value on the panel, and that is a cascade fix
 rather than a divergence.** `.pb-safe` is unlayered while Tailwind emits every
@@ -257,3 +257,69 @@ identical fact and names `SHEET_PANEL`'s `sm:pb-0` as still losing it.
 `pointer-events-none` the tail of every close is an invisible viewport-sized
 click-eater. `TaskPanel`'s scrim had no animation in **either** direction, which was
 half of what "it disappears" was about.
+
+## How a panel is dragged away
+
+**One gesture, `useSheetGesture` in `sheetDrag.ts`, and each surface supplies only
+geometry.** The config picker, `TaskPanel` below `md`, the routed `Sheet` below
+`sm` and the drawer all drag through it; `useSlideSheet` is the geometry of the three
+that simply slide. The decisions are pure in `sheetMotion.ts`, which imports nothing
+so `webcheck` drives them. Q3.650, Q3.651.
+
+- ⚠ **A finger is on the touch stream, never the pointer stream.** Pointer events
+  were the defect: wherever `touch-action` allowed a pan — the picker's full list —
+  the engine took the gesture and sent `pointercancel` on the first move, so the
+  panel never moved. `useTouchGesture` puts non-passive listeners on the panel, and
+  the first move past `PRESS_SLOP` is refused to the scroller with `preventDefault`
+  only when `claimDrag` says it is the panel's. A mouse keeps the pointer path,
+  captured at engage and never at the press.
+- **`claimDrag` decides once**, at the first move past the slop. Along the axis by
+  `DOMINANCE`, shared with `machineSwipe`; never against `cancelable === false` or
+  a move an inner gesture already refused; never after `PRESS_MS` held, which is a
+  text selection or a row's own drag arming; and inside a scroller only when it
+  cannot move that way — so a list at its top hands a downward drag to the panel and
+  keeps every other. ⚠ **The scroller is found by its computed `overflow-y`**, never
+  marked by hand: a mark was one more thing the next screen could forget.
+- **`sheetRelease`: a fling or a distance.** `FLING` px/ms toward the exit, or
+  `dismissAt` — `DISMISS_PX`, or a third of a short panel — and never while flung
+  back. Distance alone was the old rule, and a 60px flick snapped back.
+- ⚠ **A dismissal keeps the offset.** The exit keyframes have no `from`, so the
+  element's inline transform is where they leave from; `webcheck` pins both. So a
+  panel reopened mid-exit is put back by `useSlideSheet`, or it arrived to where the
+  drag had let go.
+- ⚠ **The exit curve is the arrival's.** The mirrored ease-in moved a sheet 8% of
+  its way in the first 60% of its time, so a flung panel stopped dead under the
+  finger before it fell.
+- ⚠ **A move is one transform, written once per frame, and nothing else.** From
+  engage to the end of the settle the panel is `will-change: transform` — its own
+  layer, so a move is a compositor update — and its offset is whole device pixels.
+  Measured without: every move repainted the whole viewport, the grab bar re-rasterised
+  at a new sub-pixel phase each frame (the flicker reported on Android), and New
+  session was painted per move. So **a panel stops at open** rather than growing past
+  it — a height per move laid New session out 25 times in 30 moves — and **the
+  picker is laid out at full once, at engage**, with both detents a translate.
+- ⚠ **`transition` is held at `none`, never cleared.** `index.css`'s reduced-motion
+  block gives every property a 0.01ms transition, whose first frame is the old value.
+- **A drag begins where the panel is drawn**: `hold` reads the computed transform,
+  finishes the arrival and cancels a settle, so a grab mid-flight does not jump.
+- **The layout gate is a grabber CSS hides** — `md:hidden` in `TaskPanel`,
+  `sm:hidden` in `Sheet` — read through `offsetParent` per gesture, the
+  `machineSwipe` licence. The docked card and the dialog never drag.
+- **`Sheet` drags from anywhere on it, as the pickers do** (it was the head only):
+  its screens' scrollers hand a drag over at their top, a tap is not a drag, and a
+  mouse on a field is editing. Its close is a navigation, so the `sheet-close` view
+  transition captures the dragged panel and leaves from there.
+- **The scrim is a grip too** (Q3.660): a drag begun on its bare surface moves the
+  panel as one begun on the panel does, through the same hook, and a tap still
+  closes. A scrim beside its panel fades with how much of the panel is out; the
+  routed `Sheet`'s is the panel's parent and does not (Q3.650). The sibling scrims
+  are `touch-none`, having nothing to pan or zoom.
+- **The drawer is also pulled open**, from the list's first page (Q3.657,
+  `drawerPull`): drawn for the gesture without being a layer, and opened, if it is,
+  through the menu button's own state. `machine-gestures.md` has the arbiter. A
+  drag begun inside that open's settle takes the drawer where it is drawn
+  (`yieldPull`), or the pull's timer flashed it fully open under the finger.
+- **The click a drag leaves behind is swallowed** for `CLICK_AFTER_DRAG_MS` and
+  reset by the next press, so a keyboard's Enter is never eaten.
+- **Reduced motion**: the settle and the exit are CSS, which `index.css`'s blanket
+  block zeroes; what is written per move is only the finger's own position.

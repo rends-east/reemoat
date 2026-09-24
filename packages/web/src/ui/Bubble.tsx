@@ -5,11 +5,10 @@ import { previewable } from "../preview";
 import type { PromptAttachmentRef } from "../wire";
 import type { FileAccess } from "./files";
 import { ImagePreview } from "./ImagePreview";
-import { Markdown } from "./Markdown";
 import { Icon } from "./bits";
 import { hugBubble } from "./hug";
 
-/** The person's message as a right-aligned bubble, one component for every call site; agent text stays full-bleed. */
+/** The person's message as a right-aligned bubble, one component for every call site, drawn exactly as sent: never parsed (Q3.646). */
 export function UserBubble({
   text,
   attachments = [],
@@ -30,14 +29,14 @@ export function UserBubble({
     <div className="my-4 flex justify-end select-none">
       <div
         ref={box}
-        // `min-w-0` lets `Markdown`'s overflow boxes scroll; keep the `lg` cap below `85%` so crossing `lg` never widens the bubble.
+        // Keep the `lg` cap below `85%` so crossing `lg` never widens the bubble.
         className="sel-root ml-auto w-fit min-w-0 max-w-[85%] select-none rounded-xl rounded-br-md bg-raised px-3.5 py-2.5 lg:max-w-[26rem]"
       >
         {/* `sel-root` on the box is what stops WebKit's gap fill (Q3.638). */}
-        <div className="select-text">
-          <Markdown text={text} tone="user" />
-        </div>
-        {/* Chips stay out of `text`, so the `Markdown` memo holds and no URL goes through the renderer. */}
+        {/* One text node, which is what `hug.ts` measures; `pre-wrap` keeps every space and break, `wrap-anywhere` breaks a long token. */}
+        {text.trim().length > 0 && (
+          <div className="select-text text-sm whitespace-pre-wrap text-fg wrap-anywhere">{text}</div>
+        )}
         {attachments.length > 0 && (
           <ul className="mt-1.5 space-y-1 select-text">
             {attachments.map((ref) => (

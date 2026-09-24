@@ -1,5 +1,5 @@
 import { ChevronDown, LogOut, Plus, Puzzle, Settings as SettingsIcon } from "lucide-react";
-import { useEffect, useId, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { errorText } from "../http";
 import { marketPath } from "../market";
@@ -11,13 +11,13 @@ import { serverLabel } from "../slot";
 import { sessionGroups, store, type AppState } from "../store";
 import { APP_VERSION } from "../version";
 import { Icon, Monogram, personEmoji } from "./bits";
+import { isPulled, subscribePull, yieldPull } from "./drawerPull";
 import { currentView, groupsVersion, subscribeGroups } from "./groups";
 import { useLeaving } from "./leaving";
 import { LAYER, useDismissible } from "./overlay";
+import { useSheetGesture, useSlideSheet } from "./sheetDrag";
+import { SHEET_MS } from "./sheetMotion";
 import { toast } from "./Toast";
-
-/** Backstop for the exit when no animationend arrives; webcheck asserts it against --animate-drawer-out in index.css. */
-const DRAWER_EXIT_MS = 260;
 
 const DRAWER_ROW = "tap flex min-h-12 w-full items-center gap-3 rounded-md px-3 text-left text-sm";
 
@@ -37,11 +37,24 @@ export function MenuDrawer({
   // Subscribed so a machine switch with the drawer open changes the screens it offers.
   useSyncExternalStore(subscribeGroups, groupsVersion);
 
-  const { shown, leaving, onAnimationEnd } = useLeaving(open, DRAWER_EXIT_MS);
+  const { shown, leaving, onAnimationEnd } = useLeaving(open, SHEET_MS);
   // The layer lives for shown, never open: on open it popped before the panel left and the app behind went live mid-exit.
   useDismissible("sheet", onClose, shown);
-  const machine = shown ? currentView(sessionGroups(state)).machine : null;
-  if (!shown) return null;
+  const panelRef = useRef<HTMLElement | null>(null);
+  const scrimRef = useRef<HTMLElement | null>(null);
+  const slid = useSlideSheet(panelRef, "left", onClose, { scrim: scrimRef, open });
+  const geometry = {
+    ...slid,
+    begin: () => {
+      yieldPull();
+      slid.begin();
+    },
+  };
+  const drag = useSheetGesture<HTMLElement>({ axis: "left", enabled: open, geometry, held: panelRef, scrim: scrimRef });
+  // Pulled from the list, it is drawn and not yet a layer: nothing goes inert under a finger that may still give it back (Q3.657).
+  const pulled = useSyncExternalStore(subscribePull, isPulled);
+  const machine = shown || pulled ? currentView(sessionGroups(state)).machine : null;
+  if (!shown && !pulled) return null;
 
   const me = state.me;
   const name = me?.name ?? state.host?.name ?? null;
@@ -61,22 +74,30 @@ export function MenuDrawer({
     <>
       {/* A div, never a button (no phantom tab stop); pointer-events-none while leaving so the fading scrim eats no taps. */}
       <div
+        ref={drag.scrim.ref}
+        {...drag.scrim.bind}
+        data-drawer-scrim=""
         aria-hidden={true}
         onClick={leaving ? undefined : onClose}
+        // touch-none: nothing here pans or zooms, so a drag toward the edge is always the drawer's (Q3.660).
         className={`${
           leaving ? "animate-scrim-out pointer-events-none" : "animate-scrim"
-        } fixed inset-0 touch-manipulation bg-fg/25 ${LAYER.overlay}`}
+        } fixed inset-0 touch-none bg-fg/25 ${LAYER.overlay}`}
       />
       <aside
+        ref={drag.ref}
+        {...drag.bind}
+        data-drawer-panel=""
         role="dialog"
         aria-modal="true"
         aria-label="Menu"
         onAnimationEnd={onAnimationEnd}
+        // pan-y: the rows still scroll, and a sideways move is never the engine's to take.
         className={`pt-safe pb-safe pl-safe ${
           leaving ? "animate-drawer-out" : "animate-drawer"
-        } fixed inset-y-0 left-0 flex w-88 max-w-[85vw] flex-col overflow-hidden border-r border-edge bg-surface shadow-2xl ${LAYER.overlay}`}
+        } fixed inset-y-0 left-0 flex w-88 max-w-[85vw] touch-pan-y flex-col overflow-hidden border-r border-edge bg-surface shadow-2xl ${LAYER.overlay}`}
       >
-        {/* There was a ✕ here and it is gone by the owner's call; the ways out are now: Escape, a scrim tap, the hamburger and Android's Back. What that leaves without one is a screen-reader user on **iOS**, where VoiceOver skips the aria-hidden scrim (Q3.628). */}
+        {/* There was a ✕ here and it is gone by the owner's call; the ways out are now: Escape, a scrim tap, a swipe, the hamburger and Android's Back. What that leaves without one is a screen-reader user on **iOS**, where VoiceOver skips the aria-hidden scrim (Q3.628). */}
         {!native && (
           <div className="flex shrink-0 items-center gap-3 px-3 pt-3 pb-4">
             <Monogram name={name} glyph={personEmoji(name)} size="md" className="bg-raised" />

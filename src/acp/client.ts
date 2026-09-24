@@ -6,6 +6,22 @@ import type { AgentHandle, AgentProcess } from "../runtime/types.js";
 import type { AgentLaunchConfig } from "./agents.js";
 import type { AgentRouting } from "./systems.js";
 import { AIR_CLIENT_CAPABILITY, ASYNC_TASK_MARKER, ASYNC_TASK_UPDATES, agentAdvertisesAsyncTasks } from "./asynctasks.js";
+import {
+  XAI_ASK_USER_QUESTION,
+  XAI_EXIT_PLAN_MODE,
+  XAI_MCP_ELICIT,
+  XAI_SESSION_NOTIFICATION,
+  parseMcpElicitRequest,
+  parsePlanRequest,
+  parseQuestionRequest,
+  readInteractionResolved,
+  type XaiMcpElicitRequest,
+  type XaiMcpElicitResponse,
+  type XaiPlanRequest,
+  type XaiPlanResponse,
+  type XaiQuestionRequest,
+  type XaiQuestionResponse,
+} from "./xai.js";
 
 export interface SessionHandlers {
   onUpdate(notification: acp.SessionNotification): void;
@@ -20,6 +36,12 @@ export interface SessionHandlers {
     request: ElicitationRequest,
     signal: AbortSignal,
   ): Promise<acp.CreateElicitationResponse>;
+  /** grok's own three requests (acp/xai.ts), held open like the two above until somebody answers. */
+  onXaiQuestion(request: XaiQuestionRequest, signal: AbortSignal): Promise<XaiQuestionResponse>;
+  onXaiPlan(request: XaiPlanRequest, signal: AbortSignal): Promise<XaiPlanResponse>;
+  onXaiMcpElicit(request: XaiMcpElicitRequest, signal: AbortSignal): Promise<XaiMcpElicitResponse>;
+  /** grok settled one of them itself: how its own timeout withdraws a question it never tells the client about. */
+  onXaiInteractionResolved(toolCallId: string): void;
 }
 
 export type ElicitationRequest = acp.ElicitationFormMode &
@@ -127,6 +149,12 @@ export class AcpClient {
     const connection = acp
       .client({ name: "reemoat" })
       .onNotification(acp.methods.client.session.update, (ctx) => deliver(ctx.params))
+      // Ahead of every request on purpose: each handler costs a message one await, so a later one would let the
+      // question grok asks next overtake the resolution that closed grok's own step before it (Q6.113).
+      .onNotification(XAI_SESSION_NOTIFICATION, readInteractionResolved, (ctx) => {
+        if (ctx.params === null) return;
+        router.sessions.get(ctx.params.sessionId)?.onXaiInteractionResolved(ctx.params.toolCallId);
+      })
       .onRequest(acp.methods.client.session.requestPermission, (ctx) =>
         route(ctx.params.sessionId, (h) => h.onPermission(ctx.params, ctx.signal)),
       )
@@ -159,6 +187,18 @@ export class AcpClient {
         }
         const scoped: ElicitationRequest = params;
         return route(scoped.sessionId, (h) => h.onElicitation(scoped, ctx.signal));
+      })
+      // grok's own requests; any other `_` method still answers -32601, as these did (Q2.235).
+      .onRequest(XAI_ASK_USER_QUESTION, parseQuestionRequest, (ctx) => {
+        if (!elicitation) throw acp.RequestError.methodNotFound(XAI_ASK_USER_QUESTION);
+        return route(ctx.params.sessionId, (h) => h.onXaiQuestion(ctx.params, ctx.signal));
+      })
+      .onRequest(XAI_EXIT_PLAN_MODE, parsePlanRequest, (ctx) =>
+        route(ctx.params.sessionId, (h) => h.onXaiPlan(ctx.params, ctx.signal)),
+      )
+      .onRequest(XAI_MCP_ELICIT, parseMcpElicitRequest, (ctx) => {
+        if (!elicitation) throw acp.RequestError.methodNotFound(XAI_MCP_ELICIT);
+        return route(ctx.params.sessionId, (h) => h.onXaiMcpElicit(ctx.params, ctx.signal));
       })
       .connect(stream);
 

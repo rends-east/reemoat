@@ -93,7 +93,11 @@ export function PermissionCard({
   const skip = asked?.skip ?? null;
   const buttons = useMemo(() => permissionButtons(pending.options), [pending.options]);
 
-  const plan = useMemo(() => planControls(context, pending.options), [context, pending.options]);
+  const outOfTurn = pending.outOfTurn === true;
+  const plan = useMemo(
+    () => planControls(context, pending.options, outOfTurn),
+    [context, pending.options, outOfTurn],
+  );
   // Pages the transcript in to recover a missing or clipped payload; awaitingRecord is deliberately not a dependency.
   useEffect(() => {
     if (!context.unavailable && !context.truncated) return;
@@ -127,7 +131,7 @@ export function PermissionCard({
           }))
         : buttons.order.map((option, index) => ({
           id: option.optionId,
-          label: optionLabel(pending.options, option),
+          label: optionLabel(pending.options, option, context.plan !== null),
           hint: option.name,
           leading: index < buttons.leading,
           primary: option.optionId === buttons.primaryId,

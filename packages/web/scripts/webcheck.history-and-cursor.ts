@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { check, report } from "./webcheck.env.js";
+import { srcFile, srcFiles, stripComments } from "./webcheck.source.js";
 import {
   type Attach,
   attaches,
@@ -19,7 +20,9 @@ import {
   loadStop,
   nextCut,
   reattachSince,
+  sentText,
   type StoredEvent,
+  VERBATIM_FIELD,
 } from "./webcheck.modules.js";
 
 process.stdout.write("\nwhere a re-attaching socket resumes\n");
@@ -699,7 +702,7 @@ process.stdout.write("\nhistory loads itself, and nothing asks the reader to ret
     [true, true],
   );
   check("and the padding is not inside what is selectable", /\bselect-text\b/.test(bubbleBox), false);
-  check("while something inside it is", /className="select-text"/.test(bubble), true);
+  check("while something inside it is", /className="select-text\b/.test(bubble), true);
 
   // sel-root makes each block a WebKit selection root so selection gaps are not painted; a flex container between puts the fill back (Q3.638).
   const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
@@ -760,6 +763,67 @@ process.stdout.write("\nhistory loads itself, and nothing asks the reader to ret
     (eventList.match(/\{noticeSays\}/g) ?? []).length >= 1,
     true,
   );
+}
+
+process.stdout.write("\na person's message, exactly as they sent it\n");
+{
+  // Drawn, never parsed: `1)` stays text rather than a list marker nobody can select, `**x**` stays asterisks (Q3.646).
+  const bubble = stripComments(srcFile("ui/Bubble.tsx"));
+  const drawn = /<div className="([^"]*)">\{text\}<\/div>/.exec(bubble)?.[1] ?? "";
+  check("the bubble draws the text itself, as one node", drawn !== "", true);
+  check(
+    "keeping every space and line break, and wrapping a long token",
+    ["select-text", "whitespace-pre-wrap", "wrap-anywhere"].filter((name) => !drawn.split(" ").includes(name)),
+    [],
+  );
+  check("and hands nothing to the markdown renderer", [/from "\.\/Markdown"/.test(bubble), /<Markdown\b/.test(bubble)], [false, false]);
+  check("which has no tone for a person any more", /"user"/.test(stripComments(srcFile("ui/Markdown.tsx"))), false);
+
+  const events = stripComments(srcFile("ui/EventList.tsx"));
+  check(
+    "every place a person's words are drawn is that bubble",
+    [
+      /<UserBubble text=\{echo\.text\}/.test(events),
+      /<UserBubble\s+text=\{event\.text\}/.test(events),
+      /role === "user"\) return <UserBubble text=\{text\} \/>/.test(events),
+    ],
+    [true, true, true],
+  );
+  check(
+    "and a typed answer to a question keeps its line breaks too",
+    (events.match(/className="whitespace-pre-wrap wrap-anywhere">\{answer\.value\}/g) ?? []).length +
+      (/className="whitespace-pre-wrap wrap-anywhere">\s*\{answers\.length > 1/.test(events) ? 1 : 0),
+    2,
+  );
+
+  // Blank lines around a message and whitespace after it are not content; the first line's indentation is (Q3.646).
+  check("an indented first line keeps its indentation", sentText("  indented\n    more"), "  indented\n    more");
+  check("the blank lines around a message go", sentText("\n \t\r\n  code\n\n"), "  code");
+  check("and so does whitespace after it", sentText("hello   "), "hello");
+  check("but not the blank lines inside it", sentText("a\n\n\nb"), "a\n\n\nb");
+  check("whitespace alone is nothing", sentText(" \n\t "), "");
+  const typed = "\u201Cquoted\u201D \u00ABёлки\u00BB \"straight\" it's -- --flag \u2014 1) one\n2) two **bold** `x`";
+  check("and no character is ever normalised", sentText(typed), typed);
+  const composer = stripComments(srcFile("ui/Composer.tsx"));
+  check("the composer sends that", [/send\(sentText\(text\), false\)/.test(composer), /send\(text\.trim\(\)/.test(composer)], [true, false]);
+
+  // The input never rewrites a keystroke: in WebKit, smart quotes, dashes and text replacements sit behind `spellcheck` (Q3.647).
+  check("the fields an agent reads opt out of both", VERBATIM_FIELD, { spellCheck: false, autoCorrect: "off" });
+  const textareas = srcFiles()
+    .filter((file) => file.endsWith(".tsx"))
+    .flatMap((file) =>
+      stripComments(srcFile(file))
+        .split("<textarea")
+        .slice(1)
+        .map((tail) => ({ file, opts: /^\s[^]*?\{\.\.\.VERBATIM_FIELD\}/.test(tail.slice(0, 120)) })),
+    );
+  check("every textarea there is was found", textareas.length >= 2, true);
+  check("and every one of them opts out", textareas.filter((one) => !one.opts).map((one) => one.file), []);
+  const card = stripComments(srcFile("ui/ElicitationCard.tsx"));
+  const own = (card.match(/placeholder="Type your own answer here"/g) ?? []).length;
+  // Two: one component draws every typed answer, as lines or as one line (Q3.652).
+  check("every free-text answer on the ask card was found", own >= 2, true);
+  check("and opts out as the composer does", (card.match(/\{\.\.\.VERBATIM_FIELD\}/g) ?? []).length, own);
 }
 
 process.stdout.write("\na /clear arriving down the socket\n");

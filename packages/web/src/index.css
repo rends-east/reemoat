@@ -2,11 +2,14 @@
 
 /* RAIL_DEFAULT, in px because AppShell writes px (webcheck asserts). */
 :root {
-  --rail-w: 384px;
+  --rail-w: 392px;
   /* Must stay before the xl override, which wins by source order alone (webcheck asserts). */
   --task-w: 320px;
   --task-room: 100vw;
   --task-fit: min(var(--task-w), calc(var(--task-room) - 15.75rem));
+  /* Every sheet, drawer and scrim, arriving and leaving: SHEET_MS and SHEET_EASE in sheetMotion.ts (webcheck, Q3.650). */
+  --sheet-ms: 260ms;
+  --sheet-ease: cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 @media (min-width: 64rem) {
@@ -106,7 +109,7 @@
     }
   }
 
-  --animate-sheet: sheet 260ms cubic-bezier(0.32, 0.72, 0, 1);
+  --animate-sheet: sheet var(--sheet-ms) var(--sheet-ease);
 
   @keyframes sheet {
     from {
@@ -114,7 +117,7 @@
     }
   }
 
-  --animate-drawer: drawer 260ms cubic-bezier(0.32, 0.72, 0, 1);
+  --animate-drawer: drawer var(--sheet-ms) var(--sheet-ease);
 
   @keyframes drawer {
     from {
@@ -122,8 +125,8 @@
     }
   }
 
-  /* Not a reversed drawer (a reversed arrival never replays); must equal MenuDrawer's DRAWER_EXIT_MS (webcheck). */
-  --animate-drawer-out: drawer-out 260ms cubic-bezier(1, 0, 0.68, 0.28) both;
+  /* Not a reversed drawer: a reversed arrival never replays. */
+  --animate-drawer-out: drawer-out var(--sheet-ms) var(--sheet-ease) both;
 
   @keyframes drawer-out {
     to {
@@ -131,7 +134,7 @@
     }
   }
 
-  --animate-scrim: scrim 260ms ease-out;
+  --animate-scrim: scrim var(--sheet-ms) var(--sheet-ease);
 
   @keyframes scrim {
     from {
@@ -139,8 +142,8 @@
     }
   }
 
-  /* Own keyframe names: a reversed arrival on the same node never restarts. Must equal AgentConfigBar's SHEET_EXIT_MS (webcheck). */
-  --animate-sheet-out: sheet-out 260ms cubic-bezier(1, 0, 0.68, 0.28) both;
+  /* Own keyframe names: a reversed arrival on the same node never restarts. No `from`: a dragged panel leaves from where it was let go. */
+  --animate-sheet-out: sheet-out var(--sheet-ms) var(--sheet-ease) both;
 
   @keyframes sheet-out {
     to {
@@ -148,7 +151,7 @@
     }
   }
 
-  --animate-scrim-out: scrim-out 260ms ease-in both;
+  --animate-scrim-out: scrim-out var(--sheet-ms) var(--sheet-ease) both;
 
   @keyframes scrim-out {
     to {
@@ -174,6 +177,27 @@
     50% {
       opacity: 0.35;
       box-shadow: 0 0 0 0 transparent;
+    }
+  }
+}
+
+/* Two pixels up the whole scale under a finger, each step's line-height with it (Q3.662); the scale itself stays the six above. */
+@layer theme {
+  @media (pointer: coarse) {
+    :root,
+    :host {
+      --text-2xs: 0.875rem;
+      --text-2xs--line-height: 1.3125rem;
+      --text-xs: 0.9375rem;
+      --text-xs--line-height: 1.4375rem;
+      --text-sm: 1rem;
+      --text-sm--line-height: 1.5rem;
+      --text-base: 1.0625rem;
+      --text-base--line-height: 1.6875rem;
+      --text-lg: 1.25rem;
+      --text-lg--line-height: 1.875rem;
+      --text-xl: 1.5rem;
+      --text-xl--line-height: 2rem;
     }
   }
 }
@@ -219,7 +243,7 @@ body {
   }
 }
 
-/* Only PaneHandle's separator may change the mouse shape (CURSOR_ALLOWED); that sweep reads comments too. */
+/* Only PaneHandle's separator and the session title may change the mouse shape (CURSOR_ALLOWED); that sweep reads comments too. */
 
 /* 16px stops iOS focus zoom; unlayered on purpose so it beats text-sm. */
 input,
@@ -398,11 +422,11 @@ kbd {
   animation: none;
 }
 :root[data-nav="sheet-close"]::view-transition-old(sheet) {
-  animation: sheet 260ms cubic-bezier(0.32, 0.72, 0, 1) both reverse;
+  animation: var(--animate-sheet-out);
   z-index: 1;
 }
 :root[data-nav="sheet-close"]::view-transition-old(scrim) {
-  animation: scrim 260ms ease-out both reverse;
+  animation: var(--animate-scrim-out);
 }
 
 /* Pin the root; the named groups' default cross-fade is the swap (Q3.484). */
@@ -420,7 +444,7 @@ kbd {
   }
 
   :root[data-nav="sheet-close"]::view-transition-old(sheet) {
-    animation: rise 140ms ease-out both reverse;
+    animation: var(--animate-rise-out);
   }
 }
 
@@ -472,17 +496,16 @@ ol.md-paren > li::marker {
     color 120ms ease;
 }
 
-/* AgentConfigBar's drag writes these properties directly to avoid a render per frame; SHEET_SETTLE_MS must equal the 300ms (webcheck). */
+/* Unlayered, so it beats bg-raised: while the pill travels, the tabs' own pills stand down (Q3.656). */
+[data-pill-travel] [data-tab-pill] {
+  background-color: transparent;
+}
+
+/* AgentConfigBar writes these onto the node, never through React; no transition here, since only a settle may animate them. */
 .config-sheet {
   height: var(--sheet-h, auto);
   min-height: var(--sheet-min, 0);
   max-height: var(--sheet-max, 60dvh);
-  transform: translateY(var(--sheet-y, 0));
-  transition:
-    height 300ms ease-out,
-    min-height 300ms ease-out,
-    max-height 300ms ease-out,
-    transform 300ms ease-out;
 }
 
 .press {
@@ -490,6 +513,29 @@ ol.md-paren > li::marker {
 }
 .press:active:not(:disabled) {
   transform: scale(0.97);
+}
+
+/* The send slot's swap, on rise's clock and curves (SWAP_MS, Q3.654). Arriving never scales its box, only its glyph, so a tap lands at full size. */
+.swap-in {
+  transition: opacity 140ms ease-out;
+}
+.swap-in svg {
+  transition: transform 140ms ease-out;
+}
+@starting-style {
+  .swap-in {
+    opacity: 0;
+  }
+  .swap-in svg {
+    transform: scale(0.5);
+  }
+}
+.swap-out {
+  opacity: 0;
+  transform: scale(0.6);
+  transition:
+    opacity 140ms ease-in,
+    transform 140ms ease-in;
 }
 
 /* Repeats tap's colours (a shorthand cannot extend one; webcheck compares) and must follow it. Only during a live drag, never on the dragged row. */
@@ -501,7 +547,7 @@ ol.md-paren > li::marker {
     transform 150ms ease;
 }
 
-/* Unlayered, so it beats every utility; opt out only with no-focus-ring (the composer textarea). */
+/* Unlayered, so it beats every utility; opt out only with no-focus-ring, beside outline-none or WebKit's own ring returns. */
 :where(
   button,
   a,

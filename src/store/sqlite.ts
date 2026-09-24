@@ -3,6 +3,7 @@ import { uptime } from "node:os";
 import { dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { isBuiltinAgentId } from "../acp/agents.js";
+import { MAX_TRACKED_ASYNC_TASKS, readKeptTask } from "../acp/asynctasks.js";
 import {
   isBuiltinSystemId,
   type AgentStripEntry,
@@ -1093,7 +1094,7 @@ function toAgentState(value: unknown): AgentStateMemory | null {
   try {
     const parsed: unknown = JSON.parse(String(value));
     if (typeof parsed !== "object" || parsed === null) return null;
-    const { config, commands } = parsed as { config?: unknown; commands?: unknown };
+    const { config, commands, tasks } = parsed as { config?: unknown; commands?: unknown; tasks?: unknown };
     if (typeof config !== "object" || config === null) return null;
     if (typeof commands !== "object" || commands === null) return null;
     const { options, modes } = config as { options?: unknown; modes?: unknown };
@@ -1103,6 +1104,10 @@ function toAgentState(value: unknown): AgentStateMemory | null {
     if (!options.every(isAgentConfigOption)) return null;
     if (!list.every(isAgentCommand)) return null;
     const cut = Number(dropped ?? 0);
+    // Row by row, unlike the controls: a finished task this build cannot read costs that row alone.
+    const kept = (Array.isArray(tasks) ? tasks.map(readKeptTask) : [])
+      .filter((task) => task !== null)
+      .slice(0, MAX_TRACKED_ASYNC_TASKS);
     return {
       config: {
         modes: modes ?? null,
@@ -1112,6 +1117,7 @@ function toAgentState(value: unknown): AgentStateMemory | null {
         commands: list as AgentStateMemory["commands"]["commands"],
         dropped: Number.isFinite(cut) ? cut : 0,
       },
+      ...(kept.length > 0 ? { tasks: kept } : {}),
     };
   } catch {
     // Unreadable JSON. See the docblock: a faint strip, never a lost session.

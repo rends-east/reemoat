@@ -32,38 +32,6 @@ export function remarkListDelimiter() {
   };
 }
 
-/** The user's own soft breaks become `break` nodes; `pre-wrap` instead would draw every hard break twice. */
-export function remarkHardBreaks(): (tree: unknown) => undefined {
-  const visit = (value: unknown): void => {
-    if (typeof value !== "object" || value === null) return;
-    const node = value as ListNode;
-    if (!Array.isArray(node.children)) return;
-    let split = false;
-    const out: unknown[] = [];
-    for (const child of node.children) {
-      const text = child as { type?: string; value?: string } | null;
-      if (text?.type === "text" && typeof text.value === "string" && text.value.includes("\n")) {
-        split = true;
-        // The blanks around the newline go with it, as a hard break's would.
-        const parts = text.value.split(/[\t \r]*\n[\t \r]*/);
-        parts.forEach((part, index) => {
-          if (index > 0) out.push({ type: "break" });
-          if (part.length > 0) out.push({ type: "text", value: part });
-        });
-      } else {
-        visit(child);
-        out.push(child);
-      }
-    }
-    // Only when something split, so an unchanged text keeps its node identity.
-    if (split) node.children = out;
-  };
-  return (tree: unknown): undefined => {
-    visit(tree);
-    return undefined;
-  };
-}
-
 /** Spreads an item mixing a sentence and a block, so the sentence gets a real box for WebKit selection; costs no pixels. */
 export function remarkListItemBlocks(): (tree: unknown) => undefined {
   const visit = (value: unknown): void => {

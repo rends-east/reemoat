@@ -8,6 +8,7 @@ import {
   slotFor,
   type ConfigProse,
 } from "./agentConfig";
+import { sentText } from "./composing";
 
 /** prompt entries are the agent's commands, sent as text; config entries are built from agentConfig by category, never id, and send no text. */
 export interface CommandEntry {
@@ -200,7 +201,9 @@ export function typedConfigCommand(
   if (name.length === 0) return null;
   const entry = entries.find((candidate) => candidate.kind === "config" && candidate.name === name);
   if (entry === undefined || entry.option === null) return null;
-  return { entry, option: entry.option, rest: match === null ? "" : body.slice(match.index).trim() };
+  // The spaces after the name are its separator, never indentation; what follows is sent as the box would send it.
+  const rest = match === null ? "" : sentText(body.slice(match.index).replace(/^[\t ]+/, ""));
+  return { entry, option: entry.option, rest };
 }
 
 export interface ChoiceRow {

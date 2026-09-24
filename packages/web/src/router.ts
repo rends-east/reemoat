@@ -139,14 +139,15 @@ function tell(): void {
 let navToken = 0;
 
 /**
- * View transition keyed on data-nav, skipped when navMove is null, unsupported or reduced motion; flushSync must land the DOM inside the callback.
+ * View transition keyed on data-nav, skipped when a finger drew the move, navMove is null, unsupported or reduced motion; flushSync must land the DOM inside the callback.
  * Only the navigation that set data-nav clears it, so a second tap mid-animation keeps its own.
  */
-function announce(alongside?: () => void): void {
+function announce(alongside?: () => void, drawn = false): void {
   const previous = current.route;
   current = read();
   const move = navMove(previous, current.route);
   if (
+    drawn ||
     move === null ||
     typeof document.startViewTransition !== "function" ||
     window.matchMedia("(prefers-reduced-motion: reduce)").matches
@@ -180,11 +181,20 @@ function underFor(target: string): string {
 }
 
 export function navigate(path: string, replace = false, alongside?: () => void): void {
+  go(path, replace, alongside, false);
+}
+
+/** The entry `navigate` pushes, for a movement a finger has already drawn: no view transition plays it a second time (Q3.663). */
+export function navigateDrawn(path: string): void {
+  go(path, false, undefined, true);
+}
+
+function go(path: string, replace: boolean, alongside: (() => void) | undefined, drawn: boolean): void {
   const under = underFor(path);
   const origin = originFor(window.location.pathname, path, readOrigin());
   if (replace) window.history.replaceState({ under, origin }, "", path);
   else window.history.pushState({ under, origin }, "", path);
-  announce(alongside);
+  announce(alongside, drawn);
 }
 
 export function newPath(machine?: MachineId, cwd?: string): string {

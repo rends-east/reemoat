@@ -1,4 +1,4 @@
-import { ArrowUp, Paperclip, RefreshCw, Square, X } from "lucide-react";
+import { Paperclip, RefreshCw, X } from "lucide-react";
 import {
   useEffect,
   useLayoutEffect,
@@ -26,7 +26,7 @@ import {
   type PendingAttachment,
 } from "../attach";
 import type { DaemonClient } from "../daemon";
-import { clearEcho, setEcho, type PendingEcho } from "../echo";
+import { clearEcho, sendFloor, setEcho, type PendingEcho } from "../echo";
 import { errorText } from "../http";
 import { keyOf, type SessionRef } from "../ids";
 import { composerKey } from "../keys";
@@ -48,12 +48,15 @@ import {
 } from "../wire";
 import { AgentConfigBar, applyConfigChange } from "./AgentConfigBar";
 import { choiceRefusal, configProse, drawnControls } from "./agentConfig";
+import { fitToContent } from "./autosize";
 import {
   composerPlaceholder,
   focusWorthKeeping,
+  sentText,
   shouldFocusComposer,
   shouldReleaseComposer,
   takeKeyNav,
+  VERBATIM_FIELD,
 } from "./composing";
 import { COLUMN, IconButton, Spinner } from "./bits";
 import {
@@ -65,22 +68,12 @@ import {
   typedConfigCommand,
 } from "./commands";
 import { CommandMenu } from "./CommandMenu";
+import { SendSlot } from "./SendSlot";
+import { slotOccupant } from "./slotSwap";
 import { toast } from "./Toast";
 
 // Outside the store: a draft outlives an unmount without waking every subscriber per keystroke.
 const drafts = new Map<string, string>();
-
-const COMPOSER_MAX_SHARE = 0.22;
-
-// `height = auto` first, so `scrollHeight` measures the content rather than the box.
-function fitToContent(area: HTMLTextAreaElement): void {
-  area.style.height = "auto";
-  const visible = window.visualViewport?.height ?? window.innerHeight;
-  const max = Math.round(visible * COMPOSER_MAX_SHARE);
-  const wanted = area.scrollHeight;
-  area.style.height = `${Math.min(wanted, max)}px`;
-  area.style.overflowY = wanted > max ? "auto" : "hidden";
-}
 
 // Stable identity, so memos over the event window survive each keystroke.
 const EMPTY_EVENTS: readonly StoredEvent[] = [];
@@ -95,7 +88,7 @@ function sendable(text: string, list: readonly PendingAttachment[], refused: boo
   return canSend(text, list, refused) && !stalled(list);
 }
 
-const CLEAR_REFUSAL = "/clear waits for the turn to end — stop the agent, or send it after";
+const CLEAR_REFUSAL = "/clear waits for the agent to finish — stop it, or send it after";
 
 let uploadSeq = 0;
 
@@ -357,8 +350,8 @@ export function Composer({
   const sessionRefused = revising
     ? false
     : session.status === "stopping" || (!midTurnOk && (blocked || working));
-  // The daemon still refuses `/clear` mid-turn, so it is refused here too.
-  const clearRefused = !revising && session.turn !== null && text.trim() === "/clear";
+  // The daemon refuses `/clear` while the agent works or waits, turn or not, so it is refused here too (Q2.232).
+  const clearRefused = !revising && canCancelTurn(session) && text.trim() === "/clear";
   const sendRefused = sessionRefused || clearRefused;
   const slotSends = sendable(text, attachments, sendRefused);
   // A refusal about the draft keeps a disabled Send rather than putting Stop under a thumb aimed at Send.
@@ -375,8 +368,9 @@ export function Composer({
       ? "An attachment did not upload — retry it or remove it"
       : null;
   const pendingCancel = cancelInFlight(session);
+  const occupant = slotOccupant({ sending: busy, stopping: stopping || pendingCancel, sends: slotSends, stoppable });
   // The refusal line is about Send, so it shows only while Send holds the slot.
-  const sendDrawn = !busy && !((stopping || pendingCancel) && !slotSends) && !stoppable;
+  const sendDrawn = occupant === "send";
 
   const reconnecting = waitingForDaemon(session) || resumeStalled(session);
 
@@ -468,7 +462,7 @@ export function Composer({
       return;
     }
 
-    send(text.trim(), false);
+    send(sentText(text), false);
   };
 
   // `late`: whether the caller awaited since the gesture, so it knows whether to ask `onScreen`.
@@ -482,6 +476,7 @@ export function Composer({
     const echo: PendingEcho = {
       text: body,
       seq: Number.MAX_SAFE_INTEGER,
+      after: sendFloor(key, store.getSnapshot().transcripts.get(key)?.events.at(-1)?.seq ?? 0),
       attachments: echoAttachments(sent),
     };
     setEcho(key, echo);
@@ -493,7 +488,7 @@ export function Composer({
       drafts.delete(key);
     }
     forgetAttachments(key);
-    // Before a plan, cancel the turn first: rejecting the plan leaves it open.
+    // Before a plan, cancel first, turn or not: the daemon dismisses the parked plan either way (Q2.232).
     const settled = revising
       ? daemon.cancelTurn(sessionRef.sessionId).then((result) => {
           store.applySnapshot(sessionRef, result.session);
@@ -647,6 +642,7 @@ export function Composer({
         )}
         <textarea
           ref={areaRef}
+          {...VERBATIM_FIELD}
           value={text}
           onChange={(event) => {
             update(event.target.value);
@@ -727,41 +723,14 @@ export function Composer({
         />
         {/* `ml-auto` keeps Send at the end when no config bar renders. */}
         <div className="ml-auto flex shrink-0 items-center pl-1">
-          {busy ? (
-            <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-fg text-ink">
-              <Spinner />
-            </span>
-          ) : (stopping || pendingCancel) && !slotSends ? (
-            // A spinner rather than a disabled Stop, which could show no title; it yields to a sendable draft.
-            <span
-              role="status"
-              aria-label="Stopping — the agent has not finished yet"
-              title="Stopping — the agent has not finished yet"
-              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-edge-strong bg-surface text-fg"
-            >
-              <Spinner />
-            </span>
-          ) : stoppable ? (
-            <IconButton
-              icon={Square}
-              label="Stop the agent"
-              tone="plain"
-              size="chip"
-              shape="round"
-              type="button"
-              onClick={cancelTurn}
-            />
-          ) : (
-            <IconButton
-              icon={ArrowUp}
-              label={sendRefusal ?? "Send"}
-              tone="primary"
-              size="chip"
-              shape="round"
-              type="submit"
-              disabled={!slotSends}
-            />
-          )}
+          <SendSlot
+            occupant={occupant}
+            scope={key}
+            sendLabel={sendRefusal ?? "Send"}
+            sendEnabled={slotSends}
+            onStop={cancelTurn}
+            box={areaRef}
+          />
         </div>
       </div>
       </form>

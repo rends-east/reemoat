@@ -24,6 +24,8 @@ import {
   sublineWarns,
   takeKeyNav,
   toolSummary,
+  workStartedAt,
+  workingUnprompted,
 } from "./webcheck.modules.js";
 
 process.stdout.write("\nwhat the transcript refuses to draw\n");
@@ -393,6 +395,35 @@ process.stdout.write("\nwho is working, and what the box says\n");
 
   check("a turn with nothing waiting on you is working", showsWorking(session({})), true);
   check("no turn is not", showsWorking(session({ turn: null })), false);
+
+  // Q2.233: claude works with no turn of ours once background work comes back, and the daemon says so.
+  const unprompted = (over: Record<string, unknown> = {}): never =>
+    session({ turn: null, turnStartedAt: null, unpromptedSince: 5, ...over });
+  check("work nobody prompted is working", [workingUnprompted(unprompted()), showsWorking(unprompted())], [true, true]);
+  check(
+    "a daemon too old to say, or one saying no, is not",
+    [workingUnprompted(session({ turn: null })), workingUnprompted(unprompted({ unpromptedSince: null }))],
+    [false, false],
+  );
+  check(
+    "and it waits on you exactly as a turn does",
+    showsWorking(unprompted({ status: "blocked", pendingPermissions: [{ permissionId: "p" }] })),
+    false,
+  );
+  check(
+    "and does not outlive the session",
+    ["exited", "failed", "interrupted"].map((status) => showsWorking(unprompted({ status }))),
+    [false, false, false],
+  );
+  check(
+    "its clock starts at the turn, else at the unprompted work, else nowhere",
+    [
+      workStartedAt(session({ turnStartedAt: 3, unpromptedSince: 5 })),
+      workStartedAt(unprompted()),
+      workStartedAt(session({ turn: null, turnStartedAt: null })),
+    ],
+    [3, 5, null],
+  );
   check(
     "a pending permission is not working, it is waiting for you",
     showsWorking(session({ status: "blocked", pendingPermissions: [{ permissionId: "p" }] })),
@@ -416,6 +447,19 @@ process.stdout.write("\nwho is working, and what the box says\n");
   );
   check("nothing to stop with no turn", canCancelTurn(session({ turn: null })), false);
   check(
+    "but something to stop with no turn while the agent works or waits (Q2.232)",
+    [
+      canCancelTurn(unprompted()),
+      canCancelTurn(session({ turn: null, status: "blocked", pendingElicitations: [{ elicitationId: "e" }] })),
+    ],
+    [true, true],
+  );
+  check(
+    "and still nothing once the session is over or going",
+    ["exited", "stopping"].map((status) => canCancelTurn(unprompted({ status }))),
+    [false, false],
+  );
+  check(
     "and nothing to stop on a session that has ended",
     ["exited", "failed", "interrupted"].map((status) => canCancelTurn(session({ status }))),
     [false, false, false],
@@ -431,6 +475,11 @@ process.stdout.write("\nwho is working, and what the box says\n");
     "and a stale marker with no turn is not a cancel in flight",
     cancelInFlight(session({ turn: null, cancelRequestedAt: 1 })),
     false,
+  );
+  check(
+    "while a cancel of unprompted work is, until that work ends",
+    [cancelInFlight(unprompted({ cancelRequestedAt: 1 })), cancelInFlight(unprompted({ cancelRequestedAt: 1, unpromptedSince: null }))],
+    [true, false],
   );
 
   const say = (over: Record<string, boolean>): string =>
@@ -557,13 +606,20 @@ process.stdout.write("\nwho is working, and what the box says\n");
     true,
   );
   check(
-    "and the one command the daemon still refuses mid-turn is refused here too",
-    /const clearRefused = !revising && session\.turn !== null && text\.trim\(\) === "\/clear";/.test(composerSrc),
+    "and the one command the daemon still refuses while the agent works or waits is refused here too",
+    /const clearRefused = !revising && canCancelTurn\(session\) && text\.trim\(\) === "\/clear";/.test(composerSrc),
     true,
   );
+  // The occupant is one pure function now (Q3.654); the composer only says which facts it is given.
+  const { slotOccupant } = await import("../src/ui/slotSwap.js");
   check(
     "and a sendable draft outranks the stopping spinner",
-    /\(stopping \|\| pendingCancel\) && !slotSends/.test(composerSrc),
+    slotOccupant({ sending: false, stopping: true, sends: true, stoppable: false }),
+    "send",
+  );
+  check(
+    "which is asked with a cancel in flight counted as stopping",
+    /slotOccupant\(\{ sending: busy, stopping: stopping \|\| pendingCancel, sends: slotSends, stoppable \}\)/.test(composerSrc),
     true,
   );
   // Rejecting a plan does not end the turn, so a send from that state cancels first.
@@ -605,6 +661,162 @@ process.stdout.write("\nwho is working, and what the box says\n");
     /events=\{transcript\?\.events \?\? \[\]\}/.test(sessionViewSrc),
     true,
   );
+}
+
+process.stdout.write("\nthe send slot swaps rather than jumps\n");
+{
+  // One live occupant, the ones it replaced fading beneath it, inert (Q3.654).
+  const { exitEnded, refocusBox, SLOT_ORDER, slotHolding, slotOccupant, SWAP_MS, swapTo } = await import(
+    "../src/ui/slotSwap.js"
+  );
+  type Occupant = (typeof SLOT_ORDER)[number];
+  const drawn = (state: { shown: Occupant; leaving: readonly { occupant: Occupant }[] }): string[] => [
+    `live:${state.shown}`,
+    ...state.leaving.map((one) => `out:${one.occupant}`),
+  ];
+
+  check(
+    "a send in flight holds the slot whatever else is true",
+    slotOccupant({ sending: true, stopping: true, sends: true, stoppable: true }),
+    "sending",
+  );
+  check(
+    "a cancel in flight draws its spinner over an empty box",
+    slotOccupant({ sending: false, stopping: true, sends: false, stoppable: true }),
+    "stopping",
+  );
+  check(
+    "then Stop where the turn can be cancelled, and Send the rest of the time",
+    [
+      slotOccupant({ sending: false, stopping: false, sends: false, stoppable: true }),
+      slotOccupant({ sending: false, stopping: false, sends: false, stoppable: false }),
+    ],
+    ["stop", "send"],
+  );
+  check("every occupant has one place in the layers' order", [...SLOT_ORDER].sort(), ["send", "sending", "stop", "stopping"]);
+
+  const idle = slotHolding("send");
+  check("the same occupant is no swap at all", swapTo(idle, "send", true) === idle, true);
+  const toStop = swapTo(idle, "stop", true);
+  check("a swap draws the new occupant live and the old one leaving", drawn(toStop), ["live:stop", "out:send"]);
+  const back = swapTo(toStop, "send", true);
+  // Send -> Stop -> Send inside one swap: the returning occupant is not also left fading.
+  check("a flip back inside the swap draws each occupant once", drawn(back), ["live:send", "out:stop"]);
+  check(
+    "and three swaps inside one leave two fading and one live",
+    drawn(swapTo(swapTo(idle, "sending", true), "stop", true)),
+    ["live:stop", "out:send", "out:sending"],
+  );
+  check("reduced motion jumps and leaves nothing fading", drawn(swapTo(idle, "stop", false)), ["live:stop"]);
+  check("and so does a jump over an occupant already there", drawn(swapTo(toStop, "stop", false)), ["live:stop"]);
+  check("an exit ending takes its own layer away", drawn(exitEnded(toStop, toStop.swap)), ["live:stop"]);
+  check("and a late end of an earlier swap takes nothing", exitEnded(back, toStop.swap) === back, true);
+
+  // Every sequence of four swaps, each animated or not, with every exit ending or not: never two live, never none.
+  const broken: string[] = [];
+  const seqs: Occupant[][] = [[]];
+  for (let depth = 0; depth < 4; depth += 1) {
+    for (const seq of [...seqs]) if (seq.length === depth) for (const one of SLOT_ORDER) seqs.push([...seq, one]);
+  }
+  for (const seq of seqs) {
+    for (let mask = 0; mask < 1 << (seq.length * 2); mask += 1) {
+      let state = slotHolding("send");
+      seq.forEach((one, i) => {
+        const before = state.swap;
+        state = swapTo(state, one, (mask >> (i * 2)) % 2 === 0);
+        if ((mask >> (i * 2 + 1)) % 2 === 1) state = exitEnded(state, before);
+        const out = state.leaving.map((l) => l.occupant);
+        const ok =
+          state.shown === one && !out.includes(state.shown) && new Set(out).size === out.length && out.length <= 3;
+        if (!ok) broken.push(`${seq.join(">")}#${mask}`);
+      });
+    }
+  }
+  check("over every sequence of four swaps, one live occupant and no occupant drawn twice", broken, []);
+  check("and the walk was taken", seqs.length, 341);
+
+  check(
+    "a swap that takes the focused control away hands focus to the box, on a desktop only",
+    [refocusBox(true, false), refocusBox(true, true), refocusBox(false, false)],
+    [true, false, false],
+  );
+
+  // One clock: SWAP_MS, the two classes, and the popover's rise it borrows.
+  const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rule = (selector: string): string =>
+    new RegExp(`\\n${selector.replace(/[.*]/g, "\\$&")} \\{([^}]*)\\}`).exec(css)?.[1] ?? "";
+  const swapIn = rule(".swap-in");
+  const swapOut = rule(".swap-out");
+  const glyphIn = rule(".swap-in svg");
+  check("the three swap rules were found", [swapIn !== "", swapOut !== "", glyphIn !== ""], [true, true, true]);
+  const clocks = [swapIn, swapOut, glyphIn].flatMap((body) => [...body.matchAll(/(\d+)ms/g)].map((m) => Number(m[1])));
+  const rises = [...css.matchAll(/--animate-rise(?:-out)?: rise(?:-out)? (\d+)ms/g)].map((m) => Number(m[1]));
+  check("every swap duration is SWAP_MS", [clocks.length >= 4, clocks.every((ms) => ms === SWAP_MS)], [true, true]);
+  check("and SWAP_MS is rise's clock, arriving and leaving", [rises.length, rises.every((ms) => ms === SWAP_MS)], [2, true]);
+  check(
+    "arriving eases out and leaving eases in, as rise does",
+    [/ease-out/.test(swapIn) && /ease-out/.test(glyphIn), /ease-in\b/.test(swapOut) && !/ease-out/.test(swapOut)],
+    [true, true],
+  );
+  // The arriving button's box never scales, so a tap in the first frame lands on it at full size.
+  check("the arriving layer only fades", /transform/.test(swapIn), false);
+  const starting = /@starting-style \{([\s\S]*?)\n\}/.exec(css)?.[1] ?? "";
+  check(
+    "and starts from nothing, its glyph from half size",
+    [/\.swap-in \{\s*opacity: 0;\s*\}/.test(starting), /\.swap-in svg \{\s*transform: scale\(0\.5\);\s*\}/.test(starting)],
+    [true, true],
+  );
+  check("the leaving one fades and shrinks", [/opacity: 0;/.test(swapOut), /transform: scale\(0\.6\);/.test(swapOut)], [
+    true,
+    true,
+  ]);
+
+  const slotSrc = readFileSync(new URL("../src/ui/SendSlot.tsx", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "");
+  const leavingTag = /<div\s+key=\{one\}\s+inert[\s\S]*?>/.exec(slotSrc)?.[0] ?? "";
+  check(
+    "a leaving layer is inert, hidden from assistive technology and takes no pointer",
+    [/\binert\b/.test(leavingTag), /aria-hidden="true"/.test(leavingTag), /pointer-events-none/.test(leavingTag), /swap-out/.test(leavingTag)],
+    [true, true, true, true],
+  );
+  check(
+    "and what it draws can do nothing",
+    [/onClick=\{live \? onStop : undefined\}/.test(slotSrc), /type=\{live \? "submit" : "button"\}/.test(slotSrc)],
+    [true, true],
+  );
+  check("the live layer paints on top", /className=\{`z-1 col-start-1 row-start-1 \$\{fading \? "swap-in" : ""\}`\}/.test(slotSrc), true);
+  check("in one fixed order, since a moved node restarts its transition", /\{SLOT_ORDER\.map\(\(one\) =>/.test(slotSrc), true);
+  check(
+    "the swap is decided before paint, with reduced motion and another session jumping",
+    [
+      /useLayoutEffect\(\(\) => \{\s*if \(occupant === held\.slot\.shown && scope === held\.scope\) return;/.test(slotSrc),
+      /const still = scope !== held\.scope \|\| window\.matchMedia\("\(prefers-reduced-motion: reduce\)"\)\.matches;/.test(slotSrc),
+      /swapTo\(held\.slot, occupant, !still\)/.test(slotSrc),
+    ],
+    [true, true, true],
+  );
+  check(
+    "focus is read while the old control still holds it, and given to the box",
+    /refocusBox\(here\.current\?\.contains\(document\.activeElement\) \?\? false, window\.matchMedia\("\(pointer: coarse\)"\)\.matches\)\)\s*\{\s*box\.current\?\.focus\(\{ preventScroll: true \}\);/.test(
+      slotSrc,
+    ),
+    true,
+  );
+  check(
+    "an exit ends on its own opacity, with a backstop",
+    [/event\.propertyName !== "opacity"/.test(slotSrc), /SWAP_MS \* 2/.test(slotSrc)],
+    [true, true],
+  );
+  check("nothing in the slot is a hand-rolled button", /<button\b/.test(slotSrc), false);
+
+  const composerCode = readFileSync(new URL("../src/ui/Composer.tsx", import.meta.url), "utf8");
+  check(
+    "the composer hands the slot its occupant and draws none itself",
+    [/<SendSlot\s+occupant=\{occupant\}/.test(composerCode), /icon=\{Square\}|icon=\{ArrowUp\}/.test(composerCode)],
+    [true, false],
+  );
+  check("and the refusal line follows the same answer", /const sendDrawn = occupant === "send";/.test(composerCode), true);
 }
 
 process.stdout.write("\nwho gets the caret on a session switch\n");
@@ -822,7 +1034,7 @@ process.stdout.write("\nwhich of the composer's writes may land late\n");
     /const send = \(body: string, late: boolean\): void =>/.test(composer),
     true,
   );
-  check("the keystroke door says it is not", /send\(text\.trim\(\), false\)/.test(composer), true);
+  check("the keystroke door says it is not", /send\(sentText\(text\), false\)/.test(composer), true);
   check("and the config-round-trip door says it is", /send\(rest, true\)/.test(composer), true);
   check(
     "so the shared instance is written unconditionally on the synchronous one",

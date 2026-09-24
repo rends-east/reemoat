@@ -10,6 +10,7 @@ import {
   isTerminal,
   outstandingTasks,
   permissionDecisions,
+  streamedSinceTool,
   placeNodes,
   runSummary,
   sameNode,
@@ -192,6 +193,65 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
     check("which isTerminal does not say, which is why it is its own clause", isTerminal("stopping"), false);
   }
 
+  // Q3.644: what the working line counts, and what counting it costs.
+  {
+    const { streamedSays } = await import("../src/ui/EventList.js");
+    check("nothing streamed says nothing", streamedSays(0), null);
+    check("nor does less than half a token", streamedSays(1), null);
+    check("one token is one, in the singular", streamedSays(4), "↓ 1 token");
+    check("Claude Code's estimate, characters over four", streamedSays(400), "↓ 100 tokens");
+    check("in the panel's compact number past a thousand", streamedSays(4_800), "↓ 1.2k tokens");
+
+    seq = 0;
+    const text = (body: string, over: Record<string, unknown> = {}): never =>
+      ev({ type: "text", role: "agent", thought: false, text: body, messageId: null, ...over });
+    const opening = [ev({ type: "prompt", text: "go", attachments: null }), text("abcd"), text("efgh", { thought: true })];
+    check(
+      "the agent's words count and so do its thoughts, which are logged though never drawn",
+      streamedSinceTool([...opening, text("zzzz", { role: "user" })]),
+      8,
+    );
+    const called = [...opening, toolCall("t1", "Terminal")];
+    check("a tool call starts it again", streamedSinceTool(called), 0);
+    check("so a tool's own progress adds nothing", streamedSinceTool([...called, done("t1")]), 0);
+    const answered = [...called, done("t1"), text("12345678")];
+    check("and what the agent says after it is counted from there", streamedSinceTool(answered), 8);
+    const ended = [...answered, ev({ type: "turn_end", stopReason: "end_turn", usage: null })];
+    check("a turn's end starts it again", streamedSinceTool(ended), 0);
+    check(
+      "so work nobody prompted is counted from the end of the turn before it",
+      streamedSinceTool([...ended, text("abcd")]),
+      4,
+    );
+    check(
+      "and so is a cleared conversation",
+      streamedSinceTool([...answered, ev({ type: "context_cleared", agentSessionId: "b", previousAgentSessionId: "a" }), text("ab")]),
+      2,
+    );
+    check("an empty window counts nothing", streamedSinceTool([]), 0);
+
+    // A window opened mid-run must not be remembered short once the history under it arrives.
+    seq = 100;
+    const late = [text("abcd"), text("efgh")];
+    check("a window that starts mid-run counts what it holds", streamedSinceTool(late), 8);
+    seq = 90;
+    const history = [toolCall("t2", "Read"), text("wxyz")];
+    check("and the full count once history pages in beneath it", streamedSinceTool([...history, ...late]), 12);
+
+    // The cost claim, counted rather than timed: a new event reads the one before it and itself, and nothing else.
+    seq = 0;
+    const long = [toolCall("t3", "Terminal"), ...Array.from({ length: 5_000 }, () => text("abcd"))];
+    check("five thousand chunks count once", streamedSinceTool(long), 20_000);
+    let reads = 0;
+    const watched = new Proxy([...long, text("efgh")], {
+      get(target, key, receiver) {
+        if (typeof key === "string" && /^\d+$/.test(key)) reads += 1;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    check("and the next token costs a step, not a walk", [streamedSinceTool(watched), reads <= 3], [20_004, true]);
+  }
+
   {
     const { footSays } = await import("../src/ui/EventList.js");
     check("an idle conversation with nothing outstanding says nothing", footSays(false, 0), null);
@@ -227,6 +287,22 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
       line: "last seen working · waiting for 2 tasks",
       spoken: "last seen working, not connected, waiting for 2 tasks",
     });
+
+    // Q3.644: Claude Code's `(1m 12s · ↓ 1.2k tokens)`, in this line's own separators.
+    check("what streamed since the last tool call rides beside the time", footSays(true, 0, "3m", false, [], "↓ 1.2k tokens"), {
+      line: "working… · 3m · ↓ 1.2k tokens",
+      spoken: "agent is working, 3m",
+    });
+    check(
+      "and alone while the time is under its floor",
+      footSays(true, 0, null, false, [], "↓ 12 tokens")?.line,
+      "working… · ↓ 12 tokens",
+    );
+    check(
+      "and ahead of what is outstanding, which is a different fact",
+      footSays(true, 2, null, false, [], "↓ 12 tokens")?.line,
+      "working… · ↓ 12 tokens · waiting for 2 tasks",
+    );
 
     const task = (id: string, taskType: string, state: string): unknown => ({
       id,
@@ -481,9 +557,13 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
       [true, true],
     );
     const panelCss = taskCssEarly;
-    const sheetOutMs = Number(/--animate-sheet-out:\s*sheet-out\s+(\d+)ms[^;]*\bboth\b/.exec(panelCss)?.[1] ?? Number.NaN);
+    // The sheet's exit runs on the one sheet clock; sheetMotion.ts's SHEET_MS is pinned to it in webcheck.sheets.ts.
+    const sheetOutMs = /--animate-sheet-out:\s*sheet-out\s+var\(--sheet-ms\)[^;]*\bboth\b/.test(panelCss)
+      ? Number(/--sheet-ms:\s*(\d+)ms;/.exec(panelCss)?.[1] ?? Number.NaN)
+      : Number.NaN;
     const riseOutMs = Number(/--animate-rise-out:\s*rise-out\s+(\d+)ms[^;]*\bboth\b/.exec(panelCss)?.[1] ?? Number.NaN);
-    const backstopMs = Number(/TASK_PANEL_EXIT_MS = (\d+);/.exec(panelSrc)?.[1] ?? Number.NaN);
+    const { SHEET_MS } = await import("../src/ui/sheetMotion.js");
+    const backstopMs = /useLeaving\(open, SHEET_MS\)/.test(panelSrc) ? SHEET_MS : Number.NaN;
     report(
       "both departures were found, and both fill forwards",
       Number.isFinite(sheetOutMs) && Number.isFinite(riseOutMs) && Number.isFinite(backstopMs),
@@ -558,6 +638,13 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
       "the cleared set is held in memory and released with the session",
       [/localStorage/.test(finishedSrc), /forgetHiddenFinished\(key\)/.test(storeSrc)],
       [false, true],
+    );
+    // The daemon keeps the rows across an agent swap (Q2.234), so a clear must too: released with the session and nowhere else.
+    const forgetSessionBody = /private forgetSession\(key: SessionKey\): void \{[\s\S]*?\n {2}\}/.exec(storeSrc)?.[0] ?? "";
+    check(
+      "and nothing but forgetting the session releases it, so an agent swap under it keeps hidden what it hid",
+      [(storeSrc.match(/forgetHiddenFinished\(/g) ?? []).length, /forgetHiddenFinished\(key\)/.test(forgetSessionBody)],
+      [1, true],
     );
     const { forgetHiddenFinished, hiddenFinished: hiddenFor, hideFinished } = await import("../src/finishedTasks.js");
     const aKey = "m1 s1" as never;
@@ -757,6 +844,13 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
     check("nor does a parked one, whatever the flag says", backgroundReporting(snap("parked", true)), "unasked");
     check("and an agent being torn down is not one that can be asked", backgroundReporting(snap("stopping", true)), "unasked");
     check("a row that has not arrived lands in the same arm as no agent", backgroundReporting(null), "unasked");
+    check("and so does the agent a restart is bringing back", backgroundReporting(snap("starting", false)), "unasked");
+    // So an agent swap passes through unasked, and it is the rows the daemon kept that hold the band and its fold (Q2.234).
+    check(
+      "which keeps the finished band only because it is drawn off the rows too",
+      /const showFinished = reporting === "reports" \|\| finished\.length > 0;/.test(panelSrc),
+      true,
+    );
     const arms = ["reports", "silent", "unasked"] as const;
     check("every arm has a sentence, and no two share one", new Set(arms.map((arm) => BACKGROUND_EMPTY[arm])).size, arms.length);
     check("only the answerable arm says nothing is running", arms.filter((arm) => BACKGROUND_EMPTY[arm] === "No tasks currently running"), ["reports"]);
@@ -778,11 +872,18 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
     const footCells = [false, true].flatMap((working) =>
       [0, 2].flatMap((tasks) =>
         [null, "3m"].flatMap((elapsed) =>
-          [false, true].map((stale) => ({ working, tasks, stale, said: footSays(working, tasks, elapsed, stale) })),
+          [null, "↓ 1.2k tokens"].flatMap((streamed) =>
+            [false, true].map((stale) => ({
+              working,
+              tasks,
+              stale,
+              said: footSays(working, tasks, elapsed, stale, [], streamed),
+            })),
+          ),
         ),
       ),
     );
-    check("the sweep is the whole space", footCells.length, 16);
+    check("the sweep is the whole space", footCells.length, 32);
     check(
       "and nothing anywhere in it claims the agent is working now while nothing is streaming",
       footCells.filter(
@@ -798,6 +899,25 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
       footCells.filter((one) => one.stale && one.said?.line.includes("3m") === true),
       [],
     );
+    check(
+      "and the token count goes with the time, for the same reason",
+      footCells.filter((one) => one.stale && one.said?.line.includes("↓") === true),
+      [],
+    );
+    // The spoken form feeds an aria-live region: a count in it would be announced on every token.
+    check(
+      "the count is drawn and never spoken, anywhere in the space",
+      [
+        footCells.some((one) => one.said?.line.includes("↓ 1.2k tokens") === true),
+        footCells.filter((one) => one.said !== null && /token|↓/.test(one.said.spoken)),
+      ],
+      [true, []],
+    );
+    check(
+      "and only beside a claim that the agent is working",
+      footCells.filter((one) => !one.working && one.said?.line.includes("↓") === true),
+      [],
+    );
 
     const foot = stripComments(readFileSync(new URL("../src/ui/SessionView.tsx", import.meta.url), "utf8"));
     check(
@@ -805,21 +925,34 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
       /const stale = stream === null \|\| stream\.phase !== "live";/.test(foot),
       true,
     );
-    check("while the banner keeps the narrower one", /const reconnecting = stream\?\.phase === "waiting";/.test(foot), true);
+    // The reconnecting banner is gone: a stream reattaching is the connection pill's to say (Q3.659).
     check(
-      "and they are two answers rather than one handed to both",
-      [/reconnecting=/.test(foot), (foot.match(/stale=\{stale\}/g) ?? []).length, /\{reconnecting && \(/.test(foot)],
-      [false, 2, true],
+      "and no banner over the conversation says the socket is down",
+      [/const reconnecting =/.test(foot), (foot.match(/stale=\{stale\}/g) ?? []).length, /reconnecting\{/.test(foot)],
+      [false, 2, false],
     );
     const footSrc = stripComments(readFileSync(new URL("../src/ui/EventList.tsx", import.meta.url), "utf8"));
     const waitingFootAt = footSrc.indexOf("function WaitingFoot");
     const waitingFoot = waitingFootAt < 0 ? "" : footSrc.slice(waitingFootAt, footSrc.indexOf("\n}\n", waitingFootAt));
     check("the foot's own component was found", waitingFootAt >= 0, true);
     check(
-      "the caller threads all five arguments, and both of its arms stop the mark",
+      "the caller threads all six arguments, and both of its arms stop the mark",
       [
-        /footSays\(working, tasks\.length, elapsedSays\(turnElapsedMs\), stale, background\)/.test(footSrc),
+        /footSays\(working, tasks\.length, elapsedSays\(workElapsedMs\), stale, background, streamedSays\(streamed\)\)/.test(
+          footSrc,
+        ),
         (waitingFoot.match(/WorkingMark still=\{stale\}/g) ?? []).length,
+      ],
+      [true, 2],
+    );
+    // A count threaded into the rows would re-render the whole conversation on every token.
+    const listAt = footSrc.indexOf("export function EventList(");
+    const listBody = listAt < 0 ? "" : footSrc.slice(listAt, footSrc.indexOf("\n}\n", listAt));
+    check(
+      "the count is computed only while working, and nothing but the foot receives it",
+      [
+        /const streamed = working \? streamedSinceTool\(transcript\.events\) : 0;/.test(listBody),
+        (listBody.match(/\bstreamed\b/g) ?? []).length,
       ],
       [true, 2],
     );
@@ -828,18 +961,23 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
       "the elapsed time is floored in one place, and the floor is a judgement rather than a unit",
       [
         /const ELAPSED_FLOOR_MS = 120_000;/.test(footSrc),
-        /return turnElapsedMs < ELAPSED_FLOOR_MS \? null : shortDuration\(turnElapsedMs\);/.test(footSrc),
-        /if \(turnElapsedMs === null\) return null;/.test(footSrc),
+        /return workElapsedMs < ELAPSED_FLOOR_MS \? null : shortDuration\(workElapsedMs\);/.test(footSrc),
+        /if \(workElapsedMs === null\) return null;/.test(footSrc),
       ],
       [true, true, true],
     );
     check(
       "and they are measured against the row's two clocks rather than against ours",
       [
-        /const turnElapsedMs = row === null \|\| turnStartedAt === null \? null : elapsedSince\(row, turnStartedAt\);/.test(foot),
-        /Date\.now\(\) - turnStartedAt/.test(foot + footSrc),
+        /const workElapsedMs = row === null \|\| startedAt === null \? null : elapsedSince\(row, startedAt\);/.test(foot),
+        /Date\.now\(\) - (turnStartedAt|startedAt|unpromptedSince)/.test(foot + footSrc),
       ],
       [true, false],
+    );
+    check(
+      "and the clock starts at the turn, or at the work nobody prompted",
+      /const startedAt = snapshot === null \? null : workStartedAt\(snapshot\);/.test(foot),
+      true,
     );
   }
 

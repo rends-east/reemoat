@@ -1,4 +1,14 @@
-import { useEffect, useId, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import {
   askTitle,
   elicitationAnswer,
@@ -25,12 +35,22 @@ import {
 } from "../ask";
 import { answerAlreadyLanded, errorText } from "../http";
 import { keyOf, type SessionRef } from "../ids";
+import { answerKey } from "../keys";
 import { store } from "../store";
 import { toast } from "./Toast";
 import type { ElicitationField, PendingElicitationSnapshot } from "../wire";
 import { AskAction, AskCard, askRowTone, ChoiceMark, type AskOption } from "./AskCard";
+import { fitToContent } from "./autosize";
 import { Icon, Skeleton } from "./bits";
+import { VERBATIM_FIELD } from "./composing";
 import { ChevronLeft } from "lucide-react";
+
+// Both halves: outline-none alone loses to index.css's unlayered ring, and no-focus-ring alone brings back WebKit's (Q3.645).
+const NO_RING = "no-focus-ring outline-none";
+
+// A typed box's indicator is its caret; the mark's is the app's ring on the glyph, since around its 44px target it straddled the row's edge.
+const MARK_RING =
+  "[button:focus-visible_&]:outline-2 [button:focus-visible_&]:outline-offset-2 [button:focus-visible_&]:outline-fg";
 
 /** A question the agent asked, one step at a time: Submit accepts, Skip declines and the turn carries on, the ✕ cancels the tool call. */
 export function ElicitationCard({
@@ -147,6 +167,14 @@ export function ElicitationCard({
     answer.problems.some((problem) => stepKeys.has(problem.key)) ||
     !stepAnswered(form, index, answer.content);
 
+  // One gate for the button and for Enter in a box.
+  const advanceBlocked = busy !== null || fields === null || stepBlocked || (last && !answer.canSubmit);
+  const advance = (): void => {
+    if (advanceBlocked) return;
+    if (last) respond("accept");
+    else setStep(sessionKey, pending.elicitationId, index + 1);
+  };
+
   const leader = step?.fields[0];
   // Carried as a pair: TypeScript drops the narrowing of leader.kind inside the closures below.
   const choice =
@@ -232,6 +260,7 @@ export function ElicitationCard({
                 value={fieldValue(field, draft)}
                 problem={problemOf(field.key)}
                 onChange={(value) => write(field.key, value)}
+                onAdvance={advance}
               />
             ))}
           </div>
@@ -254,14 +283,7 @@ export function ElicitationCard({
           >
             Skip
           </AskAction>
-          <AskAction
-            tone="primary"
-            onClick={() =>
-              last ? respond("accept") : setStep(sessionKey, pending.elicitationId, index + 1)
-            }
-            disabled={busy !== null || fields === null || stepBlocked || (last && !answer.canSubmit)}
-            busy={busy === "accept"}
-          >
+          <AskAction tone="primary" onClick={advance} disabled={advanceBlocked} busy={busy === "accept"}>
             {last ? "Submit" : "Next"}
           </AskAction>
         </>
@@ -280,6 +302,7 @@ function Field({
   counted,
   onToggle,
   onChange,
+  onAdvance,
 }: {
   field: RenderField;
   heading: string | null;
@@ -291,6 +314,7 @@ function Field({
   counted: boolean;
   onToggle: (on: boolean) => void;
   onChange: (value: string | boolean | string[]) => void;
+  onAdvance: () => void;
 }): ReactNode {
   // Named through aria-labelledby, not a label element, which would forward a tap on the question to its control.
   const id = useId();
@@ -322,15 +346,17 @@ function Field({
       {field.kind.k === "text" &&
         (mark !== null && mark !== undefined ? (
           // The mark is a button, so this row may not be a label: a label forwards activation to its field.
-          <div className={`flex min-h-11 w-full items-center rounded-md border ${askRowTone(counted)}`}>
-            <input
-              type="text"
+          <div className={`flex min-h-11 w-full items-start rounded-md border ${askRowTone(counted)}`}>
+            <TypedAnswer
+              multiline={field.kind.multiline}
+              rows={field.kind.rows}
               value={typeof value === "string" ? value : ""}
-              onChange={(event) => onChange(event.target.value)}
-              placeholder="Type your own answer here"
-              aria-labelledby={nameId}
-              aria-describedby={describedBy}
-              className="min-w-0 flex-1 border-none bg-transparent px-3 py-0 text-xs outline-none"
+              onChange={onChange}
+              onAdvance={onAdvance}
+              labelledBy={nameId}
+              describedBy={describedBy}
+              // py-3 makes one line the mark's 44px, so the mark stays level with the first line as the box grows.
+              className="min-w-0 flex-1 border-none bg-transparent px-3 py-3 text-xs"
             />
             <button
               type="button"
@@ -339,31 +365,24 @@ function Field({
               aria-checked={mark === "many" ? counted : undefined}
               aria-pressed={mark === "one" ? counted : undefined}
               aria-labelledby={nameId}
-              className="tap flex h-11 min-w-11 shrink-0 items-center justify-end pr-3 pl-2"
+              className={`${NO_RING} tap flex h-11 min-w-11 shrink-0 items-center justify-end pr-3 pl-2`}
             >
-              <ChoiceMark mark={mark} chosen={counted} />
+              <ChoiceMark mark={mark} chosen={counted} className={MARK_RING} />
             </button>
           </div>
-        ) : field.kind.multiline ? (
-          <textarea
-            value={typeof value === "string" ? value : ""}
-            onChange={(event) => onChange(event.target.value)}
-            rows={3}
-            placeholder="Type your own answer here"
-            aria-labelledby={nameId}
-            aria-describedby={describedBy}
-            className="w-full resize-none rounded-md border border-edge bg-raised px-2.5 py-2 text-xs"
-          />
         ) : (
-          <input
-            type="text"
-            value={typeof value === "string" ? value : ""}
-            onChange={(event) => onChange(event.target.value)}
-            placeholder="Type your own answer here"
-            aria-labelledby={nameId}
-            aria-describedby={describedBy}
-            className="min-h-11 w-full rounded-md border border-edge bg-raised px-2.5 text-xs"
-          />
+          <div className="flex min-h-11 w-full items-center rounded-md border border-edge bg-raised">
+            <TypedAnswer
+              multiline={field.kind.multiline}
+              rows={field.kind.rows}
+              value={typeof value === "string" ? value : ""}
+              onChange={onChange}
+              onAdvance={onAdvance}
+              labelledBy={nameId}
+              describedBy={describedBy}
+              className="min-w-0 flex-1 border-none bg-transparent px-2.5 py-2.5 text-xs"
+            />
+          </div>
         ))}
 
       {field.kind.k === "number" && (
@@ -373,9 +392,10 @@ function Field({
           inputMode={field.kind.integer ? "numeric" : "decimal"}
           value={typeof value === "string" ? value : ""}
           onChange={(event) => onChange(event.target.value)}
+          onKeyDown={(event) => advanceOnEnter(event, onAdvance)}
           aria-labelledby={nameId}
           aria-describedby={describedBy}
-          className="min-h-11 w-full rounded-md border border-edge bg-raised px-2.5 text-xs"
+          className={`${NO_RING} min-h-11 w-full rounded-md border border-edge bg-raised px-2.5 text-xs`}
         />
       )}
 
@@ -439,5 +459,85 @@ function Field({
         </p>
       )}
     </div>
+  );
+}
+
+// React does not forward isComposing; the pointer is read at the keystroke, as the composer reads it, so an attached keyboard is seen.
+function advanceOnEnter(event: KeyboardEvent<HTMLElement>, onAdvance: () => void): void {
+  const key = answerKey(
+    { ...event, isComposing: event.nativeEvent.isComposing },
+    !window.matchMedia("(pointer: coarse)").matches,
+  );
+  if (key === null) return;
+  event.preventDefault();
+  onAdvance();
+}
+
+/** A box an answer is typed into: lines that grow where the schema allows a newline, one line where its format does not. */
+function TypedAnswer({
+  multiline,
+  rows,
+  value,
+  onChange,
+  onAdvance,
+  labelledBy,
+  describedBy,
+  className,
+}: {
+  multiline: boolean;
+  rows: number;
+  value: string;
+  onChange: (value: string) => void;
+  onAdvance: () => void;
+  labelledBy: string;
+  describedBy: string | undefined;
+  /** Borderless: fitToContent writes scrollHeight, which leaves a border out, so the box around it draws the edge. */
+  className: string;
+}): ReactNode {
+  const areaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Before paint, so the card reports its new height in the frame it grows (Q3.649).
+  useLayoutEffect(() => {
+    if (areaRef.current !== null) fitToContent(areaRef.current);
+  }, [value, multiline, rows]);
+
+  // A narrower card rewraps the same text; only the visual viewport fires for a soft keyboard.
+  useEffect(() => {
+    const refit = (): void => {
+      if (areaRef.current !== null) fitToContent(areaRef.current);
+    };
+    window.addEventListener("resize", refit);
+    window.visualViewport?.addEventListener("resize", refit);
+    return () => {
+      window.removeEventListener("resize", refit);
+      window.visualViewport?.removeEventListener("resize", refit);
+    };
+  }, []);
+
+  return multiline ? (
+    <textarea
+      ref={areaRef}
+      {...VERBATIM_FIELD}
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      onKeyDown={(event) => advanceOnEnter(event, onAdvance)}
+      rows={rows}
+      placeholder="Type your own answer here"
+      aria-labelledby={labelledBy}
+      aria-describedby={describedBy}
+      className={`${NO_RING} resize-none overflow-hidden ${className}`}
+    />
+  ) : (
+    <input
+      {...VERBATIM_FIELD}
+      type="text"
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      onKeyDown={(event) => advanceOnEnter(event, onAdvance)}
+      placeholder="Type your own answer here"
+      aria-labelledby={labelledBy}
+      aria-describedby={describedBy}
+      className={`${NO_RING} ${className}`}
+    />
   );
 }

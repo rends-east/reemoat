@@ -48,7 +48,10 @@ export function AppShell({
       </aside>
 
       {/* `min-w-0` stops long lines widening this pane; screens stretch inside it rather than using `h-full`. */}
-      <main className="flex min-w-0 flex-1 flex-col overflow-y-auto bg-surface">{children}</main>
+      {/* Clipped while a back swipe draws the list: a conversation translated past its edge grew its scroll width and repainted it every frame (Q3.663). */}
+      <main className="flex min-w-0 flex-1 flex-col overflow-y-auto bg-surface has-[>[data-back-under]]:overflow-hidden">
+        {children}
+      </main>
 
       <RailHandle />
     </div>

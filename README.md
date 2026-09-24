@@ -146,7 +146,7 @@ is the one thing a browser could not do, and the reason there is no browser vers
 | `docs/PLUGINS.md` | Writing a plugin: the manifest, the host API, the drawing vocabulary, and what a plugin is trusted with |
 | `docs/NATIVE.md` | The native app: building it, the prerequisites per platform, what signing and notarization would take, and what is deliberately not built |
 | `docs/RELEASING.md` | Where the version is written down, when it moves, and what a tag does that a push does not |
-| `docs/DECISIONS.md` | **Why** any of it is that way. 1025 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
+| `docs/DECISIONS.md` | **Why** any of it is that way. 1056 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
 | `deploy/README.md` | The deployment surface in full |
 | `deploy/RELAYS.md` | Running more than one relay, and the order of operations |
 | `CHANGELOG.md` | What changed in each release, and what a 0.x minor is allowed to break |

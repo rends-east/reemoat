@@ -394,10 +394,13 @@ const KIND_WORDS: Partial<Record<PermissionOptionSummary["kind"], string>> = {
   reject_always: "Never allow",
 };
 
+/** `plan` keeps the agent's names: a kind's word describes a grant, and approving a plan is not one (Q2.235). */
 export function optionLabel(
   options: readonly PermissionOptionSummary[],
   option: PermissionOptionSummary,
+  plan = false,
 ): string {
+  if (plan) return option.name;
   const counts = new Map<string, number>();
   for (const entry of options) counts.set(entry.kind, (counts.get(entry.kind) ?? 0) + 1);
   if (options.some((entry) => (counts.get(entry.kind) ?? 0) > 1)) return option.name;
@@ -448,6 +451,8 @@ interface PlanShape {
   shape: readonly (readonly [string, PermissionOptionSummary["kind"]])[];
   order: readonly (readonly [string, string])[];
   primary: string;
+  /** The grant that restarts into a cleared context, which claude-agent-acp can do only inside a turn. */
+  clearing: string | null;
 }
 
 /** Newest adapter first; the first exact match wins. A new adapter's shape is an entry, never a looser rule (Q3.453). */
@@ -464,6 +469,7 @@ const PLAN_SHAPES: readonly PlanShape[] = [
       ["exit-plan-clear-auto", "Clear + auto"],
     ],
     primary: "exit-plan-clear-auto",
+    clearing: "exit-plan-clear-auto",
   },
   {
     shape: [
@@ -477,6 +483,7 @@ const PLAN_SHAPES: readonly PlanShape[] = [
       ["exit-plan-clear-bypass", "Clear + bypass"],
     ],
     primary: "exit-plan-clear-bypass",
+    clearing: "exit-plan-clear-bypass",
   },
   {
     shape: [
@@ -490,6 +497,7 @@ const PLAN_SHAPES: readonly PlanShape[] = [
       ["exit-plan-clear-accept-edits", "Clear + accept"],
     ],
     primary: "exit-plan-clear-accept-edits",
+    clearing: "exit-plan-clear-accept-edits",
   },
   // claude-agent-acp 0.63.0, kept because a machine can lag the pin.
   {
@@ -505,12 +513,15 @@ const PLAN_SHAPES: readonly PlanShape[] = [
       ["auto", "Auto mode"],
     ],
     primary: "auto",
+    clearing: null,
   },
 ];
 
+/** Out of turn the clearing grant is not drawn and the other becomes the primary: answered there, it stops claude and restarts nothing (Q2.232). */
 export function planControls(
   context: PermissionContext,
   options: readonly PermissionOptionSummary[],
+  outOfTurn = false,
 ): PlanControl[] | null {
   if (context.plan === null || context.kind !== "switch_mode") return null;
   const byId = new Map(options.map((option) => [option.optionId, option]));
@@ -521,15 +532,18 @@ export function planControls(
   );
   if (matched === undefined) return null;
 
+  const dropped = outOfTurn ? matched.clearing : null;
+  const order = matched.order.filter(([id]) => id !== dropped);
+  const primary = dropped === matched.primary ? order.at(-1)?.[0] : matched.primary;
   const controls: PlanControl[] = [];
-  for (const [id, label] of matched.order) {
+  for (const [id, label] of order) {
     const option = byId.get(id);
     if (option === undefined) return null;
     controls.push({
       option,
       label,
       leading: option.kind.startsWith("reject"),
-      primary: id === matched.primary,
+      primary: id === primary,
     });
   }
   return controls;

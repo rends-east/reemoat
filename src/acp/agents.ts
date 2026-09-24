@@ -99,8 +99,10 @@ export const ULTRACODE_SETTING = "ultracode";
 /** undefined rather than an empty object, so the request carries no _meta key at all. */
 export function sessionMetaFor(
   agent: string,
-  flags: { ultracode: boolean },
+  flags: { ultracode: boolean; elicitation: boolean },
 ): Record<string, unknown> | undefined {
+  // grok keeps its question tool whatever the client declares, so withdrawing it is this key, measured (Q6.113).
+  if (agent === "grok") return flags.elicitation ? undefined : { askUserQuestion: false };
   if (agent !== "claude" || !flags.ultracode) return undefined;
   return { claudeCode: { options: { settings: { [ULTRACODE_SETTING]: true } } } };
 }
@@ -198,6 +200,11 @@ export const AGENT_LOGIN: Record<
     credentialPath: ".grok/auth.json",
   },
 };
+
+/** grok's own question timeout answers "declined" and tells the client nothing; the environment outranks the user's config (Q6.113). */
+export const GROK_SPAWN_ENV: Readonly<Record<string, string>> = Object.freeze({
+  GROK_ASK_USER_QUESTION_TIMEOUT_ENABLED: "false",
+});
 
 /** The authenticate method id that spends a pasted key, sent only when that key is in the spawn environment: sent to a CLI-signed-in grok it breaks the session. Q6.20, Q6.110. */
 export const ACP_AUTH_METHOD: Partial<Record<AgentId, string>> = {
@@ -401,7 +408,7 @@ export function resolveAgent(id: string, machine?: HarnessCatalogue): AgentLaunc
         // --no-auto-update: src/agentupdate.ts decides when a build moves.
         // Never add --always-approve: it suppresses every permission request.
         args: ["--no-auto-update", "agent", "stdio"],
-        env: agentEnv(),
+        env: { ...agentEnv(), ...GROK_SPAWN_ENV },
         authHint:
           "Grok refused this session. Sign in with the wizard on this machine, or paste an xAI " +
           "API key under Settings → Machines → this machine. A key from console.x.ai is what " +

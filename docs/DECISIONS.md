@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 144 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 89 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 390 | `####` |
-| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 66 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 93 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 415 | `####` |
+| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 67 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 115 | `####` |
-| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 72 | `###` |
+| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 73 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 149 | `###` |
-| | | **1025** | |
+| | | **1056** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1025 rather than the 520
+dividers. So the count is over **both** depths, and it says 1056 rather than the 526
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -5599,7 +5599,7 @@ number of open calls of any kind was zero, because the work being waited on was
 behind a call that had already reported `completed`, and no ACP message describes
 it. It is the only honest client-side signal available; the drain is the fix.
 
-**Status.** Current
+**Status.** Current Amended by Q2.233: `showsWorking` now also reads work nobody prompted, which no longer refuses Send.
 
 ### Q2.45 — Choosing `ultracode` moved the mode to Manual. Why, and what fixes it?
 
@@ -8115,6 +8115,430 @@ change is one `TurnStopReason` member and the daemon ships first: `wire.ts` type
 `stopReason` as `string` and `stopReasonText` already falls through for a value it
 has never heard of.
 
+### Q2.232 — a question the agent asks between turns is cancelled the instant it arrives
+
+**Symptom.** Reported by the owner from session `s_078b731c` on their own machine:
+questions to them kept arriving already cancelled — *"cancelled — no turn to answer
+into"* — and the first plan approval was drawn *"Approve Plan — denied, no turn to
+answer into"*. His requirement, verbatim in substance: all such requests must wait
+until somebody answers them.
+
+**Measurement.** Read-only, the reporting machine's `~/.reemoat/reemoat.db`, session
+`s_078b731c`, claude under claude-agent-acp 0.73.0. `turn_end` at seq 411
+(13:50:00); the next `prompt` is seq 860 (14:28:12). Between them the agent worked
+with no prompt: 446 events from 13:59:27, beginning after a background workflow
+finished. At seq 511 (14:00:42) it raised an `AskUserQuestion` elicitation and seq
+512, stamped the same second, is `elicitation_resolved {action: "cancel", by:
+"no_turn"}`. At seq 685 (14:27:48) an ExitPlanMode `permission_request` titled
+*Approve Plan*, and seq 686 the same second, `permission_resolved {outcome:
+"cancelled", by: "no_turn"}`. Again at 1967/1968 (16:31:18), an elicitation, after
+the turn that ended at seq 1652 (15:12:36). Each time the person had to prompt
+again (seq 860, seq 2049) to be asked the same thing inside a turn, where it was
+answered (864, 2053, `by: "client"`). Across that store's 20 sessions: 3
+`no_turn` resolutions, all this session, none `turn_ended`.
+
+**Cause.** Two settle paths keyed on turn boundaries, both older than the idle
+drain. `ManagedSession.refusalReason` answered `"no_turn"` whenever `this.turn ===
+null`, so `resolvePermission` and `resolveElicitation` recorded a refusal and
+answered the agent `cancelled` on arrival. It dates from the initial commit, when
+events outside a turn were stranded in the queue (Q2.44) and nobody *could* see the
+request — refusing then was the honest answer. Q2.44 fixed the stranding and left
+the refusal behind it. The second path is the same judgement one step later:
+`pump`'s `finally` called `sweepPending("turn_ended" | "pump_failed")`, settling
+any request still parked when a turn ended.
+
+**Decision.** A request the agent raises is settled by exactly four things: a
+person's answer, a person's cancel (the card's ✕, or Stop), the agent withdrawing it
+(the abort signal, `agent_withdrew`), and the agent going away (`doStop`,
+`session_stopped` — a stop, an exit, a restart). Never by a turn boundary, never by
+a timer. `refusalReason` keeps only the terminal arm; `pump`'s sweep is deleted.
+`turn_ended`, `pump_failed` and `no_turn` stay in `AnswerResolvedBy` — stored logs
+hold them and `resolvedByText` still draws them — and nothing writes them.
+
+**Consequences walked.**
+- *Status.* A request parked with no turn reads `blocked`, which it already did
+  (`awaitingCount` precedes `turn` in `status`). `parkable` and `wedged` both read
+  `status`, so neither the idle sweep, the ceiling's eviction nor the silent-turn
+  sweep touches it.
+- *Stop.* `cancelTurn` with no turn but a request parked used to answer `no_turn`
+  and leave it, so the only way to dismiss it was the card's ✕. It now runs a turn's
+  own order — send `session/cancel`, sweep `turn_cancelled`, watch — and answers
+  `cancelled: true, turn: null` (`cancelWithoutTurn`). `CancelResult.turn` widens
+  to `number | null`; the route already typed `turn` as nullable. The sweep is
+  fenced on `turn === null`, as the turn's is on its own turn.
+- *Revising a plan.* The composer's `revising` send is cancel-then-prompt. With no
+  turn the cancel used to be `no_turn`, leaving the plan parked and the new prompt
+  queued behind it in claude's FIFO — a message that never arrives while the plan
+  waits. The cancel now dismisses it, then the prompt is an ordinary turn.
+- *`/clear`.* `clearContext` refuses (`409 turn_in_flight`) while a request is
+  parked with no turn, the same reason it refuses mid-turn: clearing decides what
+  happens to a cycle in progress, which is Stop's to decide. The composer's
+  `clearRefused` reads `canCancelTurn` rather than `turn`, so the refusal is drawn
+  rather than toasted.
+- *The client.* The ask card was never gated on a turn. `canCancelTurn` widens to a
+  parked request with no turn, so Stop is offered there.
+
+**What was not done.** No timeout on a parked request, in either direction — a
+question may wait overnight. No re-ask machinery: a request the daemon refused is
+gone from the agent's side, and the agent re-raises it if it still wants it.
+
+⚠ **A plan raised between turns is offered no clearing grant.** claude-agent-acp
+0.73.0 cannot carry out a plan approved *with the context cleared* outside a turn:
+that choice answers `deny, interrupt: true` and records
+`pendingExitPlanContextReset`, the restart it defers to sits below the
+`isAutonomousResult` early `break` in the adapter's `result` case, and
+`continuePlanInFreshContext` throws *"Cannot clear context without an active ACP
+turn"* — read off the adapter's source, not driven with a real CLI. Pressing the
+card's filled primary (Q3.594) there would stop claude with nothing continuing. So
+`PendingPermissionSnapshot.outOfTurn` records whether a turn was held when the
+request was raised, and `planControls` given `true` drops the shape's `clearing`
+grant and fills the one left; the 0.63.0 shape has none and is drawn unchanged. An
+older daemon sends no field and gets today's card. Declining with a reason is still
+the message box, and a plan re-raised inside a turn gets both grants back.
+
+**Status.** Current. Reverses the initial commit's out-of-turn refusal and the
+turn-end sweep. Amends Q3.594: between turns the plan card draws one grant.
+
+### Q2.233 — the agent working outside a turn reads as working
+
+**Symptom.** Reported by the owner: after a background workflow finished, the
+working line at the foot of the conversation did not appear although the agent was
+visibly doing things — and *the working line means literally that the agent is
+working*, which the owner called an invariant. Q2.231 had already named the mechanism from
+the other side: a cycle claude starts by itself leaves `turn === null`, so `status`
+reads `idle`.
+
+**Measurement.** The same store as Q2.232. Out-of-turn agent content — `text`,
+`tool_call`, `tool_call_update`, `plan`, a request — between a `turn_end` and the
+next `prompt`: 1 194 events in 3 sessions, **all claude**; the byo, grok, kimi and
+opencode sessions there have none. In `s_078b731c` two such stretches run 28.5 and
+54.9 minutes. Their longest gaps, 24.1 and 50.4 minutes, sit *between* cycles, not
+inside one: seq 573 is the agent writing *"I'll continue when the notification
+comes"*, and seq 574 is the next cycle starting. So a clock over output cannot tell
+a working agent from a waiting one, which rules out a timer as the primary signal.
+
+**The adapter, read (claude-agent-acp 0.73.0, `dist/acp-agent.js`).** A result
+whose `origin.kind` is in `AUTONOMOUS_RESULT_ORIGINS` (task-notification, peer,
+coordinator, observer, observer-activity) is an autonomous cycle's end. Every
+`result` — the user's own too — is followed by a `usage_update` whose `_meta` carries
+`"_claude/origin": message.origin`, sent whenever the consumer has seen a top-level
+assistant message (`lastAssistantTotalUsage !== null`), and sent *before* the
+`session.cancelled` check. The SDK's `session_state_changed` running/idle is not
+forwarded. `cancel()` calls `query.interrupt()` whether or not an ACP turn is active,
+so `session/cancel` with no prompt in flight interrupts an autonomous cycle.
+
+**Decision.** Work between turns is a state, not a clock. `Session` lights
+`unpromptedSince` when the agent's own text, thought, tool call, tool update, plan,
+permission or elicitation arrives with no `session/prompt` in flight — at arrival,
+in `onUpdate`'s order, so a drain running behind the end marker cannot light it
+again. A subagent's step (a non-null `parentToolCallId`) is a delegation and lights
+nothing. What ends it:
+1. a `usage_update` carrying `_claude/origin`, of **any** origin — one cycle runs at
+   a time, so whichever ended, the agent is between cycles (`marksCycleEnd`);
+2. the agent answering a prompt of ours — claude runs its input FIFO, so every
+   cycle begun before that prompt has ended;
+3. a `/clear`, whose old conversation's marker is unroutable;
+4. the process going (`doStop` drops the mirror);
+5. the silent-turn clock (below).
+
+`ManagedSession` mirrors it, `status` reads `running` over it, and the snapshot
+carries it as `unpromptedSince`.
+
+⚠ **Latched on the first marker.** Tracking starts only once the agent has sent one
+`usage_update` with `_claude/origin` — claude's first result does. An agent that
+never sends one is never tracked, so a straggler after another agent's turn cannot
+light a working line nothing would ever end. That is a capability read off the
+agent's own output, not its name.
+
+**Q2.44's refusal, re-read.** It refused three things. A new `SessionStatus`: still
+refused, `running` is reused. A clock in `status`: still refused — this is a state an
+event sets and an event clears. Widening `showsWorking`, *"because it is what refuses
+Send"*: no longer true. `sendRefused` is `session.status === "stopping" ||
+(!acceptsMidTurn(session) && (blocked || working))`, and a daemon that sends
+`unpromptedSince` sets it only from a live agent, whose snapshot always carries a
+`midTurnDelivery` — `daemoncheck` asserts the pair. A message sent now is an
+ordinary `prompt`, which claude queues behind the cycle.
+
+**What reads it.** `parkable` refuses it through `status` (the idle sweep would
+otherwise release an agent mid-cycle once its output went quiet for half an hour).
+`takesCredentialChange` refuses it (a credential change restarts the agent).
+`clearContext` refuses it. `wedged` now tests `turn` itself, since `running` no
+longer implies one. Stop is offered and works: send, no sweep of anything but
+parked requests, and watch `awaitUnpromptedEnd`; `cancelRequestedAt` is set for it
+and cleared when the work ends. ⚠ `armTurn` clears `cancelRequestedAt`: an
+out-of-turn cancel the agent has not finished answering would otherwise make
+`pump`'s cancel-before-prompt check end the *next* message unsent — exactly the
+revising flow's cancel-then-prompt when the plan was raised outside a turn.
+
+**The safety net, and why it is the silent turn's.** An agent that marks cycles and
+then stops marking — an adapter change, an interrupt that pre-empts the result —
+would read as working until the next turn ends it. `abandonWedgedTurns` also calls
+`unpromptedGoneQuiet`, the same predicate as `wedged` (`status === "running"`, not
+mid-clear or restart, no live background work, the agent's own clock) floored at
+`unpromptedSince`, with `TURN_SILENCE_MS` and `REEMOAT_TURN_SILENCE_MINUTES` — three
+hours by default. The evidence is the same with or without a turn: the agent has
+said nothing. A separate, shorter number was rejected: the measured gaps above show
+a waiting agent and a working one look alike to a clock, and a second number for
+one judgement drifts. It writes nothing — no turn ended — and never settles a
+request: a session waiting on a person reads `blocked`, which the predicate refuses.
+
+**Rejected.**
+- *Holding the turn open over the cycle* — Q2.44's objection stands: `canCancelTurn`
+  true for a turn that ended, `409 busy` for ever.
+- *A timer after the last output as the primary signal* — the measured 50-minute
+  between-cycle gaps make any timer either lie during them or drop the line during
+  a long tool call.
+- *Recording the marker as an event* — one row per cycle for something nobody did;
+  it rides the snapshot like `cancelRequestedAt`.
+- *Keying on the agent id* — the latch reads the agent's own output instead.
+
+**Compatibility.** `unpromptedSince` is optional in `wire.ts` and absent reads as
+not working, which is today's behaviour. Daemons ship first. An older client
+against this daemon sees `status: "running"` with `turn: null`: a running dot in the
+list and no working line — degraded, not broken.
+
+**Status.** Current. Narrows Q2.44 and closes the defect Q2.231 described from the
+other side.
+
+### Q2.234 — Finished background work belonged to the process, and an effort change took it away
+
+**Symptom.** Reported by the owner, translated: *"After changing effort from
+ultracode to high, all finished background tasks were reset, although it's the same
+dialog. They must be kept."*
+
+**Measurement.** Read-only against the development machine's store, 2026-09-24.
+Session `s_078b731c` (claude, now `ultracode = 0`) launched six workflows in the
+background between 13:39 and 15:38 — every one is a `Workflow` tool call whose
+result reads *"Workflow launched in background. Task ID: w…"* (seq 147 → 1711). At
+16:31:35 seq 2041 is `status interrupted`, `exit.reason: "config_changed"`, then
+`starting`, `agent_config`, `idle` and a `session_started` on the **same**
+conversation, all within one second. There is no `stoppedWithBackgroundWork` row
+beside it, so nothing was running: every row the panel held was finished, and every
+one was gone after that second.
+
+**Cause.** Choosing a level while ultracode is on is `setConfigOption`'s ultracode
+arm → `applyUltracode(false)` → `restartAgent` → `stop("config_changed")` and
+`resume()` on the same `agentSessionId`, because ultracode is read only when a
+conversation opens (Q2.43). `doStop` then set `backgroundTasksState = []`, and
+`onStarted` handed the list to `applyBackgroundTasks`, which **replaced** it with
+the new `Session`'s — a fresh `asyncTasks` map, empty. Nothing could refill it:
+claude-agent-acp 0.73.0 holds the lifecycle per process in `AsyncTaskRuntime`
+(`async-tasks.js`), built per session at `acp-agent.js:1377`, and
+`teardownSession` calls its `clear()` without publishing anything; the SDK's
+replace-semantics level (`backgroundTasksChanged`) *"does not create unknown
+tasks"*. So the daemon was the only thing that had ever known about that work, and
+it threw its copy away. The same `doStop` runs for a credential restart
+(`applyCredentialChange`, `onAuthFailure`), a park, an agent exiting and a clean
+daemon shutdown — all of them stops a message undoes, all of them the same
+conversation, and every one lost the rows. An effort change *without* ultracode,
+a model change and a mode change go through `session/set_config_option` and never
+restarted anything; they were not affected.
+
+**Decision.** A task list belongs to the conversation, not to the process.
+
+- **Kept on Q2.229's gate.** `doStop` keeps the rows as `earlierTasks` whenever
+  `revivableByPrompt(reason, …)` — the same call that keeps the controls and the
+  `/` menu — and `applyBackgroundTasks` merges the live agent's list over them
+  (`withEarlierAgents`). The live agent's row wins an id it shares, which would only
+  be a reused id; the cap stays `MAX_TRACKED_ASYNC_TASKS` over both together, and
+  what gives way is an earlier agent's oldest-finished row, which is the order the
+  cap already evicted in. A `/clear` is a new conversation and drops them in
+  `clearContext`; a stop nothing revives (`start_failed`, `start_timeout`,
+  `agent_kill_failed`) drops them as it drops the controls.
+- **A row that was running when its agent went reads `stopped`, with `endedAt` the
+  stop's time.** It cannot stay `running`: the process that owned it is gone and no
+  resume replays it (Q7.113), a live row makes `hasLiveBackgroundWork` refuse
+  parking and the silence sweep for ever, and the panel's clock would tick for ever.
+  `failed` draws `(error)` in the danger tone and claims the task itself went wrong,
+  which nobody measured. `stopped` is the chip for *ended from outside*, and it is the
+  adapter's own word for the same fact: `taskState` maps `killed` to `stopped`, and
+  `finishLifecycle` publishes `stopped` for a cancelled stream. The transcript's
+  existing `stoppedWithBackgroundWork` row still says it in prose, once.
+- **Durable across a clean restart, with no migration.** The finished rows ride
+  the `agent_state_json` blob Q2.229 added, as a `tasks` key, written on the same
+  gate. A JSON key is additive in both directions: an older build's `toAgentState`
+  destructures `config` and `commands` and never reads it, and a blob an older build
+  wrote has none and reads as no rows. They are bounded **apart** from the controls
+  (`keptOnDisk`, `MAX_KEPT_TASKS_CHARS` = 32 KiB, rows kept whole, oldest-finished
+  first), because the controls are refused whole past 64 KiB and a long task list
+  must never cost somebody their model picker. Read back **row by row**
+  (`readKeptTask`): a row this build did not write — live, unstamped, over a bound —
+  is dropped alone, and a `tasks` that is not an array costs the tasks and never the
+  controls beside it.
+- **A memory of tasks alone does not seed the commands revision.** Restore set it to
+  1 for any stored memory, which was right while a memory implied a list; 1 over an
+  empty list tells every client to fetch one. It is seeded only when there are
+  options or commands.
+
+**What the client needed: nothing, and why that was checked rather than assumed.**
+An agent swap walks `interrupted → starting → idle`, and `backgroundReporting` is
+`unasked` for the first two. `showFinished` is `reporting === "reports" ||
+finished.length > 0`, so the band is held open by the rows the daemon kept, not by
+the arm — `FinishedSection` stays mounted and its fold stays where the reader left
+it. The hidden set is keyed by session, the ids do not change, and
+`forgetHiddenFinished` has one caller, `forgetSession`, so a reader's clear
+survives the swap too. `webcheck` pins all three by name now, because each looked
+like it could be tidied into the bug.
+
+**What was not done.**
+
+- **A crash still loses them.** The blob is written at a stop, as the controls are,
+  and a live session's row carries none. A column of its own written on every touch
+  (`background_tasks_json` through `migrate()`) would have survived a crash, and was
+  declined: it is up to 32 KiB re-serialized on every touch of every live session to
+  cover a daemon killed hard, and a column an older build does not know is one its
+  upsert leaves stale — so a roll-forward after a rollback could list rows from
+  before a `/clear` the older build performed.
+- **The `unasked` sentence is unchanged**: *"It is not kept across a restart"*
+  remains true of running work and of a crash, and is shown only when there are no
+  rows, which is now rarer. Its wording is the owner's to revisit.
+- **The empty band still flickers for a second.** A session in the `reports` arm
+  with **no** finished rows draws `Completed (0)`, and for the second a swap takes
+  it draws the `unasked` sentence instead. Nothing is lost — a zero band is a
+  heading with no fold — and holding the arm through the window would need a wire
+  field saying *restarting*.
+- **A stop pressed on an earlier agent's id is still forwarded** to the live agent,
+  which answers `stopped: false`, already an ordinary 200. The panel offers no stop
+  on a finished row, and every earlier row is finished.
+
+**What still loses them**, exactly: a daemon crash; a `/clear`; a stop nothing
+revives; eviction at the 32-row cap; the disk budget on a clean restart; the
+startup prune taking the whole session (Q2.222); and a rollback to a build that
+rewrites the blob without the key. The budget was measured rather than guessed: a
+row shaped like one of `s_078b731c`'s workflows serializes to 542 characters, so all
+32 fit in ~17 KB and it never bites; a row at every text bound is 3 201, and 32 of
+those keep the newest 10.
+
+**Pinned.** `daemoncheck.restart-and-resume.ts`: a replacement through
+`applyCredentialChange` — the door ultracode takes — keeps two finished rows and
+turns the running one `stopped` with an end of its own; the finished row's end is
+not restamped; the new agent's rows merge live-first; earlier rows hold nobody back
+from release; a park keeps all four and writes them; a second registry over the same
+store lists them on a `parked` row before any agent is back, at commands revision 0;
+a wake keeps them; a `/clear` drops them; `start_failed` drops them; and the merge,
+the cap, the disk budget and the reader as functions.
+`daemoncheck.after-the-turn-and-config.ts`: the reported path itself on the modal
+rig — a workflow completed under ultracode, then `effort: "high"`, still listed.
+`daemoncheck.store-and-worktrees.ts`: the SQLite round trip, a live row dropped
+alone, and a malformed `tasks` costing nothing else. ⚠ **Two rows pinned the old
+behaviour** — a released session's list and a stopped session's list, both `[]` —
+and are rewritten in place with a comment saying what they were. Each new guard was
+knocked out once and its rows went red: the keep in `doStop`, the `stopped`
+relabel, the `/clear` drop, the write in `persistedRow`, the revision gate.
+
+**Status.** Current. Amends Q3.633: a zero is no longer what an agent swap leaves.
+
+### Q2.235 — grok's questions, plan approvals and MCP forms arrive as its own requests, and are routed onto the two doors every agent uses
+
+**Symptom.** Reported by the owner with grok 1.0.40: the agent called its
+`ask_user_question` tool and the transcript showed the tool failing with *"Tool
+`ask_user_question` failed: Failed to reach the client for user question: "Method
+not found": _x.ai/ask_user_question"*, over a card header reading *"Ask: Какой
+напиток ты бы выбрал прямо сейчас?"*.
+
+**Cause.** `AcpClient` registered no handler for any `_`-prefixed method, so the
+SDK answered every agent-to-client extension request `-32601`. grok sends three —
+its question, its plan approval and an MCP server's form — and Q6.113 measured what
+each did with the refusal: the question tool failed; the plan approval failed as
+*"the client disconnected"* and **ended the turn**; the MCP server was handed a
+`cancel` it never learned the reason for.
+
+**Decision.** Parse each in `src/acp/xai.ts`, the one module that knows their
+shapes, and route it onto a door every agent already uses, so parking, the log, the
+card, Stop, the idle sweep and the four ways a request ends (Q2.232) are the
+existing ones rather than a copy:
+
+- `_x.ai/ask_user_question` becomes an elicitation built in **claude-agent-acp's
+  AskUserQuestion bridge shape** — `question_<n>` with the options as a titled
+  `oneOf` (or an `anyOf` list for `multiSelect`), and its own-answer box
+  `question_<n>_custom` marked with `_askUserQuestionCustomAnswer`, the marker that
+  bridge documents as *intentionally agent-neutral, for other AskUserQuestion
+  bridges*. It then goes through `toElicitationForm`, so every elicitation bound is
+  the bound — twelve questions is twenty-four fields, the cap — with no second
+  number. The card draws it exactly as it draws claude's: a question a step, the
+  descriptions, the box and circle marks, the own-answer row. The answer goes back
+  as grok measured accepting: `{outcome: "accepted", answers: {<question text>:
+  label | [labels] | typed text}}`, a typed answer winning over a pick as on claude.
+- `_x.ai/exit_plan_mode` becomes a **permission** titled *Approve plan* with
+  `rawInput: {plan}` — which is where the card reads a plan — and two options named
+  by the outcome each sends, `approved` (*Approve plan*, `allow_once`) and
+  `abandoned` (*Abandon plan*, `reject_once`). grok's `exit_plan_mode` tool call
+  carries `{}` for arguments and the snapshot clamps a permission's blob at 8 KiB,
+  so the plan is also written onto grok's own call as a `tool_call_update` with
+  `rawInput.plan`: the card recovers a clamped payload from the log, which would
+  otherwise hold no copy.
+- `_x.ai/mcp/elicit` becomes an elicitation of the server's own schema, its message
+  prefixed with the server's name as grok's own card names it, answered `{outcome:
+  "accept", content}`, `{outcome: "decline"}` or `{outcome: "cancel"}`.
+
+**What this costs in meaning, stated.** On grok **decline and cancel are one word**:
+the question's only no-answer outcome is `cancelled`, which the model reads as
+*"User declined to answer"*, so Skip and the ✕ send the same thing where on claude
+they are two acts. `chat_about_this`, `skip_interview` and `annotations` exist on
+the wire and are never sent, because nothing on the card asks for them. A plan's ✕,
+Stop and every sweep send `cancelled`, which grok reads as *"the user wants to
+revise the plan"* and stays in plan mode — exactly what the composer's `revising`
+send (cancel, then the correction as a prompt) wants.
+
+**The question is the title of its field.** grok has no short header, and the
+title is what `renderAnswers` logs an answer under; without one a typed answer — which
+`answeredQuestions` cannot join back by label — was logged as `question_0`. The
+card draws no heading equal to its title (`askTitle`), so nothing is drawn twice.
+
+**A plan's options keep their names on the card.** `optionLabel` substitutes a
+kind's word whenever kinds are unique, and grok's two would have read *Allow once*
+and *Deny* over approve and abandon. It takes `plan` now: a kind's word describes a
+grant, and approving a plan is not one. `planControls` still curates claude's shapes
+alone — grok's request has no `switch_mode` and matches none of them.
+
+**grok withdraws by resolving, never by cancelling.** It sends
+`_x.ai/session_notification {update: {sessionUpdate: "interaction_resolved",
+tool_call_id}}` after every answer *and* after its own timeout, and no
+`$/cancel_request` ever. `Session.withdrawable` gives each request a signal that
+either the SDK's or that notification aborts, so the registry settles it
+`agent_withdrew` — Q2.232's third way. ⚠ **The notification handler's position is
+load-bearing.** grok resolves its own permission step for a call immediately before
+it asks the question on that call; the SDK walks a message through the handlers
+with one `await` each, so registered after the request handlers, that earlier
+resolution reached its handler *after* the later question reached its own and
+withdrew it on arrival — the Q2.232 defect again, by a new road. The driver
+reproduced it before the handler moved to second place; it sends the pair in
+grok's order.
+
+**grok's own question timeout is off at the spawn.** `GROK_SPAWN_ENV` carries
+`GROK_ASK_USER_QUESTION_TIMEOUT_ENABLED=false` on the grok arm of `resolveAgent`:
+the default gives up after 30 minutes and answers itself "declined" (Q6.113), which
+is Q2.232 from the other side. The environment outranks the user's `config.toml`
+and loses only to an organisation's `requirements.toml` — which is what the
+withdrawal above is for.
+
+**With questions off, the tool is withdrawn.** grok keeps `ask_user_question`
+whatever the client declares, so `REEMOAT_ELICITATION=0` now also sends
+`_meta.askUserQuestion: false` on `session/new` (`sessionMetaFor`, measured to
+remove the tool), and the question and MCP-form methods still answer `-32601`, as
+`elicitation/create` does when declined. A plan is a permission and is always asked.
+
+**Refusals.** Malformed params are `-32602` from the parser, before anything is
+parked or logged. A question longer than the card's 4096-character message cap is
+refused rather than drawn cut, because its text is the answer's key. `url` mode is
+refused as Q2.20 refuses it; grok hands its MCP server a `cancel` for any refusal.
+Every other `_` method — including x.ai's own `folder_trust/request` — is still the
+SDK's `-32601`: an unknown request must stay a failure the agent reports.
+
+**Rejected.**
+- *Recognising grok's tool calls in the transcript and asking from those* — the
+  request is the protocol; a tool call is a picture of it.
+- *A grok-specific card* — two bodies already exist and grok's requests fit them.
+- *Sending grok's `revise` with the composer's text as `feedback`* — measured to
+  work (*"The user wants to revise the plan. The user said: …"*), and it would skip
+  the cancel; but it needs a route the composer does not have, and the cancel-then-
+  prompt that works for claude works here.
+- *Handling `interaction_resolved` by diverting the line below the SDK*, as the
+  async-task updates are — it would order the notification strictly, but at the
+  price of a second parse of a stream that carries one notification per token.
+
+**Status.** Current.
+
 ## The web client
 
 ### What the client is
@@ -8690,7 +9114,7 @@ following carries on. One frame later, because the height to read is the one
 **Rejected.** A "stop following" flag. It would also make the jump-to-bottom
 button appear while the reader was still at the bottom.
 
-**Status.** Current
+**Status.** Current Amended by Q3.648: the re-measure is an observer flag in `useFollow`, not a `rAF`.
 
 #### Q3.27 — What does the transcript refuse to draw?
 
@@ -11885,7 +12309,7 @@ the composer at the exact moment that message appears above it.
 `behavior: "smooth"` is not reachable by the CSS block in `index.css` that collapses
 every other animation in this app.
 
-**Status.** Current
+**Status.** Current Amended by Q3.648: `measure` on every scroll event is gone; `atBottomRef` is the intent and the state mirrors it for the button.
 
 #### Q3.427 — Which element names a settings screen?
 
@@ -13524,7 +13948,7 @@ class. A browser that will not style `::marker` then draws exactly what it drew
 before this existed, so the degradation is a no-op rather than a fallback anybody
 has to look at; there is no third state where the marker goes missing.
 
-**Status.** Current
+**Status.** Current Amended by Q3.646: a person's message is no longer parsed, so this serves agent output only.
 
 #### Q3.436 — Your own message appeared under the conversation, then jumped into it
 
@@ -19464,7 +19888,7 @@ and both presentations are in it: without that, a refusal line carries the same 
 twice and every `aria-describedby` pointing at it resolves to whichever copy the
 browser reaches first — on a phone, the one that is `display: none`.
 
-**Status.** Current
+**Status.** Current Amended by Q3.660: a picker's scrim closes on its own click, not at the press, so a tap no longer falls through.
 
 #### Q3.566 — What does a picker sheet owe beyond appearing?
 
@@ -19571,7 +19995,7 @@ arrival's curve **mirrored** — `cubic-bezier(1 - x2, 1 - y2, 1 - x1, 1 - y1)` 
 rather than a curve picked again, so tuning one and not the other is visible as an
 asymmetry rather than as nothing.
 
-**Status.** Current. Supersedes the exit half of Q3.566.
+**Status.** Current. Supersedes the exit half of Q3.566. Superseded by Q3.650: exits use the arrival's curve on one `--sheet-ease`.
 
 #### Q3.568 — What does a picker sheet owe once its rows are taller than it is?
 
@@ -19719,7 +20143,7 @@ pressable sits under it.
 
 **Status.** Current. The `max-height`-only full detent and the discrete gesture
 are superseded above, both by measurement from the same phone that reported them;
-so are the `--sheet-settle` property, the flat 44px head, and Q3.561's `gap-1`.
+so are the `--sheet-settle` property, the flat 44px head, and Q3.561's `gap-1`. Amended by Q3.650: the drag runs on the touch stream with a fling-or-distance release; the two detents and the kept offset stay.
 
 #### Q3.569 — Whose order is the session rail in, and where does it live?
 
@@ -20631,7 +21055,7 @@ the `ResizeObserver` fires for none of this — so there is a second effect keye
 Somebody reading history keeps their `scrollTop`, for the reason the observer
 already gives: adjusting by the delta is what would move the ground under them.
 
-**Status.** Current
+**Status.** Current Amended by Q3.648: the second effect keyed on `askHeight` is gone; the padding is a commit `useFollow` pins.
 
 #### Q3.584 — Cancelling was a labelled button in the footer, and the footer is where a plan needed the room
 
@@ -21096,7 +21520,7 @@ beside the filled primary. A rule costing one comparison is cheaper than that.
 clear-context row at all, so its two are the two grants it can offer and there is
 nothing to pair them with. It drops three of five now rather than two.
 
-**Status.** Reversed an earlier decision
+**Status.** Reversed an earlier decision Amended by Q2.232: a plan raised between turns draws one grant, the elevation, filled.
 
 #### Q3.595 — The plan was on screen and the box under it said to go and answer something
 
@@ -22482,7 +22906,7 @@ screen *replacing* another one, and a tab change has no history entry and no
 mounted at once, on a rail whose whole design is one machine at a time
 (`waitingFloor` exists because of it). What ships is a nudge and a swap.
 
-**Status.** Current.
+**Status.** Current. Reversed by Q3.655: a swipe is Telegram's two-page turn now, with the neighbour sliding in.
 
 
 #### Q3.622 — A panel that lines up, against a panel that has nothing to line up with
@@ -22787,7 +23211,7 @@ repair is loosening the pattern. A control asserts it does not match that line.
 the hand from every user-agent stylesheet, and reclaiming it would mean this app
 setting a cursor on the only elements whose shape is universally understood.
 
-**Status.** Current.
+**Status.** Current. Amended by Q3.665: the header's session name shows the text caret, the second named exception.
 
 
 #### Q3.628 — the menu drawer loses its weight and its ✕, and the build line becomes a stamp
@@ -23119,7 +23543,7 @@ expressible in it at all. The partition is driven now. The slice went with it: a
 of the file rather than nothing, so deleting the sentence would have turned the
 check green over a message about something else entirely.
 
-**Status.** Current.
+**Status.** Current. Amended by Q2.234: finished rows now survive an agent swap and a clean restart.
 
 
 #### Q3.634 — a target grown with a pseudo-element grows hover with it, and the ✕ lit up 10px early
@@ -23353,6 +23777,8 @@ are about which element is selectable, which is a different question from where
 the painting stops — but nothing here should be read as saying the fill had to be
 lived with.
 
+**Status.** Amended by Q3.646: the composer sends `sentText` rather than trimming both ends.
+
 #### Q3.637 — the bubble is sized to the text it ended up holding, and that is a layout value written from JavaScript
 
 **Question.** A message bubble sits 31px wider than its longest line. Asked as
@@ -23426,6 +23852,8 @@ engine painting any gap at all — so no width here decides anything a selection
 see. What is left is the 31px themselves: a grey box 31px wider than the sentence
 inside it, with nothing selected. That is a typographic judgement rather than a
 workaround, and it is the one this entry should be read as making from here on.
+
+**Status.** Amended by Q3.646: a bubble cannot hold `pre` or `table`; `huggable` tests attachments and images.
 
 #### Q3.638 — only the text is selected, and one property is the whole of it
 
@@ -23574,6 +24002,8 @@ walk cannot enter them, and that is CommonMark's own behaviour. Asserted rather
 than trusted, because it is the property that decides whether this plugin may be
 pointed at markdown at all. It is also a **render** fix rather than a send fix —
 every message already in the log gains its breaks back on the next paint.
+
+**Status.** Reversed by Q3.646: a person's message is not markdown at all, and `pre-wrap` draws it.
 
 #### Q3.640 — New session never installs or signs in; it sends you to the machine's Agents list
 
@@ -23968,6 +24398,2198 @@ it takes this account off this computer.
 **Status.** Reversed an earlier decision — Q3.607's second entrance: the Server
 address row changes nothing now. Amends Q4.121's welcome, whose box opens locked on
 the default.
+
+#### Q3.644 — the working line counts the tokens streamed since the last tool call
+
+**Question.** From the owner, with Q2.233's working line: *add tracking of tokens
+since the last tool call, as in Claude Code, so one can see the agent is working,
+not hung.* Claude Code's spinner reads `✻ Working… (1m 12s · ↓ 1.2k tokens)`.
+
+**Decision.** The working line gains a third part, after the elapsed time:
+`working… · 3m · ↓ 1.2k tokens`. The count is the characters of agent text —
+**thoughts included**, which are logged and reach the client though `tail.ts` never
+draws them — since the newest `tool_call`, `prompt`, `turn_end` or
+`context_cleared`, divided by four (Claude Code's own estimate, as the owner's
+reference describes it; not re-read out of its binary), rounded, and drawn with
+`taskTokens`, the panel's compact formatter — so `1.2k`, never a locale's. Nothing
+under half a token draws nothing. A user's text never counts. Tool progress adds
+nothing, and a tool call starts it again, which is the whole point: a count that
+climbs says the model is producing, a count at zero with a tool row in progress says
+where the time is going.
+
+**It is the working line's, with every rule that line already has.** Drawn only
+while `working`; dropped with the elapsed time when nothing is streaming (a count
+beside *last seen working* would be a live number over a stale claim). The elapsed
+time now starts at `workStartedAt` — the turn's start, else `unpromptedSince` — so
+Q2.233's work between turns is timed as a turn is.
+
+⚠ **Drawn, never spoken.** The foot's words also feed the transcript's `aria-live`
+region; a count there would be announced on every token. `footSays`' `spoken` form
+never carries it, and `webcheck` sweeps the whole 32-cell space for it.
+
+**Cost.** `streamedSinceTool` memoises per `StoredEvent` in a `WeakMap` — the count
+up to and including that event — so a new token reads the event before it and
+itself, and nothing else; `webcheck` counts the array reads through a `Proxy` over
+5 001 events rather than timing it. It remembers only a count anchored on a restart:
+a window that opens mid-run (history still paging in) is counted but not stored, or
+the earlier events arriving underneath would leave it short for the rest of the run.
+`EventList` computes it (it already re-renders per event) and hands the formatted
+string to the foot alone; no `TailRow` receives it, so the memo on every row
+survives.
+
+**Rejected.** Reading `usage_update`'s `used` — occupancy of the context window,
+Q6.9's other quantity, and absent on kimi. Reading `turn_end.usage` — it arrives
+when the turn is over. A per-second clock render — this app schedules one only for
+the task panel (Q3.603), and the count moves with the events that re-render anyway.
+
+**Status.** Current.
+
+#### Q3.645 — the box you type your own answer in drew a dark rectangle out past its row, and `outline-none` was on it
+
+**Symptom.** Reported off a screenshot of the macOS app: an `AskUserQuestion` card,
+typing into the free-text box under the options (the "Other" row, marked with a
+filled circle once counted). The input drew a thick dark **rectangle** inside the
+rounded row, sticking out past the row's left edge — *"the input field slides out of
+the interface, and this highlight should not exist, it is superfluous."*
+
+**Cause.** One cause for both halves: `index.css`'s app-wide focus rule, `outline:
+2px solid var(--color-fg); outline-offset: 2px` under `:focus-visible`. A text
+control matches `:focus-visible` on **every** focus, mouse and touch included, and
+the rule is **unlayered**, so the `outline-none` written on that input — a utility,
+inside `@layer utilities` — lost to it regardless of specificity. That is Q3.56 and
+Q3.414, met a second time by a file that never read them. The geometry did the
+rest: the row carries the border and the radius, the input sits flush against the
+border with no radius of its own (preflight's `border-radius: 0`), so a ring 2px out
+and 2px wide is a square-cornered box ending 3px beyond the row's rounded outer edge.
+An outline is ink overflow and takes no layout space, which is why nothing moved and
+nothing scrolled — and why no width measurement could have caught it.
+
+**Measured in WebKit**, which is what the product ships — a Swift/AppKit
+`WKWebView` harness loading the card's markup with the built stylesheet, focusing
+each box and reading `getComputedStyle` before `takeSnapshot`, at 390px and 700px:
+
+| Classes on the input | Computed outline | Painted |
+|---|---|---|
+| `outline-none` (as shipped) | `solid 2px rgb(28,26,22)`, offset `2px` | the reported rectangle: input at x=30, row's outer edge at 29, outline from 26 |
+| `no-focus-ring` alone | `auto 5px rgb(0,103,244)` | WebKit's own blue ring, overhanging the same way |
+| `no-focus-ring outline-none` | `none` | nothing; the caret, `caret-color` = `--color-fg` |
+
+`document.documentElement.scrollWidth` equalled `clientWidth` in every row of that
+table, at both widths.
+
+**Decision.** Every box you type in on the card — the question's own-answer box, and
+an MCP form's text field, textarea and number field — carries `NO_RING`, which is
+`no-focus-ring outline-none`. ⚠ **It is the pair or it is nothing**: `outline-none`
+alone loses to this app's rule, `no-focus-ring` alone hands the box to WebKit's `auto`
+ring. The indicator is the caret, which is the composer's answer (Q3.55, Q3.414) and
+the owner's word here; the row gets **no** `focus-within` tone either — the row's own
+tone and the mark are what it says.
+
+**And the mark beside it moves its ring onto the glyph.** Its 44px target is
+invisible and flush with the row's right edge, so under keyboard focus the app's ring
+around it was the same square box, straddling the other end of the row. The target
+opts out (`NO_RING`) and `ChoiceMark` takes `MARK_RING` — the app's own `2px`, `fg`,
+offset `2px`, spelled `[button:focus-visible_&]:` the way `AgentBuilder` already
+spells a keyboard-only state — so a keyboard user sees a concentric ring round the
+circle or the box, inside the row. Keyboard-only, since `:focus-visible` does not
+match a button a pointer focused.
+
+**Alternatives refused.** An inset ring on the input or a `focus-within` border on
+the row — both are the highlight the owner asked to be rid of. Taking `input,
+textarea, select` out of the app-wide rule — that changes every field in the app to
+settle one card.
+
+**Pinned** in `webcheck.elicitation-and-links.ts`, off disk: the rule in `index.css`
+still declares the opt-out; `NO_RING` is exactly both halves; a sweep of every
+`<input`/`<textarea` in `ElicitationCard.tsx`, with a floor of four, finds none
+without both; the own-answer box keeps `min-w-0 flex-1` so it is the half that
+shrinks at 390px; neither `ElicitationCard` nor `AskCard` carries a `focus:`,
+`focus-within:` or `focus-visible:` utility; the mark's target opts out; and
+`MARK_RING`'s width, offset and colour are read **off `index.css`'s rule** and
+compared, so the two spellings of the ring cannot drift. Proved by drift: `outline-none`
+back alone, `NO_RING` without its second half, a `focus-within:` tone on the row, a
+1px mark ring and a lost `min-w-0` each fail it.
+
+⚠ **Not swept: `outline-none` is a no-op on every element that rule lists, app-wide**
+— `bits.tsx`'s two field constants, `NewSession`, `SessionBrowser`, `SessionMenu` and
+`AgentBuilder` each carry it on an input and each still draw the ring. Whether any of
+those *wants* it gone is a question per surface, not this entry's.
+
+**Status.** Current
+
+#### Q3.646 — a person's message is drawn exactly as they sent it, and never parsed
+
+**Question.** The owner, 2026-09-24 (translated): *"Lots of changes to messages on
+sending … Numbered items, once sent, are displayed in the chat as an entity
+separate from the text. The message must be exactly as the user sent it."*
+
+**Decision.** A person's own message is plain text. `UserBubble` draws the string
+as **one text node** in a `select-text text-sm whitespace-pre-wrap text-fg
+wrap-anywhere` block, and nothing parses it. Every row that draws a person's words
+is that component — the pending echo, a `prompt` row (queued or not), an adapter's
+`role: "user"` run, the `/clear` marker — and a settled question's typed answer
+(`ElicitationResolvedRow`) takes `whitespace-pre-wrap` too, so a multi-line answer
+keeps its breaks. A message that is only whitespace draws no text line, so an
+attachment-only message is the chips alone. Agent output keeps markdown, unchanged.
+
+**Measured** 2026-09-24 in a `WKWebView` on macOS 15.6 (24G84), against the built
+stylesheet, with the old and the new bubble DOM side by side:
+
+- **The old DOM is the report.** `Please do:\n1) first thing\n2) second
+  thing\n10) tenth`, drawn through the user tone, reads back as `innerText`
+  `"Please do:\nfirst thing\nsecond thing\ntenth"` — the numbers were `::marker`
+  boxes, not text: hanging outside the sentence, not selectable, not copied.
+- **The new DOM is the string.** textContent and `innerText` equal what was sent,
+  exactly, for seven messages — the owner's own (`…появляется надпись "start one
+  before bed"`), that numbered list, `**not bold**` with backticks, `#`, `-` and
+  `>` lines and `--all -- "x"`, a 324-character unbroken token, an indented first
+  line followed by three blank lines, a trailing newline, and one word — at 760 and
+  at 390 wide. No box overflows; the long token wraps inside the 85% cap.
+- **`hug.ts` still measures it.** One `pre-wrap` node answers one rect per line and
+  a zero-width rect per newline (`[68, 0, 78, 0, 101, 0, 56]` for the list), so the
+  widest line decides as before; a trailing `\n` adds no line box (22px, one line);
+  the owner's message at 390 hugs from 304px to 285px.
+- **The selection is unchanged.** Real `NSEvent` drags and a triple-click (the
+  Q3.636 harness) paint identically on the old and new DOM — 282×64, bands
+  `20px@159w 22px@282w 22px@30w`, the text and nothing of the padding or the gap —
+  and copy the same string. Q3.638's `sel-root` on the box needs nothing added.
+
+**Why plain text rather than a narrower markdown.** Every markdown construct in a
+person's message is a rewrite of what they typed: `1)` becomes a marker — Q3.435
+mended the *delimiter* and left the separation, which is what was reported next —
+`**x**` loses its asterisks, `# x` becomes a heading, `- x` a bullet, `> x` a
+quote, an indented first line a code block, a backslash escape vanishes. Somebody
+writing to a coding agent types those characters *as characters* as often as for
+formatting, and the agent is sent the raw string either way — so the bubble was the
+only place the two could disagree. Turning constructs off one at a time is the road
+Q3.639 took, and it leaves the next one to be reported.
+
+⚠ **Reverses Q3.639's mechanism.** Its plugin, the second plugin list that carried
+it and the `"user"` tone on `Markdown` are deleted; `MarkdownBody` has one plugin
+list again and `COMPONENTS` is untouched. Q3.639 refused `white-space: pre-wrap`
+because `mdast-util-to-hast` writes a `\n` after every `<br>`; with no parse there
+is no `<br>`, so that measurement no longer bears on this. Q3.639's finding that
+the write path is clean still holds and is still what makes a render-side fix
+sufficient: every message already in the log is drawn verbatim on its next paint.
+`huggable`'s `pre, table` clause went with it — a bubble now holds text and
+attachment chips and nothing else.
+
+**What leaves the box.** `sentText`, in `ui/composing.ts`: the blank lines before a
+message and the whitespace after it are dropped; the first line's own indentation,
+every blank line inside, and every character are kept. It replaces `text.trim()`,
+which took the indentation off the **first** line of a pasted stack trace or YAML
+fragment while keeping it on every other — a change to the content, where the ends
+are not. `typedConfigCommand`'s `rest` goes through it too, after the spaces that
+separate the command's name, so `/plan` followed by an indented block keeps the
+block. `canSend` still trims, to decide *whether* anything is worth sending. A
+first line that begins with spaces and then `/` is sent with its spaces, which is
+consistent with the composer's own model: `slashQuery` and `typedConfigCommand`
+already recognise a command only at offset 0. The daemon stores what arrives — the
+route validates and `recordPrompt` appends it untouched, re-read for this.
+
+**Rejected.**
+- **Linkifying URLs without changing a character.** The brief allowed it; declined.
+  It is a second URL grammar beside remark-gfm's, whose boundaries would disagree
+  with the agent's rendering one character at a time, for a link the person already
+  has — and in WebKit a drag that begins on an anchor is a link drag rather than a
+  selection, which costs the one thing people do with their own message: copy it.
+  `openableHref` and `ui/links.ts` are untouched.
+- **Monospace for a verbatim bubble.** `pre-wrap` is not `pre`: this is somebody's
+  prose, and `web-typography.md` draws prose in sans.
+- **Trimming the ask card's free-text answer like a message.** `elicitationAnswer`
+  keeps `raw.trim()`: that value is a form field measured against the schema's
+  `min`/`max`, not a message, and a single-line box's leading space is never
+  content. What changed there is input-side (Q3.647) and the `pre-wrap` above.
+
+**Status.** Current. Reversed an earlier decision (Q3.639's plugin). Amends Q3.435
+(the delimiter plugin now serves agent output only), Q3.636 (its "the composer
+trims" is `sentText` now) and Q3.637 (a bubble declines attachments and images;
+`pre` and `table` cannot occur in one). Amended by Q3.652: an own answer on the ask card may hold lines, and is sent with them.
+
+#### Q3.647 — the box never rewrites what was typed
+
+**Question.** The same report: *"A quote followed by a space turns into a
+«guillemet» quote — this must not happen."* The stored `prompt` event at seq 7615
+of session `s_078b731c` already reads `«start one before bed»`, so the rewrite
+happened before anything was sent — in the input.
+
+**Measured** 2026-09-24, macOS 15.6 (24G84), a `WKWebView` driven by real keyDown
+NSEvents from a Swift harness, with the system's settings untouched ("Use smart
+quotes and dashes" at its default, the text replacement list holding its default
+`omw`):
+
+- **A plain `<textarea>` or `<input type=text>` rewrites four ways.** `"hello" `
+  becomes `“hello” ` — each quote replaced the instant it is typed; `it's` becomes
+  `it’s`; `ls --all` becomes `ls —all`; `a -- b` becomes `a — b`; `omw ` becomes
+  `On my way! `. Each reaches the page as a beforeinput/input pair of type
+  insertReplacementText. The harness ran under the ABC layout and did not switch
+  the person's input source; the `«»` in the report is the same substitution under
+  the Russian layout this machine also has enabled, whose quote style is
+  guillemets — inferred, not produced here.
+- **`autocorrect="off"` changes none of it** on macOS.
+- **`spellcheck="false"` stops all four** — WebKit runs its automatic substitutions
+  behind the same per-node spell-checking gate as the red marks.
+- **Registering `WebAutomaticQuoteSubstitutionEnabled`,
+  `WebAutomaticDashSubstitutionEnabled`, `WebAutomaticTextReplacementEnabled` and
+  `WebAutomaticSpellingCorrectionEnabled` as NO stops all four** in every field,
+  with no attribute at all: WebKit reads these from the application's defaults
+  before it falls back to the system's switches. Registered after the view was
+  built but before its first load, it still held.
+- **A person's own choice wins over the registration**: an app-domain YES for
+  quotes — what the context menu's Substitutions → Smart Quotes writes — brought
+  quotes back while dashes stayed off.
+- **Spelling marks.** A bare WKWebView draws none: 0 red pixels over `teh wrold
+  recieve becuase`. With "Check Spelling While Typing" on, 179 — the same 179 with
+  the four keys registered off, so the registration costs no marks — and 0 on a
+  `spellcheck="false"` field.
+- Spelling *correction* (`teh` to `the`) never fired in the harness, with or without
+  continuous checking; double-space-period and automatic capitalisation did not
+  fire either.
+
+**Decision. Two layers, because there are two clients.**
+
+1. **The native shell registers the four off**: `leave_typing_alone` in `lib.rs`,
+   the first statement of `run()`, macOS only, over `VERBATIM_TYPING`. It is
+   app-wide on purpose — a server address, a model id and a plugin's settings are
+   fields where `--` and `"` matter as much as in a message. **Registered, never
+   set**: the registration domain is not written to disk and sits below the app's
+   own, so somebody who turns Smart Quotes back on from the context menu gets them,
+   and keeps them across launches. Raw `objc2` messages, `seats.rs`'s precedent, so
+   no new dependency; `a_keystroke_is_left_as_typed` asks Foundation under
+   `cargo test` that all four answer NO.
+2. **Every field an agent reads carries `VERBATIM_FIELD`** — `spellCheck` false and
+   `autoCorrect` off — which is the composer's textarea and the ask card's three
+   free-text fields. `spellcheck` is the one lever a *page* has over WebKit's
+   substitutions, so it is what covers the browser client in Safari, where no
+   default can be registered; `autocorrect` is the phone keyboards' word
+   correction.
+
+**Spelling correction and text replacement are off as well, and that is the
+argument rather than a side effect.** In this app a word is as likely to be a
+command, a path, an identifier or a model name as a word, and a dictionary can only
+be wrong about those. A corrected identifier is a valid-looking *different* word the
+agent will act on; a typo is something a model reads straight through. A text
+replacement is a person's own shortcut, which is why the native registration yields
+to their toggle — but in a field an agent reads it is the same rewrite as a smart
+quote.
+
+**What it costs.** `spellcheck=false` takes the red marks off the composer and the
+answer box in a browser, where Chrome, Safari and Firefox draw them by default. In
+the native macOS shell it costs nothing unless somebody has turned "Check Spelling
+While Typing" on, since a bare WKWebView draws none. Accepted: here the marks mostly
+flag identifiers, and the rewrite is the defect.
+
+**Rejected.**
+- **Undoing a substitution in the page.** An insertReplacementText beforeinput is
+  also what a deliberate right-click correction produces, and mapping `“”«»—` back
+  to ASCII would rewrite characters somebody typed on purpose — a Russian writer's
+  own `«»` first of all.
+- **`autocorrect="off"` alone** — the obvious first guess, measured to change
+  nothing on macOS.
+- **Writing the keys (set, not register) at every launch.** It writes the person's
+  preferences file and overrides their own choice every time the app starts.
+- **Automatic capitalisation off.** Left at the keyboard's default: it changes a
+  letter's case where the person watches it happen rather than a character an agent
+  parses, and a phone composer without it is worse to write prose in.
+
+**Not measured.** iOS, where this relies on WebKit dropping the keyboard's smart
+quotes and dashes traits for a `spellcheck=false` field; Android, where it relies on
+Chromium mapping `autocorrect=off` to the keyboard's no-auto-correct flag; spelling
+autocorrection on macOS, which did not fire in the harness; and an end-to-end run of
+the packaged app — the Rust half is its unit test plus the harness's measurement of
+the identical registration.
+
+**Status.** Current.
+
+#### Q3.648 — a message you send always lands at the foot, and only the reader takes the conversation off it
+
+**Symptom.** Reported by the owner: sending a message sometimes did not scroll,
+even from the very bottom. The message appeared somewhere below the fold and the
+*latest* button came up. Nothing after it followed until the reader scrolled by
+hand. Reported alongside it, and one bug underneath: the end of an answer sometimes
+stopped a line or two short of the foot. Scrolling up by a small amount while the
+agent was talking got pulled back down.
+
+**Measurement.** A WKWebView harness on this box (macOS 15.6, WebKit 605.1.15,
+420×800 and 390×844) mounted a verbatim copy of `SessionView`'s old scroll code
+and the new `useFollow`, and drove the same scenarios through both. The scenarios
+were: sends, streamed text behind `Markdown`'s 150ms settle, a parked card, taps,
+a wheel, and history paging in. Then the same page ran in headless Chromium 151.
+Engine facts first:
+
+- **A pin's own scroll event measures what landed after the pin.**
+  `scrollTop = scrollHeight`, then 90px of growth in a later task of the same
+  frame. The scroll event that the pin raised read a **90px** gap, in WebKit and
+  in Chromium alike.
+- **WebKit can deliver a `ResizeObserver` before the scroll event and `rAF` of the
+  same frame.** Growth in the same task as a programmatic scroll arrived
+  `ro → scroll → raf`, 6 of 6 trials. Growth in a later task arrived
+  `scroll → raf → ro`. Chromium matched both orders.
+- **WebKit has no scroll anchoring.** `CSS.supports("overflow-anchor", …)` is
+  false, and 200px inserted above a box scrolled to 1000 left it at 1000.
+  Chromium supports it and moved the box to **1200 on the forced layout of the
+  next `scrollTop` read**.
+
+Then the app's code, old against new:
+
+| scenario | old | new |
+|---|---|---|
+| send while the run above settles in the same frame (3 trials) | *latest* shown and the echo left below the fold in **2 of 3**; ends 294px off the foot, last row covered by 252px | at the foot, 3 of 3 |
+| send during a stream, then the answer (3 trials) | painted up to **80–100px** off the foot while "following"; ended 20px short in 2 of 3 | 0px, every frame |
+| draft sent, then answered | ended **60px** short | 0 |
+| sent from 4000px up in history | ended 60px short | 0 |
+| 40px wheel up during a stream | **pulled back 360px** to the foot | stays; 0 |
+| 40px move up with no wheel, an event landing before its scroll event | pulled back **420px** | stays; 0 |
+| tap opens a 300px card at the foot during a stream | card stays put | card stays put |
+| 30 history rows page in above a reader mid-transcript (Chromium) | reader's row moved **−1320px** | 0 |
+
+The deterministic send race did not reproduce in 3 Chromium trials. The frame
+timing differs and the flaw does not, as the pin-then-growth fact above shows.
+
+**Cause.** There were three causes, and the first one is the report.
+
+1. **"At the bottom" was re-derived from geometry on every scroll event**, in
+   `measure` in `SessionView.tsx`: `scrollHeight − scrollTop − clientHeight < 48`.
+   A scroll event cannot say who moved the box. The send's own pin raised one.
+   While the agent was still talking, `Markdown`'s trailing settle (`useSettledText`,
+   150ms) landed in a later task of the same frame, grew the run *above* the echo
+   by more than 48px, and the pin's event read that growth as the reader leaving.
+   `atBottom` went false, the button appeared, and every later pin was gated on it.
+   That is the mid-turn send, which is the ordinary send since 0.8.0 (Q3.600).
+2. **Content that grew without a commit of `Transcript` was never followed.** The
+   pins were an effect keyed on `[count, firstSeq, atBottom, working]` and an
+   observer that fired only on the box's `clientHeight`. Neither saw a settled
+   markdown run, a re-hugged bubble, a card's own padding or a width change. So a
+   streamed answer's last 150ms of text landed under the fold with nothing to pin
+   it, and the reader saw it jump in a line at a time as the next event arrived.
+3. **A reader scrolling up during a stream was pulled back**, because the pin
+   kept firing while they were inside the 48px slack, and because an event landing
+   between their move and its scroll event pinned over the move before anything
+   judged it.
+
+**Decision.** `ui/follow.ts`. The intent is a ref, `atBottomRef`, and nothing
+reads it off geometry except a move:
+
+- **`followsAfterScroll` judges a move against where the box was last left**
+  (`lastTop`). A gap with no move is growth after a pin and keeps the foot. A move
+  up of more than `FOOT_EXACT_PX` leaves it, inside the old slack too, because
+  otherwise the next pin takes the move back. Reaching the foot, or moving down
+  into `FOOT_SLACK_PX`, rejoins it. A clamp moves up and lands exactly on the foot,
+  so it keeps it. The function is pure and asserted in both directions.
+- **It is asked wherever layout settles, not only on scroll events.** That means
+  after every commit of `Transcript` (a layout effect with no dependency list), on
+  one `ResizeObserver` watching the box *and* the content element, and on every
+  scroll event. A reader's move can land before its own event, and settling
+  judges it before pinning over it. When the foot is held, each of those pins
+  before paint. That covers the echo, its row, the working line, the queued line,
+  the card's padding, a settled run, a re-hug and a width.
+- **A wheel going up leaves at once** (`wheelLeavesFoot`). It is skipped where an
+  element between the target and the box is scrolled off its own top, since that
+  element takes the wheel. A finger is left to the scroll event: touch listeners
+  belong to the gesture plumbing alone (`webcheck` sweeps them), and non-passive
+  ones would put the transcript's scrolling behind the main thread.
+- **A send is not judged.** A changed `sent` (the `tailRequest` counter) or a
+  changed session re-reads `lastTop` and holds the foot, so a move not yet
+  reported cannot keep a sent message below the fold.
+- **A tap that resizes a row is measured at the observer instead of followed**
+  (`remeasure` sets a flag, cleared two frames on). This is Q3.26's rule. It moves
+  from a `rAF` to the observer because WebKit can deliver the observer first, and
+  there the pin would have scrolled the opened card away before the `rAF` measured.
+- **`[overflow-anchor:none]` on the box.** WebKit anchors nothing. Chromium anchored
+  history paging in above a reader, and then the manual `grewAbove` shift ran on
+  top of it, so it moved the reader by twice the page. That was 1320px measured,
+  and it was live on Android. The manual shift is now the only one.
+- The *latest* button still sets nothing, for Q3.426's reason. Holding the foot at
+  the tap would pin on the next growth and cut the smooth scroll short, so arriving
+  at the foot is what holds it.
+
+**Amends.** Q3.26 (the mechanism: an observer flag rather than a `rAF`). Q3.426:
+its `measure` on every scroll event, and "`atBottomRef` is written beside the
+state", where the ref is now the intent and the state only mirrors it for the
+button. Q3.583: its "second effect keyed on `askHeight`" is gone, and the padding
+is a commit of `Transcript`, which the layout effect pins.
+
+**Rejected.**
+
+- **Input intent alone** (unpin only after a wheel, key or touch). Find-in-page,
+  focus and a scrollbar drag in an engine that sends no `pointerdown` would never
+  leave.
+- **Unpinning only when nothing was laid out since the last look.** A clamp plus
+  growth is still indistinguishable from a reader, and a scrollbar drag during a
+  stream would then never leave.
+- **Keeping the 48px slack for moves up.** It is exactly the window in which a
+  stream pulls the reader back.
+
+**Status.** Current. `webcheck.follow-and-wrap.ts` pins `followsAfterScroll`'s
+table and the wiring as source. The harness itself is outside the tree and is not
+a driver.
+
+#### Q3.649 — wrapping moves nothing: the composer measures without collapsing the page, and the card reserves its room before it paints
+
+**Symptom.** Reported by the owner: when lines wrap, the page can jerk, so check
+for overlaps and jumps. That covers three surfaces: the composer growing as you
+type, the streamed answer re-wrapping, and the parked card over the last rows.
+
+**Measurement.** Same WKWebView harness, same verbatim old code.
+
+- **The composer.** A long draft typed one keystroke at a time at the foot, with
+  the app's own box observer. On the keystroke *after* each wrap, the transcript
+  dropped **16, 36, 56, 76, 96, 116, 132px** off its foot (a 176px box), and the
+  scroll events reported the same gaps. The observer had pinned at the wrap and saw
+  no size change on the next keystroke. In the app scenario, **88 of 107
+  keystrokes** left the transcript off the foot, by up to 98px. *latest* was shown
+  for 214 frames, and following was lost from the fourth line on, because 56px
+  passes the 48px slack. With the parent held: **0px on every keystroke**, and no
+  scroll event with a gap. In Chromium 151 the drift was hidden by scroll
+  anchoring. With `overflow-anchor: none`, which Q3.648 needs, it was the same
+  16–132px, so the hold is what fixes it in both engines.
+- **The card.** Parked at the foot, the card painted **200px** over the last row
+  for a frame. Grown from inside by a commit, it painted **88px** over. With the
+  layout effects: 0 and 0.
+- **The stream.** See Q3.648: up to 100px painted off the foot per settle.
+
+**Cause.**
+
+- `fitToContent` sets `height = auto` and reads `scrollHeight`. That read is a
+  forced layout with the composer collapsed to one row, so the transcript beside it
+  grows. A box at its foot has `scrollTop` clamped to the new, smaller maximum. The
+  height comes back in the same task, and the clamp stays. The same transient
+  also ran on every `visualViewport` resize.
+- `AskCard` reported its height from a passive effect and from its observer. The
+  first update was scheduled at default priority, and the observer's always lands
+  after the frame it fires in. So the card painted over the rows for one frame
+  before the padding moved them.
+- The markdown settle grew content that no commit of `Transcript` saw (Q3.648,
+  cause 2).
+
+**Decision.**
+
+- **`fitToContent` moves to `ui/autosize.ts` and holds its parent's height**
+  (`minHeight = offsetHeight`) while the box collapses to measure. It releases the
+  hold once the new height is written, so layout sees one change of the composer's
+  height per line and never a transient. Its own module so the harness could drive
+  the shipped code. `COMPOSER_MAX_SHARE` went with it, unchanged (Q3.422).
+- **`AskCard` reports from layout effects**: the existing one with its observer
+  and its `(0)` on the way out, plus one on every commit. The padding lands in the
+  frame the card paints, and `useFollow` pins it there. Only growth no commit
+  makes, such as a font or an image, is still left to the observer, a frame late.
+- The streamed re-wrap needs nothing of its own: the content observer in Q3.648
+  pins every settle before paint.
+
+**Rejected.**
+
+- **`field-sizing: content`.** It is not in this WebKit, which is the shipped
+  engine.
+- **Restoring the transcript's `scrollTop` from inside `fitToContent`** (what
+  `autosize` libraries do for ancestors). The transcript is a sibling, not an
+  ancestor, and the composer would have to know the scroller.
+- **`flushSync` in the card's observer.** It would render inside
+  `ResizeObserver` delivery, and the transcript's own observer would then be
+  skipped as a loop past the delivered depth.
+
+**Not verified.** A caret edited mid-draft in a capped box. The harness window
+never takes key focus, so WebKit does not reveal the selection there, and nothing
+was changed for it.
+
+**Status.** Current. `webcheck.follow-and-wrap.ts` pins the hold's order in
+`autosize.ts`, the single copy, and both layout effects in `AskCard.tsx`.
+
+#### Q3.650 — one drag-to-dismiss for every sliding panel, on the touch stream, leaving from where the finger let go
+
+**Symptom.** Reported by the owner from Android: the slide-up panel with the effort or
+plan menu would not close with a swipe, and when it did, it jerked back toward where
+it started and then played its closing animation. The brief that came with it: the
+animations of the slide-out menus are to be standardised and the bugs fixed.
+
+**Cause — measured, not inferred.** Driven in Chromium (Playwright's build, mobile
+emulation at 412×860, real touch input through CDP `Input.dispatchTouchEvent`, so
+`touch-action`, the gesture detector and `pointercancel` are the engine's own) against
+`AgentConfigBar`'s picker as it stood at d7cda6a. Three separate defects, each of
+which reads as "will not close":
+
+- ⚠ **At the full detent the sheet could not be swiped at all.** The rows become
+  `overflow-y-auto` there, so `touch-action` allowed a pan, and a downward swipe on
+  them delivered `pointerdown`, one `pointermove`, then **`pointercancel`**: the
+  engine took the gesture for the list, found nothing to scroll at the top, and the
+  panel's pointer handlers never saw another event. The panel did not move by one
+  pixel, on the four-row effort picker as much as on mode with the model list folded
+  into it (Q3.565) — and pulling to full is what somebody does to see that list. Only
+  the 32px grab bar still dragged, and from there a close needed the full-to-rest
+  distance plus `SHEET_DISMISS_PX`: a 420px pull on effort settled back to rest.
+- **A flick was not a dismissal.** The release read distance only — past 72px below
+  rest — with no velocity. A 60px flick in 60ms, the ordinary way to throw a sheet
+  away on a phone, animated back to rest over 300ms. That is the most likely reading
+  of *jerks back to its initial position*: the panel returning, and a second, longer
+  swipe then closing it.
+- **Where it did close, the exit stalled under the finger.** `sheet-out` ran on the
+  arrival's curve mirrored, `cubic-bezier(1, 0, 0.68, 0.28)` (Q3.567), which starts
+  at zero velocity: measured after a 1.2px/ms flick, the panel moved 713 → 722px in
+  the first 150ms after release — 8% of its travel in 60% of its time — and then fell.
+  A panel thrown downward stopped dead, then left. And the scrim was the panel's
+  **parent**, so `scrim-out` faded the panel too: mid-exit screenshots show the
+  transcript through it.
+
+⚠ **What was not reproduced**: a literal snap to `translateY(0)` before the exit.
+Q3.568's reasoning holds in Chromium — with the offset kept, `sheet-out`'s implicit
+`from` is the drag's transform, both in `getBoundingClientRect` and in painted
+screenshots sampled through the exit. One device-only mechanism is plausible and
+unmeasured: `restH` was measured once at open, and on Android the chip tap blurs the
+composer, the soft keyboard closes after the sheet mounts, and `60dvh` grows under
+`interactive-widget=resizes-content` — so the first stretch of a drag shortened the
+panel instead of sliding it and `below` stayed under the threshold. The rest height
+is re-measured at the start of every drag from rest now.
+
+**Decision.** One gesture and one clock for the four surfaces that slide: the config
+picker, `TaskPanel` below `md`, the routed `Sheet` below `sm`, and the drawer.
+
+- **`sheetMotion.ts` holds the decisions, pure and importing nothing**, so `webcheck`
+  drives them: `sheetRelease` (a fling of `FLING` = 0.5 px/ms toward the exit, or
+  `dismissAt` = `DISMISS_PX` or a third of a short panel; never while flung back),
+  `releaseVelocity` over the last `VELOCITY_MS`, with a stop before lifting counting
+  as no speed, `resisted` for pulling past an end, `claimDrag`, and the picker's
+  `detentAfter`, where a fling picks the detent by direction.
+- **`sheetDrag.ts` is the shell.** ⚠ **A finger is on the touch stream**: the drag
+  reuses `rowDrag`'s `useTouchGesture` — non-passive listeners on the node — and
+  `claimDrag` decides once, past `PRESS_SLOP`: along its axis by `DOMINANCE` (now
+  shared with `machineSwipe`), never against `cancelable === false`, and inside a
+  `data-sheet-scroll` scroller only when it cannot move that way. Claimed, the move is
+  `preventDefault`ed, so the engine never pans and there is no `pointercancel` to
+  lose. A mouse keeps the pointer stream, captured at engage. The click a drag leaves
+  behind is swallowed for 400ms and reset by the next press. `touchcancel` is a
+  cancel, never a release.
+- **A dismissal keeps the offset**, and every exit keyframe has no `from`, so the
+  panel leaves from where it was let go — including the routed sheet, whose close is
+  a navigation: `sheet-close` captures the dragged panel and continues from it
+  (measured, 320 → 611px → gone).
+- **One clock, one curve**: `--sheet-ms` 260ms and `--sheet-ease`
+  `cubic-bezier(0.32, 0.72, 0, 1)` in `index.css`, `SHEET_MS`/`SHEET_EASE` in
+  `sheetMotion.ts`, asserted equal; every sheet, drawer and scrim, arriving and
+  leaving, and the routed `sheet-close` now plays `--animate-sheet-out` rather than
+  the arrival reversed. Exits take the **arrival's** decelerating curve: they start
+  fast, so a flung panel keeps going. The three per-surface backstops
+  (`DRAWER_EXIT_MS`, `SHEET_EXIT_MS`, `TASK_PANEL_EXIT_MS`) and the picker's
+  `SHEET_SETTLE_MS`, `SHEET_DISMISS_PX` and `SHEET_DRAG_STEP` are gone; `webcheck`
+  names each as retired.
+- **The picker is a `useLeaving` caller**, its scrim a sibling. Its geometry is its
+  own — above rest the height follows, past full `resisted`, below rest it slides —
+  but every way to a detent is `settleTo`: pin the height in px, read once to commit
+  it, transition, then hand back to the defaults with nothing animating. The class
+  animates nothing, so the old inline-transition switch and `paintNow`'s rAF are gone.
+- **Pulled the other way, a panel grows rather than lifting** off its edge.
+- **A drag begins where the panel is drawn**: `hold` reads the computed transform,
+  finishes the arrival and cancels a settle, so a grab mid-flight does not jump.
+- **The breakpoint stays in CSS**: `TaskPanel` and `Sheet` gain a grabber
+  (`md:hidden`, `sm:hidden`) that is also the gate, read through `offsetParent` per
+  gesture — the docked card and the dialog never drag. The drawer carries
+  `touch-pan-y`; grips carry `touch-none`.
+- **Reduced motion**: the settle and the exit are CSS, which the blanket block
+  zeroes (inline transitions included, since that block is `!important`); what is
+  written per move is only the finger's own position.
+
+Measured after, same harness: a 64px flick closes and the same 64px over 600ms does
+not; the exit leaves from the release point with no stall; at the full detent a
+downward swipe on the list follows the finger and closes (mode) or settles to rest
+(effort, whose rest is above the release); `TaskPanel` closes from its head and from
+its body at the top; the drawer closes on a 200px swipe left and settles on 50px; a
+routed sheet drags from its head and not its body; taps on rows still choose, for a
+finger and a mouse.
+
+**What was not done.**
+
+- **No drag from a routed sheet's body.** A screen holds its own scrollers, forms and
+  reorder gestures (`MachineAgentsSection`); the head is the grip.
+- **No scrim fade that follows the finger.** A routed sheet's panel is its scrim's
+  child, as the picker's was; fading one would fade the other.
+- **No spring or velocity-matched exit duration.** One curve and one duration keep
+  every close — swipe, scrim, Escape, a chosen row — the same movement; the curve's
+  fast start is what carries a fling.
+- **No `touch-action: pan-down`**, which would have let the list keep a pointer drag:
+  Safari does not implement it, and it cannot say "only while at the top".
+- **Not verified on a real Android device or in WebKit.** The Chromium measurements
+  above use the engine's own touch pipeline; the keyboard-resize mechanism is
+  unmeasured anywhere.
+
+**Status.** Current. Supersedes Q3.567's mirrored exit curve and the per-surface exit
+constants of Q3.566–Q3.568 and `docked-panels.md`; amends Q3.568's drag (the touch
+stream, the release rule and the settle) while keeping its two detents, its geometry
+on custom properties, and its kept offset. Amended by Q3.651: a drag is one composited, device-pixel transform per frame, and the routed sheet drags from anywhere.
+
+#### Q3.651 — a moving panel is one composited transform per frame, and New session drags from anywhere
+
+**Symptom.** The owner tested Q3.650 on an Android phone: the swipes worked. But
+(a) the grab bar at the top of the Mode picker *flickered unpleasantly while the
+panel moved, as if it were being repainted during the movement*; (b) New session
+likewise *jerked, as if repainted,* when moved up or down; and (c) New session moved
+only by its top edge, while the effort and model pickers could be dragged from
+anywhere — *make it the same*.
+
+**Cause — measured, not inferred.** The same Chromium harness as Q3.650
+(Playwright's build, mobile emulation at 412×860 and DPR 2.625, real touch through
+CDP `Input.dispatchTouchEvent`), now with a trace (devtools.timeline, cc), the
+LayerTree domain, and a React commit counter installed through the DevTools hook.
+One 30-move drag per case, at Q3.650's code:
+
+- **React was not it**: 0 commits during every drag. Q3.650 had already taken the
+  gesture out of React.
+- ⚠ **Every move repainted the whole viewport.** 55 main-thread Paint events per 30
+  moves, each clip 412×860, plus a Layerize per frame — 25–30ms on the picker and
+  76–83ms on a 300-row stand-in for New session, on a desktop CPU; a phone is several
+  times slower. The panel *was* its own layer, but for Overlap only: a 2D
+  transform written inline is not a composited transform, so under
+  CompositeAfterPaint each new offset was baked into paint and re-rasterised.
+- ⚠ **The bar flickered because it was re-rasterised at a new sub-pixel phase every
+  frame.** A finger's offsets are fractional, and at DPR 2.625 the 4px bar is 10.5
+  device pixels, so each frame drew its edge rows differently. Captured at device
+  scale with the clip aligned to the bar's own device row, its pixels changed by up
+  to **94/255** between frames while sliding, and **140/255** while the picker
+  expanded.
+- **Upward was a layout per move.** Past open, `useSlideSheet` grew the panel's
+  height — 25 Layouts, 35ms of PrePaint and 74ms of Paint for 30 moves on the
+  New session stand-in — and the picker's expand branch wrote `--sheet-h` per move,
+  an inherited custom property, so every row under it restyled (18ms of
+  UpdateLayoutTree against 7ms sliding).
+- **The rest was ruled out**: nothing display-toggles the grabber (the gate reads
+  `offsetParent`, never writes it); no `leaving` or animation class changes
+  mid-drag (0 commits); the scrim was not repainted apart from the whole-viewport
+  paints above; the view-transition path runs only at close.
+
+**Decision.**
+
+- **The panel is promoted for the gesture**: `hold` sets `will-change: transform` at
+  engage and `letGo` clears it once the settle is still. Its layer reason becomes
+  WillChangeTransform, and a move is a compositor property update.
+- **Offsets are whole device pixels** (`slide`), so the bar's raster never changes
+  phase.
+- **One write per frame**: moves go into `pending` and a single
+  `requestAnimationFrame` writes the last one; a release flushes first, so the
+  offset the exit leaves from is the last one the finger reached.
+- **Nothing is resized while a finger is down.** A plain panel **stops at open**
+  rather than growing past it (Android's own bottom sheets stop at their expanded
+  edge). The picker is **laid out at the full detent once, at engage** (`stretch`),
+  and both branches are then one formula: `fullHeight() - shows` as a translate.
+  `settleTo` moves only the transform, then in one write trades it for the detent's
+  defaults, so the edge stays put (measured continuous to 0.14px at engage and at the
+  hand-off). `resisted` and `RUBBER_PX` are gone.
+- **`transition` is held at `none`, never cleared.** Found while measuring reduced
+  motion: `index.css`'s blanket block gives every element a `0.01ms !important`
+  transition-duration, and with the default `transition-property: all` every inline
+  write became a transition whose first frame is the old value — at engage one frame
+  drew the picker at 516px tall and untranslated, 259px above where it was.
+- **`Sheet` drags from anywhere on the panel.** The grip option is gone. The scroller
+  handoff is now found rather than marked: at the first move past the slop,
+  `scrollerOf` walks from the finger to the panel for a computed `overflow-y` of
+  `auto` or `scroll`, and `claimDrag` hands the drag over only at that scroller's
+  edge. `data-sheet-scroll` is gone, since every screen in a routed sheet has
+  scrollers nobody would remember to mark.
+- **What stays the screen's own**:
+  - a tap is not a drag (the `PRESS_SLOP`, and the engine's own tap slop);
+  - a finger held past `PRESS_MS` before moving is left alone — a text selection, or
+    a row's own hold-to-drag inside settings;
+  - a move an inner gesture already `preventDefault`ed is not argued with;
+  - a mouse pressed on an input, textarea, select or contenteditable, or inside a
+    scroller, is editing or selecting.
+  The centred dialog above `sm` still never drags, because its grabber is
+  `sm:hidden`.
+
+**Measured after**, the same drags, with the panel's layer reason now
+WillChangeTransform.
+
+| Drag | Paint (whole drag) | Layout |
+|---|---|---|
+| Picker, down | 55 → 3 (at engage only) | 1 |
+| Picker, up | 51 → 3 (at engage only) | 26 → 1 |
+| New session stand-in, down | 55 → 3 | 0 |
+| New session stand-in, up | 51 → 3 | 25 → 0 |
+
+The bar's frame-to-frame pixel change went to **0/255** in both directions.
+Behaviour is unchanged elsewhere:
+- a flick closes; a slow short drag stays;
+- a full picker closes from its list at the top;
+- rows are still chosen by a finger and a mouse;
+- `TaskPanel` and the drawer close and settle as before;
+- a drag during the arrival continues from where the panel is drawn;
+- a routed sheet's `sheet-close` still leaves from the dragged offset.
+
+The routed sheet, driven from its body:
+- at the top, a downward swipe closes it;
+- scrolled 400px down, the same swipe scrolls the list and the sheet stays;
+- upward, the list scrolls;
+- a tap on a row delivers its click, and a tap on the field focuses it;
+- a 600ms hold then a swipe does nothing to the sheet;
+- a mouse drag from the field keeps focus and selection;
+- at 1100px the dialog does not move.
+
+**What was not done.**
+
+- **No rubber band.** Keeping one without a height per move needs the panel laid
+  out taller than the screen, or a gap under a lifted panel; neither was worth a
+  48px give that Android's own sheets do not have.
+- **Nothing ties its own settle to `transitionend`.** The timers stay: an event that
+  never arrives would keep a layer promoted indefinitely.
+- **The picker's bottom edge changes once at engage on a long list.** Laid out at
+  full, the rows run to the screen's edge where the panel's bottom padding was;
+  checked in screenshots, it is the last row's lower strip and nothing else.
+- **The blanket reduced-motion block is not changed.** Its `transition-property:
+  all` side effect reaches every element in the app; only the panels here now opt
+  out of it, with `none`.
+- **Not verified on a real Android device, in WebKit, or against the real New
+  session screen**, which needs a signed-in fleet; the stand-in has 300 rows,
+  buttons and a field.
+
+**Status.** Current. Amends Q3.650: the plain panels' upward growth, `resisted`, the
+routed sheet's head-only grip and the `data-sheet-scroll` mark are gone, and a
+drag's writes are composited, snapped and batched. Its release rule, clock, curve and
+kept offset are unchanged.
+
+#### Q3.652 — your own answer takes a line break, and Enter still moves the card on
+
+**Symptom.** The owner, 2026-09-24 (translated): *"When typing my own answer option,
+for some reason you can't insert a line break — make it possible."*
+
+**Cause.** The box under a question was an `<input type="text">`, which cannot hold a
+newline at all: WebKit strips one from a paste and Enter types none. Enter did not do
+anything else either, because the card is not a `<form>` and nothing on it read the
+key. So neither Enter nor the composer's Shift+Enter did anything. The same held for
+every string an MCP form asked for unless its `maxLength` was over 240. The old rule
+said an unbounded string is one line because *"the commonest is the adapter's Other
+box"*, and that box is exactly the one this report is about.
+
+**Decision.**
+
+- **A string with no `format` may hold lines.** `RenderKind.text.multiline` is now
+  `format === null`, and `rows` is the height it starts at: three past
+  `TALL_ABOVE` (240, the old threshold, which now decides height only), otherwise one.
+  A `format` (`email`, `uri`, `date`, `date-time`) names a single token, so it stays an
+  `<input>`. A number stays an `<input>`. `TypedAnswer` draws both kinds, in the row
+  under a question and as a form's own field.
+- **It grows through `fitToContent`**, the composer's one autosize, from a layout
+  effect keyed on the value and on a window or `visualViewport` resize. Q3.649's
+  parent hold comes with it, so the scroller holding the card never clamps while the
+  box collapses to measure. The same frame's commit is what `AskCard` reports its height
+  from. The composer's cap (`COMPOSER_MAX_SHARE`) comes with it too; past the cap the box
+  scrolls inside itself.
+- ⚠ **The box is borderless inside a bordered one.** `fitToContent` writes
+  `scrollHeight`, which does not include a border. A bordered textarea sized that way is 2px
+  short and clips its last line under `overflow: hidden`. The row already works this
+  way, with the border on the `<div>` and none on the control. A form's own field now
+  does the same: `border border-edge bg-raised` on the wrapper, `border-none` on the
+  box.
+- **The row keeps its geometry.** `NO_RING`, `min-w-0 flex-1`, the mark, `askRowTone`,
+  `min-h-11`. `py-3` makes one line 44px, the mark's own height, so an empty or one-line
+  row is 46px outside its border, as it was. `items-center` became
+  `items-start`: the mark stays level with the first line as the box grows, which is
+  where `OptionRow`'s mark sits.
+- **Enter is the composer's rule, through `answerKey` in `keys.ts`.** It is
+  `enterSends && shouldSend(event)`: `composerKey` with no menu, IME guard included.
+  - On a keyboard, Enter is Next or Submit and Shift+Enter is the newline.
+  - On a coarse pointer, Enter is the newline and the button advances, since a phone
+    has no Shift.
+  - The pointer is read with `matchMedia` at the keystroke, as the composer reads it.
+  - Enter and the button are **one action behind one gate** (`advance`,
+    `advanceBlocked`), so Enter can never do what the button would refuse. When the
+    button would refuse, Enter on a keyboard is swallowed rather than typing a
+    newline, as the composer's Enter is when Send is refused.
+  - The number field and a formatted `<input>` take the same handler. On a keyboard,
+    Enter moves the card on from any box you type in. On a phone it does what it
+    already did in an `<input>`, which is nothing.
+- **What is sent keeps its lines.** `elicitationAnswer` passes the draft through
+  `sentText`, which drops the blank lines before it and the whitespace after it.
+  - If what is left holds a newline, it is sent as lines: every inner line, blank
+    lines included, and the first line's own indentation.
+  - If it is one line, it is trimmed as before.
+  - `min` and `max` measure the value that is sent. Whitespace alone is still no answer.
+- **The settled row already draws it**, as `whitespace-pre-wrap` (Q3.646), and the
+  daemon passes the string through untouched: `validateField` measures it,
+  `renderAnswers` copies it, and `clip` only shortens it. None of that changed.
+
+⚠ **This amends Q3.646's rejected alternative** *"Trimming the ask card's free-text
+answer like a message"*. Its reason was that *"a single-line box's leading space is
+never content"*, and that still holds: a single line is still trimmed. What changed
+is that the box is no longer single-line. Q3.646's argument for `sentText` is that
+taking the indentation off the first line of a pasted block, while keeping it on
+every other line, changes the content. That argument applies exactly when there are
+other lines, so the rule keys on the newline and not on the field.
+
+**Measured**, in a `WKWebView` on macOS with the built stylesheet. The harness page
+draws the card's row and a form field with `TypedAnswer`'s classes, wires the
+shipped `answerKey`, `shouldSend` and `fitToContent` (type-stripped from `keys.ts`
+and `ui/autosize.ts`), and types with real keyDown NSEvents:
+
+| Keys (390px unless said) | Value | Advanced | Box | Overflow |
+|---|---|---|---|---|
+| `line one` ⇧↩ `line two` ⇧↩ `  indented three` ↩ | three lines, the indentation kept | once, no newline added | 84px (3 × 20 + 24), `scrollHeight` = `clientHeight` | none |
+| the same with ↩ only, pointer reported coarse | three lines | never | 84px | none |
+| ten lines in a form field | ten lines | never | capped at 136px (22% of a 620px window), `overflow-y: auto` | none |
+| a 75-character unbroken token, then words | wrapped inside the box | never | 84px | none |
+| empty | | | row 44px (46 with the border); field 40px centred in 44 | none |
+| `one line` ↩ at 700px | | once | 44px | none |
+
+In every run the document's `scrollWidth` equalled its `clientWidth` and the
+scroller's `scrollWidth` equalled its own `clientWidth`, and `outline-style` was
+`none` (Q3.645 still holds).
+
+**Rejected.**
+- **Enter always inserts a newline, and a chord (⌘↩) advances.** That is safe, but it is
+  a second rule beside the composer's, in the one other box in this app where
+  somebody writes to the agent, where Shift+Enter is already the newline.
+- **A second autosize, or teaching `fitToContent` to add the border.** The first
+  duplicates Q3.649's hold. The second changes the composer's measure for a box that
+  needs no border of its own.
+- **Deciding lines by `maxLength`** (the old rule). A length says how much, not
+  whether a newline is allowed, and the box this report is about has no length at all.
+
+**Not verified.** An IME commit in WebKit: the harness does not switch input source.
+`answerKey` refuses `isComposing`, which `webcheck` pins, and the card forwards
+`nativeEvent.isComposing` exactly as the composer does. The shipped React component
+was not mounted; the harness used its classes and the shipped functions. Focus after
+Enter advances a step lands on the document, because the box it was in unmounts.
+The digit shortcuts still answer from there; where Tab goes next was not measured.
+
+**Pinned** in `webcheck.elicitation-and-links.ts`:
+- `answerKey`'s table: keyboard ↩, ⇧↩, a soft keyboard's ↩, an IME commit, the
+  chords.
+- The card asks it with the pointer read at the keystroke, reads no `"Enter"` of its
+  own, and every `<input>`/`<textarea>` on it takes the handler.
+- The button and Enter share `advance` and `advanceBlocked`.
+- `fitToContent` runs from a layout effect and on both resizes, and the card has no
+  `scrollHeight` or `style.height` of its own.
+- Both `TypedAnswer` call sites are `border-none`, and the row is `items-start`.
+- An unformatted string holds lines (the Other box `[true, 1]`, a 4000-character
+  field `[true, 3]`, a 20-character one `[true, 1]`), a formatted one is `[false, 1]`,
+  and a number is a number.
+- A typed answer is sent with its lines and its first line's indentation, a single
+  line's ends still go, and whitespace alone is no answer.
+
+Each was checked by breaking the code: the box losing its Enter, `items-center`
+back, a bordered box, Enter advancing on a phone, plain `trim()`, and the button off
+the shared gate each fail the run. `webcheck.history-and-cursor.ts`'s floor for the
+card's own-answer placeholders moved from three to two: one component now draws
+every typed answer, as lines or as one line.
+
+**Status.** Current. Amends Q3.646 (the ask card's answer), and the one-line rule
+for unbounded strings that `webcheck` had pinned for the Other box.
+
+#### Q3.653 — a message sent while the agent talks is drawn once, and a pinned conversation only ever moves one way
+
+**Symptom.** Reported by the owner after 0.8.x shipped to macOS and Android:
+"Sometimes when I send a message while the agent is typing its answer, the whole
+screen jerks and sometimes blinks."
+
+**Measurement.** A harness bundled the *shipped* modules: `store.ts` (`onEvents`,
+`promptLanded`), `echo.ts`, `EventList` with `UserBubble`, `hug.ts`, `Markdown`'s
+settle and the working line, `useFollow` and `fitToContent`, all on the built
+stylesheet. It drove a send into a streaming answer. The socket and the POST were
+ordered as the daemon orders them: `sendMidTurn` calls `recordPrompt` before it
+awaits `session.steer`, so the `prompt` event is on the socket before the POST can
+answer. It ran in a WKWebView (macOS 15.6, WebKit 605.1.15) and in Chromium 151,
+at 420×800 and 390×844. Each painted frame recorded `scrollTop`/`scrollHeight`,
+how many bubbles carried the sent text, the screen position of a row above the send
+(read after `useFollow`'s observer had pinned), and the identity of the column,
+the streamed run and the foot.
+
+It was measured on the integrated tree as deployed, then with the changes below.
+
+| scenario | as deployed (WebKit / Chromium) | changed |
+|---|---|---|
+| steered, socket first, POST 60ms later | message drawn **twice for 4 / 4 frames**; a pinned reader dropped **112px** when the echo went | once; motion one way only |
+| steered, POST 150ms later | twice for **9 / 11 frames**; dropped **84px** | once; one way |
+| typed 4-line draft, steered, POST 80ms | twice for **5 / 7 frames**; dropped **96px** | once; one way |
+| queued, POST 20ms later | twice for 1 / 2 frames; dropped 74px (Chromium) | once; one way |
+| queued, the pump's two snapshots 20ms apart | working line **gone for 1 / 3 painted frames**: 20px down, 26px back up | never gone |
+| any turn ending while pinned | **20px down** as the working line left, then (Chromium) **22–44px up** as the last settled text landed | no down-move |
+| POST first | once; the turn-end drop only | once; one way |
+
+Nothing else moved: the column, the streamed run's node and the foot kept their
+identity. No frame was painted off the foot, *latest* never appeared, and the
+bubble's hugged width was the same for the echo and for the row that replaced it
+(305px WebKit, 296px Chromium). A cancel's row still lands 6px above where the
+working line stood, as it did before.
+
+**Cause.** There were three, all in the send-while-working path.
+
+1. **The echo was settled by seq alone** (`settleEcho`), and the seq arrives with
+   the POST. For a steered message the POST answers only after `session.steer`
+   returns, and the prompt event is already on the socket by then. So between the
+   event and the answer, `EventList` drew the landed row *and* the echo below it.
+   That is the "blink": a second copy of the message for 70–190ms. When the answer
+   came, the echo left, and a conversation pinned to its foot dropped by the
+   bubble's height: the "jerk". Q3.436 had accepted the doubled state as the
+   common case and bounded it by the POST, which a steer makes long.
+2. **The pump fans a turnless snapshot out before it delivers a queued message.**
+   `touchSafe()` is called before `deliverQueued()`, so one snapshot says no turn
+   with the queue still full, and the next says a turn with the queue empty. When
+   those two socket frames straddle a frame, `showsWorking` is false for that frame
+   and the working line is removed and re-added.
+3. **The working line added its own 20px to the transcript's foot.** Its arrival
+   and departure at a turn's edges moved a pinned reader by that much. At a turn's
+   end the last `Markdown` settle, 150ms behind the stream, then pushed them back
+   up.
+
+**Decision.**
+
+- **`claimEcho`** in `onEvents`, before `settleEcho`. The echo is settled in the
+  commit its own `prompt` event lands in. `isEchoOf` accepts only a `prompt` with
+  a seq past `after` and not past a seq the daemon named, with the same text and
+  the same upload ids in order. `after` comes from **`sendFloor`**, which is the
+  newest seq held at the send, raised past an earlier landed send whose event is
+  still on the socket. So sending the same words twice is not taken for the
+  earlier message. The seq path stays for the POST-first order.
+- **`deliversQueued`** (in `wire.ts`): a waiting message with nothing holding it is
+  work, *for the transcript's working line only*. `SessionView` ORs it into
+  `working`. `Composer` still reads `showsWorking`, so no gate moves.
+- **`keepsFootSlot`** (in `EventList`): while the working line is silent its
+  `h-5` room is kept, and with no card the column's own 48px foot pays for it
+  (`calc(48px - 1.25rem)`). So the line coming and going changes no height. There
+  are two exceptions. Under a card the foot is the card's (`askHeight +
+  ASK_CLEARANCE`), and a slot would sit in its clearance. Under a cancel, the
+  cancel's row takes that room as the working line did (Q3.437), so the cancel
+  still lands where the line was.
+
+**Rejected.**
+
+- **Settling on text alone.** Without the floor, an earlier identical message's
+  late event would take the new echo, and the conversation would lose a bubble for
+  a moment.
+- **A client nonce carried into the prompt event.** That would be exact, but it
+  is a daemon and wire change with a compatibility row, for a window the floor
+  already closes.
+- **Reordering `touchSafe` and `deliverQueued` in the pump.** Delivery being the
+  last statement is a daemon rule, `mid-turn-messages.md`'s, and the client can
+  read the gap honestly.
+- **Keeping the slot always, card or not.** It put the working line into the
+  card's 20px clearance.
+
+**Known and left.**
+
+- The *Waiting for the agent to finish* line leaves when a queued message is
+  delivered, and that moves a pinned reader down by its height, once. That is the
+  information itself.
+- An identical message sent from another tab inside the window can claim this
+  tab's echo early, which is the log's own row replacing it.
+- An idle transcript that ended in a cancel has 34px under the cancel line rather
+  than 54px.
+- The composer's chips still fade while the POST is out (`disabled={busy}`,
+  Q3.412). That is a candidate for the "blink" on a slow steer, and it is untouched
+  here because it is a stated decision.
+
+**Status.** Current. `webcheck.follow-and-wrap.ts` pins `isEchoOf`, `claimEcho`,
+`sendFloor`, `deliversQueued` and `keepsFootSlot` as tables. It pins as source that
+`onEvents` claims before it settles, that the composer's echo carries its floor,
+that the transcript reads `deliversQueued`, and the foot's `calc` and slot.
+
+#### Q3.654 — Send and Stop swap rather than jump, and only the arriving one can be pressed
+
+**Symptom.** The owner, 2026-09-24 (translated): *"The Send button turns into Stop
+and back instantly, whereas in Claude Code it disappears with a fairly quick
+animation and a new button appears. Do the same."* The swap is frequent: the slot
+follows the draft rather than the turn (Q3.601), so typing the first character
+mid-turn or deleting the last one flips it, and since Q2.233 an autonomous cycle
+flips it with nobody typing.
+
+**Decision.** `SendSlot` owns the slot and stacks its four occupants — Send, Stop,
+the sending spinner and the stopping spinner — in one 32px grid cell. A swap keeps
+the old occupant drawn *under* the new one while it fades to nothing and shrinks to
+0.6; the new one fades in over it, and its glyph grows from half size. Both run on
+`rise`'s clock, `SWAP_MS` (140ms), arriving `ease-out` and leaving `ease-in` — the
+popover's `rise`/`rise-out` pair, not a new motion token. The composer row keeps
+its width because every occupant is the same 32px circle (Q3.560) and the cell is
+fixed.
+
+`slotSwap.ts` is the state, as pure functions: `slotOccupant` is the decision the
+nested ternary in `Composer` used to make; `swapTo` and `exitEnded` are what is
+drawn; `refocusBox` is where focus goes.
+
+- **One live occupant, always exactly one.** Each leaving occupant carries the swap
+  that sent it out. A flip back mid-exit takes the returning one *out* of the
+  leaving list, so nothing is drawn twice (Send → Stop → Send leaves Send live and
+  Stop fading). An exit clears only its own entry, so a late `transitionend` from an
+  earlier swap cannot clear a later one. `webcheck` walks every four-swap sequence
+  (341 of them) with every mix of animated or jumped and ended or not: one live
+  occupant, never also leaving, never listed twice, at most three fading.
+- ⚠ **The arriving layer only fades; its box never scales.** Scaling the arriving
+  button would shrink its hit box for the first frames, so a tap on its rim would
+  land on nothing. The glyph scales instead (`.swap-in svg`), and the layer is on
+  top (`z-1`). The *leaving* layer shrinks freely: it is `inert`, `aria-hidden` and
+  `pointer-events-none`. What it draws can do nothing even if something reached
+  it — Stop has no handler, and Send is `type="button"`, so a fading Send is never
+  the form's default button.
+- **A leaving Send is drawn as it last was.** The change that takes Send away has
+  usually disabled it in the same render — an emptied box — so drawing it with the
+  current props would dim it to 40% at the start of its exit. The look is kept from
+  the render before the swap; measured, the leaving Send read not disabled.
+- **The swap is decided in a layout effect**, so no frame paints the old occupant
+  live and the focus is read while the old DOM still holds it. The layers render in
+  a fixed order (`SLOT_ORDER`): a keyed reorder would move a node, and a moved node
+  restarts its transition from `@starting-style`.
+- **Focus.** If the control taken away held focus, focus goes to the message box on
+  a fine pointer and stays where the browser leaves it on a coarse one. The coarse
+  case is `shouldFocusComposer`'s rule: a phone would raise the keyboard. Focus
+  never goes to the arriving control: Space held or pressed twice on Send would
+  then stop the turn it had just started.
+- **Jumps.** Reduced motion is read at the swap (`matchMedia`, as the pointer is at
+  the keystroke), and a session switch is another session's slot. Neither leaves
+  anything fading. The global reduced-motion rule in `index.css` covers the CSS
+  half as well.
+
+**Measured** 2026-09-24 in a WKWebView on macOS 15.6. The real `SendSlot` was
+bundled with React and the built stylesheet, and driven by state changes from the
+page. The harness window had to turn WebKit's window-occlusion detection off: an
+occluded page pauses transitions and throttles timers, and the first run read
+opacity 0 throughout.
+- Send→Stop: at 0ms Send 1.00 and Stop 0.00; at 35ms 0.90 and 0.40; at 75ms 0.61
+  and 0.75; by 300ms one layer, Stop at 1.00.
+- elementFromPoint at the centre and 13px out on both axes hit Stop from the first
+  frame.
+- A click dispatched on the hit element 20ms into Send→Stop stopped the turn and
+  submitted nothing (stops 1, submits 0); 20ms into Stop→Send it sent and stopped
+  nothing (submits 1, stops 0).
+- The leaving layer read `aria-hidden="true"`, `pointer-events: none`, and a Send of
+  `type="button"`, not disabled.
+- Stop→Send→Stop within 30ms: one live layer, and the reversal continued from 0.33
+  and 0.93 rather than restarting.
+- Send→sending→Stop within 40ms: three drawn, one live, and one left at the end.
+- A focused Send taken away left focus in the textarea.
+- A session switch, and `prefers-reduced-motion` (stubbed at the swap): one layer,
+  at 1.00.
+
+**Claude Code's own values were not read, and the ones here are chosen.** There is
+no Claude desktop app on this machine. The CLI (`~/.local/bin/claude`, 2.1.281) is a
+terminal UI with no such button. No browser cache here holds claude.ai's
+assets, and `claude.ai` answered 403 to a direct fetch. So 140ms and the
+fade-and-shrink are this app's own small-element motion, within the 120–200ms the
+brief described.
+
+**Rejected.**
+- **Keyframe animations**, considered first and not built: a reversal mid-exit
+  restarts from the `from` keyframe, so a rapid flip pops. Transitions continue
+  from where the value is. The cost is `@starting-style` for the arrival: an engine without it
+  (WebKit before 17.5) draws the arriving occupant at once, over a leaving one it
+  then hides — a jump, never a broken state.
+- **Scaling the arriving button**, for the rim reason above.
+- **Keeping at most one leaving occupant.** Send → sending → Stop inside one swap
+  is the ordinary send on a fast daemon, and 40ms into its exit Send still reads
+  0.87 (measured, `ease-in` barely moving it), so dropping it there would make it
+  vanish while nearly opaque.
+- **Ignoring a Stop click that is the second of a double-click** (`detail > 1`).
+  That would close the one hazard this does not: a double-click on Send whose
+  prompt returns before the second click, which then lands on Stop. It cannot be
+  told apart from somebody clicking Stop quickly and repeatedly after sending,
+  because the count keeps rising while the clicks keep coming. The hazard predates
+  this entry: the sending spinner covers the round trip, and nothing here widens it.
+
+**Status.** Current.
+
+#### Q3.655 — swiping between machines turns a page, as Telegram's folders do
+
+**Symptom.** Reported by the owner from a phone: the slide between machines is jerky.
+*"It slides where I want, but then it just returns to the initial state and
+teleports to the new folder. It should be like Telegram: smoothly go on into the
+neighbouring folder."*
+
+**Cause — read in the code, then measured.** Q3.621 shipped *"a nudge and a swap"*:
+the list's wrapper followed the finger up to `CAP`, 96px, and on release
+`onEnd` called `settle()` — a 160ms transition back to 0 — and *then*
+`selectMachine`. Driven in Chromium through the real `SessionBrowser` (Playwright's
+build, mobile emulation at 412×860 and DPR 2.625, touch through CDP, 3 machines × 40
+sessions), sampling each machine's first row every frame for a 200px swipe left:
+
+- alpha's row went 50 → −46px and stopped there, a quarter of the finger's travel;
+- beta was never drawn during the drag;
+- at release, in one frame, beta's rows replaced alpha's **at −46px**, and then slid
+  back **rightward** to 50px, against the swipe.
+
+That is the report exactly: the list returns the way it came, and the new folder
+teleports in.
+
+**Decision.** A page turn. The neighbouring machine's list slides in beside this one,
+both move with the finger, and the release carries the pair on to the neighbour or
+back home.
+
+- **The rule is the sheets', on its side.** `pageTurn` is `sheetRelease` with the
+  list's offset and velocity toward the neighbour it reveals: a fling (`FLING`), or
+  `DISMISS_PX` slowly, and never while flung back. `pageOffset` lets the list follow
+  up to a whole page, and not at all toward a side with no neighbour: Telegram's
+  pager does not rubber-band its ends, and a give that turns nothing is a promise
+  the release breaks.
+- **The sheets' clock and curve** (`SHEET_MS`, `--sheet-ease`). A page turn covers at
+  most one width, which is less than a sheet's height, so there is no case for a
+  separate token. The curve's fast start is what carries a fling on.
+- **The page that moves is the scroller itself**, inside a new window that clips it.
+  The bare wrapper Q3.621 moved sat *inside* the scroller, and a translated child
+  overflows a vertical scroller sideways and makes it scroll horizontally.
+- **Round 2's rules apply** (Q3.651): one composited transform per page per frame,
+  batched on `requestAnimationFrame`, snapped to device pixels (`snap`, now exported
+  from `sheetDrag.ts`), `will-change` only for the gesture, and `transition` held at
+  `none`, never cleared.
+- ⚠ **The turn commits in one task.** `flushSync` selects the machine and unmounts
+  the neighbour; the scroller goes to its top and back to 0; only then does anything
+  paint. Measured: beta's first row sits at 50px in the last frame of the slide and
+  at 50px in the first frame after the commit.
+- **The neighbour is mounted for the gesture only, cut to a screen, and it is a
+  picture.** That answers Q3.621's reason for taking the two-page turn back out —
+  both lists mounted at once on a rail designed around one:
+  - `BesidePane` draws `ListBody` for the neighbour's view, `inert`, `aria-hidden`
+    and without pointer events, so `visibleRows`, the keyboard and `waitingFloor`
+    never see it, and neither does a screen reader;
+  - `takeRows` cuts it to the rows one screen can show, measured once per gesture
+    at `ROW_FLOOR_PX`: 19 rows of a 300-row machine;
+  - it mounts once per direction, synchronously, so it exists before the first
+    frame that shows it, and it is gone at the commit or the give-back.
+- ⚠ **The neighbour is a store the pane alone reads, not state in
+  `SessionBrowser`.** As state, mounting it re-rendered the whole current list, and
+  the engage grew with the list: 28.8ms at 40 rows, 50.6ms at 300 (development
+  React). As a store the engage no longer depends on the current list's length.
+- **The tab's underline travels with the page**, measured once per neighbour and
+  moved as a composited transform, and hands over to the new tab's own underline at
+  the commit (measured: 70 → 158px, then beta's own at 158px). **Not toward All**,
+  which sits outside the scroller the machine tabs are in and would clip it; there
+  it switches at the commit.
+- **What stays as Q3.621 made it**:
+  - the layout gate, read through the strip's `offsetParent` per gesture;
+  - the 24px edge bands left to the platform's Back;
+  - `SWIPE_SLOP` as `PRESS_SLOP`, and `DOMINANCE`;
+  - standing down while a row drag is armed;
+  - `selectMachine` with no route, no history entry and no view transition.
+  - Under reduced motion nothing follows and nothing mounts, and the release still
+    turns the page, in place.
+- **Also new**: a touchcancel gives the page back, and a new touch lands a turn
+  still in flight rather than grabbing it.
+
+**Measured after**, same harness:
+- **Turns and gives back:**
+  - a 200px swipe turns the page with both lists moving together;
+  - 60px slow gives it back;
+  - an 80px flick turns it.
+- **Ends:** from All a drag right moves nothing, and from the last machine a drag
+  left moves nothing.
+- **Unchanged gestures:**
+  - a vertical swipe still scrolls the list;
+  - a tap on a row still opens it;
+  - a turn from a list scrolled 600px lands the new machine at its top.
+- **Per move:** 0.07–0.1ms median touchmove handling, one layout and a handful of
+  paints for the whole drag, and a constant 2 React commits at the engage and 2 at
+  the turn, whether the drag has 4 moves or 40.
+- **The engage**, production build, 300-row machines:
+  - the neighbour cut to a screen: 9.5–18.5ms of script and 1.0ms of layout;
+  - mounted whole: 12.7–22.4ms of script and 6.3ms of layout.
+
+**What was not done.**
+
+- **No neighbour on both sides at once.** Only the side the finger moves toward
+  mounts, and it is remounted if the finger turns back. Both would double the
+  engage for a direction the gesture may never take.
+- **No per-machine scroll position.** Telegram keeps each folder's; a turn here
+  lands at the top, which is what the neighbour showed while it slid in. A tab tap
+  still keeps the offset it had.
+- **The engage is not free.** On a phone, 10–19ms of desktop script is likely a
+  frame or two at the instant the finger crosses the slop, before anything has
+  moved. Pre-mounting the neighbours at rest would remove it, at the cost of a
+  second list for every screen nobody swipes.
+- **Not exercised in the harness:**
+  - a row's hold-to-drag, which does not arm under CDP touch in the harness at this
+    code or at the baseline;
+  - a real Android device;
+  - WebKit.
+- **docscheck's one other failure is not this change's.** keyDown, cited near line
+  25105 of `docs/DECISIONS.md`, resolves to no source file in the baseline tree either.
+
+**Status.** Current. Reverses Q3.621's *"deliberately not Telegram's two-page turn"*
+and its 96px cap. The rest of Q3.621 stands. Amended by Q3.656: the underline is a pill that travels on every change of tab, toward All too. Amended by Q3.667: `BesidePane` became `BesidePanes`, one per page of a strip, and a turn commits only at rest, so a flick during a settle carries the pages on.
+
+#### Q3.656 — the selected machine is a pill, and it never teleports
+
+**Symptom.** The owner, after Q3.655 shipped:
+
+> *"See, in Telegram, while paging, the element that marks the currently selected
+> folder moves together with the page. Make the element the same shape — not an
+> underline — and implement the same mechanism, so the selection never teleports."*
+
+Telegram's strip, in the owner's reference mid-swipe, marks the selected folder with
+a soft filled pill behind the label. The pill sits between the two tabs, its
+position and width set by the page's progress. Here it was:
+- a 2px underline under the selected tab;
+- carried with the page by Q3.655 but switched at the turn;
+- never carried toward All, which sits outside the machine tabs' scroller, so the
+  scroller clipped it;
+- on a tap, not animated at all.
+
+**Decision.** A pill, and a traveller for every change of tab.
+
+- **At rest the pill is the selected tab's own.** `TabLabel` is an `h-8`
+  `rounded-full` span behind the label, `bg-raised` when selected. So a strip
+  scroll, a reorder, a resize, a font load, a machine arriving or leaving, and a
+  first render all carry it with no code, and none can animate it from nowhere.
+  - Measured: during a reorder drag, the selected tab moved 96px and its pill moved
+    the same 96px.
+- **Why `raised`.** Q3.209 spends `raised` on *"a tab you are on"*. `tabPill` in
+  `bits.tsx` already draws its selected pills with it. And it is what a selected
+  menu row and a toggle that is on use. The blocked count stays `bg-fg` with
+  `text-ink` on top of it, readable on `raised` as on `ink`. Nothing else in the
+  palette was spent.
+- **Every change of tab is a trip.** `useTabPill` reads the strip, the scroller and
+  both tabs once. It then sets `data-pill-travel`: an unlayered rule in `index.css`
+  stands every tab's own pill down. A traveller runs from one tab to the other and
+  hands back to the new tab's own pill at the identical rect.
+  - A swipe drives the trip by the page's progress and settle (`machineSwipe`).
+  - A tap, a key or a fallback drives it from `MachineTabs`' layout effect, before
+    the new tab's own pill can paint. It never starts a second trip while a page
+    turn already carries one (`turning`).
+  - A trip that overtakes another starts from where the traveller is drawn that
+    moment. A second tap used to finish the first trip at its end: a jump the
+    length of what was left.
+- ⚠ **The traveller lives in the strip's coordinates, because All does not
+  scroll** — Q3.610 keeps it on screen as the scope of fleet-wide search — **and
+  the machine tabs do.**
+  - Each end is placed at the scroll of the moment and clipped to the scroller's
+    visible box (`clipSpan`), so the pill crosses into All freely and is never
+    drawn outside the strip.
+  - Putting it inside the scroller's content, as proposed, is exactly what clipped
+    it at All last time.
+- **Three pieces, transforms only.** Two `h-8` caps that only move, and a `w-16`
+  middle that moves and stretches between their centres (`pillPieces`), so the ends
+  stay round at any width with no layout per frame. A single `scaleX` would have
+  made them elliptical in flight, and animating `width` is a layout per frame.
+  Snapped to device pixels, `will-change` only for the trip, and `transition` held
+  at `none`, never cleared.
+- **The strip follows, as Telegram's does.** `scrollToShow` picks the scroll that
+  shows the whole target tab, button included, so the selection's own
+  `scrollIntoView` finds nothing to do and stands down while any trip runs.
+  - The drag writes the scroll by progress.
+  - The settle runs it in frames on `easeAt`, which is `SHEET_EASE` evaluated in
+    script, because CSS cannot transition a scroll offset.
+  - It is landed before the hand-off. Measured without that: the finish could run
+    before the last scroll frame, and the tab's own pill took over 8.1px from the
+    traveller.
+- ⚠ **Selection no longer changes a label's weight.** A bolder label is a wider
+  tab, so the pill measured before a tap would land short of the one after it.
+  Colour and the pill carry the selection.
+- **Reduced motion**: no trip. The swipe mounts nothing, and a tap simply moves the
+  tab's own pill.
+- **The desktop column is unchanged.** The owner's words are about paging on the
+  phone, and its 28px mark answers Q3.624's problem, not this one.
+
+**Measured**, in Chromium through the real `SessionBrowser` (mobile emulation at
+412×860 and DPR 2.625, touch through CDP). Every frame recorded where the visible
+pill was — the traveller while one runs, otherwise the selected tab's own.
+- **Every hand-off within 0.2px**, which is device-pixel snapping, not motion.
+  Covered:
+  - a swipe turn, a give-back, a swipe onto All and one away from it;
+  - a tap, a second tap 80ms into the first trip (the pill reverses in flight from
+    226.0px, with no jump), a tap to All then back;
+  - at 300px wide, a tap on a tab 20px from hidden: the strip scrolls it whole,
+    and the pill hands off within 0.1px;
+  - at 300px wide, a swipe onto a hidden tab.
+- **Per move, while the pill travels**: 0.08–0.1ms median touchmove handling,
+  3 layouts and 9 paints for a 30-move drag (7 with the underline), and still 2
+  React commits at engage and 2 at the turn.
+- **First render**: the traveller is not drawn in any frame.
+- **Reduced motion**: 40ms after a tap, the new tab's own pill is already drawn.
+
+**What was not done.**
+
+- **Labels do not cross-fade their colour** as Telegram's do mid-swipe. The colour
+  changes at the hand-off, and interpolating `color` per frame is a repaint of the
+  text.
+- **The strip is not a rounded bar.** The owner asked for the element that marks
+  the selection. The strip keeps its hairline.
+- **A resize or a font load during a trip** would land the traveller on the old
+  rect. The tab's own pill takes over at the hand-off and is right from then on.
+- **The traveller's clipped end is round.** A tab half out of the strip shows its
+  own pill cut straight at the scroller's edge; the traveller clipped there shows
+  a round end, for as long as the trip lasts.
+- **Not verified on a real Android device or in WebKit.**
+
+**Status.** Current. Amends Q3.655's hand-off: the underline, its switch at the turn
+and its exception for All are gone. Reverses the strip's 2px rule for a `raised`
+pill, which Q3.209 already allowed.
+
+#### Q3.657 — on the first page, a swipe toward nothing pulls the menu drawer out
+
+**Symptom.** The owner: *"make it so that after a swipe on the first folder the side
+menu opens — you don't have to press the menu button, you can swipe to it."*
+Q3.655's `pageOffset` refused a rightward drag on All, the first page: there is no
+page before it, so the list did not move at all. Telegram Android pulls its drawer
+out with exactly that gesture on its first folder.
+
+**Decision.** That drag pulls the drawer, following the finger one for one, and a
+release opens it or gives it back.
+
+- **One arbiter for the list's gestures.** `listGesture`, pure and asserted,
+  decides the first move past the slop once. Sideways on the first page, rightward,
+  is the drawer; any other sideways move is a page. Q3.658's pull is the third
+  answer.
+- ⚠ **Pulled, the drawer is drawn, not yet a layer.** `MenuDrawer` registers a
+  `sheet` layer for as long as it is shown, and that puts `inert` on `#root`, the
+  element the finger is still on. So `drawerPull` is a small store `MenuDrawer`
+  reads beside its own `open`:
+  - the drawer mounts for the pull, which is the gesture's one React commit;
+  - its layer stays keyed on `shown`, which `useLeaving` derives from `open` alone,
+    so nothing goes inert under a finger that may still give it back.
+- **The drawer mounts closed, under the finger.** `hold` stops the arrival the mount
+  started, so the finger decides where the drawer is from the first frame.
+  - Each frame writes the panel's transform, snapped, and the scrim's opacity by the
+    same progress.
+  - `will-change` only for the gesture, `transition` held at `none`.
+- **Released open, it opens through `onMenu`, the menu button's own path**, so the
+  layer, inert, Escape and Android's Back are exactly the button's. The panel carries
+  on to open from where the finger let go.
+- **Given back, it slides closed and unmounts where it stands.**
+- **The decision is `sheetRelease`, sideways**: a flick, or `DISMISS_PX`, and never
+  while flung back. Opening is the drawer leaving the list's side of the screen.
+- **The 24px edge bands stay the platform's.** A rightward swipe from the left edge
+  is Android's own Back gesture, which the system takes before the page sees it, so
+  the band does conflict. The pull starts anywhere else on the list.
+- **Reduced motion**: nothing follows the finger, and a release that opens opens the
+  drawer as the button does, with its movement zeroed.
+- **Wide layouts are unchanged**: the gesture runs only where the phone's tab strip
+  is laid out.
+
+**Measured**, in Chromium through the real `SessionBrowser` and `MenuDrawer`
+(mobile emulation at 412×860 and DPR 2.625, touch through CDP):
+- **A 200px pull**: the drawer's right edge tracked the finger exactly, 0 → 200px,
+  with the scrim at 0.57.
+  - `#root` was not inert during the drag and was inert from the release that
+    opened it.
+  - The panel then settled to its full 350px width.
+- **Commits and cost**: one React commit during the drag (the mount); per move a
+  0.09ms median touchmove, and 1 layout and 3 paints for a 30-move drag. The engage
+  costs 10ms, which is the mount.
+- **Gives back**: a slow 60px pull slid closed and unmounted, with the menu state
+  still closed.
+- **Flick**: an 80px flick opened it.
+- **Elsewhere**: from a machine's page, the same drag turned the page to All.
+- **Reduced motion**: no follow, and it opened at the release.
+
+**What was not done.**
+
+- **No pull from the drawer's side on other pages.** Anywhere but the first page a
+  rightward swipe is a page turn, as it is in Telegram.
+- **Not verified on a real Android device or in WebKit.**
+
+**Status.** Current. Amends Q3.655: on the first page, the side with no neighbour is
+the drawer's. Amended by Q3.660: a drag begun on the drawer's scrim moves it too.
+
+#### Q3.658 — a pull down from the top of the list refreshes every machine
+
+**Question.** The owner: *"a swipe down forces an update of the chats — space
+appears … with a loading animation there. After the update it disappears. If the
+update mechanism is currently not functional and not prepared, explain it and don't
+do this item."*
+
+**The mechanism exists, and it is the wake path.** `store.resume` is what the app
+runs when a phone wakes, comes back online or leaves the bfcache (`resume.ts`), and
+it is a real refresh:
+- `runResume` re-lists the registry.
+- For every machine, `resumeMachine` forgets the chosen route and re-dials it, with
+  loopback and relay probes of 1.5s each.
+- It then re-lists the machine's sessions with `GET /sessions`, bounded by the
+  15-second request timeout.
+- It reattaches that machine's streams.
+- Machines run independently under `Promise.allSettled`, so an unreachable one
+  never delays the rest, and the promise settles when every answer has landed or
+  failed.
+
+A refresh that only re-drew the same store on a timer would not have been built.
+This one re-dials an unreachable machine immediately, rather than waiting for the
+poll's 15-second re-check, and re-lists every machine the page shows.
+
+**Decision.** Pull to refresh on the list, holding the gap for exactly as long as
+`store.resume("pull")` takes.
+
+- **Only from the top, only downward, never over a gap already open.** That is the
+  third answer of `listGesture`, through `claimDrag` with `DOMINANCE`, so it
+  arbitrates by axis with the page turn and the drawer. A scrolled list, or an
+  upward drag, stays the list's own scroll.
+- **The list itself moves down**, by a composited transform on the scroller.
+  - `pullOffset` gives one for one at first and then less and less, never past
+    twice the hold.
+  - The mark sits centred in the gap and fades in toward `PULL_HOLD_PX`. It is shown
+    closed before the first write, so the engage frame draws nothing.
+- **Past the hold on release the gap stays open**, 56px (`h-14`, asserted equal),
+  until the refresh settles, and then closes on the sheet clock. Short of the hold,
+  it closes and nothing is asked.
+- **The mark is the app's own `WorkingMark`**, the three bars that already mean
+  "working" in the transcript, at 20px through a new `size` prop. It is not new art.
+- **While the gap is open, no page, drawer or second pull starts**; the list still
+  scrolls natively.
+- **A machine that does not answer** still lets the gap close when its probes give
+  up, and nothing new is drawn. Connection trouble is the new connection indicator's
+  to show, not a banner's.
+- **Android**: `html`'s `overscroll-behavior: none` keeps the engine's own pull to
+  refresh and overscroll glow out, and every claimed move is refused to the engine.
+- **Reduced motion**: nothing follows the finger. A release past the hold opens the
+  gap and closes it with no transition at all, since a 0.01ms transition draws its
+  first frame at the old value.
+- **Desktop is unchanged**: touch only, and only where the phone's tab strip is laid
+  out.
+
+**Measured**, same harness, with `store.resume` stubbed to take 1.2s so the hold can
+be seen. The product calls the real one, and that call is pinned.
+- **A 200px pull**: the list followed to 72px (`pullOffset`), then held at 56px for
+  the whole refresh and closed.
+  - `store.resume` was called once, with `"pull"`.
+- **A short pull**: 60px closed with no refresh.
+- **Scrolled 300px, the same drag scrolled the list**, and an upward drag scrolled
+  it too.
+- **Per move**: a 0.07ms median touchmove, and 1 layout and 6 paints for a 30-move
+  pull.
+  - No React commit comes from the pull itself: the two per gesture are the row
+    drag's own pressed state, the same at 14 moves or 40.
+- **Reduced motion**: 0 → 56px held → 0, with no frames in between.
+
+**What was not done.**
+
+- **The refresh does not say which machine failed.** That is the connection
+  indicator's job.
+- **A refresh coalesces with a wake already in flight** (`resume`'s own
+  coalescing). The gap then closes when that run lands, and the queued run follows
+  it.
+- **Not verified on a real Android device, in WebKit, or against a live fleet.**
+
+**Status.** Current.
+
+#### Q3.659 — connection trouble is one pill at the bottom-left, and no banner sits above the conversations
+
+**Asked.** The owner: "When there is no connection or problems with it, make a
+loading pill like in the picture — at the bottom, bottom-left. On hover it expands
+as in picture 2. Remove all kinds of notifications above the chats that break the
+interface; they are not needed." The picture is Telegram Desktop: a white circle
+with a spinning arc floating over the chat list's bottom-left, which opens on hover
+into a pill reading *Connecting…*, with a shield on the right.
+
+**Decision.** `ConnectionPill` draws it, and `connectionTrouble` in `ui/connection.ts`
+decides it as a pure function over the store's own state.
+
+- **What counts.** Four things, in this precedence:
+  1. The server unreachable (`cpError`) — *Connecting…*.
+  2. A machine this screen reads that is offline for a reason of the wire's —
+     `no_route`, `cp_unreachable` or unset — named: *studio-mac is unreachable*.
+  3. The open conversation's stream in `connecting` or `waiting` — *Connecting…*.
+  4. A first probe — *Connecting…*.
+
+  The server outranks a machine, since nothing else can be asked without it, and a
+  machine outranks its own stream, since its name says more than *Connecting…*.
+- **What this screen reads.** The list's machine tab, plus the open conversation's
+  machine and its stream. Under All a first probe counts, but a machine offline on
+  the wire does not: a machine that is simply switched off would otherwise hold the
+  pill for as long as it stays off, which says nothing the list does not. A
+  background stream held open for a session nobody is looking at is not this
+  screen's trouble.
+- **What does not count.** `over_limit`, `owner_disabled`, `not_enrolled`,
+  `no_token`, `no_machine_key` and `no_device_key` are refusals that somebody has
+  to act on. They stay where they are drawn, because a spinner over them would
+  claim a retry that fixes nothing.
+- **The grace.** `troubleSince` keeps one spell across a change of kind: a
+  reconnect that turns into an outage is one spell. `troubleShown` waits
+  `TROUBLE_GRACE_MS` (1s), so a reconnect under a second never draws the pill.
+- **The shield.** It is drawn only for a stream down the relay. That channel is
+  Noise end to end (`e2ee.md`). The server is TLS to a party that reads it, and
+  loopback is plaintext by design (`relay.md`), so neither earns it.
+- **The motion.** The pill arrives on `animate-rise` and leaves on
+  `animate-rise-out`, through `useLeaving`, with `PILL_EXIT_MS` equal to that
+  token's 140ms. It opens on the disclosure idiom this app already uses: a
+  `grid-template-columns` transition at 200ms `ease-out`. Reduced motion collapses
+  both, as the stylesheet's own block does for every animation; the spinner then
+  stands still as an arc.
+- **The inputs.** Hover opens it only where hovering exists (`pointer-fine`).
+  Focus-visible opens it for a keyboard, and a tap toggles it for a finger.
+  36px is drawn, as Telegram's is; the target is 44px under a coarse pointer.
+- **The announcement.** A `role="status"` region is mounted for good and holds the
+  words only while the pill is shown. It changes only when the words do, so a spell
+  is announced once and a retry never is.
+- **The look.** It uses this app's own `surface`, `edge`, `muted` and `shadow-lg`.
+  The app has one palette, and the page stays that palette under a dark OS
+  appearance (rendered to check).
+
+**Where it floats, and why there.**
+
+- **Beside a list.** The list's pager window, at `bottom-3 left-3`. That puts it
+  over the rows, as in the picture, and structurally above the foot's *New
+  session*, which it can never cover. A row's own target runs the width of the row,
+  so the 36px circle over its left edge blocks no row.
+- **In a conversation below `lg`.** No list is on screen there, so the conversation
+  draws its own, `lg:hidden`, in the region above the composer, at the same corner.
+  It is lifted over a parked card by `askHeight + PILL_OVER_CARD_PX`: the frame's
+  8px plus the 12px gap. It floats over the transcript's foot, where the working
+  line starts. That is accepted: the pill is up only while the stream is down, and
+  the foot then reads *last seen working*.
+- **Never on the composer.** It never sits on the composer's Send.
+- **One at a time.** Above `lg` the list's pill reads the open conversation as well,
+  and exactly one pill is ever displayed. So one live region speaks.
+
+**What was removed.** All three were connection trouble drawn as a banner:
+
+- the notice over the list (*Server unreachable — retrying…*), with its component
+  and its sentence;
+- the same sentence standing in for the conversation's workspace subtitle, which is
+  now drawn always;
+- the `reconnecting — …` line between the header and the transcript.
+
+`webcheck` asserts them absent by name and updates the two pins that held them.
+`MachineTab.reach` still has no caller, and Q3.202's gap is closed by the pill
+rather than by a row.
+
+**What stayed, and why.** Each of these is either not this client's connection or
+something somebody must act on.
+
+- The session's own notice: the daemon re-attaching its agent, a failed resume
+  with Reconnect or Sign in, an exit. These describe the agent, and a socket being
+  fine says nothing about them.
+- `transcriptNotice`'s `stalled`, although a failing history fetch causes it. Q3.112
+  makes the head of a conversation say why its beginning is missing, and asserts
+  that as a totality.
+- The lagged-frame gap, which records a real loss.
+- The machine-limit and owner-disabled bodies of a machine's tab.
+- The native setup failure.
+- The missing-row body of a conversation whose machine cannot be reached, since it
+  is the only content that screen has.
+- The toasts saying an action did not run.
+- The composer's placeholder.
+
+**Status.** Current. `webcheck.connection-pill.ts` pins `connectionTrouble` as a
+table (reasons, scope, precedence and the shield), the grace, the words, the
+placements, the hover, focus and tap openings, the live region, the exit token, and
+the removed banners by name. WebKit frames of the pill collapsed, opened, with the
+shield and naming a machine were rendered from the shipped component on the built
+stylesheet.
+
+#### Q3.660 — the scrim is a grip: a drag begun beside a panel moves it, and a tap still closes
+
+**Symptom.** The owner, from Android: *"If, while in the left menu, I start swiping
+from a part of the screen that is not in this menu, it doesn't close. Make it slide
+back together with the finger too."* The brief added that the other panels with a
+scrim should be made consistent with it in the same pass, as round 1 (Q3.650) asked.
+
+**Cause — measured, not inferred.** Driven in Chromium against the integrated tree
+07366ff, with mobile emulation at 412×860 and DPR 2.625 and real touch input through
+CDP:
+- **Three of the four scrims were not a grip at all.** `useSheetGesture` listened on
+  the panel alone. A 200px drag on the scrim of the drawer, of `TaskPanel` or of the
+  routed `Sheet` moved nothing: the drawer's edge stayed at 350px, and the two bottom
+  sheets' tops stayed at 69px.
+- **The picker's scrim closed on the press.** `AgentConfigBar`'s outside-press
+  listener counted the scrim as outside (Q3.565 kept it so on purpose), so a finger
+  landing there started the exit at once, from rest, without following the finger.
+- ⚠ **That press also let the tap fall through.** The close put
+  `pointer-events-none` on the leaving scrim before the tap's click was dispatched,
+  so the click hit whatever lay under the scrim. A tap on the picker's scrim over
+  another control closed the picker *and* pressed that control: in the harness it
+  opened the `TaskPanel` behind it.
+
+**Decision.** The scrim is a second grip on the same panel, through the same hook,
+on every surface that has one.
+
+- **One gesture, two grips.** `useSheetGesture` takes the scrim's ref and returns a
+  `scrim` half to spread on it: touch listeners and pointer handlers from the same
+  factories as the panel's, over the same record.
+  - So a drag begun on the scrim is claimed, followed and released exactly like one
+    begun on the panel: `claimDrag` past `PRESS_SLOP` along the axis by `DOMINANCE`,
+    one transform per frame, and `sheetRelease` sideways or downward.
+  - A second finger anywhere is still a pinch.
+  - The click a mouse drag leaves behind is swallowed on the scrim as on the panel.
+  - Closing goes through each surface's own `onClose`, which is the path Escape, a
+    scrim tap and Back already take, so inert, focus and history are unchanged.
+- ⚠ **Only the scrim's bare surface begins a drag.** The routed `Sheet`'s scrim is
+  its panel's parent, so every touch and pointer event on the panel bubbles through
+  it. So the scrim's half:
+  - starts only when the target is the scrim itself;
+  - answers only for a gesture that began there;
+  - never runs a second drag over the panel's.
+- **A tap still closes and a cross-axis move does nothing.** A tap is not a drag:
+  nothing is claimed within `PRESS_SLOP`, and the scrim's own click closes it as
+  before. A vertical move on the drawer's scrim, or a sideways one on a bottom
+  sheet's, is never claimed.
+- **The picker's scrim closes on its own click, not on the press**, since a press
+  may be the start of a drag. That also ends the fall-through: the click lands on the
+  scrim, which is still there to take it. This amends Q3.565's "a press on it still
+  closes".
+- **A scrim beside its panel fades with it** by how much of the panel is out, as the
+  drawer's scrim already did during Q3.657's pull:
+  - `useSlideSheet` does this for the drawer and `TaskPanel`, and the picker's own
+    geometry does it below rest;
+  - `holdFade` and `fade` are the one writer, and `drawerPull` now uses them too;
+  - the scrim is promoted to a layer of its own for the gesture, and its transition
+    is held at `none`;
+  - a settle brings it back on the sheet clock and leaves nothing inline;
+  - a dismissal keeps its opacity, and `scrim-out`, which has no `from`, leaves from
+    there.
+- ⚠ **The routed `Sheet`'s scrim does not fade.** It is the panel's parent, so
+  fading it would fade the panel. Q3.650 recorded exactly this, and it still holds.
+  Its drag moves the panel and nothing else.
+- **The three sibling scrims are `touch-none`** (they were `touch-manipulation`),
+  because a scrim has nothing to pan or zoom. A tap still clicks with no delay, and
+  the engine can never commit to a pan before the claim. The routed `Sheet`'s keeps
+  `touch-manipulation`, since as a parent its value would reach into the panel.
+- **A panel reopened mid-exit is put back.** A dismissal keeps the panel's offset
+  and now the scrim's opacity, so a `TaskPanel` reopened during its 260ms exit (its
+  scrim no longer takes taps by then) used to arrive back at the dragged offset.
+  `useSlideSheet` resets the panel and scrim it dismissed if the same nodes are
+  opened again; the picker's `show` already did this for its panel and now does it
+  for its scrim.
+- **A drag begun while a pulled drawer is still settling takes it from where it is
+  drawn.** `yieldPull` stops the pull's timer and its writes. Without it, the timer
+  landed mid-drag and drew the drawer fully open for one frame.
+- **Reduced motion** is unchanged from Q3.650: what is written per move is the
+  finger's own position, and the settle and the exit are CSS, which the blanket block
+  zeroes.
+- **Desktop is unchanged.** The routed `Sheet`'s gate is its `sm:hidden` grabber, so
+  a mouse drag on the centred card's scrim moves nothing and a click closes. The
+  picker's and `TaskPanel`'s scrims are not laid out at those widths.
+
+**Measured after**, same harness:
+- **A 200px drag on each scrim** follows the finger one for one. The drawer's edge
+  goes from 350 to 150, `TaskPanel`'s and the `Sheet`'s tops from 69 to 269, and the
+  picker's from 344 to 544.
+  - The scrims read 0.43, 0.75 and 0.61 at that point, which is the share of each
+    panel still out. The routed sheet's stays at 1.
+  - There are 0 React commits during the drag, and each panel leaves from where it was
+    let go.
+- **Release**: a 90px two-step flick closes all four, and the same 90px dragged
+  slowly settles back, since 90 is under `DISMISS_PX`. Settled back, the scrim reads
+  1 with nothing inline.
+- **Taps and cross-axis moves**: a tap closes all four. A 200px cross-axis move moves
+  and closes nothing.
+- **The fall-through is gone**: a tap on the picker's scrim over another control now
+  closes the picker and presses nothing.
+- **Mouse**, on the drawer's scrim: a slow 50px drag settles back and its click is
+  swallowed, so the drawer stays open. 250px closes it, and a click closes it.
+- **Reopened mid-exit**, `TaskPanel` and the picker come back at rest with nothing
+  inline. With the reset removed, `TaskPanel` came back 200px down with its scrim at
+  0.75. The panel half of that predates this change.
+- **Pull, then an immediate scrim drag**: three runs with no jump. With `yieldPull`
+  removed, the drawer went 229 → 350 → 210 across three frames.
+- **Per move** it costs the same as a drag begun on the panel:
+  - a 0.06–0.08ms median touchmove;
+  - no layout (the picker lays out once, at engage);
+  - 2–3 paints over 30 moves.
+- **Reduced motion**: a settle-back goes from 300 straight to 350, and an exit from
+  150 straight to 0.
+- **The round-5 pull is unchanged**: it opens at 200px with one commit and gives back
+  a slow 60px.
+
+**What was not done.**
+
+- **The routed `Sheet`'s scrim does not fade with the drag.** Making it would mean
+  moving the dim onto a sibling of the panel, and with it the view transition's
+  `scrim` group. That is a restructure of the one routed surface for a 69px strip.
+- **`touch-none` is a guard, not a measured fix.** With `touch-manipulation` the
+  drawer's scrim still dragged in Chromium, because the claim at `PRESS_SLOP` came
+  first. A device whose engine commits a pan sooner is what it guards against, and
+  that is unmeasured.
+- **Not verified on a real Android device or in WebKit.**
+
+**Status.** Current.
+- Amends Q3.650: a sibling scrim now fades with the drag, and the routed sheet's
+  still does not, for the reason given there.
+- Amends Q3.565: the picker's scrim closes on its click, not on the press.
+- Amends Q3.657: a drag takes a pulled drawer mid-settle.
+
+#### Q3.661 — the phone's menu button is the top bar's size, not a chip's
+
+**Symptom.** The owner, on a phone: the menu button at the top left is small, not
+made for a phone.
+
+**Cause.** The list header drew it as `size="chip"`: a 32px box and a 14px glyph,
+reaching 44px under a finger only through `TAP_GROW_Y`'s invisible grow. The
+target met the rule; what a thumb aims at is what it sees, and that was a 14px
+mark beside a 32px search field.
+
+**Decision.** A fifth `ICON_BUTTON_SIZE`, `bar`: `h-11 w-11` with a 20px glyph —
+the top bar's own way out on a phone. The menu takes it, and so does the
+conversation's back chevron, which is the same act on the other screen and was
+`lg` (44px, 16px glyph). The header row grows from 32px to 44px; the bell and the
+search keep their sizes, since the owner named the menu. `-ml-1.5` keeps the glyph
+where a thumb expects the screen's first control.
+
+**Status.** Current. `webcheck.shell-and-enrollment.ts` pins both call sites at
+`bar`; `webcheck.decision-surfaces.ts` already holds every size to a 44px target, a
+chosen glyph and 4px of ink margin, and `bar` passes all three.
+
+#### Q3.662 — on a phone the whole type scale is two pixels up
+
+**Symptom.** The owner, on a phone: the app's text is too small. Asked for the
+numbers, then: *increase by two*.
+
+**Measured.** The six steps are 12, 13, 14, 15, 18 and 22px at the reader's 16px
+root; `text-2xs` and `text-xs` carry 349 of 495 uses, and a conversation, a session
+title and a machine tab are `text-sm`, 14px. Telegram on Android sets messages and
+chat titles at 16sp, iOS body text at 17pt.
+
+**Decision.** One `@layer theme` block under `@media (pointer: coarse)` restates the
+six `--text-*` steps two pixels up — 14, 15, 16, 17, 20 and 24px — each with a
+line-height raised with it. Tailwind's utilities read the variables
+(`font-size: var(--text-2xs)`), so no call site changes, and the block sits in the
+theme layer so a utility still wins over it. Keyed on the pointer and never on a
+breakpoint, which is the rule the 16px field floor already follows: a narrow desktop
+window keeps its density, a tablet gets the larger text. The two count badges, `h-4`
+circles that a 14px numeral crowds, become `h-5` under the same gate. The one
+arbitrary size, `text-[11px]` on the installer line, is left alone: it is sized to
+fit a command, not to be read at arm's length.
+
+**What was not done.** The root `font-size` stays unset, so `1rem` is still the
+reader's own setting and a system font scale still applies on top. No per-surface
+tuning: every step moves by the same two pixels, so the ratios between them hold.
+
+**Status.** Current. `webcheck.typography.ts` reads the scale from the `@theme` block
+alone and pins the coarse block: every step and line-height restated, each size
+exactly two pixels up, no line-height shrinking, in the theme layer.
+
+#### Q3.663 — a conversation dragged rightward goes back to the list, following the finger, with the list revealed under it
+
+**Question.** The owner, on a phone: *"A swipe from a session must lead to the page
+with the list of conversations, i.e. back. And it must go there smoothly, not
+teleport — like with the different folders."* That means a finger moving right in
+an open conversation, Telegram style: the conversation follows the finger off to the
+right, the list is revealed under it, and a release either finishes going back or
+puts the conversation back.
+
+**How it worked before — measured.** Driven in Chromium through the real `App`, with
+synthetic state, mobile emulation at 412×860 and DPR 2.625, and touch through CDP:
+- **Two routes, one screen each below `lg`.** The phone's list and the conversation
+  are rendered in `main` one at a time. While a conversation is open, the phone's
+  list is not mounted. (The rail's `SessionBrowser` is mounted, but
+  `display: none`.)
+- **The chevron.** It calls `navigate("/")`, which pushes a history entry and plays
+  the pop view transition: 220ms, `nav-enter` and `nav-under`.
+- **The list comes back fresh.** It remounts at its top: a list scrolled to 900px
+  came back at 0.
+- **There was no swipe.**
+
+**Decision.** A back swipe on the conversation, drawn by the finger. It lands on the
+list the chevron would have landed on, without remounting it.
+
+- **One pure decision, `backClaim`,** made once, past `PRESS_SLOP`:
+  - the move must be rightward and pass `DOMINANCE`;
+  - never against an engine already panning;
+  - never while a horizontal scroller under the finger can still scroll back.
+    `scrollsBack` finds that scroller by what it is (scrolled from its start,
+    `overflow-x` that scrolls, wider than it shows), so a code block keeps the drag
+    until it is at its start, as on iOS.
+- **Where it never starts:**
+  - from a field (`EDITABLE`);
+  - over a selection already made;
+  - after a hold past `PRESS_MS`, which is a text selection starting;
+  - from the edge bands, where Android's own Back lives. `EDGE_DEAD_ZONE` moved into
+    `sheetMotion.ts`, so this swipe and the list's share one number.
+  - while any layer but the ask card is open (`currentLayers`);
+  - ⚠ **on the press that closes a menu.** Pointer events precede touch events, and a
+    menu closes on its own window `pointerdown`, so by `touchstart` the menu was gone.
+    Measured without the check: one press closed the kebab menu *and* went back. The
+    layers are now read in a capture-phase `pointerdown` on the conversation, before
+    the menu's listener runs.
+- **Gate.** The swipe runs only while the back chevron is laid out, so the breakpoint
+  stays in CSS. `Header` takes `backRef`, and `IconButton` now takes a ref. At `lg` the
+  conversation sits beside the list and there is no swipe; a tablet in portrait below
+  `lg` swipes like a phone.
+- ⚠ **The list under it is the list's own element.** `App` renders `PhoneList` with
+  the same key on both routes.
+  - On the conversation's route it renders nothing until a swipe engages. A store
+    (`backRows`) then mounts it, absolutely positioned under the conversation: inert,
+    unread and untouchable, and cut to one screen of rows (`ROW_FLOOR_PX`, as the
+    neighbouring machine's page is, through `SessionBrowser`'s new `rows`).
+  - The conversation's roots are `bg-surface`, so nothing shows through them.
+  - Landing therefore keeps the element and its scroller. The remaining rows mount
+    below the fold.
+- **The moves:**
+  - the conversation is one `translate3d` per frame, snapped to device pixels;
+  - the list comes in from the left and brightens as the conversation leaves, with
+    `underAt` giving both values;
+  - it starts where the chevron's own pop starts it (`BACK_UNDER_SHIFT`,
+    `BACK_UNDER_OPACITY`), and webcheck reads those two numbers off `nav-under` in
+    the stylesheet;
+  - `will-change` is set only for the gesture, transitions are held at `none`, and
+    moves are batched with rAF;
+  - there is no React commit per move; the only one during a drag is the mount.
+- ⚠ **`main` is clipped while the list is drawn under it**
+  (`has-[>[data-back-under]]:overflow-hidden`). Measured without it: the conversation,
+  translated past `main`'s edge, grew `main`'s scroll width to 612px on a 412px
+  screen. `main`, the document and the transcript then repainted on every frame: 118
+  paints over 30 moves, against 6 with the clip.
+- **Release uses `sheetRelease`, sideways.** A fling or `DISMISS_PX` goes back, and
+  never while flung the other way.
+  - **Going back:** the conversation is carried off from where it was let go, and the
+    list comes the rest of the way home, both on the sheet clock (`SHEET_MS`,
+    `settleTransition`). Then, in one task: `navigateDrawn("/")`, and the list lets go
+    of its gesture styles. `navigateDrawn` pushes the same history entry as the
+    chevron's `navigate("/")` but plays no view transition over a move the finger
+    already drew. So history, focus and Android's Back are the chevron's.
+  - **Otherwise:** it settles back and the list unmounts.
+- **Other doors during a gesture:**
+  - A settle overtaken by another route (Android's Back, a notification) gives back
+    rather than carrying the new route home.
+  - A conversation unmounted mid-gesture takes its styles off the list that route
+    draws.
+- **Reduced motion:** nothing follows the finger. A release that goes back goes at
+  once, by the chevron's path.
+
+**Measured after**, same harness:
+- **A 250px drag:**
+  - the conversation followed the finger one for one (21 → 250px);
+  - the list moved from −86px at 0.57 opacity to 0 and 1;
+  - one React commit during the drag;
+  - it landed on `/` with no view transition and one new history entry, as the
+    chevron does;
+  - it was the same list element with the same scroller, and a row of the list sat
+    at y=741 in every frame, the route change included.
+- **What it lands on:** 40 rows (and 100 with a larger fixture) on the same machine
+  tab, which is exactly what a chevron back draws.
+- **Release:**
+  - a 60px flick goes back, and the same 60px slowly gives back;
+  - a give-back is smooth (90 → 0px, the list back to −90px at 0.55), then the list
+    unmounts;
+  - the conversation keeps nothing inline but its transition, held at `none`.
+- **Moves it leaves alone:**
+  - a vertical drag scrolls the transcript;
+  - leftward, and from either edge band, nothing happens.
+- **Code blocks:**
+  - scrolled 120px, a rightward drag scrolls the block back to 0 and never becomes a
+    swipe;
+  - at its start, a rightward drag goes back;
+  - leftward, the block scrolls (to 210px).
+- **Where it starts and where it doesn't:**
+  - no swipe from the composer's field, after a 500ms hold, or over a selection;
+  - the header and the chip row do go back;
+  - with the kebab menu open, the press closes the menu and nothing else, and the
+    next drag goes back;
+  - with the docked task panel open at 800px, no swipe.
+- **Widths:** at 800px it goes back; at 1280px there is no swipe.
+- **Reduced motion:** nothing follows; 250px lands on the list at once, and 60px
+  stays.
+- **A route change mid-completion:** the new conversation stays at rest, and the
+  list is removed.
+- **Cost, production build:**
+  - the engage (mounting one screen of the list) costs 4–10ms whatever the list's
+    length. Uncut, it was 7–9ms at 120 rows and 11–15ms at 300.
+  - a move costs a 0.06–0.11ms median touchmove;
+  - 6 paints over 30 moves;
+  - a vertical scroll that is not claimed costs 0.1ms and 2 paints.
+- **Mutations, seen in the harness as well as in the pins:**
+  - rendering the list under the conversation as a second element: landing remounts
+    it (a new element and a new scroller);
+  - landing through `navigate`: the pop view transition plays over the finished move.
+
+**What was not done.**
+
+- **The list still opens at its top after a back, by either door, as it did before.**
+  The chevron remounts it. The swipe keeps the element it mounted when the drag
+  engaged, and that element too starts at the top. Keeping the list's place across a
+  visit is a change to both doors and belongs in its own entry.
+- **The row just left is not marked,** on the phone as before: its list has no open
+  session.
+- **No shadow on the conversation's edge,** since the chevron's pop draws none.
+- **The swipe settles on `SHEET_MS` (260ms) while the chevron's pop runs 220ms.** The
+  finger's clock is the sheets'.
+- **Touch listeners on the conversation are non-passive**, as the list's own
+  gestures already are. So the first move of each touch waits for the main thread; on
+  a phone busy streaming a transcript that could delay the start of a scroll. This is
+  unmeasured on a device.
+- **Not verified on a real Android device or in WebKit.**
+
+**Status.** Current. Amends Q3.655 and Q3.657: the edge band is one shared number.
+
+#### Q3.664 — a window that grows keeps the conversation on its foot, and the offset is written through after a resize
+
+**Symptom.** Reported by the owner from the macOS app, maximised to full screen
+during a streaming turn. A gap about 300px tall opened between the last row and the
+composer. Hovering in that gap highlighted the *Ran N commands* rows, which were
+drawn half a screen higher. So what WebKit painted and what it hit-tested
+disagreed.
+
+**Measurement.** A WKWebView harness on this box (macOS 15.6) ran the shipped
+`AppShell`, `SessionView`, `EventList`, `useFollow` and composer over the shipped
+store, on the built stylesheet. A session streamed text and tool rows every 60ms
+while the window grew. There were six ways of growing it:
+
+- an instant setFrame;
+- an animated one;
+- `zoom`;
+- a *live resize*: the view's live-resize start, 24 steps at 60Hz, then its end;
+- one jump to the final size inside a live resize, which is what a full-screen
+  transition does to the content view;
+- a real toggleFullScreen.
+
+After each one, the page's own `scrollTop`/`scrollHeight`/`clientHeight` were read
+beside the UI-side scrolling tree, which is what positions the painted layer. The
+tree came from WKWebView's testing accessor for its scrolling tree as text.
+
+- **The live resize lost the foot, 3 runs of 3.** It ended at `scrollTop` 2097
+  with 404px of scroll range below it. The *latest* button was up, and the stream
+  was no longer followed. A trace showed why:
+  - each step made the box about 4px taller, and layout clamped the offset down
+    4px;
+  - one step clamped 4px *and* took 50px of streamed text before anything looked;
+  - the scroll event then read a 4px move up with a 50px gap, and
+    `followsAfterScroll` took that for the reader leaving.
+
+  This is the "clamp, then growth, before an observation" case Q3.648 had judged
+  rare. It is the ordinary case the moment a window is resized while an agent
+  talks. The instant, animated, `zoom` and full-screen-jump resizes held the foot.
+- **The scrolling tree agreed with the page in every mode here.** Offset, box
+  height and content height all matched, before and after the fix, including after
+  real wheel scrolling put the offset in the tree's hands first. So the paint and
+  hit-test split the owner saw was not reproduced on this box.
+- **Real full screen could not be entered here.** willEnterFullScreen fires and
+  didEnterFullScreen never does on this display, so that path is not measured.
+- **Nothing on this path was transformed.** No element under `main` carried a
+  transform or `will-change` after any resize, at either width. The back swipe
+  translates only during a touch gesture, and this app gets none on a Mac.
+
+**Cause.**
+
+- **The live-resize foot loss is ours.** `followsAfterScroll` counted every move
+  up of more than 2px as the reader's. A taller box clamps its offset down by up to
+  its own growth, and when a streaming commit landed between that clamp and the
+  next look, the clamp read as a reader leaving with content below.
+- **The owner's paint/hit split fits a WebKit scrolling layer left at the old
+  offset.** The old maximum is the new one plus the growth. Painted there, the
+  content ends at the old box bottom, where the screenshot's rows end, and nothing
+  is below it. That gap equals the growth. The page meanwhile clamped to the new
+  maximum, where hit-testing puts the rows, which is where the hover found them.
+  Nothing the page did afterwards could correct it: the pin writes the maximum the
+  page already holds, WebKit drops a write that changes nothing, and a no-op never
+  reaches the scrolling layer. This is inferred from the geometry and the report,
+  not reproduced (see above).
+
+**Decision.**
+
+- **`followsAfterScroll` takes the box's last height** as a fourth argument, with
+  a default of no growth. A move up that the box's own growth since the last look
+  explains is layout, however much streamed in after it; a move past that growth is
+  still the reader's. `useFollow` keeps `lastClient` beside `lastTop`.
+- **`resync` writes the offset through.** It writes the offset WebKit holds as a
+  change (one pixel off, then back) that cannot be dropped as a no-op. It runs in
+  every settle where the box's height moved. It runs once more `RESIZE_SETTLE_MS`
+  (250ms) after the window's last `resize` event, which is past the end of a
+  transition that catches its layers up only afterwards. Both writes land in one
+  task, so nothing paints between them, and the scroll they raise is a net zero
+  move.
+- **`[overflow-anchor:none]` stays.** WebKit has no scroll anchoring for it to
+  interact with (Q3.648).
+
+**Rejected.**
+
+- **Re-pinning after the resize settles, alone.** The pin is the very no-op that
+  cannot reach a stale layer.
+- **Suspending the follow during a live resize.** WebKit gives the page no
+  live-resize signal to key on.
+- **Forcing a relayout or recompositing the box** (toggling `overflow` or a
+  transform). That costs a full re-raster of the conversation to do what one
+  written offset does.
+
+**Status.** Current.
+
+- The live-resize foot loss is fixed and measured: 404px left below the foot
+  before, 0 after, 3 runs of 3, with the tree in agreement.
+- The re-sync is a workaround for a WebKit behaviour inferred rather than
+  reproduced. The real full-screen transition could not be driven on this box.
+- `webcheck.follow-and-wrap.ts` pins:
+  - the clamp exemption as a table, from the measured live-resize step;
+  - `resync`'s two writes against a stub box, including at the top and on a box
+    with nothing to scroll;
+  - `RESIZE_SETTLE_MS`;
+  - as source: the settle judging against `lastClient`, re-syncing when the height
+    moved, and the trailing resize settle.
+
+#### Q3.665 — renaming a session moves nothing, and its name shows the text caret
+
+**Symptom.** The owner, on the Mac app: pressing the session's name in the header
+opens a field that nudges the interface, which it must not — the reference is
+Claude Code's rename box, drawn around the name where it stands. And hovering the
+name should show the text caret.
+
+**Cause.** `RenameField` was a different box from the name it replaced: a 1px
+border and `py-0.5` made it 6px taller than the name's line, so the subtitle under
+it dropped; `px-1.5` plus the border against the name's `px-1` moved the text 3px
+right; `flex-1` stretched it to the row, which on a phone also pulled a centred
+title to the left; and its `outline-none` lost to the app's unlayered focus ring,
+the trap Q3.645 measured, so a 2px ring with a 2px offset was drawn round it.
+
+**Decision.** The field takes the name's exact place: one text line tall
+(`h-[var(--text-sm--line-height)]`), the name's own `px-1`, no border and no
+vertical padding, its frame a `ring-1` — a box shadow, which takes no room — and
+`no-focus-ring` beside `outline-none`. It hugs what is typed, as Claude Code's does,
+through a hidden copy of the value in the same `inline-grid` cell rather than by
+spanning the row. Each caller lines its text up with the name it replaces: the
+header passes the button's `lg:-ml-1`, the list row, whose name has no inset,
+passes `-mx-1`. The header's name takes the text caret — the second named exception
+to Q3.627's ban on changing the mouse, on the owner's word, since this is the one
+caption in the app that is edited where it stands; the list's names are not, as
+they are renamed from the row's menu.
+
+**Status.** Current. Amends Q3.627: two exceptions now, both named in
+`CURSOR_ALLOWED`. `webcheck.command-menu-and-browser.ts` pins the box's height,
+inset, frame and focus-ring opt-out, the hugging grid, both callers' offsets and
+the caret.
+
+#### Q3.666 — the machine column is Telegram's width, and its menu button reaches below the menu bar
+
+**Symptom.** The owner, on the Mac app in full screen: pressing the menu button at
+the top left makes macOS slide its menu bar down over the window, and the bar covers
+the button. Telegram's buttons are simply larger — make the column Telegram's width
+and the buttons proportionally larger.
+
+**Measured.** Off two full-screen screenshots of the same display, both 2000px wide:
+this app's column ends at 94px and Telegram's folder rail at 104px, so Telegram's is
+about ten per cent wider — 80 CSS pixels to this column's 72. Telegram's menu glyph
+is about 1.4 times this one's, and its top row is about 59 CSS pixels tall against
+this button's 44. The folder entries below are within a few pixels of each other.
+
+**Decision.** `MACHINE_COLUMN_PX` becomes 80, and the three rail bounds move with it,
+since each is the column plus the list's own width; `--rail-w`'s first-paint value
+in `index.css` becomes 392px to match `RAIL_DEFAULT`. The menu button becomes 56px
+tall (`h-14`): the macOS menu bar is 24 points, or about 37 on a notched display, so
+a 44px button starting at the window's top was covered entirely, while the lower
+part of a 56px one stays below it. A first cut at 64px with lucide's 24px glyph read
+too bulky to the owner beside Telegram's, so the glyph is `FlatMenuGlyph` — three
+bars 22 by 14, half again as wide as tall, as Telegram's are — and the button is
+lit edge to edge with the entries' `hover:bg-raised/60`, never a rounded inset. The entries grow by the width's
+proportion: a 32px tile (a new `rail` size of `Monogram`, and the All tile beside
+it), `text-xs` labels and `py-2.5`; Add takes a 56px row and an 18px glyph.
+
+**What was not done.** Nothing moves the button away from the top: the menu bar
+appears whatever the button's size, and Telegram lives with it the same way. The
+phone's list header is untouched — its button is Q3.661's.
+
+**Status.** Current. `webcheck.shell-and-enrollment.ts` pins the column at 80px in
+device pixels, the rail bounds by subtraction as before, the CSS first-paint width,
+and the menu button's height, its edge-to-edge hover and its glyph's proportion.
+
+#### Q3.667 — a flick that follows a flick: the pages are one strip, and a turn commits only when it rests
+
+**Symptom.** The owner, on a phone: *"when flicking through the folders quickly the
+app stalls, because a folder needs time to settle; because of that you can't quickly
+flick through two folders."*
+
+**Cause — measured, not inferred.** The harness is a production build of the list in
+Chromium: mobile emulation at 412×860 and DPR 2.625, six machines of 40 rows each.
+Each flick is 140px in 72ms, stamped as a 60Hz digitizer would, since CDP's own pace
+turned a flick into a slow drag.
+- **It was not a stall: a second flick inside a settle was lost every time.**
+  - Released 38–180ms before the second touch, at two finger positions (8 cases), and
+    with 60, 120 and 200ms gaps: not one second flick turned.
+  - Two flicks ended on tab 1 of 2.
+  - Three ended on tab 2 of 3. The third turned only because the second had been
+    lost and the settle had ended by then.
+- **The first way it was lost.** The listeners were on the list scroller, which is
+  the page that moves. By the time the next finger came down, the page had slid out
+  from under it. What covered the finger was the neighbour, which takes no pointer
+  events, so no listener heard the touch.
+- ⚠ **The second way it was lost.** A touch that did land on the page landed the
+  turn: a `flushSync` inside `touchstart` selected the machine, swapped the list and
+  unmounted the neighbour.
+  - The page jumped the rest of its way, 195px in one frame at 38ms after the release.
+  - The row under the finger was replaced. Every later event of that touch went to a
+    node React had just removed, so neither the list nor a window listener ever heard
+    it.
+- **After a settle had ended (300–400ms):** a flick turned. Its first frame drew
+  57–79ms after the touch, and it paid tasks of 10–19ms: the neighbour's mount at the
+  slop, and the commit at the end of the previous turn.
+
+**Decision.** The pages are one strip, a touch catches the strip where it is drawn,
+and the machine is selected only when the strip rests.
+
+- ⚠ **The finger is heard on the pager's window, which never moves** (`windowRef`,
+  through `useTouchGesture`). The list scroller is only the page that is drawn.
+  `rowDrag` stays on the scroller inside it, so its `PRESS_SLOP` and `armed`
+  arbitration are unchanged.
+- **The strip model is pure, in `sheetMotion.ts`:**
+  - `pageX` gives every page's place from the strip's offset and the page it is
+    measured from;
+  - `offsetFrom` reads that offset back from where a page is drawn;
+  - `stripAt` says where the strip is, in pages.
+- **A touch catches a settling turn** (`hold`):
+  - the list's own page's computed transform, mid-transition, is read back into the
+    strip;
+  - every page is written there with its transition at `none`;
+  - the pill stops where it is drawn (`TabPill`'s new `hold`), with the strip's scroll
+    left where it is;
+  - nothing commits and nothing jumps.
+- **What the caught touch becomes:**
+  - Sideways, it is a page drag measured from the page the turn was heading for:
+    `pageOffset` from the caught offset, then `pageTurn`, which is the sheets' rule
+    (`FLING`, or `DISMISS_PX`).
+  - It is never the drawer or a pull: `listGesture` gains `turning`.
+  - A tap or a vertical move lets the turn carry on to where it was going.
+- **Neighbours are the strip's pages**, rendered by `BesidePanes`: one pane each,
+  keyed by place (`data-beside`), cut to one screen of rows (`ROW_FLOOR_PX`).
+  - While a turn settles, its page and both neighbours are mounted (`pagesFor`), so
+    the page beyond is already there for the next flick.
+  - That mount runs after the frame that starts the settle, a frame and then a task,
+    so it never holds back a composited transition.
+- **The pill's legs follow the strip.** `nextPage` gives the next page the strip is
+  heading for; `legProgress` gives the pill's progress along its leg. A new leg is
+  measured before the pages move in its frame, from where the pill is drawn.
+- **The commit waits for rest.** When a settle ends with no finger down,
+  `selectMachine`, unmounting the panes, and returning the scroller to its top and to
+  0 happen in one task, as before. Nothing is selected where the strip came back.
+- **Reduced motion is unchanged:** nothing follows, and every flick turns one page at
+  once.
+
+**Measured after**, same harness (production build):
+
+| Flicks | Gap between them | Before (tab reached) | After (tab reached) |
+|---|---|---|---|
+| 2 | 60, 120 and 200ms | 1 | 2 |
+| 3 | 60, 120 and 200ms | 2 | 3 |
+| 6 | 100ms | — | 6, the last page, with no further |
+
+- **At each caught touch, no jump:**
+  - the largest one-frame move of the strip is 35px, one finger step;
+  - a chained flick's first move is drawn 18–44ms after its event: one or two frames,
+    since headless Chromium's frames here run 16–35ms apart;
+  - the pill moves at most 17px in a frame.
+- **Across whole runs:** the largest strip moves (60–88px) are the fast opening of a
+  settle after a 1.9px/ms flick.
+- **No stall under the finger:**
+  - no touch handler over 4ms, and no long tasks;
+  - three flicks cost four tasks over 8ms, all off the touch: 13.0ms, 11.6ms and
+    13.4ms just after each release (the page beyond), and 17.8ms 263ms after the last
+    (the commit at rest).
+- **No jump at the commit:** a row of the page the strip rests on is drawn at
+  (50,155) by its pane, then by the list itself in the frame of the commit.
+- **Other touches mid-turn:**
+  - a tap, or a vertical drag, lets the turn carry on to tab 1;
+  - left, left, then right goes back to tab 1, continuously;
+  - under reduced motion, three flicks make three turns, each instant.
+- **Unchanged against the baseline build:**
+  - the drawer opens at 200px and gives back at 60px; from alpha the same drag turns
+    to All, with the same commit count;
+  - the pull holds 56px through one refresh;
+  - an upward drag scrolls the list 185–266px, the same spread as the baseline;
+  - a held row turns no page.
+- **Mutation, seen in the harness as well:** with the catch removed, the second flick
+  is lost again (it ends on tab 1).
+
+**What was not done.**
+
+- **The first flick from rest still mounts its neighbour at the slop,** synchronously
+  (10–19ms, Q3.655). Mounting both neighbours at rest would cost that on every screen
+  that never swipes.
+- **The commit at rest is still one task of about 18ms.** A touch that lands inside
+  that task waits for it once.
+- **One drag moves at most a page from the page it is measured from** (`pageOffset`),
+  as before. Consecutive flicks chain; a single long drag does not skip two pages.
+- **"Touch to first moving frame" is paced by CDP in this harness,** so what is
+  reported is input to frame for each move.
+- **Not verified on a real Android device or in WebKit.**
+
+**Status.** Current. Amends Q3.655: the swipe is heard on the pager's window and
+commits at rest; the pages beside it are several panes instead of one. Amends Q3.656:
+a caught trip is held where it is drawn.
+
+#### Q3.668 — the phone's machine tabs are one step down the scale
+
+**Symptom.** The owner, on a phone, after Q3.662 raised the scale: the names in the
+machine strip at the top are one pixel too large.
+
+**Decision.** Both tab spellings — All and every machine — go from `text-sm` to
+`text-xs`: one step down the scale, which is exactly one pixel under a finger (16 to
+15) and one pixel in a narrow desktop window (14 to 13), so no arbitrary size is
+needed. The pill (Q3.656) measures its tabs at runtime and needs nothing; its `h-8`
+still holds the smaller line.
+
+**Status.** Current. `webcheck.shell-and-enrollment.ts` reads the tab inset off the
+`text-xs` spelling and still requires All and the machine tabs to share it.
 
 ## Deployment, packaging and code layout
 
@@ -26332,7 +28954,7 @@ stays full-bleed because a tab strip does not mask. The Windows Store tiles are
 one inside-test away in `coverage`. Not in this commit: the defect is *size*, and a
 corner-curvature change alongside it makes the before and after unreadable.
 
-**Status.** Current. `.claude/rules/native-packaging.md` is the area.
+**Status.** Current. `.claude/rules/native-packaging.md` is the area. Amended by Q4.128: the Android foreground is sized to the 72dp mask as the Dock tile is, and the generator draws it.
 
 
 ### Q4.125 — Which door installs grok, and why it is npm under both sources
@@ -26561,6 +29183,109 @@ no longer reads as a setter.
 
 **Status.** Current. Amends Q4.121: no file here names a server, and one line
 forwards a variable that does.
+
+### Q4.128 — Why the Android launcher icon filled its circle, and why the generator now draws Android too
+
+**Question.** Reported by the owner with two screenshots: on an Android launcher the
+mark all but fills its dark circle, while in the macOS Dock the same mark sits in its
+tile with a clear margin. It should look like the Dock's. Why doesn't it?
+
+**Measurement.** An adaptive icon is two 108dp layers. The launcher's mask shows the
+**centre 72dp**, and only the centre **66dp circle** is guaranteed to survive every
+mask. The committed foreground had the mark alone on transparency, as Q4.124 said,
+with its box **58% of the 108dp frame**: 62.75 × 55.5dp at xxxhdpi. Against the 72dp
+a person sees, that is **87.2% of the height** (77.1% of the width). The Dock's tile,
+measured off `icon.png`, holds the mark at **70.6%** of the 824px squircle's height
+(582px) and 62.6% of its width. That ratio is the favicon's own `scale(.7059)`. So
+the mark read about a quarter larger in linear terms on Android than in the Dock,
+which is what the screenshot shows.
+
+⚠ **The 58% was chosen against the safe zone, and it met it exactly. That was the
+defect rather than the defence.** The farthest opaque pixel sat **32.25dp** from the
+centre at xxxhdpi, and 33.3dp at mdpi, against the safe circle's 33dp radius. The
+safe circle is 92% of the visible one, so a mark sized to reach it all but touches
+the mask. "Inside the safe zone" is a ceiling on where art may go, not the size it
+should be.
+
+**What builds is the committed tree, measured rather than assumed.**
+`buildapps.sh` runs `tauri android build` and nothing else. It runs neither
+`tauri android init` nor `tauri icon`, so it goes straight to `gen/android`. The
+0.11.0 APK it published (`d7cda6a`, 2026-09-24 06:09) carries `ic_launcher.png` at
+all five densities **byte-identical** to the committed files. Its 432px foreground
+is the committed drawing, re-crunched by aapt. Every `res/mipmap-*` file on that
+checkout was last written on 2026-09-22, two days before the build, so
+`tauri android build` copies nothing into `res/`. `tauri-build` 2.6.3's source
+names no mipmap. `release.yml` runs no `init` either.
+
+**Decision. `packages/native/scripts/icons.mjs` draws the Android rasters as well,
+from the same numbers.** Android's mask stands in for Apple's squircle.
+
+- **Foreground:** the mark alone, positioned by treating the 72dp viewport as the
+  badge. `ADAPTIVE_MARGIN = (108 - 72) / 2 / 108` joins `MARGIN` and `RADIUS` as
+  the third platform number, and the mark is the Dock's share of the visible shape
+  **by construction**. That gives 50.8 × 45dp, reaching about 26dp of the 33dp safe
+  radius, at all five densities.
+- **Background:** unchanged, `@color/ic_launcher_background`, `#1c1a16`.
+- **`<monochrome>`**, new, for Android 13's themed icons. It points at the
+  foreground itself, which is already the mark alone in one colour, and that is
+  all a themed icon tints. Tauri's own template names an `ic_launcher_monochrome`
+  mipmap that nothing here would draw. `nativecheck` used to assert *no*
+  monochrome, only because there was nothing to point one at.
+- **Legacy `ic_launcher.png` (API 24–25):** the Dock's tile itself, the same
+  function at 48dp × density. These launchers draw it unmasked, as the Dock does.
+  It was full-bleed, which is the Dock's original defect (Q4.124) in a second
+  place.
+- **Legacy `ic_launcher_round.png`:** the same tile as a circle (`radius: 0.5`).
+  **Nothing reads it.** The manifest has no `android:roundIcon`. It is drawn
+  rather than deleted so the file keeps matching its name, and so an `init` or
+  `tauri icon` diff stays small.
+
+**Both trees are written, byte for byte.** `gen/android/app/src/main/res` is the one
+a build reads. `src-tauri/icons/android` is the one a diff is read against. The
+two launcher XMLs stay **hand-authored**, and the generator writes no XML. Having
+`tauri icon` rewrite them was the defect Q4.124 retired it for.
+
+**Checked.** The macOS and Windows outputs come out **byte-identical** after the
+change, as `shasum -c` over every file under `icons/` shows. A second run of the
+generator changes no file. `nativecheck` loses the 58% band and the "writes nothing
+under either Android tree" assertion, and gains these:
+
+- The mark's share is read off the favicon's `scale`. It is asserted in the Dock
+  tile, in the foreground against 72dp and in both legacy rasters, to ±2px.
+- Each foreground is 108dp × density, carries alpha, is centred, has the mark's
+  aspect and **has every opaque pixel inside the 66dp circle**.
+- The legacy square is inset to Apple's grid and square-cornered, and the round
+  one is a circle.
+- The two trees are the same bytes, file for file.
+- All three layers of the adaptive XML are named, in both trees.
+- The generator's code names both trees and no `.xml`.
+
+Run against the tree before this change, **eight go red**. One of them reads
+`reaches 33.3dp of 33`.
+
+**Rejected.**
+
+- **Shrinking the hand-authored PNGs to a new percentage.** That is a second
+  hand-typed number to drift from the Dock's. The complaint was exactly that
+  nothing tied the two together.
+- **Sizing to the safe zone, or to Material's keylines.** The safe zone gave 58%.
+  The owner's reference is the Dock, and one share on every masked surface is
+  the only rule a driver can hold against the favicon.
+- **A separate `ic_launcher_monochrome` raster.** It would be the same pixels
+  under another name.
+- **A vector drawable foreground.** Four rounded rectangles would fit, but that
+  is a fourth copy of the mark in a fourth syntax. The rasters are derived from
+  the one copy that is read.
+- **Running `tauri icon` or `tauri android init` from the build.** Neither is
+  needed, and each would overwrite this.
+
+**Unverified.** No real launcher has drawn this build. The previews composite the
+layers and apply a circle, a superellipse and a rounded square in PIL. API 24–25
+and themed icons on Android 13+ have not been seen on a device.
+
+**Status.** Current. Amends Q4.124, whose "the mark at 58% of its frame" and
+"writes nothing under either Android tree" no longer hold.
+`.claude/rules/native-packaging.md` is the area.
 
 ## Invariants — rules that were defects first
 
@@ -30686,6 +33411,88 @@ held choice stands.
 
 **Status.** Current. Amends Q6.106: the ten-minute cache is a ceiling now rather than
 the mechanism.
+
+### Q6.113 — grok's client-bound extension requests, and what it does with each answer
+
+**Measured 2026-09-24, grok 1.0.40 (`eb1a2256660d`) at
+`/opt/homebrew/lib/node_modules/@xai-official/grok/bin/grok-native`, `grok
+--no-auto-update agent stdio`, driven by a raw JSON-RPC client that sends this
+daemon's own `initialize` and logs every frame.** About a dozen prompts on
+`grok-4.7`.
+
+**Three agent-to-client requests exist, and all three are sent whatever the client
+declares.** Their names sit side by side in the binary's leader code
+(`x.ai/ask_user_question`, `x.ai/exit_plan_mode`, `x.ai/mcp/elicit`) and go out
+with ACP's `_` prefix. Verbatim params:
+
+```json
+{"sessionId":"…","toolCallId":"call-96b1221b-…-0","questions":[{"question":"Which drink?","options":[{"label":"Coffee","description":"Hot, black"},{"label":"Tea","description":"Green"},{"label":"Water","description":"Still"}],"multiSelect":false}],"mode":"default"}
+{"sessionId":"…","toolCallId":"call-db1e94e8-…-2","planContent":"# Plan\n\nAdd one comment line to README.md.\n"}
+{"sessionId":"…","toolCallId":"mcp-elicit-ffb00a18-…","serverName":"probe","message":"Pick a colour for the probe","mode":"form","requestedSchema":{…the server's own schema, unchanged…}}
+```
+
+`mode` is `"plan"` for a question asked in plan mode, and `multiSelect` may be
+`null` there. An option with no description arrives with the label copied into it.
+Each request is preceded by `_x.ai/session_notification {sessionUpdate:
+"pending_interaction", tool_call_id, kind}` (`question`, `plan_approval`,
+`mcp_elicitation`) and followed by `interaction_resolved` — and ahead of it, for the
+same call id, by grok's own `permission` step and its `interaction_resolved`.
+
+**What each accepts.** Found from grok's own errors and tool results, never
+guessed:
+
+| | answer | grok's tool result |
+|---|---|---|
+| question | `{outcome: "accepted", answers: {"Which drink?": "Coffee"}}` | *User has answered your questions: "Which drink?"="Coffee"* |
+| | a list for a value | joined with `, ` |
+| | `{outcome: "cancelled"}` | *User declined to answer the questions. Continue with the task using your best judgment, or ask different questions.* |
+| | `{outcome: "chat_about_this"}`, `{outcome: "skip_interview"}` | clarify first; stop the plan interview (optional `partial_answers`) |
+| | `{}` | fails: *missing field `outcome`* |
+| | `{outcome: "nonsense"}` | fails: *unknown variant, expected one of `accepted`, `chat_about_this`, `skip_interview`, `cancelled`* |
+| | `{outcome: "accepted"}` | fails: *missing field `answers`* |
+| | `answers: {"Q": 5}` | fails: *did not match any variant of untagged enum StringOrVec* |
+| | `annotations: 5` / `{"Q": 5}` | fails: *expected a map* / *expected struct QuestionAnnotation*; `{"Q": {}}` is accepted |
+| plan | `{outcome: "approved"}` | *Your plan has been approved. You can now start coding.*, plan mode off |
+| | `{outcome: "abandoned"}` | *The user chose to abandon the plan entirely… Plan mode has been disabled.* |
+| | `{outcome: <anything else>, feedback: "X"}` | *The user wants to revise the plan. The user said: X* |
+| | `{}`, `"nonsense"`, `{outcome: "cancelled"}` | *The user wants to revise the plan. Ask the user what changes they would like to make.* |
+| MCP form | `{outcome: "accept", content: {…}}` | the server receives `{action: "accept", content: {…}}` |
+| | `{outcome: "decline"}` / `{outcome: "cancel"}` | `{action: "decline"}` / `{action: "cancel"}` |
+| | ACP's own `{action: "accept", content}`, `{}`, anything else | the server receives `{action: "cancel"}` |
+
+Answers are keyed by the question's **text** — an unknown key is taken and quoted
+back, an empty map is taken — and grok itself refuses two questions with one text.
+
+**`-32601`, what this daemon answered until now.** The question tool fails with
+*"Failed to reach the client for user question: Method not found"*; the plan fails
+with *"Plan approval could not be completed because the client disconnected. Plan
+mode remains active; the approval will reappear on reconnect."* **and the turn
+ends**; the MCP server is handed `{action: "cancel"}`.
+
+**The question timeout is real, silent and on by default.** `[toolset.
+ask_user_question] timeout_enabled = true, timeout_secs = 1800`, overridable by
+`GROK_ASK_USER_QUESTION_TIMEOUT_ENABLED` / `…_SECS`, with the environment ahead of
+the user's config and behind `requirements.toml` (grok's own documentation). With
+`…_SECS=5`, the question was abandoned at 5.0s as *"User declined to answer…"* —
+the `cancelled` text — with **no message of any kind to the client** except
+`interaction_resolved`; the request stays open on the client's side for ever. With
+`…_ENABLED=false` beside it, an answer 20s later was taken. Re-measured through this
+worktree's own `Session` and spawn with `…_SECS=3` in the daemon's environment: an
+answer at 8s was taken, because the spawn's `false` wins.
+
+**`_meta.askUserQuestion: false` on `session/new` removes the tool** — asked to
+call it, the model answered that it had none. It is read nowhere else we found, and
+nothing in `initialize` changes whether grok sends any of the three.
+
+**Also seen, not acted on.** `enter_plan_mode` is taken without a permission
+request, and the plan file is written through the client's `fs/write_text_file`.
+The binary names a fourth client-bound method, `x.ai/folder_trust/request`, which no
+run reached. `initialize` now advertises `cached_token` beside `grok.com`
+(as the default auth method), which Q6.110 did not see.
+
+**Status.** Current, for 1.0.40. `pincheck` pins no grok build, so a shape change
+arrives with grok's own updater; the parser refuses rather than guesses and the
+driver holds these requests verbatim.
 
 ## Open questions and deliberate non-goals
 

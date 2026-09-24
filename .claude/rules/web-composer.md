@@ -1,6 +1,8 @@
 ---
 paths:
   - packages/web/src/ui/Composer.tsx
+  - packages/web/src/ui/SendSlot.tsx
+  - packages/web/src/ui/slotSwap.ts
   - packages/web/src/ui/CommandMenu.tsx
   - packages/web/src/ui/AgentConfigBar.tsx
   - packages/web/src/ui/commands.ts
@@ -110,6 +112,15 @@ no controls, where without it Send would sit beside the paperclip mid-row. Q3.56
 arithmetic: at 390px the chip values truncate, the documented below-`sm`
 behaviour and not a new one.
 
+**Send and Stop swap rather than jump.** `SendSlot` stacks the four occupants in
+one 32px cell and a swap fades the old one out, shrinking, under the new one, on
+`rise`'s clock (`SWAP_MS`). ⚠ **The arriving layer only fades** — its glyph scales,
+its box never does — so a tap in the first frame lands on it whole; a leaving layer
+is `inert`, `aria-hidden`, and its Send is not a submit button. `slotSwap.ts` is
+the state, pure: one live occupant, none drawn twice, every four-swap sequence
+walked. Reduced motion and a session switch jump. A focused control taken away
+hands focus to the box on a desktop, never to the control arriving. Q3.654.
+
 **A config picker draws twice and a class chooses**, `AppShell`'s rule one control
 in: above `sm` the anchored panel, below it a bottom sheet portalled over a scrim,
 both in the document at once with `display` deciding — so a window dragged across
@@ -120,48 +131,33 @@ focus and registers itself on mount, side effects a `display` class cannot gate,
 one here would lock the app behind an invisible panel whenever a popover opened. **So there is no `inert` and
 Back does not close it**: Escape does, through the one `useDismissible("menu")`
 both share, and so do the scrim and choosing a row. **It leaves the way it
-arrived**: no route means no view transition to hang `sheet-close` off, so
-`dismiss` sets `leaving` and a timer unmounts it — one duration in two files,
-`webcheck` pinning them equal. Only the sheet lingers; the popover goes at once.
-⚠ **The exit needs keyframes of its own.** `sheet … reverse` never played: an
-element keeps its running animation while `animation-name` is unchanged, so the
-swapped class edited an animation finished 260ms earlier instead of starting one,
-and `both` held the reversed last frame. It vanished in one frame, on a phone, with
-every check green. `sheet-out`/`scrim-out` mirror the arrival's curve; `webcheck`
-pins that neither exit names its arrival. Q3.566, Q3.567.
+arrived**: no route means no view transition to hang `sheet-close` off, so it is a
+`useLeaving` caller like the drawer — the anchored panel draws on `open` and goes at
+once, the sheet on `shown`. ⚠ **The scrim is the panel's sibling**: as its parent,
+`scrim-out` faded the panel while it slid. Q3.566, Q3.567, Q3.650.
 
 **The sheet has two detents, a pinned head, and it follows a finger.** Its geometry
-is `.config-sheet`'s four custom properties, whose **defaults are the resting
-sheet**, so rest is the absence of every write.
-Opening sets `--sheet-min` as well as `--sheet-max`. ⚠ **The `min-` half is what
-lets a short picker open at all**: a cap does nothing to a panel already under it,
-so effort — four rows on every agent — was immovable while model took the same
-drag. At rest the rows do not scroll and the gesture that would have scrolled them
-opens the sheet, the only state where they do. The grab bar is a `<button>` and a
+is `.config-sheet`'s three custom properties, whose **defaults are the resting
+sheet**, so rest is the absence of every write, and the class animates none of them.
+⚠ **The full detent sets `--sheet-min` as well as `--sheet-max`**: a cap does
+nothing to a panel already under it, so effort — four rows on every agent — was
+immovable while model took the same drag. At rest the rows are `overflow-hidden`
+and every vertical drag on them is the panel's; full, they scroll and keep a drag
+until they reach their top. The grab bar is a `<button>` and a
 flex sibling of the scroller, not its first child, which is why it stays; 32px of
-head reaching 44px through `TAP_GROW_Y`, `min-h-11` having put twenty pixels of
-nothing above a 4px bar.
+head reaching 44px through `TAP_GROW_Y`.
 
-**The drag writes those properties onto the node, never through React** —
-`AppShell`'s `--rail-w` rule one control in, over 362 opencode rows that would
-re-render sixty times a second. So the panel carries **no `style` prop**: one
-writer, or two settle by emission order. The height is read once at `pointerdown`
-and `from.height - travelled` is where the top edge wants to be, capped at full;
-below rest the height stops and the panel slides instead, shortening past the rows
-being what eats them from the bottom while the box stays. The transition is switched off **inline** while the finger
-is down, or every frame starts a 300ms animation chasing it — never a `var()` in
-`.config-sheet`'s shorthand, which makes every longhand pending-substitution. A release takes the nearer detent, or dismisses past
-`SHEET_DISMISS_PX`, keeping the offset so the exit keyframe's implicit `from` is
-where the hand let go. ⚠ **The settle's *last* write may not animate**:
-handing the height back to the defaults moves `min-height` and `max-height`, both
-animated, so a long list settling to rest sprang to full and shrank back, and a short
-picker opening did the mirror. `paintNow` is that write, off for a frame. ⚠ **The panel captures the pointer, and
-only once the drag engages**: uncaptured, a finger lifted outside the window ends
-nothing; captured at `pointerdown`, it eats every row's `click`.
-⚠ **The click a drag leaves behind is swallowed** by one
-capture-phase guard on the panel: a touch ending with nothing scrolled still fires
-`click` on the row under it, so dragging the sheet shut would also switch the
-model. Q3.568.
+**The gesture is `useSheetGesture`, and this file owns only the geometry**
+(`docked-panels.md`). ⚠ **Nothing is resized while a finger is down**: `stretch`
+lays the panel out at the full detent once, at engage, and every move after is
+`fullHeight() - shows` as a translate — a height per move relaid the list and
+flickered the grab bar (Q3.651). The panel carries **no `style` prop** — 362
+opencode rows re-rendering per move, and one writer. A release below rest is
+`sheetRelease`; above it `detentAfter`. ⚠ **Every way to a detent is `settleTo`**
+— a drag, a cancel and the grab bar's tap — which moves only the transform, then in
+one write with nothing animating trades it for the detent's defaults, so the edge
+stays put; animated, `min-height` and `max-height` sprang to full and shrank back.
+Q3.568, Q3.650.
 
 **Below `sm` the model chip leaves the row and folds into the mode picker.**
 `hidden sm:contents` on the chip — `contents` and not `flex`, or above `sm` it is a
@@ -175,9 +171,10 @@ makes the same test before anything enters `nested`, and without it a hidden chi
 puts its choices nowhere. Two copies of one list cost ids: `ChoiceSection` takes
 `where` and namespaces every id it makes, or an `aria-describedby` resolves to
 whichever copy the browser reaches first — on a phone, the hidden one. And the
-outside-press listener tests **both** boxes, the sheet being outside `boxRef` by
-construction: without that a tap on a row was an outside press and the picker did
-nothing. Q3.565.
+outside-press listener tests the sheet as well, outside `boxRef` by construction,
+or a tap on a row was an outside press and did nothing (Q3.565); and the scrim,
+which closes on its own click: closing on the press left it undraggable and let the
+tap click whatever lay under it (Q3.660).
 
 **The row's gaps are a grouping rather than three numbers.** Wider where the
 *kind* of control changes — the paperclip acts on the message, the chips describe
@@ -238,6 +235,7 @@ that reads as "it did not send" and invites a duplicate.
 - `/clear` is restored per agent and **appended** rather than prepended, so the
   irreversible entry does not outrank `/compact` for `c`.
 - **A control with nothing to choose between is not offered.**
+- **The box never rewrites a keystroke**: `VERBATIM_FIELD`; `web-transcript.md`.
 - **Ctrl+V and drag-and-drop.** `onPaste` calls `preventDefault` **only when there
   really are files**. A pasted file can arrive nameless and an empty `?name=` is a
   `400`, so `pastedName` synthesizes one and `uploadFile` takes it as an argument:
@@ -454,12 +452,13 @@ Q3.410, Q3.641.
 | `packages/web/src/attach.ts` | Files attached to a message not yet sent: a module `Map` with subscribers, `admitFiles`, `sendableAttachments`. At `src/` because `store.ts` imports it |
 | `packages/web/src/choices.ts` | Config changes asked for and not yet answered, keyed by session and option. The same shape as `attach.ts` and at `src/` for the same reason; it exists because two components dispatch the same change |
 | `packages/web/src/echo.ts` | The message sent and not yet back. The third of that shape, and the one whose move *out* of React fixed a bug rather than avoiding one |
-| `packages/web/src/keys.ts` | Enter-to-send, the command menu's keys, the bare-letter guards. Enter is claimed by two and `composerKey` resolves it here rather than in a JSX prop, with `enterSends` required — how a soft keyboard gets its newline back |
+| `packages/web/src/keys.ts` | Enter-to-send, the command menu's keys, the bare-letter guards. Enter is claimed by two and `composerKey` resolves it here rather than in a JSX prop, with `enterSends` required — how a soft keyboard gets its newline back. `answerKey` is the same rule for the ask card's typed answer (Q3.652) |
 | `packages/web/src/ui/commands.ts` | What a `/` means, as pure functions: where the token starts and ends, which entries exist, how a query ranks them |
 | `packages/web/src/ui/composing.ts` | What the empty box says and who gets the caret, including `focusWorthKeeping` |
 | `packages/web/src/ui/agentConfig.ts` | The config bar's rules as pure functions: slotting, `labelFor`, `choiceOverride`, the prose the snapshot strips |
-| `packages/web/src/ui/Composer.tsx` | Where a prompt is written, and **the box everything else here is inside**: Enter to send, auto-grow, the draft, the `/` menu, the chips, the paperclip, the control row, and the send slot — Stop while the box is empty, Send the moment it is not (`mid-turn-messages.md`). It **writes** the optimistic echo and does not draw it |
+| `packages/web/src/ui/Composer.tsx` | Where a prompt is written, and **the box everything else here is inside**: Enter to send, auto-grow (`autosize.ts`), the draft, the `/` menu, the chips, the paperclip, the control row, and the send slot — Stop while the box is empty, Send the moment it is not (`mid-turn-messages.md`). It **writes** the optimistic echo and does not draw it |
 | `packages/web/src/ui/CommandMenu.tsx` | The menu: the agent's commands and the controls it does *not* publish, one list, two stages. Never takes focus |
+| `packages/web/src/ui/SendSlot.tsx` | The send slot's four occupants and the swap between them; `slotSwap.ts` is its state, pure |
 | `packages/web/src/ui/AgentConfigBar.tsx` | The agent's own controls, as a cluster in the composer's control row: mode left, model/effort right, a nested control inside its host's menu, the rest behind `…`. Drawn from `category`, never an id |
 
 **`installCommand` does not appear in the strip.** `MachineLine`'s empty state

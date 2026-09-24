@@ -1,5 +1,5 @@
 import { Bot, ChevronRight, Square, Trash2, X } from "lucide-react";
-import { memo, useEffect, useId, useMemo, useState, type ReactNode } from "react";
+import { memo, useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { errorText } from "../http";
 import {
@@ -21,10 +21,9 @@ import { Icon, IconButton, SETTINGS_HEADING } from "./bits";
 import { useLeaving } from "./leaving";
 import { PaneHandle } from "./PaneHandle";
 import { LAYER, useDismissible } from "./overlay";
+import { useSheetGesture, useSlideSheet } from "./sheetDrag";
+import { SHEET_MS } from "./sheetMotion";
 import { taskPane } from "./taskWidth";
-
-// Backstop for the exit, so it must outlast the longer exit animation; webcheck asserts it.
-const TASK_PANEL_EXIT_MS = 260;
 
 /** Docked width from md, a draggable custom property; its defaults live in index.css since a class cannot be built from a number. */
 export const TASK_PANEL_WIDTH = "md:w-[var(--task-fit)]";
@@ -56,29 +55,40 @@ export function TaskPanel({
   onClearFinished: (ids: readonly string[]) => void;
 }): ReactNode {
   // shown, never open: the layer lives as long as the element, or shortcuts return while the sheet still covers the screen.
-  const { shown, leaving, onAnimationEnd } = useLeaving(open, TASK_PANEL_EXIT_MS);
+  // SHEET_MS is the longer of its two exits, the card's rise-out being 140ms.
+  const { shown, leaving, onAnimationEnd } = useLeaving(open, SHEET_MS);
   useDismissible("menu", onClose, shown);
+  const panelRef = useRef<HTMLElement | null>(null);
+  const grabber = useRef<HTMLSpanElement | null>(null);
+  const scrimRef = useRef<HTMLElement | null>(null);
+  const geometry = useSlideSheet(panelRef, "down", onClose, { scrim: scrimRef, open });
+  // The grabber is md:hidden, so the docked card never drags.
+  const drag = useSheetGesture<HTMLElement>({ axis: "down", enabled: open, geometry, gate: grabber, held: panelRef, scrim: scrimRef });
   if (!shown) return null;
   return createPortal(
     <>
       {/* Below md only; pointer-events-none while leaving, or the fading scrim eats clicks. */}
       <div
+        ref={drag.scrim.ref}
+        {...drag.scrim.bind}
         aria-hidden={true}
         className={`${
           leaving ? "animate-scrim-out pointer-events-none" : "animate-scrim"
-        } fixed inset-0 touch-manipulation bg-fg/25 md:hidden ${LAYER.overlay}`}
+        } fixed inset-0 touch-none bg-fg/25 md:hidden ${LAYER.overlay}`}
         onClick={leaving ? undefined : onClose}
       />
       {/* SHEET_PANEL's tokens spelled out; pb-safe is a utility here because the unlayered .pb-safe would beat md:pb-0. */}
       <aside
+        ref={drag.ref}
+        {...drag.bind}
         aria-label="Background"
-        // Ends the exit; TASK_PANEL_EXIT_MS is the backstop.
+        // Ends the exit; SHEET_MS is the backstop.
         onAnimationEnd={onAnimationEnd}
         // One animation utility per variant in each arm; md needs a real animation or no animationend fires.
         className={`pb-[max(0.75rem,env(safe-area-inset-bottom))] ${leaving ? "animate-sheet-out" : "animate-sheet"} fixed inset-x-0 bottom-0 flex h-[92dvh] min-h-0 flex-col overflow-hidden rounded-t-2xl border-t border-edge bg-surface shadow-2xl ${TASK_PANEL_WIDTH} ${TASK_PANEL_INSET} ${leaving ? "md:animate-rise-out" : "md:animate-rise"} md:left-auto md:h-auto md:rounded-2xl md:border md:pb-0 md:shadow-lg ${LAYER.overlay}`}
         role="dialog"
       >
-        <PanelHead onClose={onClose} />
+        <PanelHead onClose={onClose} grabber={grabber} />
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5">
           <PanelBody
             background={background}
@@ -103,12 +113,21 @@ export function TaskPanel({
   );
 }
 
-// SHEET_HEAD's tokens at 44px, spelled out: a composed second min-h can only make it taller.
-const PANEL_HEAD = "flex min-h-11 shrink-0 items-center gap-2 border-b border-edge px-4 sm:px-5";
+const GRABBER_BELOW_MD = "absolute top-1 left-1/2 h-1 w-9 -translate-x-1/2 rounded-full bg-edge-strong md:hidden";
 
-function PanelHead({ onClose }: { onClose: () => void }): ReactNode {
+// SHEET_HEAD's tokens at 44px, spelled out: a composed second min-h can only make it taller.
+const PANEL_HEAD = "relative flex min-h-11 shrink-0 touch-none items-center gap-2 border-b border-edge px-4 sm:px-5";
+
+function PanelHead({
+  onClose,
+  grabber,
+}: {
+  onClose: () => void;
+  grabber: RefObject<HTMLSpanElement | null>;
+}): ReactNode {
   return (
     <div className={PANEL_HEAD}>
+      <span ref={grabber} aria-hidden className={GRABBER_BELOW_MD} />
       {/* text-xs: strictly smaller than SessionTitle, which webcheck asserts. */}
       <h2 className="min-w-0 flex-1 truncate text-xs font-semibold">Background</h2>
       <IconButton icon={X} label="Close background tasks" onClick={onClose} size="sm" />

@@ -407,25 +407,52 @@ process.stdout.write("\nthe composer's send key\n");
       false,
     );
     check("the anchored panel is the wide one", /hidden w-60 max-w-\[calc\(100vw-1\.5rem\)\] sm:block/.test(barCode), true);
-    check("and the sheet is the narrow one", /flex touch-manipulation flex-col justify-end bg-fg\/25 sm:hidden/.test(barCode), true);
+    check(
+      "and the sheet is the narrow one",
+      /fixed inset-x-0 bottom-0 \$\{LAYER\.overlay\} flex w-full flex-col[^`]*sm:hidden`/.test(barCode),
+      true,
+    );
     // Not `Sheet`: it inerts #root on mount, which a display class cannot gate.
     check("the picker registers as a menu and never as a sheet", /useDismissible\("sheet"/.test(barCode), false);
     check("so nothing here can make the app inert", /inert/.test(barCode), false);
     check("an id says which presentation it is in", /\$\{where\}-\$\{option\.id\}-refusal/.test(barCode), true);
     check(
       "the outside-press test covers the portalled sheet as well as the panel",
-      /boxRef\.current\?\.contains\(target\) === true \|\| sheetRef\.current\?\.contains\(target\) === true/.test(barCode),
+      /boxRef\.current\?\.contains\(target\) === true \|\|\s+sheetRef\.current\?\.contains\(target\) === true/.test(barCode),
       true,
     );
-    // The scrim is outside that ref on purpose: a press on it has to close.
-    check("and the ref is on the panel rather than on the scrim", /ref=\{sheetRef\}\n\s+onPointerDown=/.test(barCode), true);
+    // A press on the scrim once closed the picker, so it could not be dragged and its tap clicked what lay under it (Q3.660).
+    check(
+      "and so is the scrim, which closes on its own click instead",
+      [/scrimRef\.current\?\.contains\(target\) === true;/.test(barCode), /onClick=\{leaving \? undefined : dismiss\}/.test(barCode)],
+      [true, true],
+    );
+    check("and the ref is on the panel rather than on the scrim", /<div\n\s+ref=\{drag\.ref\}\n\s+\{\.\.\.drag\.bind\}/.test(barCode), true);
+    // Its parent once, so scrim-out faded the panel as it slid (Q3.650).
+    check(
+      "and the scrim is the panel's sibling rather than its parent",
+      /bg-fg\/25 sm:hidden`\}\n\s+\/>\n\s+<div\n\s+ref=\{drag\.ref\}/.test(barCode),
+      true,
+    );
+    check(
+      "and it stops taking taps the instant it starts to leave",
+      /leaving \? "animate-scrim-out pointer-events-none" : "animate-scrim"/.test(barCode),
+      true,
+    );
 
     {
       const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
-      const declared = /--animate-sheet-out: sheet-out (\d+)ms/.exec(css)?.[1];
-      const timed = /const SHEET_EXIT_MS = (\d+);/.exec(barCode)?.[1];
-      check("both halves of the exit were found", [declared !== undefined, timed !== undefined], [true, true]);
-      check("and the unmount waits exactly as long as the animation", timed, declared);
+      check(
+        "the sheet keeps its layer and its element for exactly its exit",
+        [
+          /useLeaving\(open, SHEET_MS\)/.test(barCode),
+          /useDismissible\("menu", dismiss, shown\)/.test(barCode),
+          /\{shown &&\n\s+createPortal/.test(barCode),
+          /onAnimationEnd=\{onAnimationEnd\}/.test(barCode),
+        ],
+        [true, true, true, true],
+      );
+      check("and no timer of its own stands in for that exit", /SHEET_EXIT_MS|exit\.current/.test(barCode), false);
       // Each exit needs keyframes of its own: swapping the class on one node never restarts a finished animation.
       check(
         "the sheet's exit has keyframes of its own",
@@ -442,7 +469,7 @@ process.stdout.write("\nthe composer's send key\n");
         /--animate-(?:sheet|scrim)-out: (?:sheet|scrim) /.test(css),
         false,
       );
-      check("the anchored panel does not linger", /\{open && !leaving && \(/.test(barCode), true);
+      check("the anchored panel does not linger", /\{open && \(\n\s+<div\n\s+role="listbox"/.test(barCode), true);
     }
 
     check(
@@ -451,6 +478,7 @@ process.stdout.write("\nthe composer's send key\n");
       true,
     );
     check("and it reaches 44px by growing rather than by padding", /justify-center \$\{TAP_GROW_Y\}`\}/.test(barCode), true);
+    check("and a tap on it takes the same way to a detent a drag does", /onClick=\{\(\) => settleTo\(expanded \? "rest" : "full"\)\}/.test(barCode), true);
     check(
       "and the panel clips rather than scrolls",
       /flex w-full flex-col overflow-hidden overscroll-contain rounded-t-2xl/.test(barCode),
@@ -461,20 +489,25 @@ process.stdout.write("\nthe composer's send key\n");
       /expanded \? "flex-1 overflow-y-auto" : "touch-none overflow-hidden"/.test(barCode),
       true,
     );
+    // Found by what it is (Q3.651): a hand-written mark was one more thing a new scroller could forget.
+    check("and the list carries no mark for the drag to find it by", /data-sheet-scroll/.test(barCode), false);
     {
       const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
+      const rule = /\.config-sheet \{([^}]*)\}/.exec(css)?.[1] ?? "";
       check(
         "rest is a default in the stylesheet rather than a class on the panel",
         [/--sheet-max, 60dvh/.test(css), /--sheet-min, 0/.test(css), /--sheet-h, auto/.test(css)],
         [true, true, true],
       );
+      // A class transition animated every write, including the one that says the panel is already where it is.
+      check("and the stylesheet animates none of that geometry", [rule.length > 0, /transition|transform/.test(rule)], [true, false]);
       check("and the full detent is the routed sheets' phone height", /const SHEET_FULL = "92dvh";/.test(barCode), true);
       check(
         "a short picker can be pulled open too",
         /"--sheet-min": SHEET_FULL, "--sheet-max": SHEET_FULL/.test(barCode),
         true,
       );
-      check("the geometry has exactly one writer", /ref=\{sheetRef\}[\s\S]{0,2000}?style=/.test(barCode), false);
+      check("the geometry has exactly one writer", /ref=\{drag\.ref\}[\s\S]{0,2000}?style=/.test(barCode), false);
       check("and the panel wears the class that declares it", /className=\{`config-sheet pb-safe/.test(barCode), true);
     }
     {
@@ -483,80 +516,64 @@ process.stdout.write("\nthe composer's send key\n");
       check("both spellings of the full detent were found", [share !== undefined, dvh !== undefined], [true, true]);
       check("and they are the same height", share, dvh === undefined ? undefined : String(Number(dvh) / 100));
     }
+    check("the drag is the shared one", /useSheetGesture<HTMLDivElement>\(\{ axis: "down", enabled: open, geometry, held: sheetRef, scrim: scrimRef \}\)/.test(barCode), true);
     check(
-      "the drag reads where the panel is when it starts",
-      /height: panel\.getBoundingClientRect\(\)\.height/.test(barCode),
-      true,
+      "and nothing here listens to a pointer, captures one or swallows a click itself",
+      /onPointer(?:Down|Move|Up|Cancel)=|setPointerCapture|onClickCapture/.test(barCode),
+      false,
     );
     check(
-      "and every move is that height less the travel",
-      /const wanted = from\.height - travelled;/.test(barCode),
-      true,
-    );
-    check("with the settle off while the finger is down", /settling\(false\);\n\s+paint\(\{\n\s+"--sheet-min": "0px"/.test(barCode), true);
-    check(
-      "and the hand-off back to the defaults lands in one frame",
-      barCode.match(/paintNow\(\{/g)?.length,
-      2,
-    );
-    check(
-      "with the animation put back a frame later rather than immediately",
-      /restore\.current = window\.requestAnimationFrame\(\(\) => \{\n\s+restore\.current = null;\n\s+settling\(true\);/.test(barCode),
-      true,
-    );
-    check(
-      "a gesture inside that frame cancels it rather than inheriting it",
-      /window\.cancelAnimationFrame\(restore\.current\);\n\s+restore\.current = null;/.test(barCode),
-      true,
-    );
-    check(
-      "the transition is switched off inline rather than substituted",
-      [/panel\.style\.transition = on \? "" : "none";/.test(barCode), /--sheet-settle/.test(barCode)],
-      [true, false],
-    );
-    check("the drag writes those properties directly", /panel\.style\.setProperty\(name, value\)/.test(barCode), true);
-    check(
-      "and the only render it costs is the list's detent",
-      barCode.match(/setExpanded\(/g)?.length,
-      3,
-    );
-    check(
-      "and below rest it slides rather than shortening",
-      /\{ height: rest, below: rest - wanted \}/.test(barCode),
-      true,
+      "the drag reads where the panel is drawn when it starts, mid-settle included",
+      [/const height = panel\.getBoundingClientRect\(\)\.height;/.test(barCode), /top\.current = height - hold\(panel, "down"\);/.test(barCode)],
+      [true, true],
     );
     {
-      const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
-      const declared = /\.config-sheet \{[\s\S]*?transition:\n\s+height (\d+)ms/.exec(css)?.[1];
-      const timed = /const SHEET_SETTLE_MS = (\d+);/.exec(barCode)?.[1];
-      check("both halves of the settle were found", [declared !== undefined, timed !== undefined], [true, true]);
-      check("and the height goes back to its classes exactly when it lands", timed, declared);
+      const move = /move: \(travel\) => \{([\s\S]*?)\n    \},/.exec(barCode)?.[1] ?? "";
+      report("the move was found", move.length > 0, `${move.length} chars`);
+      // A height per move laid out every row and re-rasterised the bar at a new phase each frame (Q3.651).
+      check(
+        "every move is one translate of a panel already laid out at full, and nothing moves it past full",
+        [/live\.current = Math\.min\(top\.current - travel, fullHeight\(\)\);\s+slide\(panel, "down", fullHeight\(\) - live\.current\);/.test(move), /paint\(|resisted/.test(move)],
+        [true, false],
+      );
     }
-    // Capture only once the drag engages: capture also retargets the click a tap on a row needs.
     check(
-      "a release outside the viewport still ends the drag",
-      /dragged\.current = true;[\s\S]{0,900}?sheetRef\.current\?\.setPointerCapture\(event\.pointerId\)/.test(barCode),
+      "the panel is laid out at full once, when a drag engages",
+      [
+        /const stretch = \(panel: HTMLDivElement\): void => \{\s+const full = `\$\{String\(fullHeight\(\)\)\}px`;\s+paint\(\{ "--sheet-h": full, "--sheet-min": full, "--sheet-max": full \}\);/.test(barCode),
+        /top\.current = height - hold\(panel, "down"\);\s+stretch\(panel\);/.test(barCode),
+      ],
+      [true, true],
+    );
+    check(
+      "a release below rest is the shared decision, above it a detent a fling can choose",
+      [/sheetRelease\(rest - shows, velocity, rest\)/.test(barCode), /detentAfter\(shows, velocity, rest, fullHeight\(\)\)/.test(barCode)],
+      [true, true],
+    );
+    check(
+      "a settle moves only the transform",
+      [/settleTransition\(\["transform"\]\)/.test(barCode), /settleTransition\(\["height"/.test(barCode)],
+      [true, false],
+    );
+    check(
+      "a settle from a tap commits the stretched start before any transition exists",
+      /stretch\(panel\);\s+panel\.getBoundingClientRect\(\);\s+\}\s+panel\.style\.transition = settleTransition\(/.test(barCode),
       true,
     );
-    check("and nothing is captured before it engages", /onPointerDown[\s\S]{0,200}setPointerCapture/.test(barCode), false);
+    check(
+      "and hands the height back to the defaults in one write, with nothing animating",
+      /letGo\(panel\);\s+slide\(panel, "down", 0\);\s+paint\(detent === "full" \? FULL_DEFAULTS : REST_DEFAULTS\);/.test(barCode),
+      true,
+    );
+    check("and the only render it costs is the list's detent", barCode.match(/setExpanded\(/g)?.length, 2);
     check(
       "a reopened picker is back at rest, with nothing carried over",
-      /atRest\(\);\n\s+setExpanded\(false\);\n\s+setOpen\(true\);/.test(barCode),
+      /paint\(REST_DEFAULTS\);\n\s+restH\.current = null;\n\s+setExpanded\(false\);\n\s+setOpen\(true\);/.test(barCode),
       true,
     );
     check(
       "and rest is written as nothing rather than as numbers",
-      /const atRest = \(\): void =>\n\s+paint\(\{\n\s+"--sheet-h": null,\n\s+"--sheet-y": null,\n\s+"--sheet-min": null,\n\s+"--sheet-max": null,\n\s+\}\);/.test(barCode),
-      true,
-    );
-    check(
-      "a drag never also chooses the row it started on",
-      /onClickCapture=\{\(event\) => \{\n\s+if \(!dragged\.current\) return;/.test(barCode),
-      true,
-    );
-    check(
-      "the move is heard across the whole screen",
-      /onPointerMove=\{dragMove\}\n\s+onPointerUp=\{\(event\) => dragEnd\(event\.pointerId\)\}/.test(barCode),
+      /const REST_DEFAULTS = \{ "--sheet-h": null, "--sheet-min": null, "--sheet-max": null \};/.test(barCode),
       true,
     );
     check(

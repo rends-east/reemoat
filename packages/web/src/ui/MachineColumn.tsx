@@ -1,4 +1,4 @@
-import { Layers, Menu as MenuIcon, Plus } from "lucide-react";
+import { Layers, Plus } from "lucide-react";
 import { useCallback, useEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
 import { mayAddMachine } from "../quota";
 import { navigate } from "../router";
@@ -45,20 +45,21 @@ export function MachineColumn({ state, onMenu }: { state: AppState; onMenu: () =
 
   return (
     // The width is in device pixels to match MACHINE_COLUMN_PX in rail.ts.
-    <nav aria-label="Machines" className="flex w-[72px] shrink-0 flex-col border-r border-edge">
+    <nav aria-label="Machines" className="flex w-[80px] shrink-0 flex-col border-r border-edge">
       {/* A plain button rather than IconButton: w-full cannot reliably override the chip size's fixed width. */}
-      <div className="pt-safe shrink-0 px-1 pb-1">
+      {/* Tall enough that its lower half clears the menu bar macOS slides over a full-screen window; lit edge to edge as an entry is (Q3.666). */}
+      <div className="pt-safe shrink-0">
         <button
           type="button"
           aria-label="Menu"
           onClick={onMenu}
-          className="tap flex min-h-11 w-full items-center justify-center rounded-md text-muted hover:bg-raised hover:text-fg"
+          className="tap flex h-14 w-full items-center justify-center text-muted hover:bg-raised/60 hover:text-fg"
         >
-          <Icon as={MenuIcon} size={18} />
+          <FlatMenuGlyph />
         </button>
       </div>
       <div ref={hold} className="min-h-0 flex-1 overflow-y-auto">
-        <MachineEntry tab={all} glyph={<Icon as={Layers} size={14} />} />
+        <MachineEntry tab={all} glyph={<Icon as={Layers} size={16} />} />
         {tabs.map((tab, index) => (
           <MachineEntry key={tab.id} tab={tab} index={index} drag={drag} />
         ))}
@@ -71,10 +72,10 @@ export function MachineColumn({ state, onMenu }: { state: AppState; onMenu: () =
           <button
             type="button"
             onClick={() => navigate(settingsPath("machines"))}
-            className="tap flex min-h-11 w-full flex-col items-center justify-center gap-1 text-muted hover:bg-raised hover:text-fg"
+            className="tap flex min-h-14 w-full flex-col items-center justify-center gap-1 text-muted hover:bg-raised hover:text-fg"
           >
-            <Icon as={Plus} size={16} />
-            <span className="text-2xs">Add</span>
+            <Icon as={Plus} size={18} />
+            <span className="text-xs">Add</span>
           </button>
         </div>
       )}
@@ -112,22 +113,22 @@ function MachineEntry({
       title={tab.name}
       style={shift === 0 ? undefined : { transform: `translateY(${String(shift)}px)` }}
       {...(movable ? drag.bind(tab.id, index) : { "data-machine": tab.id })}
-      className={`tap group relative flex w-full flex-col items-center gap-1 px-0.5 py-2 ${tile} ${
+      className={`tap group relative flex w-full flex-col items-center gap-1 px-0.5 py-2.5 ${tile} ${
         drag?.sliding === true && !lifted ? "slides" : ""
       } ${lifted ? "z-10 bg-surface shadow-lg will-change-transform" : ""}`}
     >
       {glyph === undefined ? (
-        <Monogram name={tab.name} className={chip} />
+        <Monogram name={tab.name} size="rail" className={chip} />
       ) : (
         <span
           aria-hidden="true"
-          className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${chip}`}
+          className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${chip}`}
         >
           {glyph}
         </span>
       )}
       <span
-        className={`w-full truncate text-center text-2xs ${
+        className={`w-full truncate text-center text-xs ${
           tab.selected ? "font-medium text-fg" : "text-muted group-hover:text-fg"
         }`}
       >
@@ -135,10 +136,19 @@ function MachineEntry({
       </span>
       {tab.blockedCount > 0 && (
         // The ring separates the badge from the selected chip, which is also bg-fg.
-        <span className="pointer-events-none absolute top-1 right-2 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-fg px-1 text-2xs font-semibold text-ink ring-2 ring-ink">
+        <span className="pointer-events-none absolute top-1 right-2 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-fg px-1 text-2xs font-semibold text-ink ring-2 ring-ink [@media(pointer:coarse)]:h-5 [@media(pointer:coarse)]:min-w-5">
           {tab.blockedCount}
         </span>
       )}
     </button>
+  );
+}
+
+/** Three wide, thin bars, flatter than lucide's square menu glyph, as Telegram draws its own (Q3.666). */
+function FlatMenuGlyph(): ReactNode {
+  return (
+    <svg aria-hidden="true" width="22" height="14" viewBox="0 0 22 14" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round">
+      <path d="M1 1h20M1 7h20M1 13h20" />
+    </svg>
   );
 }

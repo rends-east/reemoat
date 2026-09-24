@@ -316,7 +316,14 @@ process.stdout.write("\nsigning out, as a state of the machine\n");
   check("never stopping it on the pump", /onAgentUnusable\(\): void \{[\s\S]*?\n  \}/.exec(reg)?.[0].includes('stop("agent_signed_out")'), false);
   // failed means the prompt was rejected, so the agent never took the message; errors inside a turn never reach it.
   check("a prompt the agent never took also replaces it", /if \(failed\) this\.onAgentUnusable\(\);/.test(code), true);
-  check("and the message is never what decides", /describeError\(error\)[\s\S]{0,400}onAgentUnusable/.test(code), false);
+  // A condition, not a distance: a character window went red when an unrelated line between the two was deleted.
+  const byMessage = /if \([^;]*(describeError|\.message\b|isAuthRequiredMessage)[^;]*this\.onAgentUnusable/;
+  check("and the message is never what decides", byMessage.test(code), false);
+  check(
+    "which is a test that would see one",
+    byMessage.test("if (isAuthRequiredMessage(describeError(error))) this.onAgentUnusable();"),
+    true,
+  );
   check("one replacement per message somebody sends", /this\.authRestartArmed = true;/.test(reg), true);
   check("spent when it fires", /onAgentUnusable\(\): void \{[\s\S]*?this\.authRestartArmed = false;/.test(reg), true);
   check("only an explicit sign-out still writes the reason", (code.match(/stop\("agent_signed_out"\)/g) ?? []).length, 1);

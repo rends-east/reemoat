@@ -174,6 +174,14 @@ export function matching(rows: readonly SessionRow[], needle: string): SessionRo
   return rows.filter((row) => matchesQuery(row, needle));
 }
 
+/** Takes what is left of a page's row budget, a section's heading costing one: the swipe's neighbour draws a screen, not a machine. */
+export function takeRows<T>(list: readonly T[], left: { rows: number }, heading = 0): T[] {
+  left.rows -= heading;
+  const taken = list.slice(0, Math.max(0, left.rows));
+  left.rows -= taken.length;
+  return taken;
+}
+
 export interface ListView {
   filter: Filter;
   machine: MachineId | null;

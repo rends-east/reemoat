@@ -7,6 +7,8 @@ paths:
   - packages/web/src/machine.ts
   - packages/web/src/localRoute.ts
   - src/announce.ts
+  - packages/web/src/ui/connection.ts
+  - packages/web/src/ui/ConnectionPill.tsx
   - scripts/relaycheck.ts
 ---
 
@@ -138,6 +140,38 @@ already took, with a **staleness window that errs toward *present***: a stale
 `forgetRoute()`, while a stale `false` draws a reachable machine as offline with
 nothing to correct it. `relay_id` is a slot rather than a process, so a dead
 relay's rows are cleared by its replacement at boot. Q4.35.
+
+## What the app says when a connection is down
+
+**One pill, bottom-left, and no banner above any conversation.** The server
+unreachable, a machine the wire cannot reach, the open conversation's stream
+reattaching and a first probe are all `connectionTrouble`'s answer, drawn by
+`ConnectionPill` — a 36px circle with a spinner that opens into its words on hover
+(`pointer-fine`), on focus, or on a tap. The banner over the list, the line that
+replaced the conversation's workspace subtitle and the `reconnecting` line over the
+transcript are gone, and `webcheck` asserts them absent by name. Q3.659.
+
+- **Connection trouble only.** An offline reason is the wire's only when it is
+  `no_route`, `cp_unreachable` or unset; `over_limit`, `owner_disabled`,
+  `not_enrolled`, `no_token` and the two key refusals need somebody to act, and
+  stay where they are drawn. So do the session's own notices — a daemon re-attaching
+  its agent is not this client's socket.
+- **What this screen reads, not the fleet.** The list's tab, plus the open
+  conversation's machine and its stream. Under All a probe counts and a machine
+  that is off does not — it would hold the pill for as long as it stays off. The
+  server outranks a machine, and a machine its own stream.
+- **A spell, then a second.** `troubleSince` keeps one spell across a change of
+  kind; `troubleShown` waits `TROUBLE_GRACE_MS`, so a reconnect under a second never
+  draws it. The live region is mounted for good and changes only with the words:
+  a spell is announced once, a retry never.
+- **The shield only down the relay.** A stream over the relay is Noise
+  (`e2ee.md`); the server is TLS and loopback is plaintext by design, so neither
+  earns it.
+- **Where it floats.** In the list's pager window, so it is over the rows and above
+  New session, which it never covers; a row's target runs its full width. Below
+  `lg` a conversation draws its own, `lg:hidden`, over the transcript's foot and
+  lifted over a parked card; above `lg` the list's reads that conversation too.
+  Exactly one is ever displayed, so one live region speaks.
 
 ## Invariants
 

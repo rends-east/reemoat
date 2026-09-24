@@ -1,6 +1,6 @@
 import type { SessionKey } from "./ids";
 
-// Finished background rows a reader dismissed: hides them in this tab only, and in memory because a restart, a clear or eviction invalidates the ids.
+// Finished background rows a reader dismissed: hides them in this tab only, and in memory because a crash, a clear or eviction invalidates the ids.
 
 /** One shared empty set, so an untouched session's snapshot is reference-stable. */
 const NONE: ReadonlySet<string> = new Set();

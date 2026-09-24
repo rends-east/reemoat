@@ -274,6 +274,308 @@ process.stdout.write("\nwho owns a session's events\n");
   await heldRegistry.shutdown();
 }
 
+process.stdout.write("\nwhat the agent asks, and does, with no turn held\n");
+{
+  // claude's shape after background work comes back: output, questions and a plan with no session/prompt, each cycle ended by a usage_update carrying its origin.
+  const acp = await import("@agentclientprotocol/sdk");
+  type Rig = {
+    marks: boolean;
+    // Off for one prompt, so a turn's end is seen ending the work with no marker's help.
+    markTurn: boolean;
+    emit: (update: Record<string, unknown>) => void;
+    ask: (method: string, params: Record<string, unknown>) => Promise<any>;
+    methods: string[];
+    heldPrompt: ((stopReason: string) => void) | null;
+    holdNextPrompt: boolean;
+    onCancel: () => void;
+  };
+  const rigs: Rig[] = [];
+  const cycleEnd = (kind: string) => ({
+    sessionUpdate: "usage_update",
+    used: 10,
+    size: 100,
+    _meta: { "_claude/origin": { kind } },
+  });
+
+  const spawnUnprompted = (): AgentProcess => {
+    const toAgent = new PassThrough();
+    const toClient = new PassThrough();
+    const send = (message: unknown): void => void toClient.write(`${JSON.stringify(message)}\n`);
+    const waiting = new Map<number, (result: unknown) => void>();
+    let askId = 7000;
+    const rig: Rig = {
+      marks: rigs.length > 0,
+      markTurn: true,
+      emit: (update) =>
+        send({ jsonrpc: "2.0", method: acp.methods.client.session.update, params: { sessionId: "conv_u", update } }),
+      ask: (method, params) =>
+        new Promise((resolve) => {
+          askId += 1;
+          waiting.set(askId, resolve);
+          send({ jsonrpc: "2.0", id: askId, method, params: { sessionId: "conv_u", ...params } });
+        }),
+      methods: [],
+      heldPrompt: null,
+      holdNextPrompt: false,
+      onCancel: () => {},
+    };
+    rigs.push(rig);
+    let buffer = "";
+    toAgent.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      for (let nl = buffer.indexOf("\n"); nl >= 0; nl = buffer.indexOf("\n")) {
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (line.trim().length === 0) continue;
+        const message = JSON.parse(line) as Record<string, any>;
+        const id = message["id"];
+        if (message["method"] === undefined && id !== undefined) {
+          waiting.get(id)?.(message["result"] ?? message["error"]);
+          waiting.delete(id);
+          continue;
+        }
+        rig.methods.push(String(message["method"]));
+        switch (message["method"]) {
+          case acp.methods.agent.initialize:
+            send({
+              jsonrpc: "2.0",
+              id,
+              result: {
+                protocolVersion: acp.PROTOCOL_VERSION,
+                agentCapabilities: { sessionCapabilities: { resume: {} } },
+                authMethods: [],
+              },
+            });
+            break;
+          case acp.methods.agent.session.new:
+            send({ jsonrpc: "2.0", id, result: { sessionId: "conv_u", modes: null, configOptions: [] } });
+            break;
+          case acp.methods.agent.session.prompt: {
+            const finish = (stopReason: string): void => {
+              // The adapter's order: the result's usage_update, then the answer to session/prompt.
+              if (rig.marks && rig.markTurn) rig.emit(cycleEnd("human"));
+              send({ jsonrpc: "2.0", id, result: { stopReason } });
+            };
+            if (rig.holdNextPrompt) {
+              rig.holdNextPrompt = false;
+              rig.heldPrompt = finish;
+            } else {
+              finish("end_turn");
+            }
+            break;
+          }
+          case acp.methods.agent.session.cancel:
+            rig.onCancel();
+            break;
+          default:
+            if (id !== undefined) send({ jsonrpc: "2.0", id, result: {} });
+        }
+      }
+    });
+    return {
+      stdin: toAgent,
+      stdout: toClient,
+      stderr: new PassThrough(),
+      handle: null,
+      onceStartError: () => () => {},
+      onceExit: () => () => {},
+      hasExited: false,
+      waitForExit: async () => true,
+      endStdin: () => toAgent.end(),
+      kill: async () => {},
+    } as unknown as AgentProcess;
+  };
+
+  class UnpromptedRuntime extends LocalRuntime {
+    override async availability(): Promise<AgentAvailability[]> {
+      return [{ id: "kimi", displayName: "fake", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null }];
+    }
+    override describe(agent: AgentId): AgentLaunchConfig {
+      return stubAgentConfig(agent);
+    }
+    override async launch(): Promise<AgentProcess> {
+      return spawnUnprompted();
+    }
+  }
+
+  const registry = new SessionRegistry(new MemoryEventStore(), null, undefined, new UnpromptedRuntime());
+  const silenceMs = 60_000;
+  registry.setSessionLimits({ turnSilenceMs: silenceMs });
+  const dir = tmp("unpromptedcheck-");
+  const { app } = createApp({ registry, verifier, instanceId: "i_unprompted", startedAt: now, credentials, roots: [dir] });
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 30));
+  const say = (text: string) => ({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
+  const post = async (path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+    const response = await app.fetch(
+      new Request(`http://d${path}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${tokenFor("u_alice")}`, "content-type": "application/json" },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }),
+    );
+    const text = await response.text();
+    return { status: response.status, body: text.length === 0 ? null : JSON.parse(text) };
+  };
+  const permission = (rig: Rig, title: string) =>
+    rig.ask(acp.methods.client.session.requestPermission, {
+      toolCall: { toolCallId: `tc_${title}`, title, rawInput: { plan: "1. do it" } },
+      options: [
+        { optionId: "o_yes", name: "Yes", kind: "allow_once" },
+        { optionId: "o_no", name: "No", kind: "reject_once" },
+      ],
+    });
+  const question = (rig: Rig) =>
+    rig.ask(acp.methods.client.elicitation.create, {
+      mode: "form",
+      toolCallId: "tc_ask",
+      message: "Which one?",
+      requestedSchema: {
+        type: "object",
+        properties: { question_0: { type: "string", title: "Pick", oneOf: [{ const: "a", title: "A" }] } },
+      },
+    });
+
+  // An agent that has never marked where a cycle ends is not tracked at all: nothing could ever end it.
+  const plain = await registry.create({ agent: "kimi", cwd: dir });
+  const plainRig = rigs[0]!;
+  plain.prompt("go");
+  await settle();
+  plainRig.emit(say("after the turn"));
+  await settle();
+  check("an agent that never marks a cycle's end reads idle after its turn, as before", [plain.status, plain.snapshot().unpromptedSince], ["idle", null]);
+
+  const managed = await registry.create({ agent: "kimi", cwd: dir });
+  const rig = rigs[1]!;
+  const log = () => managed.log.read(0, 10_000, 4 * 1024 * 1024).map((stored) => stored.event);
+  const resolutions = () =>
+    log()
+      .filter((event) => event.type === "permission_resolved" || event.type === "elicitation_resolved")
+      .map((event) => (event as { by: string }).by);
+
+  managed.prompt("go");
+  await settle();
+  check("a turn that marked its end leaves nothing running", [managed.status, managed.snapshot().unpromptedSince], ["idle", null]);
+
+  rig.emit(say("the workflow finished, reading its report"));
+  await settle();
+  const lit = managed.snapshot();
+  check("output with no turn held is the agent working", [lit.status, lit.turn, typeof lit.unpromptedSince], ["running", null, "number"]);
+  // Q2.44's objection to widening showsWorking was Send; a daemon that says this also says it takes a message now.
+  check("and a daemon that says so is one that takes a message mid-work", lit.midTurnDelivery !== null, true);
+  check("so it is not released, however long ago anybody typed", managed.parkable(Date.now() + 10 * silenceMs, 0), false);
+  check("nor is its agent restarted under it for a credential", managed.takesCredentialChange, false);
+  check("and a /clear is refused rather than deciding the cycle's fate", (await managed.clearContext("/clear")).kind, "busy");
+  rig.emit({ sessionUpdate: "usage_update", used: 11, size: 100 });
+  await settle();
+  check("a usage_update with no origin is a token, not an end", managed.snapshot().unpromptedSince === lit.unpromptedSince, true);
+  rig.emit(cycleEnd("task-notification"));
+  await settle();
+  check("the cycle's own end marker ends it", [managed.status, managed.snapshot().unpromptedSince], ["idle", null]);
+
+  rig.emit({
+    sessionUpdate: "tool_call",
+    toolCallId: "sub_1",
+    title: "grep",
+    kind: "search",
+    status: "pending",
+    _meta: { claudeCode: { parentToolUseId: "task_1" } },
+  });
+  await settle();
+  check("a subagent's step is a delegation, not the agent's own cycle", managed.snapshot().unpromptedSince, null);
+
+  // Q2.232: the defect as filed — a question raised with no turn held was cancelled on arrival.
+  const asked = question(rig);
+  await settle();
+  check("a question raised with no turn held is parked, not refused", [managed.status, managed.snapshot().pendingElicitations.length], ["blocked", 1]);
+  check("and nothing settled it on arrival", resolutions(), []);
+  const elicitationId = managed.snapshot().pendingElicitations[0]?.elicitationId ?? "none";
+  const replied = await post(`/sessions/${managed.id}/elicitations/${elicitationId}`, { content: { question_0: "a" } });
+  check("a person answers it", [replied.status, ((await asked) as any)?.action], [200, "accept"]);
+  check("and the answer is attributed to them", resolutions(), ["client"]);
+  rig.emit(cycleEnd("task-notification"));
+  await settle();
+
+  const plan = permission(rig, "Approve Plan");
+  await settle();
+  check("so is a plan", [managed.status, managed.snapshot().pendingPermissions.length], ["blocked", 1]);
+  check("and it says it was raised between turns", managed.snapshot().pendingPermissions[0]?.outOfTurn, true);
+  const permissionId = managed.snapshot().pendingPermissions[0]?.permissionId ?? "none";
+  const approved = await post(`/sessions/${managed.id}/permissions/${permissionId}`, { optionId: "o_yes" });
+  check("and approving it reaches the agent", [approved.status, ((await plan) as any)?.outcome?.optionId], [200, "o_yes"]);
+  rig.emit(cycleEnd("task-notification"));
+  await settle();
+
+  // A turn ending is not an answer.
+  rig.holdNextPrompt = true;
+  managed.prompt("hold on");
+  await settle();
+  const inTurn = permission(rig, "Terminal");
+  await settle();
+  check("a request raised inside a turn says so", managed.snapshot().pendingPermissions[0]?.outOfTurn, false);
+  rig.heldPrompt?.("end_turn");
+  await settle();
+  check("a request still parked when its turn ends stays parked", [managed.snapshot().turn, managed.snapshot().pendingPermissions.length], [null, 1]);
+  check("with nothing settled by the turn's end", resolutions(), ["client", "client"]);
+  const late = managed.snapshot().pendingPermissions[0]?.permissionId ?? "none";
+  const lateAnswer = await post(`/sessions/${managed.id}/permissions/${late}`, { optionId: "o_no" });
+  check("and it can still be answered", [lateAnswer.status, ((await inTurn) as any)?.outcome?.optionId], [200, "o_no"]);
+
+  // Stop with no turn: send, sweep, watch, as a turn's Stop does.
+  rig.emit(say("working on the next part"));
+  const parkedPlan = permission(rig, "Approve Plan");
+  await settle();
+  rig.onCancel = () => rig.emit(cycleEnd("task-notification"));
+  const cancelsBefore = rig.methods.filter((method) => method === acp.methods.agent.session.cancel).length;
+  const stopped = await post(`/sessions/${managed.id}/cancel`);
+  check("Stop with no turn held is a cancel, not a no_turn", [stopped.status, stopped.body?.cancelled, stopped.body?.turn], [200, true, null]);
+  check("the agent was told", rig.methods.filter((method) => method === acp.methods.agent.session.cancel).length - cancelsBefore, 1);
+  check("and what it had parked was answered cancelled, by the person", [((await parkedPlan) as any)?.outcome?.outcome, resolutions().at(-1)], ["cancelled", "turn_cancelled"]);
+  check("and it settled once the cycle said it had ended", [stopped.body?.settled, managed.status, managed.snapshot().cancelRequestedAt], [true, "idle", null]);
+
+  // Revising a plan parked with no turn: cancel, then the message goes through as a turn of its own.
+  rig.emit(say("still going"));
+  await settle();
+  rig.onCancel = () => {};
+  const unsettled = await post(`/sessions/${managed.id}/cancel`);
+  check("an agent that has not ended the cycle yet is reported honestly", [unsettled.body?.settled, typeof managed.snapshot().cancelRequestedAt], [false, "number"]);
+  const promptsBefore = rig.methods.filter((method) => method === acp.methods.agent.session.prompt).length;
+  rig.markTurn = false;
+  const revised = await post(`/sessions/${managed.id}/prompt`, { text: "change step 2" });
+  await settle();
+  rig.markTurn = true;
+  check("and the message sent after it is taken, never a 409", revised.status, 202);
+  check(
+    "and really reaches the agent rather than ending as cancelled before it is sent",
+    rig.methods.filter((method) => method === acp.methods.agent.session.prompt).length - promptsBefore,
+    1,
+  );
+  check("and a turn's end ends the unprompted work before it too", [managed.status, managed.snapshot().unpromptedSince], ["idle", null]);
+
+  const idleCancel = await post(`/sessions/${managed.id}/cancel`);
+  check("with nothing working and nothing parked, Stop is still the lost race it was", [idleCancel.body?.cancelled, idleCancel.body?.turn], [false, null]);
+
+  // The safety net: the silent-turn clock, for an adapter that stops sending the marker.
+  rig.emit(say("a cycle whose end never comes"));
+  await settle();
+  // Measured from the agent's own last word, the clock the sweep reads, rather than from a margin.
+  const lastWord = managed.lastAgentActivityAt ?? Number.NaN;
+  registry.abandonWedgedTurns(lastWord + silenceMs - 1);
+  check("the silent-turn clock leaves unprompted work alone a moment before the bound", typeof managed.snapshot().unpromptedSince, "number");
+  check("and does not take it for a turn to abandon", registry.abandonWedgedTurns(lastWord + silenceMs), []);
+  check("but ends it at the bound", managed.snapshot().unpromptedSince, null);
+  check("writing nothing, since no turn ended", log().at(-1)?.type, "text");
+  const blocking = permission(rig, "Terminal");
+  await settle();
+  registry.abandonWedgedTurns(Date.now() + 10 * silenceMs);
+  check("and never while it waits on a person", [managed.status, typeof managed.snapshot().unpromptedSince], ["blocked", "number"]);
+
+  await managed.stop();
+  check("stopping the session answers what is parked and ends the work", [((await blocking) as any)?.outcome?.outcome, managed.snapshot().unpromptedSince], ["cancelled", null]);
+  check("and the old resolvers are unreachable", resolutions().filter((by) => by === "no_turn" || by === "turn_ended" || by === "pump_failed"), []);
+
+  await registry.shutdown();
+}
+
 process.stdout.write("\nultracode, which claude offers and ACP has no field for\n");
 
 {
@@ -302,12 +604,12 @@ process.stdout.write("\nultracode, which claude offers and ACP has no field for\
   });
   const claude = effort(["default", "low", "medium", "high", "xhigh", "max"]);
 
-  check("claude is asked for it in the one shape its adapter reads", sessionMetaFor("claude", { ultracode: true }), {
+  check("claude is asked for it in the one shape its adapter reads", sessionMetaFor("claude", { ultracode: true, elicitation: true }), {
     claudeCode: { options: { settings: { ultracode: true } } },
   });
-  check("and asked nothing at all when it is off", sessionMetaFor("claude", { ultracode: false }), undefined);
-  check("kimi is never asked, whatever the session says", sessionMetaFor("kimi", { ultracode: true }), undefined);
-  check("nor codex", sessionMetaFor("codex", { ultracode: true }), undefined);
+  check("and asked nothing at all when it is off", sessionMetaFor("claude", { ultracode: false, elicitation: true }), undefined);
+  check("kimi is never asked, whatever the session says", sessionMetaFor("kimi", { ultracode: true, elicitation: true }), undefined);
+  check("nor codex", sessionMetaFor("codex", { ultracode: true, elicitation: true }), undefined);
 
   // Which control the extra row belongs on — by category, never by id.
   check("the row goes on claude's effort control", ultracodeOptionId(claude, "claude"), "effort");
@@ -737,6 +1039,19 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
     const answered = inFlight[0] === undefined ? null : await inFlight[0];
     check("but the route waits and sends it", answered?.status ?? -1, 202);
     check("and by the time it lands the restart is over", modeOf(), "acceptEdits");
+  }
+
+  {
+    // The reported path (Q2.234): ultracode back to a level restarts the agent, and the panel's finished rows came back empty.
+    const listed = (): string[][] => managed.snapshot().backgroundTasks.map((task) => [task.id, task.state]);
+    check("ultracode is on going in", effortOf(), "ultracode");
+    modalHook.emit({ sessionUpdate: "async_task_spawned", asyncTaskId: "wf_1", name: "map", taskType: "workflow", description: "", showInTranscript: false, canStop: true });
+    modalHook.emit({ sessionUpdate: "async_task_state_update", asyncTaskId: "wf_1", state: "completed" });
+    await modeSettle();
+    check("a workflow finished under ultracode is listed", listed(), [["wf_1", "completed"]]);
+    await managed.setConfigOption("effort", "high");
+    check("effort is a level again, on a fresh agent", [effortOf(), managed.status], ["high", "idle"]);
+    check("and the finished workflow is still listed, since the conversation is the same", listed(), [["wf_1", "completed"]]);
   }
 
   await modalRegistry.shutdown();

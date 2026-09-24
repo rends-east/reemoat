@@ -1,7 +1,7 @@
 import { authFailure, signedOutText, type AuthFailure } from "./account";
 import { forgetAttachments } from "./attach";
 import { forgetAllConfig, rememberConfig, rememberedConfig } from "./configMemory";
-import { clearEcho, landEcho, settleEcho, type PendingEcho } from "./echo";
+import { claimEcho, clearEcho, landEcho, settleEcho, type PendingEcho } from "./echo";
 import { forgetHiddenFinished } from "./finishedTasks";
 import { forgetAsks } from "./ask";
 import { forgetChoices } from "./choices";
@@ -1311,6 +1311,7 @@ class AppStore implements StreamSink {
     const clearedAt = nextCut(current.clearedAt, events);
 
     this.transcripts.set(key, { ...current, events: merged, heldBytes, loadedFrom, clearedAt });
+    claimEcho(key, events);
     settleEcho(key, merged.at(-1)?.seq ?? 0);
     this.emitTranscripts();
   }

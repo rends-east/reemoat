@@ -258,11 +258,14 @@ export function RenameField({
   current,
   placeholder,
   onDone,
+  className = "",
 }: {
   sessionRef: SessionRef;
   current: string | null;
   placeholder: string;
   onDone: () => void;
+  /** Where the box sits against the name it replaces; the text itself never moves (Q3.665). */
+  className?: string;
 }): ReactNode {
   const [value, setValue] = useState(current ?? "");
 
@@ -281,25 +284,31 @@ export function RenameField({
       .catch((cause: unknown) => toast("error", errorText(cause)));
   };
 
+  // The hidden copy sizes the grid cell, so the box hugs what is typed and is one text line tall.
   return (
-    <input
-      value={value}
-      autoFocus
-      onFocus={(event) => event.currentTarget.select()}
-      onChange={(event) => setValue(event.target.value)}
-      onBlur={(event) => commit(event.target.value)}
-      onClick={(event) => event.stopPropagation()}
-      onKeyDown={(event) => {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          commit(event.currentTarget.value);
-        }
-        if (event.key === "Escape") onDone();
-      }}
-      maxLength={MAX_TITLE_CHARS}
-      placeholder={placeholder}
-      aria-label="Session name"
-      className="min-w-0 flex-1 rounded-sm border border-edge-strong bg-ink px-1.5 py-0.5 text-sm outline-none"
-    />
+    <span className={`inline-grid min-w-0 max-w-full ${className}`}>
+      <span aria-hidden={true} className="invisible col-start-1 row-start-1 overflow-hidden px-1 text-sm whitespace-pre">
+        {`${value.length > 0 ? value : placeholder}\u00a0`}
+      </span>
+      <input
+        value={value}
+        autoFocus
+        onFocus={(event) => event.currentTarget.select()}
+        onChange={(event) => setValue(event.target.value)}
+        onBlur={(event) => commit(event.target.value)}
+        onClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            commit(event.currentTarget.value);
+          }
+          if (event.key === "Escape") onDone();
+        }}
+        maxLength={MAX_TITLE_CHARS}
+        placeholder={placeholder}
+        aria-label="Session name"
+        className="no-focus-ring col-start-1 row-start-1 h-[var(--text-sm--line-height)] w-full min-w-0 rounded-sm border-0 bg-transparent px-1 py-0 text-sm outline-none ring-1 ring-edge-strong"
+      />
+    </span>
   );
 }

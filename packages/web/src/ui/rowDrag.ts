@@ -47,7 +47,7 @@ export function driftFor(near: number, far: number, at: number): number {
 export interface TouchOps {
   start: (event: TouchEvent) => void;
   move: (event: TouchEvent) => void;
-  stop: () => void;
+  stop: (event: TouchEvent) => void;
 }
 
 /**
@@ -60,7 +60,7 @@ export function useTouchGesture<T extends HTMLElement>(ops: TouchOps, held?: Ref
   const relay = useRef({
     start: (event: TouchEvent): void => latest.current.start(event),
     move: (event: TouchEvent): void => latest.current.move(event),
-    stop: (): void => latest.current.stop(),
+    stop: (event: TouchEvent): void => latest.current.stop(event),
   });
   const own = useRef<T | null>(null);
   const kept = useRef<RefObject<T | null>>(held ?? own);

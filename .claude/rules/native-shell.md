@@ -323,6 +323,11 @@ and `parseLegalDoc` assertably disjoint. A typed `/register` falls through to
   it, while the paperclip beside them keeps working. So the failure reads as "drag
   and drop was never supported". `nativecheck` asserts it because nothing else can.
   It reaches a child webview only through `from_config`, which `seats.rs` uses for all.
+- **WebKit rewrites a keystroke unless told not to**: `"` to `“` (`«` under a
+  Russian layout), `--` to `—`, `omw` to its expansion, measured in a WKWebView.
+  `leave_typing_alone` registers `VERBATIM_TYPING` off before the first webview —
+  *registered*, never set, so a person's own Substitutions toggle still wins,
+  measured too. `autocorrect="off"` changes none of it on macOS. Q3.647.
 - **`tauri://localhost` is a secure context** on macOS, so `crypto.*` and
   `navigator.clipboard` are available. The clipboard still gets a native arm first:
   a webview that has the object and refuses it without focus would fall through to

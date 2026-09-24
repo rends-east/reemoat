@@ -26,7 +26,7 @@ import type {
   SessionEvent,
 } from "../wire";
 import { taskFinished } from "../wire";
-import { TASK_NOUNS, type BackgroundReporting } from "../tasks";
+import { TASK_NOUNS, taskTokens, type BackgroundReporting } from "../tasks";
 import type { PendingEcho } from "../echo";
 import { UserBubble } from "./Bubble";
 import { Markdown } from "./Markdown";
@@ -50,6 +50,7 @@ import {
   clipTitle,
   toolSummary,
   outstandingTasks,
+  streamedSinceTool,
   SUMMARY_CHARS,
   type AnsweredQuestion,
   type ChangeNode,
@@ -61,6 +62,9 @@ import {
 
 const TRANSCRIPT_FOOT_PX = 48;
 
+/** The working line's `h-5`, which lives inside that foot rather than on top of it while no card claims the foot. */
+const FOOT_LINE = "1.25rem";
+
 const ASK_CLEARANCE = 20;
 
 export function EventList({
@@ -70,7 +74,7 @@ export function EventList({
   files,
   working,
   reporting,
-  turnElapsedMs,
+  workElapsedMs,
   stale,
   echo,
   queued,
@@ -90,8 +94,8 @@ export function EventList({
   files: FileAccess | null;
   working: boolean;
   reporting: boolean;
-  /** Elapsed turn time, computed by the caller from the store's skew-corrected clock; null for no turn. */
-  turnElapsedMs: number | null;
+  /** Elapsed time of the turn or of unprompted work, from the store's skew-corrected clock; null for neither. */
+  workElapsedMs: number | null;
   /** Nothing is streaming; working cannot tell, since it reflects the last snapshot that arrived. */
   stale: boolean;
   echo: PendingEcho | null;
@@ -142,7 +146,9 @@ export function EventList({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
     [taskKey],
   );
-  const foot = footSays(working, tasks.length, elapsedSays(turnElapsedMs), stale, background);
+  // Only the foot reads it, and the memo inside makes a token one step; no row re-renders for it (Q3.644).
+  const streamed = working ? streamedSinceTool(transcript.events) : 0;
+  const foot = footSays(working, tasks.length, elapsedSays(workElapsedMs), stale, background, streamedSays(streamed));
   const retained = background.length;
   const footLine = foot?.line ?? null;
   const footSpoken = foot?.spoken ?? null;
@@ -152,7 +158,10 @@ export function EventList({
     // sel-root covers selection in the space between messages, which no message owns.
     <div
       className={`sel-root ${COLUMN} px-4 pt-2`}
-      style={{ paddingBottom: Math.max(TRANSCRIPT_FOOT_PX, askHeight + ASK_CLEARANCE) }}
+      style={{
+        paddingBottom:
+          askHeight === 0 ? `calc(${TRANSCRIPT_FOOT_PX}px - ${FOOT_LINE})` : Math.max(TRANSCRIPT_FOOT_PX, askHeight + ASK_CLEARANCE),
+      }}
     >
 
       {/* Every arm is about the conversation's beginning, so it is drawn at the head, not the foot (Q3.423). */}
@@ -188,12 +197,12 @@ export function EventList({
           {echo !== null && (
             <UserBubble text={echo.text} attachments={echo.attachments} files={files} />
           )}
-          {/* WaitingFoot below has a fixed height inside the scroll box: it changes only scrollHeight, so nothing in history moves. */}
+          {/* WaitingFoot below has a fixed height, and with no card a slot kept for it, so its coming and going changes no height. */}
           {/* Mounted unconditionally with only its text swapping: a status region inserted with its content is often not announced. */}
           <p role="status" aria-live="polite" className="sr-only">
             {[footSpoken ?? "", noticeSays].filter((said) => said !== "").join(". ")}
           </p>
-          {footLine !== null && (
+          {footLine !== null ? (
             <WaitingFoot
               line={footLine}
               working={working}
@@ -202,6 +211,8 @@ export function EventList({
               retained={retained}
               onOpenTasks={onOpenTasks}
             />
+          ) : (
+            keepsFootSlot(askHeight, rows.at(-1), echo !== null) && <div aria-hidden={true} className="h-5" />
           )}
           <TaskPanel
             background={background}
@@ -217,6 +228,16 @@ export function EventList({
       </ResizedContext.Provider>
     </div>
   );
+}
+
+/**
+ * The working line's room is kept while it says nothing, so its coming and going at a turn's edges moves nothing a pinned reader
+ * sees (Q3.653) — except under a card, which pads its own, and under a cancel, whose row takes that room as the line did (Q3.437).
+ */
+export function keepsFootSlot(askHeight: number, last: TailNode | undefined, echoPending: boolean): boolean {
+  if (askHeight > 0) return false;
+  const event = last?.kind === "event" ? last.stored.event : null;
+  return echoPending || event?.type !== "turn_end" || event.stopReason !== "cancelled";
 }
 
 /** Read only by PermissionResolvedRow: a fresh Map per event would defeat the TailRow memo in any other consumer. */
@@ -276,10 +297,19 @@ function noticeText(notice: TranscriptNotice): string {
 
 const ELAPSED_FLOOR_MS = 120_000;
 
-/** Null for no turn or under the floor, which also swallows a negative from clock drift. */
-function elapsedSays(turnElapsedMs: number | null): string | null {
-  if (turnElapsedMs === null) return null;
-  return turnElapsedMs < ELAPSED_FLOOR_MS ? null : shortDuration(turnElapsedMs);
+/** Null for no work or under the floor, which also swallows a negative from clock drift. */
+function elapsedSays(workElapsedMs: number | null): string | null {
+  if (workElapsedMs === null) return null;
+  return workElapsedMs < ELAPSED_FLOOR_MS ? null : shortDuration(workElapsedMs);
+}
+
+const CHARS_PER_TOKEN = 4;
+
+/** Claude Code's estimate, characters over four, in its compact number; null until there is a token to show (Q3.644). */
+export function streamedSays(chars: number): string | null {
+  const tokens = Math.round(chars / CHARS_PER_TOKEN);
+  if (tokens < 1) return null;
+  return `↓ ${taskTokens(tokens)} ${tokens === 1 ? "token" : "tokens"}`;
 }
 
 /** The two sources are disjoint, so counts add without dedup; terminal rows are skipped here, not by callers. */
@@ -308,11 +338,14 @@ export function footSays(
   elapsed: string | null = null,
   stale: boolean = false,
   background: readonly BackgroundTask[] = [],
+  streamed: string | null = null,
 ): { line: string; spoken: string } | null {
-  // With nothing streaming, working is stale: the tense changes and the elapsed time goes.
+  // With nothing streaming, working is stale: the tense changes and both numbers go.
   const frozen = working && stale;
   const shown = frozen ? null : elapsed;
-  const runs = frozen ? "last seen working" : shown === null || !working ? "working…" : `working… · ${shown}`;
+  // The count is never spoken: the live region would announce every token.
+  const counted = [shown, frozen ? null : streamed].filter((part): part is string => part !== null);
+  const runs = frozen ? "last seen working" : counted.length === 0 || !working ? "working…" : `working… · ${counted.join(" · ")}`;
   // Only the spoken form names the lost connection: sighted readers have the banner.
   const said = frozen
     ? "last seen working, not connected"
@@ -454,14 +487,15 @@ function ElicitationResolvedRow({
           {asked.map((answer) => (
             <div key={answer.key}>
               <p className="text-muted wrap-anywhere">{answer.question ?? answer.label}</p>
-              <p className="wrap-anywhere">{answer.value}</p>
+              {/* A typed answer keeps its line breaks, as a message does (Q3.646). */}
+              <p className="whitespace-pre-wrap wrap-anywhere">{answer.value}</p>
             </div>
           ))}
         </div>
       ) : answers.length > 0 ? (
         <div className="mt-1 space-y-0.5">
           {answers.map((answer) => (
-            <p key={answer.key} className="wrap-anywhere">
+            <p key={answer.key} className="whitespace-pre-wrap wrap-anywhere">
               {answers.length > 1 && <span className="text-faint">{answer.label}: </span>}
               {answer.value}
             </p>

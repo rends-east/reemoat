@@ -5,6 +5,7 @@ import { isSheet, sheetTitle, sheetUpLabel, upFrom } from "./nav";
 import { navigate, parsePath, useOrigin, usePathname, useRoute, useUnder, type Route } from "./router";
 import { sessionLists, store } from "./store";
 import { AppShell, NothingSelected } from "./ui/AppShell";
+import { backRows, subscribeBack } from "./ui/backSwipe";
 import { ChooseServer } from "./ui/ChooseServer";
 import { ForcedPasswordChange } from "./ui/ForcedPasswordChange";
 import { MenuDrawer } from "./ui/MenuDrawer";
@@ -208,17 +209,47 @@ function content(
 ): ReactNode {
   switch (route.name) {
     case "session":
-      return <SessionView state={state} sessionRef={route.ref} />;
+      return (
+        <>
+          <PhoneList key="list" state={state} onMenu={onMenu} beneath />
+          <SessionView key="session" state={state} sessionRef={route.ref} />
+        </>
+      );
     default:
       return (
         <>
-          <div className="h-full bg-ink lg:hidden">
-            <SessionBrowser state={state} onMenu={onMenu} />
-          </div>
-          <div className="hidden flex-1 lg:block">
+          <PhoneList key="list" state={state} onMenu={onMenu} beneath={false} />
+          <div key="nothing" className="hidden flex-1 lg:block">
             <NothingSelected state={state} />
           </div>
         </>
       );
   }
+}
+
+/**
+ * The phone's list, one element on both routes: under a conversation only while a back swipe draws it, inert and unread, so
+ * landing on it remounts nothing (Q3.663).
+ */
+function PhoneList({
+  state,
+  onMenu,
+  beneath,
+}: {
+  state: ReturnType<typeof store.getSnapshot>;
+  onMenu: () => void;
+  beneath: boolean;
+}): ReactNode {
+  const rows = useSyncExternalStore(subscribeBack, backRows);
+  if (beneath && rows === null) return null;
+  return (
+    <div
+      data-back-under={beneath ? "" : undefined}
+      aria-hidden={beneath || undefined}
+      inert={beneath}
+      className={`${beneath ? "pointer-events-none absolute inset-0" : "h-full"} bg-ink lg:hidden`}
+    >
+      <SessionBrowser state={state} onMenu={onMenu} rows={beneath ? rows : null} />
+    </div>
+  );
 }

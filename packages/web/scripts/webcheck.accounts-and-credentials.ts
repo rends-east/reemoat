@@ -323,13 +323,11 @@ process.stdout.write("\nleaving the loading screen without a reload\n");
       app.indexOf("if (state.me?.mustChangePassword === true)"),
     );
     report("the loading arm was found", loadingArm.includes("<Spinner />"), `${loadingArm.length} chars`);
+    // The outage is the connection pill's to say (Q3.659): no banner over the list, and the title keeps its workspace line.
     check(
-      "under the conversation's title, in the list's own words",
-      [
-        /subtitle=\{\s*state\.cpError !== null \? \(\s*<span className="truncate">\{CONTROL_PLANE_UNREACHABLE\}<\/span>/.test(view),
-        /\{CONTROL_PLANE_UNREACHABLE\}/.test(browser),
-      ],
-      [true, true],
+      "and nothing above the conversations says it",
+      [/cpError/.test(view), /ControlPlaneNotice|CONTROL_PLANE_UNREACHABLE/.test(browser + view), /<ConnectionPill/.test(browser)],
+      [false, false, true],
     );
     check(
       "and the list does not call an unread registry empty",

@@ -32,48 +32,12 @@ process.stdout.write("\nwhich lists keep their delimiter\n");
   // CommonMark caps a list marker at nine digits.
   check("nine digits is still a list marker", classOf(run("123456789) a", list(0))), [PAREN_LIST]);
 
-  const { remarkHardBreaks } = await import("../src/ui/mdlist.js");
+  // A person's message is drawn as sent and never parsed, so the plugin that gave it back its line breaks is deleted rather than idle (Q3.646 reverses Q3.639).
+  const mdlist = await import("../src/ui/mdlist.js");
+  check("no plugin turns a soft break into a hard one any more", "remarkHardBreaks" in mdlist, false);
   const para = (...children: unknown[]): Record<string, unknown> => ({ type: "paragraph", children });
   const text = (value: string): Record<string, unknown> => ({ type: "text", value });
-  const kids = (tree: Record<string, unknown>): unknown[] => {
-    remarkHardBreaks()(tree);
-    return (tree["children"] as { children?: unknown[] }[])[0]?.children ?? [];
-  };
-  const types = (nodes: unknown[]): unknown[] => nodes.map((n) => (n as { type?: string }).type);
-
   const root = (...children: unknown[]): Record<string, unknown> => ({ type: "root", children });
-  check(
-    "a newline becomes a break, with the text either side of it",
-    kids(root(para(text("a\nb")))),
-    [{ type: "text", value: "a" }, { type: "break" }, { type: "text", value: "b" }],
-  );
-  check("and the blanks around it go with it", kids(root(para(text("a  \n  b")))), [
-    { type: "text", value: "a" },
-    { type: "break" },
-    { type: "text", value: "b" },
-  ]);
-  check("a stray carriage return goes too", kids(root(para(text("a\r\nb")))), [
-    { type: "text", value: "a" },
-    { type: "break" },
-    { type: "text", value: "b" },
-  ]);
-  check("two newlines are two breaks", types(kids(root(para(text("a\nb\nc"))))), ["text", "break", "text", "break", "text"]);
-  const kept = text("nothing to split here");
-  const tree = root(para(kept));
-  check("a text with no newline is the same node afterwards", kids(tree)[0] === kept, true);
-  const fence = { type: "code", value: "a\nb" };
-  const withFence = root(para(text("x")), fence);
-  remarkHardBreaks()(withFence);
-  check(
-    "a fence is not walked into",
-    [(withFence["children"] as unknown[])[1] === fence, fence.value],
-    [true, "a\nb"],
-  );
-  check(
-    "and neither is inline code",
-    types(kids(root(para({ type: "inlineCode", value: "a\nb" }, text("y"))))),
-    ["inlineCode", "text"],
-  );
 
   const { remarkListItemBlocks } = await import("../src/ui/mdlist.js");
   const item = (...children: unknown[]): Record<string, unknown> => ({ type: "listItem", children });
@@ -258,7 +222,7 @@ process.stdout.write("\nthe message on its way out\n");
   const a = "m/a" as never;
   const b = "m/b" as never;
 
-  const sending = (text: string) => ({ text, seq: Number.MAX_SAFE_INTEGER, attachments: [] });
+  const sending = (text: string) => ({ text, seq: Number.MAX_SAFE_INTEGER, after: 0, attachments: [] });
 
   check("a session with nothing outstanding has no echo", echoFor(a), null);
   const hello = sending("hello");
@@ -310,7 +274,7 @@ process.stdout.write("\nthe message on its way out\n");
   // The snapshot has to move, or `useSyncExternalStore` never re-reads.
   {
     const before = echoVersion();
-    setEcho(b, { text: "x", seq: 1, attachments: [] });
+    setEcho(b, { text: "x", seq: 1, after: 0, attachments: [] });
     check("writing one is a change subscribers can see", echoVersion() > before, true);
     const written = echoVersion();
     clearEcho(b);

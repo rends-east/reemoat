@@ -1,5 +1,5 @@
 import { ChevronLeft } from "lucide-react";
-import type { ReactNode } from "react";
+import type { ReactNode, Ref } from "react";
 import { navigate } from "../router";
 import { LAYER } from "./overlay";
 import { IconButton } from "./bits";
@@ -9,11 +9,14 @@ export function Header({
   title,
   subtitle,
   close = false,
+  backRef,
   children,
 }: {
   title: ReactNode;
   subtitle?: ReactNode;
   close?: boolean;
+  /** The chevron is laid out exactly where a back swipe may run (Q3.663). */
+  backRef?: Ref<HTMLButtonElement>;
   children?: ReactNode;
 }): ReactNode {
   return (
@@ -23,10 +26,11 @@ export function Header({
     >
       {close && (
         <IconButton
+          ref={backRef}
           icon={ChevronLeft}
           label="Back to sessions"
           onClick={() => navigate("/")}
-          size="lg"
+          size="bar"
           className="-ml-1 lg:hidden"
         />
       )}

@@ -17,6 +17,7 @@ import {
   listChanges,
   type FileChange,
 } from "../src/changes.js";
+import type { BackgroundTask } from "../src/acp/asynctasks.js";
 import { containedIn } from "../src/paths.js";
 import { GitError, hostGit, type GitExec, type GitRun } from "../src/git.js";
 import { SessionRegistry } from "../src/registry.js";
@@ -48,6 +49,23 @@ import {
 
 /** The real store through a reopen: put swallows its own failures, so a broken statement fails every write silently and only a reopen shows it. */
 process.stdout.write("\nthe database, across a restart\n");
+
+const keptTask: BackgroundTask = {
+  id: "t",
+  name: "npm test",
+  taskType: "shell",
+  description: "runs the suite",
+  state: "completed",
+  summary: "passed",
+  lastToolName: null,
+  usage: { totalTokens: 10, toolUses: 1, durationMs: 5 },
+  canStop: true,
+  showInTranscript: false,
+  outputFilePath: "/tmp/x/tasks/t.output",
+  toolCallId: "toolu_1",
+  startedAt: 1_000,
+  endedAt: 2_000,
+};
 
 const badState: [string, string][] = [
   ["notobject", "[]"],
@@ -112,8 +130,17 @@ const badState: [string, string][] = [
           ],
         },
         commands: { commands: [{ name: "context", description: "Show current context usage", hint: null }], dropped: 0 },
+        // Hand-written like the rest: a live row is one no restart can honour, so it is dropped and its neighbour kept (Q2.234).
+        tasks: [
+          { ...keptTask, id: "t_done" },
+          { ...keptTask, id: "t_live", state: "running", endedAt: null },
+        ],
       },
     });
+    first.sessions.put(persisted("s_tasks_unreadable"));
+    first.db.exec(
+      `UPDATE sessions SET agent_state_json = '{"config":{"modes":null,"options":[]},"commands":{"commands":[{"name":"context","description":"","hint":null}],"dropped":0},"tasks":5}' WHERE id = 's_tasks_unreadable'`,
+    );
     first.sessions.put(persisted("s_unreadable"));
     first.db.exec("UPDATE sessions SET agent_state_json = '{not json' WHERE id = 's_unreadable'");
     // Blobs that parse with wrong elements: adopted, they throw inside snapshot and break GET /sessions, so each is forgotten while its session comes back.
@@ -174,6 +201,7 @@ const badState: [string, string][] = [
       "s_plain",
       "s_remembered",
       "s_routed",
+      "s_tasks_unreadable",
       "s_unreadable",
     ].sort(),
   );
@@ -279,6 +307,13 @@ const badState: [string, string][] = [
     check("the agent's controls survive the restart", remembered?.agentState?.config.options[0]?.value, "opus");
     check("and the mode with them", remembered?.agentState?.config.modes?.current, "plan");
     check("and the command list, which is what the `/` menu is", remembered?.agentState?.commands.commands[0]?.name, "context");
+    check("and the finished background rows, a live one dropped alone", remembered?.agentState?.tasks, [{ ...keptTask, id: "t_done" }]);
+    const tasksUnreadable = rows.find((row) => row.id === "s_tasks_unreadable");
+    check(
+      "a task list this build cannot read costs the tasks, never the controls beside them",
+      [tasksUnreadable?.agentState?.commands.commands[0]?.name, tasksUnreadable?.agentState?.tasks],
+      ["context", undefined],
+    );
     const unreadable = rows.find((row) => row.id === "s_unreadable");
     // Not a sentinel fallback: the value under test is null, so the row's presence is asserted separately.
     check("a blob this build cannot read is forgotten", unreadable?.agentState, null);

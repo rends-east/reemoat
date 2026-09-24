@@ -1,5 +1,5 @@
 import { Check, ChevronDown, ChevronRight, X } from "lucide-react";
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { optionShortcut } from "../keys";
 import { COLUMN, Icon, IconButton, Spinner } from "./bits";
 import { focusWorthKeeping } from "./composing";
@@ -85,7 +85,8 @@ export function AskCard({
 
   const heightOut = useRef(onHeight);
   heightOut.current = onHeight;
-  useEffect(() => {
+  // Layout effects, so the room is reserved in the frame the card paints over the rows; the observer alone lands a frame late (Q3.649).
+  useLayoutEffect(() => {
     const panel = panelRef.current;
     if (panel === null || typeof ResizeObserver === "undefined") return;
     const send = (): void => heightOut.current?.(panel.offsetHeight);
@@ -97,6 +98,10 @@ export function AskCard({
       heightOut.current?.(0);
     };
   }, [collapsed]);
+  useLayoutEffect(() => {
+    const panel = panelRef.current;
+    if (panel !== null) heightOut.current?.(panel.offsetHeight);
+  });
 
   // Off while collapsed and under any other layer: inert does not stop a window keydown.
   useEffect(() => {

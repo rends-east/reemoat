@@ -9,6 +9,7 @@ paths:
   - packages/web/src/ui/EventList.tsx
   - packages/web/src/ui/SessionView.tsx
   - packages/web/src/attach.ts
+  - packages/web/src/echo.ts
   - packages/web/src/wire.ts
   - scripts/daemoncheck.mid-turn-messages.ts
 ---
@@ -86,9 +87,10 @@ arrangement for the identical reason: an event for waiting would put a second ro
 on screen for one act.
 
 **Delivery is the last statement in `pump`'s `finally`, and the position is the
-rule.** `sweepPending` there is not fenced on turn identity, so a turn started any
-earlier has its own freshly-raised permissions cancelled by the previous turn's
-sweep. `whenRestarted` and `clearContext` call `deliverQueued` too, being two of
+rule.** It follows `onAgentUnusable`, so a restart armed there takes the queue
+rather than a turn being armed on the agent it is replacing. ⚠ The reason it once
+gave — an unfenced `sweepPending` beside it — is gone: a turn's end settles no
+request any more (Q2.232). `whenRestarted` and `clearContext` call `deliverQueued` too, being two of
 the three states it declines in — without them a message queued just before either
 window waits for a turn nobody will start. A queued message survives a `/clear` and
 lands in the fresh conversation, which is both acts in the order they were asked
@@ -182,7 +184,8 @@ attachment still uploading, one that failed, and a daemon not yet updated, which
 running `deploy.sh`. The worst instance is a parked question on such a daemon,
 precisely the state `canCancelTurn` is deliberately wider than `showsWorking` to
 reach. So: **Send is drawn when it would work, and Stop holds the slot the rest of
-the time.**
+the time.** `slotOccupant` is that decision; how one occupant gives way to the next
+is `web-composer.md`'s, Q3.654.
 
 ⚠ **With one exception, which is a refusal about the *draft* rather than about the
 session.** `draftAnswerable` is `!sessionRefused && !slotSends` over a box that is
@@ -199,7 +202,9 @@ only turn-cancel this client has must stay.
 here is not optional.** The route carries `/clear` out itself rather than
 forwarding it, and `clearContext` refuses while a turn is in flight — deliberately,
 because clearing under a running agent means deciding what happens to that turn's
-output. So it still answers `409 turn_in_flight`, and `/clear` is in this client's
+output. The same holds with no turn at all while the agent works unprompted or
+waits on a request, so `clearRefused` reads `canCancelTurn` rather than `turn`
+(Q2.232). So it still answers `409 turn_in_flight`, and `/clear` is in this client's
 own restored command list for **claude**, a steerable agent. Lifting the gate made
 "type `/clear` while it works, press Send, red toast" reachable for the first time,
 which is verbatim the defect `attach.ts` records this composer shipping once
@@ -225,7 +230,7 @@ send this feature exists for.
 on the agent being steerable — which was wrong twice over.** The reasoning for the
 gate was that a message sent now is taken, so "Answer the request above first"
 argues with a live Send. But the instruction is not about the box, it is about the
-**turn**: a parked request keeps the turn open whatever else happens, so answering
+**turn**: a parked request keeps the agent waiting whatever else happens, so answering
 it is still the only thing that lets the agent get anywhere, steered message or
 not. The gate was also **unreachable in the direction it mattered** — `blocked` is
 `needsHuman` and `working` is `showsWorking`, which carries `!needsHuman`, so
@@ -245,6 +250,27 @@ message *this tab* has sent and not had answered, a claim about the network draw
 as doubt over something delivered. This is the daemon reporting a fact about the
 agent, it survives closing the tab, and the bubble itself is untouched.
 
+**Sending while the agent talks moves a pinned conversation one way only**, and
+three things used to move it back, each measured in WebKit and Chromium (Q3.653):
+
+- **The echo waited for the POST's seq**, and a steered message's `prompt` event is
+  fanned out before `session.steer` is even sent, so the socket wins: the message
+  was drawn twice for 4–11 frames and the conversation dropped 74–112px when the
+  echo went. `claimEcho` takes it in the commit its own event lands in — the first
+  `prompt` past `sendFloor` with the same text and the same files in order. ⚠ Text
+  is only safe *with* that floor, which also steps past an earlier send's event
+  still on the socket; an identical message from another tab inside the window can
+  take it early, which is the log's own row replacing it.
+- **The pump fans a turnless snapshot out before `deliverQueued`**, so a queued
+  message's two snapshots can straddle a frame and the working line blinked out
+  and back. `deliversQueued` counts a waiting message as work, for the transcript
+  only: `Composer` still reads `showsWorking`.
+- **The working line leaving at a turn's end dropped a pinned reader 20px**, and
+  the last settled text then pushed them back up. `keepsFootSlot` keeps its `h-5`
+  inside the column's own 48px foot while it is silent — except under a card, which
+  pads its own foot, and under a cancel, whose row takes that place as it did
+  (Q3.437).
+
 ⚠ **`QueuedContext`'s *identity* is part of the contract.** A context for
 `DecisionsContext`'s reason — a fresh `Set` as a prop is a new identity on every row
 on every token, which defeats `TailRow`'s memo entirely — and the half that does not
@@ -255,6 +281,40 @@ turn.
 **No control takes a queued message back**, on the owner's word and matching Claude
 Code. What ends a wait is the turn ending; what discards it is stopping the session,
 which says so in the transcript.
+
+## Work nobody prompted
+
+**claude works with no turn of ours when background work it started comes back**,
+and that is a state now rather than a gap (Q2.233). `Session` lights
+`unpromptedSince` when the agent's own text, thought, tool call, plan or request
+arrives with no `session/prompt` in flight — on arrival, in `onUpdate`'s order,
+never from the drain, which runs behind the end marker. A subagent's step is a
+delegation and lights nothing. What ends it: the `usage_update` claude sends after
+every SDK result carrying `_meta["_claude/origin"]` (`marksCycleEnd`, any origin,
+one cycle running at a time), the answer to a prompt of ours (the agent takes its
+input in order), a `/clear`, the process going, and `daemon-bounds.md`'s silent-turn
+clock. ⚠ **It is latched on the first marker the agent sends**, so the four agents
+that send none are never tracked — a straggler after their turn cannot light a
+working line nothing would ever end.
+
+**It reads as working everywhere a turn does.** `status` is `running`, so `parkable`
+refuses it, as do `takesCredentialChange` and `clearContext`; `wedged` reads `turn`
+itself now that `running` no longer implies one. The snapshot carries
+`unpromptedSince`; `showsWorking`, `canCancelTurn` and `workStartedAt` read it, and
+an older daemon, which omits it, reads as today. Widening `showsWorking` refuses no
+Send, because `sendRefused`'s `working` clause is behind `!acceptsMidTurn` and a
+daemon that sends the field is one that takes a message mid-work — `daemoncheck`
+pins the pair. A message sent now is an ordinary `prompt`, which claude queues
+behind the cycle.
+
+**Stop has something to stop without a turn.** `cancelTurn` with no turn but work
+unprompted or a request parked runs the turn's order — send, sweep
+(`turn_cancelled`), watch — and answers `cancelled: true, turn: null`, measured off
+claude-agent-acp 0.73.0, whose `cancel()` interrupts the SDK's query whether or not
+a prompt is running. `cancelRequestedAt` is set for it and cleared when the work ends;
+`armTurn` clears a stale one, or `pump`'s cancel-before-prompt check would end the
+next message unsent — which is exactly `revising`'s cancel-then-prompt when the plan
+was raised outside a turn.
 
 ## What deliberately did not change
 

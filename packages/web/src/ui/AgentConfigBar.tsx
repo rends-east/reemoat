@@ -7,7 +7,6 @@ import {
   useState,
   useSyncExternalStore,
   type ComponentType,
-  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
@@ -36,6 +35,9 @@ import {
   effortFollowUp,
 } from "./agentConfig";
 import { Icon, MENU_HEADING, MENU_PANEL, menuRow, TAP_GROW_Y } from "./bits";
+import { useLeaving } from "./leaving";
+import { fade, hold, holdFade, letGo, settleTransition, slide, useSheetGesture, type SheetGeometry } from "./sheetDrag";
+import { detentAfter, SHEET_MS, sheetRelease } from "./sheetMotion";
 import { toast } from "./Toast";
 
 /** Draws the agent's answer, never the requested value; records the pending choice for both doors until then. */
@@ -83,20 +85,13 @@ const CATEGORY_ICON: Record<string, ComponentType<{ size?: number | string; clas
 
 const CHIP_MAX = "max-w-32";
 
-// Must equal --animate-sheet-out in index.css; webcheck asserts it.
-const SHEET_EXIT_MS = 260;
-
 const SHEET_FULL = "92dvh";
 
 // SHEET_FULL as a fraction, for the drag math; webcheck asserts they agree.
 const SHEET_FULL_SHARE = 0.92;
 
-const SHEET_DRAG_STEP = 24;
-
-const SHEET_DISMISS_PX = 72;
-
-// Must equal the transition literal in .config-sheet; webcheck asserts it.
-const SHEET_SETTLE_MS = 300;
+const REST_DEFAULTS = { "--sheet-h": null, "--sheet-min": null, "--sheet-max": null };
+const FULL_DEFAULTS = { "--sheet-h": null, "--sheet-min": SHEET_FULL, "--sheet-max": SHEET_FULL };
 
 // Borderless in the composer's box: the chevron marks a chip as a control, so it shows at every width.
 const CHIP = `tap press relative inline-flex min-h-8 items-center gap-1.5 rounded-md border text-2xs ${TAP_GROW_Y}`;
@@ -370,82 +365,51 @@ function Select({
   const prose = proseOf(option);
   const align = slotFor(option) === "left" ? "left-0" : "right-0";
   const [open, setOpen] = useState(false);
-  const [leaving, setLeaving] = useState(false);
+  // The sheet outlives `open` by its exit; the anchored panel does not.
+  const { shown, leaving, onAnimationEnd } = useLeaving(open, SHEET_MS);
   /** Full detent below sm: the list is clipped at rest and scrolls only when full. */
   const [expanded, setExpanded] = useState(false);
   const restH = useRef<number | null>(null);
-  const live = useRef({ height: 0, below: 0 });
+  /** How much of the panel shows above the screen's bottom edge. */
+  const top = useRef(0);
+  const live = useRef(0);
   const settle = useRef<number | null>(null);
-  const restore = useRef<number | null>(null);
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const sheetRef = useRef<HTMLDivElement | null>(null);
+  const scrimRef = useRef<HTMLElement | null>(null);
   /** Geometry goes straight onto the node, avoiding a render per pointer move. */
   const paint = (vars: Record<string, string | null>): void => {
     const panel = sheetRef.current;
     if (panel === null) return;
     for (const [name, value] of Object.entries(vars)) {
       if (value === null) panel.style.removeProperty(name);
-      else panel.style.setProperty(name, value);
+      else if (panel.style.getPropertyValue(name) !== value) panel.style.setProperty(name, value);
     }
   };
-  const atRest = (): void =>
-    paint({
-      "--sheet-h": null,
-      "--sheet-y": null,
-      "--sheet-min": null,
-      "--sheet-max": null,
-    });
-  const settling = (on: boolean): void => {
-    // Cancel a pending restore, or a new drag gets its transition back mid-gesture.
-    if (restore.current !== null) {
-      window.cancelAnimationFrame(restore.current);
-      restore.current = null;
-    }
-    const panel = sheetRef.current;
-    if (panel === null) return;
-    panel.style.transition = on ? "" : "none";
-  };
-  /** Writes without a transition and restores it a frame later. */
-  const paintNow = (vars: Record<string, string | null>): void => {
-    settling(false);
-    paint(vars);
-    restore.current = window.requestAnimationFrame(() => {
-      restore.current = null;
-      settling(true);
-    });
-  };
-  const exit = useRef<number | null>(null);
-  const boxRef = useRef<HTMLDivElement | null>(null);
-  const sheetRef = useRef<HTMLDivElement | null>(null);
-  const listRef = useRef<HTMLDivElement | null>(null);
-  const drag = useRef<{ id: number; y: number; height: number } | null>(null);
-  /** Lets the capture handler swallow the click a drag would send to a row. */
-  const dragged = useRef(false);
-
-  const dismiss = (): void => {
-    if (exit.current !== null) return;
-    setLeaving(true);
-    exit.current = window.setTimeout(() => {
-      exit.current = null;
-      setLeaving(false);
-      setOpen(false);
-    }, SHEET_EXIT_MS);
+  const stopSettle = (): void => {
+    if (settle.current !== null) window.clearTimeout(settle.current);
+    settle.current = null;
   };
 
-  // Cancels an unfinished exit, or a fast tap-tap leaves the sheet stuck leaving.
+  const fullHeight = (): number => window.innerHeight * SHEET_FULL_SHARE;
+  const restHeight = (): number => restH.current ?? window.innerHeight / 2;
+
+  const dismiss = (): void => setOpen(false);
+
   const show = (): void => {
-    if (exit.current !== null) {
-      window.clearTimeout(exit.current);
-      exit.current = null;
+    stopSettle();
+    const panel = sheetRef.current;
+    // Reopened mid-exit, the same nodes still carry the drag that closed them.
+    if (panel !== null) {
+      letGo(panel);
+      slide(panel, "down", 0);
     }
-    setLeaving(false);
-    if (settle.current !== null) {
-      window.clearTimeout(settle.current);
-      settle.current = null;
+    if (scrimRef.current !== null) {
+      letGo(scrimRef.current);
+      scrimRef.current.style.opacity = "";
     }
-    drag.current = null;
+    paint(REST_DEFAULTS);
     restH.current = null;
-    live.current = { height: 0, below: 0 };
-    settling(true);
-    atRest();
     setExpanded(false);
     setOpen(true);
   };
@@ -457,91 +421,82 @@ function Select({
     if (height > 0) restH.current = height;
   }, [open]);
 
-  // Move and release are on the full-viewport scrim, so a finger leaving the panel keeps dragging.
-  const fullHeight = (): number => window.innerHeight * SHEET_FULL_SHARE;
-  const restHeight = (): number => restH.current ?? window.innerHeight / 2;
+  /** Lays the panel out once at the full detent, so everything a gesture does after is a transform (Q3.651). */
+  const stretch = (panel: HTMLDivElement): void => {
+    const full = `${String(fullHeight())}px`;
+    paint({ "--sheet-h": full, "--sheet-min": full, "--sheet-max": full });
+    slide(panel, "down", fullHeight() - top.current);
+  };
 
-  const dragStart = (event: ReactPointerEvent<HTMLElement>): void => {
-    dragged.current = false;
-    if (expanded && listRef.current?.contains(event.target as Node) === true) return;
+  /** Every way to a detent: a translate on the stretched panel, then the detent's defaults once still. */
+  const settleTo = (detent: "rest" | "full"): void => {
     const panel = sheetRef.current;
     if (panel === null) return;
-    if (settle.current !== null) {
-      window.clearTimeout(settle.current);
-      settle.current = null;
+    const dragged = panel.style.willChange !== "";
+    stopSettle();
+    if (!dragged) {
+      top.current = panel.getBoundingClientRect().height - hold(panel, "down");
+      stretch(panel);
+      // Commits the start, or the transition has nothing to move from.
+      panel.getBoundingClientRect();
     }
-    drag.current = { id: event.pointerId, y: event.clientY, height: panel.getBoundingClientRect().height };
-  };
-
-  const dragMove = (event: ReactPointerEvent<HTMLElement>): void => {
-    const from = drag.current;
-    if (from === null || from.id !== event.pointerId) return;
-    const travelled = event.clientY - from.y;
-    if (!dragged.current && Math.abs(travelled) < SHEET_DRAG_STEP) return;
-    if (!dragged.current) {
-      dragged.current = true;
-      // Captured here, not at pointer down, which would retarget every tap's click.
-      sheetRef.current?.setPointerCapture(event.pointerId);
+    panel.style.transition = settleTransition(["transform"]);
+    slide(panel, "down", detent === "full" ? 0 : fullHeight() - restHeight());
+    const scrim = scrimRef.current;
+    if (scrim !== null) {
+      scrim.style.transition = settleTransition(["opacity"]);
+      scrim.style.opacity = "";
     }
-    const rest = restHeight();
-    const wanted = from.height - travelled;
-    const next =
-      wanted >= rest
-        ? { height: Math.min(wanted, fullHeight()), below: 0 }
-        : { height: rest, below: rest - wanted };
-    live.current = next;
-    settling(false);
-    paint({
-      "--sheet-min": "0px",
-      "--sheet-max": SHEET_FULL,
-      "--sheet-h": `${next.height}px`,
-      "--sheet-y": `${next.below}px`,
-    });
-  };
-
-  const dragEnd = (pointerId: number): void => {
-    const from = drag.current;
-    if (from === null || from.id !== pointerId) return;
-    drag.current = null;
-    if (!dragged.current) return;
-    // Keep the offset: the exit keyframe animates from the current transform.
-    if (live.current.below > SHEET_DISMISS_PX) {
-      dismiss();
-      return;
-    }
-    const rest = restHeight();
-    const full = fullHeight();
-    const toFull = live.current.height > (rest + full) / 2;
-    settling(true);
-    paint({ "--sheet-y": "0px", "--sheet-h": `${toFull ? full : rest}px` });
-    setExpanded(toFull);
-    // The pixel height must outlive the settle animation and no longer.
+    setExpanded(detent === "full");
     settle.current = window.setTimeout(() => {
       settle.current = null;
-      if (toFull) paintNow({ "--sheet-h": null, "--sheet-y": null, "--sheet-min": SHEET_FULL, "--sheet-max": SHEET_FULL });
-      else paintNow({ "--sheet-h": null, "--sheet-y": null, "--sheet-min": null, "--sheet-max": null });
-    }, SHEET_SETTLE_MS);
+      // One write with nothing animating: the transform and the height trade places and the edge stays put.
+      letGo(panel);
+      slide(panel, "down", 0);
+      paint(detent === "full" ? FULL_DEFAULTS : REST_DEFAULTS);
+      if (scrim !== null) letGo(scrim);
+    }, SHEET_MS);
   };
 
-  const toggleDetent = (): void => {
-    if (settle.current !== null) {
-      window.clearTimeout(settle.current);
-      settle.current = null;
-    }
-    settling(true);
-    if (expanded) atRest();
-    else paint({ "--sheet-h": null, "--sheet-y": null, "--sheet-min": SHEET_FULL, "--sheet-max": SHEET_FULL });
-    setExpanded(!expanded);
-  };
-
-  useEffect(
-    () => () => {
-      if (exit.current !== null) window.clearTimeout(exit.current);
-      if (settle.current !== null) window.clearTimeout(settle.current);
-      if (restore.current !== null) window.cancelAnimationFrame(restore.current);
+  // One formula for both branches: below rest the panel leaves, above it more of the list shows, and nothing is resized.
+  const geometry: SheetGeometry = {
+    begin: () => {
+      const panel = sheetRef.current;
+      if (panel === null) return;
+      const still = settle.current === null;
+      stopSettle();
+      const height = panel.getBoundingClientRect().height;
+      // Re-measured here, since a keyboard closing under the picker moves 60dvh after it opened.
+      if (still && !expanded && panel.style.transform === "") restH.current = height;
+      top.current = height - hold(panel, "down");
+      stretch(panel);
+      if (scrimRef.current === null) return;
+      holdFade(scrimRef.current);
+      fade(scrimRef.current, top.current / restHeight());
     },
-    [],
-  );
+    move: (travel) => {
+      const panel = sheetRef.current;
+      if (panel === null) return;
+      live.current = Math.min(top.current - travel, fullHeight());
+      slide(panel, "down", fullHeight() - live.current);
+      // Below rest it is leaving, and the scrim goes with it; above rest it stays dark.
+      if (scrimRef.current !== null) fade(scrimRef.current, live.current / restHeight());
+    },
+    release: (_travel, velocity) => {
+      const shows = live.current;
+      const rest = restHeight();
+      if (shows < rest) {
+        if (sheetRelease(rest - shows, velocity, rest) === "dismiss") dismiss();
+        else settleTo("rest");
+        return;
+      }
+      settleTo(detentAfter(shows, velocity, rest, fullHeight()));
+    },
+    cancel: () => settleTo(expanded ? "full" : "rest"),
+  };
+  const drag = useSheetGesture<HTMLDivElement>({ axis: "down", enabled: open, geometry, held: sheetRef, scrim: scrimRef });
+
+  useEffect(() => stopSettle, []);
 
   const current = drawnChoices(option).find((choice) => choice.value === option.value);
   const currentProse =
@@ -550,15 +505,18 @@ function Select({
 
   const parts = chipParts(option, true, prose);
 
-  useDismissible("menu", dismiss, open);
+  useDismissible("menu", dismiss, shown);
 
-  // Both boxes are tested because the sheet is portalled outside boxRef.
+  // Both boxes are tested because the sheet is portalled outside boxRef; the scrim closes on its own click, since a press on
+  // it may begin a drag, and closing on the press let the tap's click land on whatever was under it (Q3.660).
   useEffect(() => {
     if (!open) return;
     const close = (event: Event): void => {
       const target = event.target as Node;
       const inside =
-        boxRef.current?.contains(target) === true || sheetRef.current?.contains(target) === true;
+        boxRef.current?.contains(target) === true ||
+        sheetRef.current?.contains(target) === true ||
+        scrimRef.current?.contains(target) === true;
       if (!inside) dismiss();
     };
     window.addEventListener("pointerdown", close);
@@ -604,7 +562,7 @@ function Select({
         <Icon as={ChevronDown} size={12} className="text-faint" />
       </button>
 
-      {open && !leaving && (
+      {open && (
         <div
           role="listbox"
           className={`absolute bottom-full ${align} mb-1 hidden w-60 max-w-[calc(100vw-1.5rem)] sm:block ${MENU_PANEL}`}
@@ -613,37 +571,30 @@ function Select({
         </div>
       )}
       {/* Not Sheet: it would set inert on the root even while hidden above sm. */}
-      {open &&
+      {shown &&
         createPortal(
-          <div
-            data-config-scrim=""
-            className={`${
-              leaving ? "animate-scrim-out" : "animate-scrim"
-            } fixed inset-0 ${LAYER.overlay} flex touch-manipulation flex-col justify-end bg-fg/25 sm:hidden`}
-            onClick={(event) => {
-              if (event.target === event.currentTarget) dismiss();
-            }}
-            onPointerMove={dragMove}
-            onPointerUp={(event) => dragEnd(event.pointerId)}
-            onPointerCancel={(event) => dragEnd(event.pointerId)}
-          >
+          <>
+            {/* A sibling rather than the panel's parent, or its fade takes the panel with it. */}
             <div
-              ref={sheetRef}
-              onPointerDown={dragStart}
-              // Swallows the one click a drag leaves behind.
-              onClickCapture={(event) => {
-                if (!dragged.current) return;
-                dragged.current = false;
-                event.preventDefault();
-                event.stopPropagation();
-              }}
+              ref={drag.scrim.ref}
+              {...drag.scrim.bind}
+              aria-hidden={true}
+              onClick={leaving ? undefined : dismiss}
+              className={`${
+                leaving ? "animate-scrim-out pointer-events-none" : "animate-scrim"
+              } fixed inset-0 ${LAYER.overlay} touch-none bg-fg/25 sm:hidden`}
+            />
+            <div
+              ref={drag.ref}
+              {...drag.bind}
+              onAnimationEnd={onAnimationEnd}
               className={`config-sheet pb-safe ${
                 leaving ? "animate-sheet-out" : "animate-sheet"
-              } flex w-full flex-col overflow-hidden overscroll-contain rounded-t-2xl border-t border-edge bg-surface shadow-2xl`}
+              } fixed inset-x-0 bottom-0 ${LAYER.overlay} flex w-full flex-col overflow-hidden overscroll-contain rounded-t-2xl border-t border-edge bg-surface shadow-2xl sm:hidden`}
             >
               <button
                 type="button"
-                onClick={toggleDetent}
+                onClick={() => settleTo(expanded ? "rest" : "full")}
                 aria-label={expanded ? "Collapse the menu" : "Expand the menu"}
                 aria-expanded={expanded}
                 className={`tap relative flex min-h-8 shrink-0 touch-none items-center justify-center ${TAP_GROW_Y}`}
@@ -651,7 +602,6 @@ function Select({
                 <span aria-hidden className="h-1 w-9 rounded-full bg-edge-strong" />
               </button>
               <div
-                ref={listRef}
                 // This copy owns the listbox role too, or the phone's option rows are orphans.
                 role="listbox"
                 className={`min-h-0 overscroll-contain px-1.5 pb-1.5 ${
@@ -661,7 +611,7 @@ function Select({
                 {sections([option, ...nested, ...narrow], "sheet")}
               </div>
             </div>
-          </div>,
+          </>,
           document.body,
         )}
     </div>

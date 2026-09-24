@@ -6,6 +6,7 @@ import {
   type ComponentType,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
+  type Ref,
   type RefObject,
 } from "react";
 import { AlertTriangle, Check, ChevronDown, ChevronRight, X } from "lucide-react";
@@ -196,7 +197,7 @@ export function Monogram({
 }: {
   name: string | null;
   glyph?: string;
-  size?: "sm" | "row" | "md" | "lg";
+  size?: "sm" | "rail" | "row" | "md" | "lg";
   className?: string;
 }): ReactNode {
   const letter = name === null ? "" : [...name.trim()][0]?.toUpperCase() ?? "";
@@ -207,7 +208,9 @@ export function Monogram({
         ? "h-10 w-10 rounded-full text-lg"
         : size === "row"
           ? "h-8 w-8 rounded-full text-base"
-          : "h-7 w-7 rounded-md text-2xs font-semibold";
+          : size === "rail"
+            ? "h-8 w-8 rounded-md text-xs font-semibold"
+            : "h-7 w-7 rounded-md text-2xs font-semibold";
   return (
     <span
       aria-hidden="true"
@@ -666,6 +669,8 @@ const ICON_BUTTON_SIZE = {
   // One per row edge: two adjacent overlap by 12px of invisible target.
   nav: "relative h-8 w-8 [@media(pointer:coarse)]:after:absolute [@media(pointer:coarse)]:after:-inset-1.5 [@media(pointer:coarse)]:after:content-['']",
   lg: "h-11 w-11",
+  // The top bar's own way out on a phone, menu or back: a thumb's target and a glyph read at arm's length.
+  bar: "h-11 w-11",
 } as const;
 
 const ICON_BUTTON_GLYPH: Record<keyof typeof ICON_BUTTON_SIZE, number> = {
@@ -673,6 +678,7 @@ const ICON_BUTTON_GLYPH: Record<keyof typeof ICON_BUTTON_SIZE, number> = {
   chip: 14,
   nav: 16,
   lg: 16,
+  bar: 20,
 };
 
 const ICON_BUTTON_TONE: Record<ButtonTone, string> = {
@@ -697,6 +703,7 @@ export function IconButton({
   title,
   type = "button",
   className = "",
+  ref,
 }: {
   icon: ComponentType<{ size?: number | string; className?: string; "aria-hidden"?: boolean }>;
   label: string;
@@ -713,9 +720,11 @@ export function IconButton({
   title?: string;
   type?: "button" | "submit";
   className?: string;
+  ref?: Ref<HTMLButtonElement>;
 }): ReactNode {
   return (
     <button
+      ref={ref}
       type={type}
       onClick={onClick}
       disabled={disabled}

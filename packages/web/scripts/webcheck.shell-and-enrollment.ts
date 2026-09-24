@@ -184,11 +184,15 @@ process.stdout.write("\nwho owns Escape, and what paints above what\n");
   check("and gives the room back as it goes", /heightOut\.current\?\.\(0\)/.test(askCardSrc), true);
   check(
     "the transcript's own foot is what the card raises",
-    /paddingBottom: Math\.max\(TRANSCRIPT_FOOT_PX, askHeight \+ ASK_CLEARANCE\)/.test(eventListSrcForFoot),
+    /: Math\.max\(TRANSCRIPT_FOOT_PX, askHeight \+ ASK_CLEARANCE\)/.test(eventListSrcForFoot),
     true,
   );
   check("and the scroll box outside it pads nothing", /paddingBottom/.test(stripComments(sessionViewSrc)), false);
-  check("and chases the tail when it changes, which no resize reports", /\}, \[askHeight\]\);/.test(sessionViewSrc), true);
+  check(
+    "and a change of it is a commit of the transcript, which useFollow settles at the foot",
+    [/<Transcript[\s\S]*?askHeight=\{askHeight\}/.test(sessionViewSrc), /useFollow\(/.test(sessionViewSrc)],
+    [true, true],
+  );
   const composerSrc = stripComments(readFileSync(new URL("../src/ui/Composer.tsx", import.meta.url), "utf8"));
   const gutterOf = (src: string, after: string): string | null => {
     const at = src.indexOf(after);
@@ -301,7 +305,7 @@ process.stdout.write("\nnothing names a colour that no longer exists\n");
   );
   check("caution is one word on one chip, and never a fill", spendsCaution, ["tasks.ts: text-caution"]);
 
-  // No module changes the mouse except PaneHandle (col-resize); `files` includes .css, which srcFiles() does not.
+  // No module changes the mouse except PaneHandle (col-resize) and the session title; `files` includes .css, which srcFiles() does not.
   // The declaration arm needs a cursor value, never a bare `cursor:`, because wire.ts declares `cursor: number`.
   const CURSOR_VALUES =
     "pointer|default|not-allowed|text|move|grab|grabbing|wait|help|crosshair|" +
@@ -310,7 +314,8 @@ process.stdout.write("\nnothing names a colour that no longer exists\n");
   const cursorPattern = new RegExp(
     `\\bcursor\\s*[:=]\\s*["'\`]?(?:${CURSOR_VALUES})\\b|\\bcursor-(?:${CURSOR_VALUES})\\b`,
   );
-  const CURSOR_ALLOWED: readonly string[] = ["src/ui/PaneHandle.tsx"];
+  // The session title is the second, on the owner's word: a name edited in place shows the text caret (Q3.665).
+  const CURSOR_ALLOWED: readonly string[] = ["src/ui/PaneHandle.tsx", "src/ui/SessionView.tsx"];
   const cursorOffenders = files
     .filter((file) => cursorPattern.test(stripped(readFileSync(file, "utf8"))))
     .map((file) => file.slice(file.indexOf("/packages/web/") + "/packages/web/".length));
@@ -622,6 +627,25 @@ process.stdout.write("\nhow wide the rail is\n");
     ],
     [true, false],
   );
+  {
+    // Q3.666: macOS slides its menu bar over the top of a full-screen window, so the menu button reaches below it.
+    const menuAt = columnSrc.indexOf('aria-label="Menu"');
+    const menuButton = columnSrc.slice(menuAt, columnSrc.indexOf("</button>", menuAt));
+    check(
+      "the column's menu button is 56px tall, so its lower half clears the full-screen menu bar",
+      /\bh-14\b/.test(menuButton),
+      true,
+    );
+    check(
+      "and it is lit edge to edge as an entry is, never a rounded inset",
+      [/hover:bg-raised\/60/.test(menuButton), /\brounded-/.test(menuButton), /pt-safe shrink-0">/.test(columnSrc)],
+      [true, false, true],
+    );
+    const glyphAt = columnSrc.indexOf("function FlatMenuGlyph");
+    const glyph = columnSrc.slice(glyphAt, columnSrc.indexOf("\n}\n", glyphAt));
+    const [w, h] = [Number(/width="(\d+)"/.exec(glyph)?.[1] ?? 0), Number(/height="(\d+)"/.exec(glyph)?.[1] ?? 1)];
+    check("and its glyph is Telegram's flat three bars, half again as wide as tall", [/<FlatMenuGlyph \/>/.test(menuButton), w / h >= 1.5], [true, true]);
+  }
 
   check("a width inside the bounds is kept", clampRailWidth(360), 360);
   check("too narrow is refused rather than allowed", clampRailWidth(10), RAIL_MIN);
@@ -782,13 +806,19 @@ process.stdout.write("\nthe menu, the machines and the build\n");
   );
   check("so a drawer on the stack silences the bare-letter shortcuts", shortcutsEnabled([{ id: 91, kind: "sheet" }]), false);
   const layerActive = /useDismissible\("sheet",\s*onClose,\s*([A-Za-z_$][\w$]*)\)/.exec(drawer)?.[1] ?? "";
-  const mountGuard = /if \(!([A-Za-z_$][\w$]*)\) return null;/.exec(drawer)?.[1] ?? "";
+  const mountGuard = /if \(!([A-Za-z_$][\w$]*) && !pulled\) return null;/.exec(drawer)?.[1] ?? "";
   report(
     "the layer's lifetime and the panel's were both found",
     layerActive.length > 0 && mountGuard.length > 0,
-    `layer on ${layerActive}, mounted on ${mountGuard}`,
+    `layer on ${layerActive}, mounted on ${mountGuard} or while pulled`,
   );
   check("the sheet layer lives exactly as long as the panel it covers the app with", layerActive, mountGuard);
+  // Q3.657: pulled from the list it is drawn and not yet a layer, so nothing goes inert under a finger that may give it back.
+  check(
+    "and the one other time it is drawn, a pull, it is not a layer",
+    /const pulled = useSyncExternalStore\(subscribePull, isPulled\);/.test(drawer),
+    true,
+  );
 
   // No close button in the drawer head, by the owner's call; the remaining exits are asserted to work (Q3.628).
   const CLOSER = /<IconButton[^>]*?label="Close[^"]*"[\s\S]{0,240}?\/>/;
@@ -865,15 +895,18 @@ process.stdout.write("\nthe menu, the machines and the build\n");
     [/animate-drawer/.test(drawer), /animate-scrim/.test(drawer), /bg-fg\/25/.test(drawer)],
     [true, true, true],
   );
-  const sheetMs = /--animate-sheet:\s*sheet\s+(\d+)ms/.exec(css)?.[1] ?? "";
-  const drawerMs = /--animate-drawer:\s*drawer\s+(\d+)ms/.exec(css)?.[1] ?? "";
-  report("both movements were found in the stylesheet", sheetMs.length > 0 && drawerMs.length > 0, `sheet ${sheetMs}ms, drawer ${drawerMs}ms`);
-  check("and the drawer travels on the sheet's clock", drawerMs, sheetMs);
+  const sheetMs = /--animate-sheet:\s*sheet\s+(var\(--sheet-ms\) var\(--sheet-ease\))/.exec(css)?.[1] ?? "";
+  const drawerMs = /--animate-drawer:\s*drawer\s+(var\(--sheet-ms\) var\(--sheet-ease\))/.exec(css)?.[1] ?? "";
+  report("both movements were found in the stylesheet", sheetMs.length > 0 && drawerMs.length > 0, `sheet ${sheetMs}, drawer ${drawerMs}`);
+  check("and the drawer travels on the sheet's clock and curve", drawerMs, sheetMs);
   check("its keyframe moves on the inline axis", /@keyframes drawer \{\s*from \{\s*transform: translateX\(-100%\);/.test(css), true);
   check("and it does not try to leave by reversing its arrival", /animate-drawer[^"`]*\breverse\b/.test(drawer), false);
-  const outMs = /--animate-drawer-out:\s*drawer-out\s+(\d+)ms[^;]*\bboth\b/.exec(css)?.[1] ?? "";
+  const outMs = /--animate-drawer-out:\s*drawer-out\s+var\(--sheet-ms\)[^;]*\bboth\b/.test(css)
+    ? (/--sheet-ms:\s*(\d+)ms;/.exec(css)?.[1] ?? "")
+    : "";
   report("the departure was found, and it fills forwards", outMs.length > 0, `${outMs}ms both`);
-  const waitMs = /DRAWER_EXIT_MS = (\d+);/.exec(drawer)?.[1] ?? "";
+  const { SHEET_MS } = await import("../src/ui/sheetMotion.js");
+  const waitMs = /useLeaving\(open, SHEET_MS\)/.test(drawer) ? String(SHEET_MS) : "";
   check("the panel waits exactly as long as the movement it is playing", waitMs, outMs);
   check(
     "and the scrim leaves with it rather than blinking out",
@@ -895,11 +928,14 @@ process.stdout.write("\nthe menu, the machines and the build\n");
     ],
     [true, false, true],
   );
-  const drawerCalls = /useLeaving\(open, DRAWER_EXIT_MS\)/.test(drawer);
-  const panelCalls = /useLeaving\(open, TASK_PANEL_EXIT_MS\)/.test(
+  const drawerCalls = /useLeaving\(open, SHEET_MS\)/.test(drawer);
+  const panelCalls = /useLeaving\(open, SHEET_MS\)/.test(
     stripComments(readFileSync(new URL("../src/ui/TaskPanel.tsx", import.meta.url), "utf8")),
   );
-  check("and both surfaces that keep a layer past its close are callers", [drawerCalls, panelCalls], [true, true]);
+  const pickerCalls = /useLeaving\(open, SHEET_MS\)/.test(
+    stripComments(readFileSync(new URL("../src/ui/AgentConfigBar.tsx", import.meta.url), "utf8")),
+  );
+  check("and all three surfaces that keep a layer past its close are callers", [drawerCalls, panelCalls, pickerCalls], [true, true, true]);
 
   const destinations = [...drawer.matchAll(/go\(([A-Za-z_$][\w$]*\([^)]*\))\)/g)].map((m) => m[1]);
   check("the drawer's destinations, in order and no others", destinations, [
@@ -1046,6 +1082,12 @@ process.stdout.write("\nthe menu, the machines and the build\n");
   const deskTrigger = TRIGGER.exec(column)?.[0] ?? "";
   check("the list header opens the menu, and so does the machine column", [phoneTrigger.length > 0, deskTrigger.length > 0], [true, true]);
   check("the list header's copy is withdrawn where the column draws one", /lg:hidden/.test(phoneTrigger), true);
+  const headerSrc = stripComments(readFileSync(new URL("../src/ui/Header.tsx", import.meta.url), "utf8"));
+  check(
+    "and on a phone it is the top bar's size, as the conversation's back is: a thumb's target, not a chip",
+    [/size="bar"/.test(phoneTrigger), /label="Back to sessions"[\s\S]{0,120}?size="bar"/.test(headerSrc)],
+    [true, true],
+  );
   check("and the column's needs no breakpoint, being inside the lg aside", /\blg:/.test(deskTrigger), false);
 
   report("the call sweep can see one", /machineTabs\(/.test("machineTabs(groups, view)"), "positive control");
@@ -1108,7 +1150,7 @@ process.stdout.write("\nthe menu, the machines and the build\n");
   check(
     "every gesture reaches it through the one hook, and no screen that draws one mounts it",
     sweptFor(/useTouchGesture[(<]/),
-    ["ui/machineDrag.ts", "ui/machineSwipe.ts", "ui/rowDrag.ts"].sort(),
+    ["ui/backSwipe.ts", "ui/machineDrag.ts", "ui/machineSwipe.ts", "ui/rowDrag.ts", "ui/sheetDrag.ts"].sort(),
   );
   check(
     "which registers both halves non-passive, on the node, from the ref callback",
@@ -1165,7 +1207,7 @@ process.stdout.write("\nthe menu, the machines and the build\n");
   const wire = stripComments(readFileSync(new URL("../src/wire.ts", import.meta.url), "utf8"));
   check(
     "a message on its way is drawn as work about to happen",
-    /const working = echo !== null \|\| \(snapshot !== null && showsWorking\(snapshot\)\);/.test(view),
+    /const working = echo !== null \|\| \(snapshot !== null && \(showsWorking\(snapshot\) \|\| deliversQueued\(snapshot\)\)\);/.test(view),
     true,
   );
   check("and the predicate it ORs stays a pure reading of the snapshot", /echo|Echo/.test(wire), false);
@@ -1271,14 +1313,18 @@ process.stdout.write("\nthe menu, the machines and the build\n");
   }
 
   const strip = stripComments(browser);
-  const tabInset = /min-h-11 items-center gap-1\.5 px-(\d+)/.exec(strip)?.[1] ?? "";
-  const markInset = /absolute inset-x-(\d+) -bottom-px/.exec(strip)?.[1] ?? "";
-  report("both insets were found to compare", tabInset.length > 0 && markInset.length > 0, `tab px-${tabInset}, mark inset-x-${markInset}`);
-  check("the mark under a tab is as wide as the tab's own content box", markInset, tabInset);
-  check("All and the + share that inset", (strip.match(new RegExp(`px-${tabInset}\\b`, "g")) ?? []).length >= 3, true);
+  // Q3.656: a tab's label sits in its pill, so its inset is the tab's padding plus the pill's, and the + keeps it whole.
+  const tabPad = Number(/min-h-11 (?:shrink-0 )?items-center px-(\d+) text-xs/.exec(strip)?.[1] ?? Number.NaN);
+  const pillPad = Number(/inline-flex h-8 items-center gap-1\.5 rounded-full px-(\d+)/.exec(strip)?.[1] ?? Number.NaN);
+  const plusPad = Number(/min-h-11 shrink-0 items-center justify-center px-(\d+)/.exec(strip)?.[1] ?? Number.NaN);
+  const tabInset = String(tabPad + pillPad);
+  report("all three insets were found to compare", [tabPad, pillPad, plusPad].every(Number.isFinite), `tab px-${tabPad} + pill px-${pillPad}, + px-${plusPad}`);
+  check("a label sits as far in as the + does, tab and pill together", tabPad + pillPad, plusPad);
+  check("and All and every machine tab spell it the same way", (strip.match(new RegExp(`items-center px-${tabPad} text-xs`, "g")) ?? []).length, 2);
   check("the cut edge fades by twice a tab's inset", /w-8 bg-gradient-to-l/.test(strip) && Number(tabInset) * 2 === 8, true);
   const { MACHINE_COLUMN_PX: columnPx } = await import("../src/ui/rail.js");
-  check("widening the phone's tabs did not widen the desktop column", columnPx, 72);
+  // 80 is the owner's Telegram-width column (Q3.666); the phone's tabs still never move it.
+  check("widening the phone's tabs did not widen the desktop column", columnPx, 80);
   check("and the two insets are not one number by accident", new RegExp(`px-${tabInset}\\b`).test(stripComments(column)), false);
 
   const swipe = stripComments(readFileSync(new URL("../src/ui/machineSwipe.ts", import.meta.url), "utf8"));
@@ -1296,28 +1342,42 @@ process.stdout.write("\nthe menu, the machines and the build\n");
     [/useTouchGesture</.test(swipe), /addEventListener\("touch/.test(swipe)],
     [true, false],
   );
+  // Q3.655: a pager rather than a nudge, so what these pin is the one clock, the one timer and a turn that commits in one task.
   check(
-    "a live follow is never transitioned, and the settle's timer can be taken back",
+    "a live follow is never transitioned, only held at none, and the settle runs on the sheets' clock",
     [
-      /const slide = \(by: number\): void => \{[\s\S]{0,200}unsettle\(node\)/.test(swipe),
-      /const settling = useRef<number \| null>\(null\);/.test(swipe),
-      /window\.clearTimeout\(settling\.current\)/.test(swipe),
-      /settling\.current = window\.setTimeout\(/.test(swipe),
+      /function lift\(node: HTMLElement \| null\): void \{\s+if \(node === null\) return;\s+node\.style\.transition = "none";\s+node\.style\.willChange = "transform";/.test(swipe),
+      /node\.style\.transition = settleTransition\(\["transform"\]\)/.test(swipe),
+      /settling\.current = \{ timer: window\.setTimeout\(rest, SHEET_MS\), from, pillFrom \};/.test(swipe),
+      /style\.transition = ""/.test(swipe),
     ],
-    [true, true, true, true],
+    [true, true, true, false],
   );
   check(
-    "and the node going takes the pending clear with it",
-    /const wrapRef = useCallback\([\s\S]{0,300}window\.clearTimeout\(settling\.current\)/.test(swipe),
-    true,
+    "a new touch catches a turn still in flight, where it is drawn, and unmounting takes its timer and frame",
+    [
+      /const hold = \(\): boolean => \{\s+const pending = settling\.current;\s+const now = away\.current;\s+if \(pending === null \|\| now === null\) return false;\s+window\.clearTimeout\(pending\.timer\);/.test(swipe),
+      /window\.cancelAnimationFrame\(frame\.current\);\s+if \(settling\.current !== null\) window\.clearTimeout\(settling\.current\.timer\);/.test(swipe),
+    ],
+    [true, true],
   );
   const timers = (swipe.match(/window\.setTimeout\(/g) ?? []).length;
-  const held = (swipe.match(/settling\.current = window\.setTimeout\(/g) ?? []).length;
-  check("every timer the swipe starts is one it can cancel", [timers, held], [1, 1]);
-  const slideMs = Number(/const SETTLE_MS = (\d+);/.exec(swipe)?.[1] ?? "0");
-  const clearMs = Number(/const SETTLE_CLEAR_MS = (\d+);/.exec(swipe)?.[1] ?? "0");
-  report("both settle durations were found", slideMs > 0 && clearMs > 0, `slide ${String(slideMs)}ms, clear ${String(clearMs)}ms`);
-  check("the transition comes off after the slide it animates, not during it", clearMs > slideMs, true);
+  const held = [
+    /settling\.current = \{ timer: window\.setTimeout\(/.test(swipe),
+    /gap\.current\.timer = window\.setTimeout\(/.test(swipe),
+    /later\.current\.timer = window\.setTimeout\(/.test(swipe),
+  ];
+  check("every timer the swipe starts is one it can cancel: the page's settle, the gap's, and the mount after a settle's first frame", [timers, held], [3, [true, true, true]]);
+  check(
+    "and unmounting takes all three",
+    [/if \(gap\.current\?\.timer != null\) window\.clearTimeout\(gap\.current\.timer\);\s+cancelLater\(\);/.test(swipe), /if \(later\.current\.timer !== null\) window\.clearTimeout\(later\.current\.timer\);/.test(swipe)],
+    [true, true],
+  );
+  check(
+    "a turn commits, scrolls to the top and comes back to 0 in one task, so nothing paints between",
+    /flushSync\(\(\) => \{\s+selectMachine\(target\.id\);\s+mount\(NONE\);\s+\}\);\s+if \(page\.current !== null\) page\.current\.scrollTop = 0;\s+\}[\s\S]{0,200}?letGo\(page\.current\);/.test(swipe),
+    true,
+  );
   check("the swipe's slop is the hold's, by import rather than by coincidence", [/PRESS_SLOP/.test(swipe), /from "\.\/rowDrag"/.test(swipe)], [true, true]);
   check("and it stands down while a row drag owns the touch", /busy\.current\(\)/.test(swipe), true);
   check("the platform's own Back keeps its edge", /EDGE_DEAD_ZONE/.test(swipe), true);
@@ -1326,12 +1386,24 @@ process.stdout.write("\nthe menu, the machines and the build\n");
     [/selectMachine\(/.test(swipe), /navigate\(/.test(swipe), /startViewTransition/.test(swipe)],
     [true, false, false],
   );
-  check("and it clamps at both ends rather than wrapping", /Math\.min\(Math\.max\(/.test(swipe), true);
   check(
-    "the machine tabs mark the selected one with a rule rather than a fill",
-    [/function TabUnderline\(\)/.test(browser), /\{tab\.selected && <TabUnderline \/>\}/.test(browser), /rounded-full px-2\.5 text-xs/.test(browser)],
-    [true, true, false],
+    "and it clamps at both ends rather than wrapping",
+    /going\.offset = pageOffset\(going\.start \+ dx, going\.width, going\.at > 0, going\.at >= 0 && going\.at < tabsNow\.length - 1\);/.test(swipe),
+    true,
   );
+  // Q3.656 reverses the rule: `raised` is what Q3.209 spends on a tab you are on, and a pill is what the owner asked for.
+  check(
+    "the machine tabs mark the selected one with a raised pill, and the rule is gone",
+    [
+      /function TabLabel\(/.test(browser),
+      /data-tab-pill=\{tab\.id\}/.test(browser),
+      /\$\{tab\.selected \? "bg-raised" : ""\}/.test(browser),
+      /TabUnderline|data-tab-underline|-bottom-px h-0\.5/.test(browser),
+    ],
+    [true, true, true, false],
+  );
+  // A selected label that grew bolder grew wider, and the pill measured before the tap would land short of it.
+  check("and no label changes weight when it is selected, so a tab is one width either way", /selected \? "font-semibold/.test(browser), false);
   const nav = /<nav[^>]*className="([^"]*)"/.exec(column)?.[1] ?? "";
   report("the column's own element was found", nav.length > 0, nav);
   check("it is divided by a line and paints no ground of its own", [/border-r border-edge/.test(nav), /\bbg-/.test(nav)], [true, false]);

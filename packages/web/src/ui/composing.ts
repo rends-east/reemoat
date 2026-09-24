@@ -16,6 +16,14 @@ export function composerPlaceholder(state: {
   return state.hasCommands ? "Type / for commands" : "Message…";
 }
 
+/** On every field an agent reads: WebKit's smart quotes, dashes and text replacements all sit behind `spellcheck`, measured; `autocorrect` is a phone keyboard's (Q3.647). */
+export const VERBATIM_FIELD = { spellCheck: false, autoCorrect: "off" } as const;
+
+/** The blank lines around a message and the whitespace after it; the first line's indentation is content (Q3.646). */
+export function sentText(text: string): string {
+  return text.replace(/^\s*\n/, "").trimEnd();
+}
+
 /** A text control, contenteditable or open disclosure; shared with `AskCard` so both agree on what an interruption is. */
 export function focusWorthKeeping(active: unknown): boolean {
   if (active === null || typeof active !== "object") return false;

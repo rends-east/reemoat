@@ -2310,40 +2310,122 @@ if (member !== null) {
   );
 }
 
-// Android's adaptive foreground is the mark alone at 58% of the frame; its legacy rasters fill the frame.
-const DENSITIES = ["mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi"];
+// The mark's share of the shape a person sees, on every platform that masks: the favicon's `scale` of its own badge. Q4.128.
+const favicon = read("packages/web/public/favicon.svg");
+const MARK_SHARE = Number(capture(favicon, /scale\(([\d.]+)\)/) ?? "NaN");
+report("the mark's share was read off the favicon", MARK_SHARE > 0.6 && MARK_SHARE < 0.8, String(MARK_SHARE));
+// Android's adaptive layer is 108dp, a launcher's mask shows the centre 72dp, and only the centre 66dp circle survives every mask.
+const ADAPTIVE_DP = 108;
+const VIEWPORT_DP = 72;
+const SAFE_DP = 66;
+const DENSITIES: Record<string, number> = { mdpi: 1, hdpi: 1.5, xhdpi: 2, xxhdpi: 3, xxxhdpi: 4 };
 const ART_ASPECT = 170 / 192;
-for (const tree of [`${TAURI_DIR}/icons/android`, `${ANDROID_DIR}/app/src/main/res`]) {
-  const foreground = DENSITIES.map((density) => {
-    const img = png(`${tree}/mipmap-${density}/ic_launcher_foreground.png`);
-    const box = opaqueBox(img);
-    const share = box.height / img.height;
-    const aspect = box.width / box.height;
-    return share > 0.57 && share < 0.59 && Math.abs(aspect - ART_ASPECT) < 0.01 ? "the mark, inset to the safe zone" : `${String(box.width)}x${String(box.height)} of ${String(img.width)}`;
-  });
-  check(`${tree}: the adaptive foreground is the mark alone, not the badge`, foreground, DENSITIES.map(() => "the mark, inset to the safe zone"));
-  const legacy = DENSITIES.flatMap((density) =>
-    ["ic_launcher.png", "ic_launcher_round.png"].map((name) => {
-      const img = png(`${tree}/mipmap-${density}/${name}`);
-      const box = opaqueBox(img);
-      return box.width === img.width && box.height === img.height ? "full bleed" : `${String(box.width)} of ${String(img.width)}`;
-    }),
-  );
-  check(`${tree}: and the legacy rasters still fill their frame`, [...new Set(legacy)], ["full bleed"]);
+
+/** The light mark's box, whatever it sits on: #f9f8f6 on #1c1a16 or on nothing. */
+function markBox(img: Decoded): { x: number; y: number; width: number; height: number } {
+  let x0 = img.width;
+  let y0 = img.height;
+  let x1 = -1;
+  let y1 = -1;
+  for (let y = 0; y < img.height; y += 1) {
+    for (let x = 0; x < img.width; x += 1) {
+      const at = (y * img.width + x) * img.bpp;
+      const alpha = img.bpp === 4 ? (img.px[at + 3] ?? 0) : 255;
+      if (alpha <= 8 || (img.px[at] ?? 0) <= 128) continue;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+  }
+  return { x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 };
 }
 
+/** "ok", or what the mark measured against the side of the shape it should be that share of. Two pixels: an antialiased edge on each end. */
+const markShare = (img: Decoded, visible: number): string => {
+  const box = markBox(img);
+  const want = MARK_SHARE * visible;
+  return Math.abs(box.height - want) <= 2 ? "ok" : `${String(box.height)}px, want ${want.toFixed(1)}`;
+};
+
+const RES = `${ANDROID_DIR}/app/src/main/res`;
+const ANDROID_TREES = [`${TAURI_DIR}/icons/android`, RES];
+check(
+  "the Dock's tile holds the mark at the favicon's share",
+  markShare(png(`${TAURI_DIR}/icons/icon.png`), 1024 * (1 - 2 * MARGIN)),
+  "ok",
+);
+for (const tree of ANDROID_TREES) {
+  const foreground = Object.entries(DENSITIES).map(([density, d]) => {
+    const img = png(`${tree}/mipmap-${density}/ic_launcher_foreground.png`);
+    const box = opaqueBox(img);
+    const centre = img.width / 2;
+    let reach = 0;
+    for (let y = 0; y < img.height; y += 1) {
+      for (let x = 0; x < img.width; x += 1) {
+        if ((img.px[(y * img.width + x) * 4 + 3] ?? 0) <= 8) continue;
+        const dx = Math.max(Math.abs(x - centre), Math.abs(x + 1 - centre));
+        const dy = Math.max(Math.abs(y - centre), Math.abs(y + 1 - centre));
+        reach = Math.max(reach, Math.hypot(dx, dy));
+      }
+    }
+    const faults = [
+      img.width === ADAPTIVE_DP * d && img.height === img.width ? "" : `canvas ${String(img.width)}`,
+      img.bpp === 4 ? "" : "no alpha",
+      markShare(img, VIEWPORT_DP * d) === "ok" ? "" : `of the ${String(VIEWPORT_DP)}dp mask: ${markShare(img, VIEWPORT_DP * d)}`,
+      Math.abs(box.width / box.height - ART_ASPECT) < 0.03 ? "" : `aspect ${(box.width / box.height).toFixed(3)}`,
+      Math.abs(box.x + box.width / 2 - centre) <= 1 && Math.abs(box.y + box.height / 2 - centre) <= 1 ? "" : "off centre",
+      reach <= (SAFE_DP / 2) * d ? "" : `reaches ${(reach / d).toFixed(1)}dp of ${String(SAFE_DP / 2)}`,
+    ].filter(Boolean);
+    return faults.length === 0 ? "the mark, at the Dock's share of the mask" : `${density}: ${faults.join(", ")}`;
+  });
+  check(
+    `${tree}: the adaptive foreground is the mark alone, at the Dock's share of the 72dp mask and inside the safe circle`,
+    foreground,
+    Object.keys(DENSITIES).map(() => "the mark, at the Dock's share of the mask"),
+  );
+  const legacy = Object.entries(DENSITIES).flatMap(([density, d]) =>
+    ["ic_launcher.png", "ic_launcher_round.png"].map((name) => {
+      const rel = `${tree}/mipmap-${density}/${name}`;
+      const img = png(rel);
+      const box = opaqueBox(img);
+      // Ten percent in from the corner of the badge's box: inside a 22.5% corner, outside a circle.
+      const corner = img.px[((box.y + Math.round(box.height / 10)) * img.width + box.x + Math.round(box.width / 10)) * 4 + 3] ?? 0;
+      const shape = name === "ic_launcher.png" ? corner > 8 : corner <= 8;
+      const faults = [
+        img.width === 48 * d ? "" : `canvas ${String(img.width)}`,
+        inset(rel) === "inset" ? "" : inset(rel),
+        markShare(img, img.width * (1 - 2 * MARGIN)) === "ok" ? "" : markShare(img, img.width * (1 - 2 * MARGIN)),
+        shape ? "" : "the wrong shape",
+      ].filter(Boolean);
+      return faults.length === 0 ? "the Dock's tile" : `${density}/${name}: ${faults.join(", ")}`;
+    }),
+  );
+  check(`${tree}: and the legacy rasters are the Dock's tile, square and round`, [...new Set(legacy)], ["the Dock's tile"]);
+}
+check(
+  "and the two Android trees are the same bytes, file for file",
+  Object.keys(DENSITIES).flatMap((density) =>
+    ["ic_launcher_foreground.png", "ic_launcher.png", "ic_launcher_round.png"]
+      .map((name) => `mipmap-${density}/${name}`)
+      .filter((rel) => Buffer.compare(readFileSync(join(ROOT, ANDROID_TREES[0] ?? "", rel)), readFileSync(join(ROOT, RES, rel))) !== 0),
+  ),
+  [],
+);
+
 const stripXml = (text: string): string => text.replace(/<!--[\s\S]*?-->/g, "");
-for (const tree of [`${TAURI_DIR}/icons/android`, `${ANDROID_DIR}/app/src/main/res`]) {
+for (const tree of ANDROID_TREES) {
   const adaptive = stripXml(read(`${tree}/mipmap-anydpi-v26/ic_launcher.xml`));
   const colours = stripXml(read(`${tree}/values/ic_launcher_background.xml`));
   check(
-    `${tree}: the launcher's background is a colour, not a mipmap`,
+    `${tree}: the launcher is the mark over a colour, and Android 13 tints the same mark`,
     [
+      /<foreground android:drawable="@mipmap\/ic_launcher_foreground"\s*\/>/.test(adaptive),
       /<background android:drawable="@color\/ic_launcher_background"\s*\/>/.test(adaptive),
-      /@mipmap\/ic_launcher_background/.test(adaptive),
-      /<monochrome/.test(adaptive),
+      /<monochrome android:drawable="@mipmap\/ic_launcher_foreground"\s*\/>/.test(adaptive),
+      /@mipmap\/ic_launcher_(?:background|monochrome)/.test(adaptive),
     ],
-    [true, false, false],
+    [true, true, true, false],
   );
   check(
     `${tree}: and it is the badge colour the browser tab already uses`,
@@ -2352,7 +2434,6 @@ for (const tree of [`${TAURI_DIR}/icons/android`, `${ANDROID_DIR}/app/src/main/r
   );
 }
 
-const favicon = read("packages/web/public/favicon.svg");
 const faviconBars = [...favicon.matchAll(/<rect(?: x="([\d.]+)")?(?: y="([\d.]+)")? width="([\d.]+)" height="([\d.]+)" rx="([\d.]+)"\/>/g)].map(
   (m) => [Number(m[1] ?? 0), Number(m[2] ?? 0), Number(m[4])] as const,
 );
@@ -2374,14 +2455,22 @@ check("and the home-screen icon has no alpha to inset with", png("packages/web/p
 
 const generator = read(`${NATIVE}/scripts/icons.mjs`);
 check(
-  "the generator derives the mark from the favicon and states only the grid",
-  [/favicon\.svg/.test(generator), /100 \/ 1024/.test(generator), /185\.4 \/ 824/.test(generator), /BAR_WIDTH|16\.43/.test(generator)],
-  [true, true, true, false],
+  "the generator derives the mark from the favicon and states only the grids",
+  [
+    /favicon\.svg/.test(generator),
+    /100 \/ 1024/.test(generator),
+    /185\.4 \/ 824/.test(generator),
+    /\(108 - 72\) \/ 2 \/ 108/.test(generator),
+    /BAR_WIDTH|16\.43/.test(generator),
+  ],
+  [true, true, true, true, false],
 );
+// It draws both Android trees and writes no XML: the launcher XMLs stay hand-authored, since `tauri icon` rewriting them was the defect.
+const generatorCode = rustCode(generator);
 check(
-  "and it writes nothing under either Android tree",
-  [/icons\/android/.test(generator.replace(/\/\*\*[\s\S]*?\*\//g, "")), /gen\/android/.test(generator.replace(/\/\*\*[\s\S]*?\*\//g, ""))],
-  [false, false],
+  "and it writes both Android trees' rasters and no launcher XML",
+  [/"icons\/android"/.test(generatorCode), /"gen\/android\/app\/src\/main\/res"/.test(generatorCode), /\.xml/.test(generatorCode)],
+  [true, true, false],
 );
 
 const nativeScripts = (json(`${NATIVE}/package.json`)["scripts"] ?? {}) as Record<string, string>;
@@ -2551,6 +2640,44 @@ check(
   for (const name of ["SHELL", "TMPDIR"]) {
     check(`and ${name} reaches the daemon too`, new RegExp(`"${name}",`).test(start), true);
   }
+}
+
+process.stdout.write("\nwhat a keystroke becomes\n");
+{
+  // WebKit rewrites `"`, `--` and a text replacement as they are typed unless these read NO; registered, never set, so a person's own toggle still wins (Q3.647).
+  const lib = rustCode(read(`${TAURI_DIR}/src/lib.rs`));
+  const named = capture(lib, /const VERBATIM_TYPING: \[&std::ffi::CStr; 4\] = \[([^\]]*)\]/) ?? "";
+  check(
+    "the four substitutions WebKit reads first are named",
+    [...named.matchAll(/c"(\w+)"/g)].map((m) => m[1]).sort(),
+    [
+      "WebAutomaticDashSubstitutionEnabled",
+      "WebAutomaticQuoteSubstitutionEnabled",
+      "WebAutomaticSpellingCorrectionEnabled",
+      "WebAutomaticTextReplacementEnabled",
+    ],
+  );
+  const body = flat(between(lib, "fn leave_typing_alone()", "pub fn run()"));
+  check("the function was found", body !== "", true);
+  check(
+    "and every one is registered off",
+    [/numberWithBool: Bool::NO\]/.test(body), /let values = vec!\[off; keys\.len\(\)\];/.test(body), /registerDefaults: table\]/.test(body)],
+    [true, true, true],
+  );
+  check("never written, which would outrank a person's own choice", /setBool|setObject/.test(body), false);
+  check("and spell checking itself is left alone, since a mark alters nothing", /WebContinuousSpellChecking/.test(lib), false);
+  check(
+    "macOS only, where these keys mean something",
+    [/#\[cfg\(target_os = "macos"\)\] const VERBATIM_TYPING/.test(flat(lib)), /#\[cfg\(target_os = "macos"\)\] fn leave_typing_alone\(\)/.test(flat(lib))],
+    [true, true],
+  );
+  // The web process is handed the state when it starts, so this must run before any webview is built.
+  check(
+    "before anything else the shell does",
+    /pub fn run\(\) \{ #\[cfg\(target_os = "macos"\)\] leave_typing_alone\(\); tauri::Builder::default\(\)/.test(flat(lib)),
+    true,
+  );
+  check("and cargo test asks Foundation that it held", /fn a_keystroke_is_left_as_typed\(\)/.test(lib), true);
 }
 
 process.stdout.write(failures === 0 ? "\nall green\n\n" : `\n${failures} FAILED\n\n`);

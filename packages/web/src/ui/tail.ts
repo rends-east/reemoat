@@ -695,6 +695,50 @@ export function outstandingTasks(rows: readonly TailNode[], floor = 0): Outstand
   return out;
 }
 
+/** Where the working line's count starts again: a tool call, and the edges of a turn or a conversation (Q3.644). */
+function restartsStreamCount(event: SessionEvent): boolean {
+  return (
+    event.type === "tool_call" ||
+    event.type === "prompt" ||
+    event.type === "turn_end" ||
+    event.type === "context_cleared"
+  );
+}
+
+// Per event, the characters counted up to and including it; keyed on the object, so it dies with the transcript.
+const STREAMED_CHARS = new WeakMap<StoredEvent, number>();
+
+/** Agent text since the newest restart, thoughts included though never drawn; each event is counted once, so a token costs one step. */
+export function streamedSinceTool(events: readonly StoredEvent[]): number {
+  let at = events.length - 1;
+  let total = 0;
+  // A window that starts mid-run is counted but not remembered: history paging in underneath would make the memo short.
+  let anchored = false;
+  for (; at >= 0; at -= 1) {
+    const stored = events[at];
+    if (stored === undefined) break;
+    const known = STREAMED_CHARS.get(stored);
+    if (known !== undefined) {
+      total = known;
+      anchored = true;
+      break;
+    }
+    if (restartsStreamCount(stored.event)) {
+      STREAMED_CHARS.set(stored, 0);
+      anchored = true;
+      break;
+    }
+  }
+  for (let next = at + 1; next < events.length; next += 1) {
+    const stored = events[next];
+    if (stored === undefined) continue;
+    const event = stored.event;
+    if (event.type === "text" && event.role === "agent") total += event.text.length;
+    if (anchored) STREAMED_CHARS.set(stored, total);
+  }
+  return total;
+}
+
 /** Only changes, non-delegation foreground tool calls and known approvals fold; a backgrounded call stays out because run membership must depend on the log alone. */
 function foldable(node: TailNode, decisions: ReadonlyMap<string, PermissionOptionKind>): boolean {
   if (node.kind === "change") return true;

@@ -67,11 +67,11 @@ process.stdout.write("\nthe question an agent asked\n");
   );
   check("a follow-up box loses the sentence the grouping makes redundant", ask.steps[0]?.fields[1]?.hint, null);
   check("but the flat field list is untouched", ask.fields[1]?.hint !== null, true);
-  // Unbounded strings are one line: the commonest is the adapter's Other box.
+  // The adapter's Other box is an unformatted string, so it holds lines; it starts at one (Q3.652).
   check(
-    "an unbounded string field is a single line",
-    ask.fields[1]?.kind.k === "text" && ask.fields[1].kind.multiline,
-    false,
+    "the Other box may hold a newline, and starts one line tall",
+    ask.fields[1]?.kind.k === "text" ? [ask.fields[1].kind.multiline, ask.fields[1].kind.rows] : null,
+    [true, 1],
   );
 
   const renamed = elicitationForm(
@@ -160,12 +160,19 @@ process.stdout.write("\nthe question an agent asked\n");
     { key: "notes", kind: "string", title: "Notes", description: null, required: false, options: null, min: null, max: 4000, format: null, default: null },
   ];
   const mcp = elicitationForm(pendingOf("Configure the service.", 6), mcpFields);
-  check(
-    "a long maxLength is what makes a field multiline",
-    mcp.fields.find((f) => f.key === "notes")?.kind.k === "text" &&
-      (mcp.fields.find((f) => f.key === "notes")!.kind as any).multiline,
-    true,
-  );
+  const textKind = (form: typeof mcp, key: string): unknown => {
+    const kind = form.fields.find((f) => f.key === key)?.kind;
+    return kind?.k === "text" ? [kind.multiline, kind.rows] : kind?.k;
+  };
+  check("a long maxLength is what makes a box start three lines tall", textKind(mcp, "notes"), [true, 3]);
+  check("a short one still holds lines, and starts at one", textKind(mcp, "name"), [true, 1]);
+  // A format names one token, so its box is one line and Enter never has a newline to make there.
+  const formatted = elicitationForm(pendingOf("Where?", 2), [
+    { key: "mail", kind: "string", title: "Mail", description: null, required: true, options: null, min: null, max: 4000, format: "email", default: null },
+    { key: "site", kind: "string", title: "Site", description: null, required: true, options: null, min: null, max: null, format: "uri", default: null },
+  ] as any);
+  check("a formatted field is one line, however long it may be", [textKind(formatted, "mail"), textKind(formatted, "site")], [[false, 1], [false, 1]]);
+  check("and a number is a number", textKind(mcp, "port"), "number");
 
   check(
     "a multi-step form with no descriptions is titled per field",
@@ -608,7 +615,7 @@ process.stdout.write("\na question says how many of its answers you may pick\n")
   // The typed answer is painted by askRowTone, the option rows' own function, not by a matching class list.
   check("the typed answer is painted by the rows' own function", /askRowTone\(counted\)/.test(elicitationCode), true);
   check("and the option rows go through it too", /askRowTone\(option\.chosen === true\)/.test(askCode), true);
-  check("it carries the step's own mark", /<ChoiceMark mark=\{mark\} chosen=\{counted\} \/>/.test(elicitationCode), true);
+  check("it carries the step's own mark", /<ChoiceMark mark=\{mark\} chosen=\{counted\} className=\{MARK_RING\} \/>/.test(elicitationCode), true);
   // Picked means counted in the body, not text in the box.
   check("and it reads the body rather than the box", /chosen=\{typeof value === "string"/.test(elicitationCode), false);
   check("the mark comes from one rule", /mark=\{answerMark\(form, field\)\}/.test(elicitationCode), true);
@@ -712,4 +719,117 @@ process.stdout.write("\na question says how many of its answers you may pick\n")
     [/role=\{multi \? "checkbox" : undefined\}/.test(elicitationCode), /role="radio"/.test(elicitationCode)],
     [true, false],
   );
+}
+
+process.stdout.write("\na typed answer on the ask card draws no ring, and nothing on its row draws one outside it\n");
+{
+  const code = stripComments(readFileSync(new URL("../src/ui/ElicitationCard.tsx", import.meta.url), "utf8"));
+  const askCode = stripComments(readFileSync(new URL("../src/ui/AskCard.tsx", import.meta.url), "utf8"));
+  const css = stripComments(readFileSync(new URL("../src/index.css", import.meta.url), "utf8"));
+
+  // The premise: an unlayered rule beats every utility, so outline-none alone drew the ring anyway (Q3.645).
+  const ring = /\):not\(:where\(\.no-focus-ring\)\):focus-visible \{\s*outline: (\d+)px solid var\(--color-(\w+)\);\s*outline-offset: (\d+)px;/.exec(css);
+  check("the app's ring still declares the opt-out the card spends", ring !== null, true);
+  const noRing = /const NO_RING = "([^"]*)";/.exec(code)?.[1] ?? "";
+  // Measured in WebKit: no-focus-ring alone brings back its own blue ring, outline-none alone the app's.
+  check("the opt-out is both halves", noRing.split(" ").sort(), ["no-focus-ring", "outline-none"]);
+  const classesOf = (tag: string): string[] =>
+    (/className=\{?[`"]([^`"]*)[`"]\}?/.exec(tag)?.[1] ?? "").replace("${NO_RING}", noRing).split(/\s+/);
+  const boxes = [...code.matchAll(/<(?:input|textarea)\b[\s\S]*?\/>/g)].map((match) => match[0]);
+  check("the sweep found every element a typed box is drawn with", boxes.length >= 3, true);
+  check(
+    "and every one of them spends both halves",
+    boxes
+      .map(classesOf)
+      .filter((classes) => !["no-focus-ring", "outline-none"].every((name) => classes.includes(name)))
+      .map((classes) => classes.join(" ")),
+    [],
+  );
+  // The box you type your own answer in shrinks at 390px and the mark beside it does not.
+  const row = code.slice(code.indexOf("askRowTone(counted)"), code.indexOf("onToggle(!counted)"));
+  const typed = (/<TypedAnswer[\s\S]*?className="([^"]*)"/.exec(row)?.[1] ?? "").split(" ");
+  check("the typed answer is the row's shrinking half", ["min-w-0", "flex-1"].every((name) => typed.includes(name)), true);
+  check(
+    "the box looks the same focused and not, on the card and on the frame",
+    [/\bfocus(?:-within|-visible)?:/.test(code), /\bfocus(?:-within|-visible)?:/.test(askCode)],
+    [false, false],
+  );
+
+  // The mark's target is invisible and flush with the row, so the app's ring around it straddled the row's edge.
+  const markButton = /<button\n\s+type="button"\n\s+onClick=\{\(\) => onToggle\(!counted\)\}[\s\S]*?>/.exec(code)?.[0] ?? "";
+  check("the mark's target opts out of the ring", ["no-focus-ring", "outline-none"].every((name) => classesOf(markButton).includes(name)), true);
+  const markRing = (/const MARK_RING =\s*"([^"]*)";/.exec(code)?.[1] ?? "").split(" ").sort();
+  const [, width, colour, offset] = ring ?? [];
+  check(
+    "and the glyph draws the app's own ring, read off index.css",
+    markRing,
+    [`outline-${width}`, `outline-offset-${offset}`, `outline-${colour}`].map((name) => `[button:focus-visible_&]:${name}`).sort(),
+  );
+}
+
+process.stdout.write("\nyour own answer takes a line break, and Enter still moves the card on\n");
+{
+  const { answerKey } = await import("../src/keys.js");
+  const { elicitationForm, elicitationAnswer } = await import("../src/elicitation.js");
+  const code = stripComments(readFileSync(new URL("../src/ui/ElicitationCard.tsx", import.meta.url), "utf8"));
+
+  // The composer's rule, asked with a menu that is never open (Q3.652).
+  const enter = { key: "Enter" };
+  check(
+    "on a keyboard Enter moves the card on, and Shift+Enter is the newline",
+    [answerKey(enter, true), answerKey({ ...enter, shiftKey: true }, true)],
+    ["advance", null],
+  );
+  check("on a soft keyboard Enter is the newline, since there is no Shift", answerKey(enter, false), null);
+  check("an IME commit never moves the card on", answerKey({ ...enter, isComposing: true }, true), null);
+  check(
+    "nor does a chord, or any other key",
+    [answerKey({ ...enter, metaKey: true }, true), answerKey({ ...enter, ctrlKey: true }, true), answerKey({ key: "a" }, true)],
+    [null, null, null],
+  );
+
+  // Every box reads the pointer at the keystroke, as the composer does, and nothing else on the card reads Enter.
+  check(
+    "the card asks the rule with the pointer read at the keystroke",
+    /answerKey\(\s*\{ \.\.\.event, isComposing: event\.nativeEvent\.isComposing \},\s*!window\.matchMedia\("\(pointer: coarse\)"\)\.matches,?\s*\)/.test(code),
+    true,
+  );
+  check("and reads no Enter of its own", /"Enter"/.test(code), false);
+  const keyed = [...code.matchAll(/<(?:input|textarea)\b[\s\S]*?\/>/g)].filter((match) => /onKeyDown=\{\(event\) => advanceOnEnter\(event, onAdvance\)\}/.test(match[0]));
+  check("every box a person types into takes it", keyed.length, [...code.matchAll(/<(?:input|textarea)\b/g)].length);
+  // Enter and the button are one action behind one gate, so Enter can never do what the button would refuse.
+  check(
+    "Enter and Next/Submit share the action and its gate",
+    [/<AskAction tone="primary" onClick=\{advance\} disabled=\{advanceBlocked\}/.test(code), /onAdvance=\{advance\}/.test(code), /if \(advanceBlocked\) return;/.test(code)],
+    [true, true, true],
+  );
+
+  // Grown by the composer's own measure, which holds the row's height while it collapses to measure (Q3.649).
+  check(
+    "the box grows through fitToContent, before paint and on a resize",
+    [/useLayoutEffect\(\(\) => \{\s*if \(areaRef\.current !== null\) fitToContent\(areaRef\.current\);/.test(code), /window\.visualViewport\?\.addEventListener\("resize", refit\)/.test(code)],
+    [true, true],
+  );
+  check("and there is no second autosize", /scrollHeight|style\.height/.test(code), false);
+  // fitToContent writes scrollHeight, which leaves a border out: a bordered box would lose 2px of its last line.
+  const calls = [...code.matchAll(/<TypedAnswer[\s\S]*?className="([^"]*)"/g)].map((match) => match[1] ?? "");
+  check("the sweep found both places a box is drawn", calls.length, 2);
+  check("and neither draws a border of its own", calls.filter((classes) => !classes.split(" ").includes("border-none")), []);
+  check("the one under a question is a line level with its mark", /flex min-h-11 w-full items-start rounded-md border \$\{askRowTone\(counted\)\}/.test(code), true);
+
+  // What is sent keeps every line: only the blank lines before it and the whitespace after it go, as a message's do.
+  const pendingOf = (message: string, fieldCount: number): any => ({ elicitationId: "e", toolCallId: null, message, fieldCount, raisedAt: 1 });
+  const form = elicitationForm(pendingOf("Which picture?", 3), [
+    { key: "q", kind: "string", title: "Q", description: null, required: false, options: [{ value: "a", label: "a", description: null }], min: null, max: null, format: null, default: null, alternativeTo: null },
+    { key: "q_custom", kind: "string", title: "Other", description: null, required: false, options: null, min: null, max: null, format: null, default: null, alternativeTo: "q" },
+    { key: "mail", kind: "string", title: "Mail", description: null, required: false, options: null, min: null, max: null, format: "email", default: null },
+  ] as any);
+  const typed = "\n  моя картинка:\n\n  - вторая строка  \n";
+  check(
+    "a typed answer is sent with its lines and its first line's indentation",
+    elicitationAnswer(form, { q_custom: typed } as never).content["q_custom"],
+    "  моя картинка:\n\n  - вторая строка",
+  );
+  check("and a one-line value's ends still go", elicitationAnswer(form, { mail: "  a@b.c  " } as never).content["mail"], "a@b.c");
+  check("whitespace and newlines alone are still no answer", Object.keys(elicitationAnswer(form, { q_custom: " \n\n " } as never).content), []);
 }

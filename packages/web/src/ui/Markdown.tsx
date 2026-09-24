@@ -7,7 +7,7 @@ import { Icon, LINK } from "./bits";
 import { copyText } from "./clipboard";
 import { useFileAccess } from "./files";
 import { openableHref } from "./links";
-import { PAREN_LIST, remarkHardBreaks, remarkListDelimiter, remarkListItemBlocks } from "./mdlist";
+import { PAREN_LIST, remarkListDelimiter, remarkListItemBlocks } from "./mdlist";
 
 /** No rehype-raw: agent output is untrusted, and react-markdown's HTML escaping is the security boundary. */
 
@@ -102,14 +102,6 @@ const REMARK_PLUGINS: Parameters<typeof ReactMarkdown>[0]["remarkPlugins"] = [
   remarkListItemBlocks,
 ];
 
-/** Adds remarkHardBreaks for a person's own message, where a single newline is a line break rather than a soft break. */
-const USER_REMARK_PLUGINS: Parameters<typeof ReactMarkdown>[0]["remarkPlugins"] = [
-  remarkGfm,
-  remarkListDelimiter,
-  remarkListItemBlocks,
-  remarkHardBreaks,
-];
-
 /** Module scope is load-bearing: a fresh object per render would defeat MarkdownBody's memo. */
 const COMPONENTS: Parameters<typeof ReactMarkdown>[0]["components"] = {
   h1: ({ children }) => <h3 className="mt-3 mb-1 text-lg font-semibold first:mt-0">{children}</h3>,
@@ -174,20 +166,11 @@ const COMPONENTS: Parameters<typeof ReactMarkdown>[0]["components"] = {
 };
 
 /** The parse, memoised on the settled text below the throttle, which is the entire saving. */
-const MarkdownBody = memo(function MarkdownBody({
-  text,
-  body,
-  plugins,
-}: {
-  text: string;
-  body: string;
-  /** One of the two module-scope arrays above, never a fresh one. */
-  plugins: Parameters<typeof ReactMarkdown>[0]["remarkPlugins"];
-}): ReactNode {
+const MarkdownBody = memo(function MarkdownBody({ text, body }: { text: string; body: string }): ReactNode {
   return (
     // sel-root lives here because every markdown passes through this div; a flex container above it brings WebKit's selection fill back.
     <div className={`sel-root text-sm wrap-anywhere ${body}`}>
-      <ReactMarkdown remarkPlugins={plugins} components={COMPONENTS}>
+      <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={COMPONENTS}>
         {text}
       </ReactMarkdown>
     </div>
@@ -199,17 +182,11 @@ export const Markdown = memo(function Markdown({
   tone = "normal",
 }: {
   text: string;
-  /** `dim` is for thinking blocks, which are context rather than the answer. */
-  tone?: "normal" | "dim" | "user";
+  /** `dim` is for thinking blocks, which are context rather than the answer. A person's own message is never markdown: `Bubble.tsx`. */
+  tone?: "normal" | "dim";
 }): ReactNode {
   const body = tone === "dim" ? "text-muted" : "text-fg";
-  return (
-    <MarkdownBody
-      text={useSettledText(text)}
-      body={body}
-      plugins={tone === "user" ? USER_REMARK_PLUGINS : REMARK_PLUGINS}
-    />
-  );
+  return <MarkdownBody text={useSettledText(text)} body={body} />;
 });
 
 // Offers a download, never a preview, for a span naming a file this session touched.

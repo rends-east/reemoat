@@ -63,6 +63,11 @@ export function composerKey(event: KeyLike, menuOpen: boolean, enterSends: boole
   return enterSends && shouldSend(event) ? "send" : null;
 }
 
+/** The ask card's typed answer, on the composer's terms: Enter moves the card on where it would send, and is the newline on a soft keyboard (Q3.652). */
+export function answerKey(event: KeyLike, enterSends: boolean): "advance" | null {
+  return enterSends && shouldSend(event) ? "advance" : null;
+}
+
 /** No Cmd, Ctrl or Alt held and no IME composition; Shift is left to each caller. */
 export function isBareKey(event: KeyLike): boolean {
   return (

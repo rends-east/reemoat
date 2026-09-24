@@ -37,15 +37,17 @@ rather than replacing the label. De-emphasis in fill and border, never in text.
 twice and the disclosure sits *between* them. There is **no scrim** — Q3.39.
 
 **It moves nothing behind it, and the transcript is what makes that survivable.**
-Out of flow means `SessionView`'s `ResizeObserver` never sees it, so the last rows
+Out of flow means the transcript's `ResizeObserver` never sees it, so the last rows
 sat under it with no way out — folded too. The card reports `offsetHeight` through
 `onHeight` and `EventList` spends it as the foot of its column:
-`max(TRANSCRIPT_FOOT_PX, askHeight + ASK_CLEARANCE)`. Padding grows `scrollHeight`
+`max(TRANSCRIPT_FOOT_PX, askHeight + ASK_CLEARANCE)`; with no card the working
+line's kept room comes out of that 48px (Q3.653). Padding grows `scrollHeight`
 and leaves `clientHeight` alone, so nothing drawn moves and the tail scrolls clear.
 ⚠ **One number, never two that add up** — a second `paddingBottom` on the scroll
-box, over a column already ending in 48px, left a 56px hole. ⚠ **No resize fires for
-it**, so an effect keyed on `askHeight` chases the tail, only from the bottom.
-Q3.583, Q3.587.
+box, over a column already ending in 48px, left a 56px hole. It reports from layout
+effects, on mount and on every commit, so the room is there in the frame the card
+paints; `askHeight` is then a commit of the transcript, which `useFollow` pins.
+Q3.583, Q3.587, Q3.649.
 
 **The card is the width of the conversation, and one gutter makes it so.** `COLUMN`
 moves to the frame with `px-4`, the transcript's own; the panel is `w-full` in it,
@@ -56,6 +58,14 @@ the card overhung the rows by 32px and the box you type in overhung the card by 
 **`outline-none`**: this `tabIndex={-1}` dialog takes the caret when a request
 parks, so the *browser's* ring drew around every question, and `.no-focus-ring` is
 not the instrument — `index.css`'s rule never matched it. Q3.587, Q3.589.
+
+**A box you type in draws no ring, and it takes both opt-outs to say so.** A
+text control is the opposite case: it *does* match that rule, unlayered, so its
+`outline-none` lost and a dark rectangle drew 3px past the row's rounded edge on
+every click. ⚠ `.no-focus-ring` alone hands the box to WebKit's own blue ring —
+`NO_RING` is the pair, on every typed box, and the caret is the indicator; no
+`focus-within` on the row. The mark's target is flush with that edge, so its ring is
+drawn on the glyph (`MARK_RING`). Q3.645.
 
 **Cancelling is a ✕ at the top right, in its own group behind a hairline.** It was
 there once at `gap-1` — two identical 44px squares, one of which ends the request —
@@ -83,6 +93,18 @@ erased** — your own answer clears the *selection*, picking clears nothing, and
 `elicitationAnswer` stops *sending* an alternative while its question holds a value.
 The mark is a `<button>`, so the row is no longer a `<label>` forwarding taps into
 the box; off is `ask.ts`'s `excluded`. Q3.586, Q3.591, Q3.592.
+
+**Your own answer takes lines, and Enter follows the composer's rule.** A string with no
+`format` is a growing `<textarea>` (`TypedAnswer`, through `fitToContent`, starting
+at `rows`: three past 240 characters, else one). A format names one token and stays
+an `<input>`, and so does a number. `answerKey`: on a keyboard Enter is Next/Submit, sharing the
+button's action and its gate (`advanceBlocked`), and Shift+Enter is the newline; on
+a coarse pointer Enter is the newline and the button advances; an IME commit
+never advances. ⚠ **The box is borderless inside a bordered one**, because
+`fitToContent` writes `scrollHeight`, which leaves a border out. The row is
+`items-start`, so the mark stays level with the first line. What is sent keeps its lines, and a
+multi-line answer keeps its first line's indentation (`sentText`), which amends Q3.646's
+"trim it"; a single line is still trimmed. Q3.652.
 
 **Submit needs something to submit, `Next` owes an answer, Skip says nothing.**
 claude-agent-acp marks no `AskUserQuestion` field `required`, on purpose, so an
@@ -134,6 +156,11 @@ matched exactly; `order` is what is drawn, and the gap between them is the only
 place anything is dropped. **This reverses Q3.470's "nothing is deleted" for this
 one card** — curation on a measured shape rather than a length rule, with `null`
 still meaning the agent's own buttons. Q3.594.
+⚠ **Between turns it draws one.** A plan raised with no turn held (`outOfTurn` on
+the snapshot) loses the shape's `clearing` grant and the elevation is filled:
+0.73.0 cannot restart into a cleared context outside a turn, so that press would
+stop claude and continue nothing. No field from an older daemon means today's card.
+Q2.232.
 
 **Neither is given up as a capability, and that is the whole argument.** Declining
 has two routes on screen: the ✕ settles the request `cancelled`, and the message box
@@ -161,7 +188,9 @@ flight, and a prompt inside a turn is `409 turn_in_flight`. ⚠ The anecdote tha
 to justify it — *a refused plan does not end the turn* — was measured on 0.63.0 and
 is stale: 0.73.0 answers `reject` with `deny(…, interrupt: true)` and its own
 comment says that stops the ACP turn. The ordering survives; the reason for it
-changed under an adapter bump. All four flags are pinned as source text; a gate left reading
+changed under an adapter bump. ⚠ **With no turn at all it is the same call**:
+claude raises plans between turns, and the daemon's cancel dismisses one parked
+there rather than answering `no_turn` over it (Q2.232). All four flags are pinned as source text; a gate left reading
 `blocked || working` refuses the one send this state exists for. ⚠ **`awaitingPlan`
 is computed above `SessionView`'s guard clause and must stay there** — it holds a
 `useMemo`, and below the `if (row === undefined)` return it ran on some renders and
@@ -219,7 +248,11 @@ A layout is this app's problem and an option is the agent's. Q3.92, Q3.470.
 `optionLabel` substitutes our word only when the kind identifies the option;
 codex's two `allow_always` entries would both read "Always allow", which is the one
 rendering that must never happen — the scope is the whole difference between them.
-`webcheck` pins that it does.
+`webcheck` pins that it does. **A plan's options keep their names too**
+(`optionLabel`'s `plan`): a kind's word describes a grant, and grok's two distinct
+kinds would read *Allow once* and *Deny* over *Approve plan* and *Abandon plan*.
+`planControls` still curates claude's alone; grok's card is its own two buttons,
+and `revising` reaches it through `context.plan` like any plan. Q2.235.
 
 ## Layout
 

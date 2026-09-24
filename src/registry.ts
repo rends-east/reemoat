@@ -3,6 +3,9 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { AgentUnavailableError, type AgentId } from "./acp/agents.js";
 import {
   isTerminalAsyncTaskState,
+  keptOnDisk,
+  outlivingAgent,
+  withEarlierAgents,
   type AsyncTaskUsage,
   type BackgroundTask,
 } from "./acp/asynctasks.js";
@@ -191,7 +194,22 @@ export function revivableByPrompt(reason: ExitReason, agentSessionId: string | n
 const MAX_AGENT_STATE_BYTES = 64 * 1024;
 
 /** Reduced from the raw agentConfigState, never the composed snapshot; only unselected choices lose their descriptions. */
-export function reduceAgentState(config: AgentConfig, commands: AgentCommands): AgentStateMemory | null {
+export function reduceAgentState(
+  config: AgentConfig,
+  commands: AgentCommands,
+  tasks: readonly BackgroundTask[] = [],
+): AgentStateMemory | null {
+  // Bounded apart, so a long task list can never cost the controls their memory (Q2.234).
+  const kept = keptOnDisk(tasks);
+  const controls = reduceControls(config, commands);
+  if (kept.length === 0) return controls;
+  return {
+    ...(controls ?? { config: { modes: null, options: [] }, commands: { commands: [], dropped: 0 } }),
+    tasks: kept,
+  };
+}
+
+function reduceControls(config: AgentConfig, commands: AgentCommands): AgentStateMemory | null {
   // Nothing to remember is null: a stored empty pair makes restore tell clients to fetch an empty list.
   if (config.options.length === 0 && commands.commands.length === 0) return null;
   const reduced: AgentStateMemory = {
@@ -450,6 +468,8 @@ export interface PendingPermissionSnapshot {
   /** Carried here because kimi's tool_call event has rawInput null; both may be the truncated stand-in. */
   rawInput: unknown;
   content: unknown;
+  /** Raised with no turn held, where claude cannot restart a plan into a cleared context (Q2.232). */
+  outOfTurn: boolean;
 }
 
 export interface PendingElicitationSnapshot {
@@ -492,6 +512,9 @@ export interface SessionSnapshot {
   agentHandle: AgentHandle | null;
   turn: number | null;
   turnStartedAt: number | null;
+  /** When the agent began working with no turn held, or null; set only for an agent that marks where a cycle ends (Q2.233). */
+  unpromptedSince: number | null;
+  /** Also set by a cancel with no turn held, and cleared then when the unprompted work ends. */
   cancelRequestedAt: number | null;
   /** Not guaranteed empty on a steerable agent: a failed steer falls through to the queue. */
   queuedPrompts: QueuedPrompt[];
@@ -666,9 +689,9 @@ export type ClearResult =
   | { kind: "not_ready"; status: SessionStatus }
   | { kind: "terminal"; status: SessionStatus; exit: SessionExit | null };
 
-/** no_turn is a success; settled false means we stopped watching, not a failure. */
+/** no_turn is a success; settled false means we stopped watching, not a failure. turn is null for work nobody prompted (Q2.233). */
 export type CancelResult =
-  | { kind: "cancelled"; turn: number; settled: boolean }
+  | { kind: "cancelled"; turn: number | null; settled: boolean }
   | { kind: "no_turn"; status: SessionStatus }
   | { kind: "busy"; status: SessionStatus }
   | { kind: "not_ready"; status: SessionStatus }
@@ -865,8 +888,13 @@ export class ManagedSession {
   private unsubscribeUsage: (() => void) | null = null;
   // Read by parkable. An empty list with reportsBackgroundTasksState false means nobody asked.
   private backgroundTasksState: readonly BackgroundTask[] = [];
+  // Earlier agents' rows on this conversation, all finished; merged under the live agent's (Q2.234).
+  private earlierTasks: readonly BackgroundTask[] = [];
   private reportsBackgroundTasksState = false;
   private unsubscribeBackgroundTasks: (() => void) | null = null;
+  // Session's, mirrored like the two above so a stop can drop it without waiting on the agent.
+  private unpromptedSinceState: number | null = null;
+  private unsubscribeUnprompted: (() => void) | null = null;
 
   private readonly sessionStore: SessionStore | null;
   private readonly makeRoomForWake: (() => Promise<void>) | null;
@@ -939,7 +967,11 @@ export class ManagedSession {
     if (init.agentState != null) {
       this.agentConfigState = init.agentState.config;
       this.agentCommandsState = init.agentState.commands;
-      this.commandsRevisionValue = 1;
+      // A memory of tasks alone holds no list, and 0 is what keeps a client from fetching an empty one.
+      if (this.agentConfigState.options.length > 0 || this.agentCommandsState.commands.length > 0) {
+        this.commandsRevisionValue = 1;
+      }
+      this.earlierTasks = this.backgroundTasksState = init.agentState.tasks ?? [];
     }
     this.ultracodeChoice = init.ultracode ?? null;
     this.ultracodeDefault = options.ultracodeDefault ?? (() => false);
@@ -1031,6 +1063,8 @@ export class ManagedSession {
     if (this.stopRequested) return "stopping";
     if (this.awaitingCount > 0) return "blocked";
     if (this.turn !== null) return "running";
+    // Running means the agent is working, with or without a turn of ours (Q2.233).
+    if (this.unpromptedSinceState !== null) return "running";
     if (this.session === null) return "starting";
     return "idle";
   }
@@ -1071,17 +1105,33 @@ export class ManagedSession {
 
   /** Reads status, so blocked (an unanswered approval) is never reaped; a queue is no clause, since ending the turn delivers it. */
   wedged(now: number, silenceMs: number): boolean {
-    if (silenceMs <= 0) return false;
-    if (this.status !== "running") return false;
-    if (this.clearing || this.restarting) return false;
-    if (this.hasLiveBackgroundWork) return false;
-    // The agent's clock, never lastActivityAt, which a person's messages move; floored at turnStartedAt for a fresh turn.
-    const quietSince = Math.max(this.lastAgentEventAt ?? 0, this.turnStartedAt ?? 0);
-    return now - quietSince >= silenceMs;
+    if (this.turn === null) return false;
+    return this.silentFor(now, silenceMs, this.turnStartedAt ?? 0);
   }
 
   abandonTurn(): boolean {
     return this.session?.abandonTurn() ?? false;
+  }
+
+  /** wedged's clock for work nobody prompted, whose end marker an adapter may stop sending (Q2.233). */
+  unpromptedGoneQuiet(now: number, silenceMs: number): boolean {
+    if (this.turn !== null || this.unpromptedSinceState === null) return false;
+    return this.silentFor(now, silenceMs, this.unpromptedSinceState);
+  }
+
+  /** Writes nothing: no turn ends, so there is nothing for the log to say. */
+  endUnprompted(): void {
+    this.session?.endUnprompted();
+  }
+
+  private silentFor(now: number, silenceMs: number, since: number): boolean {
+    if (silenceMs <= 0) return false;
+    if (this.status !== "running") return false;
+    if (this.clearing || this.restarting) return false;
+    if (this.hasLiveBackgroundWork) return false;
+    // The agent's clock, never lastActivityAt, which a person's messages move; floored at the start for fresh work.
+    const quietSince = Math.max(this.lastAgentEventAt ?? 0, since);
+    return now - quietSince >= silenceMs;
   }
 
   private get hasLiveBackgroundWork(): boolean {
@@ -1158,6 +1208,7 @@ export class ManagedSession {
       agentHandle: this.agentHandle,
       turn: this.turn,
       turnStartedAt: this.turnStartedAt,
+      unpromptedSince: this.unpromptedSinceState,
       cancelRequestedAt: this.cancelRequestedAt,
       // Field by field, never a spread: QueuedEntry carries the message body and its uploads.
       queuedPrompts: this.queuedPrompts.map((entry) => ({ id: entry.id, seq: entry.seq, at: entry.at })),
@@ -1234,6 +1285,8 @@ export class ManagedSession {
     const session = this.session;
     if (!session) return { kind: "not_ready", status: this.status };
     if (this.turn !== null || this.clearing || this.restarting) return { kind: "busy", status: this.status };
+    // The agent is mid-cycle without a turn: clearing would decide that cycle's fate, which is Stop's to decide (Q2.232).
+    if (this.unpromptedSinceState !== null || this.awaitingCount > 0) return { kind: "busy", status: this.status };
 
     const seq = this.safeAppend({ type: "prompt", text, attachments: [] })?.seq ?? 0;
     // Set before the await: nothing else may address the agent while its session id is replaced.
@@ -1243,6 +1296,9 @@ export class ManagedSession {
     try {
       const moved = await session.clearContext();
       this.restoredAgentSessionId = moved.next;
+      // A cleared conversation is a new one, so no earlier agent's work belongs to it.
+      this.earlierTasks = [];
+      this.applyBackgroundTasks(session.backgroundTasks);
       this.safeAppend({
         type: "context_cleared",
         agentSessionId: moved.next,
@@ -1496,6 +1552,14 @@ export class ManagedSession {
       this.applyBackgroundTasks(tasks);
     });
 
+    // Unconditional for the same reason: a previous agent's cycle is not this one's.
+    this.unsubscribeUnprompted?.();
+    this.unpromptedSinceState = session.unpromptedSince;
+    this.unsubscribeUnprompted = session.onUnpromptedChanged((since) => {
+      if (this.session !== session) return;
+      this.applyUnprompted(since);
+    });
+
     this.safeAppend({ type: "status", status: "idle", exit: null });
     this.startIdleDrain(session);
     this.touchSafe();
@@ -1552,11 +1616,20 @@ export class ManagedSession {
     this.touchSafe();
   }
 
+  // Snapshot-only like cancelRequestedAt: an event per edge would put a row on screen for no act anybody did.
+  private applyUnprompted(since: number | null): void {
+    this.unpromptedSinceState = since;
+    // An out-of-turn cancel is answered by the work ending; a turn's own cancel is pump's to clear.
+    if (since === null && this.turn === null) this.cancelRequestedAt = null;
+    this.touchSafe();
+  }
+
   // Not logged, since anything recorded moves lastEventAt, which parkable measures; always assigned, fan-out gated.
   private applyBackgroundTasks(tasks: readonly BackgroundTask[]): void {
     const before = this.backgroundTasksState;
-    this.backgroundTasksState = tasks;
-    if (sameBackgroundTasks(before, tasks)) return;
+    const merged = withEarlierAgents(tasks, this.earlierTasks);
+    this.backgroundTasksState = merged;
+    if (sameBackgroundTasks(before, merged)) return;
     this.touchSafe();
   }
 
@@ -1683,11 +1756,11 @@ export class ManagedSession {
     }
   }
 
-  /** False while terminal, mid-turn, awaiting a permission, or at another process boundary; a getter so callers can count before acting. */
+  /** False while terminal, working, awaiting a permission, or at another process boundary; a getter so callers can count before acting. */
   get takesCredentialChange(): boolean {
     if (this.terminal || this.stopRequested) return false;
     if (this.session === null || this.agentSessionId === null) return false;
-    if (this.turn !== null) return false;
+    if (this.turn !== null || this.unpromptedSinceState !== null) return false;
     if (this.awaitingCount > 0) return false;
     return !this.clearing && !this.restarting;
   }
@@ -1834,8 +1907,17 @@ export class ManagedSession {
     if (abandoned > 0 && reason !== "parked") {
       this.safeAppend({ type: "error", message: stoppedWithBackgroundWork(abandoned), data: null });
     }
-    this.backgroundTasksState = [];
+    // Kept for every stop that keeps the conversation, with what was running marked stopped: its agent is gone (Q2.234).
+    this.earlierTasks = revivableByPrompt(reason, this.agentSessionId)
+      ? outlivingAgent(this.backgroundTasksState, Date.now())
+      : [];
+    this.backgroundTasksState = this.earlierTasks;
     this.reportsBackgroundTasksState = false;
+
+    // Whatever the agent was doing goes with the process.
+    this.unsubscribeUnprompted?.();
+    this.unsubscribeUnprompted = null;
+    this.unpromptedSinceState = null;
 
     // Bumped, never reset: the revision is a change marker clients compare.
     this.unsubscribeCommands?.();
@@ -2017,6 +2099,8 @@ export class ManagedSession {
     const turn = this.turnCounter;
     this.turn = turn;
     this.turnStartedAt = Date.now();
+    // A cancel of unprompted work that has not ended yet would otherwise end this turn in pump before it is sent.
+    this.cancelRequestedAt = null;
     // A new message re-arms one agent replacement; see onAgentUnusable.
     this.authRestartArmed = true;
     return turn;
@@ -2082,7 +2166,7 @@ export class ManagedSession {
     this.safeAppend({ type: "error", message: stoppedBeforeDelivery(dropped), data: null });
   }
 
-  /** Called last in pump's finally, since sweepPending is not turn-fenced; clearContext and restartAgent call it again on their way out. */
+  /** Called last in pump's finally; clearContext and restartAgent call it again on their way out. */
   private deliverQueued(): void {
     if (this.queuedPrompts.length === 0) return;
     if (this.terminal || this.stopRequested) return;
@@ -2107,7 +2191,7 @@ export class ManagedSession {
     // Before the turn test: a clear holds no turn and must answer busy, not no_turn.
     if (this.clearing || this.restarting) return { kind: "busy", status: this.status };
     const turn = this.turn;
-    if (turn === null) return { kind: "no_turn", status: this.status };
+    if (turn === null) return await this.cancelWithoutTurn(session);
 
     // Recorded before the await so a snapshot already shows the cancel.
     this.cancelRequestedAt = Date.now();
@@ -2126,6 +2210,28 @@ export class ManagedSession {
     // After the sweep: an agent blocked on a permission cannot end its turn until answered.
     const settled = await session.awaitTurnEnd();
     return { kind: "cancelled", turn, settled };
+  }
+
+  /** The same send, sweep, watch, for an agent working unprompted or waiting on a request no turn holds (Q2.232, Q2.233). */
+  private async cancelWithoutTurn(session: Session): Promise<CancelResult> {
+    const working = this.unpromptedSinceState !== null;
+    if (!working && this.awaitingCount === 0) return { kind: "no_turn", status: this.status };
+
+    if (working) this.cancelRequestedAt = Date.now();
+    this.touchSafe();
+
+    try {
+      await session.cancelTurn();
+    } catch {
+      // Unreachable agent: the sweep below still answers what it parked.
+    } finally {
+      // Fenced like the turn's: a turn that began during the send keeps what it parks.
+      if (this.turn === null) this.sweepPending("turn_cancelled");
+      this.touchSafe();
+    }
+
+    const settled = working ? await session.awaitUnpromptedEnd() : true;
+    return { kind: "cancelled", turn: null, settled };
   }
 
   /** Checks the id against announced tasks before it reaches the agent; not gated on the turn, since tasks outlive prompts. */
@@ -2195,11 +2301,11 @@ export class ManagedSession {
         // Not when queued: deliverQueued below claims the queue for a turn.
         if (live !== null && this.queuedPrompts.length === 0) this.startIdleDrain(live);
       }
-      this.sweepPending(failed ? "pump_failed" : "turn_ended");
+      // No sweep: a request is settled by an answer, a cancel, its withdrawal or the agent going, never by a turn ending (Q2.232).
       // A rejected prompt means the agent process is finished: replace it.
       if (failed) this.onAgentUnusable();
       this.touchSafe();
-      // Last: sweepPending is not turn-fenced, and a restart armed above drains the queue when it finishes.
+      // Last: a restart armed above drains the queue when it finishes.
       this.deliverQueued();
     }
   }
@@ -2228,7 +2334,7 @@ export class ManagedSession {
     request: PendingPermission,
     signal: AbortSignal,
   ): Promise<acp.RequestPermissionResponse> => {
-    // Refuse to park what nobody could answer: a dead session, or a request outside a turn.
+    // Refuse to park only what nobody could answer, a dead session: an agent working between turns is answerable (Q2.232).
     const refusal = this.refusalReason();
     if (refusal) return Promise.resolve(this.recordRefusal(request, refusal));
 
@@ -2241,6 +2347,7 @@ export class ManagedSession {
       raisedAt: Date.now(),
       rawInput: clampBlob(request.rawInput, MAX_PERMISSION_BLOB_BYTES),
       content: clampBlob(request.content, MAX_PERMISSION_BLOB_BYTES),
+      outOfTurn: this.turn === null,
     };
 
     // One statement in the executor: a throw there would reject while leaving the entry pending.
@@ -2275,7 +2382,6 @@ export class ManagedSession {
 
   private refusalReason(): AnswerResolvedBy | null {
     if (this.terminal || this.stopRequested) return "session_stopped";
-    if (this.turn === null) return "no_turn";
     return null;
   }
 
@@ -2372,7 +2478,7 @@ export class ManagedSession {
     return { outcome, optionId, seq };
   }
 
-  /** Both maps, so neither caller can leave an agent parked after its turn. */
+  /** Both maps. Only a stop and a cancel sweep: a turn ending is not an answer (Q2.232). */
   private sweepPending(by: AnswerResolvedBy): void {
     for (const permissionId of [...this.pending.keys()]) {
       this.settle(permissionId, CANCELLED, by);
@@ -2623,7 +2729,7 @@ export class ManagedSession {
       agentState:
         snapshot.exit !== null &&
         revivableByPrompt(snapshot.exit.reason, snapshot.agentSessionId)
-          ? reduceAgentState(this.agentConfigState, this.agentCommandsState)
+          ? reduceAgentState(this.agentConfigState, this.agentCommandsState, this.backgroundTasksState)
           : null,
     };
   }
@@ -2877,11 +2983,13 @@ export class SessionRegistry {
     return this.turnSilenceMs > 0;
   }
 
-  /** Synchronous and unpaced, since it only queues an event; returns ids for the operator line. */
+  /** Synchronous and unpaced, since it only queues an event; returns ids for the operator line, which names turns only. */
   abandonWedgedTurns(now = Date.now()): string[] {
     if (this.turnSilenceMs <= 0 || this.shuttingDown) return [];
     const abandoned: string[] = [];
     for (const session of this.sessions.values()) {
+      // Same clock, same bound: the evidence is the agent saying nothing, turn or not (Q2.233).
+      if (session.unpromptedGoneQuiet(now, this.turnSilenceMs)) session.endUnprompted();
       if (!session.wedged(now, this.turnSilenceMs)) continue;
       if (session.abandonTurn()) abandoned.push(session.id);
     }

@@ -259,6 +259,13 @@ process.stdout.write("\nthe composer's command menu\n");
   const withPrompt = typedConfigCommand("/plan I want to build a tg bot", modal as never);
   check("an argument after the name survives as the message", withPrompt?.rest, "I want to build a tg bot");
   check("and the mode is still what gets applied", withPrompt?.entry.value, "plan");
+  // The message after the name is sent as the box sends one: the separator goes, the first line's indentation stays (Q3.646).
+  check(
+    "a message on the lines below keeps its indentation",
+    typedConfigCommand("/plan\n    def f():\n        pass\n", modal as never)?.rest,
+    "    def f():\n        pass",
+  );
+  check("while the spaces after the name are only its separator", typedConfigCommand("/plan   do it  ", modal as never)?.rest, "do it");
 
   check("a control with no value is recognised too", typedConfigCommand("/mode", modal as never)?.entry.value, null);
 
@@ -1308,6 +1315,40 @@ process.stdout.write("\nthe orphan section, drawn and walked from one list\n");
     true,
   );
 
+
+  {
+    // Q3.665: the field takes the name's place, so opening it moves nothing.
+    const menuSrc = stripComments(readFileSync(new URL("../src/ui/SessionMenu.tsx", import.meta.url), "utf8"));
+    const viewSrc = stripComments(readFileSync(new URL("../src/ui/SessionView.tsx", import.meta.url), "utf8"));
+    const at = menuSrc.indexOf("export function RenameField");
+    const field = menuSrc.slice(at, menuSrc.indexOf("\n}\n", at));
+    const input = field.slice(field.indexOf("<input"), field.indexOf("/>", field.indexOf("<input")));
+    check(
+      "the rename box is one text line tall with the name's own inset, and its frame takes no room",
+      [
+        /h-\[var\(--text-sm--line-height\)\]/.test(input),
+        /\bpy-0\b/.test(input) && /\bborder-0\b/.test(input) && /\bpx-1\b/.test(input),
+        /\bring-1\b/.test(input),
+      ],
+      [true, true, true],
+    );
+    check("and the app's focus ring is off on it, both halves", /no-focus-ring/.test(input) && /outline-none/.test(input), true);
+    check(
+      "it hugs what is typed through a hidden copy in the same grid cell, never by spanning the row",
+      [/inline-grid/.test(field), /invisible col-start-1 row-start-1/.test(field), /\bflex-1\b/.test(input)],
+      [true, true, false],
+    );
+    check(
+      "and each caller lines its text up with the name it replaces",
+      [/onDone=\{\(\) => onRenaming\(false\)\}\s*className="lg:-ml-1"/.test(viewSrc), /onDone=\{\(\) => setRenaming\(false\)\}\s*className="-mx-1"/.test(stripComments(browser))],
+      [true, true],
+    );
+    check(
+      "the header's name shows the text caret, and it is the one in the app beside the separators",
+      /title="Rename this session"[\s\S]{0,200}?\bcursor-text\b/.test(viewSrc),
+      true,
+    );
+  }
 
   check("the rail's pinned section goes through the helper too", /\bpinnedFor\(groups, view\)/.test(browser), true);
   check("and never reaches past that one either", /groups\.pinned/.test(browser), false);

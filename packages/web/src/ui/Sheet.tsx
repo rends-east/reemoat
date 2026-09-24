@@ -5,6 +5,7 @@ import { navigate, sessionPath, useUnder } from "../router";
 import { sessionLists, store } from "../store";
 import { Icon, IconButton, SHEET_BODY, SHEET_HEAD, SHEET_PANEL, TAP_GROW_Y } from "./bits";
 import { LAYER, useDismissible } from "./overlay";
+import { useSheetGesture, useSlideSheet } from "./sheetDrag";
 
 /** Portals to `document.body`, so `position: fixed` escapes the app's `backdrop-blur` ancestors and there is nothing to outrank. */
 export function Sheet({
@@ -32,10 +33,16 @@ export function Sheet({
   const under = useUnder();
   const headingId = useId();
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const grabber = useRef<HTMLSpanElement | null>(null);
+  const scrimRef = useRef<HTMLElement | null>(null);
 
   const close = onClose ?? ((): void => navigate(under, true));
 
   useDismissible("sheet", close, true);
+  // From anywhere on the panel or its scrim, as the pickers; the grabber is sm:hidden, so the centred card never drags.
+  // The scrim is the panel's parent and does not fade with a drag, or the panel would fade too (Q3.650).
+  const geometry = useSlideSheet(panelRef, "down", close);
+  const drag = useSheetGesture<HTMLDivElement>({ axis: "down", enabled: true, geometry, gate: grabber, held: panelRef, scrim: scrimRef });
 
   // Declared before the focus-taking effect so it records the trigger first; `[]` so it restores only on close.
   useEffect(() => {
@@ -53,6 +60,8 @@ export function Sheet({
 
   return createPortal(
     <div
+      ref={drag.scrim.ref}
+      {...drag.scrim.bind}
       data-sheet-scrim=""
       className={`animate-scrim fixed inset-0 ${LAYER.overlay} flex touch-manipulation flex-col justify-end bg-fg/25 sm:items-center sm:justify-center sm:p-6`}
       onClick={(event) => {
@@ -60,7 +69,8 @@ export function Sheet({
       }}
     >
       <div
-        ref={panelRef}
+        ref={drag.ref}
+        {...drag.bind}
         role="dialog"
         aria-modal="true"
         aria-labelledby={labelledBy ?? headingId}
@@ -68,7 +78,8 @@ export function Sheet({
         data-sheet-panel=""
         className={`${SHEET_PANEL} outline-none`}
       >
-        <div className={SHEET_HEAD}>
+        <div className={`${SHEET_HEAD} relative touch-none`}>
+          <span ref={grabber} aria-hidden className="absolute top-1.5 left-1/2 h-1 w-9 -translate-x-1/2 rounded-full bg-edge-strong sm:hidden" />
           {up !== undefined && (
             <IconButton
               icon={ChevronLeft}

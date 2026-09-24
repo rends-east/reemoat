@@ -10,11 +10,9 @@ export function hugWidth(lineWidths: readonly number[], chrome: number): number 
   return Math.ceil(widest) + chrome;
 }
 
-/** False when a child is laid out to the box or scrolls, since hugging would clip it. */
+/** False when a child is laid out to the box, since hugging would clip it: the attachment chips and an image. */
 export function huggable(bubble: Element): boolean {
-  if (bubble.querySelector("ul, img") !== null) return false;
-  if (bubble.querySelector("pre, table") !== null) return false;
-  return true;
+  return bubble.querySelector("ul, img") === null;
 }
 
 // One observer on each bubble's full-width row, so a column resize reaches every bubble.

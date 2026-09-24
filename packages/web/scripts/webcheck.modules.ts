@@ -80,8 +80,18 @@ export const {
   withChoice,
   effortFollowUp,
 } = await import("../src/ui/agentConfig.js");
-export const { acceptsMidTurn, canCancelTurn, cancelInFlight, hasLiveAgent, isTerminal, needsHuman, queuedSeqs, showsWorking } =
-  await import("../src/wire.js");
+export const {
+  acceptsMidTurn,
+  canCancelTurn,
+  cancelInFlight,
+  hasLiveAgent,
+  isTerminal,
+  needsHuman,
+  queuedSeqs,
+  showsWorking,
+  workingUnprompted,
+  workStartedAt,
+} = await import("../src/wire.js");
 export const {
   TRANSCRIPT_SILENT,
   buildTail,
@@ -106,6 +116,7 @@ export const {
   supersedes,
   toolSummary,
   outstandingTasks,
+  streamedSinceTool,
   stillRunning,
   isDelegation,
   MAX_CHILDREN,
@@ -114,12 +125,15 @@ export const {
   composerPlaceholder,
   focusWorthKeeping,
   markKeyNav,
+  sentText,
   shouldFocusComposer,
   shouldReleaseComposer,
   takeKeyNav,
+  VERBATIM_FIELD,
 } = await import(
   "../src/ui/composing.js"
 );
 export const { hugWidth } = await import("../src/ui/hug.js");
+export const { FOOT_EXACT_PX, FOOT_SLACK_PX, followsAfterScroll, gapBelow, wheelLeavesFoot } = await import("../src/ui/follow.js");
 
 export type Stream = InstanceType<typeof SessionStream>;

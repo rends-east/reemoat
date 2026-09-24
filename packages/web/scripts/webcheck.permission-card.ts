@@ -344,6 +344,44 @@ process.stdout.write("\nthe permission card's context\n");
     ["Always Allow Read(//tmp/svgout/**), Read(//private/tmp/svgout/**)", "Allow once", "Deny"],
   );
 
+  // grok's plan card (Q2.235): two distinct kinds would otherwise read "Allow once" and "Deny" over approve and abandon.
+  const grokPlan = [
+    { optionId: "approved", name: "Approve plan", kind: "allow_once" },
+    { optionId: "abandoned", name: "Abandon plan", kind: "reject_once" },
+  ];
+  check(
+    "a plan's options keep their own names, where the same kinds on a grant take our words",
+    [
+      grokPlan.map((o) => optionLabel(grokPlan as never, o as never, true)),
+      grokPlan.map((o) => optionLabel(grokPlan as never, o as never)),
+    ],
+    [
+      ["Approve plan", "Abandon plan"],
+      ["Allow once", "Deny"],
+    ],
+  );
+  const grokPlanContext = permissionContext(
+    { ...base, toolCallId: "call-1", rawInput: { plan: "# Plan\n\nDo it." }, content: null } as never,
+    [],
+  );
+  check(
+    "and it is a plan card with no switch_mode, so claude's curation stands aside and the refusal stays on the left",
+    [
+      grokPlanContext.plan,
+      planControls(grokPlanContext, grokPlan as never),
+      permissionButtons(grokPlan as never).order.map((o) => o.optionId),
+      permissionButtons(grokPlan as never).primaryId,
+    ],
+    ["# Plan\n\nDo it.", null, ["abandoned", "approved"], "approved"],
+  );
+  check(
+    "the card asks the rule whether it is drawing a plan, by the context and nothing else",
+    /label: optionLabel\(pending\.options, option, context\.plan !== null\),/.test(
+      readFileSync(new URL("../src/ui/PermissionCard.tsx", import.meta.url), "utf8"),
+    ),
+    true,
+  );
+
   check(
     "an unknown kind is left alone, because there is no better version of it",
     optionLabel(
@@ -575,6 +613,11 @@ process.stdout.write("\nthe permission card's context\n");
     const context = permissionContext(planPending({ options: PLAN_OPTIONS }), [planCall("switch_mode")]);
     const controls = planControls(context, PLAN_OPTIONS as never);
     check("a measured plan request draws two controls", controls?.length, 2);
+    check(
+      "the older shape has no clearing grant, so between turns it is drawn unchanged",
+      planControls(context, PLAN_OPTIONS as never, true),
+      controls,
+    );
     check("in this order", controls?.map((c) => c.option.optionId), ["acceptEdits", "auto"]);
     check("and none of them is a refusal", controls?.map((c) => c.leading), [false, false]);
     check(
@@ -675,6 +718,15 @@ process.stdout.write("\nthe permission card's context\n");
       );
       check(`${mode}: the agent's own words would not have been buttons`, permissionLayout(options as never), "rows");
       check(`${mode}: and the agent's wording is kept as the tooltip`, controls?.map((c) => c.option.name).length, 2);
+
+      // Q2.232: raised with no turn held, the clearing grant would stop claude and restart nothing.
+      const between = planControls(ctx, options as never, true);
+      check(
+        `${mode}: raised between turns, only the elevation is drawn, and it is the filled one`,
+        between?.map((c) => [c.option.optionId, c.primary]),
+        [[elevateId, true]],
+      );
+      check(`${mode}: and inside a turn nothing changes`, planControls(ctx, options as never, false), controls);
 
       const renamed = options.map((o) => (o.optionId === clearId ? { ...o, optionId: `${clearId}x` } : o));
       check(
@@ -1046,4 +1098,9 @@ process.stdout.write("\nthe two truncation sentences\n");
   );
   // Asserted as an absence over comment-stripped source, so prose quoting the old sentence cannot match.
   check("and the fixed one it replaced is gone from the card's markup", cardSrc.includes("too large to keep"), false);
+  check(
+    "the plan curation is told whether the request was raised between turns",
+    /planControls\(context, pending\.options, outOfTurn\)/.test(cardSrc) && /outOfTurn = pending\.outOfTurn === true/.test(cardSrc),
+    true,
+  );
 }

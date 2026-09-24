@@ -1,5 +1,6 @@
 /** Pure so webcheck can assert it. Nothing here reads a field's name: adapter key names are not a contract. */
 
+import { sentText } from "./ui/composing";
 import { MAX_ANSWER_CHARS } from "./wire";
 import type { ElicitationField, ElicitationOption, PendingElicitationSnapshot } from "./wire";
 
@@ -13,7 +14,16 @@ export type ElicitationDraft = Readonly<Record<string, DraftValue>>;
 export type ContentValue = string | number | boolean | string[];
 
 export type RenderKind =
-  | { k: "text"; multiline: boolean; format: ElicitationField["format"]; min: number | null; max: number | null }
+  | {
+      k: "text";
+      /** Whether the box may hold a newline: every string but one whose format is a single token (Q3.652). */
+      multiline: boolean;
+      /** How many lines the box starts at; it grows from there. */
+      rows: number;
+      format: ElicitationField["format"];
+      min: number | null;
+      max: number | null;
+    }
   | { k: "number"; integer: boolean; min: number | null; max: number | null }
   | { k: "boolean" }
   | { k: "select"; options: ElicitationOption[] }
@@ -68,7 +78,7 @@ export interface ElicitationAnswer {
   canSubmit: boolean;
 }
 
-const MULTILINE_ABOVE = 240;
+const TALL_ABOVE = 240;
 
 /** One frozen instance, so a default argument cannot defeat a caller's `useMemo`. */
 const EMPTY_EXCLUSIONS: ReadonlySet<string> = Object.freeze(new Set<string>());
@@ -177,7 +187,8 @@ function toRenderField(field: ElicitationField): RenderField {
             ...base,
             kind: {
               k: "text",
-              multiline: field.max !== null && field.max > MULTILINE_ABOVE,
+              multiline: field.format === null,
+              rows: field.format === null && field.max !== null && field.max > TALL_ABOVE ? 3 : 1,
               format: field.format,
               min: field.min,
               max: field.max,
@@ -242,7 +253,9 @@ export function elicitationAnswer(
     switch (field.kind.k) {
       case "text": {
         if (typeof raw !== "string") break;
-        const value = raw.trim();
+        // Lines keep the first one's indentation, as a message does (Q3.646); a single line's ends are never content.
+        const lines = sentText(raw);
+        const value = lines.includes("\n") ? lines : lines.trim();
         const { min, max } = field.kind;
         if (min !== null && value.length < min) {
           fail(field.key, "too_short", `at least ${min} characters`);

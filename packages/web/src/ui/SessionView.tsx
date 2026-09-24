@@ -26,20 +26,24 @@ import {
   backgroundTasksOf,
   queuedSeqs,
   showsWorking,
+  deliversQueued,
   waitingCount,
+  workStartedAt,
   type BackgroundTask,
   type SessionSnapshot,
 } from "../wire";
 import { agentLabel } from "./agentCard";
+import { useBackSwipe } from "./backSwipe";
 import { Composer } from "./Composer";
+import { ConnectionPill } from "./ConnectionPill";
 import { EventList } from "./EventList";
+import { useFollow } from "./follow";
 import { FileAccessContext, type FileAccess } from "./files";
 import { saveBlob } from "./download";
 import { Header } from "./Header";
 import { ElicitationCard } from "./ElicitationCard";
 import { PermissionCard } from "./PermissionCard";
 import { RenameField, resumeSession, SessionMenu } from "./SessionMenu";
-import { CONTROL_PLANE_UNREACHABLE } from "./SessionBrowser";
 import { toast } from "./Toast";
 import { TASK_PANEL_GUTTER } from "./TaskPanel";
 import {
@@ -54,6 +58,9 @@ import {
 const EMPTY_QUEUE: ReadonlySet<number> = new Set();
 
 const EMPTY_TASKS: readonly BackgroundTask[] = [];
+
+/** The card frame's own 8px under the panel, and the pill's 12px off whatever it floats over. */
+const PILL_OVER_CARD_PX = 20;
 
 export function SessionView({ state, sessionRef }: { state: AppState; sessionRef: SessionRef }): ReactNode {
   const key = keyOf(sessionRef);
@@ -87,12 +94,14 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
   useEffect(() => setTasksOpen(false), [key]);
   const openTasks = useCallback(() => setTasksOpen(true), []);
   const closeTasks = useCallback(() => setTasksOpen(false), []);
+  // Opaque, because below lg a back swipe draws the list under it (Q3.663).
+  const back = useBackSwipe();
 
   if (row === undefined) {
     const why = missingRowReason(machine?.reach ?? null, state.listed.has(sessionRef.machineId));
     return (
-      <div className="flex min-h-0 flex-1 flex-col">
-        <Header title={<span className="text-base font-semibold">Session</span>} close />
+      <div ref={back.ref} onPointerDownCapture={back.press} className="flex min-h-0 flex-1 flex-col bg-surface">
+        <Header title={<span className="text-base font-semibold">Session</span>} close backRef={back.gate} />
         {why === "loading" ? (
           <div className={`${COLUMN} px-4 py-2`}>
             <TranscriptSkeleton />
@@ -112,14 +121,17 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
 
   const session = row.snapshot;
   const stream = transcript?.stream ?? null;
-  // The banner announces only `waiting`; the foot's `stale` is anything not live, since a handshake can sit in `connecting` indefinitely.
-  const reconnecting = stream?.phase === "waiting";
+  // Anything not live, since a handshake can sit in `connecting` indefinitely; the trouble itself is the pill's to say.
   const stale = stream === null || stream.phase !== "live";
 
 
   return (
     // `min-h-0` so the transcript scrolls; the gutter pads this column because the fixed panel displaces nothing.
-    <div className={`flex min-h-0 flex-1 flex-col ${tasksOpen ? TASK_PANEL_GUTTER : ""}`}>
+    <div
+      ref={back.ref}
+      onPointerDownCapture={back.press}
+      className={`flex min-h-0 flex-1 flex-col bg-surface ${tasksOpen ? TASK_PANEL_GUTTER : ""}`}
+    >
       <Header
         title={
           <>
@@ -138,17 +150,14 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
           </>
         }
         subtitle={
-          state.cpError !== null ? (
-            <span className="truncate">{CONTROL_PLANE_UNREACHABLE}</span>
-          ) : (
-            <WorkspaceLine
-              machineName={machineDisplayName({ id: sessionRef.machineId, name: row.machineName }, state.localMachineId)}
-              workspace={session.workspace}
-              roots={state.rootsByMachine.get(sessionRef.machineId) ?? []}
-            />
-          )
+          <WorkspaceLine
+            machineName={machineDisplayName({ id: sessionRef.machineId, name: row.machineName }, state.localMachineId)}
+            workspace={session.workspace}
+            roots={state.rootsByMachine.get(sessionRef.machineId) ?? []}
+          />
         }
         close
+        backRef={back.gate}
       >
         {/* At every width: Background tasks has no other door once nothing is outstanding. Q3.631. */}
         <SessionMenu
@@ -159,13 +168,7 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
         />
       </Header>
 
-      {/* Above the conversation region, so the absolute ask card cannot paint over them. */}
-      {reconnecting && (
-        <p className={`${COLUMN} px-4 py-1 text-center text-2xs text-muted`}>
-          reconnecting{stream.error === null ? "" : ` — ${stream.error}`}
-        </p>
-      )}
-
+      {/* Above the conversation region, so the absolute ask card cannot paint over it. */}
       <ExitNotice row={row} machineName={row.machineName} />
 
       <div className="relative flex min-h-0 flex-1 flex-col">
@@ -202,6 +205,17 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
               onHeight={setAskHeight}
             />
           ))}
+
+        {/* Below lg only, where no list is on screen; above it the list's pill reads this conversation too. Lifted over a card. */}
+        <div className="contents lg:hidden">
+          <ConnectionPill
+            state={state}
+            openKey={key}
+            machines={[sessionRef.machineId]}
+            placement="bottom-3 left-3"
+            style={askHeight > 0 ? { bottom: askHeight + PILL_OVER_CARD_PX } : undefined}
+          />
+        </div>
       </div>
 
       <Composer
@@ -235,6 +249,7 @@ function SessionTitle({
         current={row.snapshot.title ?? null}
         placeholder={fallback}
         onDone={() => onRenaming(false)}
+        className="lg:-ml-1"
       />
     );
   }
@@ -243,7 +258,8 @@ function SessionTitle({
     <button
       onClick={() => onRenaming(true)}
       title="Rename this session"
-      className="tap min-w-0 truncate rounded-sm px-1 text-left text-sm hover:bg-raised lg:-ml-1"
+      // The text caret says the name is edited in place, on the owner's word (Q3.665).
+      className="tap min-w-0 truncate rounded-sm px-1 text-left text-sm hover:bg-raised lg:-ml-1 cursor-text"
     >
       {sessionLabel(row, roots)}
     </button>
@@ -350,11 +366,11 @@ function Transcript({
   const hiddenFinishedIds = hiddenFinished(key);
 
   // Optimistic: an echo in flight counts as working, bounded by the echo's own lifetime; `showsWorking` itself stays pure.
-  const working = echo !== null || (snapshot !== null && showsWorking(snapshot));
+  const working = echo !== null || (snapshot !== null && (showsWorking(snapshot) || deliversQueued(snapshot)));
   const reporting = snapshot !== null && mayStillReport(snapshot);
-  const turnStartedAt = snapshot?.turnStartedAt ?? null;
+  const startedAt = snapshot === null ? null : workStartedAt(snapshot);
   // `elapsedSince` corrects for the device clock; never subtract the local time from a daemon stamp.
-  const turnElapsedMs = row === null || turnStartedAt === null ? null : elapsedSince(row, turnStartedAt);
+  const workElapsedMs = row === null || startedAt === null ? null : elapsedSince(row, startedAt);
   const transcript = state.transcripts.get(key);
 
   const queuedKey = (snapshot?.queuedPrompts ?? []).map((entry) => entry.seq).join(",");
@@ -417,111 +433,40 @@ function Transcript({
       },
     };
   }, [root, sessionRef.machineId, sessionRef.sessionId]);
-  const boxRef = useRef<HTMLDivElement | null>(null);
-  const [atBottom, setAtBottom] = useState(true);
-  const [scrolledDown, setScrolledDown] = useState(false);
-  const atBottomRef = useRef(true);
-  const lastHeight = useRef(0);
-  const count = transcript?.events.length ?? 0;
   const firstSeq = transcript?.events[0]?.seq ?? 0;
-  const lastFirstSeq = useRef(firstSeq);
-
-  useEffect(() => {
-    const box = boxRef.current;
-    if (box === null) return;
-    // History pages in unasked: when the oldest seq falls, shift by the growth so the reader's content stays put.
-    const grewAbove = firstSeq < lastFirstSeq.current;
-    lastFirstSeq.current = firstSeq;
-    const previous = lastHeight.current;
-    lastHeight.current = box.scrollHeight;
-
-    if (grewAbove && !atBottom) {
-      box.scrollTop += box.scrollHeight - previous;
-      return;
-    }
-    if (atBottom) box.scrollTop = box.scrollHeight;
-    // `working` is a row that grows the content without resizing the box, so only this re-pins it.
-  }, [count, firstSeq, atBottom, working]);
-
-  useEffect(() => {
-    if (tailRequest === 0) return;
-    const box = boxRef.current;
-    if (box === null) return;
-    atBottomRef.current = true;
-    setAtBottom(true);
-    box.scrollTop = box.scrollHeight;
-  }, [tailRequest]);
-
-  // A ResizeObserver catches every cause of a height change; only the parked-at-the-bottom case is chased.
-  useEffect(() => {
-    const box = boxRef.current;
-    if (box === null || typeof ResizeObserver === "undefined") return;
-    let previous = box.clientHeight;
-    const observer = new ResizeObserver(() => {
-      const height = box.clientHeight;
-      if (height === previous) return;
-      previous = height;
-      if (atBottomRef.current) box.scrollTop = box.scrollHeight;
-    });
-    observer.observe(box);
-    return () => observer.disconnect();
-  }, []);
-
-  // Padding is not a resize, so the observer misses `askHeight` changes.
-  useEffect(() => {
-    const box = boxRef.current;
-    if (box === null) return;
-    if (atBottomRef.current) box.scrollTop = box.scrollHeight;
-  }, [askHeight]);
-
-  useEffect(() => {
-    setAtBottom(true);
-    atBottomRef.current = true;
-    const box = boxRef.current;
-    if (box !== null) box.scrollTop = box.scrollHeight;
-  }, [key]);
-
-  const measure = useCallback((): void => {
-    const box = boxRef.current;
-    if (box === null) return;
-    const bottom = box.scrollHeight - box.scrollTop - box.clientHeight < 48;
-    atBottomRef.current = bottom;
-    setAtBottom(bottom);
-    setScrolledDown(box.scrollTop > 0);
-  }, []);
-
-  const remeasure = useCallback((): void => {
-    requestAnimationFrame(measure);
-  }, [measure]);
+  const { boxRef, contentRef, atBottom, scrolledDown, remeasure } = useFollow(key, firstSeq, tailRequest);
 
   return (
     <div className="relative min-h-0 flex-1">
       {/* `relative` keeps absolutely positioned descendants inside this scroller rather than overflowing `main`. */}
-      <div ref={boxRef} onScroll={measure} className="scroll-stable relative h-full overflow-y-auto">
-        {transcript !== undefined && (
-          <FileAccessContext.Provider value={files}>
-            <EventList
-              files={files}
-              echo={echo}
-              queued={queued}
-              transcript={transcript}
-              askHeight={askHeight}
-              working={working}
-              reporting={reporting}
-              stale={stale}
-              turnElapsedMs={turnElapsedMs}
-              background={background}
-              reportsTasks={backgroundReporting(snapshot)}
-              tasksOpen={tasksOpen}
-              onOpenTasks={onOpenTasks}
-              onCloseTasks={onCloseTasks}
-              onStopTask={onStopTask}
-              hiddenFinished={hiddenFinishedIds}
-              onClearFinished={onClearFinished}
-              onResized={remeasure}
-            />
-          </FileAccessContext.Provider>
-        )}
+      {/* Chrome's own anchoring would add a second shift to useFollow's history one; WebKit has none. */}
+      <div ref={boxRef} className="scroll-stable relative h-full overflow-y-auto [overflow-anchor:none]">
+        <div ref={contentRef}>
+          {transcript !== undefined && (
+            <FileAccessContext.Provider value={files}>
+              <EventList
+                files={files}
+                echo={echo}
+                queued={queued}
+                transcript={transcript}
+                askHeight={askHeight}
+                working={working}
+                reporting={reporting}
+                stale={stale}
+                workElapsedMs={workElapsedMs}
+                background={background}
+                reportsTasks={backgroundReporting(snapshot)}
+                tasksOpen={tasksOpen}
+                onOpenTasks={onOpenTasks}
+                onCloseTasks={onCloseTasks}
+                onStopTask={onStopTask}
+                hiddenFinished={hiddenFinishedIds}
+                onClearFinished={onClearFinished}
+                onResized={remeasure}
+              />
+            </FileAccessContext.Provider>
+          )}
+        </div>
       </div>
 
       {/* No backdrop blur here (a filter pass per scroll frame); `pointer-events-none` because it covers live controls. */}
@@ -534,7 +479,7 @@ function Transcript({
 
       {!atBottom && (
         <button
-          // No `setAtBottom` here: the pinning effect would cut the smooth scroll short, and `measure` flips it on arrival.
+          // Holds nothing: held, the next growth would pin and cut the smooth scroll short; arriving is what holds it (Q3.426).
           onClick={() => {
             const box = boxRef.current;
             if (box === null) return;

@@ -112,7 +112,7 @@ export const BACKGROUND_EMPTY: Record<BackgroundReporting, string> = {
   reports: "No tasks currently running",
   silent: "This agent doesn't report background work, so nothing here can say whether any is running.",
   unasked:
-    "Nothing has asked this session about background work yet. It is not kept across a restart, and an agent comes back when you send a message.",
+    "Nothing has asked this session about background work yet. Finished tasks outlast a clean restart but not a crash, and an agent comes back when you send a message.",
 };
 
 /** The finished band's label; the panel draws that band itself, so taskSections returns live kinds only. */

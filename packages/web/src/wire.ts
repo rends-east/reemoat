@@ -411,6 +411,8 @@ export interface PendingPermissionSnapshot {
   raisedAt: number;
   rawInput: unknown;
   content: unknown;
+  /** Absent from an older daemon, which read as raised in a turn. */
+  outOfTurn?: boolean;
 }
 
 export interface PendingElicitationSnapshot {
@@ -516,6 +518,8 @@ export interface SessionSnapshot {
   agentHandle: AgentHandle | null;
   turn: number | null;
   turnStartedAt: number | null;
+  // Absent from an older daemon, which cannot see the agent working between turns: read through workingUnprompted.
+  unpromptedSince?: number | null;
   cancelRequestedAt?: number | null;
   // Not always empty on a steerable agent: a failed steer falls back to this queue, so read it through queuedSeqs.
   queuedPrompts?: QueuedPrompt[];
@@ -580,8 +584,25 @@ export function showsAsEnded(session: SessionSnapshot): boolean {
   );
 }
 
+/** The agent working with no turn of ours, which claude does when background work it started comes back (Q2.233). */
+export function workingUnprompted(session: SessionSnapshot): boolean {
+  return (session.unpromptedSince ?? null) !== null;
+}
+
+/** When the work drawn as working began: the turn's start, else the unprompted work's. */
+export function workStartedAt(session: SessionSnapshot): number | null {
+  return session.turnStartedAt ?? session.unpromptedSince ?? null;
+}
+
+/** Widened to unprompted work safely: a daemon that sends it takes a message mid-work, so this no longer refuses Send (Q2.233). */
 export function showsWorking(session: SessionSnapshot): boolean {
-  return session.turn !== null && !needsHuman(session) && !isTerminal(session.status);
+  return (session.turn !== null || workingUnprompted(session)) && !needsHuman(session) && !isTerminal(session.status);
+}
+
+/** A message waits and nothing holds it: the daemon fans out a turnless snapshot just before handing it over, which is not idleness (Q3.653). */
+export function deliversQueued(session: SessionSnapshot): boolean {
+  const waiting = session.queuedPrompts?.length ?? 0;
+  return waiting > 0 && !needsHuman(session) && !isTerminal(session.status) && session.status !== "stopping";
 }
 
 /** Ignores turn on purpose and must not gate Send or Stop; stale pending calls are Tail.taskFloor's half. */
@@ -589,9 +610,10 @@ export function mayStillReport(session: SessionSnapshot): boolean {
   return !isTerminal(session.status) && session.status !== "stopping";
 }
 
-/** Wider than showsWorking by the blocked case; stopping is excluded because it lingers for seconds with a turn set. */
+/** Wider than showsWorking by the blocked case, turn or not (Q2.232); stopping is excluded because it lingers for seconds with a turn set. */
 export function canCancelTurn(session: SessionSnapshot): boolean {
-  return session.turn !== null && !isTerminal(session.status) && session.status !== "stopping";
+  const engaged = session.turn !== null || workingUnprompted(session) || needsHuman(session);
+  return engaged && !isTerminal(session.status) && session.status !== "stopping";
 }
 
 /** The daemon refuses a restarting change while a turn is set, even with a permission parked (Q3.429). */

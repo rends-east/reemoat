@@ -15,7 +15,13 @@ import {
   MAX_ASYNC_TASK_ID_CHARS,
   MAX_ASYNC_TASK_NAME_CHARS,
   MAX_ASYNC_TASK_TEXT_CHARS,
+  MAX_KEPT_TASKS_CHARS,
   MAX_TRACKED_ASYNC_TASKS,
+  keptOnDisk,
+  outlivingAgent,
+  readKeptTask,
+  withEarlierAgents,
+  type BackgroundTask,
 } from "../src/acp/asynctasks.js";
 import { IdleParking } from "../src/idlepark.js";
 import { LocalRuntime } from "../src/runtime/local.js";
@@ -870,7 +876,12 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     await settle();
     check("the work ending is on the wire", bg?.snapshot().backgroundTasks.map((task) => task.state), ["completed"]);
     check("and the same sweep now releases it", await own.parkIdleSessions(now + 24 * 60 * 60_000), ["s_bg"]);
-    check("and a released session claims no running work", own.get("s_bg")?.snapshot().backgroundTasks, []);
+    // Was `[]`: a release kept nothing, so what had finished vanished with the process (Q2.234).
+    check(
+      "and a released session claims no running work, and still lists what finished",
+      own.get("s_bg")?.snapshot().backgroundTasks.map((task) => [task.id, task.state]),
+      [["task_1", "completed"]],
+    );
 
     await own.shutdown();
   }
@@ -1044,7 +1055,12 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
       .filter((stored) => stored.event.type === "error")
       .map((stored) => (stored.event as { message: string }).message);
     check("a stop says what it was still running, once", said, [stoppedWithBackgroundWork(1)]);
-    check("and the session then claims nothing", own.get("s_only")?.snapshot().backgroundTasks, []);
+    // Was `[]`: the row now outlives its agent, and reads stopped rather than running for ever (Q2.234).
+    check(
+      "and the session then claims nothing running: the row it had reads stopped",
+      own.get("s_only")?.snapshot().backgroundTasks.map((task) => [task.id, task.state, task.endedAt !== null]),
+      [["build", "stopped", true]],
+    );
     // The sentence names the agent: `doStop` also runs on `daemon_shutdown` and `config_changed`, where the session has not ended.
     check(
       "and it is the agent that was shut down, never the session that ended",
@@ -1053,6 +1069,197 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     );
 
     await own.shutdown();
+  }
+
+  // Finished work belongs to the conversation, not to the process that did it (Q2.234): replaced, parked and restarted, it stays listed.
+  {
+    const seed = interruptedRow("s_carry", "daemon_restarted", "a_carry");
+    const rows = new Map<string, PersistedSession>([[seed.id, seed]]);
+    const recording: SessionStore = {
+      put: (row) => void rows.set(row.id, row),
+      list: () => [...rows.values()],
+      remove: (id) => void rows.delete(id),
+    };
+    const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25));
+    const spawn = (id: string, taskType = "shell") => ({
+      sessionUpdate: "async_task_spawned",
+      asyncTaskId: id,
+      name: id,
+      taskType,
+      description: "",
+      showInTranscript: false,
+      canStop: true,
+    });
+    const ended = (id: string, state: string) => ({ sessionUpdate: "async_task_state_update", asyncTaskId: id, state });
+    const rig = rigWith({ resume: true, advertisesTasks: true });
+    const own = new SessionRegistry(new MemoryEventStore(), recording, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    const carry = own.get("s_carry");
+    // Sorted by id: rows spawned in one millisecond tie on startedAt, and the order is not what is under test.
+    const rowsOf = (session = carry): string[][] =>
+      (session?.snapshot().backgroundTasks ?? []).map((task) => [task.id, task.state]).sort((a, b) => a[0]!.localeCompare(b[0]!));
+    const errorsOf = (session = carry): string[] =>
+      (session?.log.read(0, 1000, 1024 * 1024) ?? [])
+        .filter((stored) => stored.event.type === "error")
+        .map((stored) => (stored.event as { message: string }).message);
+
+    rig.notify("a_carry", spawn("wf_done", "workflow"));
+    rig.notify("a_carry", ended("wf_done", "completed"));
+    rig.notify("a_carry", spawn("sh_err"));
+    rig.notify("a_carry", ended("sh_err", "failed"));
+    rig.notify("a_carry", spawn("sh_live"));
+    await settle();
+    check("the agent reports two finished rows and one running", rowsOf(), [
+      ["sh_err", "failed"],
+      ["sh_live", "running"],
+      ["wf_done", "completed"],
+    ]);
+    const endedAt = carry?.snapshot().backgroundTasks.find((task) => task.id === "wf_done")?.endedAt ?? null;
+
+    // The same door an effort change from ultracode takes: stop("config_changed"), then a resume on the same conversation.
+    const launched = rig.launches();
+    await carry?.applyCredentialChange();
+    check("the agent was replaced under the conversation", [rig.launches() - launched, carry?.status], [1, "idle"]);
+    check("and what finished under the old one is still listed", rowsOf(), [
+      ["sh_err", "failed"],
+      ["sh_live", "stopped"],
+      ["wf_done", "completed"],
+    ]);
+    check(
+      "with the end it had, never restamped by the replacement",
+      carry?.snapshot().backgroundTasks.find((task) => task.id === "wf_done")?.endedAt,
+      endedAt,
+    );
+    check(
+      "while the one that was running has an end of its own, so its clock stops",
+      typeof carry?.snapshot().backgroundTasks.find((task) => task.id === "sh_live")?.endedAt,
+      "number",
+    );
+    check("and the transcript says once what the replacement cut short", errorsOf(), [stoppedWithBackgroundWork(1)]);
+
+    rig.notify("a_carry", spawn("sh_new"));
+    await settle();
+    check(
+      "the new agent's own work joins them, live first",
+      carry?.snapshot().backgroundTasks.map((task) => task.id)[0],
+      "sh_new",
+    );
+    rig.notify("a_carry", ended("sh_new", "completed"));
+    await settle();
+    check("rows an earlier agent left hold nobody back from release", await own.parkIdleSessions(now + 31 * 60_000), ["s_carry"]);
+    check("and the release keeps all four", rowsOf().length, 4);
+    check("which is what the row on disk now holds", rows.get("s_carry")?.agentState?.tasks?.length, 4);
+    await own.shutdown();
+
+    const second = new SessionRegistry(new MemoryEventStore(), recording, undefined, rigWith({ resume: true }).runtime);
+    second.restore({ reapOrphans: false });
+    const back = second.get("s_carry");
+    check("a restarted daemon lists them before any agent is back", [back?.status, rowsOf(back)], [
+      "parked",
+      [
+        ["sh_err", "failed"],
+        ["sh_live", "stopped"],
+        ["sh_new", "completed"],
+        ["wf_done", "completed"],
+      ],
+    ]);
+    // This rig publishes no controls and no commands, so the memory is tasks alone.
+    check("and a memory of tasks alone does not tell a client to fetch an empty command list", back?.commandsRevision, 0);
+
+    await back?.resume();
+    check("a wake keeps them", rowsOf(back).length, 4);
+    const cleared = await back?.clearContext("/clear");
+    check("but a /clear is a new conversation, and none of them belong to it", [cleared?.kind, rowsOf(back)], ["cleared", []]);
+    await second.shutdown();
+  }
+
+  // Only a stop that keeps the conversation keeps its rows: one nothing can revive has none to answer for.
+  {
+    const rig = rigWith({ resume: true });
+    const own = new SessionRegistry(new MemoryEventStore(), storeOf([interruptedRow("s_gone", "daemon_restarted", "a_gone")]), undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    rig.notify("a_gone", {
+      sessionUpdate: "async_task_spawned",
+      asyncTaskId: "t",
+      name: "t",
+      taskType: "shell",
+      description: "",
+      showInTranscript: false,
+      canStop: true,
+    });
+    rig.notify("a_gone", { sessionUpdate: "async_task_state_update", asyncTaskId: "t", state: "completed" });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await own.get("s_gone")?.stop("start_failed");
+    check("a stop nothing can revive keeps no rows", own.get("s_gone")?.snapshot().backgroundTasks, []);
+    await own.shutdown();
+  }
+
+  // The merge and the two bounds, driven as functions: the cap in memory and the budget on disk.
+  {
+    const row = (id: string, state: BackgroundTask["state"], startedAt: number, endedAt: number | null): BackgroundTask => ({
+      id,
+      name: id,
+      taskType: "shell",
+      description: "",
+      state,
+      summary: null,
+      lastToolName: null,
+      usage: null,
+      canStop: true,
+      showInTranscript: false,
+      outputFilePath: null,
+      toolCallId: null,
+      startedAt,
+      endedAt,
+    });
+    check(
+      "a row still live when its agent goes is stopped, and a finished one is untouched",
+      outlivingAgent([row("a", "running", 1, null), row("b", "paused", 2, null), row("c", "failed", 3, 4)], 9).map((task) => [task.id, task.state, task.endedAt]),
+      [["a", "stopped", 9], ["b", "stopped", 9], ["c", "failed", 4]],
+    );
+    check(
+      "the live agent's row wins an id it shares with an earlier agent's",
+      withEarlierAgents([row("x", "running", 5, null)], [row("x", "completed", 1, 2), row("y", "completed", 1, 3)]).map((task) => [task.id, task.state]),
+      [["x", "running"], ["y", "completed"]],
+    );
+    const live = Array.from({ length: MAX_TRACKED_ASYNC_TASKS - 2 }, (_, n) => row(`live_${n}`, "running", 100 + n, null));
+    const earlier = [row("old", "completed", 1, 10), row("mid", "completed", 2, 20), row("new", "completed", 3, 30)];
+    const merged = withEarlierAgents(live, earlier);
+    check("the cap holds over both together", merged.length, MAX_TRACKED_ASYNC_TASKS);
+    check("and it is the oldest-finished earlier row that gives way", merged.filter((task) => task.state === "completed").map((task) => task.id).sort(), ["mid", "new"]);
+
+    const wide = (n: number): BackgroundTask => ({ ...row(`w_${n}`, "completed", n, 1_000 + n), description: "d".repeat(500), summary: "s".repeat(500), name: "n".repeat(200) });
+    const onDisk = keptOnDisk(Array.from({ length: MAX_TRACKED_ASYNC_TASKS }, (_, n) => wide(n)));
+    report(
+      "the copy on disk stays inside its own budget",
+      JSON.stringify(onDisk).length <= MAX_KEPT_TASKS_CHARS,
+      `${String(onDisk.length)} rows, ${String(JSON.stringify(onDisk).length)} chars against ${String(MAX_KEPT_TASKS_CHARS)}`,
+    );
+    check("and keeps the newest-finished whole rather than every row cut short", [onDisk.length < MAX_TRACKED_ASYNC_TASKS, onDisk.every((task) => task.description.length === 500), onDisk.some((task) => task.id === `w_${MAX_TRACKED_ASYNC_TASKS - 1}`), onDisk.some((task) => task.id === "w_0")], [true, true, true, false]);
+    check("a live row is never written down", keptOnDisk([row("r", "running", 1, null)]), []);
+    check(
+      "and the controls' own memory is untouched by a task list too long to keep",
+      reduceAgentState({ modes: null, options: [] }, { commands: [{ name: "context", description: "", hint: null }], dropped: 0 }, onDisk)?.commands.commands.length,
+      1,
+    );
+    check("a memory of tasks alone is still a memory", reduceAgentState({ modes: null, options: [] }, { commands: [], dropped: 0 }, [row("t", "completed", 1, 2)])?.tasks?.length, 1);
+
+    check("a row read back is taken whole", readKeptTask(row("t", "completed", 1, 2)), row("t", "completed", 1, 2));
+    check(
+      "and one this build did not write is refused rather than repaired",
+      [
+        readKeptTask({ ...row("t", "running", 1, null) }),
+        readKeptTask({ ...row("t", "completed", 1, 2), endedAt: null }),
+        readKeptTask({ ...row("", "completed", 1, 2) }),
+        readKeptTask({ ...row("t", "completed", 1, 2), name: "n".repeat(MAX_ASYNC_TASK_NAME_CHARS + 1) }),
+        readKeptTask({ ...row("t", "completed", 1, 2), summary: 7 }),
+        readKeptTask(null),
+        readKeptTask([]),
+      ],
+      [null, null, null, null, null, null, null],
+    );
   }
 
   // Parking must be invisible (Q2.224): commands and controls stay published and nothing is written to the transcript.

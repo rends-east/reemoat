@@ -3,6 +3,12 @@ import { readFileSync, readdirSync } from "node:fs";
 import { check, report, skip } from "./webcheck.env.js";
 import { srcFile, srcFiles, stripComments } from "./webcheck.source.js";
 
+/** The `@theme` block alone: a coarse-pointer restatement of the same names follows it (Q3.662). */
+const themeBlock = (text: string): string => {
+  const at = text.indexOf("@theme {");
+  return at < 0 ? "" : text.slice(at, text.indexOf("\n}\n", at));
+};
+
 // Pins the two font families and the type scale; `.claude/rules/web-typography.md` is the rule, Q3.579.
 
 const WEB_SRC = new URL("../src/", import.meta.url);
@@ -57,8 +63,27 @@ process.stdout.write("\nevery size from the scale, and the one that is not\n");
   check("the sweep can see an arbitrary size", ARBITRARY.test('className="text-[11px]"'), true);
   check("no size is written outside the scale, beyond the one named exception", found, ALLOWED);
 
-  const steps = [...css.matchAll(/--text-([a-z0-9]+):\s*([^;]+);/g)].map((m) => m[1]);
+  const steps = [...themeBlock(css).matchAll(/--text-([a-z0-9]+):\s*([^;]+);/g)].map((m) => m[1]);
   check("the scale is the six steps the rule describes", steps, ["2xs", "xs", "sm", "base", "lg", "xl"]);
+  // Q3.662: under a finger every step and its line-height are restated, the size exactly two pixels up.
+  const coarseAt = css.indexOf("@media (pointer: coarse) {\n    :root");
+  const coarse = coarseAt < 0 ? "" : css.slice(coarseAt, css.indexOf("}", coarseAt));
+  const rem = (text: string): Map<string, number> =>
+    new Map([...text.matchAll(/--text-([a-z0-9-]+):\s*([\d.]+)rem;/g)].map((m) => [m[1] ?? "", Number(m[2])]));
+  const base = rem(themeBlock(css));
+  const finger = rem(coarse);
+  check("a coarse pointer restates every step and every line-height, and nothing else", [...finger.keys()], [...base.keys()]);
+  check(
+    "each size is exactly two pixels up",
+    steps.filter((step) => Math.round(((finger.get(step ?? "") ?? 0) - (base.get(step ?? "") ?? 0)) * 16) !== 2),
+    [],
+  );
+  check(
+    "and no line-height shrinks with it",
+    steps.filter((step) => (finger.get(`${step}--line-height`) ?? 0) <= (base.get(`${step}--line-height`) ?? 0)),
+    [],
+  );
+  check("in the theme layer, so a utility still wins over it", /@layer theme \{\s*@media \(pointer: coarse\)/.test(css), true);
 }
 
 process.stdout.write("\nthe three caps constants, and the colour that may not be appended\n");
@@ -290,7 +315,7 @@ process.stdout.write("\nthe other copy of both stacks, in a repository this one 
     // A subset, not equality: the landing legitimately has no `--text-xl`.
     const scaleOf = (text: string): Map<string, string> =>
       new Map([...text.matchAll(/--text-([a-z0-9]+):\s*([^;]+);/g)].map((m) => [m[1] ?? "", (m[2] ?? "").trim()]));
-    const ours = scaleOf(css);
+    const ours = scaleOf(themeBlock(css));
     const theirs = scaleOf(landing);
 
     report("the landing names a scale at all", theirs.size >= 4, `${theirs.size} steps against this app's ${ours.size}`);

@@ -75,6 +75,44 @@ pub(crate) fn is_our_own(url: &url::Url) -> bool {
     }
 }
 
+/// What WebKit reads, before the system's own switches, to rewrite a keystroke — `"` to
+/// `“`, `--` to `—`. Registered, never set, so a person's own toggle still wins (Q3.647).
+#[cfg(target_os = "macos")]
+const VERBATIM_TYPING: [&std::ffi::CStr; 4] = [
+    c"WebAutomaticQuoteSubstitutionEnabled",
+    c"WebAutomaticDashSubstitutionEnabled",
+    c"WebAutomaticTextReplacementEnabled",
+    c"WebAutomaticSpellingCorrectionEnabled",
+];
+
+/// Before the first webview: the web process is handed the state when it starts.
+#[cfg(target_os = "macos")]
+fn leave_typing_alone() {
+    use objc2::rc::autoreleasepool;
+    use objc2::runtime::{AnyObject, Bool};
+    use objc2::{class, msg_send};
+    autoreleasepool(|_| {
+        // SAFETY: Foundation class messages with arguments of their declared types; every
+        // object lives inside this pool, and `registerDefaults:` copies what it is given.
+        unsafe {
+            let off: *mut AnyObject = msg_send![class!(NSNumber), numberWithBool: Bool::NO];
+            let mut keys: Vec<*mut AnyObject> = Vec::with_capacity(VERBATIM_TYPING.len());
+            for key in VERBATIM_TYPING {
+                keys.push(msg_send![class!(NSString), stringWithUTF8String: key.as_ptr()]);
+            }
+            let values = vec![off; keys.len()];
+            let table: *mut AnyObject = msg_send![
+                class!(NSDictionary),
+                dictionaryWithObjects: values.as_ptr(),
+                forKeys: keys.as_ptr(),
+                count: keys.len()
+            ];
+            let defaults: *mut AnyObject = msg_send![class!(NSUserDefaults), standardUserDefaults];
+            let _: () = msg_send![defaults, registerDefaults: table];
+        }
+    });
+}
+
 /// ⚠ **The attribute is what makes a mobile build a build rather than a library
 /// nobody can start, and it was missing for as long as `main.rs` has claimed the
 /// layout was ready.**
@@ -91,6 +129,8 @@ pub(crate) fn is_our_own(url: &url::Url) -> bool {
 /// — so there is nothing to declare and nothing that can disagree with it.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "macos")]
+    leave_typing_alone();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -291,6 +331,28 @@ mod tests {
         // actually meets, and a packaged build may navigate to neither.
         assert_eq!(at("http://127.0.0.1:7888/"), dev);
         assert_eq!(at("http://127.0.0.1:7887/sessions"), dev);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_keystroke_is_left_as_typed() {
+        use objc2::rc::autoreleasepool;
+        use objc2::runtime::{AnyObject, Bool};
+        use objc2::{class, msg_send};
+        super::leave_typing_alone();
+        for key in super::VERBATIM_TYPING {
+            // SAFETY: as in `leave_typing_alone`, reading where it registers.
+            let (held, on) = autoreleasepool(|_| unsafe {
+                let defaults: *mut AnyObject =
+                    msg_send![class!(NSUserDefaults), standardUserDefaults];
+                let name: *mut AnyObject =
+                    msg_send![class!(NSString), stringWithUTF8String: key.as_ptr()];
+                let held: *mut AnyObject = msg_send![defaults, objectForKey: name];
+                let on: Bool = msg_send![defaults, boolForKey: name];
+                (!held.is_null(), on.as_bool())
+            });
+            assert_eq!((held, on), (true, false), "{key:?} is registered, and off");
+        }
     }
 
     #[test]

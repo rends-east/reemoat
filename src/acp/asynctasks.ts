@@ -1,5 +1,7 @@
 /** Background work an agent started. ACP has no such concept, so it rides the vendor `jetbrains.air` extension in `_meta` (Q2.228). */
 
+import { MAX_PARENT_ID_CHARS } from "./subagents.js";
+
 /** Must equal the adapter's module-private constant; pincheck asserts it. */
 export const AIR_EXTENSION_VERSION = 1;
 
@@ -209,4 +211,97 @@ export interface BackgroundTask {
   startedAt: number;
   /** Stamped here, since the adapter sends no end time; kept across terminal relabels, cleared if running again. */
   endedAt: number | null;
+}
+
+/** Live first, then newest started: the one order every list of these is served in. */
+export function byLiveThenNewest(a: BackgroundTask, b: BackgroundTask): number {
+  const liveA = isTerminalAsyncTaskState(a.state) ? 1 : 0;
+  const liveB = isTerminalAsyncTaskState(b.state) ? 1 : 0;
+  if (liveA !== liveB) return liveA - liveB;
+  return b.startedAt - a.startedAt;
+}
+
+function newestEndedFirst(a: BackgroundTask, b: BackgroundTask): number {
+  return (b.endedAt ?? b.startedAt) - (a.endedAt ?? a.startedAt);
+}
+
+/** What a conversation keeps when its agent goes: every row, with what was still live stopped, since it died with the process (Q2.234). */
+export function outlivingAgent(tasks: readonly BackgroundTask[], at: number): BackgroundTask[] {
+  return tasks.map((task) =>
+    isTerminalAsyncTaskState(task.state) ? task : { ...task, state: "stopped", endedAt: at },
+  );
+}
+
+/** The live agent's rows win an id; earlier agents' rows fill what the cap leaves, the oldest-finished dropped first. */
+export function withEarlierAgents(
+  live: readonly BackgroundTask[],
+  earlier: readonly BackgroundTask[],
+): BackgroundTask[] {
+  if (earlier.length === 0) return [...live];
+  const ids = new Set(live.map((task) => task.id));
+  const room = Math.max(0, MAX_TRACKED_ASYNC_TASKS - live.length);
+  const kept = earlier.filter((task) => !ids.has(task.id)).sort(newestEndedFirst).slice(0, room);
+  return [...live, ...kept].sort(byLiveThenNewest);
+}
+
+/** On the copy written to disk only: rows are kept whole, and the oldest-finished go first once it is spent. */
+export const MAX_KEPT_TASKS_CHARS = 32 * 1024;
+
+/** Finished rows only: a live one would be a claim about a process no restart brings back. */
+export function keptOnDisk(tasks: readonly BackgroundTask[]): BackgroundTask[] {
+  const kept: BackgroundTask[] = [];
+  let spent = 2;
+  for (const task of tasks.filter((one) => isTerminalAsyncTaskState(one.state)).sort(newestEndedFirst)) {
+    spent += JSON.stringify(task).length + 1;
+    if (spent > MAX_KEPT_TASKS_CHARS || kept.length >= MAX_TRACKED_ASYNC_TASKS) break;
+    kept.push(task);
+  }
+  return kept.sort(byLiveThenNewest);
+}
+
+function bounded(value: unknown, max: number): value is string {
+  return typeof value === "string" && value.length <= max;
+}
+
+function boundedOrNull(value: unknown, max: number): value is string | null {
+  return value === null || bounded(value, max);
+}
+
+function stamp(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+/** A row read back from disk: one this build did not write, or one claiming to be live, is dropped alone. Cannot throw. */
+export function readKeptTask(value: unknown): BackgroundTask | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const { id, name, taskType, description, state, summary, lastToolName } = raw;
+  const { outputFilePath, toolCallId, startedAt, endedAt, canStop, showInTranscript } = raw;
+  if (!bounded(id, MAX_ASYNC_TASK_ID_CHARS) || id.length === 0) return null;
+  if (typeof state !== "string" || !TERMINAL.includes(state as AsyncTaskState)) return null;
+  if (!bounded(name, MAX_ASYNC_TASK_NAME_CHARS) || !bounded(taskType, MAX_ASYNC_TASK_TYPE_CHARS)) return null;
+  if (!bounded(description, MAX_ASYNC_TASK_TEXT_CHARS) || !boundedOrNull(summary, MAX_ASYNC_TASK_TEXT_CHARS)) {
+    return null;
+  }
+  if (!boundedOrNull(lastToolName, MAX_ASYNC_TASK_TYPE_CHARS)) return null;
+  if (!boundedOrNull(outputFilePath, MAX_ASYNC_TASK_PATH_CHARS) || !boundedOrNull(toolCallId, MAX_PARENT_ID_CHARS)) {
+    return null;
+  }
+  if (!stamp(startedAt) || !stamp(endedAt)) return null;
+  return {
+    id,
+    name,
+    taskType,
+    description,
+    state: state as AsyncTaskState,
+    summary,
+    lastToolName,
+    usage: usageOf(raw["usage"]),
+    canStop: flag(canStop),
+    showInTranscript: flag(showInTranscript),
+    outputFilePath,
+    toolCallId,
+    startedAt,
+    endedAt,
+  };
 }

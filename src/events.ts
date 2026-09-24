@@ -7,6 +7,7 @@ import type {
   Usage,
 } from "@agentclientprotocol/sdk";
 import type { AgentId } from "./acp/agents.js";
+import type { BackgroundTask } from "./acp/asynctasks.js";
 import { describeError } from "./http.js";
 
 /** Every agent collapses into this union. Optional data is T | null, never ?:, so every event serializes to a stable shape. */
@@ -191,6 +192,7 @@ export interface PermissionRequestEvent {
   decision: string | null;
 }
 
+/** turn_ended, pump_failed and no_turn are no longer written (Q2.232) and stay because stored logs hold them. */
 export type AnswerResolvedBy =
   | "client"
   | "agent_withdrew"
@@ -492,6 +494,8 @@ export interface AgentStateMemory {
   /** The raw `agentConfigState`, never the composed `snapshot().agentConfig`. */
   config: AgentConfig;
   commands: AgentCommands;
+  /** Finished background rows; absent on a blob an older build wrote (Q2.234). */
+  tasks?: BackgroundTask[];
 }
 
 export interface SessionStore {

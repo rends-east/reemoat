@@ -10,17 +10,28 @@ import {
   Plus,
   Search,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { MachineId, SessionKey } from "../ids";
 import { AGENT_HOST_OS, installCommand } from "../enrollment";
 import { controlPlaneOrigin } from "../native";
 import { machineQuotaNotice, mayAddMachine } from "../quota";
 import { folderLabel } from "../paths";
+import { ConnectionPill } from "./ConnectionPill";
 import { useMachineDrag } from "./machineDrag";
-import { useMachineSwipe } from "./machineSwipe";
+import { useMachineSwipe, type MachineSwipe } from "./machineSwipe";
+import { useTabPill, type TabPill } from "./tabPill";
 import { navigate, newPath, sessionPath } from "../router";
 import { settingsPath } from "../settings";
-import { elapsedSince, sessionGroups, sessionLists, type AppState, type SessionRow, type SetupState } from "../store";
+import {
+  elapsedSince,
+  sessionGroups,
+  sessionLists,
+  store,
+  type AppState,
+  type SessionGroups,
+  type SessionRow,
+  type SetupState,
+} from "../store";
 import { machineDisplayName } from "../machineOrder";
 import { humanRequests, needsHuman, resumeStalled } from "../wire";
 import {
@@ -37,6 +48,7 @@ import {
 } from "./bits";
 import {
   ALL_FOLDER,
+  ALL_MACHINES,
   PINNED_FOLDER,
   allRows,
   allTab,
@@ -54,40 +66,52 @@ import {
   setFilter,
   setQuery,
   subscribeGroups,
+  takeRows,
   toggleFolder,
   isFolderCollapsed,
   waitingFloor,
   type Filter,
   type Folder,
   type FolderId,
+  type ListView,
   type MachineTab,
 } from "./groups";
 import { useRowDrag, type RowDrag } from "./rowDrag";
 import { CommandLine } from "./CommandLine";
 import { RenameField, SessionMenu } from "./SessionMenu";
+import { WorkingMark } from "./Mark";
 
 /** Mounted twice, in the desktop aside and the phone wrapper; the breakpoint lives only in those two class strings. */
 export function SessionBrowser({
   state,
   activeKey = null,
   onMenu,
+  rows = null,
 }: {
   state: AppState;
   activeKey?: SessionKey | null;
   /** Opens the menu drawer. Drawn only below `lg`; see `SidebarHeader`. */
   onMenu: () => void;
+  /** Cut to one screen while it is drawn under a conversation for a back swipe (Q3.663). */
+  rows?: number | null;
 }): ReactNode {
   const groups = sessionGroups(state);
   const drag = useRowDrag(state);
   // Collapse, filter, tab and needle live in `groups.ts`, outside React, so they survive an unmount.
   useSyncExternalStore(subscribeGroups, groupsVersion);
   const view = currentView(groups);
-  // Destructured so the call below reads exactly as webcheck greps for it; never reach past the helper here, not even in prose.
-  const { filter } = view;
 
   const tabs = machineTabs(groups, view);
   const all = allTab(groups, view);
-  const swipe = useMachineSwipe({ tabs: [all, ...tabs], armed: drag.armed });
+  const pill = useTabPill();
+  const swipe = useMachineSwipe({
+    tabs: [all, ...tabs],
+    armed: drag.armed,
+    pill,
+    openMenu: onMenu,
+    // The app's own wake path: the registry, every machine re-dialled and re-listed, streams reattached (Q3.658).
+    refresh: () => store.resume("pull"),
+  });
   const listRef = useCallback(
     (node: HTMLDivElement | null): void => {
       drag.scrollerRef(node);
@@ -96,11 +120,135 @@ export function SessionBrowser({
     [drag.scrollerRef, swipe.scrollerRef],
   );
   const floor = waitingFloor(groups, view);
+  const needle = currentQuery();
+
+  return (
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
+      <SidebarHeader state={state} machines={state.machines.length} needle={needle} onMenu={onMenu} />
+
+      {/* First: `visibleRows` walks floor, pinned, folders, orphans, and the draw order must match. */}
+      {floor.length > 0 && (
+        <WaitingElsewhere rows={floor} state={state} activeKey={activeKey} />
+      )}
+
+      {/* Below lg only; above it `MachineColumn` draws the machines as a column. */}
+      {state.machines.length > 0 && (
+        <div ref={swipe.stripRef} className="lg:hidden">
+          <MachineTabs tabs={tabs} all={all} canAdd={mayAddMachine(state.me)} pill={pill} />
+        </div>
+      )}
+
+      {state.setup !== null && <SetupNotice setup={state.setup} />}
+
+      {/* The pager's window: the list and its neighbours move side by side inside it, and it clips them (Q3.655). */}
+      {/* It hears the finger, never the page: a page mid-turn has moved from under it, and a neighbour takes no touch (Q3.667). */}
+      <div ref={swipe.windowRef} className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+        {/* The gap a pull opens above the list; drawn only while there is one, and the refresh's own mark in it. */}
+        <div
+          ref={swipe.pullRef}
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-x-0 top-0 hidden h-14 items-center justify-center text-muted"
+        >
+          <WorkingMark size={20} />
+        </div>
+        {/* Overflow-y alone computes x to auto, so any horizontal overflow here paints a scrollbar: fix the overflow, never clip it. */}
+        {/* `relative`: every drop slot is measured in this box's content coordinates. */}
+        {/* Pan-y plus pinch-zoom: the horizontal axis is the swipe's; refusing every gesture would stop the rail scrolling. */}
+        <div
+          ref={listRef}
+          className="relative min-h-0 flex-1 overflow-y-auto [touch-action:pan-y_pinch-zoom]"
+        >
+          {drag.unpinning && (
+            <div
+              ref={drag.pillRef}
+              className="pointer-events-none absolute top-0 left-0 z-30"
+            >
+              <div className="-translate-x-1/2 -translate-y-[calc(100%+18px)] rounded-md border border-edge-strong bg-surface px-2 py-1 text-2xs font-medium whitespace-nowrap text-danger shadow-sm">
+                Release to unpin
+              </div>
+            </div>
+          )}
+          <ListBody state={state} groups={groups} view={view} activeKey={activeKey} drag={drag} rows={rows} />
+        </div>
+        <BesidePanes swipe={swipe} state={state} groups={groups} view={view} activeKey={activeKey} drag={drag} />
+        {/* Over the list and above the foot's New session, like Telegram's; a row's own target runs its full width. */}
+        <ConnectionPill
+          state={state}
+          openKey={activeKey}
+          machines={view.all ? "all" : view.machine === null ? [] : [view.machine]}
+          placement="bottom-3 left-3"
+        />
+      </div>
+
+      <SidebarFoot machine={view.machine} />
+    </div>
+  );
+}
+
+/** The neighbouring machines' pages while the strip is away from rest: inert, unread, and cut to the rows one screen shows. */
+function BesidePanes({
+  swipe,
+  state,
+  groups,
+  view,
+  activeKey,
+  drag,
+}: {
+  swipe: MachineSwipe;
+  state: AppState;
+  groups: SessionGroups;
+  view: ListView;
+  activeKey: SessionKey | null;
+  drag: RowDrag;
+}): ReactNode {
+  const besides = useSyncExternalStore(swipe.subscribe, swipe.beside);
+  return besides.map((beside) => (
+    <div
+      key={beside.id}
+      ref={swipe.paneRef}
+      data-beside={beside.index}
+      aria-hidden="true"
+      inert
+      className="pointer-events-none absolute inset-0 overflow-hidden"
+    >
+      <ListBody
+        state={state}
+        groups={groups}
+        view={{ ...view, all: beside.id === ALL_MACHINES, machine: beside.id === ALL_MACHINES ? null : beside.id }}
+        activeKey={activeKey}
+        drag={drag}
+        rows={beside.rows}
+      />
+    </div>
+  ));
+}
+
+/** One page of the list; the pager draws a second for the neighbour, cut to `rows` so a long machine costs one screen. */
+function ListBody({
+  state,
+  groups,
+  view,
+  activeKey,
+  drag,
+  rows,
+}: {
+  state: AppState;
+  groups: SessionGroups;
+  view: ListView;
+  activeKey: SessionKey | null;
+  drag: RowDrag;
+  rows: number | null;
+}): ReactNode {
+  // Destructured so the call below reads exactly as webcheck greps for it; never reach past the helper here, not even in prose.
+  const { filter } = view;
+  const left = { rows: rows ?? Number.POSITIVE_INFINITY };
   // Through the helper and the needle, so the drawn rows are exactly the ones `keyboard.ts` steps through.
-  const pinned = matching(pinnedFor(groups, view), view.query);
-  const orphans = matching(orphansFor(groups, filter), view.query);
-  const folders = foldersOf(groups, view);
-  const everything = allRows(groups, view);
+  const pinned = takeRows(matching(pinnedFor(groups, view), view.query), left);
+  const everything = takeRows(allRows(groups, view), left);
+  const folders = foldersOf(groups, view).flatMap((folder) =>
+    left.rows <= 0 ? [] : [{ ...folder, rows: takeRows(folder.rows, left, 1) }],
+  );
+  const orphans = takeRows(matching(orphansFor(groups, filter), view.query), left);
   const probing = state.machines.some((m) => m.reach === "probing" || m.reach === "unknown");
   const needle = currentQuery();
   // Rows the filter alone withholds, so the empty state can offer them.
@@ -116,187 +264,144 @@ export function SessionBrowser({
   const selectedOverLimit = !selectedOwnerDisabled && selected?.overLimit === true;
 
   return (
-    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
-      <SidebarHeader state={state} machines={state.machines.length} needle={needle} onMenu={onMenu} />
+    <>
+    {folders.length === 0 && everything.length === 0 && pinned.length === 0 && probing && (
+      <Skeleton rows={4} />
+    )}
 
-      {/* First: `visibleRows` walks floor, pinned, folders, orphans, and the draw order must match. */}
-      {floor.length > 0 && (
-        <WaitingElsewhere rows={floor} state={state} activeKey={activeKey} />
-      )}
-
-      {/* Below lg only; above it `MachineColumn` draws the machines as a column. */}
-      {state.machines.length > 0 && (
-        <div ref={swipe.stripRef} className="lg:hidden">
-          <MachineTabs tabs={tabs} all={all} canAdd={mayAddMachine(state.me)} />
-        </div>
-      )}
-
-      {state.cpError !== null && <ControlPlaneNotice />}
-
-      {state.setup !== null && <SetupNotice setup={state.setup} />}
-
-
-
-      {/* Overflow-y alone computes x to auto, so any horizontal overflow here paints a scrollbar: fix the overflow, never clip it. */}
-      {/* `relative`: every drop slot is measured in this box's content coordinates. */}
-      {/* Pan-y plus pinch-zoom: the horizontal axis is the swipe's; refusing every gesture would stop the rail scrolling. */}
-      <div
-        ref={listRef}
-        className="relative min-h-0 flex-1 overflow-y-auto [touch-action:pan-y_pinch-zoom]"
-      >
-        {drag.unpinning && (
-          <div
-            ref={drag.pillRef}
-            className="pointer-events-none absolute top-0 left-0 z-30"
-          >
-            <div className="-translate-x-1/2 -translate-y-[calc(100%+18px)] rounded-md border border-edge-strong bg-surface px-2 py-1 text-2xs font-medium whitespace-nowrap text-danger shadow-sm">
-              Release to unpin
+    {/* Not while the registry is unreadable: no machines would be a guess. */}
+    {state.machines.length === 0 && !probing && state.cpError === null && (
+      <div className="px-4 py-6 text-center">
+        <p className="text-sm text-muted">No machines yet.</p>
+        {mayAddMachine(state.me) ? (
+          <>
+            {/* Below lg only: at lg `NothingSelected` draws the command in the pane. */}
+            <div className="lg:hidden">
+              <p className="mt-3 text-xs text-muted">Run this on the {AGENT_HOST_OS} machine you want to use:</p>
+              <div className="text-left">
+                <CommandLine command={installCommand(controlPlaneOrigin())} />
+              </div>
             </div>
-          </div>
+          </>
+        ) : (
+          <p className="mx-auto mt-2 max-w-xs text-xs text-muted">{machineQuotaNotice(state.me)}</p>
         )}
-        {/* A bare wrapper: the swipe transforms it, and any layout here would move every drop slot measured in the scroller. */}
-        <div ref={swipe.wrapRef}>
-          {folders.length === 0 && everything.length === 0 && pinned.length === 0 && probing && (
-            <Skeleton rows={4} />
-          )}
-
-          {/* Not while the registry is unreadable: no machines would be a guess. */}
-          {state.machines.length === 0 && !probing && state.cpError === null && (
-            <div className="px-4 py-6 text-center">
-              <p className="text-sm text-muted">No machines yet.</p>
-              {mayAddMachine(state.me) ? (
-                <>
-                  {/* Below lg only: at lg `NothingSelected` draws the command in the pane. */}
-                  <div className="lg:hidden">
-                    <p className="mt-3 text-xs text-muted">Run this on the {AGENT_HOST_OS} machine you want to use:</p>
-                    <div className="text-left">
-                      <CommandLine command={installCommand(controlPlaneOrigin())} />
-                    </div>
-                  </div>
-                </>
-              ) : (
-                <p className="mx-auto mt-2 max-w-xs text-xs text-muted">{machineQuotaNotice(state.me)}</p>
-              )}
-            </div>
-          )}
-
-          {pinned.length > 0 && (
-            <GroupSection
-              icon={Pin}
-              name="Pinned"
-              id={PINNED_FOLDER}
-              blockedCount={pinned.filter((row) => needsHuman(row.snapshot)).length}
-              space={drag.spaceFor(PINNED_FOLDER)}
-              sliding={drag.sliding}
-            >
-              {pinned.map((row, index) => (
-                <SessionLine
-                  key={row.key}
-                  row={row}
-                  state={state}
-                  selected={row.key === activeKey}
-                  showMachine={view.all}
-                  indented
-                  drag={drag.bind(row, PINNED_FOLDER)}
-                  lifted={drag.dragging === row.key}
-                  pressed={drag.pressing === row.key && drag.dragging !== row.key}
-                  sliding={drag.sliding}
-                  shift={drag.shiftFor(PINNED_FOLDER, index, row.key)}
-                />
-              ))}
-            </GroupSection>
-          )}
-
-          {everything.length > 0 && (
-            <GroupSection
-              icon={Layers}
-              name="All chats"
-              id={ALL_FOLDER}
-              blockedCount={everything.filter((row) => needsHuman(row.snapshot)).length}
-            >
-              {everything.map((row) => (
-                <SessionLine
-                  key={row.key}
-                  row={row}
-                  state={state}
-                  selected={row.key === activeKey}
-                  showMachine
-                  indented
-                />
-              ))}
-            </GroupSection>
-          )}
-
-          {folders.map((folder) => (
-            <FolderSection
-              key={folder.id}
-              folder={folder}
-              state={state}
-              activeKey={activeKey}
-              drag={drag}
-            />
-          ))}
-
-          {/* Shown rather than dropped, on every tab: a vanished session is the worse failure. */}
-          {orphans.length > 0 && (
-            <Section name="No longer granted" count={orphans.length}>
-              {orphans.map((row) => (
-                <SessionLine
-                  key={row.key}
-                  row={row}
-                  state={state}
-                  selected={row.key === activeKey}
-                  showMachine
-                  indented
-                />
-              ))}
-            </Section>
-          )}
-
-          {/* Ask the unfiltered question before claiming the machine is empty. */}
-          {folders.length === 0 && everything.length === 0 && state.machines.length > 0 && !probing && (
-            <div className="px-4 py-6 text-center">
-              {needle.trim().length > 0 ? (
-                // The only exit from a typo: the needle is not persisted and some browsers draw no native clear.
-                <>
-                  <p className="text-sm text-muted">Nothing matches.</p>
-                  <Button className="mt-3" onClick={() => setQuery("")}>
-                    Clear search
-                  </Button>
-                </>
-              ) : selectedOwnerDisabled ? (
-                <p className="text-sm text-muted">
-                  This machine&rsquo;s owner has been disabled, so it is not being reached.
-                </p>
-              ) : selectedOverLimit ? (
-                <p className="text-sm text-muted">
-                  This machine is over the machine limit, so it is not being reached.
-                </p>
-              ) : hiddenHere > 0 ? (
-                <>
-                  <p className="text-sm text-muted">
-                    {hiddenHere === 1 ? "One conversation here" : `${hiddenHere} conversations here`}
-                    {filter === "ended" ? ", none of them ended." : ", all of them ended."}
-                  </p>
-                  <Button className="mt-3" onClick={() => setFilter("all")}>
-                    Show all
-                  </Button>
-                </>
-              ) : (
-                <>
-                  <p className="text-sm text-muted">No sessions here yet.</p>
-                  <p className="mx-auto mt-2 max-w-xs text-xs text-muted">
-                    New session, at the bottom of this list, starts one.
-                  </p>
-                </>
-              )}
-            </div>
-          )}
-        </div>
       </div>
+    )}
 
-      <SidebarFoot machine={view.machine} />
-    </div>
+    {pinned.length > 0 && (
+      <GroupSection
+        icon={Pin}
+        name="Pinned"
+        id={PINNED_FOLDER}
+        blockedCount={pinned.filter((row) => needsHuman(row.snapshot)).length}
+        space={drag.spaceFor(PINNED_FOLDER)}
+        sliding={drag.sliding}
+      >
+        {pinned.map((row, index) => (
+          <SessionLine
+            key={row.key}
+            row={row}
+            state={state}
+            selected={row.key === activeKey}
+            showMachine={view.all}
+            indented
+            drag={drag.bind(row, PINNED_FOLDER)}
+            lifted={drag.dragging === row.key}
+            pressed={drag.pressing === row.key && drag.dragging !== row.key}
+            sliding={drag.sliding}
+            shift={drag.shiftFor(PINNED_FOLDER, index, row.key)}
+          />
+        ))}
+      </GroupSection>
+    )}
+
+    {everything.length > 0 && (
+      <GroupSection
+        icon={Layers}
+        name="All chats"
+        id={ALL_FOLDER}
+        blockedCount={everything.filter((row) => needsHuman(row.snapshot)).length}
+      >
+        {everything.map((row) => (
+          <SessionLine
+            key={row.key}
+            row={row}
+            state={state}
+            selected={row.key === activeKey}
+            showMachine
+            indented
+          />
+        ))}
+      </GroupSection>
+    )}
+
+    {folders.map((folder) => (
+      <FolderSection
+        key={folder.id}
+        folder={folder}
+        state={state}
+        activeKey={activeKey}
+        drag={drag}
+      />
+    ))}
+
+    {/* Shown rather than dropped, on every tab: a vanished session is the worse failure. */}
+    {orphans.length > 0 && (
+      <Section name="No longer granted" count={orphans.length}>
+        {orphans.map((row) => (
+          <SessionLine
+            key={row.key}
+            row={row}
+            state={state}
+            selected={row.key === activeKey}
+            showMachine
+            indented
+          />
+        ))}
+      </Section>
+    )}
+
+    {/* Ask the unfiltered question before claiming the machine is empty. */}
+    {folders.length === 0 && everything.length === 0 && state.machines.length > 0 && !probing && (
+      <div className="px-4 py-6 text-center">
+        {needle.trim().length > 0 ? (
+          // The only exit from a typo: the needle is not persisted and some browsers draw no native clear.
+          <>
+            <p className="text-sm text-muted">Nothing matches.</p>
+            <Button className="mt-3" onClick={() => setQuery("")}>
+              Clear search
+            </Button>
+          </>
+        ) : selectedOwnerDisabled ? (
+          <p className="text-sm text-muted">
+            This machine&rsquo;s owner has been disabled, so it is not being reached.
+          </p>
+        ) : selectedOverLimit ? (
+          <p className="text-sm text-muted">
+            This machine is over the machine limit, so it is not being reached.
+          </p>
+        ) : hiddenHere > 0 ? (
+          <>
+            <p className="text-sm text-muted">
+              {hiddenHere === 1 ? "One conversation here" : `${hiddenHere} conversations here`}
+              {filter === "ended" ? ", none of them ended." : ", all of them ended."}
+            </p>
+            <Button className="mt-3" onClick={() => setFilter("all")}>
+              Show all
+            </Button>
+          </>
+        ) : (
+          <>
+            <p className="text-sm text-muted">No sessions here yet.</p>
+            <p className="mx-auto mt-2 max-w-xs text-xs text-muted">
+              New session, at the bottom of this list, starts one.
+            </p>
+          </>
+        )}
+      </div>
+    )}
+    </>
   );
 }
 
@@ -316,7 +421,7 @@ function SidebarHeader({
   return (
     <div className="pt-safe flex shrink-0 items-center gap-1.5 px-3 pb-2">
       <h1 className="sr-only">Reemoat</h1>
-      <IconButton icon={MenuIcon} label="Menu" size="chip" onClick={onMenu} className="lg:hidden" />
+      <IconButton icon={MenuIcon} label="Menu" size="bar" onClick={onMenu} className="-ml-1.5 lg:hidden" />
       {machines > 0 && <ChatSearch value={needle} />}
       {/* To the longest-waiting session; the dot is a sibling because `IconButton` takes no children, hence `pointer-events-none`. */}
       <span className="relative ml-auto inline-flex shrink-0">
@@ -339,12 +444,32 @@ function SidebarHeader({
 }
 
 // `inset-x-4` must equal the tab's `px-4`; `-bottom-px` puts the mark on the bar's hairline.
-function TabUnderline(): ReactNode {
-  return <span aria-hidden="true" className="absolute inset-x-4 -bottom-px h-0.5 rounded-full bg-fg" />;
+/** The selected tab's own pill is this span's ground, so it rides a scroll, a reorder or a resize with its tab (Q3.656). */
+function TabLabel({ tab }: { tab: MachineTab }): ReactNode {
+  return (
+    <span data-tab-pill={tab.id} className={`inline-flex h-8 items-center gap-1.5 rounded-full px-3 ${tab.selected ? "bg-raised" : ""}`}>
+      {tab.name}
+      {tab.blockedCount > 0 && (
+        <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-fg px-1 text-2xs font-semibold text-ink [@media(pointer:coarse)]:h-5 [@media(pointer:coarse)]:min-w-5">
+          {tab.blockedCount}
+        </span>
+      )}
+    </span>
+  );
 }
 
 // Order is the store's, never activity or reachability, which flicker on the poll.
-function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTab; canAdd: boolean }): ReactNode {
+function MachineTabs({
+  tabs,
+  all,
+  canAdd,
+  pill,
+}: {
+  tabs: MachineTab[];
+  all: MachineTab;
+  canAdd: boolean;
+  pill: TabPill;
+}): ReactNode {
   const lone = tabs.length === 1;
   const selected = tabs.find((tab) => tab.selected)?.id ?? null;
   const stripRef = useRef<HTMLDivElement | null>(null);
@@ -355,13 +480,31 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
     (node: HTMLDivElement | null): void => {
       scroller.current = node;
       drag.scrollerRef(node);
+      pill.scrollerRef(node);
     },
-    [drag.scrollerRef],
+    [drag.scrollerRef, pill.scrollerRef],
   );
+  const holdStrip = useCallback(
+    (node: HTMLDivElement | null): void => {
+      stripRef.current = node;
+      pill.stripRef(node);
+    },
+    [pill.stripRef],
+  );
+  // Before paint: the new tab's own pill is hidden until the traveller reaches it, so a tap never teleports it.
+  const current = all.selected ? all.id : selected;
+  const shown = useRef(current);
+  useLayoutEffect(() => {
+    const previous = shown.current;
+    shown.current = current;
+    if (previous === null || current === null || previous === current || pill.turning()) return;
+    pill.moveTo(previous, current);
+  }, [current]);
   const fade = useRef<HTMLDivElement | null>(null);
   // Keyed on the selection, not an inline ref, which re-scrolled on every render and yanked a dragged strip back.
+  // A travelling pill scrolls the strip itself, on its own curve; this is for a change nothing animated.
   useEffect(() => {
-    if (lone || selected === null) return;
+    if (lone || selected === null || pill.travelling()) return;
     stripRef.current
       ?.querySelector(`[data-machine="${CSS.escape(selected)}"]`)
       ?.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -390,25 +533,26 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
 
   return (
     <div
-      ref={stripRef}
-      className="flex shrink-0 items-center border-b border-edge px-1.5"
+      ref={holdStrip}
+      className="relative flex shrink-0 items-center border-b border-edge px-1.5"
     >
+      {/* The pill between tabs, first so every label paints over it; three pieces so its ends stay round at any width. */}
+      <span ref={pill.travellerRef} aria-hidden="true" className="pointer-events-none absolute top-0 left-0 hidden">
+        <span className="absolute top-0 left-0 h-8 w-8 rounded-full bg-raised" />
+        <span className="absolute top-0 left-0 h-8 w-16 origin-left bg-raised" />
+        <span className="absolute top-0 left-0 h-8 w-8 rounded-full bg-raised" />
+      </span>
+
       {/* `All` stays outside the scroller so it can never scroll away. */}
       <button
         type="button"
         onClick={() => selectMachine(all.id)}
         aria-pressed={all.selected}
-        className={`tap relative flex min-h-11 shrink-0 items-center gap-1.5 px-4 text-sm whitespace-nowrap ${
-          all.selected ? "font-semibold text-fg" : "text-muted hover:text-fg"
+        className={`tap relative flex min-h-11 shrink-0 items-center px-1 text-xs whitespace-nowrap ${
+          all.selected ? "text-fg" : "text-muted hover:text-fg"
         }`}
       >
-        {all.name}
-        {all.selected && <TabUnderline />}
-        {all.blockedCount > 0 && (
-          <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-fg px-1 text-2xs font-semibold text-ink">
-            {all.blockedCount}
-          </span>
-        )}
+        <TabLabel tab={all} />
       </button>
 
       {/* Outside the scroller: an absolute child of an overflow box travels with its content. */}
@@ -431,20 +575,14 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
                 }
                 // A hold reorders and a flick does not: the slop that tells the swipe it is horizontal already killed the hold.
                 {...drag.bind(tab.id, index)}
-                className={`tap relative flex min-h-11 items-center gap-1.5 px-4 text-sm whitespace-nowrap ${
+                className={`tap relative flex min-h-11 items-center px-1 text-xs whitespace-nowrap ${
                   lone ? "flex-1 justify-center" : "min-w-22 shrink-0 justify-center"
-                } ${tab.selected ? "font-semibold text-fg" : "text-muted hover:text-fg"} ${
+                } ${tab.selected ? "text-fg" : "text-muted hover:text-fg"} ${
                   // `slides`, not a transition utility: the unlayered `.tap` resets the transition property.
                   drag.sliding && drag.dragging !== tab.id ? "slides" : ""
                 } ${drag.dragging === tab.id ? "z-10 bg-ink shadow-lg will-change-transform" : ""}`}
               >
-                {tab.name}
-                {tab.selected && <TabUnderline />}
-                {tab.blockedCount > 0 && (
-                  <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-fg px-1 text-2xs font-semibold text-ink">
-                    {tab.blockedCount}
-                  </span>
-                )}
+                <TabLabel tab={tab} />
               </button>
             ))}
           </div>
@@ -802,6 +940,7 @@ function SessionLine({
                   current={row.snapshot.title ?? null}
                   placeholder={label}
                   onDone={() => setRenaming(false)}
+                  className="-mx-1"
                 />
               </span>
             ) : (
@@ -876,13 +1015,3 @@ export function SetupNotice({ setup }: { setup: SetupState }): ReactNode {
   );
 }
 
-/** Shared with the line under a conversation's title: one state, one wording. */
-export const CONTROL_PLANE_UNREACHABLE = "Server unreachable — retrying…";
-
-export function ControlPlaneNotice(): ReactNode {
-  return (
-    <div className="mx-3 mb-2 shrink-0 rounded-md border border-edge-strong bg-raised px-3 py-2 text-xs text-fg">
-      {CONTROL_PLANE_UNREACHABLE}
-    </div>
-  );
-}
