@@ -401,6 +401,12 @@ export async function pickFolderNative(start: string | null): Promise<string | n
   return (await invoke<string | null>("host_pick_folder", { start })) ?? null;
 }
 
+/** The window's title bar and the webview's own controls follow the switch. */
+export function setNativeTheme(theme: "light" | "dark"): void {
+  // A hidden seat is refused and the window keeps what it has, which is what every seat asked for anyway.
+  void invoke("host_set_theme", { theme }).catch(() => undefined);
+}
+
 function interceptExternalLinks(): void {
   document.addEventListener(
     "click",

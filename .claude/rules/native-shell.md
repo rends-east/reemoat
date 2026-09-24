@@ -328,6 +328,8 @@ and `parseLegalDoc` assertably disjoint. A typed `/register` falls through to
   `leave_typing_alone` registers `VERBATIM_TYPING` off before the first webview —
   *registered*, never set, so a person's own Substitutions toggle still wins,
   measured too. `autocorrect="off"` changes none of it on macOS. Q3.647.
+- **The window's theme is the switch's, set in Rust, never declared.** On macOS it
+  is app-wide and WKWebView's `prefers-color-scheme` follows it. Q3.671.
 - **`tauri://localhost` is a secure context** on macOS, so `crypto.*` and
   `navigator.clipboard` are available. The clipboard still gets a native arm first:
   a webview that has the object and refuses it without focus would fall through to

@@ -76,7 +76,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1056 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1059 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -224,7 +224,11 @@ pnpm webcheck                        # packages/web: the cursor, rotation, repla
                                      #   gives it up, that the two storage keys are different names
                                      #   and neither is a swept legacy one, and that the id is kept
                                      #   in the shell's config rather than its keyring — read off
-                                     #   both languages, since nothing typed can hold it
+                                     #   both languages, since nothing typed can hold it.
+                                     #   And the dark palette: a twin for every token and the
+                                     #   contrast both owe, computed in both; no colour outside
+                                     #   the palette; one key for the two writers of `data-theme`;
+                                     #   and the drawer's switch as its last row
 pnpm nativecheck                     # packages/native: the Boot payload's keys against NativeBoot's,
                                      #   which is the census a missing `serde(rename)` slips past in
                                      #   five checkers at once; that the frontend is a path inside the
@@ -496,6 +500,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `native-accounts.md` | `packages/native/src-tauri/src/accounts.rs`, `seats.rs`, `commands.rs`, `config.rs`, `daemon.rs`, `packages/web/src/slot.ts`, `native.ts`, `store.ts`, `ui/MenuDrawer.tsx`, `ChooseServer.tsx`, `SignIn.tsx` | What an account is on this computer, and why its key is the server *and* the user · why the host decides which account a call is about and the page never names one · the bridge contract, in one table · a document rather than a label, and what a generation refuses · a webview per account on macOS, a rebind and a reload everywhere else · what adding, switching and signing out each keep and give up · a daemon per account, and which one keeps `~/.reemoat` · what the first launch after the update moves, and only on proof |
 | `native-packaging.md` | `packages/native/src-tauri/tauri.*.conf.json`, `packages/native/scripts/`, `deploy/ci-release.sh` | Which platforms carry a daemon inside them and which carry a client · the one JSON file a profile is, and the measurement that made it one rather than a cargo feature · what an overlay may say, and why the list is that short · why the staging script refuses a Windows triple by name |
 | `web-typography.md` | `packages/web/src/index.css`, `ui/bits.tsx`, `paths.ts`, `ui/settings/` | Which strings are monospace and which are prose · the one surface where a path is a name instead · the scale, and the single arbitrary size that is allowed to exist · one caps idiom, three constants, and why the choice between them is a colour · what the landing page shares and what nothing can check |
+| `dark-theme.md` | `packages/web/src/index.css`, `theme.ts`, `public/theme.js`, both HTML shells, `ui/MenuDrawer.tsx` | What a dark token owes its light twin · what may not hold a colour, and the three traps · which palette is on, who writes `data-theme`, and why before the first paint · why light until the switch says dark, and whose choice it is |
 | `docked-panels.md` | `packages/web/src/ui/paneWidth.ts`, `rail.ts`, `taskWidth.ts`, `PaneHandle.tsx`, `leaving.ts`, `TaskPanel.tsx` | How wide a draggable pane is, and which custom property the panel actually spends · who owns the separator's keyboard path · how a layer leaves |
 | `machine-gestures.md` | `packages/web/src/machineOrder.ts`, `ui/machineDrag.ts`, `machineSwipe.ts`, `MachineColumn.tsx`, `SessionBrowser.tsx` | What orders the machines until a reader drags one, and why this computer's leads · what this computer's own is called, and on which screens · why the reorder is a hook and not a component · where the merge is applied and which memo is load-bearing · swiping between machines, on the list and not on the strip · the tabs' own numbers |
 | `native-panels.md` | `packages/web/src/ui/NewSession.tsx`, `download.ts`, `packages/web/src/native.ts`, `packages/native/src-tauri/src/commands.rs`, `packages/web/scripts/webcheck.native-bridge.ts`, `local-route.ts` | Why a cancel is neither a failure nor an answer · `(async)` as a rule and now a mechanism · why the folder panel is the one thing here that is per *machine* · what this loosens and what it does not · the browser arm, which is not a gap |

@@ -58,18 +58,18 @@ bug in the file.
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 144 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 93 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 415 | `####` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 418 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 67 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 115 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 73 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 149 | `###` |
-| | | **1056** | |
+| | | **1059** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1056 rather than the 526
+dividers. So the count is over **both** depths, and it says 1059 rather than the 526
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -22477,7 +22477,8 @@ on the one element that does not look like one, which is the discoverability
 problem the session row's kebab was added to solve.
 
 **What is unchanged.** No Language row and no ellipsis of extras — there is no i18n
-and `index.css` refuses a theme switcher. `Sign out` is last, separated, **above
+and `index.css` refuses a theme switcher [⚠ reversed by Q3.670: the drawer's
+last row is a dark-theme switch]. `Sign out` is last, separated, **above
 the version**, and drawn even when `me === null`, because `bootstrap`'s catch keeps
 `phase: "ready"` with no `me` during a control-plane outage and that is the worst
 moment for the way out to disappear. One tap, no two-step confirm: the confirming
@@ -25898,8 +25899,8 @@ decides it as a pure function over the store's own state.
   words only while the pill is shown. It changes only when the words do, so a spell
   is announced once and a retry never is.
 - **The look.** It uses this app's own `surface`, `edge`, `muted` and `shadow-lg`.
-  The app has one palette, and the page stays that palette under a dark OS
-  appearance (rendered to check).
+  [⚠ reversed by Q3.669: there are two palettes, and the pill spends the same
+  tokens in both.]
 
 **Where it floats, and why there.**
 
@@ -26590,6 +26591,153 @@ still holds the smaller line.
 
 **Status.** Current. `webcheck.shell-and-enrollment.ts` reads the tab inset off the
 `text-xs` spelling and still requires All and the machine tabs to share it.
+
+#### Q3.669 — a dark palette, and what keeps a second palette honest this time
+
+**Question.** The dark block was deleted on the argument that every state had been
+re-encoded in fill, ring, weight and shape, so a second palette meant designing all of
+it twice and reviewing it once. The owner asked for a dark theme built to the usual
+practice. What makes a second palette hold now, where the first one did not?
+
+**Decision.** One unlayered block, `:root[data-theme="dark"]`, restating the same
+fifteen colour tokens and nothing else, so no component knows which palette is on.
+Each dark token keeps its light twin's *job* and its *ratio to surface*: `raised` is
+the message you wrote at 1.21:1 (1.22 light), `ink` the rail's hint at 1.05:1 (1.06),
+`edge` one step beyond `raised`, `edge-strong` at least 3:1 on every paper, and every
+text tone at least 4.5:1 on every paper. Elevation reads lighter — `ink` < `surface` <
+`raised` < `edge` — because a shadow barely shows on a dark ground. Neither end is
+pure: `fg` is `#e9e6e1` (14.53:1 on surface, against light's 17.37) and `ink` is
+`#11100e`. Hue and chroma are the light palette's (a warm grey near 80°, chroma
+0.004–0.006); `danger`, `caution` and the diff's four are lightened and kept at low
+chroma rather than inverted.
+
+**The conversation's ground is `#171614`, one notch under where it was drawn first.**
+The owner put the first build beside Claude's own dark window and asked for the
+conversation a little darker; `surface` moved down with `ink`, `raised` and `edge` so
+every ratio above held, rather than giving the pane a colour of its own.
+
+**Three things outside the palette had to move, and each was a defect in the dark
+before it was a change.**
+
+- **The scrim was `fg` at a quarter**, which turns into a light wash when `fg` does.
+  It is its own token, `scrim`: the same `rgb(28 26 22 / 0.25)` in light, black at
+  55% in dark. `webcheck` bans the old spelling across `src/`.
+- **Tailwind v4 inlines a shadow's colour into the utility** — `.shadow-lg` carries
+  `var(--tw-shadow-color, #3c34261f)`, measured by compiling — so restating
+  `--shadow-*` under the dark selector reaches nothing. The colour moved into two
+  plain properties, `--shade` and `--shade-k`, which the dark block turns black and
+  three times heavier. The light shadows compute to the same values as before.
+- **The key hint on the affirmative fill** was `ink` at half over `fg`: 4.98:1 in
+  light and 3.30:1 in dark. It is at 60% now, 6.58 and 4.53.
+
+**What answers "the second copy is the one nobody looks at".** `webcheck.theme.ts`
+reads both palettes off `index.css` and fails a dark twin that is missing, extra or
+copied from light, then computes every ratio above in both from one table. It also
+fails a colour literal or a palette-free utility in any component — which is what
+makes a second palette one block rather than a sweep.
+
+**The first paint.** `public/theme.js` is a blocking classic script in the app's
+HTML shell: the CSP refuses an inline one, and a module may run after the first
+paint. It reads the switch's choice, sets `data-theme` and rewrites the
+`color-scheme` and `theme-color` tags; `theme.ts` owns every later change, and the
+driver holds the two to one key. Under the dark palette the page's own controls,
+autofill and scrollbars have to be dark, which is the reverse of what "light only"
+defended. The gate keeps none of this: it is another origin with no switch, so it is
+light, as it was.
+**A swap holds every transition for two frames**, or `.tap`'s colour fades smear it;
+the switch's knob is exempt, since its slide is the answer to the press.
+
+**Measured.** Rendered in Chromium against a scratch control plane: sign-in, the
+shell, the drawer, settings, and a sheet of the transcript's parts (a bubble, a code
+fence, a table, a diff, the buttons and choice marks) in both palettes. The sign-in
+screen rendered in a bare WKWebView too, which is the engine the shell ships.
+
+**Rejected.** `light-dark()` — one declaration per token, but it is Safari 17.5, the bundle's minimum is macOS 13, and an engine
+without it resolves every token to nothing: an app with no colours, not a light one.
+A `@media (prefers-color-scheme: dark)` copy of the block beside the attribute one —
+two copies of the palette to drift, for a default the owner then decided against
+(Q3.670).
+
+**Status.** Reversed an earlier decision: the stylesheet's "there is no second
+palette" position, and the connection pill's "one palette" line.
+
+#### Q3.670 — the drawer's switch, and light until it is pressed
+
+**Question.** Where does the dark theme's control go, and what does pressing it mean
+beside a system that already has an appearance?
+
+**Decision.** Where Telegram puts night mode: a `role="switch"` row, **Dark theme**,
+last in the drawer's list — under Settings, Plugins and any plugin screens, parted
+from the screens by a rule so it does not read as one of them — and above the
+parted-off Sign out, which stays last. A press leaves the drawer open, so the app
+repaints in view.
+
+**What it means.** **Light until it is pressed, whatever the system says** — the
+owner's call on 2026-09-25, after the first build opened dark on a phone whose system
+was dark. The system's appearance is read nowhere, and `webcheck` asserts the absence.
+The choice is a *device's*, kept in `reemoat.theme`: every account's webview shares
+one data store, signing out keeps it, and the `storage` event repaints the seats that
+did not press.
+
+**How it looks.** The track is outlined at `edge-strong`, and takes `raised` when on
+— the tone this app gives state. The knob is 14px, `fg` when on and `edge-strong`
+when off: a glyph-sized mark, which is the only size `bg-fg` may wear outside a
+decision (Q3.209).
+
+**Rejected.** *Following the system until the switch is pressed* — built first, and
+taken out on the owner's word for the reason above. *A three-way control* (system,
+light, dark) — the owner asked for a switch, and light by default.
+
+**What this changes in Q3.612.** Its test was that a drawer row is a destination.
+This one is not, by the owner's call, and it is the only one.
+
+**Status.** Current.
+
+#### Q3.671 — the shell's window follows the page's palette
+
+**Question.** The page can now be dark. What does the window around it — its title
+bar, the colour behind the page before it paints, the webview's own idea of the
+system's appearance — have to do so the app does not show a light frame around a dark
+page, or a light flash before one?
+
+**Decision.** Three things, all in the shell.
+
+- **The window's theme is the switch's, always, and Rust sets it.** On macOS a window
+  theme is app-wide: it becomes the application's appearance, which the title bar and
+  WKWebView's `prefers-color-scheme` follow. `tauri.conf.json` said `"Light"`, which
+  would have left a light title bar over a dark page; it declares none now, and
+  `seats::themed` builds the window light unless `server.json` says dark. The window
+  never follows the system, which is also what keeps the system out of the page.
+- **The switch reaches the window through `host_set_theme`** — a surfacing command
+  (the seat on screen only), `(async)` because a change is a durable `server.json`
+  write. The page repeats its theme at every boot and every show, so the command
+  writes and applies **only a change**; a write that fails is still applied.
+  It uses `Window::set_theme` rather than the application's: tao's app-wide call on
+  macOS leaves the window's cached answer stale, and on Linux leaves the window's own
+  preference in place.
+- **Launch builds the window in the stored theme, on that palette's ink.**
+  `server.json` keeps `"dark"` as `theme` and light as no key, so the one moment no
+  page can speak — before the first one paints — is already right; a junk value is
+  light. The two inks live once, in `seats.rs`, and `nativecheck` holds them to
+  `--color-ink` in both palettes of `index.css`.
+
+**Measured.** In a bare WKWebView from a Swift harness on this machine, the page read
+`prefers-color-scheme: dark` under a dark application appearance and light under a
+light one — so the appearance is what the window's theme sets. Read from source
+rather than run: without wry's `transparent` feature (Tauri's `macos-private-api`,
+which is off) a WKWebView's background cannot be set at runtime and the configured
+colour becomes only its under-page colour, so on macOS it is the appearance, not the
+colour, that decides what shows before the first paint. Tao's Linux window ignores a configured theme at
+creation for the XDG portal's answer, so the theme is applied again after building. On
+iOS and Android a window's theme and background are no-ops that answer `Ok`, and
+`theme()` always answers light.
+
+**Known limitations.** The shell was not launched here to watch it, because launching
+starts this computer's real daemons: the launch flash and the title bar following the
+switch are unmeasured by this repository. Two overlapping calls could apply out of
+order; the page's next boot or show repeats the theme.
+
+**Status.** Current.
 
 ## Deployment, packaging and code layout
 

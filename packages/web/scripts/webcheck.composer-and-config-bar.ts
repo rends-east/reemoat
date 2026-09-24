@@ -431,7 +431,7 @@ process.stdout.write("\nthe composer's send key\n");
     // Its parent once, so scrim-out faded the panel as it slid (Q3.650).
     check(
       "and the scrim is the panel's sibling rather than its parent",
-      /bg-fg\/25 sm:hidden`\}\n\s+\/>\n\s+<div\n\s+ref=\{drag\.ref\}/.test(barCode),
+      /bg-scrim sm:hidden`\}\n\s+\/>\n\s+<div\n\s+ref=\{drag\.ref\}/.test(barCode),
       true,
     );
     check(

@@ -74,7 +74,7 @@ export function TaskPanel({
         aria-hidden={true}
         className={`${
           leaving ? "animate-scrim-out pointer-events-none" : "animate-scrim"
-        } fixed inset-0 touch-none bg-fg/25 md:hidden ${LAYER.overlay}`}
+        } fixed inset-0 touch-none bg-scrim md:hidden ${LAYER.overlay}`}
         onClick={leaving ? undefined : onClose}
       />
       {/* SHEET_PANEL's tokens spelled out; pb-safe is a utility here because the unlayered .pb-safe would beat md:pb-0. */}

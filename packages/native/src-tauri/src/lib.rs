@@ -159,6 +159,7 @@ pub fn run() {
             commands::host_open_external,
             commands::host_save_file,
             commands::host_pick_folder,
+            commands::host_set_theme,
         ])
         /*
          * ⚠ **A new page load is a new document, and the one place the host can
@@ -191,15 +192,17 @@ pub fn run() {
              */
             let dir = app.path().app_config_dir()?;
             /*
-             * ⚠ **Two reads and no write.** `read_server` is the server a first run
+             * ⚠ **Three reads and no write.** `read_server` is the server a first run
              * chose, which is the pending seat's when there is no account at all;
-             * `read_accounts` is every account. A file from before accounts has its
+             * `read_accounts` is every account; `read_theme` is the switch's theme,
+             * which the window is built in. A file from before accounts has its
              * list derived rather than written: the evidence for its server is one
              * keyring read here, once, and the list reaches the disk only with the
              * first act that changes it.
              */
             let server = config::read_server(&dir);
             let roster = config::read_accounts(&dir, &|origin| credential::read(origin).is_some());
+            let theme = config::read_theme(&dir);
             app.manage(Host::new(dir, credential::probe(), &roster));
 
             /*
@@ -209,6 +212,7 @@ pub fn run() {
              * webview per account, and the navigation guard on every one.
              */
             let config = seats::main_config(app.handle())
+                .map(|config| seats::themed(&config, theme))
                 .ok_or("tauri.conf.json declares no window labelled main")?;
             seats::open_at_launch(app, &config, &roster, server)?;
 

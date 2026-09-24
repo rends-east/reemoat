@@ -10,6 +10,10 @@
   /* Every sheet, drawer and scrim, arriving and leaving: SHEET_MS and SHEET_EASE in sheetMotion.ts (webcheck, Q3.650). */
   --sheet-ms: 260ms;
   --sheet-ease: cubic-bezier(0.32, 0.72, 0, 1);
+  /* The shadows' colour and strength: plain properties because Tailwind inlines a shadow's value into its utility (Q3.669). */
+  --shade: 60 52 38;
+  --shade-k: 1;
+  color-scheme: light;
 }
 
 @media (min-width: 64rem) {
@@ -48,6 +52,9 @@
 
   --color-caution: #5f4a1e;
 
+  /* Behind every sheet and the drawer; fg at a quarter here, never fg itself, since fg turns light in the dark palette. */
+  --color-scrim: rgb(28 26 22 / 0.25);
+
   --text-2xs: 0.75rem;
   --text-2xs--line-height: 1.125rem;
   --text-xs: 0.8125rem;
@@ -66,14 +73,17 @@
   --radius-lg: 0.875rem;
   --radius-xl: 1.25rem;
 
-  --shadow-sm: 0 1px 2px 0 rgb(60 52 38 / 0.06);
+  --shadow-sm: 0 1px 2px 0 rgb(var(--shade) / calc(0.06 * var(--shade-k)));
   --shadow-md:
-    0 2px 6px -1px rgb(60 52 38 / 0.08), 0 1px 2px -1px rgb(60 52 38 / 0.06);
+    0 2px 6px -1px rgb(var(--shade) / calc(0.08 * var(--shade-k))),
+    0 1px 2px -1px rgb(var(--shade) / calc(0.06 * var(--shade-k)));
   --shadow-lg:
-    0 8px 20px -6px rgb(60 52 38 / 0.12), 0 2px 6px -2px rgb(60 52 38 / 0.07);
+    0 8px 20px -6px rgb(var(--shade) / calc(0.12 * var(--shade-k))),
+    0 2px 6px -2px rgb(var(--shade) / calc(0.07 * var(--shade-k)));
   --shadow-xl:
-    0 16px 36px -10px rgb(60 52 38 / 0.16), 0 4px 10px -4px rgb(60 52 38 / 0.08);
-  --shadow-2xl: 0 28px 60px -16px rgb(60 52 38 / 0.22);
+    0 16px 36px -10px rgb(var(--shade) / calc(0.16 * var(--shade-k))),
+    0 4px 10px -4px rgb(var(--shade) / calc(0.08 * var(--shade-k)));
+  --shadow-2xl: 0 28px 60px -16px rgb(var(--shade) / calc(0.22 * var(--shade-k)));
 
   /* YaHei UI before YaHei (the print cut breaks 44px rows), -apple-system before any CJK face; the CJK tail avoids a serif fallback. */
   --font-sans:
@@ -202,6 +212,41 @@
   }
 }
 
+/*
+ * The dark palette: the same names, so no component knows which one is on. Each token keeps its light
+ * twin's job and its ratio to surface; elevation reads lighter, text stops short of white (Q3.669).
+ * Unlayered, like the :root block it overrides. data-theme is set before the first paint by public/theme.js
+ * and afterwards by theme.ts.
+ */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-ink: #11100e;
+  --color-surface: #171614;
+  --color-raised: #292724;
+  --color-edge: #312f2c;
+  --color-edge-strong: #7b7874;
+  --color-fg: #e9e6e1;
+  --color-muted: #afaaa3;
+  --color-faint: #9c9689;
+  --color-danger: #df8878;
+  --color-add: #1d2e1e;
+  --color-add-ink: #97ca9a;
+  --color-del: #38221e;
+  --color-del-ink: #e59c8f;
+  --color-caution: #d5ba86;
+  --color-scrim: rgb(0 0 0 / 0.55);
+  /* A shadow on a dark ground has to be black and heavier to read at all; the edge still carries most of it. */
+  --shade: 0 0 0;
+  --shade-k: 3;
+}
+
+/* For the frames a palette swap takes, so .tap's colour fades do not smear it; the switch keeps its own motion (theme.ts). */
+:root[data-theme-swap] *:not([data-keeps-motion]),
+:root[data-theme-swap] *::before,
+:root[data-theme-swap] *::after {
+  transition: none !important;
+}
+
 html,
 body,
 #root {
@@ -219,8 +264,6 @@ body {
   color: var(--color-fg);
   font-family: var(--font-sans);
   -webkit-text-size-adjust: 100%;
-  /* light only: `dark light` paints dark autofill and UA controls under an OS dark mode. */
-  color-scheme: light;
 }
 
 /* Needs viewport-fit=cover in index.html too. */

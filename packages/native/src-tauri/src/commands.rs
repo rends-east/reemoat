@@ -39,9 +39,9 @@
 //!
 //! **Hidden webviews cannot reach the screen.** Where every account has a webview
 //! of its own, every page runs, shown or not — so switching accounts, adding one,
-//! and the four commands that surface something (`host_copy_text`,
-//! `host_open_external`, `host_save_file`, `host_pick_folder`) are refused with
-//! `not_shown` from any webview but the one on screen.
+//! and the five commands that surface something (`host_copy_text`,
+//! `host_open_external`, `host_save_file`, `host_pick_folder`, `host_set_theme`)
+//! are refused with `not_shown` from any webview but the one on screen.
 //!
 //! ⚠ **The lock rule.** No `Host` mutex but `changing` is ever held across a
 //! `Window` or `Webview` call, and nothing on the main thread takes `changing`.
@@ -73,12 +73,13 @@
 //!   which is the hot-path clause rather than the waiting one.
 //! - `host_save_file` — a platform panel, and then up to `MAX_DOWNLOAD_BYTES`.
 //! - `host_pick_folder` — a platform panel, and nothing after it.
-//! - `host_set_server`, `host_credential_clear`, `host_device_set`,
-//!   `host_device_clear`, `host_device_key_reset` — a `server.json` write, which
-//!   `config.rs` makes durable by flushing the file **and** its directory entry:
-//!   two `sync_all`s. The first, on a regular file, is `fcntl(F_FULLFSYNC)` on
-//!   macOS — a full device cache flush. ⚠ The second is that same call on a
-//!   **directory** descriptor, which is measured only as far as being reached and
+//! - `host_set_server`, `host_credential_clear`, `host_set_theme`,
+//!   `host_device_set`, `host_device_clear`, `host_device_key_reset` — a
+//!   `server.json` write, which `config.rs` makes durable by flushing the file
+//!   **and** its directory entry: two `sync_all`s. The first, on a regular file,
+//!   is `fcntl(F_FULLFSYNC)` on macOS — a full device cache flush. ⚠ The second
+//!   is that same call on a **directory** descriptor, which is measured only as
+//!   far as being reached and
 //!   answering success; `config::sync_dir` carries the numbers, and the platform
 //!   where it does nothing at all. `host_credential_clear` was bare while it was
 //!   one keyring erase; it also records the account signed out now, so the drawer
@@ -2593,4 +2594,26 @@ fn pick_folder(app: AppHandle, start: Option<String>) -> Result<Option<String>, 
 #[cfg(any(target_os = "android", target_os = "ios"))]
 fn pick_folder(_app: AppHandle, _start: Option<String>) -> Result<Option<String>, String> {
     Err("this platform has no folder panel".to_string())
+}
+
+/// Put the window in the switch's theme: the title bar and every page's
+/// `prefers-color-scheme` follow the window (Q3.671). From the webview on screen only, since
+/// it changes what is on it.
+///
+/// The page says its theme at every boot and every show, so only a change is written or
+/// applied — and a write that fails is applied anyway. `(async)` for the durable
+/// `server.json` write a change is.
+#[tauri::command(async)]
+pub fn host_set_theme(
+    webview: tauri::Webview,
+    host: State<'_, Host>,
+    theme: String,
+) -> Result<(), String> {
+    host.require_shown(webview.label())?;
+    let theme = config::Theme::parse(&theme).ok_or("not a theme")?;
+    let wrote = config::write_theme(&host.config_dir, theme);
+    if !matches!(wrote, Ok(false)) {
+        seats::show_theme(&webview.window(), theme);
+    }
+    wrote.map(|_| ())
 }

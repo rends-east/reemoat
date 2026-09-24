@@ -892,7 +892,7 @@ process.stdout.write("\nthe menu, the machines and the build\n");
 
   check(
     "the drawer arrives from its edge, over the one scrim this app has",
-    [/animate-drawer/.test(drawer), /animate-scrim/.test(drawer), /bg-fg\/25/.test(drawer)],
+    [/animate-drawer/.test(drawer), /animate-scrim/.test(drawer), /bg-scrim/.test(drawer)],
     [true, true, true],
   );
   const sheetMs = /--animate-sheet:\s*sheet\s+(var\(--sheet-ms\) var\(--sheet-ease\))/.exec(css)?.[1] ?? "";

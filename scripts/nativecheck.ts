@@ -537,7 +537,7 @@ check("and every command lives in commands.rs", strayCommands, []);
     "host_local_daemon",
     "host_set_server",
   ];
-  const SURFACING = ["host_copy_text", "host_open_external", "host_pick_folder", "host_save_file"];
+  const SURFACING = ["host_copy_text", "host_open_external", "host_pick_folder", "host_save_file", "host_set_theme"];
   const BOOT = ["host_boot"];
   check(
     "every command is one kind: seat-scoped, surfacing, or the boot that issues the generation",
@@ -2678,6 +2678,86 @@ process.stdout.write("\nwhat a keystroke becomes\n");
     true,
   );
   check("and cargo test asks Foundation that it held", /fn a_keystroke_is_left_as_typed\(\)/.test(lib), true);
+}
+
+process.stdout.write("\nthe window's theme, and the ink behind the page\n");
+{
+  // The switch's theme is the window's, set in one place in Rust; a declared one would be a second answer (Q3.671).
+  check("the window declares no theme of its own", Object.keys(main).filter((key) => key === "theme"), []);
+
+  const blockAt = (text: string, head: string): string => {
+    const at = text.indexOf(head);
+    const end = at < 0 ? -1 : text.indexOf("\n}", at);
+    return end < 0 ? "" : text.slice(at, end);
+  };
+  const css = read("packages/web/src/index.css").replace(/\/\*[\s\S]*?\*\//g, "");
+  const pageInk = (head: string): string | null => capture(blockAt(css, head), /--color-ink:\s*(#[0-9a-f]{6});/i)?.toLowerCase() ?? null;
+  const seatsCode = rustCode(read(`${TAURI_DIR}/src/seats.rs`));
+  const hostInk = (name: string): string | null => {
+    const m = new RegExp(`const ${name}: Color = Color\\(0x([0-9a-f]{2}), 0x([0-9a-f]{2}), 0x([0-9a-f]{2}), 0xff\\);`).exec(seatsCode);
+    return m === null ? null : `#${m[1]}${m[2]}${m[3]}`;
+  };
+  const inks = {
+    light: [hostInk("LIGHT_INK"), pageInk("@theme {")],
+    dark: [hostInk("DARK_INK"), pageInk(':root[data-theme="dark"] {')],
+  };
+  report(
+    "both inks were read, off seats.rs and off index.css",
+    [...inks.light, ...inks.dark].every((ink) => ink !== null) && inks.light[1] !== inks.dark[1],
+    `light ${inks.light.join(" / ")}, dark ${inks.dark.join(" / ")}`,
+  );
+  check("the window's light ink is the page's", inks.light[0], inks.light[1]);
+  check("and its dark ink is the dark palette's", inks.dark[0], inks.dark[1]);
+  check("and tauri.conf.json's declared background is the light one", String(main["backgroundColor"]).toLowerCase(), inks.light[1]);
+  const rustSources = readdirSync(join(ROOT, TAURI_DIR, "src")).filter((file) => file.endsWith(".rs"));
+  const rustOf = (file: string): string => flat(rustCode(read(`${TAURI_DIR}/src/${file}`)));
+  check(
+    "a colour is written down in one Rust file",
+    rustSources.filter((file) => /Color\(0x[0-9a-f]{2}/.test(rustOf(file))),
+    ["seats.rs"],
+  );
+
+  const pageNames = [...(capture(rustCode(read("packages/web/src/theme.ts")), /export type Theme = ([^;]+);/) ?? "").matchAll(/"(\w+)"/g)].map((m) => m[1]);
+  const parse = capture(rustOf("config.rs"), /pub fn parse\(name: &str\) -> Option<Theme> \{ match name \{ ([^}]*)\}/) ?? "";
+  const hostNames = [...parse.matchAll(/"(\w+)" => Some\(Theme::\w+\)/g)].map((m) => m[1]);
+  report("the page's theme names were read", pageNames.length === 2, pageNames.join(", "));
+  check("and the host accepts exactly those, refusing the rest", [hostNames.sort(), /_ => None,/.test(parse)], [pageNames.sort(), true]);
+
+  // The page says its theme at every boot and every show, so an unchanged one is neither written nor applied.
+  const commandsFlat = flat(rustCode(commandsRs));
+  check(
+    "the command writes and applies a change and nothing else",
+    /let wrote = config::write_theme\(&host\.config_dir, theme\); if !matches!\(wrote, Ok\(false\)\) \{ seats::show_theme\(&webview\.window\(\), theme\); \}/.test(commandsFlat),
+    true,
+  );
+  const writeTheme = between(rustOf("config.rs"), "pub fn write_theme(", "#[cfg(test)]");
+  check(
+    "and the writer returns before a write where the file already says it, without writing the accounts era down",
+    [/if stored\.replaceable && theme_of\(&stored\) == theme \{ return Ok\(false\); \}/.test(writeTheme), /accounts_mut|materialize/.test(writeTheme)],
+    [true, false],
+  );
+  const libFlat = flat(rustCode(libRs));
+  check(
+    "a launch builds the window in the stored theme, and writes none",
+    [/let theme = config::read_theme\(&dir\);/.test(libFlat), /\.map\(\|config\| seats::themed\(&config, theme\)\)/.test(libFlat), /write_theme/.test(startupCode)],
+    [true, true, false],
+  );
+  // Light by default, on the owner's word (Q3.670): the window always carries the switch's theme, so the system's never reaches a page.
+  check(
+    "the window is always in a theme of the switch's, and nothing listens for the system's",
+    [
+      /themed\.theme = Some\(to_tauri\(theme\)\);/.test(seatsCode.replace(/\s+/g, " ")),
+      /Some\("dark"\) => Theme::Dark, _ => Theme::Light,/.test(rustOf("config.rs")),
+      rustSources.filter((file) => /ThemeChanged/.test(rustOf(file))),
+    ],
+    [true, true, []],
+  );
+  // tao's app-wide call leaves the window's cached theme stale on macOS and its own preference in place on Linux.
+  check(
+    "and every theme is set on the window rather than app-wide",
+    rustSources.flatMap((file) => [...rustOf(file).matchAll(/(\w+)\.set_theme\(/g)].map((m) => `${file}: ${m[1]}`)),
+    ["seats.rs: window"],
+  );
 }
 
 process.stdout.write(failures === 0 ? "\nall green\n\n" : `\n${failures} FAILED\n\n`);

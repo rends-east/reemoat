@@ -23,7 +23,6 @@
         "center": true,
         "resizable": true,
         "backgroundColor": "#f9f8f6",
-        "theme": "Light",
         "dragDropEnabled": false
       }
     ],

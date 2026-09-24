@@ -582,7 +582,7 @@ function Select({
               onClick={leaving ? undefined : dismiss}
               className={`${
                 leaving ? "animate-scrim-out pointer-events-none" : "animate-scrim"
-              } fixed inset-0 ${LAYER.overlay} touch-none bg-fg/25 sm:hidden`}
+              } fixed inset-0 ${LAYER.overlay} touch-none bg-scrim sm:hidden`}
             />
             <div
               ref={drag.ref}

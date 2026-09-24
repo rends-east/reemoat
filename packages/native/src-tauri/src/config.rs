@@ -153,10 +153,11 @@ static WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
 /// from the main thread any more.** `host_boot` did, and was the reason this
 /// paragraph existed; it carries `(async)` since one webview per account boots at
 /// launch (`commands.rs` has the census). What is left on the main thread is
-/// `lib.rs`'s setup — `read_server` and `read_accounts`, two reads before any
-/// command can exist — and the evidence `read_accounts` is handed is called with
-/// this lock held, so it may not reach for it: it is a keyring read at setup and
-/// a map lookup in `Host` afterwards, and neither touches this file.
+/// `lib.rs`'s setup — `read_server`, `read_accounts` and `read_theme`, three
+/// reads before any command can exist — and the evidence `read_accounts` is
+/// handed is called with this lock held, so it may not reach for it: it is a
+/// keyring read at setup and a map lookup in `Host` afterwards, and neither
+/// touches this file.
 static CONFIG_LOCK: Mutex<()> = Mutex::new(());
 
 /// The whole file, read under `CONFIG_LOCK`, with the lock still held — and
@@ -299,6 +300,11 @@ struct Stored {
     /// answered the legacy root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     legacy_root_holder: Option<String>,
+    /// `"dark"` once the menu drawer's switch has chosen it; absent means light, which is
+    /// the default. A `Value` rather than a `String`, so a shape this build cannot read is
+    /// ignored instead of quarantining the whole file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    theme: Option<serde_json::Value>,
     /// Every key in this file that this build has never heard of.
     ///
     /// ⚠ **Without it, a read-modify-write by an older build is a downgrade that
@@ -1914,15 +1920,59 @@ pub fn set_legacy_root_holder(dir: &Path, origin: &str) -> Result<(), String> {
     write_stored(dir, &stored)
 }
 
+/// A palette, in the page's own spelling (Q3.671).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Theme {
+    Light,
+    Dark,
+}
+
+impl Theme {
+    pub fn parse(name: &str) -> Option<Theme> {
+        match name {
+            "light" => Some(Theme::Light),
+            "dark" => Some(Theme::Dark),
+            _ => None,
+        }
+    }
+}
+
+fn theme_of(stored: &Stored) -> Theme {
+    match stored.theme.as_ref().and_then(serde_json::Value::as_str) {
+        Some("dark") => Theme::Dark,
+        _ => Theme::Light,
+    }
+}
+
+/// The switch's theme: dark once it has chosen dark, and light for anything else.
+pub fn read_theme(dir: &Path) -> Theme {
+    theme_of(&read_stored(dir))
+}
+
+/// Record the switch's theme, answering whether anything changed: the page says it at
+/// every boot, so an unchanged one writes nothing. Light is written as no key at all. Not
+/// an account act, so a file from before accounts stays one.
+pub fn write_theme(dir: &Path, theme: Theme) -> Result<bool, String> {
+    let mut stored = read_stored(dir);
+    // `replaceable` for `erase_device`'s reason: an unread file's light is not a light
+    // known to be recorded.
+    if stored.replaceable && theme_of(&stored) == theme {
+        return Ok(false);
+    }
+    stored.theme = (theme == Theme::Dark).then(|| serde_json::Value::from("dark"));
+    write_stored(dir, &stored)?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         bind_account, claim_bare, default_server, erase_device, erase_device_key_fallback,
         forget_account, give_up_device_key, materialize_accounts, normalize_origin, read_accounts,
-        read_device, read_device_key_fallback, read_server, rename_account, server_file, set_bound,
-        set_signed_in, show_account, temp_name, unreadable_file, write_device,
-        write_device_key_fallback, write_server, Bind, BindRequest, Evidence, Proof,
-        DEFAULT_SERVER,
+        read_device, read_device_key_fallback, read_server, read_theme, rename_account,
+        server_file, set_bound, set_signed_in, show_account, temp_name, unreadable_file,
+        write_device, write_device_key_fallback, write_server, write_theme, Bind, BindRequest,
+        Evidence, Proof, Theme, DEFAULT_SERVER,
     };
     use std::path::Path;
 
@@ -3431,6 +3481,126 @@ mod tests {
                 "name {i} was handed out twice: {name}"
             );
         }
+    }
+
+    /* ── the theme ────────────────────────────────────────────────────────── */
+
+    /// Light until dark is written, and going back to light takes the key out rather than
+    /// writing a second spelling of the default.
+    #[test]
+    fn a_theme_is_read_back_and_light_takes_it_out() {
+        let dir = scratch("theme");
+        assert_eq!(read_theme(&dir), Theme::Light);
+        assert!(write_theme(&dir, Theme::Dark).unwrap());
+        assert_eq!(read_theme(&dir), Theme::Dark);
+        assert!(write_theme(&dir, Theme::Light).unwrap());
+        assert_eq!(read_theme(&dir), Theme::Light);
+        let text = std::fs::read_to_string(server_file(&dir)).unwrap();
+        assert!(!text.contains("theme"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The page says its theme at every boot. HOW IT GOES RED: without the early return
+    /// every call is a rename, which the inode sees — and a first run in light would
+    /// create a file it has no reason to.
+    #[test]
+    fn a_theme_is_written_only_when_it_changes() {
+        let dir = scratch("theme-once");
+        assert!(!write_theme(&dir, Theme::Light).unwrap());
+        assert!(
+            !server_file(&dir).exists(),
+            "a boot in the default writes nothing"
+        );
+        assert!(write_theme(&dir, Theme::Dark).unwrap());
+        #[cfg(unix)]
+        let inode = || {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(server_file(&dir)).unwrap().ino()
+        };
+        #[cfg(unix)]
+        let before = inode();
+        assert!(!write_theme(&dir, Theme::Dark).unwrap());
+        #[cfg(unix)]
+        assert_eq!(inode(), before, "the same theme again is not a write");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file from before the field reads as light, and so does one holding anything but
+    /// `"dark"` — with the rest of the file intact, not moved aside.
+    #[test]
+    fn a_theme_this_build_cannot_read_is_light() {
+        let dir = scratch("theme-junk");
+        std::fs::create_dir_all(&dir).unwrap();
+        for theme in [
+            "",
+            r#","theme":"blue""#,
+            r#","theme":5"#,
+            r#","theme":{"mode":"dark"}"#,
+            r#","theme":null"#,
+            r#","theme":"light""#,
+        ] {
+            std::fs::write(server_file(&dir), format!(r#"{{"server":"{A}"{theme}}}"#)).unwrap();
+            assert_eq!(read_theme(&dir), Theme::Light, "{theme}");
+            assert_eq!(read_server(&dir).as_deref(), Some(A), "{theme}");
+            assert!(
+                !unreadable_file(&dir).exists(),
+                "{theme} is not a file that will not parse"
+            );
+        }
+        assert!(
+            !write_theme(&dir, Theme::Light).unwrap(),
+            "what cannot be read is light already, so nothing is written"
+        );
+        assert!(write_theme(&dir, Theme::Dark).unwrap());
+        assert_eq!(read_theme(&dir), Theme::Dark);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A pin is one field of a read-modify-write: accounts, devices, keys and a field from
+    /// a later build all survive it, and a file from before accounts is still one after.
+    #[test]
+    fn a_theme_write_keeps_everything_else() {
+        let dir = scratch("theme-keeps");
+        write_server(&dir, A).unwrap();
+        bound(bind_account(&dir, &request(None, "u_a", true, &EMPTY)));
+        let key = "https://a.example#u_a";
+        write_device(&dir, key, "dv_a").unwrap();
+        write_device_key_fallback(&dir, key, "AAAA").unwrap();
+        let text = std::fs::read_to_string(server_file(&dir)).unwrap();
+        let text = text.replacen('{', r#"{"tomorrow":{"k":1},"#, 1);
+        std::fs::write(server_file(&dir), text).unwrap();
+
+        assert!(write_theme(&dir, Theme::Dark).unwrap());
+        let roster = read_accounts(&dir, &|_| false);
+        assert_eq!(
+            roster.accounts.iter().map(|a| a.key()).collect::<Vec<_>>(),
+            vec![key]
+        );
+        assert_eq!(roster.current.as_deref(), Some(key));
+        assert_eq!(read_device(&dir, key).as_deref(), Some("dv_a"));
+        assert_eq!(read_device_key_fallback(&dir, key).as_deref(), Some("AAAA"));
+        assert_eq!(read_server(&dir).as_deref(), Some(A));
+        assert!(std::fs::read_to_string(server_file(&dir))
+            .unwrap()
+            .contains("tomorrow"));
+
+        let old = scratch("theme-era");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(
+            server_file(&old),
+            format!(r#"{{"server":"{A}","devices":{{"{A}":"dv_a"}}}}"#),
+        )
+        .unwrap();
+        assert!(write_theme(&old, Theme::Dark).unwrap());
+        assert!(
+            read_accounts(&old, &|_| false).derived,
+            "a theme does not write the accounts era down"
+        );
+        assert!(!std::fs::read_to_string(server_file(&old))
+            .unwrap()
+            .contains("accounts"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&old);
     }
 
     #[test]

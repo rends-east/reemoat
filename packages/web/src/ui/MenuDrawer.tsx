@@ -1,4 +1,4 @@
-import { ChevronDown, LogOut, Plus, Puzzle, Settings as SettingsIcon } from "lucide-react";
+import { ChevronDown, LogOut, Moon, Plus, Puzzle, Settings as SettingsIcon } from "lucide-react";
 import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { errorText } from "../http";
@@ -9,6 +9,7 @@ import { navigate } from "../router";
 import { settingsPath } from "../settings";
 import { serverLabel } from "../slot";
 import { sessionGroups, store, type AppState } from "../store";
+import { currentTheme, setTheme, subscribeTheme } from "../theme";
 import { APP_VERSION } from "../version";
 import { Icon, Monogram, personEmoji } from "./bits";
 import { isPulled, subscribePull, yieldPull } from "./drawerPull";
@@ -82,7 +83,7 @@ export function MenuDrawer({
         // touch-none: nothing here pans or zooms, so a drag toward the edge is always the drawer's (Q3.660).
         className={`${
           leaving ? "animate-scrim-out pointer-events-none" : "animate-scrim"
-        } fixed inset-0 touch-none bg-fg/25 ${LAYER.overlay}`}
+        } fixed inset-0 touch-none bg-scrim ${LAYER.overlay}`}
       />
       <aside
         ref={drag.ref}
@@ -140,6 +141,9 @@ export function MenuDrawer({
               ))}
             </>
           )}
+          {/* Under a plugin's screens it would read as one of them, so a rule parts the two there. */}
+          {launchable.length > 0 && <div className="my-1.5 border-t border-edge" />}
+          <DarkThemeRow />
         </div>
 
         <div className="shrink-0 border-t border-edge px-1.5 py-1.5">
@@ -160,6 +164,37 @@ export function MenuDrawer({
       </aside>
     </>,
     document.body,
+  );
+}
+
+/**
+ * The drawer's one row that is not a destination, as Telegram's night mode is: a switch that stays put while the app
+ * repaints behind it (Q3.670). On, the knob is fg, a glyph-sized mark; the track is raised, the tone this app gives state.
+ */
+function DarkThemeRow(): ReactNode {
+  const dark = useSyncExternalStore(subscribeTheme, currentTheme) === "dark";
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={dark}
+      onClick={() => setTheme(dark ? "light" : "dark")}
+      className={`${DRAWER_ROW} text-fg hover:bg-raised`}
+    >
+      <Icon as={Moon} size={18} />
+      <span className="min-w-0 flex-1 truncate">Dark theme</span>
+      <span
+        aria-hidden
+        className={`flex h-5 w-9 shrink-0 items-center rounded-full border border-edge-strong ${dark ? "bg-raised" : ""}`}
+      >
+        <span
+          data-keeps-motion=""
+          className={`size-3.5 rounded-full transition-transform duration-200 ease-out ${
+            dark ? "translate-x-4.5 bg-fg" : "translate-x-0.5 bg-edge-strong"
+          }`}
+        />
+      </span>
+    </button>
   );
 }
 

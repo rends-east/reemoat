@@ -54,11 +54,12 @@
 use std::error::Error;
 
 use tauri::utils::config::WindowConfig;
+use tauri::window::Color;
 use tauri::{App, AppHandle, Manager};
 
 use crate::accounts::Slot;
 use crate::commands::Host;
-use crate::config;
+use crate::config::{self, Theme};
 use crate::is_our_own;
 
 /// One window, one webview per account. See the module docblock; flipping this is
@@ -78,6 +79,72 @@ pub fn main_config(app: &AppHandle) -> Option<WindowConfig> {
         .iter()
         .find(|window| window.label == MAIN)
         .cloned()
+}
+
+/// The page's `--color-ink` in each palette: what shows before it paints. `nativecheck`
+/// holds both to `index.css`.
+const LIGHT_INK: Color = Color(0xf9, 0xf8, 0xf6, 0xff);
+const DARK_INK: Color = Color(0x11, 0x10, 0x0e, 0xff);
+
+fn ink(theme: Theme) -> Color {
+    match theme {
+        Theme::Light => LIGHT_INK,
+        Theme::Dark => DARK_INK,
+    }
+}
+
+fn to_tauri(theme: Theme) -> tauri::Theme {
+    match theme {
+        Theme::Light => tauri::Theme::Light,
+        Theme::Dark => tauri::Theme::Dark,
+    }
+}
+
+fn from_tauri(theme: tauri::Theme) -> Theme {
+    match theme {
+        tauri::Theme::Dark => Theme::Dark,
+        _ => Theme::Light,
+    }
+}
+
+/// `main`'s configuration in the switch's theme, on that theme's ink. Always a theme: on
+/// macOS a window's is app-wide, and with none the system's would reach every page (Q3.671).
+pub fn themed(config: &WindowConfig, theme: Theme) -> WindowConfig {
+    let mut themed = inked(config, theme);
+    themed.theme = Some(to_tauri(theme));
+    themed
+}
+
+/// The theme a configuration from `themed` carries.
+fn theme_in(config: &WindowConfig) -> Theme {
+    config.theme.map(from_tauri).unwrap_or(Theme::Light)
+}
+
+/// `config` with `theme`'s ink behind every page built from it.
+fn inked(config: &WindowConfig, theme: Theme) -> WindowConfig {
+    let mut inked = config.clone();
+    inked.background_color = Some(ink(theme));
+    inked
+}
+
+/// Put `theme`'s ink on the window and behind every page in it. The second half is a no-op
+/// on a WKWebView: without wry's `transparent` feature it takes only an under-page colour,
+/// and only at creation.
+fn paint(window: &tauri::Window, theme: Theme) {
+    let color = Some(ink(theme));
+    let _ = window.set_background_color(color);
+    for webview in window.webviews() {
+        let _ = webview.set_background_color(color);
+    }
+}
+
+/// Put the window in `theme`: `host_set_theme`'s change, and a window just built, since
+/// tao's Linux window ignores a configured theme at creation for the portal's.
+/// `Window::set_theme` rather than the app's: tao's app-wide call leaves the window's own
+/// answer stale on macOS, and its Linux preference in place.
+pub fn show_theme(window: &tauri::Window, theme: Theme) {
+    let _ = window.set_theme(Some(to_tauri(theme)));
+    paint(window, theme);
 }
 
 /// Which seats a launch opens, and which of them is shown.
@@ -214,9 +281,12 @@ mod single {
         // Registered before it exists, so its first `host_boot` finds a seat.
         host.register(MAIN, slot);
         host.set_shown(MAIN);
-        tauri::WebviewWindowBuilder::from_config(app, config)?
+        let window = tauri::WebviewWindowBuilder::from_config(app, config)?
             .on_navigation(is_our_own)
             .build()?;
+        // Visible already, but still inside `setup` on the main thread, so this lands before
+        // the loop draws; the macOS arm builds its window hidden instead.
+        show_theme(&window.as_ref().window(), theme_in(config));
         Ok(())
     }
 }
@@ -251,6 +321,7 @@ mod multi {
         let window = tauri::window::WindowBuilder::from_config(app, config)?
             .visible(false)
             .build()?;
+        show_theme(&window, theme_in(config));
         let size = window.inner_size()?;
         let shown = host.next_label();
         let first = launch
@@ -297,6 +368,11 @@ mod multi {
         let window = app
             .get_window(MAIN)
             .ok_or("the window has already closed")?;
+        // The ink of the theme the window is in now, which the switch may have moved since launch.
+        let config = inked(
+            &config,
+            window.theme().map(from_tauri).unwrap_or(Theme::Light),
+        );
         let label = host.next_label();
         host.register(&label, slot);
         match window.add_child(
@@ -488,6 +564,35 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    /// A launch is built in the switch's theme, on its ink, and reads it back — and nothing
+    /// else in the configuration moves.
+    #[test]
+    fn a_launch_is_built_in_the_theme() {
+        let declared = WindowConfig {
+            drag_drop_enabled: false,
+            ..WindowConfig::default()
+        };
+        let dark = themed(&declared, Theme::Dark);
+        assert_eq!(
+            (dark.theme, dark.background_color, theme_in(&dark)),
+            (Some(tauri::Theme::Dark), Some(DARK_INK), Theme::Dark)
+        );
+        let light = themed(&declared, Theme::Light);
+        assert_eq!(
+            (light.theme, light.background_color, theme_in(&light)),
+            (Some(tauri::Theme::Light), Some(LIGHT_INK), Theme::Light)
+        );
+        assert!(
+            !light.drag_drop_enabled,
+            "the rest of main's configuration rides along"
+        );
+        assert_eq!(
+            inked(&dark, Theme::Light).theme,
+            Some(tauri::Theme::Dark),
+            "an ink is not a theme"
+        );
     }
 
     fn account(origin: &str, user: Option<&str>, seen: u64) -> config::Account {

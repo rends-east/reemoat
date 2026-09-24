@@ -15,14 +15,13 @@
          and that cap reads `visualViewport` and is unaffected either way.
          Browsers that do not know the key ignore it. -->
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+    <!-- Light, whatever the system says, until the drawer's switch says dark
+         (Q3.670). Both tags hold the light values; `theme.js` rewrites them before
+         the first paint and `theme.ts` on every change after. -->
     <meta name="color-scheme" content="light" />
-    <!-- One tag, because there is one palette. It is `--color-ink` from
-         `index.css`, duplicated here because a `<meta>` cannot read a CSS
-         variable — if `--color-ink` moves, move this too. There were two of these,
-         one per theme, and before that one unconditional `#0b0d10` that matched
-         neither, so an iOS home-screen launch drew a chrome bar in a near-black
-         nobody had chosen. The `media` attributes went with the dark palette. -->
     <meta name="theme-color" content="#f9f8f6" />
+    <!-- Blocking and first, so a dark page is dark on its first paint (Q3.669). -->
+    <script src="/theme.js"></script>
     <!-- Nothing here should ever be indexed or previewed; it is a control surface. -->
     <meta name="robots" content="noindex, nofollow" />
     <!--

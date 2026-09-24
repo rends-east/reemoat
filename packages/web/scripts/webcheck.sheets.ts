@@ -617,7 +617,7 @@ process.stdout.write("\nthe scrim is a grip too\n");
   check(
     "a scrim beside its panel has nothing to pan or zoom, so the engine never takes the drag; the routed sheet's holds the panel",
     [
-      ...["ui/MenuDrawer.tsx", "ui/TaskPanel.tsx", "ui/AgentConfigBar.tsx"].map((rel) => /fixed inset-0 (?:\$\{LAYER\.overlay\} )?touch-none bg-fg\/25/.test(code[rel] ?? "")),
+      ...["ui/MenuDrawer.tsx", "ui/TaskPanel.tsx", "ui/AgentConfigBar.tsx"].map((rel) => /fixed inset-0 (?:\$\{LAYER\.overlay\} )?touch-none bg-scrim/.test(code[rel] ?? "")),
       /data-sheet-scrim=""\s+className=\{`animate-scrim fixed inset-0 \$\{LAYER\.overlay\} flex touch-manipulation/.test(code["ui/Sheet.tsx"] ?? ""),
     ],
     [true, true, true, true],

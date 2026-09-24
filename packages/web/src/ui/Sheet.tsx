@@ -63,7 +63,7 @@ export function Sheet({
       ref={drag.scrim.ref}
       {...drag.scrim.bind}
       data-sheet-scrim=""
-      className={`animate-scrim fixed inset-0 ${LAYER.overlay} flex touch-manipulation flex-col justify-end bg-fg/25 sm:items-center sm:justify-center sm:p-6`}
+      className={`animate-scrim fixed inset-0 ${LAYER.overlay} flex touch-manipulation flex-col justify-end bg-scrim sm:items-center sm:justify-center sm:p-6`}
       onClick={(event) => {
         if (event.target === event.currentTarget) close();
       }}

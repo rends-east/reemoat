@@ -114,6 +114,7 @@ struct would hide a missing rename:
 | `host_account_add` | — | `AccountMove{reload}` |
 | `host_account_forget` | — | `AccountMove{reload}` |
 | `host_set_server` | `{url}` | the address; refused `pending_seat` unless the seat is pending |
+| `host_set_theme` | `{theme: "light"\|"dark"}` | —; shown seat only; writes `server.json` and applies only a change (Q3.671) |
 
 Refusal prefixes the page may match: `stale_document` (reload), `not_shown`,
 `pending_seat`, `account_limit`. `AccountMove`'s Rust field is `reload_page`, renamed
@@ -167,8 +168,8 @@ closed seat's page is ended with WebKit's `_close` (`end_page`) — `Webview::cl
 alone left it running. The page never branches on the arm.
 
 **A hidden webview cannot reach the screen.** Switch, add, `host_save_file`,
-`host_pick_folder`, `host_open_external` and `host_copy_text` are refused
-`not_shown` from any label but `Host.shown`.
+`host_pick_folder`, `host_open_external`, `host_copy_text` and `host_set_theme`
+are refused `not_shown` from any label but `Host.shown`.
 
 ## Signing in: the host proves whose it is
 

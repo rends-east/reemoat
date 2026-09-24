@@ -25,6 +25,10 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+### Added
+
+- **A dark theme.** The menu has a **Dark theme** switch under everything else; the app stays light until you turn it on. The choice belongs to this device rather than an account: every account on it shares it, and signing out keeps it. Every colour was re-chosen for a dark background rather than inverted, and text, borders, the diff and the question card keep the contrast they have in the light theme. The page is dark from its first frame, and in the desktop app the window's title bar follows the switch too.
+
 ### Security
 
 - **Continuous deployment no longer trusts the deploy host's key on first use.** `deploy/ci-deploy.sh` pins the new `DEPLOY_KNOWN_HOSTS` secret with `StrictHostKeyChecking=yes` and refuses to deploy without it. Add the secret before the next dispatch: the host's keys as `ssh-keyscan -H <DEPLOY_HOST>` prints them, checked against the host's own fingerprints.
