@@ -1691,8 +1691,10 @@ export class ManagedSession {
     if (ultracodeId !== null && configId === ultracodeId) {
       const wanted = value === ULTRACODE_CHOICE;
       if (wanted !== this.ultracodeWanted) {
-        // A restart would kill the turn in flight.
-        if (this.turn !== null) return { kind: "turn_in_flight", status: this.status };
+        // A restart would kill the turn, unprompted work, or a request parked between turns: clearContext's gate (Q2.232).
+        if (this.turn !== null || this.unpromptedSinceState !== null || this.awaitingCount > 0) {
+          return { kind: "turn_in_flight", status: this.status };
+        }
         await this.applyUltracode(wanted);
       }
       if (wanted) return { kind: "ok", config: this.snapshot().agentConfig };

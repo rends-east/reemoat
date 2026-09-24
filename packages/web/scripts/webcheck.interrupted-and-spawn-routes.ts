@@ -935,6 +935,19 @@ process.stdout.write("\nthe routes that spawn a process\n");
         null,
       ],
     );
+    // http.ts drops this 409's toast, so a gate narrower than the daemon's would leave its refusal silent.
+    const { turnInFlight } = await import("../src/wire.js");
+    const idle = { ...snapshot, turn: null, unpromptedSince: null, pendingPermissions: [], pendingElicitations: [] };
+    check(
+      "and the row's gate is the daemon's: a turn, work nobody prompted, or a request parked between turns",
+      [
+        turnInFlight(idle as never),
+        turnInFlight({ ...idle, turn: 3 } as never),
+        turnInFlight({ ...idle, unpromptedSince: 1 } as never),
+        turnInFlight({ ...idle, pendingElicitations: [{ elicitationId: "e_1", raisedAt: 1 }] } as never),
+      ],
+      [false, true, true, true],
+    );
 
     const shape = {
       id: "one",

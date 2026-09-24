@@ -628,7 +628,7 @@ class AppStore implements StreamSink {
     }
   }
 
-  /** The host proves the account (Q1.651); `existing` signs out but keeps remembered controls. */
+  /** The host proves the account (Q1.651); on `existing` it has already kept or revoked the token, so the page only drops its copy. */
   private async confirmAccount(): Promise<boolean> {
     if (!confirmDue(nativeBoot(), this.snapshot.me)) return false;
     let answer: NativeBound;
@@ -638,7 +638,8 @@ class AppStore implements StreamSink {
       return false;
     }
     if (answer.outcome === "existing") {
-      await cp.logout();
+      // Never logout(): an adopted token is now that account's session, and a revoked one answers 401, which sweeps forgetAllConfig.
+      cp.detachSession();
       const moved = await forgetNativeAccount().catch(() => ({ reload: true }));
       if (moved.reload) window.location.replace("/");
       return true;

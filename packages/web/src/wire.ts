@@ -616,9 +616,9 @@ export function canCancelTurn(session: SessionSnapshot): boolean {
   return engaged && !isTerminal(session.status) && session.status !== "stopping";
 }
 
-/** The daemon refuses a restarting change while a turn is set, even with a permission parked (Q3.429). */
+/** The daemon refuses a restarting change during a turn, unprompted work, or a parked request (Q3.429, Q2.232); a superset here only costs a sentence. */
 export function turnInFlight(session: SessionSnapshot): boolean {
-  return session.turn !== null;
+  return session.turn !== null || workingUnprompted(session) || needsHuman(session);
 }
 
 export function cancelInFlight(session: SessionSnapshot): boolean {

@@ -592,6 +592,19 @@ check("and every command lives in commands.rs", strayCommands, []);
     [/host\.supervisor_if\(&root\)/.test(bodyOf("host_account_forget")), /supervisor\.stop\(\);/.test(bodyOf("host_account_forget"))],
     [true, true],
   );
+  {
+    // A start that read the roster before the removal must have spawned already, and one after must find nothing.
+    const forget = bodyOf("host_account_forget");
+    check(
+      "and a start in flight cannot outlive it: the entry goes under the root lock, before the stop",
+      [
+        /let _roots = daemon::lock_roots\(\); host\.materialize\(\)\?; config::forget_account\(/.test(forget),
+        forget.indexOf("config::forget_account(") >= 0 && forget.indexOf("config::forget_account(") < forget.indexOf("supervisor.stop();"),
+        /let _roots = daemon::lock_roots\(\);[^}]*if !host\.lists_root\(&home, &root\)/.test(bodyOf("host_daemon_start")),
+      ],
+      [true, true, true],
+    );
+  }
   check(
     "a hidden account's page can neither move the screen nor put anything on it",
     ["host_account_switch", "host_account_add", ...SURFACING].filter((name) => !bodyOf(name).includes("require_shown(")),
@@ -1636,6 +1649,13 @@ check("and leaves the previous server's daemon running", /supervisor|stop_all|\.
       /WebviewWindowBuilder|WebviewBuilder/.test(libCodeFlat),
     ],
     [true, true, false],
+  );
+  check(
+    "and it skips a root no account maps to any more, asked under the root lock",
+    /daemon::start_configured_at_launch\(&payload, &home, &roots, &\|root\| \{ if !host\.lists_root\(&home, root\) \{ return None; \}/.test(
+      libCodeFlat,
+    ),
+    true,
   );
 }
 

@@ -524,6 +524,18 @@ impl Host {
             })
             .collect()
     }
+
+    /// Whether an account on this computer still maps to `root`. Asked under
+    /// `daemon::lock_roots` before every spawn, which a forget also takes to remove its entry.
+    pub fn lists_root(&self, home: &std::path::Path, root: &daemon::StateRoot) -> bool {
+        let roster = self.roster();
+        let holder = self.holder();
+        roster.accounts.iter().any(|account| {
+            Slot::from_account(account, &roster.roots)
+                .root(home, holder.as_deref())
+                .is_some_and(|mapped| mapped.dir == root.dir)
+        })
+    }
 }
 
 /// Sixteen random bytes, hex. A failure of the system's randomness is not a
@@ -812,6 +824,9 @@ pub fn host_daemon_start(
     let root = slot
         .root(&home, host.holder().as_deref())
         .ok_or_else(|| pending_seat("no account has been signed in to yet"))?;
+    if !host.lists_root(&home, &root) {
+        return Err(pending_seat("this account is no longer on this computer"));
+    }
     let env_file = root.env_file();
     if daemon::config_state(&root.dir, Some(&origin)) == daemon::CONFIG_ELSEWHERE {
         return Err(format!(
@@ -2120,14 +2135,16 @@ pub fn host_account_add(
 /// account's credential away. In order:
 ///
 /// 1. The account's keyring credential is erased.
-/// 2. **Its daemon is stopped**, unless another account still on this computer
+/// 2. The entry goes, under `daemon::lock_roots`; the device id, the key and the
+///    root record stay, so signing in as the same person again reuses the device
+///    row and the root.
+/// 3. **Its daemon is stopped**, unless another account still on this computer
 ///    shares its root — a legacy seat and the account it became do. Removal is
 ///    not a switch: a removed account's daemon would otherwise go on serving that
 ///    account's phones and grantees, running agents as this person, until quit,
-///    under a screen that says the account is gone. Nothing starts it at the next
-///    launch, because only listed accounts' roots are started. Q7.149.
-/// 3. The entry goes; the device id, the key and the root record stay, so signing
-///    in as the same person again reuses the device row and the root.
+///    under a screen that says the account is gone. Every spawn asks
+///    `Host::lists_root` under the same lock, so neither the launch thread nor a
+///    setup already in flight starts it again after step 2. Q7.149.
 /// 4. The most recently shown other account is shown — a hidden caller is closed
 ///    and leaves the screen alone — or, with none left, this webview becomes a
 ///    sign-in on the same server and reloads.
@@ -2164,26 +2181,31 @@ pub fn host_account_forget(
 
     let _ = credential::erase(&scope);
     let roster = host.roster();
-    if let Ok(home) = app.path().home_dir() {
-        let holder = host.holder();
-        if let Some(root) = slot.root(&home, holder.as_deref()) {
-            let shared = roster.accounts.iter().any(|account| {
-                account.key() != scope
-                    && Slot::from_account(account, &roster.roots)
-                        .root(&home, holder.as_deref())
-                        .is_some_and(|other| other.dir == root.dir)
-            });
-            if !shared {
-                if let Some(handle) = host.supervisor_if(&root) {
-                    if let Ok(mut supervisor) = handle.lock() {
-                        supervisor.stop();
-                    }
-                }
+    let holder = host.holder();
+    let own_root = app.path().home_dir().ok().and_then(|home| {
+        let root = slot.root(&home, holder.as_deref())?;
+        let shared = roster.accounts.iter().any(|account| {
+            account.key() != scope
+                && Slot::from_account(account, &roster.roots)
+                    .root(&home, holder.as_deref())
+                    .is_some_and(|other| other.dir == root.dir)
+        });
+        (!shared).then_some(root)
+    });
+    // Removed under the root lock and stopped after it: a start that won the lock first
+    // has spawned and is stopped below, and one after it finds no account (`lists_root`).
+    let next_key = {
+        let _roots = daemon::lock_roots();
+        host.materialize()?;
+        config::forget_account(&host.config_dir, &scope)?
+    };
+    if let Some(root) = own_root {
+        if let Some(handle) = host.supervisor_if(&root) {
+            if let Ok(mut supervisor) = handle.lock() {
+                supervisor.stop();
             }
         }
     }
-    host.materialize()?;
-    let next_key = config::forget_account(&host.config_dir, &scope)?;
     let roster = host.roster();
     let next = next_key
         .as_deref()

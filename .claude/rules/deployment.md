@@ -284,7 +284,9 @@ on `workflow_dispatch` and nothing else, refusing a commit whose `check` run is
 not green and **refusing to deploy a daemon**. **The workflow file decides
 nothing**: every decision is in `deploy/ci-deploy.sh`, driven by `deploycheck`
 through the `SSH` and `GH` seams. The host key is pinned from the `DEPLOY_KNOWN_HOSTS`
-secret, never scanned; the ssh itself is unmeasured. Q7.94.
+secret, never scanned; the ssh itself is unmeasured. **The script that holds the
+key is the workflow's own commit's**, never the requested ref's — a rollback past
+the pin would scan again — and that ref travels as `DEPLOY_REF` alone. Q7.94.
 
 **A release is a tag push, and `release.yml` decides nothing either.** Everything
 is in `deploy/ci-release.sh`, five verbs — `plan`, `image`, `manifest`, `app`, `publish`

@@ -208,10 +208,12 @@ finds out.
 - **Switch** (`host_account_switch`): shown caller only; stops nothing; records
   `current` after the switch, never before.
 - **Forget** (`host_account_forget`) — Sign out, and *Remove account*: caller only,
-  in order: erase its credential; **stop its root's supervisor** unless another
-  listed account shares the root; `config::forget_account`, which **keeps the device
-  id, the key and the `roots` record** so signing in again reuses the device row and
-  the root; show the most recent other account (a hidden caller closes itself), or
+  in order: erase its credential; `config::forget_account` under
+  `daemon::lock_roots`, which **keeps the device id, the key and the `roots` record**
+  so signing in again reuses the device row and the root; then **stop its root's
+  supervisor** unless another listed account shares the root. Both spawns — the launch
+  thread and `host_daemon_start` — ask `Host::lists_root` under that lock, so a start
+  in flight cannot outlive the removal; show the most recent other account (a hidden caller closes itself), or
   rebind to a pending seat on the same origin. A pending caller with no account
   anywhere is refused — a first run stays uncancellable. `nativecheck` asserts the
   stop here and its absence in switch, add, confirm and sign-in.
@@ -252,8 +254,10 @@ erase, and **inherits nothing else without proof** — the device only if
 claim only if the claimed or announced machine is among the user's *owned*
 `/v1/machines`. Unreachable → `pending_proof`, asked again next bootstrap. The page
 runs **confirm, then `ensureDevice`, then `beginSetUp`**, asserted as source order,
-and a confirm answering `existing` logs this seat out and forgets it without
-`forgetAllConfig`.
+and a confirm answering `existing` drops the page's copy (`cp.detachSession()`) and
+forgets the seat — never `cp.logout()`: the host has already adopted the token into
+the existing account or revoked it, so a logout would revoke the adopted session or
+take a 401 that sweeps `forgetAllConfig`.
 
 ## The lock rule
 
@@ -271,6 +275,10 @@ launch.
 - **Per-account `localStorage`.** Every webview shares one data store, so one sign-out's
   `forgetAllConfig` clears every account's remembered controls.
 - **A multi-webview arm off macOS**, and **several accounts in the browser**.
+- **A proof that waits for the root's daemon.** An `install.sh` root with no bare
+  claim, not yet announced at the first confirm, is bound a guest and set up as a
+  second machine; the owner root is then never launched, and a later flip orphans the
+  guest daemon. Documented, not fixed — Q7.149 has the trace and the fix.
 - **A protected `release` environment** for the default-server variable (Q4.127).
 
 ## Layout

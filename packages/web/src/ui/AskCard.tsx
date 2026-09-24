@@ -340,7 +340,7 @@ function OptionRow({
       {index < 9 && (
         <span
           className={`mt-0.5 shrink-0 text-2xs tabular-nums ${KEYS_ONLY} ${
-            option.primary === true ? "text-ink/60" : "text-faint"
+            option.primary === true ? "text-ink/70" : "text-faint"
           }`}
         >
           {index + 1}
@@ -412,7 +412,7 @@ function OptionButton({
       )}
       {option.label}
       {index < 9 && (
-        <span className={`tabular-nums ${KEYS_ONLY} ${option.primary === true ? "text-ink/60" : "text-faint"}`}>
+        <span className={`tabular-nums ${KEYS_ONLY} ${option.primary === true ? "text-ink/70" : "text-faint"}`}>
           {index + 1}
         </span>
       )}

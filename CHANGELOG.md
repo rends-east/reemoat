@@ -131,7 +131,10 @@ it — so a citation here would be the one kind nothing checks.
 - **Updating keeps you signed in.** The first launch asks the server whose sign-in
   this computer holds and moves it to that account; the device and the machine
   beside it move only where the server confirms they are that account's. Going
-  back to an earlier release afterwards asks you to sign in again.
+  back to an earlier release afterwards asks you to sign in again. ⚠ **Where the
+  one-line installer set this computer up, update with its daemon running.** If it
+  has not answered by the time the app asks, the app sets the computer up again as
+  a second machine, and the first — with its sessions — stays offline.
 
 ### Fixed
 

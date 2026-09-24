@@ -236,7 +236,11 @@ pub fn run() {
                         return;
                     };
                     let roots = host.launch_roots(&home, &roster);
+                    // Called under the root lock, so an account removed since launch is skipped.
                     daemon::start_configured_at_launch(&payload, &home, &roots, &|root| {
+                        if !host.lists_root(&home, root) {
+                            return None;
+                        }
                         host.supervisor_for(root).ok()
                     });
                 });

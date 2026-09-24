@@ -39670,13 +39670,17 @@ Q1.651; binding a call to a document is Q5.120.
 - **Taking an account off this computer stops its daemon.** Sign out
   (`store.signOut`, then `cp.logout`, then `forgetNativeAccount`) and *Remove
   account* both run `host_account_forget`, which acts on the caller only: erase its
-  credential; stop its root's supervisor unless another listed account shares the
-  root; drop the entry (`config::forget_account`, which keeps the device id, the key
-  and the `roots` record, so signing in again as the same person reuses the device
-  row and the root); then show the most recently shown other account — a hidden
-  caller closes itself and leaves the screen alone — or, with none left, rebind to a
-  sign-in on the same server. It is not started at the next launch, which starts only
-  listed accounts. A switch, an add, a confirm and a sign-in stop nothing, and
+  credential; drop the entry under `daemon::lock_roots` (`config::forget_account`,
+  which keeps the device id, the key and the `roots` record, so signing in again as
+  the same person reuses the device row and the root); stop its root's supervisor
+  unless another listed account shares the root; then show the most recently shown
+  other account — a hidden caller closes itself and leaves the screen alone — or,
+  with none left, rebind to a sign-in on the same server. ⚠ **Both spawns ask
+  `Host::lists_root` under the same lock** — the launch thread, working through a
+  roster read at launch, and a `host_daemon_start` already past its seat check. The
+  first version stopped before dropping the entry and neither spawn looked again, so
+  a start in flight brought the removed account's daemon back until quit (review,
+  2026-09-25). A switch, an add, a confirm and a sign-in stop nothing, and
   `nativecheck` pins both halves.
 - **A hidden webview cannot reach the screen.** Every page runs, shown or not, and
   may be rendering agent output, so `host_account_switch`, `host_account_add`,
@@ -39838,6 +39842,25 @@ somebody about it. The owner's call, for this iteration.
   locked default outside code review; the job summary is detection, not prevention.
 - **`install.sh` reaches only the legacy root** (Q7.148), so a guest root's daemon
   lives exactly as long as the app.
+- **An upgrading owner can be bound a guest, and a second machine bought.** Traced
+  in review on 2026-09-25, not reproduced on a device. A legacy seat's confirm proves
+  `~/.reemoat` by a machine id — the bare claim in `machine.json`, or the root's
+  announcement — and a root `install.sh` set up has no bare claim, while at the
+  first launch after the update its daemon is still starting when the page asks.
+  With no id `accounts::gather` answers `Unreachable`: the account is bound a guest
+  with `pending_proof`, and the same bootstrap's `beginSetUp` finds the guest root
+  empty and creates a machine — a quota slot that is never returned. From the next
+  launch `launch_roots` starts only the guest root, so `~/.reemoat` never announces
+  and the proof never lands: this computer is a new, empty machine, and the old one,
+  sessions and all, is offline. Where the old daemon does come up — its own unit — a
+  later confirm proves the root and flips `owner`, and the guest daemon runs on
+  under a supervisor keyed by the old directory, which Stop and Sign out no longer
+  reach: two daemons and two machines for one account until quit. **Update with the
+  root's daemon running**, so it has announced before the page asks. The fix, when
+  it is wanted: start a `pending_proof` account's owner root at launch and wait a
+  bounded time for its announcement, refuse machine creation while a proof is
+  pending, and stop the guest supervisor when `owner` flips. Documented rather than
+  fixed, the owner's call of 2026-09-25.
 
 **Status.** Reversed an earlier decision — Q7.148's root and daemon per server, which
 are per account now; its rejected "start every root at launch", since every listed

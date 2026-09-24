@@ -377,7 +377,10 @@ export function useMachineSwipe({
   }, []);
 
   const onStart = (event: TouchEvent): void => {
+    const going = live.current;
     live.current = null;
+    // A second finger ends the gesture it lands on as a cancel, as sheetDrag and backSwipe do; dropped, a pull's gap never closes.
+    if (going !== null) finish(going, true, event.timeStamp);
     if (event.touches.length !== 1 || busy.current()) return;
     const finger = event.touches.item(0);
     if (finger === null) return;
@@ -483,7 +486,10 @@ export function useMachineSwipe({
   const onEnd = (event: TouchEvent): void => {
     const going = live.current;
     live.current = null;
-    if (going === null) return;
+    if (going !== null) finish(going, event.type === "touchcancel", event.timeStamp);
+  };
+
+  const finish = (going: Going, cancelled: boolean, at: number): void => {
     if (going.mode === null || going.mode === "none") {
       resume(going);
       return;
@@ -491,10 +497,9 @@ export function useMachineSwipe({
     // The settle starts from what was painted last, so a write still waiting for its frame is dropped rather than jumped to.
     if (frame.current !== null) window.cancelAnimationFrame(frame.current);
     frame.current = null;
-    const cancelled = event.type === "touchcancel";
     if (going.mode === "drawer") {
       // Opening is the drawer's exit from the list's point of view: the sheets' rule, sideways.
-      const opens = !cancelled && sheetRelease(going.offset, releaseVelocity(going.samples, event.timeStamp), going.width) === "dismiss";
+      const opens = !cancelled && sheetRelease(going.offset, releaseVelocity(going.samples, at), going.width) === "dismiss";
       if (going.still) {
         if (opens) actions.current.openMenu();
         return;
@@ -514,7 +519,7 @@ export function useMachineSwipe({
       settlePull(refreshes);
       return;
     }
-    const turn = cancelled ? 0 : pageTurn(going.offset, releaseVelocity(going.samples, event.timeStamp), going.width);
+    const turn = cancelled ? 0 : pageTurn(going.offset, releaseVelocity(going.samples, at), going.width);
     if (!going.still) {
       settle(going.at + turn, turn);
       return;

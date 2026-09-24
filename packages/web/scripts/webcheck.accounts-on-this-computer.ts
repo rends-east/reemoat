@@ -185,10 +185,10 @@ const accountAwaitingProof = bootWith({ account: "https://app.example#u_ada", na
     [true, true],
   );
   check(
-    "and a duplicate is revoked and forgotten without sweeping the remembered controls",
+    "and a duplicate only drops the page's copy, since the host kept or revoked the token, then forgets the seat",
     [
-      /answer\.outcome === "existing"[\s\S]*?await cp\.logout\(\);[\s\S]*?forgetNativeAccount\(\)/.test(confirmBody),
-      /forgetAllConfig/.test(confirmBody),
+      /answer\.outcome === "existing"\) \{\s*(?:\/\/[^\n]*\s*)?cp\.detachSession\(\);[\s\S]*?forgetNativeAccount\(\)/.test(confirmBody),
+      /cp\.logout\(|forgetAllConfig/.test(stripComments(confirmBody)),
     ],
     [true, false],
   );

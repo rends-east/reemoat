@@ -65,10 +65,18 @@ process.stdout.write("\neach palette keeps the contrast the other was argued at\
 
   check("the ratio is the published one", ratio("#000000", "#ffffff").toFixed(0), "21");
   const PAPERS = ["ink", "surface", "raised"];
+  // Read off the card, so the weights measured are the ones drawn.
+  const card = stripComments(srcFile("ui/AskCard.tsx"));
+  const hintAlphas = [...card.matchAll(/option\.primary === true \? "text-ink\/(\d+)"/g)].map((m) => Number(m[1]) / 100);
+  const hoverAlphas = [...card.matchAll(/bg-fg text-ink hover:bg-fg\/(\d+)/g)].map((m) => Number(m[1]) / 100);
+  report("the primary fill's hints and hover were read off the card", hintAlphas.length > 0 && hoverAlphas.length > 0, `${hintAlphas.length} hints, ${hoverAlphas.length} hovers`);
   for (const [name, palette] of [["light", light], ["dark", dark]] as const) {
+    const unread: string[] = [];
     const hex = (token: string): string => {
-      const value = palette.get(token) ?? "";
-      return /^#[0-9a-f]{6}$/.test(value) ? value : "#000000";
+      const value = (palette.get(token) ?? "").toLowerCase();
+      if (/^#[0-9a-f]{6}$/.test(value)) return value;
+      unread.push(token);
+      return "#000000";
     };
     const short = (floor: number, fronts: string[], backs: string[]): string[] =>
       fronts.flatMap((front) =>
@@ -83,9 +91,16 @@ process.stdout.write("\neach palette keeps the contrast the other was argued at\
     );
     check(`${name}: the affirmative fill carries its own label`, short(4.5, ["ink"], ["fg"]), []);
     check(
-      `${name}: the key hint on that fill is still text`,
-      ratio(over(hex("ink"), hex("fg"), 0.6), hex("fg")) >= 4.5,
-      true,
+      `${name}: the key hint on that fill is still text, hovered too`,
+      PAPERS.flatMap((paper) =>
+        [1, ...hoverAlphas].flatMap((fillAlpha) => {
+          const fill = over(hex("fg"), hex(paper), fillAlpha);
+          return hintAlphas
+            .filter((hintAlpha) => ratio(over(hex("ink"), fill, hintAlpha), fill) < 4.5)
+            .map((hintAlpha) => `ink/${String(hintAlpha)} on fg/${String(fillAlpha)} over ${paper}`);
+        }),
+      ),
+      [],
     );
     // Q3.205: raised is the message you wrote at 1.22:1, and edge sits one step further out.
     check(
@@ -94,6 +109,8 @@ process.stdout.write("\neach palette keeps the contrast the other was argued at\
       [true, true],
     );
     check(`${name}: the rail stays the hint it is (Q3.210)`, Math.abs(ratio(hex("ink"), hex("surface")) - 1.06) < 0.02, true);
+    // A token missing or not written #rrggbb would be weighed as black, which passes every check above.
+    check(`${name}: every colour weighed above was read as #rrggbb`, [...new Set(unread)], []);
   }
   const darkLum = (token: string): number => lum(dark.get(token) ?? "#000000");
   check(

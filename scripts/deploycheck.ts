@@ -2421,7 +2421,18 @@ process.stdout.write("\nwhat a runner does, driven without a runner\n");
     [],
   );
   check("including the pinned host keys", required.includes("DEPLOY_KNOWN_HOSTS"), true);
-  check("and sets the ref itself", deployYml.some((line) => /DEPLOY_REF=\$\(git rev-parse HEAD\) deploy\/ci-deploy\.sh/.test(line)), true);
+  // The script that holds the key is this workflow's own; a checked-out older ref would run one from before the pin.
+  check(
+    "and runs its own commit's script, the commit to deploy passing as DEPLOY_REF alone",
+    [
+      deployYml.some((line) => /^\s*ref:\s*\S/.test(line)),
+      deployYml.some((line) => line.trim() === "REQUESTED_REF: ${{ inputs.ref }}"),
+      deployYml.some((line) =>
+        /^\s*DEPLOY_REF=\$\(git rev-parse --verify --end-of-options "\$\{REQUESTED_REF:-HEAD\}\^\{commit\}"\) deploy\/ci-deploy\.sh$/.test(line),
+      ),
+    ],
+    [false, true, true],
+  );
 }
 
 process.stdout.write("\nwhat a release does, driven without a registry\n");

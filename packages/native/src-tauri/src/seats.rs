@@ -35,10 +35,10 @@
 //! child webview never quits — and the last account's webview is never closed:
 //! forgetting the last account rebinds it to a sign-in instead.
 //!
-//! ⚠ **What a hidden page is, measured nowhere yet.** It runs — its sockets stay
+//! ⚠ **What a hidden page is, as Q7.149 measured it.** It runs — its sockets stay
 //! open and its bootstrap completes — but `store.ts` skips its poll while
 //! `visibilityState` is not `visible`, `resume.ts` catches up on show, and macOS
-//! 14 and later suspends a hidden `WKWebView` after about five minutes. That last
+//! throttles a hidden `WKWebView`, then suspends it after about eight minutes. That last
 //! is why no account's *daemon* depends on its page: the host starts every set-up
 //! one at launch (`daemon::start_configured_at_launch`). And every page shares one
 //! `WKWebsiteDataStore`, so `localStorage` is shared across accounts — isolating it

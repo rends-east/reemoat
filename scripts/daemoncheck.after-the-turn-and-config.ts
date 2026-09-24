@@ -465,6 +465,13 @@ process.stdout.write("\nwhat the agent asks, and does, with no turn held\n");
   check("so it is not released, however long ago anybody typed", managed.parkable(Date.now() + 10 * silenceMs, 0), false);
   check("nor is its agent restarted under it for a credential", managed.takesCredentialChange, false);
   check("and a /clear is refused rather than deciding the cycle's fate", (await managed.clearContext("/clear")).kind, "busy");
+  // Ultracode is the third restart, and kimi offers no row for it, so its gate is read off the source.
+  const registryCode = (await readFile(new URL("../src/registry.ts", import.meta.url), "utf8")).replace(/^\s*\/\/[^\n]*$/gm, "");
+  check(
+    "nor its agent restarted for ultracode, on the same three facts",
+    /if \(this\.turn !== null \|\| this\.unpromptedSinceState !== null \|\| this\.awaitingCount > 0\) \{\s*return \{ kind: "turn_in_flight"[^}]*\};\s*\}\s*await this\.applyUltracode\(wanted\);/.test(registryCode),
+    true,
+  );
   rig.emit({ sessionUpdate: "usage_update", used: 11, size: 100 });
   await settle();
   check("a usage_update with no origin is a token, not an end", managed.snapshot().unpromptedSince === lit.unpromptedSince, true);

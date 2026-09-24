@@ -258,7 +258,7 @@ process.stdout.write("\nturning a machine's page\n");
   const browser = stripComments(srcFile("ui/SessionBrowser.tsx"));
   check(
     "the release is the sheets' rule on its side, and a touchcancel gives the page back",
-    /const turn = cancelled \? 0 : pageTurn\(going\.offset, releaseVelocity\(going\.samples, event\.timeStamp\), going\.width\);/.test(swipe) && /const cancelled = event\.type === "touchcancel";/.test(swipe),
+    /const turn = cancelled \? 0 : pageTurn\(going\.offset, releaseVelocity\(going\.samples, at\), going\.width\);/.test(swipe) && /finish\(going, event\.type === "touchcancel", event\.timeStamp\);/.test(swipe),
     true,
   );
   // Settling to 0 before the swap was the defect: the old list sprang back and the new one appeared where it had been.
@@ -497,8 +497,16 @@ process.stdout.write("\nthe list's other two gestures: the drawer and the refres
     [true, true, true],
   );
   check(
+    "a second finger ends the gesture it lands on as a cancel before refusing, or a pull's gap never closes",
+    [
+      /const onStart = \(event: TouchEvent\): void => \{\s*const going = live\.current;\s*live\.current = null;\s*if \(going !== null\) finish\(going, true, event\.timeStamp\);\s*if \(event\.touches\.length !== 1/.test(swipe),
+      /if \(going !== null\) finish\(going, event\.type === "touchcancel", event\.timeStamp\);/.test(swipe),
+    ],
+    [true, true],
+  );
+  check(
     "and it is decided by the sheets' release, from where the finger let go",
-    /const opens = !cancelled && sheetRelease\(going\.offset, releaseVelocity\(going\.samples, event\.timeStamp\), going\.width\) === "dismiss";/.test(swipe),
+    /const opens = !cancelled && sheetRelease\(going\.offset, releaseVelocity\(going\.samples, at\), going\.width\) === "dismiss";/.test(swipe),
     true,
   );
   check("given back, it unmounts where it stands, closed", /flushSync\(\(\) => announce\(false\)\);\s*\}/.test(pull), true);
